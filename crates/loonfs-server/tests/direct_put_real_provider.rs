@@ -3,7 +3,7 @@
 use loonfs_api::{
     v0::{CompleteUploadRequest, ObjectTransferAccess, ValidatedContentToken},
     ChangeSeq, CommitId, CommitResponse, ContentRef, DestinationBehavior, FilesystemOperation,
-    FilesystemOperationRequest,
+    FilesystemOperationRequest, NamespaceId,
 };
 use loonfs_client::{Client, ClientConfig, ClientError, NamespacePath};
 use loonfs_server::{
@@ -90,8 +90,9 @@ async fn direct_put_round_trip(config: ServerConfig) {
 
     tokio::task::spawn_blocking(move || {
         let namespace = "direct-put-e2e";
-        let target = NamespacePath::parse(&format!("{namespace}:/direct-put.txt"))
-            .expect("parse direct-put target");
+        let namespace_id = NamespaceId::parse(namespace).expect("valid namespace id");
+        let target =
+            NamespacePath::parse(namespace, "/direct-put.txt").expect("parse direct-put target");
         let bytes = b"direct put through a real provider\n";
         let content_ref = ContentRef::whole_file_v0(bytes);
 
@@ -100,16 +101,16 @@ async fn direct_put_round_trip(config: ServerConfig) {
 
         harness
             .client
-            .create_namespace(namespace)
+            .create_namespace(&namespace_id)
             .expect("create namespace");
 
-        assert_wrong_direct_put_bytes_rejected(&harness.client, namespace);
-        assert_direct_put_requires_signed_checksum_header(&harness.client, namespace);
-        assert_direct_put_is_no_replace(&harness.client, namespace);
+        assert_wrong_direct_put_bytes_rejected(&harness.client, &namespace_id);
+        assert_direct_put_requires_signed_checksum_header(&harness.client, &namespace_id);
+        assert_direct_put_is_no_replace(&harness.client, &namespace_id);
 
         let begin = harness
             .client
-            .begin_direct_put(namespace, content_ref.clone())
+            .begin_direct_put(&namespace_id, content_ref.clone())
             .expect("begin direct put");
         let direct_put = begin.direct_put.expect("direct-put access");
         assert_eq!(direct_put.content_ref, content_ref);
@@ -122,7 +123,7 @@ async fn direct_put_round_trip(config: ServerConfig) {
         let complete = harness
             .client
             .complete_upload(
-                namespace,
+                &namespace_id,
                 begin.upload_id.as_str(),
                 &CompleteUploadRequest {
                     content_ref: content_ref.clone(),
@@ -144,7 +145,7 @@ async fn direct_put_round_trip(config: ServerConfig) {
                     token: validated_content_token,
                 }],
                 operation: FilesystemOperation::PutFile {
-                    path: target.absolute_path.clone(),
+                    path: target.absolute_path().as_str().to_owned(),
                     content_ref,
                     behavior: DestinationBehavior::NoReplace,
                 },
@@ -159,12 +160,12 @@ async fn direct_put_round_trip(config: ServerConfig) {
     .expect("join blocking task");
 }
 
-fn assert_wrong_direct_put_bytes_rejected(client: &Client, namespace: &str) {
+fn assert_wrong_direct_put_bytes_rejected(client: &Client, namespace_id: &NamespaceId) {
     let bytes = b"expected direct put bytes\n";
     let wrong_bytes = b"wrong direct put bytes\n";
     let content_ref = ContentRef::whole_file_v0(bytes);
     let begin = client
-        .begin_direct_put(namespace, content_ref.clone())
+        .begin_direct_put(namespace_id, content_ref.clone())
         .expect("begin wrong-bytes direct put");
     let direct_put = begin.direct_put.expect("wrong-bytes direct-put access");
     assert_eq!(direct_put.content_ref, content_ref);
@@ -175,7 +176,7 @@ fn assert_wrong_direct_put_bytes_rejected(client: &Client, namespace: &str) {
     );
     expect_client_rejection(
         client.complete_upload(
-            namespace,
+            namespace_id,
             begin.upload_id.as_str(),
             &CompleteUploadRequest { content_ref },
         ),
@@ -183,11 +184,11 @@ fn assert_wrong_direct_put_bytes_rejected(client: &Client, namespace: &str) {
     );
 }
 
-fn assert_direct_put_requires_signed_checksum_header(client: &Client, namespace: &str) {
+fn assert_direct_put_requires_signed_checksum_header(client: &Client, namespace_id: &NamespaceId) {
     let bytes = b"direct put bytes without checksum header\n";
     let content_ref = ContentRef::whole_file_v0(bytes);
     let begin = client
-        .begin_direct_put(namespace, content_ref.clone())
+        .begin_direct_put(namespace_id, content_ref.clone())
         .expect("begin missing-checksum direct put");
     let direct_put = begin
         .direct_put
@@ -202,7 +203,7 @@ fn assert_direct_put_requires_signed_checksum_header(client: &Client, namespace:
     );
     expect_client_rejection(
         client.complete_upload(
-            namespace,
+            namespace_id,
             begin.upload_id.as_str(),
             &CompleteUploadRequest { content_ref },
         ),
@@ -210,11 +211,11 @@ fn assert_direct_put_requires_signed_checksum_header(client: &Client, namespace:
     );
 }
 
-fn assert_direct_put_is_no_replace(client: &Client, namespace: &str) {
+fn assert_direct_put_is_no_replace(client: &Client, namespace_id: &NamespaceId) {
     let bytes = b"duplicate direct put bytes\n";
     let content_ref = ContentRef::whole_file_v0(bytes);
     let begin = client
-        .begin_direct_put(namespace, content_ref.clone())
+        .begin_direct_put(namespace_id, content_ref.clone())
         .expect("begin duplicate direct put");
     let direct_put = begin.direct_put.expect("duplicate direct-put access");
     assert_eq!(direct_put.content_ref, content_ref);
@@ -229,7 +230,7 @@ fn assert_direct_put_is_no_replace(client: &Client, namespace: &str) {
 
     let complete = client
         .complete_upload(
-            namespace,
+            namespace_id,
             begin.upload_id.as_str(),
             &CompleteUploadRequest { content_ref },
         )

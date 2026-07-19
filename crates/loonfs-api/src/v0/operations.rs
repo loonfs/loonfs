@@ -91,7 +91,7 @@ pub struct ErrorDetails {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct CreateNamespaceRequest {
     /// Durable namespace id to create.
-    pub namespace_id: String,
+    pub namespace_id: NamespaceId,
 }
 
 /// Request to fork a namespace.
@@ -99,7 +99,7 @@ pub struct CreateNamespaceRequest {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ForkNamespaceRequest {
     /// Durable namespace id for the fork target.
-    pub new_namespace_id: String,
+    pub new_namespace_id: NamespaceId,
 }
 
 /// Short namespace identifier returned by namespace create/fork operations.

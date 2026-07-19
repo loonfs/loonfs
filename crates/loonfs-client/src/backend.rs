@@ -23,7 +23,7 @@ use loonfs_api::{
     CommitResponse, CreateCheckpointRequest, CreateCheckpointResponse, DeleteNamespaceResponse,
     DestinationBehavior, DisableGramsIndexResponse, EnableGramsIndexResponse, ErrorCode,
     ErrorDetails, FlushWalResponse, GcRequest, GcResponse, GrepRequest, GrepResponse, InodeId,
-    ListFileRevisionsResponse, MaintenanceTickRequest, MaintenanceTickResponse,
+    ListFileRevisionsResponse, MaintenanceTickRequest, MaintenanceTickResponse, NamespaceId,
     NamespaceStatusResponse, NamespaceSummary, ReleaseCheckpointResponse, RevisionNo,
 };
 use thiserror::Error;
@@ -139,24 +139,27 @@ impl From<ClientError> for BackendError {
 #[async_trait]
 pub trait Backend {
     /// Creates a new empty namespace.
-    async fn create_namespace(&self, namespace_id: &str) -> Result<NamespaceSummary, BackendError>;
+    async fn create_namespace(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<NamespaceSummary, BackendError>;
     /// Marks a namespace deleted; `expected_head_seq` guards against deleting
     /// a namespace that moved since the caller last observed it.
     async fn delete_namespace(
         &self,
-        namespace_id: &str,
+        namespace_id: &NamespaceId,
         expected_head_seq: Option<u64>,
     ) -> Result<DeleteNamespaceResponse, BackendError>;
     /// Creates a new namespace as a fork of the source's durable view.
     async fn fork_namespace(
         &self,
-        source: &str,
-        new_namespace_id: &str,
+        source_namespace_id: &NamespaceId,
+        new_namespace_id: &NamespaceId,
     ) -> Result<NamespaceSummary, BackendError>;
     /// Summarizes a namespace's current head state.
     async fn namespace_status(
         &self,
-        namespace_id: &str,
+        namespace_id: &NamespaceId,
     ) -> Result<NamespaceStatusResponse, BackendError>;
     /// Lists the entries of a directory.
     async fn list_path_all(
@@ -171,18 +174,18 @@ pub trait Backend {
     /// Content search over a namespace's gram index.
     async fn grep(
         &self,
-        namespace_id: &str,
+        namespace_id: &NamespaceId,
         request: &GrepRequest,
     ) -> Result<GrepResponse, BackendError>;
     /// Enables the gram index on a namespace (admin plane).
     async fn enable_grams_index(
         &self,
-        namespace_id: &str,
+        namespace_id: &NamespaceId,
     ) -> Result<EnableGramsIndexResponse, BackendError>;
     /// Disables the gram index on a namespace (admin plane).
     async fn disable_grams_index(
         &self,
-        namespace_id: &str,
+        namespace_id: &NamespaceId,
     ) -> Result<DisableGramsIndexResponse, BackendError>;
     /// Reads a retained file revision's content.
     async fn read_file_revision_bytes(
@@ -266,42 +269,43 @@ pub trait Backend {
     /// namespace's current view.
     async fn create_checkpoint(
         &self,
-        namespace_id: &str,
+        namespace_id: &NamespaceId,
         request: CreateCheckpointRequest,
     ) -> Result<CreateCheckpointResponse, BackendError>;
     /// Releases a user-owned checkpoint pin by id. Idempotent.
     async fn release_checkpoint(
         &self,
-        namespace_id: &str,
+        namespace_id: &NamespaceId,
         checkpoint_id: &str,
     ) -> Result<ReleaseCheckpointResponse, BackendError>;
     /// Flushes the WAL tail and advances the metadata root, creating no
     /// checkpoint record.
-    async fn flush_wal(&self, namespace_id: &str) -> Result<FlushWalResponse, BackendError>;
+    async fn flush_wal(&self, namespace_id: &NamespaceId)
+        -> Result<FlushWalResponse, BackendError>;
     /// Advances the namespace retention floor. Irreversible: WAL history
     /// before the floor stops being replayable.
     async fn advance_retention(
         &self,
-        namespace_id: &str,
+        namespace_id: &NamespaceId,
     ) -> Result<AdvanceRetentionResponse, BackendError>;
     /// Runs one bounded maintenance step: a root advancement once the WAL
     /// tail reaches the threshold, optionally followed by a GC pass.
     async fn maintenance_tick(
         &self,
-        namespace_id: &str,
+        namespace_id: &NamespaceId,
         request: MaintenanceTickRequest,
     ) -> Result<MaintenanceTickResponse, BackendError>;
     /// Runs one mark-and-sweep garbage-collection pass. Nothing sweeps
     /// without this explicit call or a maintenance-tick opt-in.
     async fn gc_namespace(
         &self,
-        namespace_id: &str,
+        namespace_id: &NamespaceId,
         request: GcRequest,
     ) -> Result<GcResponse, BackendError>;
     /// Reads the ordered change feed after the `after_seq` cursor.
     async fn list_changes_page(
         &self,
-        namespace_id: &str,
+        namespace_id: &NamespaceId,
         after_seq: ChangeSeq,
         limit: Option<u32>,
     ) -> Result<ChangesResponse, BackendError>;
@@ -317,13 +321,6 @@ impl RemoteBackend {
     /// Wraps a configured HTTP client.
     pub fn new(client: Client) -> Self {
         Self { client }
-    }
-}
-
-/// Carries a backend-level commit id into the wire client's options.
-fn mutation_options(commit_id: Option<CommitId>) -> MutationOptions {
-    MutationOptions {
-        commit_id: commit_id.map(|id| id.to_string()),
     }
 }
 
@@ -345,18 +342,21 @@ impl RemoteBackend {
 
 #[async_trait]
 impl Backend for RemoteBackend {
-    async fn create_namespace(&self, namespace_id: &str) -> Result<NamespaceSummary, BackendError> {
-        let namespace_id = namespace_id.to_owned();
+    async fn create_namespace(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<NamespaceSummary, BackendError> {
+        let namespace_id = namespace_id.clone();
         self.wire(move |client| client.create_namespace(&namespace_id))
             .await
     }
 
     async fn delete_namespace(
         &self,
-        namespace_id: &str,
+        namespace_id: &NamespaceId,
         expected_head_seq: Option<u64>,
     ) -> Result<DeleteNamespaceResponse, BackendError> {
-        let namespace_id = namespace_id.to_owned();
+        let namespace_id = namespace_id.clone();
         self.wire(move |client| {
             client.delete_namespace(&namespace_id, expected_head_seq.map(ChangeSeq))
         })
@@ -365,20 +365,20 @@ impl Backend for RemoteBackend {
 
     async fn fork_namespace(
         &self,
-        source: &str,
-        new_namespace_id: &str,
+        source_namespace_id: &NamespaceId,
+        new_namespace_id: &NamespaceId,
     ) -> Result<NamespaceSummary, BackendError> {
-        let source = source.to_owned();
-        let new_namespace_id = new_namespace_id.to_owned();
-        self.wire(move |client| client.fork_namespace(&source, &new_namespace_id))
+        let source_namespace_id = source_namespace_id.clone();
+        let new_namespace_id = new_namespace_id.clone();
+        self.wire(move |client| client.fork_namespace(&source_namespace_id, &new_namespace_id))
             .await
     }
 
     async fn namespace_status(
         &self,
-        namespace_id: &str,
+        namespace_id: &NamespaceId,
     ) -> Result<NamespaceStatusResponse, BackendError> {
-        let namespace_id = namespace_id.to_owned();
+        let namespace_id = namespace_id.clone();
         self.wire(move |client| client.namespace_status(&namespace_id))
             .await
     }
@@ -409,10 +409,10 @@ impl Backend for RemoteBackend {
 
     async fn grep(
         &self,
-        namespace_id: &str,
+        namespace_id: &NamespaceId,
         request: &GrepRequest,
     ) -> Result<GrepResponse, BackendError> {
-        let namespace_id = namespace_id.to_owned();
+        let namespace_id = namespace_id.clone();
         let request = request.clone();
         self.wire(move |client| client.grep(&namespace_id, &request))
             .await
@@ -420,18 +420,18 @@ impl Backend for RemoteBackend {
 
     async fn enable_grams_index(
         &self,
-        namespace_id: &str,
+        namespace_id: &NamespaceId,
     ) -> Result<EnableGramsIndexResponse, BackendError> {
-        let namespace_id = namespace_id.to_owned();
+        let namespace_id = namespace_id.clone();
         self.wire(move |client| client.enable_grams_index(&namespace_id))
             .await
     }
 
     async fn disable_grams_index(
         &self,
-        namespace_id: &str,
+        namespace_id: &NamespaceId,
     ) -> Result<DisableGramsIndexResponse, BackendError> {
-        let namespace_id = namespace_id.to_owned();
+        let namespace_id = namespace_id.clone();
         self.wire(move |client| client.disable_grams_index(&namespace_id))
             .await
     }
@@ -467,7 +467,7 @@ impl Backend for RemoteBackend {
     ) -> Result<CommitResponse, BackendError> {
         let spec = spec.clone();
         let bytes = bytes.to_vec();
-        let options = mutation_options(commit_id);
+        let options = MutationOptions { commit_id };
         self.wire(move |client| client.put_file_bytes(&spec, &bytes, behavior, &options))
             .await
     }
@@ -479,7 +479,7 @@ impl Backend for RemoteBackend {
         commit_id: Option<CommitId>,
     ) -> Result<CommitResponse, BackendError> {
         let spec = spec.clone();
-        let options = mutation_options(commit_id);
+        let options = MutationOptions { commit_id };
         self.wire(move |client| client.create_directory(&spec, parents, &options))
             .await
     }
@@ -491,7 +491,7 @@ impl Backend for RemoteBackend {
         commit_id: Option<CommitId>,
     ) -> Result<CommitResponse, BackendError> {
         let spec = spec.clone();
-        let options = mutation_options(commit_id);
+        let options = MutationOptions { commit_id };
         self.wire(move |client| match expected_inode_id {
             Some(expected) => client.delete_path_expecting(&spec, expected, &options),
             None => client.delete_path(&spec, &options),
@@ -508,7 +508,7 @@ impl Backend for RemoteBackend {
     ) -> Result<CommitResponse, BackendError> {
         let from = from.clone();
         let to = to.clone();
-        let options = mutation_options(commit_id);
+        let options = MutationOptions { commit_id };
         self.wire(move |client| client.move_path(&from, &to, behavior, &options))
             .await
     }
@@ -522,7 +522,7 @@ impl Backend for RemoteBackend {
     ) -> Result<CommitResponse, BackendError> {
         let from = from.clone();
         let to = to.clone();
-        let options = mutation_options(commit_id);
+        let options = MutationOptions { commit_id };
         self.wire(move |client| client.copy_path(&from, &to, behavior, &options))
             .await
     }
@@ -534,7 +534,7 @@ impl Backend for RemoteBackend {
         commit_id: Option<CommitId>,
     ) -> Result<CommitResponse, BackendError> {
         let spec = spec.clone();
-        let options = mutation_options(commit_id);
+        let options = MutationOptions { commit_id };
         self.wire(move |client| client.restore_file_revision(&spec, source_revision_no, &options))
             .await
     }
@@ -547,74 +547,77 @@ impl Backend for RemoteBackend {
         commit_id: Option<CommitId>,
     ) -> Result<CommitResponse, BackendError> {
         let spec = spec.clone();
-        let options = mutation_options(commit_id);
+        let options = MutationOptions { commit_id };
         self.wire(move |client| client.undelete(&spec, inode_id, deleted_at_seq, &options))
             .await
     }
 
     async fn create_checkpoint(
         &self,
-        namespace_id: &str,
+        namespace_id: &NamespaceId,
         request: CreateCheckpointRequest,
     ) -> Result<CreateCheckpointResponse, BackendError> {
-        let namespace_id = namespace_id.to_owned();
+        let namespace_id = namespace_id.clone();
         self.wire(move |client| client.create_checkpoint(&namespace_id, &request))
             .await
     }
 
     async fn release_checkpoint(
         &self,
-        namespace_id: &str,
+        namespace_id: &NamespaceId,
         checkpoint_id: &str,
     ) -> Result<ReleaseCheckpointResponse, BackendError> {
-        let namespace_id = namespace_id.to_owned();
+        let namespace_id = namespace_id.clone();
         let checkpoint_id = checkpoint_id.to_owned();
         self.wire(move |client| client.release_checkpoint(&namespace_id, &checkpoint_id))
             .await
     }
 
-    async fn flush_wal(&self, namespace_id: &str) -> Result<FlushWalResponse, BackendError> {
-        let namespace_id = namespace_id.to_owned();
+    async fn flush_wal(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<FlushWalResponse, BackendError> {
+        let namespace_id = namespace_id.clone();
         self.wire(move |client| client.flush_wal(&namespace_id))
             .await
     }
 
     async fn advance_retention(
         &self,
-        namespace_id: &str,
+        namespace_id: &NamespaceId,
     ) -> Result<AdvanceRetentionResponse, BackendError> {
-        let namespace_id = namespace_id.to_owned();
+        let namespace_id = namespace_id.clone();
         self.wire(move |client| client.advance_retention(&namespace_id))
             .await
     }
 
     async fn maintenance_tick(
         &self,
-        namespace_id: &str,
+        namespace_id: &NamespaceId,
         request: MaintenanceTickRequest,
     ) -> Result<MaintenanceTickResponse, BackendError> {
-        let namespace_id = namespace_id.to_owned();
+        let namespace_id = namespace_id.clone();
         self.wire(move |client| client.maintenance_tick(&namespace_id, &request))
             .await
     }
 
     async fn gc_namespace(
         &self,
-        namespace_id: &str,
+        namespace_id: &NamespaceId,
         request: GcRequest,
     ) -> Result<GcResponse, BackendError> {
-        let namespace_id = namespace_id.to_owned();
+        let namespace_id = namespace_id.clone();
         self.wire(move |client| client.gc_namespace(&namespace_id, &request))
             .await
     }
 
     async fn list_changes_page(
         &self,
-        namespace_id: &str,
+        namespace_id: &NamespaceId,
         after_seq: ChangeSeq,
         limit: Option<u32>,
     ) -> Result<ChangesResponse, BackendError> {
-        let namespace_id = namespace_id.to_owned();
+        let namespace_id = namespace_id.clone();
         self.wire(move |client| client.list_changes_page(&namespace_id, after_seq, limit))
             .await
     }

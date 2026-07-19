@@ -18,7 +18,7 @@ pub(crate) struct ResolvedProfile {
 }
 
 pub(crate) struct ResolvedNamespace {
-    pub namespace: String,
+    pub namespace: NamespaceId,
 }
 
 pub(crate) fn load_cli_config() -> Result<LoadedConfig, CliError> {
@@ -54,18 +54,22 @@ pub(crate) fn resolve_namespace(
     explicit_namespace: Option<&str>,
 ) -> Result<ResolvedNamespace, CliError> {
     if let Some(namespace) = explicit_namespace {
-        return validate_namespace(namespace);
+        return Ok(ResolvedNamespace {
+            namespace: parse_namespace_id(namespace)?,
+        });
     }
     let (profile_name, profile) = resolve_profile(config, explicit_profile)?;
     let namespace =
         default_namespace(profile).ok_or_else(|| CliError::no_default_namespace(profile_name))?;
-    validate_namespace(namespace)
+    Ok(ResolvedNamespace {
+        namespace: parse_namespace_id(namespace)?,
+    })
 }
 
-fn validate_namespace(namespace: &str) -> Result<ResolvedNamespace, CliError> {
+/// Parses a namespace argument once at the CLI boundary. A malformed id
+/// surfaces its registry code so both profile modes report the same code
+/// the server would serve for it.
+pub(crate) fn parse_namespace_id(namespace: &str) -> Result<NamespaceId, CliError> {
     NamespaceId::parse(namespace)
-        .map_err(|error| CliError::new(ErrorCode::InvalidRequest.as_str(), error.to_string()))?;
-    Ok(ResolvedNamespace {
-        namespace: namespace.to_owned(),
-    })
+        .map_err(|error| CliError::new(ErrorCode::InvalidRequest.as_str(), error.to_string()))
 }
