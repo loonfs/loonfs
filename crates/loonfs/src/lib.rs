@@ -49,17 +49,17 @@ pub use loonfs_api::v0::{
 };
 pub use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, CapabilityDocument,
-    ChangeSeq, CheckpointId, CommitId, ContentRef, ContentRefKind, CopyBehavior,
-    CreateCheckpointRequest, CreateCheckpointResponse, DeleteDirectoryBehavior,
-    DeleteNamespaceResponse, DirectoryPageCursor, DisableGramsIndexResponse, DisplayName,
+    ChangeSeq, CheckpointId, CommitId, ContentRef, ContentRefKind, CreateCheckpointRequest,
+    CreateCheckpointResponse, DeleteDirectoryBehavior, DeleteNamespaceResponse,
+    DestinationBehavior, DirectoryPageCursor, DisableGramsIndexResponse, DisplayName,
     EffectiveLimit, EnableGramsIndexResponse, FileRevision, FileRevisionsPageCursor,
     FlushWalOutcome, FlushWalResponse, GrepMatch, GrepRequest, GrepResponse, InodeId, InodeKind,
-    ListFileRevisionsResponse, ListPathEntriesResponse, ManifestId, MoveBehavior, NameKey,
-    NamePolicy, NamespaceId, NamespaceStatusResponse, NamespaceSummary, Page, PageRequest,
-    PaginationPolicy, PutBehavior, ReleaseCheckpointResponse, RevisionNo, UploadId,
-    FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK,
-    FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_PUT, PROFILE_ADMIN_V0, PROFILE_CORE_V0,
-    PROFILE_QUERY_V0, PROTOCOL_VERSION,
+    ListFileRevisionsResponse, ListPathEntriesResponse, ManifestId, NameKey, NamePolicy,
+    NamespaceId, NamespaceStatusResponse, NamespaceSummary, Page, PageRequest, PaginationPolicy,
+    ReleaseCheckpointResponse, RevisionNo, UploadId, FEATURE_NAMESPACES_CREATE,
+    FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK, FEATURE_QUERY_GREP,
+    FEATURE_UPLOADS_DIRECT_PUT, PROFILE_ADMIN_V0, PROFILE_CORE_V0, PROFILE_QUERY_V0,
+    PROTOCOL_VERSION,
 };
 pub use loonfs_core::cache::MetadataTableCacheConfig;
 pub use loonfs_core::{

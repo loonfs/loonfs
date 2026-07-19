@@ -86,14 +86,14 @@ pub use path::{AbsolutePath, DisplayName, PathComponent, PathError, MAX_DISPLAY_
 // in `v0`; add here only what most consumers touch.
 pub use v0::{
     AdvanceRetentionResponse, ApiError, AuthoritativeFileBytes, AuthoritativePathEntry,
-    CommitResponse, CopyBehavior, CreateCheckpointRequest, CreateCheckpointResponse,
-    CreateNamespaceRequest, DeleteDirectoryBehavior, DeleteNamespaceResponse,
+    CommitResponse, CreateCheckpointRequest, CreateCheckpointResponse, CreateNamespaceRequest,
+    DeleteDirectoryBehavior, DeleteNamespaceResponse, DestinationBehavior,
     DisableGramsIndexResponse, EnableGramsIndexResponse, ErrorDetails, FileRevision,
     FilesystemOperation, FilesystemOperationRequest, FlushWalOutcome, FlushWalResponse,
     ForkNamespaceRequest, GcRequest, GcResponse, GrepMatch, GrepRequest, GrepResponse,
     ListFileRevisionsResponse, ListPathEntriesResponse, MaintenanceTickOutcome,
-    MaintenanceTickRequest, MaintenanceTickResponse, MoveBehavior, NamespaceStatusResponse,
-    NamespaceSummary, PutBehavior, ReleaseCheckpointResponse, RestoreFileRevisionRequest,
+    MaintenanceTickRequest, MaintenanceTickResponse, NamespaceStatusResponse, NamespaceSummary,
+    ReleaseCheckpointResponse, RestoreFileRevisionRequest,
 };
 
 #[cfg(test)]

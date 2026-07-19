@@ -1,5 +1,5 @@
 use loonfs::{
-    CreateNamespaceOptions, FsWriter, NamespaceId, PutBehavior, PutFileOptions, StoreConfig,
+    CreateNamespaceOptions, DestinationBehavior, FsWriter, NamespaceId, PutFileOptions, StoreConfig,
 };
 
 #[allow(clippy::print_stdout)]
@@ -34,7 +34,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/hello.txt",
             b"hello from embedded LoonFS\n",
             PutFileOptions {
-                behavior: PutBehavior::Replace,
+                behavior: DestinationBehavior::Replace,
                 commit_id: None,
             },
         )

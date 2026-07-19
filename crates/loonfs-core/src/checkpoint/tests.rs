@@ -60,8 +60,8 @@ use loonfs_api::wire::sst_blocks::{
     decode_data_block_rows, decode_index_block, BlockHandle, DecodedDataBlock, SegmentBlocksBuilder,
 };
 use loonfs_api::{
-    ChangeSeq, CheckpointId, CommitId, EffectiveLimit, InodeId, ManifestId, ManifestObjectId,
-    NameKey, NamespaceId, PutBehavior, RevisionNo,
+    ChangeSeq, CheckpointId, CommitId, DestinationBehavior, EffectiveLimit, InodeId, ManifestId,
+    ManifestObjectId, NameKey, NamespaceId, RevisionNo,
 };
 use loonfs_objectstore::keys::{
     metadata_manifest_object, metadata_manifest_prefix, metadata_table, wal_head, wal_segment,
@@ -299,7 +299,7 @@ async fn manifest_round_trip_uses_manifest_materialization_for_mixed_namespace()
         &namespace_id,
         "/docs/hello.txt",
         b"hello again\n",
-        PutBehavior::Replace,
+        DestinationBehavior::Replace,
         &context,
         None,
     )
@@ -5796,7 +5796,7 @@ async fn over_budget_wal_flush_aborts_without_publishing() {
         &namespace_id,
         "/docs/budget.txt",
         b"body",
-        PutBehavior::NoReplace,
+        DestinationBehavior::NoReplace,
         &context,
         None,
     )
@@ -5858,7 +5858,7 @@ async fn over_budget_reorganization_aborts_without_publishing() {
         &namespace_id,
         "/docs/fold.txt",
         b"body",
-        PutBehavior::NoReplace,
+        DestinationBehavior::NoReplace,
         &context,
         None,
     )

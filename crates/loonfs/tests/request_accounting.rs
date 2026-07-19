@@ -228,7 +228,7 @@ async fn warm_phase_request_accounting() {
                     absolute_path: AbsolutePath::parse(format!("/hot/file-{index:05}.txt"))
                         .expect("path"),
                     content_ref,
-                    behavior: loonfs::PutBehavior::NoReplace,
+                    behavior: loonfs::DestinationBehavior::NoReplace,
                 },
             ));
             index += 1;
@@ -317,7 +317,7 @@ async fn warm_phase_request_accounting() {
             "/hot/file-05001.txt",
             b"replaced",
             PutFileOptions {
-                behavior: loonfs::PutBehavior::Replace,
+                behavior: loonfs::DestinationBehavior::Replace,
                 commit_id: None,
             },
         )
@@ -333,7 +333,7 @@ async fn warm_phase_request_accounting() {
             "/hot/file-05002.txt",
             b"replaced again",
             PutFileOptions {
-                behavior: loonfs::PutBehavior::Replace,
+                behavior: loonfs::DestinationBehavior::Replace,
                 commit_id: None,
             },
         )

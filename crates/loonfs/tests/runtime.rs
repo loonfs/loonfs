@@ -9,10 +9,10 @@ use loonfs::{
     BeginUploadResponse, ChangeSeq, ChangesResponse, CommitId, CommitOp, CommitRequest,
     CommitResponse, CompleteUploadRequest, CompleteUploadResponse, ContentRef, CopyOptions,
     CreateCheckpointOptions, CreateCheckpointResponse, CreateDirectoryOptions,
-    CreateNamespaceOptions, DeleteOptions, DirectoryPageCursor, ErrorCode, FsAdmin, FsReader,
-    FsWriter, FsWriterBuilder, InodeId, InodeKind, ListChangesOptions, MaintenanceTickOptions,
-    MaintenanceTickOutcome, MaintenanceTickResult, ManifestId, MoveOptions, NamespaceId,
-    NamespaceStatusResponse, PageRequest, PaginationPolicy, PutBehavior, PutFileOptions,
+    CreateNamespaceOptions, DeleteOptions, DestinationBehavior, DirectoryPageCursor, ErrorCode,
+    FsAdmin, FsReader, FsWriter, FsWriterBuilder, InodeId, InodeKind, ListChangesOptions,
+    MaintenanceTickOptions, MaintenanceTickOutcome, MaintenanceTickResult, ManifestId, MoveOptions,
+    NamespaceId, NamespaceStatusResponse, PageRequest, PaginationPolicy, PutFileOptions,
     RuntimeCacheConfig, RuntimeError, SharedObjectStore, TraceStoreKind, UploadContentResponse,
     UploadId,
 };
@@ -672,7 +672,7 @@ fn filesystem_operations_match_core_semantics() {
         "/docs/hello.txt",
         b"updated",
         PutFileOptions {
-            behavior: PutBehavior::Replace,
+            behavior: DestinationBehavior::Replace,
             commit_id: None,
         },
     )
@@ -1145,7 +1145,7 @@ fn undelete_recovers_a_deleted_file_and_generations_stay_scoped() {
         "/docs/report.txt",
         b"draft two",
         PutFileOptions {
-            behavior: PutBehavior::Replace,
+            behavior: DestinationBehavior::Replace,
             commit_id: None,
         },
     )
@@ -1766,7 +1766,7 @@ fn file_revision_pages_merge_manifest_and_wal_tail_newest_first() {
         .expect("create namespace");
 
     let replace = PutFileOptions {
-        behavior: PutBehavior::Replace,
+        behavior: DestinationBehavior::Replace,
         commit_id: None,
     };
     fs.put_file_bytes_blocking(&namespace_id, "/doc.txt", b"v1", PutFileOptions::default())
@@ -2014,7 +2014,7 @@ fn forked_namespace_shares_content_then_diverges() {
         "/docs/shared.txt",
         b"clone",
         PutFileOptions {
-            behavior: PutBehavior::Replace,
+            behavior: DestinationBehavior::Replace,
             commit_id: None,
         },
     )
@@ -2332,7 +2332,7 @@ fn put_file_bytes_gates_publish_on_its_own_content_write_without_probing() {
         "/docs/direct.txt",
         b"replaced bytes",
         PutFileOptions {
-            behavior: PutBehavior::Replace,
+            behavior: DestinationBehavior::Replace,
             commit_id: None,
         },
     )
@@ -2361,7 +2361,7 @@ fn put_file_bytes_content_write_failure_leaves_nothing_visible_and_a_retry_lands
             "/docs/report.txt",
             b"overlap survives",
             PutFileOptions {
-                behavior: PutBehavior::NoReplace,
+                behavior: DestinationBehavior::NoReplace,
                 commit_id: Some(commit_id.clone()),
             },
         )
@@ -2389,7 +2389,7 @@ fn put_file_bytes_content_write_failure_leaves_nothing_visible_and_a_retry_lands
         "/docs/report.txt",
         b"overlap survives",
         PutFileOptions {
-            behavior: PutBehavior::NoReplace,
+            behavior: DestinationBehavior::NoReplace,
             commit_id: Some(commit_id),
         },
     )
@@ -2704,7 +2704,7 @@ fn begin_upload_validates_controls_without_replay_reads() {
         "/docs/hello.txt",
         b"updated",
         PutFileOptions {
-            behavior: PutBehavior::Replace,
+            behavior: DestinationBehavior::Replace,
             commit_id: None,
         },
     )

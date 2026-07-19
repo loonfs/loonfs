@@ -152,7 +152,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
                     ))
                     .expect("path"),
                     content_ref,
-                    behavior: loonfs::PutBehavior::NoReplace,
+                    behavior: loonfs::DestinationBehavior::NoReplace,
                 },
             ));
         }

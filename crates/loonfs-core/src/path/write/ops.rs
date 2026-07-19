@@ -8,8 +8,8 @@ use crate::context::MutationContext;
 use crate::error::CoreError;
 use crate::path::helpers::parse_mutation_path;
 use loonfs_api::{
-    CommitId, CommitResponse, ContentRef, DeleteDirectoryBehavior, MoveBehavior, NamespaceId,
-    PutBehavior, RevisionNo,
+    CommitId, CommitResponse, ContentRef, DeleteDirectoryBehavior, DestinationBehavior,
+    NamespaceId, RevisionNo,
 };
 use loonfs_objectstore::ObjectStore;
 
@@ -40,7 +40,7 @@ pub(crate) async fn put_file_bytes<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     absolute_path: &str,
     bytes: &[u8],
-    behavior: PutBehavior,
+    behavior: DestinationBehavior,
     context: &MutationContext,
     commit_id: Option<&CommitId>,
 ) -> Result<CommitResponse, CoreError> {
@@ -71,7 +71,7 @@ pub(crate) async fn write_file_bytes<S: ObjectStore + ?Sized>(
         namespace_id,
         absolute_path,
         bytes,
-        PutBehavior::Replace,
+        DestinationBehavior::Replace,
         context,
         commit_id,
     )
@@ -83,7 +83,7 @@ pub(crate) async fn put_file_content_ref<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     absolute_path: &str,
     content_ref: ContentRef,
-    behavior: PutBehavior,
+    behavior: DestinationBehavior,
     context: &MutationContext,
     commit_id: Option<&CommitId>,
 ) -> Result<CommitResponse, CoreError> {
@@ -159,7 +159,7 @@ pub(crate) async fn move_path<S: ObjectStore + ?Sized>(
             commit_id,
             from_path: parse_mutation_path(from_path)?,
             to_path: parse_mutation_path(to_path)?,
-            behavior: MoveBehavior::NoReplace,
+            behavior: DestinationBehavior::NoReplace,
         },
         context,
     )

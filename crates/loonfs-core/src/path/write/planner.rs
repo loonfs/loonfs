@@ -15,8 +15,8 @@ use loonfs_api::{
         CommitOp as ApiCommitOp, CommitPrecondition as ApiCommitPrecondition,
         CommitRequest as ApiCommitRequest,
     },
-    AbsolutePath, CommitId, ContentRef, CopyBehavior, DeleteDirectoryBehavior, DisplayName,
-    InodeId, InodeKind, MoveBehavior, NameKey, NamespaceId, PutBehavior, RevisionNo,
+    AbsolutePath, CommitId, ContentRef, DeleteDirectoryBehavior, DestinationBehavior, DisplayName,
+    InodeId, InodeKind, NameKey, NamespaceId, RevisionNo,
 };
 use loonfs_objectstore::ObjectStore;
 use serde::Serialize;
@@ -45,7 +45,7 @@ enum PathFingerprintInput {
     PutFile {
         namespace_id: NamespaceId,
         absolute_path: String,
-        behavior: PutBehavior,
+        behavior: DestinationBehavior,
         content_ref: ContentRef,
     },
     DeletePath {
@@ -57,13 +57,13 @@ enum PathFingerprintInput {
         namespace_id: NamespaceId,
         from_path: String,
         to_path: String,
-        behavior: MoveBehavior,
+        behavior: DestinationBehavior,
     },
     CopyFilePath {
         namespace_id: NamespaceId,
         from_path: String,
         to_path: String,
-        behavior: CopyBehavior,
+        behavior: DestinationBehavior,
     },
     RestoreRevision {
         namespace_id: NamespaceId,
@@ -467,7 +467,7 @@ async fn plan_publish_undelete<S: ObjectStore + ?Sized>(
 async fn plan_publish_put_file_content_ref<S: ObjectStore + ?Sized>(
     absolute_path: &AbsolutePath,
     content_ref: ContentRef,
-    behavior: PutBehavior,
+    behavior: DestinationBehavior,
     commit_id: &CommitId,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
 ) -> Result<ApiCommitRequest, CoreError> {
@@ -488,7 +488,7 @@ async fn plan_publish_put_file_content_ref<S: ObjectStore + ?Sized>(
 
     match target {
         Ok(existing) => {
-            if behavior == PutBehavior::NoReplace {
+            if behavior == DestinationBehavior::NoReplace {
                 return Err(CoreError::DestinationExists(
                     absolute_path.as_str().to_owned(),
                 ));
@@ -624,7 +624,7 @@ async fn plan_publish_delete_path<S: ObjectStore + ?Sized>(
 async fn plan_publish_move_path<S: ObjectStore + ?Sized>(
     from_path: &AbsolutePath,
     to_path: &AbsolutePath,
-    behavior: MoveBehavior,
+    behavior: DestinationBehavior,
     commit_id: &CommitId,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
 ) -> Result<ApiCommitRequest, CoreError> {
@@ -642,7 +642,7 @@ async fn plan_publish_move_path<S: ObjectStore + ?Sized>(
     // replaces itself.
     let replaced = match view.metadata_state.resolve_visible_path(to_path).await {
         Ok(existing)
-            if behavior == MoveBehavior::Replace && existing.inode_id != source.inode_id =>
+            if behavior == DestinationBehavior::Replace && existing.inode_id != source.inode_id =>
         {
             if existing.inode_kind != InodeKind::File {
                 return Err(CoreError::ExpectedFile {
@@ -698,7 +698,7 @@ async fn plan_publish_move_path<S: ObjectStore + ?Sized>(
 async fn plan_publish_copy_file_path<S: ObjectStore + ?Sized>(
     from_path: &AbsolutePath,
     to_path: &AbsolutePath,
-    behavior: CopyBehavior,
+    behavior: DestinationBehavior,
     commit_id: &CommitId,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
 ) -> Result<ApiCommitRequest, CoreError> {
@@ -721,7 +721,7 @@ async fn plan_publish_copy_file_path<S: ObjectStore + ?Sized>(
     // replaces itself.
     let replaced = match view.metadata_state.resolve_visible_path(to_path).await {
         Ok(existing)
-            if behavior == CopyBehavior::Replace && existing.inode_id != source.inode_id =>
+            if behavior == DestinationBehavior::Replace && existing.inode_id != source.inode_id =>
         {
             if existing.inode_kind != InodeKind::File {
                 return Err(CoreError::ExpectedFile {
@@ -1144,7 +1144,7 @@ mod tests {
                 commit_id: CommitId::parse("put-nested").expect("valid commit id"),
                 absolute_path: AbsolutePath::parse("/docs/nested/a.txt").expect("path"),
                 content_ref: staged.content_ref.clone(),
-                behavior: PutBehavior::NoReplace,
+                behavior: DestinationBehavior::NoReplace,
             },
         )
         .await;
@@ -1180,7 +1180,7 @@ mod tests {
             &namespace_id,
             "/docs/a.txt",
             b"hello",
-            PutBehavior::NoReplace,
+            DestinationBehavior::NoReplace,
             &context,
             Some(&seed_commit_id),
         )
@@ -1194,7 +1194,7 @@ mod tests {
                 commit_id: CommitId::parse("move-file").expect("valid commit id"),
                 from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
                 to_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
-                behavior: MoveBehavior::NoReplace,
+                behavior: DestinationBehavior::NoReplace,
             },
         )
         .await;
@@ -1230,7 +1230,7 @@ mod tests {
             &namespace_id,
             "/docs/a.txt",
             b"hello",
-            PutBehavior::NoReplace,
+            DestinationBehavior::NoReplace,
             &context,
             Some(&seed_commit_id),
         )
@@ -1244,7 +1244,7 @@ mod tests {
                 commit_id: CommitId::parse("copy-file").expect("valid commit id"),
                 from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
                 to_path: AbsolutePath::parse("/docs/copy.txt").expect("path"),
-                behavior: CopyBehavior::NoReplace,
+                behavior: DestinationBehavior::NoReplace,
             },
         )
         .await;
@@ -1282,7 +1282,7 @@ mod tests {
             &namespace_id,
             "/docs/tmp.txt",
             b"first",
-            PutBehavior::NoReplace,
+            DestinationBehavior::NoReplace,
             &context,
             Some(&CommitId::parse("recreate-seed").expect("valid commit id")),
         )
@@ -1305,7 +1305,7 @@ mod tests {
             &namespace_id,
             "/docs/tmp.txt",
             b"second",
-            PutBehavior::NoReplace,
+            DestinationBehavior::NoReplace,
             &context,
             Some(&CommitId::parse("recreate-put").expect("valid commit id")),
         )
@@ -1322,7 +1322,7 @@ mod tests {
             &namespace_id,
             "/dead/file.txt",
             b"hello",
-            PutBehavior::NoReplace,
+            DestinationBehavior::NoReplace,
             &context,
             Some(&seed_commit_id),
         )
@@ -1351,7 +1351,7 @@ mod tests {
                 commit_id: CommitId::parse("put-under-dead").expect("valid commit id"),
                 absolute_path: AbsolutePath::parse("/dead/new.txt").expect("path"),
                 content_ref: staged.content_ref,
-                behavior: PutBehavior::NoReplace,
+                behavior: DestinationBehavior::NoReplace,
             },
         )
         .await

@@ -4,8 +4,8 @@
 
 use crate::DEFAULT_MAX_WAL_TAIL_SEGMENTS;
 use crate::{
-    ChangeSeq, CommitId, CopyBehavior, DeleteDirectoryBehavior, EffectiveLimit, GcConfig, GcReport,
-    InodeId, ManifestId, MoveBehavior, NamespaceId, NamespaceStatusResponse, PutBehavior,
+    ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior, EffectiveLimit, GcConfig,
+    GcReport, InodeId, ManifestId, NamespaceId, NamespaceStatusResponse,
 };
 use loonfs_api::v0::{
     CreateCheckpointRequest, GcRequest, GcResponse,
@@ -176,7 +176,7 @@ pub struct CreateNamespaceOptions {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PutFileOptions {
     /// Create-only or replace-existing behavior.
-    pub behavior: PutBehavior,
+    pub behavior: DestinationBehavior,
     /// Optional idempotency key.
     pub commit_id: Option<CommitId>,
 }
@@ -184,7 +184,7 @@ pub struct PutFileOptions {
 impl Default for PutFileOptions {
     fn default() -> Self {
         Self {
-            behavior: PutBehavior::NoReplace,
+            behavior: DestinationBehavior::NoReplace,
             commit_id: None,
         }
     }
@@ -226,7 +226,7 @@ impl Default for DeleteOptions {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MoveOptions {
     /// Create-only or replace-existing behavior for the destination.
-    pub behavior: MoveBehavior,
+    pub behavior: DestinationBehavior,
     /// Optional idempotency key.
     pub commit_id: Option<CommitId>,
 }
@@ -235,7 +235,7 @@ pub struct MoveOptions {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CopyOptions {
     /// Create-only or replace-existing behavior for the destination.
-    pub behavior: CopyBehavior,
+    pub behavior: DestinationBehavior,
     /// Optional idempotency key.
     pub commit_id: Option<CommitId>,
 }

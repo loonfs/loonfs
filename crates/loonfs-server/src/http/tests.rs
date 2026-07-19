@@ -75,8 +75,7 @@ use loonfs::{
     PutFileOptions, TraceMode, TraceStoreKind,
 };
 use loonfs_api::ErrorCode;
-use loonfs_api::MoveBehavior;
-use loonfs_api::{ChangeSeq, CommitId, DeleteDirectoryBehavior, NamespaceId, PutBehavior};
+use loonfs_api::{ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior, NamespaceId};
 use loonfs_client::{Client, ClientConfig, ClientError, MutationOptions, NamespacePath};
 use loonfs_objectstore::keys::wal_head;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -234,7 +233,7 @@ async fn runtime_created_state_is_readable_through_http() {
         "/notes/hello.txt",
         b"hello from runtime",
         PutFileOptions {
-            behavior: PutBehavior::NoReplace,
+            behavior: DestinationBehavior::NoReplace,
             commit_id: Some(CommitId::parse("runtime-put").expect("valid commit id")),
         },
     )
@@ -319,7 +318,7 @@ async fn http_missing_namespace_mutations_return_namespace_not_found() {
             harness.client.move_path(
                 &target,
                 &destination,
-                MoveBehavior::NoReplace,
+                DestinationBehavior::NoReplace,
                 &MutationOptions::default(),
             ),
             404,
@@ -428,7 +427,7 @@ async fn http_put_over_directory_and_move_into_existing_target_return_path_confl
             harness.client.move_path(
                 &from,
                 &to,
-                MoveBehavior::NoReplace,
+                DestinationBehavior::NoReplace,
                 &MutationOptions::default(),
             ),
             409,
@@ -489,7 +488,7 @@ async fn http_put_and_move_under_deleted_ancestor_create_fresh_subtrees() {
             .move_path(
                 &from,
                 &to,
-                MoveBehavior::NoReplace,
+                DestinationBehavior::NoReplace,
                 &MutationOptions::default(),
             )
             .expect("move lands in the recreated subtree");
@@ -1440,7 +1439,7 @@ async fn write_file_bytes(
         absolute_path,
         bytes,
         PutFileOptions {
-            behavior: PutBehavior::Replace,
+            behavior: DestinationBehavior::Replace,
             commit_id: Some(CommitId::parse(commit_id).expect("valid test commit id")),
         },
     )

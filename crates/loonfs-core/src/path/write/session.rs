@@ -79,7 +79,7 @@ mod tests {
     use crate::namespace::bootstrap::bootstrap_namespace;
     use crate::protocol::{load_publish_metadata_view, PublishTailOptions};
     use crate::storage::content::store_bytes_as_content;
-    use loonfs_api::{CommitId, DeleteDirectoryBehavior, PutBehavior};
+    use loonfs_api::{CommitId, DeleteDirectoryBehavior, DestinationBehavior};
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use tempfile::tempdir;
 
@@ -117,7 +117,7 @@ mod tests {
             commit_id: CommitId::parse(commit_id).expect("valid commit id"),
             absolute_path: AbsolutePath::parse(absolute_path).expect("path"),
             content_ref,
-            behavior: PutBehavior::NoReplace,
+            behavior: DestinationBehavior::NoReplace,
         })
     }
 
@@ -162,7 +162,7 @@ mod tests {
             commit_id: CommitId::parse("plan-a").expect("valid commit id"),
             absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
             content_ref: staged.content_ref.clone(),
-            behavior: PutBehavior::NoReplace,
+            behavior: DestinationBehavior::NoReplace,
         };
         session
             .plan_path_mutation(&namespace_id, &first_intent, view.metadata_view())
@@ -174,7 +174,7 @@ mod tests {
             commit_id: CommitId::parse("plan-b").expect("valid commit id"),
             absolute_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
             content_ref: staged.content_ref.clone(),
-            behavior: PutBehavior::NoReplace,
+            behavior: DestinationBehavior::NoReplace,
         };
         session
             .plan_path_mutation(&namespace_id, &second_intent, view.metadata_view())

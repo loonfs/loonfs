@@ -141,15 +141,16 @@ pub struct DeleteNamespaceResponse {
     pub head_seq: ChangeSeq,
 }
 
-/// Put behavior for path-oriented file writes.
+/// Destination-conflict behavior for path-oriented puts, moves, and copies.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
-pub enum PutBehavior {
-    /// Fail if the path already exists.
+pub enum DestinationBehavior {
+    /// Fail if the destination path already exists.
     #[default]
     NoReplace,
-    /// Replace the current file if it exists.
+    /// Replace the current file at the destination; only a file
+    /// destination can be replaced.
     Replace,
 }
 
@@ -163,30 +164,6 @@ pub enum DeleteDirectoryBehavior {
     NonRecursive,
     /// Delete a directory subtree.
     Recursive,
-}
-
-/// Move behavior for path-oriented moves, mirroring [`PutBehavior`].
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[serde(rename_all = "snake_case")]
-pub enum MoveBehavior {
-    /// Fail if the destination path already exists.
-    #[default]
-    NoReplace,
-    /// Replace the current file at the destination if one exists.
-    Replace,
-}
-
-/// Copy behavior for path-oriented copies, mirroring [`PutBehavior`].
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[serde(rename_all = "snake_case")]
-pub enum CopyBehavior {
-    /// Fail if the destination path already exists.
-    #[default]
-    NoReplace,
-    /// Replace the current file at the destination if one exists.
-    Replace,
 }
 
 /// One path-oriented filesystem operation.
@@ -209,7 +186,7 @@ pub enum FilesystemOperation {
         path: String,
         content_ref: ContentRef,
         #[serde(default)]
-        behavior: PutBehavior,
+        behavior: DestinationBehavior,
     },
     /// Delete one path.
     #[cfg_attr(feature = "openapi", schema(title = "FsOpDeletePath"))]
@@ -229,7 +206,7 @@ pub enum FilesystemOperation {
         from_path: String,
         to_path: String,
         #[serde(default)]
-        behavior: MoveBehavior,
+        behavior: DestinationBehavior,
     },
     /// Copy one file path to another path.
     #[cfg_attr(feature = "openapi", schema(title = "FsOpCopyPath"))]
@@ -237,7 +214,7 @@ pub enum FilesystemOperation {
         from_path: String,
         to_path: String,
         #[serde(default)]
-        behavior: CopyBehavior,
+        behavior: DestinationBehavior,
     },
     /// Restore an older revision as the current revision for a path.
     /// Recover a deleted file or subtree: revoke the deletion of
@@ -516,17 +493,21 @@ mod tests {
 
     #[test]
     fn behavior_enums_use_snake_case_wire_values() {
-        assert_eq!(PutBehavior::default(), PutBehavior::NoReplace);
+        assert_eq!(
+            DestinationBehavior::default(),
+            DestinationBehavior::NoReplace
+        );
         assert_eq!(
             DeleteDirectoryBehavior::default(),
             DeleteDirectoryBehavior::NonRecursive
         );
         assert_eq!(
-            serde_json::to_value(PutBehavior::NoReplace).expect("put behavior json"),
+            serde_json::to_value(DestinationBehavior::NoReplace)
+                .expect("destination behavior json"),
             serde_json::json!("no_replace")
         );
         assert_eq!(
-            serde_json::to_value(PutBehavior::Replace).expect("put behavior json"),
+            serde_json::to_value(DestinationBehavior::Replace).expect("destination behavior json"),
             serde_json::json!("replace")
         );
         assert_eq!(
@@ -585,7 +566,7 @@ mod tests {
         let move_path = FilesystemOperation::MovePath {
             from_path: "/docs/a.txt".to_owned(),
             to_path: "/docs/b.txt".to_owned(),
-            behavior: MoveBehavior::Replace,
+            behavior: DestinationBehavior::Replace,
         };
         assert_eq!(
             serde_json::to_value(&move_path).expect("move op json"),
@@ -600,7 +581,7 @@ mod tests {
         let copy_path = FilesystemOperation::CopyPath {
             from_path: "/docs/a.txt".to_owned(),
             to_path: "/docs/b.txt".to_owned(),
-            behavior: CopyBehavior::Replace,
+            behavior: DestinationBehavior::Replace,
         };
         assert_eq!(
             serde_json::to_value(&copy_path).expect("copy op json"),
@@ -628,7 +609,7 @@ mod tests {
         assert!(matches!(
             put,
             FilesystemOperation::PutFile {
-                behavior: PutBehavior::NoReplace,
+                behavior: DestinationBehavior::NoReplace,
                 ..
             }
         ));
@@ -658,7 +639,7 @@ mod tests {
             FilesystemOperation::MovePath {
                 from_path: "/docs/a.txt".to_owned(),
                 to_path: "/docs/b.txt".to_owned(),
-                behavior: MoveBehavior::NoReplace,
+                behavior: DestinationBehavior::NoReplace,
             }
         );
 
@@ -673,7 +654,7 @@ mod tests {
             FilesystemOperation::CopyPath {
                 from_path: "/docs/a.txt".to_owned(),
                 to_path: "/docs/b.txt".to_owned(),
-                behavior: CopyBehavior::NoReplace,
+                behavior: DestinationBehavior::NoReplace,
             }
         );
     }

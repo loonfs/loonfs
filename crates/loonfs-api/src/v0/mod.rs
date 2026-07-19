@@ -24,13 +24,13 @@ pub use commits::{
     CommittedChange,
 };
 pub use operations::{
-    AdvanceRetentionResponse, ApiError, CopyBehavior, CreateCheckpointRequest,
-    CreateCheckpointResponse, CreateNamespaceRequest, DeleteDirectoryBehavior,
-    DeleteNamespaceResponse, ErrorDetails, FileRevision, FilesystemOperation,
-    FilesystemOperationRequest, FlushWalOutcome, FlushWalResponse, ForkNamespaceRequest, GcRequest,
-    GcResponse, ListFileRevisionsResponse, MaintenanceTickOutcome, MaintenanceTickRequest,
-    MaintenanceTickResponse, MoveBehavior, NamespaceStatusResponse, NamespaceSummary, PutBehavior,
-    ReleaseCheckpointResponse, RestoreFileRevisionRequest,
+    AdvanceRetentionResponse, ApiError, CreateCheckpointRequest, CreateCheckpointResponse,
+    CreateNamespaceRequest, DeleteDirectoryBehavior, DeleteNamespaceResponse, DestinationBehavior,
+    ErrorDetails, FileRevision, FilesystemOperation, FilesystemOperationRequest, FlushWalOutcome,
+    FlushWalResponse, ForkNamespaceRequest, GcRequest, GcResponse, ListFileRevisionsResponse,
+    MaintenanceTickOutcome, MaintenanceTickRequest, MaintenanceTickResponse,
+    NamespaceStatusResponse, NamespaceSummary, ReleaseCheckpointResponse,
+    RestoreFileRevisionRequest,
 };
 pub use reads::{AuthoritativeFileBytes, AuthoritativePathEntry, ListPathEntriesResponse};
 pub use search::{

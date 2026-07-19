@@ -3554,14 +3554,6 @@
         "type": "string",
         "description": "Durable id for an immutable content store.\n\nContent stores own file bytes. Namespaces point at content stores."
       },
-      "CopyBehavior": {
-        "type": "string",
-        "description": "Copy behavior for path-oriented copies, mirroring [`PutBehavior`].",
-        "enum": [
-          "no_replace",
-          "replace"
-        ]
-      },
       "CreateCheckpointRequest": {
         "type": "object",
         "description": "Request to create a durable checkpoint pin.",
@@ -3670,6 +3662,14 @@
             "description": "Namespace whose history ended."
           }
         }
+      },
+      "DestinationBehavior": {
+        "type": "string",
+        "description": "Destination-conflict behavior for path-oriented puts, moves, and copies.",
+        "enum": [
+          "no_replace",
+          "replace"
+        ]
       },
       "DirectPutUpload": {
         "type": "object",
@@ -3923,7 +3923,7 @@
             ],
             "properties": {
               "behavior": {
-                "$ref": "#/components/schemas/PutBehavior"
+                "$ref": "#/components/schemas/DestinationBehavior"
               },
               "content_ref": {
                 "$ref": "#/components/schemas/ContentRef"
@@ -3984,7 +3984,7 @@
             ],
             "properties": {
               "behavior": {
-                "$ref": "#/components/schemas/MoveBehavior"
+                "$ref": "#/components/schemas/DestinationBehavior"
               },
               "from_path": {
                 "type": "string"
@@ -4011,7 +4011,7 @@
             ],
             "properties": {
               "behavior": {
-                "$ref": "#/components/schemas/CopyBehavior"
+                "$ref": "#/components/schemas/DestinationBehavior"
               },
               "from_path": {
                 "type": "string"
@@ -4648,14 +4648,6 @@
         "description": "Monotonically increasing namespace manifest identity.\n\nThis is the durable file-set version identity for namespace manifests.\nInitial/fork manifests may be seeded from the current head sequence, but\nlater manifest ids can advance for checkpoint metadata, compaction, or\nfork/index metadata without a new namespace commit.",
         "minimum": 0
       },
-      "MoveBehavior": {
-        "type": "string",
-        "description": "Move behavior for path-oriented moves, mirroring [`PutBehavior`].",
-        "enum": [
-          "no_replace",
-          "replace"
-        ]
-      },
       "NameKey": {
         "type": "string",
         "description": "Name-policy-derived directory entry key.\n\nUse this for exact name preconditions. Keep user-facing spelling in\n`DisplayName`."
@@ -4765,14 +4757,6 @@
           }
         ],
         "description": "Client-facing direct transfer capability."
-      },
-      "PutBehavior": {
-        "type": "string",
-        "description": "Put behavior for path-oriented file writes.",
-        "enum": [
-          "no_replace",
-          "replace"
-        ]
       },
       "ReleaseCheckpointResponse": {
         "type": "object",

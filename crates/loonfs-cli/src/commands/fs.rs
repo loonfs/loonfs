@@ -13,7 +13,7 @@ use crate::args::{
     RuntimeBehavior,
 };
 use crate::error::CliError;
-use loonfs_api::{CommitId, CopyBehavior, InodeKind, MoveBehavior, PutBehavior, RevisionNo};
+use loonfs_api::{CommitId, DestinationBehavior, InodeKind, RevisionNo};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -334,9 +334,9 @@ pub(crate) async fn run_filesystem_put(
     let commit_id = parse_commit_id_arg(args.commit_id.as_deref())
         .map_err(|error| context.fail(kind, error))?;
     let behavior = if args.force {
-        PutBehavior::Replace
+        DestinationBehavior::Replace
     } else {
-        PutBehavior::NoReplace
+        DestinationBehavior::NoReplace
     };
     let result = context
         .target
@@ -534,9 +534,9 @@ async fn run_filesystem_transfer(
             ));
         }
         let behavior = if args.force {
-            CopyBehavior::Replace
+            DestinationBehavior::Replace
         } else {
-            CopyBehavior::NoReplace
+            DestinationBehavior::NoReplace
         };
         context
             .target
@@ -545,9 +545,9 @@ async fn run_filesystem_transfer(
             .await
     } else {
         let behavior = if args.force {
-            MoveBehavior::Replace
+            DestinationBehavior::Replace
         } else {
-            MoveBehavior::NoReplace
+            DestinationBehavior::NoReplace
         };
         context
             .target
