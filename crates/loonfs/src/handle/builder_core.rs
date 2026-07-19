@@ -4,9 +4,10 @@
 use crate::background::BackgroundWork;
 use crate::config::FsConfig;
 use crate::fs::FsCore;
+use crate::metrics::ObjectStoreMetricsRecorder;
 use crate::{
-    GramIndexBuildPolicy, ObjectStoreMetricsRecorder, Result, RuntimeCacheConfig, RuntimeError,
-    SharedObjectStore, StoreConfig, TraceMode, TraceStoreKind,
+    GramIndexBuildPolicy, Result, RuntimeCacheConfig, RuntimeError, SharedObjectStore, StoreConfig,
+    TraceMode, TraceStoreKind,
 };
 use loonfs_core::cache::MetadataTableCache;
 use loonfs_objectstore::metrics::InstrumentedObjectStore;

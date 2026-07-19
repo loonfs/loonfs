@@ -198,7 +198,7 @@ impl TestRuntime {
         &self,
         namespace_id: &NamespaceId,
         content_ref: ContentRef,
-    ) -> loonfs::Result<loonfs::BeginDirectPutUploadTargetResponse> {
+    ) -> loonfs::Result<loonfs::uploads::BeginDirectPutUploadTargetResponse> {
         self.writer
             .begin_direct_put_upload_target(namespace_id, content_ref)
             .await

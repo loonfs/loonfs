@@ -2,7 +2,7 @@
 //! plus the wire conversions the server and embedded hosts share so both
 //! transports report identical maintenance shapes.
 
-use crate::DEFAULT_MAX_WAL_TAIL_SEGMENTS;
+use crate::config::DEFAULT_MAX_WAL_TAIL_SEGMENTS;
 use crate::{
     ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior, EffectiveLimit, GcConfig,
     GcReport, InodeId, ManifestId, NamespaceId, NamespaceStatusResponse,

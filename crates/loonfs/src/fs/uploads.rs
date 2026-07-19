@@ -1,10 +1,11 @@
 //! Staged uploads and direct-put targets.
 
 use super::core::FsCore;
+use crate::uploads::BeginDirectPutUploadTargetResponse;
 use crate::Result;
 use crate::{
-    BeginDirectPutUploadTargetResponse, BeginUploadRequest, BeginUploadResponse,
-    CompleteUploadRequest, CompleteUploadResponse, ContentRef, NamespaceId, UploadContentResponse,
+    BeginUploadRequest, BeginUploadResponse, CompleteUploadRequest, CompleteUploadResponse,
+    ContentRef, NamespaceId, UploadContentResponse,
 };
 use loonfs_api::UploadId;
 

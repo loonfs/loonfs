@@ -52,10 +52,11 @@ use axum::middleware::{self, Next};
 use axum::response::Response;
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
+use loonfs::metrics::{JsonlObjectStoreMetricsRecorder, ObjectStoreMetricsRecorder};
 use loonfs::publisher::PublisherRegistry;
 use loonfs::{
-    ErrorCode, FsAdmin, FsBackgroundWork, FsReader, FsWriter, JsonlObjectStoreMetricsRecorder,
-    ObjectStoreMetricsRecorder, SharedObjectStore, TraceMode, TraceStoreKind,
+    ErrorCode, FsAdmin, FsBackgroundWork, FsReader, FsWriter, SharedObjectStore, TraceMode,
+    TraceStoreKind,
 };
 use loonfs_api::NamespaceId;
 use loonfs_objectstore::presign::ObjectTransferIssuer;

@@ -6,21 +6,21 @@ use crate::{GramIndexBuildPolicy, MetadataTableCacheConfig, Result, RuntimeError
 
 /// Default visible WAL-tail length, in segments, at which a maintenance tick
 /// publishes a checkpoint.
-pub const DEFAULT_MAX_WAL_TAIL_SEGMENTS: u64 = 32;
+pub(crate) const DEFAULT_MAX_WAL_TAIL_SEGMENTS: u64 = 32;
 /// Default maximum namespaces retained in runtime caches.
-pub const DEFAULT_MAX_CACHED_NAMESPACES: usize = 64;
+pub(crate) const DEFAULT_MAX_CACHED_NAMESPACES: usize = 64;
 /// Default maximum metadata rows retained across cached WAL-tail projections.
-pub const DEFAULT_MAX_CACHED_WAL_TAIL_PROJECTION_ROWS: usize =
+pub(crate) const DEFAULT_MAX_CACHED_WAL_TAIL_PROJECTION_ROWS: usize =
     loonfs_core::cache::DEFAULT_WAL_TAIL_PROJECTION_ROWS;
 /// Default decoded-byte budget for cached WAL-tail projections.
-pub const DEFAULT_MAX_CACHED_WAL_TAIL_PROJECTION_DECODED_BYTES: usize =
+pub(crate) const DEFAULT_MAX_CACHED_WAL_TAIL_PROJECTION_DECODED_BYTES: usize =
     loonfs_core::cache::DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES;
 /// Default minimum interval, in milliseconds, between publication starts
 /// for one namespace (see [`crate::publisher`]). A cold namespace
 /// publishes immediately; the interval only paces follow-up batches, so
 /// concurrent submissions amortize into fewer, larger WAL segments. Zero
 /// keeps only the batching that in-flight publications force.
-pub const DEFAULT_MIN_PUBLISH_INTERVAL_MS: u64 = 15;
+pub(crate) const DEFAULT_MIN_PUBLISH_INTERVAL_MS: u64 = 15;
 /// Default cap on concurrently running writer-scheduled maintenance ticks,
 /// across all namespaces of one handle. Each namespace already runs at most
 /// one tick at a time; this bounds how many namespaces may tick at once, so

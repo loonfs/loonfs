@@ -4,14 +4,15 @@ use super::{owning_runtime, FsReader, HandleBuilderCore};
 use crate::background::{BackgroundWork, FsBackgroundWork};
 use crate::config::default_writer_version;
 use crate::fs::FsCore;
+use crate::metrics::ObjectStoreMetricsRecorder;
 use crate::publish::NamespaceMutationCandidate;
+use crate::uploads::BeginDirectPutUploadTargetResponse;
 use crate::{
-    BeginDirectPutUploadTargetResponse, BeginUploadRequest, BeginUploadResponse,
-    CapabilityDocument, ChangeSeq, CommitRequest, CommitResponse, CompleteUploadRequest,
-    CompleteUploadResponse, ContentRef, CopyOptions, CreateDirectoryOptions,
-    CreateNamespaceOptions, DeleteNamespaceOptions, DeleteNamespaceResponse, DeleteOptions,
-    GramIndexBuildPolicy, InodeId, MoveOptions, NamespaceId, NamespaceSummary,
-    ObjectStoreMetricsRecorder, PutFileOptions, RestoreRevisionOptions, Result, RevisionNo,
+    BeginUploadRequest, BeginUploadResponse, CapabilityDocument, ChangeSeq, CommitRequest,
+    CommitResponse, CompleteUploadRequest, CompleteUploadResponse, ContentRef, CopyOptions,
+    CreateDirectoryOptions, CreateNamespaceOptions, DeleteNamespaceOptions,
+    DeleteNamespaceResponse, DeleteOptions, GramIndexBuildPolicy, InodeId, MoveOptions,
+    NamespaceId, NamespaceSummary, PutFileOptions, RestoreRevisionOptions, Result, RevisionNo,
     RuntimeCacheConfig, RuntimeCacheStats, RuntimeError, SharedObjectStore, StoreConfig, TraceMode,
     TraceStoreKind, UndeleteOptions, UploadContentResponse, UploadId,
 };
@@ -462,8 +463,7 @@ impl FsWriterBuilder {
     /// A cold namespace publishes immediately; the interval only paces
     /// follow-up batches, so concurrent publishes amortize into fewer,
     /// larger WAL segments — with each caller still awaiting its own
-    /// durable, visible result. Defaults to
-    /// [`crate::DEFAULT_MIN_PUBLISH_INTERVAL_MS`]; zero keeps only the
+    /// durable, visible result. Defaults to 15 ms; zero keeps only the
     /// batching that in-flight publications force.
     pub fn min_publish_interval_ms(mut self, min_publish_interval_ms: u64) -> Self {
         self.core.min_publish_interval_ms = min_publish_interval_ms;

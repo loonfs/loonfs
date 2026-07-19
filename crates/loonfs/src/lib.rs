@@ -51,11 +51,11 @@ pub use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, CapabilityDocument,
     ChangeSeq, CheckpointId, CommitId, ContentRef, ContentRefKind, CreateCheckpointRequest,
     CreateCheckpointResponse, DeleteDirectoryBehavior, DeleteNamespaceResponse,
-    DestinationBehavior, DirectoryPageCursor, DisableGramsIndexResponse, DisplayName,
-    EffectiveLimit, EnableGramsIndexResponse, FileRevision, FileRevisionsPageCursor,
-    FlushWalOutcome, FlushWalResponse, GrepMatch, GrepRequest, GrepResponse, InodeId, InodeKind,
-    ListFileRevisionsResponse, ListPathEntriesResponse, ManifestId, NameKey, NamePolicy,
-    NamespaceId, NamespaceStatusResponse, NamespaceSummary, Page, PageRequest, PaginationPolicy,
+    DestinationBehavior, DirectoryPageCursor, DisableGramsIndexResponse, EffectiveLimit,
+    EnableGramsIndexResponse, FileRevision, FileRevisionsPageCursor, FlushWalOutcome,
+    FlushWalResponse, GrepMatch, GrepRequest, GrepResponse, InodeId, InodeKind,
+    ListFileRevisionsResponse, ListPathEntriesResponse, ManifestId, NameKey, NamespaceId,
+    NamespaceStatusResponse, NamespaceSummary, Page, PageRequest, PaginationPolicy,
     ReleaseCheckpointResponse, RevisionNo, UploadId, FEATURE_NAMESPACES_CREATE,
     FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK, FEATURE_QUERY_GREP,
     FEATURE_UPLOADS_DIRECT_PUT, PROFILE_ADMIN_V0, PROFILE_CORE_V0, PROFILE_QUERY_V0,
@@ -63,9 +63,8 @@ pub use loonfs_api::{
 };
 pub use loonfs_core::cache::MetadataTableCacheConfig;
 pub use loonfs_core::{
-    BeginDirectPutUploadTargetResponse, BootstrapNamespaceError, DeleteNamespaceOptions,
-    DirectPutUploadTarget, Error as CoreError, ErrorCode, ErrorKind, GcConfig, GcReport,
-    GramIndexBuildPolicy, WriterFence,
+    BootstrapNamespaceError, DeleteNamespaceOptions, Error as CoreError, ErrorCode, ErrorKind,
+    GcConfig, GcReport, GramIndexBuildPolicy, WriterFence,
 };
 
 /// Integration seam: the vocabulary for handing classified mutation work to
@@ -87,20 +86,20 @@ pub mod content_tokens {
         mint_content_token, verify_content_token, ContentAdmission, ContentTokenError,
     };
 }
-pub use loonfs_objectstore::metrics::{
-    JsonlObjectStoreMetricsRecorder, KeyClass, ObjectStoreMetricSample, ObjectStoreMetricsRecorder,
-    ObjectStoreOperation, ObjectStoreResultClass, PutModeClass, RangeClass,
-};
+
+/// Server-integration seam: the resolved direct-put upload target a serving
+/// session turns into a presigned URL for client-side object PUT. Most
+/// embedded users never need this module.
+pub mod uploads {
+    pub use loonfs_core::{BeginDirectPutUploadTargetResponse, DirectPutUploadTarget};
+}
+
+pub use loonfs_objectstore::metrics;
 pub use loonfs_objectstore::{ObjectStore, ObjectStoreError, SharedObjectStore, StoreConfig};
 
 pub use background::FsBackgroundWork;
 pub use cache::RuntimeCacheStats;
-pub use config::{
-    RuntimeCacheConfig, DEFAULT_MAX_CACHED_NAMESPACES,
-    DEFAULT_MAX_CACHED_WAL_TAIL_PROJECTION_DECODED_BYTES,
-    DEFAULT_MAX_CACHED_WAL_TAIL_PROJECTION_ROWS, DEFAULT_MAX_CONCURRENT_MAINTENANCE,
-    DEFAULT_MAX_WAL_TAIL_SEGMENTS, DEFAULT_MIN_PUBLISH_INTERVAL_MS,
-};
+pub use config::{RuntimeCacheConfig, DEFAULT_MAX_CONCURRENT_MAINTENANCE};
 pub use handle::{FsAdmin, FsAdminBuilder, FsReader, FsReaderBuilder, FsWriter, FsWriterBuilder};
 pub use options::{
     gc_config_from_request, gc_response_from_report, CopyOptions, CreateCheckpointOptions,
