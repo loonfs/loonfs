@@ -47,7 +47,7 @@ use crate::publish::PathMutationIntent;
 use crate::storage::content::store_bytes_as_content;
 use bytes::Bytes;
 use futures::stream::BoxStream;
-use loonfs_api::{AbsolutePath, CommitId, PutBehavior};
+use loonfs_api::{AbsolutePath, CommitId, DestinationBehavior};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ByteRange, ObjectBody, ObjectMetadata, ObjectStoreError, PutMode};
 use tempfile::tempdir;
@@ -113,7 +113,7 @@ async fn write_file<S: ObjectStore>(
                     commit_id: CommitId::parse(commit_id).expect("commit id"),
                     absolute_path: AbsolutePath::parse(path).expect("path"),
                     content_ref,
-                    behavior: PutBehavior::NoReplace,
+                    behavior: DestinationBehavior::NoReplace,
                 },
             )],
             context,

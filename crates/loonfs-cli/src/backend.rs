@@ -18,12 +18,12 @@ use loonfs::{
 };
 use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativePathEntry, ChangeSeq, CheckpointId, CommitId,
-    CommitResponse, CopyBehavior, CreateCheckpointRequest, CreateCheckpointResponse,
-    DeleteDirectoryBehavior, DisableGramsIndexResponse, EffectiveLimit, EnableGramsIndexResponse,
+    CommitResponse, CreateCheckpointRequest, CreateCheckpointResponse, DeleteDirectoryBehavior,
+    DestinationBehavior, DisableGramsIndexResponse, EffectiveLimit, EnableGramsIndexResponse,
     FlushWalResponse, GcRequest, GcResponse, GrepRequest, GrepResponse, InodeId,
-    ListFileRevisionsResponse, MaintenanceTickRequest, MaintenanceTickResponse, MoveBehavior,
-    NamespaceId, NamespaceStatusResponse, NamespaceSummary, PaginationPolicy, PutBehavior,
-    ReleaseCheckpointResponse, RevisionNo,
+    ListFileRevisionsResponse, MaintenanceTickRequest, MaintenanceTickResponse, NamespaceId,
+    NamespaceStatusResponse, NamespaceSummary, PaginationPolicy, ReleaseCheckpointResponse,
+    RevisionNo,
 };
 use loonfs_client::{Client, ClientConfig, NamespacePath};
 use std::sync::Arc;
@@ -272,7 +272,7 @@ impl Backend for EmbeddedBackend {
         &self,
         spec: &NamespacePath,
         bytes: &[u8],
-        behavior: PutBehavior,
+        behavior: DestinationBehavior,
         commit_id: Option<CommitId>,
     ) -> Result<CommitResponse, BackendError> {
         let namespace_id = parse_namespace_id(&spec.namespace)?;
@@ -335,7 +335,7 @@ impl Backend for EmbeddedBackend {
         &self,
         from: &NamespacePath,
         to: &NamespacePath,
-        behavior: MoveBehavior,
+        behavior: DestinationBehavior,
         commit_id: Option<CommitId>,
     ) -> Result<CommitResponse, BackendError> {
         let namespace_id = parse_namespace_id(&from.namespace)?;
@@ -357,7 +357,7 @@ impl Backend for EmbeddedBackend {
         &self,
         from: &NamespacePath,
         to: &NamespacePath,
-        behavior: CopyBehavior,
+        behavior: DestinationBehavior,
         commit_id: Option<CommitId>,
     ) -> Result<CommitResponse, BackendError> {
         let namespace_id = parse_namespace_id(&from.namespace)?;
@@ -718,7 +718,7 @@ mod tests {
         FsWriter, PutFileOptions, RuntimeError, SharedObjectStore,
     };
     use loonfs_api::{
-        ChangeSeq, CreateCheckpointRequest, InodeId, NamespaceId, PutBehavior, RevisionNo,
+        ChangeSeq, CreateCheckpointRequest, DestinationBehavior, InodeId, NamespaceId, RevisionNo,
     };
     use loonfs_client::NamespacePath;
     use std::sync::Arc;
@@ -787,7 +787,7 @@ mod tests {
                     absolute_path: "/file.txt".to_owned(),
                 },
                 b"hello",
-                PutBehavior::NoReplace,
+                DestinationBehavior::NoReplace,
                 None,
             )
             .await
@@ -865,7 +865,7 @@ mod tests {
                         absolute_path: format!("/files/f{index}.txt"),
                     },
                     b"payload",
-                    PutBehavior::NoReplace,
+                    DestinationBehavior::NoReplace,
                     None,
                 )
                 .await
@@ -912,7 +912,7 @@ mod tests {
                     &format!("/files/f{index}.txt"),
                     b"payload",
                     PutFileOptions {
-                        behavior: PutBehavior::NoReplace,
+                        behavior: DestinationBehavior::NoReplace,
                         commit_id: None,
                     },
                 )
@@ -943,7 +943,7 @@ mod tests {
                     absolute_path: "/recovered.txt".to_owned(),
                 },
                 b"payload",
-                PutBehavior::NoReplace,
+                DestinationBehavior::NoReplace,
                 None,
             )
             .await

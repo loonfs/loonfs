@@ -1,8 +1,8 @@
 //! [`PathMutationIntent`]: a user-facing path mutation before planning.
 
 use loonfs_api::{
-    AbsolutePath, ChangeSeq, CommitId, ContentRef, CopyBehavior, DeleteDirectoryBehavior, InodeId,
-    MoveBehavior, PutBehavior, RevisionNo,
+    AbsolutePath, ChangeSeq, CommitId, ContentRef, DeleteDirectoryBehavior, DestinationBehavior,
+    InodeId, RevisionNo,
 };
 
 /// User-facing path mutation before it is planned against namespace state.
@@ -27,7 +27,7 @@ pub enum PathMutationIntent {
         commit_id: CommitId,
         absolute_path: AbsolutePath,
         content_ref: ContentRef,
-        behavior: PutBehavior,
+        behavior: DestinationBehavior,
     },
     /// Delete one path.
     DeletePath {
@@ -44,14 +44,14 @@ pub enum PathMutationIntent {
         commit_id: CommitId,
         from_path: AbsolutePath,
         to_path: AbsolutePath,
-        behavior: MoveBehavior,
+        behavior: DestinationBehavior,
     },
     /// Copy one file path to another path.
     CopyFilePath {
         commit_id: CommitId,
         from_path: AbsolutePath,
         to_path: AbsolutePath,
-        behavior: CopyBehavior,
+        behavior: DestinationBehavior,
     },
     /// Restore a file revision at a path.
     RestoreRevision {

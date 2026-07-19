@@ -23,9 +23,9 @@ use loonfs_api::{
     },
     wire::wal::{decode_wal_segment_envelope_zstd, WalDelta},
     AbsolutePath, AuthoritativePathEntry, ChangeSeq, CommitId, ContentRef, ContentRefKind,
-    CopyBehavior, DeleteDirectoryBehavior, DirectoryPageCursor, EffectiveLimit, InodeId, InodeKind,
-    ManifestId, MoveBehavior, NameKey, NamespaceId, Page, PageRequest, PutBehavior, RevisionNo,
-    UploadId, WriterEpoch,
+    DeleteDirectoryBehavior, DestinationBehavior, DirectoryPageCursor, EffectiveLimit, InodeId,
+    InodeKind, ManifestId, NameKey, NamespaceId, Page, PageRequest, RevisionNo, UploadId,
+    WriterEpoch,
 };
 use loonfs_core::cache::{
     MetadataTableCache, MetadataTableCacheConfig, WalTailProjectionCache,
@@ -291,7 +291,7 @@ fn put_file_bytes<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     absolute_path: &str,
     bytes: &[u8],
-    behavior: PutBehavior,
+    behavior: DestinationBehavior,
     context: &MutationContext,
     commit_id: Option<&str>,
 ) -> Result<loonfs_api::CommitResponse, CoreError> {
@@ -322,7 +322,7 @@ fn write_file_bytes<S: ObjectStore + ?Sized>(
         namespace_id,
         absolute_path,
         bytes,
-        PutBehavior::Replace,
+        DestinationBehavior::Replace,
         context,
         commit_id,
     )
@@ -402,7 +402,7 @@ fn move_path<S: ObjectStore + ?Sized>(
             commit_id: test_commit_id(commit_id),
             from_path: AbsolutePath::parse(from_path).expect("path"),
             to_path: AbsolutePath::parse(to_path).expect("path"),
-            behavior: MoveBehavior::NoReplace,
+            behavior: DestinationBehavior::NoReplace,
         },
         context,
     )
@@ -423,7 +423,7 @@ fn copy_file_path<S: ObjectStore + ?Sized>(
             commit_id: test_commit_id(commit_id),
             from_path: AbsolutePath::parse(from_path).expect("path"),
             to_path: AbsolutePath::parse(to_path).expect("path"),
-            behavior: CopyBehavior::NoReplace,
+            behavior: DestinationBehavior::NoReplace,
         },
         context,
     )
@@ -1449,7 +1449,7 @@ async fn begin_upload_does_not_read_manifest_or_wal_replay_objects() {
         &namespace_id,
         "/docs/hello.txt",
         b"hello",
-        PutBehavior::NoReplace,
+        DestinationBehavior::NoReplace,
         &context,
         Some("upload-guard-create"),
     )
@@ -1460,7 +1460,7 @@ async fn begin_upload_does_not_read_manifest_or_wal_replay_objects() {
         &namespace_id,
         "/docs/hello.txt",
         b"updated",
-        PutBehavior::Replace,
+        DestinationBehavior::Replace,
         &context,
         Some("upload-guard-replace"),
     )
@@ -1608,7 +1608,7 @@ async fn path_put_file_validates_content_by_reading_it_once() {
                 commit_id: CommitId::parse("put-cold-content").expect("valid commit id"),
                 absolute_path: AbsolutePath::parse("/docs/hello.txt").expect("path"),
                 content_ref: content.content_ref,
-                behavior: PutBehavior::NoReplace,
+                behavior: DestinationBehavior::NoReplace,
             },
         )],
         &context,
@@ -1641,13 +1641,13 @@ async fn path_batch_validates_a_repeated_content_ref_once() {
                 commit_id: CommitId::parse("put-shared-a").expect("valid commit id"),
                 absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
                 content_ref: content.content_ref.clone(),
-                behavior: PutBehavior::NoReplace,
+                behavior: DestinationBehavior::NoReplace,
             }),
             NamespaceMutationCandidate::Path(PathMutationIntent::PutFile {
                 commit_id: CommitId::parse("put-shared-b").expect("valid commit id"),
                 absolute_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
                 content_ref: content.content_ref,
-                behavior: PutBehavior::NoReplace,
+                behavior: DestinationBehavior::NoReplace,
             }),
         ],
         &context,
@@ -1697,7 +1697,7 @@ async fn valid_content_admission_skips_durable_content_validation() {
                 commit_id: CommitId::parse("put-admitted-content").expect("valid commit id"),
                 absolute_path: AbsolutePath::parse("/docs/admitted.txt").expect("path"),
                 content_ref: content.content_ref,
-                behavior: PutBehavior::NoReplace,
+                behavior: DestinationBehavior::NoReplace,
             },
             admissions: vec![admission],
         }],
@@ -1749,7 +1749,7 @@ async fn expired_content_admission_falls_back_to_durable_validation() {
                 commit_id: CommitId::parse("put-expired-admission").expect("valid commit id"),
                 absolute_path: AbsolutePath::parse("/docs/expired.txt").expect("path"),
                 content_ref: content.content_ref,
-                behavior: PutBehavior::NoReplace,
+                behavior: DestinationBehavior::NoReplace,
             },
             admissions: vec![admission],
         }],
@@ -1782,7 +1782,7 @@ async fn metadata_queries_do_not_get_content_blobs_but_file_reads_do_once() {
             &namespace_id,
             &path,
             bytes.as_bytes(),
-            PutBehavior::NoReplace,
+            DestinationBehavior::NoReplace,
             &context,
             Some(&commit_id),
         )
@@ -1825,7 +1825,7 @@ async fn query_driven_reads_use_initial_manifest_with_wal_overlay() {
         &namespace_id,
         "/docs/file.txt",
         b"file",
-        PutBehavior::NoReplace,
+        DestinationBehavior::NoReplace,
         &context,
         Some("put-file"),
     )
@@ -1852,7 +1852,7 @@ async fn query_driven_stat_and_list_use_metadata_view_with_l0_run_and_wal_overla
         &namespace_id,
         "/docs/a.txt",
         b"alpha",
-        PutBehavior::NoReplace,
+        DestinationBehavior::NoReplace,
         &context,
         Some("put-alpha"),
     )
@@ -1862,7 +1862,7 @@ async fn query_driven_stat_and_list_use_metadata_view_with_l0_run_and_wal_overla
         &namespace_id,
         "/docs/b.txt",
         b"bravo",
-        PutBehavior::NoReplace,
+        DestinationBehavior::NoReplace,
         &context,
         Some("put-bravo"),
     )
@@ -1872,7 +1872,7 @@ async fn query_driven_stat_and_list_use_metadata_view_with_l0_run_and_wal_overla
         &namespace_id,
         "/dead/leaf.txt",
         b"dead",
-        PutBehavior::NoReplace,
+        DestinationBehavior::NoReplace,
         &context,
         Some("put-dead"),
     )
@@ -1893,7 +1893,7 @@ async fn query_driven_stat_and_list_use_metadata_view_with_l0_run_and_wal_overla
         &namespace_id,
         "/docs/b.txt",
         b"bravo two",
-        PutBehavior::Replace,
+        DestinationBehavior::Replace,
         &context,
         Some("replace-bravo"),
     )
@@ -1913,7 +1913,7 @@ async fn query_driven_stat_and_list_use_metadata_view_with_l0_run_and_wal_overla
         &namespace_id,
         "/docs/wal.txt",
         b"wal",
-        PutBehavior::NoReplace,
+        DestinationBehavior::NoReplace,
         &context,
         Some("put-wal"),
     )
@@ -1956,7 +1956,7 @@ async fn query_driven_stat_uses_exact_name_key_for_dash_containing_siblings() {
         &namespace_id,
         "/docs/report",
         b"short",
-        PutBehavior::NoReplace,
+        DestinationBehavior::NoReplace,
         &context,
         Some("put-report"),
     )
@@ -1966,7 +1966,7 @@ async fn query_driven_stat_uses_exact_name_key_for_dash_containing_siblings() {
         &namespace_id,
         "/docs/report-2024",
         b"newer-longer",
-        PutBehavior::NoReplace,
+        DestinationBehavior::NoReplace,
         &context,
         Some("put-report-2024"),
     )
@@ -1995,7 +1995,7 @@ async fn batch_delete_then_recreate_of_a_durable_file_layers_over_cached_state()
         &namespace_id,
         "/docs/cycled.txt",
         b"durable",
-        PutBehavior::NoReplace,
+        DestinationBehavior::NoReplace,
         &context,
         Some("put-durable"),
     )
@@ -2024,7 +2024,7 @@ async fn batch_delete_then_recreate_of_a_durable_file_layers_over_cached_state()
                 commit_id: CommitId::parse("recreate-cycled").expect("valid commit id"),
                 absolute_path: AbsolutePath::parse("/docs/cycled.txt").expect("path"),
                 content_ref: staged.content_ref,
-                behavior: PutBehavior::NoReplace,
+                behavior: DestinationBehavior::NoReplace,
             }),
         ]),
     );
@@ -2069,7 +2069,7 @@ async fn wide_directory_listing_resolves_tail_unbinds_cross_directory_renames_an
             &namespace_id,
             &path,
             b"first",
-            PutBehavior::NoReplace,
+            DestinationBehavior::NoReplace,
             &context,
             Some(&format!("put-{index:03}")),
         )
@@ -2082,7 +2082,7 @@ async fn wide_directory_listing_resolves_tail_unbinds_cross_directory_renames_an
             &namespace_id,
             &path,
             b"rebound",
-            PutBehavior::Replace,
+            DestinationBehavior::Replace,
             &context,
             Some(&format!("rebind-{index:03}")),
         )
@@ -2115,7 +2115,7 @@ async fn wide_directory_listing_resolves_tail_unbinds_cross_directory_renames_an
         &namespace_id,
         "/wide/file-005.txt",
         b"tail-rebound",
-        PutBehavior::Replace,
+        DestinationBehavior::Replace,
         &context,
         Some("tail-rebind-005"),
     )
@@ -2172,7 +2172,7 @@ async fn query_driven_directory_page_merges_manifest_and_tail_visible_children()
         &namespace_id,
         "/docs/c-file.txt",
         b"charlie",
-        PutBehavior::NoReplace,
+        DestinationBehavior::NoReplace,
         &context,
         Some("put-c-file"),
     )
@@ -2182,7 +2182,7 @@ async fn query_driven_directory_page_merges_manifest_and_tail_visible_children()
         &namespace_id,
         "/docs/stale.txt",
         b"stale",
-        PutBehavior::NoReplace,
+        DestinationBehavior::NoReplace,
         &context,
         Some("put-stale"),
     )
@@ -2201,7 +2201,7 @@ async fn query_driven_directory_page_merges_manifest_and_tail_visible_children()
         &namespace_id,
         "/docs/dead/leaf.txt",
         b"dead",
-        PutBehavior::NoReplace,
+        DestinationBehavior::NoReplace,
         &context,
         Some("put-dead"),
     )
@@ -2221,7 +2221,7 @@ async fn query_driven_directory_page_merges_manifest_and_tail_visible_children()
         &namespace_id,
         "/docs/d-tail.txt",
         b"delta",
-        PutBehavior::NoReplace,
+        DestinationBehavior::NoReplace,
         &context,
         Some("put-d-tail"),
     )
@@ -2239,7 +2239,7 @@ async fn query_driven_directory_page_merges_manifest_and_tail_visible_children()
         &namespace_id,
         "/docs/tail-dead/leaf.txt",
         b"tail-dead",
-        PutBehavior::NoReplace,
+        DestinationBehavior::NoReplace,
         &context,
         Some("put-tail-dead"),
     )
@@ -2378,7 +2378,7 @@ async fn revision_queries_read_historical_bytes_and_path_restore_appends_revisio
         &namespace_id,
         "/docs/rev.txt",
         b"one",
-        PutBehavior::NoReplace,
+        DestinationBehavior::NoReplace,
         &context,
         Some("rev-create"),
     )
@@ -2746,7 +2746,7 @@ async fn namespace_delete_is_terminal_for_reads_writes_creation_and_forks() {
             commit_id: CommitId::parse("before-delete").expect("valid commit id"),
             absolute_path: AbsolutePath::parse("/keep.txt").expect("path"),
             content_ref: content.content_ref.clone(),
-            behavior: PutBehavior::NoReplace,
+            behavior: DestinationBehavior::NoReplace,
         },
         &context,
     )
@@ -2780,7 +2780,7 @@ async fn namespace_delete_is_terminal_for_reads_writes_creation_and_forks() {
             commit_id: CommitId::parse("after-delete").expect("valid commit id"),
             absolute_path: AbsolutePath::parse("/late.txt").expect("path"),
             content_ref: content.content_ref.clone(),
-            behavior: PutBehavior::NoReplace,
+            behavior: DestinationBehavior::NoReplace,
         },
         &context,
     )
@@ -2823,7 +2823,7 @@ async fn fork_clone_survives_source_delete() {
             commit_id: CommitId::parse("seed-clone").expect("valid commit id"),
             absolute_path: AbsolutePath::parse("/shared.txt").expect("path"),
             content_ref: content.content_ref,
-            behavior: PutBehavior::NoReplace,
+            behavior: DestinationBehavior::NoReplace,
         },
         &context,
     )
@@ -2858,7 +2858,7 @@ async fn ack_lost_head_cas_reports_unknown_outcome_and_replays_idempotently() {
         commit_id: CommitId::parse("ack-lost-put").expect("valid commit id"),
         absolute_path: AbsolutePath::parse("/ack.txt").expect("path"),
         content_ref: content.content_ref.clone(),
-        behavior: PutBehavior::NoReplace,
+        behavior: DestinationBehavior::NoReplace,
     };
 
     // The CAS landed but its acknowledgment was lost: this must surface as
@@ -2894,7 +2894,7 @@ async fn retry_succeeds_after_wal_orphaned_by_stale_head_cas() {
         commit_id: CommitId::parse("retry-after-orphan").expect("valid commit id"),
         absolute_path: AbsolutePath::parse("/retry.txt").expect("path"),
         content_ref: content.content_ref,
-        behavior: PutBehavior::NoReplace,
+        behavior: DestinationBehavior::NoReplace,
     };
     let error = submit_intent_async(&store, &namespace_id, intent.clone(), &context)
         .await
@@ -2990,7 +2990,7 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
                 commit_id: CommitId::parse("accept-a").expect("valid commit id"),
                 absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
                 content_ref: content.content_ref.clone(),
-                behavior: PutBehavior::NoReplace,
+                behavior: DestinationBehavior::NoReplace,
             }),
             // Rejected only because of the accepted candidate's speculative
             // in-batch create.
@@ -2998,7 +2998,7 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
                 commit_id: CommitId::parse("reject-speculative").expect("valid commit id"),
                 absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
                 content_ref: content.content_ref.clone(),
-                behavior: PutBehavior::NoReplace,
+                behavior: DestinationBehavior::NoReplace,
             }),
             // Alias of the materialization-decided rejection.
             NamespaceMutationCandidate::Path(PathMutationIntent::DeletePath {
@@ -3079,13 +3079,13 @@ async fn stale_head_cas_fails_rejections_decided_against_in_batch_state() {
                 commit_id: CommitId::parse("accept-a").expect("valid commit id"),
                 absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
                 content_ref: content.content_ref.clone(),
-                behavior: PutBehavior::NoReplace,
+                behavior: DestinationBehavior::NoReplace,
             }),
             NamespaceMutationCandidate::Path(PathMutationIntent::PutFile {
                 commit_id: CommitId::parse("reject-speculative").expect("valid commit id"),
                 absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
                 content_ref: content.content_ref.clone(),
-                behavior: PutBehavior::NoReplace,
+                behavior: DestinationBehavior::NoReplace,
             }),
         ]
     };
@@ -3157,7 +3157,7 @@ async fn retry_succeeds_after_stale_head_get_during_publish_view_load() {
         &namespace_id,
         "/file.txt",
         b"first contents",
-        PutBehavior::NoReplace,
+        DestinationBehavior::NoReplace,
         &context,
         Some("write-first"),
     )
@@ -3167,7 +3167,7 @@ async fn retry_succeeds_after_stale_head_get_during_publish_view_load() {
         &namespace_id,
         "/file.txt",
         b"second contents win",
-        PutBehavior::Replace,
+        DestinationBehavior::Replace,
         &context,
         Some("write-second"),
     )
@@ -3442,7 +3442,7 @@ async fn path_intents_cover_basic_mutations() {
             commit_id: CommitId::parse("put-path").expect("valid commit id"),
             absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
             content_ref: content.content_ref.clone(),
-            behavior: PutBehavior::NoReplace,
+            behavior: DestinationBehavior::NoReplace,
         },
         &context,
     )
@@ -3457,7 +3457,7 @@ async fn path_intents_cover_basic_mutations() {
             commit_id: CommitId::parse("move-path").expect("valid commit id"),
             from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
-            behavior: MoveBehavior::NoReplace,
+            behavior: DestinationBehavior::NoReplace,
         },
         &context,
     )
@@ -3472,7 +3472,7 @@ async fn path_intents_cover_basic_mutations() {
             commit_id: CommitId::parse("copy-path").expect("valid commit id"),
             from_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/c.txt").expect("path"),
-            behavior: CopyBehavior::NoReplace,
+            behavior: DestinationBehavior::NoReplace,
         },
         &context,
     )
@@ -3515,7 +3515,7 @@ async fn path_publishes_use_durable_path_commit_receipt_index() {
         commit_id: CommitId::parse("same-path-request").expect("valid commit id"),
         absolute_path: AbsolutePath::parse("/same//path.txt").expect("path"),
         content_ref: content.content_ref.clone(),
-        behavior: PutBehavior::NoReplace,
+        behavior: DestinationBehavior::NoReplace,
     };
     let first = submit_intent_async(&store, &namespace_id, intent.clone(), &context)
         .await
@@ -3527,7 +3527,7 @@ async fn path_publishes_use_durable_path_commit_receipt_index() {
             commit_id: CommitId::parse("same-path-request").expect("valid commit id"),
             absolute_path: AbsolutePath::parse("/same/path.txt").expect("path"),
             content_ref: content.content_ref.clone(),
-            behavior: PutBehavior::NoReplace,
+            behavior: DestinationBehavior::NoReplace,
         },
         &context,
     )
@@ -3579,13 +3579,13 @@ async fn path_intents_in_one_batch_see_tentative_state() {
                 commit_id: CommitId::parse("put-batched-path").expect("valid commit id"),
                 absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
                 content_ref: content.content_ref,
-                behavior: PutBehavior::NoReplace,
+                behavior: DestinationBehavior::NoReplace,
             }),
             NamespaceMutationCandidate::Path(PathMutationIntent::MovePath {
                 commit_id: CommitId::parse("move-batched-path").expect("valid commit id"),
                 from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
                 to_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
-                behavior: MoveBehavior::NoReplace,
+                behavior: DestinationBehavior::NoReplace,
             }),
         ],
         &context,
@@ -4573,7 +4573,7 @@ async fn idempotent_path_retry_returns_receipt_before_content_validation() {
                 commit_id: commit_id.clone(),
                 absolute_path: AbsolutePath::parse("/docs/idempotent.txt").expect("path"),
                 content_ref: content.content_ref.clone(),
-                behavior: PutBehavior::NoReplace,
+                behavior: DestinationBehavior::NoReplace,
             },
         )],
         &context,
@@ -4595,7 +4595,7 @@ async fn idempotent_path_retry_returns_receipt_before_content_validation() {
                 commit_id,
                 absolute_path: AbsolutePath::parse("/docs/idempotent.txt").expect("path"),
                 content_ref: content.content_ref,
-                behavior: PutBehavior::NoReplace,
+                behavior: DestinationBehavior::NoReplace,
             },
         )],
         &context,
@@ -4846,7 +4846,7 @@ async fn put_file_no_replace_rejects_existing_target_without_force() {
         &namespace_id(),
         "/docs/hello.txt",
         b"new-bytes",
-        PutBehavior::NoReplace,
+        DestinationBehavior::NoReplace,
         &context,
         Some("put-no-force"),
     )
@@ -4960,7 +4960,7 @@ async fn no_replace_put_rejects_casefold_and_normalization_equivalent_name() {
         &namespace_id(),
         "/CAF\u{00c9}.TXT",
         b"new-bytes",
-        PutBehavior::NoReplace,
+        DestinationBehavior::NoReplace,
         &context,
         Some("create-only-conflict"),
     )
@@ -5877,7 +5877,7 @@ async fn tombstoned_children_stay_unlisted_and_live_entries_keep_revision_data()
         &namespace_id(),
         "/live/kept.txt",
         b"alive",
-        PutBehavior::NoReplace,
+        DestinationBehavior::NoReplace,
         &context,
         None,
     )
@@ -5887,7 +5887,7 @@ async fn tombstoned_children_stay_unlisted_and_live_entries_keep_revision_data()
         &namespace_id(),
         "/dead/gone.txt",
         b"doomed",
-        PutBehavior::NoReplace,
+        DestinationBehavior::NoReplace,
         &context,
         None,
     )
@@ -5945,7 +5945,7 @@ async fn move_replace_atomically_replaces_a_file_destination() {
         &namespace_id,
         "/docs/a.txt",
         b"alpha",
-        PutBehavior::NoReplace,
+        DestinationBehavior::NoReplace,
         &context,
         Some("put-a"),
     )
@@ -5955,7 +5955,7 @@ async fn move_replace_atomically_replaces_a_file_destination() {
         &namespace_id,
         "/docs/b.txt",
         b"beta",
-        PutBehavior::NoReplace,
+        DestinationBehavior::NoReplace,
         &context,
         Some("put-b"),
     )
@@ -5969,7 +5969,7 @@ async fn move_replace_atomically_replaces_a_file_destination() {
             commit_id: CommitId::parse("move-no-replace").expect("valid commit id"),
             from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
-            behavior: MoveBehavior::NoReplace,
+            behavior: DestinationBehavior::NoReplace,
         },
         &context,
     )
@@ -5985,7 +5985,7 @@ async fn move_replace_atomically_replaces_a_file_destination() {
             commit_id: CommitId::parse("move-replace").expect("valid commit id"),
             from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
-            behavior: MoveBehavior::Replace,
+            behavior: DestinationBehavior::Replace,
         },
         &context,
     )
@@ -6009,7 +6009,7 @@ async fn move_replace_rejects_directory_destinations_and_self_moves() {
         &namespace_id,
         "/docs/a.txt",
         b"alpha",
-        PutBehavior::NoReplace,
+        DestinationBehavior::NoReplace,
         &context,
         Some("put-a"),
     )
@@ -6025,7 +6025,7 @@ async fn move_replace_rejects_directory_destinations_and_self_moves() {
             commit_id: CommitId::parse("move-onto-dir").expect("valid commit id"),
             from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/dir").expect("path"),
-            behavior: MoveBehavior::Replace,
+            behavior: DestinationBehavior::Replace,
         },
         &context,
     )
@@ -6040,7 +6040,7 @@ async fn move_replace_rejects_directory_destinations_and_self_moves() {
             commit_id: CommitId::parse("move-onto-self").expect("valid commit id"),
             from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
-            behavior: MoveBehavior::Replace,
+            behavior: DestinationBehavior::Replace,
         },
         &context,
     )
@@ -6061,7 +6061,7 @@ async fn copy_replace_appends_a_revision_to_the_destination_inode() {
         &namespace_id,
         "/docs/a.txt",
         b"alpha",
-        PutBehavior::NoReplace,
+        DestinationBehavior::NoReplace,
         &context,
         Some("put-a"),
     )
@@ -6071,7 +6071,7 @@ async fn copy_replace_appends_a_revision_to_the_destination_inode() {
         &namespace_id,
         "/docs/b.txt",
         b"beta",
-        PutBehavior::NoReplace,
+        DestinationBehavior::NoReplace,
         &context,
         Some("put-b"),
     )
@@ -6086,7 +6086,7 @@ async fn copy_replace_appends_a_revision_to_the_destination_inode() {
             commit_id: CommitId::parse("copy-replace").expect("valid commit id"),
             from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
-            behavior: CopyBehavior::Replace,
+            behavior: DestinationBehavior::Replace,
         },
         &context,
     )

@@ -2,8 +2,8 @@
 
 use loonfs_api::{
     v0::{CompleteUploadRequest, ObjectTransferAccess, ValidatedContentToken},
-    ChangeSeq, CommitId, CommitResponse, ContentRef, FilesystemOperation,
-    FilesystemOperationRequest, PutBehavior,
+    ChangeSeq, CommitId, CommitResponse, ContentRef, DestinationBehavior, FilesystemOperation,
+    FilesystemOperationRequest,
 };
 use loonfs_client::{Client, ClientConfig, ClientError, NamespacePath};
 use loonfs_server::{
@@ -146,7 +146,7 @@ async fn direct_put_round_trip(config: ServerConfig) {
                 operation: FilesystemOperation::PutFile {
                     path: target.absolute_path.clone(),
                     content_ref,
-                    behavior: PutBehavior::NoReplace,
+                    behavior: DestinationBehavior::NoReplace,
                 },
             },
         );

@@ -1,6 +1,6 @@
 //! Per-operation options structs for the engine surface.
 
-use loonfs_api::{CommitId, DeleteDirectoryBehavior, PutBehavior};
+use loonfs_api::{CommitId, DeleteDirectoryBehavior, DestinationBehavior};
 
 /// Options for namespace bootstrap.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -25,7 +25,7 @@ pub struct WriteOptions {
     /// If omitted, path helpers generate one internally.
     pub commit_id: Option<CommitId>,
     /// Whether a file put may replace an existing file.
-    pub put_behavior: PutBehavior,
+    pub put_behavior: DestinationBehavior,
     /// Whether delete may remove a non-empty subtree.
     pub delete_behavior: DeleteDirectoryBehavior,
 }
@@ -34,7 +34,7 @@ impl Default for WriteOptions {
     fn default() -> Self {
         Self {
             commit_id: None,
-            put_behavior: PutBehavior::NoReplace,
+            put_behavior: DestinationBehavior::NoReplace,
             delete_behavior: DeleteDirectoryBehavior::NonRecursive,
         }
     }

@@ -21,14 +21,13 @@ use loonfs_api::{
         UploadMode, ValidatedContentToken,
     },
     AdvanceRetentionResponse, AuthoritativePathEntry, CapabilityDocument, ChangeSeq, CommitId,
-    ContentRef, CopyBehavior, CreateCheckpointRequest, CreateCheckpointResponse,
-    CreateNamespaceRequest, DeleteDirectoryBehavior, DeleteNamespaceResponse,
+    ContentRef, CreateCheckpointRequest, CreateCheckpointResponse, CreateNamespaceRequest,
+    DeleteDirectoryBehavior, DeleteNamespaceResponse, DestinationBehavior,
     DisableGramsIndexResponse, EnableGramsIndexResponse, ErrorCode, FilesystemOperation,
     FilesystemOperationRequest, FlushWalResponse, ForkNamespaceRequest, GcRequest, GcResponse,
     GrepRequest, GrepResponse, InodeId, ListFileRevisionsResponse, ListPathEntriesResponse,
-    MaintenanceTickRequest, MaintenanceTickResponse, MoveBehavior, NamespaceId,
-    NamespaceStatusResponse, NamespaceSummary, PutBehavior, ReleaseCheckpointResponse,
-    RestoreFileRevisionRequest, RevisionNo,
+    MaintenanceTickRequest, MaintenanceTickResponse, NamespaceId, NamespaceStatusResponse,
+    NamespaceSummary, ReleaseCheckpointResponse, RestoreFileRevisionRequest, RevisionNo,
 };
 use std::sync::{Arc, OnceLock};
 
@@ -652,7 +651,7 @@ impl Client {
         &self,
         spec: &NamespacePath,
         bytes: &[u8],
-        behavior: PutBehavior,
+        behavior: DestinationBehavior,
         options: &MutationOptions,
     ) -> Result<ApiCommitResponse, ClientError> {
         let commit_id = options.resolve_commit_id()?;
@@ -678,7 +677,7 @@ impl Client {
         bytes: &[u8],
         options: &MutationOptions,
     ) -> Result<ApiCommitResponse, ClientError> {
-        self.put_file_bytes(spec, bytes, PutBehavior::Replace, options)
+        self.put_file_bytes(spec, bytes, DestinationBehavior::Replace, options)
     }
 
     pub fn create_directory(
@@ -762,7 +761,7 @@ impl Client {
         &self,
         from: &NamespacePath,
         to: &NamespacePath,
-        behavior: MoveBehavior,
+        behavior: DestinationBehavior,
         options: &MutationOptions,
     ) -> Result<ApiCommitResponse, ClientError> {
         if from.namespace != to.namespace {
@@ -791,7 +790,7 @@ impl Client {
         &self,
         from: &NamespacePath,
         to: &NamespacePath,
-        behavior: CopyBehavior,
+        behavior: DestinationBehavior,
         options: &MutationOptions,
     ) -> Result<ApiCommitResponse, ClientError> {
         if from.namespace != to.namespace {

@@ -1061,7 +1061,7 @@ mod tests {
     use futures::stream::BoxStream;
     use loonfs_api::v0::{CommitOp, CommitRequest};
     use loonfs_api::wire::wal::decode_wal_segment_envelope_zstd;
-    use loonfs_api::{AbsolutePath, ChangeSeq, InodeId, PutBehavior};
+    use loonfs_api::{AbsolutePath, ChangeSeq, DestinationBehavior, InodeId};
     use loonfs_objectstore::keys::{wal_head, wal_segment_prefix};
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::{
@@ -2088,7 +2088,7 @@ mod tests {
             commit_id: CommitId::parse("path-put").expect("valid commit id"),
             absolute_path: AbsolutePath::parse("/file.txt").expect("path"),
             content_ref: staged.content_ref,
-            behavior: PutBehavior::NoReplace,
+            behavior: DestinationBehavior::NoReplace,
         };
 
         let (explicit_response, path_response) = tokio::join!(
