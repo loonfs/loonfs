@@ -1,6 +1,6 @@
 //! `loon namespace` commands: create, fork, delete, use, and current.
 
-use super::context::{fail, fail_for, validate_namespace_id};
+use super::context::{fail, fail_for};
 use super::output::{CommandData, CommandFailure, CommandOutput};
 use crate::args::{
     CommandKind, CurrentArgs, NamespaceCommand, NamespaceCreateArgs, NamespaceDeleteArgs,
@@ -10,7 +10,9 @@ use crate::config::save_config;
 use crate::error::CliError;
 use crate::profiles::{default_namespace, set_default_namespace};
 use crate::prompt::prompt_line;
-use crate::resolve::{load_cli_config, resolve_target_profile, resolve_target_profile_from_config};
+use crate::resolve::{
+    load_cli_config, parse_namespace_id, resolve_target_profile, resolve_target_profile_from_config,
+};
 
 // --- namespace ---
 
@@ -35,12 +37,12 @@ async fn run_namespace_create(
         .await
         .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
     let mode = resolved.target.mode_str().to_owned();
-    validate_namespace_id(&args.namespace_id)
+    let namespace_id = parse_namespace_id(&args.namespace_id)
         .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
     let namespace = resolved
         .target
         .backend()
-        .create_namespace(&args.namespace_id)
+        .create_namespace(&namespace_id)
         .await
         .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
 
@@ -62,7 +64,7 @@ async fn run_namespace_delete(
         .await
         .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
     let mode = resolved.target.mode_str().to_owned();
-    validate_namespace_id(&args.namespace_id)
+    let namespace_id = parse_namespace_id(&args.namespace_id)
         .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
 
     if !args.yes {
@@ -103,7 +105,7 @@ async fn run_namespace_delete(
     let response = resolved
         .target
         .backend()
-        .delete_namespace(&args.namespace_id, args.expected_head_seq)
+        .delete_namespace(&namespace_id, args.expected_head_seq)
         .await
         .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
 
@@ -124,14 +126,14 @@ async fn run_namespace_fork(
         .await
         .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
     let mode = resolved.target.mode_str().to_owned();
-    validate_namespace_id(&args.source)
+    let source_namespace_id = parse_namespace_id(&args.source)
         .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
-    validate_namespace_id(&args.new_namespace_id)
+    let new_namespace_id = parse_namespace_id(&args.new_namespace_id)
         .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
     let namespace = resolved
         .target
         .backend()
-        .fork_namespace(&args.source, &args.new_namespace_id)
+        .fork_namespace(&source_namespace_id, &new_namespace_id)
         .await
         .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
 
@@ -155,13 +157,13 @@ pub(crate) async fn run_namespace_use(
             .await
             .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
     let mode = resolved.target.mode_str().to_owned();
-    validate_namespace_id(&args.namespace)
+    let namespace_id = parse_namespace_id(&args.namespace)
         .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
 
     resolved
         .target
         .backend()
-        .namespace_status(&args.namespace)
+        .namespace_status(&namespace_id)
         .await
         .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
 

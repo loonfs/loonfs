@@ -2,10 +2,7 @@
 //! handlers.
 
 use super::error::ApiResponseError;
-use super::{
-    authorize, parse_namespace_id, AppJson, AppPath, AppQuery, AppState, NamespaceIdPath,
-    OptionalAppJson,
-};
+use super::{authorize, AppJson, AppPath, AppQuery, AppState, NamespaceIdPath, OptionalAppJson};
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
@@ -103,10 +100,9 @@ pub(super) async fn create_namespace(
     AppJson(request): AppJson<CreateNamespaceRequest>,
 ) -> Result<Json<loonfs_api::NamespaceSummary>, ApiResponseError> {
     authorize(&state.config, &headers)?;
-    let namespace_id = parse_namespace_id(request.namespace_id)?;
     let summary = state
         .writer
-        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .create_namespace(&request.namespace_id, CreateNamespaceOptions::default())
         .await
         .map_err(ApiResponseError::runtime)?;
     Ok(Json(summary))
@@ -215,10 +211,9 @@ pub(super) async fn fork_namespace(
 ) -> Result<Json<loonfs_api::NamespaceSummary>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let source_namespace_id = namespace.into_id()?;
-    let new_namespace_id = parse_namespace_id(request.new_namespace_id)?;
     let summary = state
         .writer
-        .fork_namespace(&source_namespace_id, &new_namespace_id)
+        .fork_namespace(&source_namespace_id, &request.new_namespace_id)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&source_namespace_id, error))?;
     Ok(Json(summary))

@@ -14,6 +14,7 @@ use crate::args::{
 };
 use crate::error::CliError;
 use loonfs_api::{CommitId, DestinationBehavior, InodeKind, RevisionNo};
+use loonfs_client::NamespacePath;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -214,7 +215,7 @@ pub(crate) async fn run_filesystem_get(
             kind,
             CliError::invalid_input(format!(
                 "directory operations are not available for `{}`",
-                spec.absolute_path
+                spec.absolute_path()
             )),
         ));
     }
@@ -235,7 +236,7 @@ pub(crate) async fn run_filesystem_get(
         Some("-") => CommandData::StreamBytes(bytes),
         other => {
             let derived_name = other.is_none();
-            let destination = destination_path_for_get(&spec.absolute_path, other)
+            let destination = destination_path_for_get(spec.absolute_path().as_str(), other)
                 .map_err(|error| context.fail(kind, error))?;
             // The local working copy is the one thing this CLI touches
             // that has no revision history behind it, so clobbering it is
@@ -255,7 +256,7 @@ pub(crate) async fn run_filesystem_get(
                 context.fail(kind, error)
             })?;
             CommandData::FileTransfer {
-                target: render_target(&context.namespace, &spec.absolute_path),
+                target: render_target(&context.namespace, spec.absolute_path()),
                 destination: destination.display().to_string(),
                 bytes_written: bytes.len() as u64,
             }
@@ -289,7 +290,7 @@ pub(crate) async fn run_filesystem_revisions(
         profile: Some(context.profile_name),
         mode: Some(context.mode),
         data: CommandData::FileRevisions {
-            target: render_target(&context.namespace, &spec.absolute_path),
+            target: render_target(&context.namespace, spec.absolute_path()),
             revisions: response.revisions,
             next_cursor: response.next_cursor,
         },
@@ -328,8 +329,7 @@ pub(crate) async fn run_filesystem_put(
         None => default_remote_put_path(&local_path),
     }
     .map_err(|error| context.fail(kind, error))?;
-    let spec = namespace_path(&context.namespace, &remote_path, false)
-        .map_err(|error| context.fail(kind, error))?;
+    let spec = NamespacePath::new(context.namespace.clone(), remote_path);
     let bytes = fs::read(&local_path).map_err(|error| context.fail(kind, CliError::io(error)))?;
     let commit_id = parse_commit_id_arg(args.commit_id.as_deref())
         .map_err(|error| context.fail(kind, error))?;
@@ -350,7 +350,7 @@ pub(crate) async fn run_filesystem_put(
         profile: Some(context.profile_name),
         mode: Some(context.mode),
         data: CommandData::FileMutation {
-            target: render_target(&context.namespace, &spec.absolute_path),
+            target: render_target(&context.namespace, spec.absolute_path()),
             committed_seq: result.committed_seq.0,
             commit_id: result.commit_id.to_string(),
             inode_id: None,
@@ -390,7 +390,7 @@ pub(crate) async fn run_filesystem_rm(
         profile: Some(context.profile_name),
         mode: Some(context.mode),
         data: CommandData::FileMutation {
-            target: render_target(&context.namespace, &spec.absolute_path),
+            target: render_target(&context.namespace, spec.absolute_path()),
             committed_seq: result.committed_seq.0,
             commit_id: result.commit_id.to_string(),
             inode_id: Some(deleted_inode.0),
@@ -419,7 +419,7 @@ pub(crate) async fn run_filesystem_restore(
         profile: Some(context.profile_name),
         mode: Some(context.mode),
         data: CommandData::FileMutation {
-            target: render_target(&context.namespace, &spec.absolute_path),
+            target: render_target(&context.namespace, spec.absolute_path()),
             committed_seq: result.committed_seq.0,
             commit_id: result.commit_id.to_string(),
             inode_id: None,
@@ -453,7 +453,7 @@ pub(crate) async fn run_filesystem_undelete(
         profile: Some(context.profile_name),
         mode: Some(context.mode),
         data: CommandData::FileMutation {
-            target: render_target(&context.namespace, &spec.absolute_path),
+            target: render_target(&context.namespace, spec.absolute_path()),
             committed_seq: result.committed_seq.0,
             commit_id: result.commit_id.to_string(),
             inode_id: Some(args.inode),
@@ -482,7 +482,7 @@ pub(crate) async fn run_filesystem_mkdir(
         profile: Some(context.profile_name),
         mode: Some(context.mode),
         data: CommandData::FileMutation {
-            target: render_target(&context.namespace, &spec.absolute_path),
+            target: render_target(&context.namespace, spec.absolute_path()),
             committed_seq: result.committed_seq.0,
             commit_id: result.commit_id.to_string(),
             inode_id: None,
@@ -529,7 +529,7 @@ async fn run_filesystem_transfer(
                 kind,
                 CliError::invalid_input(format!(
                     "directory operations are not available for `{}`",
-                    from.absolute_path
+                    from.absolute_path()
                 )),
             ));
         }
@@ -562,8 +562,8 @@ async fn run_filesystem_transfer(
         profile: Some(context.profile_name),
         mode: Some(context.mode),
         data: CommandData::PathMove {
-            from: render_target(&context.namespace, &from.absolute_path),
-            to: render_target(&context.namespace, &to.absolute_path),
+            from: render_target(&context.namespace, from.absolute_path()),
+            to: render_target(&context.namespace, to.absolute_path()),
             committed_seq: result.committed_seq.0,
             commit_id: result.commit_id.to_string(),
         },
