@@ -102,7 +102,7 @@ pub mod publish {
     pub use crate::commit::{CommitHeadPublishError, SemanticMutationIdentity};
     pub use crate::commit_engine::{
         NamespaceCommitEngine, NamespaceCommitEnginePublishResult, NamespaceMutationCandidate,
-        ResultingReadState, SharedWriterSessionState, WriterSessionState,
+        ResultingReadState, SharedWriterSessionState, WalTailPolicy, WriterSessionState,
     };
     pub use crate::path::write::PathMutationIntent;
     pub use crate::protocol::PublishTailOptions;

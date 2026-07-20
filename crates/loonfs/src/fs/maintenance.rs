@@ -40,6 +40,17 @@ impl FsCore {
                 "max_wal_tail_segments must be greater than zero".to_owned(),
             ));
         }
+        // A threshold above the write-rejection cap would make the tick
+        // answer `not needed` while every publish is being rejected — the
+        // one tool that relieves backpressure refusing to act.
+        let reject_writes_at_segments =
+            loonfs_core::publish::WalTailPolicy::DEFAULT.reject_writes_at_segments;
+        if options.max_wal_tail_segments > reject_writes_at_segments {
+            return Err(RuntimeError::Config(format!(
+                "max_wal_tail_segments may not exceed the write-rejection threshold \
+                 ({reject_writes_at_segments})"
+            )));
+        }
 
         let status_before = self.namespace_status(namespace_id).await?;
         let observed_head_seq = status_before.head_seq;
