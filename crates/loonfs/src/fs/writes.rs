@@ -446,12 +446,14 @@ impl FsCore {
 
         // Cache-disabled diagnostic mode: a throwaway engine per publish,
         // but the session's epoch and fencing still come from the registry —
-        // no cache configuration disables session state.
+        // cache configuration disables neither session state nor
+        // maintenance scheduling.
         let mut engine = loonfs_core::publish::NamespaceCommitEngine::new(namespace_id.clone())
             .writer_session(self.inner.writer_sessions.state(namespace_id));
         // Boxed for the same type-recursion reason as the cached-engine path.
-        let results: Vec<_> = Box::pin(engine.publish_batch(&store, candidates, &context))
-            .await
+        let publish = Box::pin(engine.publish_batch(&store, candidates, &context)).await;
+        let wal_tail_segments = publish.wal_tail_segments;
+        let results: Vec<_> = publish
             .results
             .into_iter()
             .map(|result| result.map_err(RuntimeError::Core))
@@ -467,6 +469,7 @@ impl FsCore {
             .entered();
             self.invalidate_namespace_cache_after_batch(namespace_id, &results);
         }
+        self.maybe_auto_tick_after_publish(namespace_id, wal_tail_segments);
         results
     }
 
@@ -476,8 +479,7 @@ impl FsCore {
     /// writer (and no server batch pipeline) waits behind a checkpoint or
     /// base rebuild. The per-namespace singleflight claim dedupes concurrent
     /// publishers and is released on every outcome, including tick panics
-    /// and dropped tasks. The cache-disabled diagnostic mode never reaches
-    /// this, as it tracks no tail projection to observe.
+    /// and dropped tasks.
     fn maybe_auto_tick_after_publish(&self, namespace_id: &NamespaceId, wal_tail_segments: u64) {
         let options = MaintenanceTickOptions::default();
         let run_full_tick = wal_tail_segments >= options.max_wal_tail_segments;

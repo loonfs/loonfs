@@ -61,8 +61,9 @@ pub struct RuntimeCacheConfig {
     /// Maximum namespaces retained in runtime caches (control anchors,
     /// catalogs, commit engines, and WAL-tail projection entries).
     /// Setting this to zero disables those caches — a diagnostic mode that
-    /// also disables post-publish auto-maintenance, leaving only the hard
-    /// publish backpressure. Not for production use.
+    /// trades speed for re-reads. Cache settings never change behavior:
+    /// maintenance scheduling is controlled only by
+    /// [`FsBackgroundWork`](crate::FsBackgroundWork).
     pub max_cached_namespaces: usize,
     /// Maximum metadata rows retained across cached WAL-tail projections;
     /// zero disables the projection cache.

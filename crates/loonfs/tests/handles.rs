@@ -8,7 +8,8 @@
 
 use loonfs::{
     CreateCheckpointOptions, CreateNamespaceOptions, FsAdmin, FsBackgroundWork, FsReader, FsWriter,
-    MaintenanceTickOptions, ManifestId, NamespaceId, PutFileOptions, RuntimeError, StoreConfig,
+    MaintenanceTickOptions, ManifestId, NamespaceId, PutFileOptions, RuntimeCacheConfig,
+    RuntimeError, StoreConfig,
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
 use loonfs_core::control::load_namespace_metadata_root_control;
@@ -231,6 +232,50 @@ fn enabled_writer_schedules_maintenance_on_its_owning_runtime() {
             status.current_manifest_id > Some(ManifestId(0)),
             "auto tick should have published a manifest: {status:?}"
         );
+        assert!(
+            status.wal_tail_segments < 32,
+            "auto tick should have bounded the tail: {status:?}"
+        );
+        writer
+            .shutdown_background()
+            .await
+            .expect("shut down writer background work");
+    });
+}
+
+#[test]
+fn enabled_writer_schedules_maintenance_with_caches_disabled() {
+    // Cache configuration is performance-only: with the caches off, the
+    // Enabled policy still schedules the same post-publish maintenance.
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace_id();
+    block_on(async {
+        let writer = FsWriter::builder(store_config(temp_dir.path()))
+            .writer_id("handle-test-writer")
+            .background_work(FsBackgroundWork::Enabled)
+            .runtime_cache(RuntimeCacheConfig::disabled())
+            .build()
+            .await
+            .expect("build writer");
+        writer
+            .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+            .await
+            .expect("create namespace");
+        fill_wal_tail_past_threshold(&writer, &namespace_id).await;
+        writer
+            .wait_for_background_work()
+            .await
+            .expect("background maintenance quiesces");
+
+        let admin = FsAdmin::builder(store_config(temp_dir.path()))
+            .actor_id("handle-test-admin")
+            .build()
+            .await
+            .expect("build admin");
+        let status = admin
+            .namespace_status(&namespace_id)
+            .await
+            .expect("status after auto tick");
         assert!(
             status.wal_tail_segments < 32,
             "auto tick should have bounded the tail: {status:?}"
