@@ -402,6 +402,11 @@ impl NamespacePublisher {
             .closed = true;
     }
 
+    /// The path to `admit` is await-free: a submission future's first poll
+    /// either admits the candidate or fails, and only then parks on the
+    /// result channel. Cancellation tests rely on this — after one poll of
+    /// a submission, the publication is admitted and owned by the publish
+    /// task.
     async fn submit(&self, candidate: NamespaceMutationCandidate) -> CommitResult {
         let commit_id = candidate.commit_id().clone();
         let operation_class = operation_class(&candidate);

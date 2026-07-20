@@ -5,8 +5,13 @@
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use futures::future::BoxFuture;
 use futures::stream::BoxStream;
-use loonfs::{CreateNamespaceOptions, FsWriter, NamespaceId, PutFileOptions, SharedObjectStore};
+use loonfs::publish::{parse_mutation_path, PathMutationIntent};
+use loonfs::{
+    BeginUploadRequest, CommitId, CommitResponse, CoreError, CreateNamespaceOptions,
+    DestinationBehavior, FsWriter, NamespaceId, PutFileOptions, SharedObjectStore,
+};
 use loonfs_objectstore::keys::wal_head;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{
@@ -17,7 +22,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tempfile::tempdir;
 use tokio::sync::Notify;
-use tokio::time::{sleep, timeout, Duration};
+use tokio::time::{timeout, Duration};
 
 /// Blocks head compare-and-swap writes while armed, so a test can park a
 /// publication mid-flight, cancel its callers, and then let it finish.
@@ -123,15 +128,25 @@ struct ParkedPuts {
     store: Arc<BlockingHeadCasStore>,
     writer: Arc<FsWriter>,
     namespace_id: NamespaceId,
-    first: tokio::task::JoinHandle<loonfs::Result<loonfs::CommitResponse>>,
-    second: tokio::task::JoinHandle<loonfs::Result<loonfs::CommitResponse>>,
+    first: tokio::task::JoinHandle<loonfs::Result<CommitResponse>>,
+    /// A caller future whose publication is already admitted, batched
+    /// behind the parked one. Awaiting it yields the publication's result;
+    /// dropping it is the caller walking away from admitted work.
+    second: BoxFuture<'static, Result<CommitResponse, CoreError>>,
 }
 
-/// Parks one publication at the blocked head CAS with a second put queued
-/// behind it, so tests can cancel callers at both positions. The settle
-/// sleep is the point of the fixture, so the timer method the workspace
-/// otherwise disallows is scoped to this helper.
-#[allow(clippy::disallowed_methods)]
+/// Parks one put at the blocked head CAS with a second put admitted behind
+/// it, so tests can cancel callers at both positions.
+///
+/// Both positions are arranged, not timed. The first put has provably been
+/// admitted because its head CAS is observably in flight. The second put's
+/// content is staged up front through the upload API, and its submission
+/// future is polled exactly once: submission is synchronous through the
+/// publisher's admission and its only await is the result channel, so a
+/// pending first poll proves the candidate sits in the open batch behind
+/// the parked publication. A settle sleep would leave a window where a
+/// caller cancelled early was never admitted at all — and a publication
+/// that never existed cannot land.
 async fn park_two_puts(temp_dir: &Path) -> ParkedPuts {
     let namespace_id = NamespaceId::parse("parked").expect("valid namespace id");
     let store_impl = Arc::new(BlockingHeadCasStore::new(temp_dir, &namespace_id));
@@ -149,6 +164,24 @@ async fn park_two_puts(temp_dir: &Path) -> ParkedPuts {
         .await
         .expect("create namespace");
 
+    // Stage the second put's content while the store is unblocked: once
+    // callers start being cancelled, the only work still in flight is
+    // publication, the thing under test.
+    let upload = writer
+        .begin_upload(
+            &namespace_id,
+            BeginUploadRequest {
+                mode: None,
+                content_ref: None,
+            },
+        )
+        .await
+        .expect("begin upload");
+    let staged = writer
+        .upload_content(&namespace_id, &upload.upload_id, b"b")
+        .await
+        .expect("stage second put content");
+
     store_impl.arm();
     let first = {
         let writer = Arc::clone(&writer);
@@ -161,20 +194,24 @@ async fn park_two_puts(temp_dir: &Path) -> ParkedPuts {
     };
     store_impl.wait_for_blocked_head_cas().await;
 
-    // The publish task is parked, so this put deterministically batches
-    // behind it.
-    let second = {
-        let writer = Arc::clone(&writer);
+    // The publish task is parked inside the blocked CAS with its batch
+    // already taken, so this submission deterministically opens the next
+    // batch behind it.
+    let registry = writer.publisher();
+    let mut second: BoxFuture<'static, Result<CommitResponse, CoreError>> = {
         let namespace_id = namespace_id.clone();
-        tokio::spawn(async move {
-            writer
-                .put_file_bytes(&namespace_id, "/b.txt", b"b", PutFileOptions::default())
-                .await
-        })
+        let intent = PathMutationIntent::PutFile {
+            commit_id: CommitId::parse("parked-second").expect("valid commit id"),
+            absolute_path: parse_mutation_path("/b.txt").expect("mutation path"),
+            content_ref: staged.content_ref,
+            behavior: DestinationBehavior::NoReplace,
+        };
+        Box::pin(async move { registry.submit_path_intent(namespace_id, intent).await })
     };
-    // The second put's content upload and admission settle quickly; give
-    // it a beat before any cancellation.
-    sleep(Duration::from_millis(100)).await;
+    assert!(
+        futures::poll!(second.as_mut()).is_pending(),
+        "the second submission must be admitted and parked on its result channel"
+    );
 
     ParkedPuts {
         store: store_impl,
@@ -200,7 +237,6 @@ async fn cancelled_caller_does_not_cancel_admitted_publication() {
     let second = timeout(Duration::from_secs(15), parked.second)
         .await
         .expect("queued put must settle")
-        .expect("queued put task")
         .expect("queued put publishes normally");
     assert_eq!(second.namespace_id, parked.namespace_id);
 
@@ -223,9 +259,8 @@ async fn all_callers_cancelled_publication_still_lands() {
     let parked = park_two_puts(temp_dir.path()).await;
 
     parked.first.abort();
-    parked.second.abort();
     let _ = parked.first.await;
-    let _ = parked.second.await;
+    drop(parked.second);
     parked.store.release();
 
     // The writer-owned drain settles the publish tasks the callers left
