@@ -5,10 +5,12 @@ use crate::checkpoint::{
     build_initial_namespace_manifest, load_namespace_manifest_envelope, write_namespace_manifest,
 };
 use crate::context::MutationContext;
+use crate::error::CoreError;
 use crate::limits::GC_MIN_GRACE_WINDOW_MS;
 use crate::metadata::{InodeRecord, MetadataState};
 use crate::namespace::catalog::{
-    namespace_initialization_state, NamespaceInitializationError, NamespaceInitializationState,
+    map_namespace_initialization_error_to_core, namespace_initialization_state,
+    put_completion_descriptor, put_target_namespace_control_object, NamespaceInitializationState,
 };
 use crate::namespace::control::ControlObjectLoadError;
 use crate::namespace::control::{read_head_object, read_metadata_root_object};
@@ -21,7 +23,7 @@ use loonfs_api::wire::control::{
 };
 use loonfs_api::{
     ChangeSeq, ContentStoreId, ErrorCode, InodeId, InodeKind, NamePolicy, NamespaceId,
-    NamespaceIdValidationError, NamespaceSummary,
+    NamespaceSummary,
 };
 use loonfs_objectstore::keys::{
     content_store_descriptor, metadata_root, namespace_config, wal_floor, wal_head,
@@ -29,12 +31,8 @@ use loonfs_objectstore::keys::{
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 use thiserror::Error;
 
-// Descriptor and Head both wrap ControlObjectLoadError; conversion stays
-// explicit so `?` cannot pick a variant silently.
 #[derive(Debug, Clone, Error)]
 pub enum BootstrapNamespaceError {
-    #[error(transparent)]
-    InvalidNamespaceId(#[from] NamespaceIdValidationError),
     #[error("holder id must not be empty")]
     EmptyHolderId,
     #[error("writer version must not be empty")]
@@ -46,23 +44,14 @@ pub enum BootstrapNamespaceError {
     #[error("namespace `{namespace_id}` is deleted and its id is retired")]
     NamespaceDeleted { namespace_id: NamespaceId },
     #[error(transparent)]
-    Descriptor(ControlObjectLoadError),
-    #[error("failed to write namespace descriptor object: {0}")]
-    DescriptorWrite(String),
-    #[error("failed to write content store descriptor object: {0}")]
-    ContentStoreWrite(String),
+    Head(#[from] ControlObjectLoadError),
+    /// A failure inside the installation protocol shared with fork — the
+    /// classification probe, a control-object install, debris recovery — or
+    /// engine plumbing such as assembling the mutation context. The wire
+    /// code delegates to [`CoreError::code`](crate::Error::code), so store
+    /// failures keep their failure class.
     #[error(transparent)]
-    Head(ControlObjectLoadError),
-    #[error("failed to write head object: {0}")]
-    HeadWrite(String),
-    #[error("failed to write initial namespace manifest: {0}")]
-    ManifestWrite(String),
-    #[error("failed to clean pre-head debris: {0}")]
-    DebrisCleanup(String),
-    /// An engine failure outside the bootstrap protocol itself, such as
-    /// assembling the mutation context.
-    #[error(transparent)]
-    Core(#[from] crate::error::CoreError),
+    Core(#[from] CoreError),
 }
 
 impl BootstrapNamespaceError {
@@ -73,51 +62,15 @@ impl BootstrapNamespaceError {
     /// [`CoreError::code`](crate::Error::code).
     pub fn code(&self) -> ErrorCode {
         match self {
-            BootstrapNamespaceError::InvalidNamespaceId(_)
-            | BootstrapNamespaceError::EmptyHolderId
+            BootstrapNamespaceError::EmptyHolderId
             | BootstrapNamespaceError::EmptyWriterVersion => ErrorCode::InvalidRequest,
             BootstrapNamespaceError::NamespaceAlreadyExists { .. } => ErrorCode::NamespaceExists,
             BootstrapNamespaceError::NamespacePartiallyInitialized { .. } => {
                 ErrorCode::NamespacePartial
             }
             BootstrapNamespaceError::NamespaceDeleted { .. } => ErrorCode::NamespaceDeleted,
-            BootstrapNamespaceError::Descriptor(_)
-            | BootstrapNamespaceError::DescriptorWrite(_)
-            | BootstrapNamespaceError::ContentStoreWrite(_)
-            | BootstrapNamespaceError::Head(_)
-            | BootstrapNamespaceError::HeadWrite(_)
-            | BootstrapNamespaceError::ManifestWrite(_)
-            | BootstrapNamespaceError::DebrisCleanup(_) => ErrorCode::ServerError,
+            BootstrapNamespaceError::Head(_) => ErrorCode::ServerError,
             BootstrapNamespaceError::Core(error) => error.code(),
-        }
-    }
-}
-
-impl From<NamespaceInitializationError> for BootstrapNamespaceError {
-    fn from(value: NamespaceInitializationError) -> Self {
-        match value {
-            NamespaceInitializationError::InvalidNamespaceId(error) => {
-                Self::InvalidNamespaceId(error)
-            }
-            NamespaceInitializationError::InspectNamespaceDescriptor {
-                object_key,
-                message,
-                ..
-            } => Self::DescriptorWrite(format!("failed to inspect `{object_key}`: {message}")),
-            NamespaceInitializationError::InspectNamespaceHead {
-                object_key,
-                message,
-                ..
-            } => Self::HeadWrite(format!("failed to inspect `{object_key}`: {message}")),
-            NamespaceInitializationError::InspectNamespaceControl {
-                object_key,
-                message,
-                ..
-            } => Self::DebrisCleanup(format!("failed to inspect `{object_key}`: {message}")),
-            NamespaceInitializationError::LoadNamespaceDescriptor(error)
-            | NamespaceInitializationError::LoadContentStoreDescriptor(error) => {
-                Self::Descriptor(error)
-            }
         }
     }
 }
@@ -137,11 +90,12 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
 
     let mut recovered_debris = false;
     loop {
-        match namespace_initialization_state(store, namespace_id).await? {
+        match namespace_initialization_state(store, namespace_id)
+            .await
+            .map_err(map_namespace_initialization_error_to_core)?
+        {
             NamespaceInitializationState::Complete => {
-                let head = read_head_object(store, namespace_id)
-                    .await
-                    .map_err(BootstrapNamespaceError::Head)?;
+                let head = read_head_object(store, namespace_id).await?;
                 // A deleted namespace retires its id permanently; re-creation is
                 // refused as deleted, not as existing.
                 if head.envelope.state.state == NamespaceState::Deleted {
@@ -194,11 +148,10 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
         &initial_head,
         &context.writer_version,
     )
-    .await
-    .map_err(|err| BootstrapNamespaceError::ManifestWrite(err.to_string()))?;
+    .await?;
     write_namespace_manifest(store, &initial_manifest)
         .await
-        .map_err(|err| BootstrapNamespaceError::ManifestWrite(err.to_string()))?;
+        .map_err(CoreError::MetadataProjection)?;
 
     let root_envelope = MetadataRootEnvelope::from_state(
         ControlObjectKind::MetadataRoot,
@@ -212,16 +165,16 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
             updated_at_ms: context.now_ms,
         },
     )
-    .map_err(|err| BootstrapNamespaceError::ManifestWrite(err.to_string()))?;
-    let root_bytes = encode_control_object(&root_envelope)
-        .map_err(|err| BootstrapNamespaceError::ManifestWrite(err.to_string()))?;
-    store
-        .put_if_absent(
-            &metadata_root(namespace_id.as_str()),
-            Bytes::from(root_bytes),
-        )
-        .await
-        .map_err(|err| pre_head_write_error(namespace_id, err))?;
+    .map_err(|err| CoreError::Internal(format!("failed to build metadata root envelope: {err}")))?;
+    put_target_namespace_control_object(
+        store,
+        namespace_id,
+        &metadata_root(namespace_id.as_str()),
+        &encode_control_object(&root_envelope).map_err(|err| {
+            CoreError::Internal(format!("failed to encode metadata root object: {err}"))
+        })?,
+    )
+    .await?;
 
     let floor_envelope = WalFloorEnvelope::from_state(
         ControlObjectKind::WalFloor,
@@ -233,28 +186,31 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
             updated_at_ms: context.now_ms,
         },
     )
-    .map_err(|err| BootstrapNamespaceError::ManifestWrite(err.to_string()))?;
-    let floor_bytes = encode_control_object(&floor_envelope)
-        .map_err(|err| BootstrapNamespaceError::ManifestWrite(err.to_string()))?;
-    store
-        .put_if_absent(&wal_floor(namespace_id.as_str()), Bytes::from(floor_bytes))
-        .await
-        .map_err(|err| pre_head_write_error(namespace_id, err))?;
+    .map_err(|err| CoreError::Internal(format!("failed to build wal floor envelope: {err}")))?;
+    put_target_namespace_control_object(
+        store,
+        namespace_id,
+        &wal_floor(namespace_id.as_str()),
+        &encode_control_object(&floor_envelope).map_err(|err| {
+            CoreError::Internal(format!("failed to encode wal floor object: {err}"))
+        })?,
+    )
+    .await?;
 
     let head_envelope = HeadStateEnvelope::from_state(
         ControlObjectKind::WalHead,
         &context.writer_version,
         initial_head,
     )
-    .map_err(|err| BootstrapNamespaceError::HeadWrite(err.to_string()))?;
-    let head_bytes = encode_control_object(&head_envelope)
-        .map_err(|err| BootstrapNamespaceError::HeadWrite(err.to_string()))?;
-
-    let head_key = wal_head(namespace_id.as_str());
-    store
-        .put_if_absent(&head_key, Bytes::from(head_bytes))
-        .await
-        .map_err(|err| BootstrapNamespaceError::HeadWrite(err.to_string()))?;
+    .map_err(|err| CoreError::Internal(format!("failed to build head envelope: {err}")))?;
+    put_target_namespace_control_object(
+        store,
+        namespace_id,
+        &wal_head(namespace_id.as_str()),
+        &encode_control_object(&head_envelope)
+            .map_err(|err| CoreError::Internal(format!("failed to encode head object: {err}")))?,
+    )
+    .await?;
 
     let content_store_id = create_new_content_store(store, context).await?;
     let namespace_descriptor_envelope = NamespaceConfigEnvelope::from_state(
@@ -266,35 +222,26 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
             name_policy: NamePolicy::default(),
         },
     )
-    .map_err(|err| BootstrapNamespaceError::DescriptorWrite(err.to_string()))?;
-    let namespace_descriptor_bytes = encode_control_object(&namespace_descriptor_envelope)
-        .map_err(|err| BootstrapNamespaceError::DescriptorWrite(err.to_string()))?;
-
-    let descriptor_key = namespace_config(namespace_id.as_str());
-    store
-        .put_if_absent(&descriptor_key, Bytes::from(namespace_descriptor_bytes))
-        .await
-        .map_err(|err| BootstrapNamespaceError::DescriptorWrite(err.to_string()))?;
+    .map_err(|err| {
+        CoreError::Internal(format!(
+            "failed to build namespace descriptor envelope: {err}"
+        ))
+    })?;
+    put_target_namespace_control_object(
+        store,
+        namespace_id,
+        &namespace_config(namespace_id.as_str()),
+        &encode_control_object(&namespace_descriptor_envelope).map_err(|err| {
+            CoreError::Internal(format!(
+                "failed to encode namespace descriptor object: {err}"
+            ))
+        })?,
+    )
+    .await?;
 
     Ok(NamespaceSummary {
         namespace_id: namespace_id.clone(),
     })
-}
-
-/// Losing a pre-head put-if-absent means another create is mid-flight (or
-/// crashed moments ago): the id is partially initialized, not broken.
-fn pre_head_write_error(
-    namespace_id: &NamespaceId,
-    error: ObjectStoreError,
-) -> BootstrapNamespaceError {
-    match error {
-        ObjectStoreError::PreconditionFailed { .. } | ObjectStoreError::Conflict { .. } => {
-            BootstrapNamespaceError::NamespacePartiallyInitialized {
-                namespace_id: namespace_id.clone(),
-            }
-        }
-        other => BootstrapNamespaceError::ManifestWrite(other.to_string()),
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -316,19 +263,19 @@ pub(super) async fn recover_pre_head_debris<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     now_ms: u64,
-) -> Result<PreHeadRecovery, BootstrapNamespaceError> {
+) -> Result<PreHeadRecovery, CoreError> {
     let prefix = format!("namespaces/{}/", namespace_id.as_str());
     let head_key = wal_head(namespace_id.as_str());
     let keys = store
         .list_prefix(&prefix)
         .await
-        .map_err(|err| BootstrapNamespaceError::DebrisCleanup(err.to_string()))?;
+        .map_err(|err| CoreError::store(&prefix, &err))?;
     let mut newest = 0u64;
     for key in &keys {
         let Some(metadata) = store
             .head(key)
             .await
-            .map_err(|err| BootstrapNamespaceError::DebrisCleanup(err.to_string()))?
+            .map_err(|err| CoreError::store(key.as_str(), &err))?
         else {
             continue;
         };
@@ -345,7 +292,7 @@ pub(super) async fn recover_pre_head_debris<S: ObjectStore + ?Sized>(
         let head_exists = store
             .head(&head_key)
             .await
-            .map_err(|err| BootstrapNamespaceError::DebrisCleanup(err.to_string()))?
+            .map_err(|err| CoreError::store(&head_key, &err))?
             .is_some();
         if head_exists {
             // A concurrent attempt linearized while this one was cleaning;
@@ -355,7 +302,7 @@ pub(super) async fn recover_pre_head_debris<S: ObjectStore + ?Sized>(
         store
             .delete(key)
             .await
-            .map_err(|err| BootstrapNamespaceError::DebrisCleanup(err.to_string()))?;
+            .map_err(|err| CoreError::store(key.as_str(), &err))?;
     }
     Ok(PreHeadRecovery::Cleaned)
 }
@@ -418,22 +365,18 @@ async fn complete_post_head_bootstrap<S: ObjectStore + ?Sized>(
             name_policy: NamePolicy::default(),
         },
     )
-    .map_err(|err| BootstrapNamespaceError::DescriptorWrite(err.to_string()))?;
+    .map_err(|err| {
+        CoreError::Internal(format!(
+            "failed to build namespace descriptor envelope: {err}"
+        ))
+    })?;
     let namespace_descriptor_bytes = encode_control_object(&namespace_descriptor_envelope)
-        .map_err(|err| BootstrapNamespaceError::DescriptorWrite(err.to_string()))?;
-    match store
-        .put_if_absent(
-            &namespace_config(namespace_id.as_str()),
-            Bytes::from(namespace_descriptor_bytes),
-        )
-        .await
-    {
-        // A raced completion wrote it first; the namespace is complete
-        // either way.
-        Ok(_)
-        | Err(ObjectStoreError::PreconditionFailed { .. } | ObjectStoreError::Conflict { .. }) => {}
-        Err(err) => return Err(BootstrapNamespaceError::DescriptorWrite(err.to_string())),
-    }
+        .map_err(|err| {
+            CoreError::Internal(format!(
+                "failed to encode namespace descriptor object: {err}"
+            ))
+        })?;
+    put_completion_descriptor(store, namespace_id, &namespace_descriptor_bytes).await?;
     Ok(NamespaceSummary {
         namespace_id: namespace_id.clone(),
     })
@@ -444,7 +387,7 @@ const CONTENT_STORE_ID_RETRY_LIMIT: usize = 8;
 async fn create_new_content_store<S: ObjectStore + ?Sized>(
     store: &S,
     context: &MutationContext,
-) -> Result<ContentStoreId, BootstrapNamespaceError> {
+) -> Result<ContentStoreId, CoreError> {
     for _attempt in 0..CONTENT_STORE_ID_RETRY_LIMIT {
         let content_store_id = ContentStoreId::generate();
         let descriptor = ContentStoreDescriptorEnvelope::from_state(
@@ -454,20 +397,27 @@ async fn create_new_content_store<S: ObjectStore + ?Sized>(
                 content_store_id: content_store_id.clone(),
             },
         )
-        .map_err(|err| BootstrapNamespaceError::ContentStoreWrite(err.to_string()))?;
-        let bytes = encode_control_object(&descriptor)
-            .map_err(|err| BootstrapNamespaceError::ContentStoreWrite(err.to_string()))?;
+        .map_err(|err| {
+            CoreError::Internal(format!(
+                "failed to build content store descriptor envelope: {err}"
+            ))
+        })?;
+        let bytes = encode_control_object(&descriptor).map_err(|err| {
+            CoreError::Internal(format!(
+                "failed to encode content store descriptor object: {err}"
+            ))
+        })?;
         let key = content_store_descriptor(content_store_id.as_str());
         match store.put_if_absent(&key, Bytes::from(bytes)).await {
             Ok(_) => return Ok(content_store_id),
             Err(
                 ObjectStoreError::PreconditionFailed { .. } | ObjectStoreError::Conflict { .. },
             ) => continue,
-            Err(err) => return Err(BootstrapNamespaceError::ContentStoreWrite(err.to_string())),
+            Err(err) => return Err(CoreError::store(&key, &err)),
         }
     }
 
-    Err(BootstrapNamespaceError::ContentStoreWrite(
+    Err(CoreError::Internal(
         "content store id generation collided repeatedly".to_owned(),
     ))
 }

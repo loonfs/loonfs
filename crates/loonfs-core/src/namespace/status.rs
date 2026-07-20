@@ -5,7 +5,8 @@ use crate::checkpoint::load_namespace_manifest_envelope;
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
 use crate::namespace::catalog::{
-    namespace_initialization_state, NamespaceInitializationError, NamespaceInitializationState,
+    map_namespace_initialization_error_to_core, namespace_initialization_state,
+    NamespaceInitializationState,
 };
 use crate::namespace::control::{
     read_head_and_metadata_root, read_wal_floor_seq_or_zero, ControlObjectLoadError,
@@ -120,45 +121,4 @@ async fn count_wal_tail_segments_by_position<S: ObjectStore + ?Sized>(
         .count();
     u64::try_from(tail_segments)
         .map_err(|_| CoreError::Internal("WAL tail segment count overflow".to_owned()))
-}
-
-fn map_namespace_initialization_error_to_core(error: NamespaceInitializationError) -> CoreError {
-    match error {
-        NamespaceInitializationError::InvalidNamespaceId(error) => {
-            CoreError::InvalidNamespaceId(error)
-        }
-        NamespaceInitializationError::LoadNamespaceDescriptor(error) => {
-            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadNamespaceDescriptor(
-                error,
-            ))
-        }
-        NamespaceInitializationError::LoadContentStoreDescriptor(error) => {
-            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadContentStoreDescriptor(
-                error,
-            ))
-        }
-        NamespaceInitializationError::InspectNamespaceControl {
-            object_key,
-            message,
-            class,
-        } => CoreError::Store {
-            object_key,
-            message,
-            class,
-        },
-        NamespaceInitializationError::InspectNamespaceDescriptor {
-            object_key,
-            message,
-            class,
-        }
-        | NamespaceInitializationError::InspectNamespaceHead {
-            object_key,
-            message,
-            class,
-        } => CoreError::Store {
-            object_key,
-            message,
-            class,
-        },
-    }
 }

@@ -7,8 +7,8 @@ use crate::engine::{BeginDirectPutUploadTargetResponse, DirectPutUploadTarget};
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
 use crate::namespace::catalog::{
-    load_namespace_content_store_id, namespace_initialization_state, NamespaceInitializationError,
-    NamespaceInitializationState,
+    load_namespace_content_store_id, map_namespace_initialization_error_to_core,
+    namespace_initialization_state, NamespaceInitializationState,
 };
 use crate::namespace::control::{
     load_content_store_descriptor_control, load_namespace_descriptor_control,
@@ -172,44 +172,7 @@ async fn ensure_upload_namespace_available<S: ObjectStore + ?Sized>(
                 namespace_id: namespace_id.clone(),
             })
         }
-        Err(error) => Err(map_upload_namespace_initialization_error(error)),
-    }
-}
-
-fn map_upload_namespace_initialization_error(error: NamespaceInitializationError) -> CoreError {
-    match error {
-        NamespaceInitializationError::InvalidNamespaceId(error) => {
-            CoreError::InvalidNamespaceId(error)
-        }
-        NamespaceInitializationError::LoadNamespaceDescriptor(error) => {
-            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadNamespaceDescriptor(
-                error,
-            ))
-        }
-        NamespaceInitializationError::LoadContentStoreDescriptor(error) => {
-            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadContentStoreDescriptor(
-                error,
-            ))
-        }
-        NamespaceInitializationError::InspectNamespaceDescriptor {
-            object_key,
-            message,
-            class,
-        }
-        | NamespaceInitializationError::InspectNamespaceHead {
-            object_key,
-            message,
-            class,
-        }
-        | NamespaceInitializationError::InspectNamespaceControl {
-            object_key,
-            message,
-            class,
-        } => CoreError::Store {
-            object_key,
-            message,
-            class,
-        },
+        Err(error) => Err(map_namespace_initialization_error_to_core(error)),
     }
 }
 

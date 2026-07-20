@@ -13,9 +13,9 @@ use loonfs_api::{
     },
     wire::control::{
         decode_control_object, encode_control_object, CheckpointOwner,
-        ContentStoreDescriptorEnvelope, ControlObjectKind, HeadState, HeadStateEnvelope,
-        NamespaceConfigEnvelope, NamespaceConfigState, UploadSessionEnvelope, UploadSessionState,
-        WriterBlock,
+        ContentStoreDescriptorEnvelope, ContentStoreDescriptorState, ControlObjectKind, HeadState,
+        HeadStateEnvelope, NamespaceConfigEnvelope, NamespaceConfigState, UploadSessionEnvelope,
+        UploadSessionState, WriterBlock,
     },
     wire::manifest::{
         decode_namespace_manifest_json, encode_namespace_manifest_json, MetadataTableFamily,
@@ -23,9 +23,9 @@ use loonfs_api::{
     },
     wire::wal::{decode_wal_segment_envelope_zstd, WalDelta},
     AbsolutePath, AuthoritativePathEntry, ChangeSeq, CommitId, ContentRef, ContentRefKind,
-    DeleteDirectoryBehavior, DestinationBehavior, DirectoryPageCursor, EffectiveLimit, InodeId,
-    InodeKind, ManifestId, NameKey, NamespaceId, Page, PageRequest, RevisionNo, UploadId,
-    WriterEpoch,
+    ContentStoreId, DeleteDirectoryBehavior, DestinationBehavior, DirectoryPageCursor,
+    EffectiveLimit, InodeId, InodeKind, ManifestId, NameKey, NamespaceId, Page, PageRequest,
+    RevisionNo, UploadId, WriterEpoch,
 };
 use loonfs_core::cache::{
     MetadataTableCache, MetadataTableCacheConfig, WalTailProjectionCache,
@@ -1368,11 +1368,14 @@ async fn bootstrap_head_reservation_failure_does_not_allocate_content_store() {
     );
 
     let error = bootstrap_namespace(&store, &namespace_id, &context, false)
-        .expect_err("target head precondition should fail bootstrap");
+        .expect_err("target head precondition should re-check partial namespace");
+    // The lost ack left the head written and the descriptor absent, so the
+    // shared install re-check answers partial — the same policy fork pins.
     assert!(matches!(
-        error,
-        loonfs_core::BootstrapNamespaceError::HeadWrite(_)
+        &error,
+        loonfs_core::BootstrapNamespaceError::Core(CoreError::NamespacePartiallyInitialized { .. })
     ));
+    assert_eq!(error.code(), ErrorCode::NamespacePartial);
     assert!(
         store
             .list_prefix("content-stores/")
@@ -1386,6 +1389,61 @@ async fn bootstrap_head_reservation_failure_does_not_allocate_content_store() {
     // the genesis tree instead of wedging on namespace_partial.
     bootstrap_namespace(&store, &namespace_id, &context, false)
         .expect("retry completes the ack-lost create");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bootstrap_head_conflict_rechecks_complete_namespace() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace_id();
+    let context = mutation_context();
+    // The injected conflict simulates a racing create that completed the
+    // namespace: its head wins the reservation and its descriptor pair is
+    // already published when this attempt re-checks.
+    let content_store_id = ContentStoreId::generate();
+    let content_store_descriptor_envelope = ContentStoreDescriptorEnvelope::from_state(
+        ControlObjectKind::ContentStoreDescriptor,
+        &context.writer_version,
+        ContentStoreDescriptorState {
+            content_store_id: content_store_id.clone(),
+        },
+    )
+    .expect("content store descriptor envelope");
+    let descriptor = NamespaceConfigEnvelope::from_state(
+        ControlObjectKind::NamespaceConfig,
+        &context.writer_version,
+        NamespaceConfigState {
+            namespace_id: namespace_id.clone(),
+            content_store_id: content_store_id.clone(),
+            name_policy: loonfs_api::NamePolicy::default(),
+        },
+    )
+    .expect("descriptor envelope");
+    let store = InjectCreateFailureStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyMatcher::Exact(wal_head(namespace_id.as_str())),
+        InjectedCreateFailure::Conflict {
+            write_attempted_object: true,
+            additional_writes: vec![
+                (
+                    content_store_descriptor(content_store_id.as_str()),
+                    encode_control_object(&content_store_descriptor_envelope)
+                        .expect("content store descriptor bytes"),
+                ),
+                (
+                    namespace_config(namespace_id.as_str()),
+                    encode_control_object(&descriptor).expect("descriptor bytes"),
+                ),
+            ],
+        },
+    );
+
+    let error = bootstrap_namespace(&store, &namespace_id, &context, false)
+        .expect_err("target head conflict should re-check complete namespace");
+    assert!(matches!(
+        &error,
+        loonfs_core::BootstrapNamespaceError::Core(CoreError::NamespaceAlreadyExists { .. })
+    ));
+    assert_eq!(error.code(), ErrorCode::NamespaceExists);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
