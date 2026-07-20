@@ -1,14 +1,17 @@
 //! The namespace catalog: the immutable descriptor pair (namespace config
-//! and content-store descriptor) loaded once and reused for a session.
+//! and content-store descriptor) loaded once and reused for a session, the
+//! initialization-state probe over that pair, and the installation writes
+//! namespace create and fork share.
 
-use crate::error::StoreFailureClass;
+use crate::error::{CoreError, MetadataProjectionLoadError, StoreFailureClass};
 use crate::namespace::control::{
     read_content_store_descriptor_object, read_namespace_descriptor_object, ControlObjectLoadError,
 };
+use bytes::Bytes;
 use loonfs_api::wire::control::NamespaceConfigState;
 use loonfs_api::{ContentStoreId, NamespaceId, NamespaceIdValidationError};
 use loonfs_objectstore::keys::{metadata_root, namespace_config, wal_floor, wal_head};
-use loonfs_objectstore::ObjectStore;
+use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 use thiserror::Error;
 
 // Both variants share ControlObjectLoadError; conversion stays explicit so
@@ -186,5 +189,113 @@ pub(crate) async fn namespace_initialization_state<S: ObjectStore + ?Sized>(
             Ok(NamespaceInitializationState::Complete)
         }
         _ => Ok(NamespaceInitializationState::Partial),
+    }
+}
+
+/// The one classification-probe failure mapping every entry point (create,
+/// fork, status, uploads) shares: store failures keep their
+/// [`StoreFailureClass`], so the same probe failure answers the same wire
+/// code — `permission_denied` for rejected credentials — regardless of which
+/// operation ran the probe.
+pub(crate) fn map_namespace_initialization_error_to_core(
+    error: NamespaceInitializationError,
+) -> CoreError {
+    match error {
+        NamespaceInitializationError::InvalidNamespaceId(error) => {
+            CoreError::InvalidNamespaceId(error)
+        }
+        NamespaceInitializationError::LoadNamespaceDescriptor(error) => {
+            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadNamespaceDescriptor(
+                error,
+            ))
+        }
+        NamespaceInitializationError::LoadContentStoreDescriptor(error) => {
+            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadContentStoreDescriptor(
+                error,
+            ))
+        }
+        NamespaceInitializationError::InspectNamespaceDescriptor {
+            object_key,
+            message,
+            class,
+        }
+        | NamespaceInitializationError::InspectNamespaceHead {
+            object_key,
+            message,
+            class,
+        }
+        | NamespaceInitializationError::InspectNamespaceControl {
+            object_key,
+            message,
+            class,
+        } => CoreError::Store {
+            object_key,
+            message,
+            class,
+        },
+    }
+}
+
+/// Installs one control object of a namespace being created or forked.
+///
+/// Losing the put-if-absent race re-classifies the target instead of
+/// guessing at the winner: a complete target answers `namespace_exists`, a
+/// partial or pre-head tree answers `namespace_partial`, and an absent
+/// target reports the write failure itself. Non-conflict failures keep
+/// their [`StoreFailureClass`].
+pub(crate) async fn put_target_namespace_control_object<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    object_key: &str,
+    bytes: &[u8],
+) -> Result<(), CoreError> {
+    match store
+        .put_if_absent(object_key, Bytes::copy_from_slice(bytes))
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(ObjectStoreError::PreconditionFailed { .. } | ObjectStoreError::Conflict { .. }) => {
+            match namespace_initialization_state(store, namespace_id)
+                .await
+                .map_err(map_namespace_initialization_error_to_core)?
+            {
+                NamespaceInitializationState::Complete => Err(CoreError::NamespaceAlreadyExists {
+                    namespace_id: namespace_id.clone(),
+                }),
+                NamespaceInitializationState::Partial
+                | NamespaceInitializationState::PreHeadDebris => {
+                    Err(CoreError::NamespacePartiallyInitialized {
+                        namespace_id: namespace_id.clone(),
+                    })
+                }
+                NamespaceInitializationState::Absent => Err(CoreError::Store {
+                    object_key: object_key.to_owned(),
+                    message: "control object write failed, but namespace remains absent".to_owned(),
+                    class: StoreFailureClass::Other,
+                }),
+            }
+        }
+        Err(err) => Err(CoreError::store(object_key, &err)),
+    }
+}
+
+/// Publishes the namespace descriptor — the completion marker — for a
+/// post-head completion retry, tolerating the race: a conflict means another
+/// completion wrote it first and the namespace is complete either way.
+pub(crate) async fn put_completion_descriptor<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    bytes: &[u8],
+) -> Result<(), CoreError> {
+    let descriptor_key = namespace_config(namespace_id.as_str());
+    match store
+        .put_if_absent(&descriptor_key, Bytes::copy_from_slice(bytes))
+        .await
+    {
+        Ok(_)
+        | Err(ObjectStoreError::PreconditionFailed { .. } | ObjectStoreError::Conflict { .. }) => {
+            Ok(())
+        }
+        Err(err) => Err(CoreError::store(&descriptor_key, &err)),
     }
 }

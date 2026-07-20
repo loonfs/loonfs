@@ -2,20 +2,20 @@
 //! source checkpoint, sharing content bytes and copying metadata
 //! references.
 
-use super::bootstrap::{recover_pre_head_debris, BootstrapNamespaceError, PreHeadRecovery};
+use super::bootstrap::{recover_pre_head_debris, PreHeadRecovery};
 use crate::checkpoint::{
     create_checkpoint, freshen_fork_checkpoint, load_namespace_manifest_envelope,
     load_verified_manifest_tables, read_checkpoint_record, write_namespace_manifest,
 };
 use crate::context::MutationContext;
 use crate::error::MetadataProjectionLoadError;
-use crate::error::{CoreError, Result, StoreFailureClass};
+use crate::error::{CoreError, Result};
 use crate::namespace::catalog::{
-    load_namespace_descriptor, namespace_initialization_state, NamespaceInitializationError,
+    load_namespace_descriptor, map_namespace_initialization_error_to_core,
+    namespace_initialization_state, put_completion_descriptor, put_target_namespace_control_object,
     NamespaceInitializationState,
 };
 use crate::namespace::control::{read_head_object, read_metadata_root_object};
-use bytes::Bytes;
 use loonfs_api::wire::control::{
     encode_control_object, CheckpointOwner, CheckpointRecordState, ControlObjectKind, HeadState,
     HeadStateEnvelope, MetadataRootEnvelope, MetadataRootState, NamespaceConfigEnvelope,
@@ -29,7 +29,7 @@ use loonfs_api::wire::manifest::{
 };
 use loonfs_api::{ManifestId, ManifestObjectId, NamespaceId, NamespaceSummary, WriterEpoch};
 use loonfs_objectstore::keys::{metadata_root, namespace_config, wal_head};
-use loonfs_objectstore::{ObjectStore, ObjectStoreError};
+use loonfs_objectstore::ObjectStore;
 
 pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     store: &S,
@@ -75,10 +75,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
                         namespace_id: new_namespace_id.clone(),
                     });
                 }
-                match recover_pre_head_debris(store, new_namespace_id, context.now_ms)
-                    .await
-                    .map_err(bootstrap_recovery_error_to_core)?
-                {
+                match recover_pre_head_debris(store, new_namespace_id, context.now_ms).await? {
                     PreHeadRecovery::Cleaned => {
                         recovered_debris = true;
                         continue;
@@ -261,10 +258,6 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     })
 }
 
-fn bootstrap_recovery_error_to_core(error: BootstrapNamespaceError) -> CoreError {
-    CoreError::Internal(format!("pre-head debris recovery failed: {error}"))
-}
-
 /// Finishes a fork that crashed after its target head write. The head is
 /// the linearization point and everything before it exists, so the retry
 /// only writes the missing descriptor — derived, exactly as the crashed
@@ -331,16 +324,7 @@ async fn complete_post_head_fork<S: ObjectStore + ?Sized>(
                 "failed to encode namespace descriptor object: {err}"
             ))
         })?;
-    let descriptor_key = namespace_config(new_namespace_id.as_str());
-    match store
-        .put_if_absent(&descriptor_key, Bytes::copy_from_slice(&descriptor_bytes))
-        .await
-    {
-        // A raced completion wrote it first; complete either way.
-        Ok(_)
-        | Err(ObjectStoreError::PreconditionFailed { .. } | ObjectStoreError::Conflict { .. }) => {}
-        Err(err) => return Err(CoreError::store(&descriptor_key, &err)),
-    }
+    put_completion_descriptor(store, new_namespace_id, &descriptor_bytes).await?;
     Ok(NamespaceSummary {
         namespace_id: new_namespace_id.clone(),
     })
@@ -423,51 +407,6 @@ fn fork_target_manifest_payload(
         metadata_files: source_manifest.payload.metadata_files.clone(),
         index_files: source_manifest.payload.index_files.clone(),
     })
-}
-
-async fn put_target_namespace_control_object<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    object_key: &str,
-    bytes: &[u8],
-) -> Result<()> {
-    match store
-        .put_if_absent(object_key, Bytes::copy_from_slice(bytes))
-        .await
-    {
-        Ok(_) => Ok(()),
-        Err(ObjectStoreError::PreconditionFailed { .. } | ObjectStoreError::Conflict { .. }) => {
-            match namespace_initialization_state(store, namespace_id)
-                .await
-                .map_err(map_namespace_initialization_error_to_core)?
-            {
-                NamespaceInitializationState::Complete => Err(CoreError::NamespaceAlreadyExists {
-                    namespace_id: namespace_id.clone(),
-                }),
-                NamespaceInitializationState::Partial
-                | NamespaceInitializationState::PreHeadDebris => {
-                    Err(CoreError::NamespacePartiallyInitialized {
-                        namespace_id: namespace_id.clone(),
-                    })
-                }
-                NamespaceInitializationState::Absent => Err(CoreError::Store {
-                    object_key: object_key.to_owned(),
-                    message: "control object write failed, but namespace remains absent".to_owned(),
-                    class: StoreFailureClass::Other,
-                }),
-            }
-        }
-        Err(err) => Err(CoreError::store(object_key, &err)),
-    }
-}
-
-fn map_namespace_initialization_error_to_core(error: NamespaceInitializationError) -> CoreError {
-    match error {
-        NamespaceInitializationError::InvalidNamespaceId(error) => {
-            CoreError::InvalidNamespaceId(error)
-        }
-        other => CoreError::Internal(BootstrapNamespaceError::from(other).to_string()),
-    }
 }
 
 #[cfg(test)]
