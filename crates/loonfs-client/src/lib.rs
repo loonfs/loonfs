@@ -89,21 +89,24 @@ impl MutationOptions {
 }
 
 impl Client {
-    /// Creates a client from validated config.
-    pub fn new(config: ClientConfig) -> Self {
+    /// Creates a client, validating the config exactly as
+    /// [`ClientConfig::load`] does — direct Rust construction cannot bypass
+    /// validation.
+    pub fn new(config: ClientConfig) -> Result<Self, ClientError> {
+        config.validate()?;
         let mut agent = ureq::AgentBuilder::new()
             .timeout_read(IO_INACTIVITY_TIMEOUT)
             .timeout_write(IO_INACTIVITY_TIMEOUT);
         if let Some(timeout_ms) = config.request_timeout_ms {
             agent = agent.timeout(std::time::Duration::from_millis(timeout_ms));
         }
-        Self {
+        Ok(Self {
             base_url: config.server_url.trim().trim_end_matches('/').to_owned(),
             auth_token: config.auth_token,
             agent: agent.build(),
             transient_retry: !config.disable_transient_retry,
             capabilities: Arc::new(OnceLock::new()),
-        }
+        })
     }
 
     /// Returns the server's capability document, fetched once and cached for
@@ -916,6 +919,29 @@ fn append_query_param(url: &mut String, has_query: &mut bool, name: &str, value:
 #[cfg(test)]
 mod tests {
 
+    /// `Client::new` runs the same validation as `ClientConfig::load`, so a
+    /// directly built config cannot bypass it.
+    #[test]
+    fn construction_validates_config_like_load_does() {
+        let error = super::Client::new(super::ClientConfig {
+            server_url: "ftp://example.com".to_owned(),
+            auth_token: None,
+            request_timeout_ms: None,
+            disable_transient_retry: false,
+        })
+        .expect_err("ftp scheme must be rejected");
+        assert!(
+            matches!(
+                &error,
+                super::ClientError::ConfigValidation {
+                    field: "server_url",
+                    ..
+                }
+            ),
+            "unexpected error: {error:?}"
+        );
+    }
+
     /// Configs are strict like everywhere else in the workspace: a typo'd
     /// key fails decode instead of silently producing an unauthenticated
     /// client.
@@ -996,7 +1022,8 @@ mod tests {
             auth_token: None,
             request_timeout_ms: None,
             disable_transient_retry: false,
-        });
+        })
+        .expect("valid client config");
         let error = retrying
             .namespace_status(&namespace_id)
             .expect_err("dropped connections must fail");
@@ -1011,7 +1038,8 @@ mod tests {
             auth_token: None,
             request_timeout_ms: None,
             disable_transient_retry: true,
-        });
+        })
+        .expect("valid client config");
         single_shot
             .namespace_status(&namespace_id)
             .expect_err("dropped connection must fail without retry");
@@ -1032,7 +1060,8 @@ mod tests {
             auth_token: None,
             request_timeout_ms: None,
             disable_transient_retry: true,
-        });
+        })
+        .expect("valid client config");
         let response = ureq::Response::new(502, "Bad Gateway", "<html>upstream error</html>")
             .expect("synthetic response");
         let error = client.map_error(ureq::Error::Status(502, response));

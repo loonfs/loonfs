@@ -145,6 +145,10 @@ impl ServerLifecycle {
 /// Builds the HTTP application: the router that serves requests, and the
 /// lifecycle handle its host must shut down after draining the listener.
 pub async fn app(config: ServerConfig) -> Result<(Router, ServerLifecycle), ServerConfigError> {
+    // The one unavoidable validation point: configs that skipped
+    // `load_server_config` (direct Rust construction) fail here exactly as
+    // file-loaded ones fail at load.
+    config.validate()?;
     let store = config.object_store()?;
     let transfer_issuer = store.transfer_issuer();
     let store = Arc::new(store) as SharedObjectStore;
@@ -417,12 +421,6 @@ fn object_store_metrics_recorder(
 /// Failure starting or running the HTTP server.
 #[derive(Debug, Error)]
 pub enum ServeError {
-    #[error("invalid bind address `{addr}`: {source}")]
-    BindAddr {
-        addr: String,
-        #[source]
-        source: std::net::AddrParseError,
-    },
     #[error("invalid server config: {0}")]
     Config(#[from] ServerConfigError),
     #[error("failed to bind `{addr}`: {source}")]
@@ -451,10 +449,7 @@ pub async fn serve_with_shutdown(
     config: ServerConfig,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<(), ServeError> {
-    let bind: SocketAddr = config.bind.parse().map_err(|source| ServeError::BindAddr {
-        addr: config.bind.clone(),
-        source,
-    })?;
+    let bind = config.bind_addr()?;
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .map_err(|source| ServeError::Bind { addr: bind, source })?;

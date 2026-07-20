@@ -1,8 +1,8 @@
 //! The CLI config file: profiles, defaults, and strict TOML loading.
 
 use crate::error::CliError;
-use http::Uri;
 use loonfs_api::NamespaceId;
+use loonfs_client::ClientConfig;
 use loonfs_objectstore::{SecretString, StoreConfigError};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -307,25 +307,15 @@ fn validate_default_namespace(field: &str, value: &str) -> Result<(), CliError> 
 }
 
 fn validate_http_url(field: &str, value: &str) -> Result<(), CliError> {
-    require_non_empty(field, value)?;
-    let uri = value
-        .trim()
-        .parse::<Uri>()
-        .map_err(|err| CliError::invalid_config(format!("invalid `{field}`: {err}")))?;
-    let scheme = uri
-        .scheme_str()
-        .ok_or_else(|| CliError::invalid_config(format!("invalid `{field}`: missing scheme")))?;
-    if !matches!(scheme, "http" | "https") {
-        return Err(CliError::invalid_config(format!(
-            "invalid `{field}`: scheme must be http or https, got `{scheme}`"
-        )));
+    // One URL grammar authority: the client's own config validation.
+    ClientConfig {
+        server_url: value.to_owned(),
+        auth_token: None,
+        request_timeout_ms: None,
+        disable_transient_retry: false,
     }
-    if uri.host().is_none() {
-        return Err(CliError::invalid_config(format!(
-            "invalid `{field}`: missing host"
-        )));
-    }
-    Ok(())
+    .validate()
+    .map_err(|error| CliError::invalid_config(format!("invalid `{field}`: {error}")))
 }
 
 #[cfg(test)]

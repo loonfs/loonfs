@@ -254,8 +254,14 @@ impl ServerConfig {
             })
     }
 
-    fn validate(&self) -> Result<(), ServerConfigError> {
-        let bind = validate_socket_addr("bind", &self.bind)?;
+    /// Parses the bind address; the one authority for that conversion, used
+    /// by validation and by serving.
+    pub(crate) fn bind_addr(&self) -> Result<SocketAddr, ServerConfigError> {
+        validate_socket_addr("bind", &self.bind)
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), ServerConfigError> {
+        let bind = self.bind_addr()?;
         require_non_empty("writer_id", &self.writer_id)?;
         require_non_empty("writer_version", &self.writer_version)?;
 

@@ -305,7 +305,8 @@ async fn start_server(config: ServerConfig) -> TestServer {
             auth_token: Some(AUTH_TOKEN.to_owned()),
             request_timeout_ms: None,
             disable_transient_retry: false,
-        }),
+        })
+        .expect("valid client config"),
         server_url,
         server,
     }

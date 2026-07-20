@@ -679,7 +679,8 @@ impl RemoteTarget {
             auth_token: auth_token.map(ToOwned::to_owned),
             request_timeout_ms: None,
             disable_transient_retry: no_retry,
-        });
+        })
+        .map_err(|error| CliError::invalid_config(error.to_string()))?;
         Ok(Self {
             backend: RemoteBackend::new(client),
         })
