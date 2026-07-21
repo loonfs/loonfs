@@ -204,7 +204,7 @@ impl PublisherRegistry {
 
     /// Submits one already-classified candidate; the runtime's direct
     /// mutation paths funnel through this.
-    pub(crate) async fn submit_candidate(
+    pub async fn submit_candidate(
         &self,
         namespace_id: NamespaceId,
         candidate: NamespaceMutationCandidate,

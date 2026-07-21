@@ -1,4 +1,5 @@
 use bytes::Bytes;
+use loonfs::content_tokens::mint_content_token;
 use loonfs_api::{
     v0::{
         BeginUploadRequest, CommitDelta, CommitOp, CommitRequest as ApiCommitRequest,
@@ -18,6 +19,8 @@ use serde_json::json;
 use std::future::Future;
 use std::path::PathBuf;
 use tempfile::tempdir;
+
+const TEST_CONTENT_TOKEN_SECRET: &str = "test-content-token-secret";
 
 fn block_on<T>(future: impl Future<Output = T>) -> T {
     tokio::runtime::Builder::new_current_thread()
@@ -812,6 +815,7 @@ async fn path_put_with_bad_content_token_fails_content_not_prepared() {
         assert_content_not_prepared_response(
             send_filesystem_operation(&harness.server_url, &namespace, &request),
             &request,
+            "content token was rejected: content token is malformed",
         );
     })
     .await
@@ -850,6 +854,7 @@ async fn path_put_without_content_token_fails_content_not_prepared() {
         assert_content_not_prepared_response(
             send_filesystem_operation(&harness.server_url, &namespace, &request),
             &request,
+            &missing_content_proof_message(&request),
         );
     })
     .await
@@ -909,7 +914,7 @@ async fn path_put_with_valid_content_token_succeeds() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn landed_path_put_replays_after_content_token_is_absent() {
+async fn landed_path_put_replays_after_content_token_is_absent_expired_or_garbage() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
@@ -925,6 +930,7 @@ async fn landed_path_put_replays_after_content_token_is_absent() {
             .create_namespace(&namespace)
             .expect("create namespace");
         let completed = stage_uploaded_content(&harness.client, &namespace, b"token replay");
+        let content_ref = completed.content_ref.clone();
         let mut request = FilesystemOperationRequest {
             commit_id: CommitId::parse("token-replay-put").expect("valid commit id"),
             content_tokens: vec![ValidatedContentToken {
@@ -939,17 +945,74 @@ async fn landed_path_put_replays_after_content_token_is_absent() {
                 behavior: DestinationBehavior::NoReplace,
             },
         };
-        let original = send_filesystem_operation(&harness.server_url, &namespace, &request)
-            .expect("original admitted put");
-        let original: CommitResponse =
-            serde_json::from_reader(original.into_reader()).expect("decode original response");
+        let send = |request: &FilesystemOperationRequest| {
+            let response = send_filesystem_operation(&harness.server_url, &namespace, request)
+                .expect("landed put should replay");
+            serde_json::from_reader::<_, CommitResponse>(response.into_reader())
+                .expect("decode operation response")
+        };
+        let original = send(&request);
 
         request.content_tokens.clear();
-        let replay = send_filesystem_operation(&harness.server_url, &namespace, &request)
-            .expect("landed put replays without token");
-        let replay: CommitResponse =
-            serde_json::from_reader(replay.into_reader()).expect("decode replay response");
-        assert_eq!(replay, original);
+        assert_eq!(send(&request), original);
+
+        request.content_tokens = vec![ValidatedContentToken {
+            content_ref: content_ref.clone(),
+            token: mint_content_token(TEST_CONTENT_TOKEN_SECRET, &namespace, &content_ref, 0)
+                .expect("mint expired content token"),
+        }];
+        assert_eq!(send(&request), original);
+
+        request.content_tokens = vec![ValidatedContentToken {
+            content_ref,
+            token: "not.a.valid.token".to_owned(),
+        }];
+        assert_eq!(send(&request), original);
+    })
+    .await
+    .expect("blocking task");
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn path_put_with_only_an_irrelevant_token_reports_the_missing_put_proof() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loonfs-server-current",
+        "http-irrelevant-content-token",
+    ))
+    .await;
+
+    tokio::task::spawn_blocking(move || {
+        let namespace = namespace_id("demo");
+        harness
+            .client
+            .create_namespace(&namespace)
+            .expect("create namespace");
+        let target = stage_uploaded_content(&harness.client, &namespace, b"target content");
+        let irrelevant = stage_uploaded_content(&harness.client, &namespace, b"irrelevant content");
+        let request = FilesystemOperationRequest {
+            commit_id: CommitId::parse("irrelevant-token-put").expect("valid commit id"),
+            content_tokens: vec![ValidatedContentToken {
+                content_ref: irrelevant.content_ref,
+                token: irrelevant
+                    .validated_content_token
+                    .expect("completed upload carries token"),
+            }],
+            operation: FilesystemOperation::PutFile {
+                path: "/irrelevant-token.txt".to_owned(),
+                content_ref: target.content_ref,
+                behavior: DestinationBehavior::NoReplace,
+            },
+        };
+
+        assert_content_not_prepared_response(
+            send_filesystem_operation(&harness.server_url, &namespace, &request),
+            &request,
+            &missing_content_proof_message(&request),
+        );
     })
     .await
     .expect("blocking task");
@@ -2146,7 +2209,7 @@ fn test_config(store_root: std::path::PathBuf, writer_id: &str, key_prefix: &str
     ServerConfig {
         bind: "127.0.0.1:0".to_owned(),
         auth_token: Some("test-token".into()),
-        content_token_secret: "test-content-token-secret".into(),
+        content_token_secret: TEST_CONTENT_TOKEN_SECRET.into(),
         writer_id: writer_id.to_owned(),
         writer_version: format!("{writer_id}/0.1.0"),
         runtime_cache: RuntimeCacheConfigOverrides::default(),
@@ -2337,6 +2400,7 @@ fn send_filesystem_operation(
 fn assert_content_not_prepared_response(
     result: Result<ureq::Response, Box<ureq::Error>>,
     request: &FilesystemOperationRequest,
+    expected_message: &str,
 ) {
     match result {
         Err(error) if matches!(error.as_ref(), ureq::Error::Status(_, _)) => {
@@ -2347,10 +2411,7 @@ fn assert_content_not_prepared_response(
             let error: ApiError =
                 serde_json::from_reader(response.into_reader()).expect("decode api error");
             assert_eq!(error.code, ErrorCode::ContentNotPrepared.as_str());
-            let FilesystemOperation::PutFile { content_ref, .. } = &request.operation else {
-                unreachable!("content preparation assertion requires a put request");
-            };
-            assert!(error.message.contains(&content_ref.digest));
+            assert_eq!(error.message, expected_message);
             assert_eq!(
                 error.details.and_then(|details| details.commit_id),
                 Some(request.commit_id.clone())
@@ -2358,6 +2419,16 @@ fn assert_content_not_prepared_response(
         }
         other => unreachable!("expected content_not_prepared response, got {other:?}"),
     }
+}
+
+fn missing_content_proof_message(request: &FilesystemOperationRequest) -> String {
+    let FilesystemOperation::PutFile { content_ref, .. } = &request.operation else {
+        unreachable!("content preparation assertion requires a put request");
+    };
+    format!(
+        "content ref `{}` is not prepared for publication",
+        content_ref.digest
+    )
 }
 
 fn stage_uploaded_content(
