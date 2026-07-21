@@ -106,6 +106,7 @@ pub mod publish {
     };
     pub use crate::path::write::PathMutationIntent;
     pub use crate::protocol::PublishTailOptions;
+    pub use crate::storage::content_admission::ContentAdmission;
 }
 
 pub use checkpoint::{

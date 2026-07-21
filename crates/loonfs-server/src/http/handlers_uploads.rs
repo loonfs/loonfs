@@ -9,9 +9,8 @@ use crate::config::ServerConfig;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
-use loonfs::content_tokens::{
-    mint_content_token, verify_content_token, ContentAdmission, ContentTokenError,
-};
+use loonfs::content_tokens::{mint_content_token, verify_content_token, ContentTokenError};
+use loonfs::publish::ContentAdmission;
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
 use loonfs_api::ErrorCode;

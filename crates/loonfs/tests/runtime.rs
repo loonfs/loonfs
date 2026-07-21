@@ -4,7 +4,6 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
-use loonfs::content_tokens::ContentAdmission;
 use loonfs::publish::{parse_mutation_path, PathMutationIntent};
 use loonfs::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, BeginUploadRequest,
@@ -2498,7 +2497,11 @@ fn concurrent_puts_coalesce_into_one_wal_segment() {
         // Stage every file's content first: a put publishes only after its
         // bytes are durable, so racing already-staged publishes is what
         // reaches the publication queue together deterministically.
-        let mut content_refs = Vec::new();
+        let catalog =
+            loonfs_core::control::load_namespace_catalog_entry(&object_store, &namespace_id)
+                .await
+                .expect("load namespace catalog");
+        let mut prepared_contents = Vec::new();
         for bytes in [b"alpha" as &[u8], b"beta", b"gamma", b"delta"] {
             let begin = fs
                 .writer
@@ -2521,30 +2524,37 @@ fn concurrent_puts_coalesce_into_one_wal_segment() {
                 )
                 .await
                 .expect("complete upload");
-            content_refs.push(completed.content_ref);
-        }
-        let [ref_a, ref_b, ref_c, ref_d] = content_refs.try_into().expect("four staged refs");
-        let segments_before = wal_segment_count(&object_store, &namespace_id).await;
-        let admitted_put = |commit_id: &str, path: &str, content_ref: ContentRef| {
-            let admission = ContentAdmission::for_durable_content_write(
-                namespace_id.clone(),
-                content_ref.clone(),
-                u64::MAX,
+            prepared_contents.push(
+                loonfs_core::content::prepare_existing_content_ref(
+                    &object_store,
+                    &namespace_id,
+                    catalog.content_store_id(),
+                    completed.content_ref,
+                )
+                .await
+                .expect("prepare completed content"),
             );
-            (
-                PathMutationIntent::PutFile {
-                    commit_id: CommitId::parse(commit_id).expect("valid commit id"),
-                    absolute_path: parse_mutation_path(path).expect("valid mutation path"),
-                    content_ref,
-                    behavior: DestinationBehavior::NoReplace,
-                },
-                vec![admission],
-            )
-        };
-        let put_a = admitted_put("batch-a", "/docs/a.txt", ref_a);
-        let put_b = admitted_put("batch-b", "/docs/b.txt", ref_b);
-        let put_c = admitted_put("batch-c", "/docs/c.txt", ref_c);
-        let put_d = admitted_put("batch-d", "/docs/d.txt", ref_d);
+        }
+        let [content_a, content_b, content_c, content_d] =
+            prepared_contents.try_into().expect("four prepared refs");
+        let segments_before = wal_segment_count(&object_store, &namespace_id).await;
+        let admitted_put =
+            |commit_id: &str, path: &str, prepared: loonfs_core::content::PreparedContent| {
+                let content_ref = prepared.content_ref().clone();
+                (
+                    PathMutationIntent::PutFile {
+                        commit_id: CommitId::parse(commit_id).expect("valid commit id"),
+                        absolute_path: parse_mutation_path(path).expect("valid mutation path"),
+                        content_ref,
+                        behavior: DestinationBehavior::NoReplace,
+                    },
+                    vec![prepared.into_admission()],
+                )
+            };
+        let put_a = admitted_put("batch-a", "/docs/a.txt", content_a);
+        let put_b = admitted_put("batch-b", "/docs/b.txt", content_b);
+        let put_c = admitted_put("batch-c", "/docs/c.txt", content_c);
+        let put_d = admitted_put("batch-d", "/docs/d.txt", content_d);
         let publisher = fs.writer.publisher();
 
         let puts = tokio::join!(

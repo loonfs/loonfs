@@ -149,7 +149,6 @@ pub(crate) async fn publish_namespace_mutations_batch_against_publish_view<
                 &view.content_store_id,
                 &request,
                 candidate,
-                context.now_ms,
                 &mut content_validation,
             )
             .await

@@ -10,7 +10,6 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
-use loonfs::content_tokens::ContentAdmission;
 use loonfs::{
     CreateNamespaceOptions, FsAdmin, FsReader, FsWriter, MaintenanceTickOptions, NamespaceId,
     PageRequest, PaginationPolicy, PutFileOptions, SharedObjectStore,
@@ -215,14 +214,24 @@ async fn warm_phase_request_accounting() {
         let mut candidates = Vec::with_capacity(BATCH);
         for _ in 0..BATCH.min(FILES - index) {
             let bytes = format!("body {index}");
-            let content_ref = loonfs_core::content::store_bytes_as_content(
+            let stored = loonfs_core::content::store_bytes_as_content(
                 &store,
                 &namespace_id,
                 bytes.as_bytes(),
             )
             .await
-            .expect("stage content")
-            .content_ref;
+            .expect("stage content");
+            // External tests prepare through the validating producer: one
+            // content HEAD and one full GET by design.
+            let prepared = loonfs_core::content::prepare_existing_content_ref(
+                &store,
+                &namespace_id,
+                &stored.content_store_id,
+                stored.content_ref,
+            )
+            .await
+            .expect("prepare existing content");
+            let content_ref = prepared.content_ref().clone();
             candidates.push(
                 loonfs::publish::NamespaceMutationCandidate::PathWithContentAdmission {
                     intent: loonfs::publish::PathMutationIntent::PutFile {
@@ -232,11 +241,7 @@ async fn warm_phase_request_accounting() {
                         content_ref: content_ref.clone(),
                         behavior: loonfs::DestinationBehavior::NoReplace,
                     },
-                    admissions: vec![ContentAdmission::for_durable_content_write(
-                        namespace_id.clone(),
-                        content_ref,
-                        u64::MAX,
-                    )],
+                    admissions: vec![prepared.into_admission()],
                 },
             );
             index += 1;

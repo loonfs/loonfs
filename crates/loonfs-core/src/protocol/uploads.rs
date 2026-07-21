@@ -15,6 +15,7 @@ use crate::namespace::control::{
     load_namespace_head_control,
 };
 use crate::storage::content::{probe_durable_content_reference, write_immutable_object};
+use crate::storage::content_admission::{ContentAdmission, PreparedContent};
 use bytes::Bytes;
 use loonfs_api::v0::{
     BeginUploadRequest, BeginUploadResponse, CompleteUploadRequest, CompleteUploadResponse,
@@ -270,9 +271,10 @@ pub(crate) async fn complete_upload<S: ObjectStore + ?Sized>(
 
                 let staged_content_ref = match state.staged_content_ref.clone() {
                     Some(content_ref) => content_ref,
-                    None => {
-                        stage_direct_put_content_ref(store, &namespace_id, &state, &request).await?
-                    }
+                    None => stage_direct_put_content_ref(store, &namespace_id, &state, &request)
+                        .await?
+                        .content_ref()
+                        .clone(),
                 };
                 if staged_content_ref != request.content_ref {
                     return Err(CoreError::InvalidUploadContent(
@@ -307,7 +309,7 @@ async fn stage_direct_put_content_ref<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     state: &UploadSessionState,
     request: &CompleteUploadRequest,
-) -> Result<ContentRef> {
+) -> Result<PreparedContent> {
     if state.mode != UploadMode::DirectPut {
         return Err(CoreError::InvalidUploadContent(
             "upload content has not been staged".to_owned(),
@@ -336,5 +338,8 @@ async fn stage_direct_put_content_ref<S: ObjectStore + ?Sized>(
     probe_durable_content_reference(store, &content_store_id, &request.content_ref)
         .await
         .map_err(|err| CoreError::InvalidUploadContent(err.to_string()))?;
-    Ok(request.content_ref.clone())
+    let content_ref = request.content_ref.clone();
+    let admission =
+        ContentAdmission::for_durable_content_write(namespace_id.clone(), content_ref.clone());
+    Ok(PreparedContent::from_admission(content_ref, admission))
 }

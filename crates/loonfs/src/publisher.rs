@@ -47,9 +47,8 @@
 //! [`FsWriter::shutdown_background`](crate::FsWriter::shutdown_background)
 //! drains without closing, so the handle stays usable.
 
-use crate::content_tokens::ContentAdmission;
 use crate::fs::{FsCore, FsInner};
-use crate::publish::{NamespaceMutationCandidate, PathMutationIntent};
+use crate::publish::{ContentAdmission, NamespaceMutationCandidate, PathMutationIntent};
 use crate::{CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, RuntimeError};
 use loonfs_api::v0::{CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse};
 use loonfs_api::{CommitId, NamespaceId};
@@ -2079,6 +2078,17 @@ mod tests {
             .upload_content(&namespace_id, &upload.upload_id, b"hello")
             .await
             .expect("stage content");
+        let catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &namespace_id)
+            .await
+            .expect("load namespace catalog");
+        let prepared_content = loonfs_core::content::prepare_existing_content_ref(
+            &store,
+            &namespace_id,
+            catalog.content_store_id(),
+            staged.content_ref,
+        )
+        .await
+        .expect("prepare existing content");
         let registry = writer.publisher();
 
         // Warm the namespace so the pacing interval deterministically holds
@@ -2103,14 +2113,10 @@ mod tests {
         let path_intent = PathMutationIntent::PutFile {
             commit_id: CommitId::parse("path-put").expect("valid commit id"),
             absolute_path: AbsolutePath::parse("/file.txt").expect("path"),
-            content_ref: staged.content_ref.clone(),
+            content_ref: prepared_content.content_ref().clone(),
             behavior: DestinationBehavior::NoReplace,
         };
-        let content_admission = ContentAdmission::for_durable_content_write(
-            namespace_id.clone(),
-            staged.content_ref,
-            u64::MAX,
-        );
+        let content_admission = prepared_content.into_admission();
 
         let (explicit_response, path_response) = tokio::join!(
             registry.submit_commit(namespace_id.clone(), explicit),

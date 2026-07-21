@@ -38,7 +38,6 @@ async fn create_checkpoint<S: ObjectStore + ?Sized>(
     .await
 }
 use crate::commit_engine::{NamespaceCommitEngine, NamespaceMutationCandidate};
-use crate::content::ContentAdmission;
 use crate::namespace::bootstrap::bootstrap_namespace;
 use crate::namespace::delete::delete_namespace;
 use crate::namespace::fork::fork_namespace;
@@ -46,6 +45,7 @@ use crate::options::DeleteNamespaceOptions;
 use crate::path::read::{load_metadata_view, ReadLoadContext};
 use crate::publish::PathMutationIntent;
 use crate::storage::content::store_bytes_as_content;
+use crate::storage::content_admission::ContentAdmission;
 use bytes::Bytes;
 use futures::stream::BoxStream;
 use loonfs_api::{AbsolutePath, CommitId, DestinationBehavior};
@@ -119,7 +119,6 @@ async fn write_file<S: ObjectStore>(
                 admissions: vec![ContentAdmission::for_durable_content_write(
                     namespace_id.clone(),
                     content_ref,
-                    context.now_ms,
                 )],
             }],
             context,

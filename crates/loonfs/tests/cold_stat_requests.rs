@@ -11,7 +11,6 @@
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use loonfs::content_tokens::ContentAdmission;
 use loonfs::{
     CreateNamespaceOptions, FsAdmin, FsReader, FsWriter, MaintenanceTickOptions, NamespaceId,
 };
@@ -137,14 +136,22 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
         let mut candidates = Vec::new();
         for index in (0..FILES).filter(|index| index % RUNS == run) {
             let bytes = format!("body {index}");
-            let content_ref = loonfs_core::content::store_bytes_as_content(
+            let stored = loonfs_core::content::store_bytes_as_content(
                 &store,
                 &namespace_id,
                 bytes.as_bytes(),
             )
             .await
-            .expect("stage content")
-            .content_ref;
+            .expect("stage content");
+            let prepared = loonfs_core::content::prepare_existing_content_ref(
+                &store,
+                &namespace_id,
+                &stored.content_store_id,
+                stored.content_ref,
+            )
+            .await
+            .expect("prepare existing content");
+            let content_ref = prepared.content_ref().clone();
             candidates.push(
                 loonfs::publish::NamespaceMutationCandidate::PathWithContentAdmission {
                     intent: loonfs::publish::PathMutationIntent::PutFile {
@@ -156,11 +163,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
                         content_ref: content_ref.clone(),
                         behavior: loonfs::DestinationBehavior::NoReplace,
                     },
-                    admissions: vec![ContentAdmission::for_durable_content_write(
-                        namespace_id.clone(),
-                        content_ref,
-                        u64::MAX,
-                    )],
+                    admissions: vec![prepared.into_admission()],
                 },
             );
         }

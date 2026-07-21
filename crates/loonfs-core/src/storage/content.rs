@@ -4,6 +4,7 @@
 use crate::error::{CoreError, StoreFailureClass};
 use crate::invariants::InvariantId;
 use crate::namespace::catalog::load_namespace_content_store_id;
+use crate::storage::content_admission::{ContentAdmission, PreparedContent};
 use bytes::Bytes;
 use loonfs_api::{sha256_digest, ContentRef, ContentRefKind, ContentStoreId, NamespaceId};
 use loonfs_objectstore::keys::content_blob;
@@ -27,14 +28,19 @@ pub struct ReadDurableContent {
     pub bytes: Vec<u8>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct StoredContent {
     pub content_store_id: ContentStoreId,
     pub object_key: String,
     pub content_ref: ContentRef,
     pub file_digest_sha256: String,
     pub file_size_bytes: u64,
+    #[serde(skip)]
+    _write_acknowledged: StoredContentWriteAcknowledgement,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StoredContentWriteAcknowledgement;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ContentValidationTracker {
@@ -104,6 +110,34 @@ pub async fn validate_durable_content_reference<S: ObjectStore + ?Sized>(
 
     let bytes = load_required_object(store, &object_key).await?;
     validate_loaded_content_bytes(object_key, content_ref, &bytes)
+}
+
+/// Prepares content from an acknowledged LoonFS-managed durable write.
+///
+/// Consuming [`StoredContent`] ties the proof to the successful return from
+/// [`store_bytes_as_content`] or [`store_bytes_as_content_with_store_id`].
+pub fn prepare_stored_content(
+    namespace_id: NamespaceId,
+    stored_content: StoredContent,
+) -> PreparedContent {
+    let content_ref = stored_content.content_ref;
+    let admission = ContentAdmission::for_durable_content_write(namespace_id, content_ref.clone());
+    PreparedContent::from_admission(content_ref, admission)
+}
+
+/// Fully validates an existing durable content reference for publication.
+///
+/// This performs one object HEAD followed by one full GET and digest check.
+pub async fn prepare_existing_content_ref<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    content_store_id: &ContentStoreId,
+    content_ref: ContentRef,
+) -> Result<PreparedContent, DurableContentValidationError> {
+    validate_durable_content_reference(store, content_store_id, &content_ref).await?;
+    let admission =
+        ContentAdmission::for_durable_content_write(namespace_id.clone(), content_ref.clone());
+    Ok(PreparedContent::from_admission(content_ref, admission))
 }
 
 /// Proves a content reference is durable — the object exists and carries the
@@ -267,6 +301,7 @@ pub async fn store_bytes_as_content_with_store_id<S: ObjectStore + ?Sized>(
         file_digest_sha256: content_ref.digest.clone(),
         file_size_bytes: content_ref.size_bytes,
         content_ref,
+        _write_acknowledged: StoredContentWriteAcknowledgement,
     })
 }
 

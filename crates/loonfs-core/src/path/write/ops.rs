@@ -4,13 +4,12 @@
 use super::content_write::store_file_bytes_before_metadata_publish;
 use super::intent::PathMutationIntent;
 use crate::commit_engine::NamespaceMutationCandidate;
-use crate::content::ContentAdmission;
 use crate::context::MutationContext;
 use crate::error::CoreError;
 use crate::path::helpers::parse_mutation_path;
+use crate::storage::content_admission::{ContentAdmission, PreparedContent};
 use loonfs_api::{
-    CommitId, CommitResponse, ContentRef, DeleteDirectoryBehavior, DestinationBehavior,
-    NamespaceId, RevisionNo,
+    CommitId, CommitResponse, DeleteDirectoryBehavior, DestinationBehavior, NamespaceId, RevisionNo,
 };
 use loonfs_objectstore::ObjectStore;
 
@@ -57,13 +56,13 @@ pub(crate) async fn put_file_bytes<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     commit_id: Option<&CommitId>,
 ) -> Result<CommitResponse, CoreError> {
-    let content_ref =
+    let prepared_content =
         store_file_bytes_before_metadata_publish(store, namespace_id, absolute_path, bytes).await?;
-    put_file_content_ref(
+    put_prepared_file_content(
         store,
         namespace_id,
         absolute_path,
-        content_ref,
+        prepared_content,
         behavior,
         context,
         commit_id,
@@ -91,20 +90,16 @@ pub(crate) async fn write_file_bytes<S: ObjectStore + ?Sized>(
     .await
 }
 
-pub(crate) async fn put_file_content_ref<S: ObjectStore + ?Sized>(
+async fn put_prepared_file_content<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
-    content_ref: ContentRef,
+    prepared_content: PreparedContent,
     behavior: DestinationBehavior,
     context: &MutationContext,
     commit_id: Option<&CommitId>,
 ) -> Result<CommitResponse, CoreError> {
-    let admission = ContentAdmission::for_durable_content_write(
-        namespace_id.clone(),
-        content_ref.clone(),
-        context.now_ms,
-    );
+    let content_ref = prepared_content.content_ref().clone();
     submit_path_intent(
         store,
         namespace_id,
@@ -114,7 +109,7 @@ pub(crate) async fn put_file_content_ref<S: ObjectStore + ?Sized>(
             content_ref,
             behavior,
         },
-        vec![admission],
+        vec![prepared_content.into_admission()],
         context,
     )
     .await
