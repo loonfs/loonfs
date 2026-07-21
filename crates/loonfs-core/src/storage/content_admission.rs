@@ -1,6 +1,9 @@
-//! Short-lived content tokens: a serving session mints one after
-//! validating direct-put content, and batch validation accepts it instead
-//! of re-probing object storage for the blob.
+//! Producer-only content preparation proofs and short-lived wire tokens.
+//!
+//! A serving session verifies token expiry once when turning a signed wire
+//! token into an in-process [`ContentAdmission`]. Admissions then remain valid
+//! for the process lifetime: they record accepted authoritative evidence that
+//! the identified content is durable, rather than carrying another clock.
 
 use base64::Engine as _;
 use loonfs_api::v0::ValidatedContentToken;
@@ -16,39 +19,47 @@ const DEFAULT_TOKEN_TTL_MS: u64 = 60 * 60 * 1000;
 pub struct ContentAdmission {
     namespace_id: NamespaceId,
     content_ref: ContentRef,
-    expires_at_ms: u64,
 }
 
 impl ContentAdmission {
-    /// Admits a content ref the caller itself wrote durably (and had acked)
-    /// before submitting the publish, so batch validation does not re-probe
-    /// object storage for a blob this process just stored. The caller's own
-    /// completed write is the durability authority, exactly like a token
-    /// minted after upload validation.
-    pub fn for_durable_content_write(
+    pub(crate) fn for_durable_content_write(
         namespace_id: NamespaceId,
         content_ref: ContentRef,
-        now_ms: u64,
     ) -> Self {
         Self {
             namespace_id,
             content_ref,
-            // Generous on purpose: it must outlive batched publications
-            // and stale-head retries. An expired admission no longer covers
-            // the publication.
-            expires_at_ms: now_ms.saturating_add(DEFAULT_TOKEN_TTL_MS),
         }
     }
 
-    pub(crate) fn admits(
-        &self,
-        namespace_id: &NamespaceId,
-        content_ref: &ContentRef,
-        now_ms: u64,
-    ) -> bool {
-        self.namespace_id == *namespace_id
-            && self.content_ref == *content_ref
-            && self.expires_at_ms >= now_ms
+    pub(crate) fn admits(&self, namespace_id: &NamespaceId, content_ref: &ContentRef) -> bool {
+        self.namespace_id == *namespace_id && self.content_ref == *content_ref
+    }
+}
+
+/// Opaque evidence that a content reference was prepared for publication.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedContent {
+    content_ref: ContentRef,
+    admission: ContentAdmission,
+}
+
+impl PreparedContent {
+    pub(crate) fn from_admission(content_ref: ContentRef, admission: ContentAdmission) -> Self {
+        Self {
+            content_ref,
+            admission,
+        }
+    }
+
+    /// Returns the prepared content reference.
+    pub fn content_ref(&self) -> &ContentRef {
+        &self.content_ref
+    }
+
+    /// Consumes the proof and returns its publisher admission.
+    pub fn into_admission(self) -> ContentAdmission {
+        self.admission
     }
 }
 
@@ -136,11 +147,10 @@ pub fn verify_content_token(
         return Err(ContentTokenError::Expired);
     }
 
-    Ok(ContentAdmission {
-        namespace_id: payload.namespace_id,
-        content_ref: payload.content_ref,
-        expires_at_ms: payload.expires_at_ms,
-    })
+    Ok(ContentAdmission::for_durable_content_write(
+        payload.namespace_id,
+        payload.content_ref,
+    ))
 }
 
 fn base64_url(bytes: &[u8]) -> String {
@@ -201,7 +211,30 @@ mod tests {
         let admission =
             verify_content_token("secret", &namespace, &token, 1_000).expect("verify token");
 
-        assert!(admission.admits(&namespace, &content, 1_000));
+        assert!(admission.admits(&namespace, &content));
+    }
+
+    #[test]
+    fn verified_token_admission_does_not_decay_after_token_expiry() {
+        let namespace = NamespaceId::parse("demo").expect("namespace");
+        let content = ContentRef::whole_file_v0(b"hello");
+        let issued_at_ms = 1_000;
+        let token = mint_content_token("secret", &namespace, &content, issued_at_ms).expect("mint");
+        let token = ValidatedContentToken {
+            content_ref: content.clone(),
+            token,
+        };
+        let admission = verify_content_token(
+            "secret",
+            &namespace,
+            &token,
+            issued_at_ms + DEFAULT_TOKEN_TTL_MS,
+        )
+        .expect("verify token before expiry");
+
+        // The admission carries no clock: expiry was the token's concern,
+        // checked exactly once by the verification above.
+        assert!(admission.admits(&namespace, &content));
     }
 
     #[test]

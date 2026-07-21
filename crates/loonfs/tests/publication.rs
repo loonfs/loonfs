@@ -7,7 +7,6 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
-use loonfs::content_tokens::ContentAdmission;
 use loonfs::publish::{parse_mutation_path, PathMutationIntent};
 use loonfs::{
     BeginUploadRequest, CommitId, CommitResponse, CoreError, CreateNamespaceOptions,
@@ -182,6 +181,19 @@ async fn park_two_puts(temp_dir: &Path) -> ParkedPuts {
         .upload_content(&namespace_id, &upload.upload_id, b"b")
         .await
         .expect("stage second put content");
+    let catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &namespace_id)
+        .await
+        .expect("load namespace catalog");
+    let prepared = loonfs_core::content::prepare_existing_content_ref(
+        &store,
+        &namespace_id,
+        catalog.content_store_id(),
+        staged.content_ref,
+    )
+    .await
+    .expect("prepare second put content");
+    let prepared_content_ref = prepared.content_ref().clone();
+    let admission = prepared.into_admission();
 
     store_impl.arm();
     let first = {
@@ -204,14 +216,9 @@ async fn park_two_puts(temp_dir: &Path) -> ParkedPuts {
         let intent = PathMutationIntent::PutFile {
             commit_id: CommitId::parse("parked-second").expect("valid commit id"),
             absolute_path: parse_mutation_path("/b.txt").expect("mutation path"),
-            content_ref: staged.content_ref.clone(),
+            content_ref: prepared_content_ref,
             behavior: DestinationBehavior::NoReplace,
         };
-        let admission = ContentAdmission::for_durable_content_write(
-            namespace_id.clone(),
-            staged.content_ref,
-            u64::MAX,
-        );
         Box::pin(async move {
             registry
                 .submit_path_intent_with_content_admission(namespace_id, intent, vec![admission])

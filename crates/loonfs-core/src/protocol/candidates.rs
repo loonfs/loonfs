@@ -8,11 +8,11 @@ use crate::commit::{
     CommitOp, CommitRequest as CoreCommitRequest, SemanticMutationIdentity,
 };
 use crate::commit_engine::NamespaceMutationCandidate;
-use crate::content::ContentAdmission;
 use crate::error::{CoreError, Result};
 use crate::metadata::CommitReceiptRecord;
 use crate::path::write::{path_intent_fingerprint_for_path_intent, PublishPlanningSession};
 use crate::storage::content::ContentValidationTracker;
+use crate::storage::content_admission::ContentAdmission;
 use loonfs_api::v0::CommitResponse as ApiCommitResponse;
 use loonfs_api::{CommitId, ContentRef, ContentStoreId, NamespaceId};
 use loonfs_objectstore::ObjectStore;
@@ -242,14 +242,13 @@ fn commit_response_from_commit_receipt(
 struct CommitContentAdmissions<'a> {
     namespace_id: &'a NamespaceId,
     admissions: &'a [ContentAdmission],
-    now_ms: u64,
 }
 
 impl CommitContentAdmissions<'_> {
     fn admits(&self, content_ref: &ContentRef) -> bool {
         self.admissions
             .iter()
-            .any(|admission| admission.admits(self.namespace_id, content_ref, self.now_ms))
+            .any(|admission| admission.admits(self.namespace_id, content_ref))
     }
 }
 
@@ -261,7 +260,6 @@ pub(super) async fn validate_commit_content_references<S: ObjectStore + ?Sized>(
     content_store_id: &ContentStoreId,
     request: &CoreCommitRequest,
     candidate: &NamespaceMutationCandidate,
-    now_ms: u64,
     content_validation: &mut ContentValidationTracker,
 ) -> Result<()> {
     match candidate {
@@ -287,7 +285,6 @@ pub(super) async fn validate_commit_content_references<S: ObjectStore + ?Sized>(
             let admissions = CommitContentAdmissions {
                 namespace_id: &request.namespace_id,
                 admissions: candidate_content_admissions(candidate),
-                now_ms,
             };
             if !admissions.admits(content_ref) {
                 return Err(CoreError::ContentNotPrepared {

@@ -226,7 +226,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `upload_not_found` | 404 | No upload session with this id. |
 | `namespace_exists` | 409 | The create target already exists. |
 | `namespace_partial` | 409 | The namespace is partially initialized and unusable. |
-| `content_not_prepared` | 409 | A path put references external content without a matching unexpired admission. Prepare the content and retry with its proof. |
+| `content_not_prepared` | 409 | A path put references external content without a matching admission. Prepare the content and retry with its proof. |
 | `path_conflict` | 409 | The destination path is already bound. |
 | `directory_not_empty` | 409 | The directory has children and the operation is not recursive. |
 | `stale_head` | 409 | The write raced a head advance; retry against fresh state. |

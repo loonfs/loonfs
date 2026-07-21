@@ -14,7 +14,7 @@ use loonfs_core::cache::{
     WalTailProjectionCacheConfig, DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES,
     DEFAULT_WAL_TAIL_PROJECTION_ROWS,
 };
-use loonfs_core::content::{store_bytes_as_content, ContentAdmission};
+use loonfs_core::content::{prepare_existing_content_ref, store_bytes_as_content};
 use loonfs_core::control::load_namespace_read_anchor;
 use loonfs_core::gc::{gc_namespace, GcConfig};
 use loonfs_core::publish::{NamespaceCommitEngine, NamespaceMutationCandidate, PathMutationIntent};
@@ -38,6 +38,15 @@ async fn put_file<S: ObjectStore + ?Sized>(
     let content = store_bytes_as_content(store, namespace_id, bytes)
         .await
         .expect("stage content");
+    let prepared = prepare_existing_content_ref(
+        store,
+        namespace_id,
+        &content.content_store_id,
+        content.content_ref,
+    )
+    .await
+    .expect("prepare existing content");
+    let content_ref = prepared.content_ref().clone();
     NamespaceCommitEngine::new(namespace_id.clone())
         .publish_batch(
             store,
@@ -45,14 +54,10 @@ async fn put_file<S: ObjectStore + ?Sized>(
                 intent: PathMutationIntent::PutFile {
                     commit_id: loonfs_api::CommitId::generate(),
                     absolute_path: AbsolutePath::parse(absolute_path).expect("path"),
-                    content_ref: content.content_ref.clone(),
+                    content_ref,
                     behavior: loonfs_api::DestinationBehavior::NoReplace,
                 },
-                admissions: vec![ContentAdmission::for_durable_content_write(
-                    namespace_id.clone(),
-                    content.content_ref,
-                    context.now_ms,
-                )],
+                admissions: vec![prepared.into_admission()],
             }],
             context,
         )

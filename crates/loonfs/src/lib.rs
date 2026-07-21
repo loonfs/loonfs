@@ -75,16 +75,19 @@ pub use loonfs_core::{
 /// never need this module.
 pub mod publish {
     pub use loonfs_core::path::parse_mutation_path;
-    pub use loonfs_core::publish::{NamespaceMutationCandidate, PathMutationIntent};
+    pub use loonfs_core::publish::{
+        ContentAdmission, NamespaceMutationCandidate, PathMutationIntent,
+    };
 }
 
-/// Server-integration seam: mint/verify surface for the short-lived content
-/// tokens a serving session uses to admit already-validated direct-put
-/// content. Most embedded users never need this module.
+/// Server-integration seam for producer-only content admissions.
+///
+/// A serving session mints short-lived wire tokens after durable preparation
+/// and verifies expiry once before yielding an opaque publisher admission.
+/// The in-process admission records accepted durability evidence and does not
+/// expire. Most embedded users never need this module.
 pub mod content_tokens {
-    pub use loonfs_core::content::{
-        mint_content_token, verify_content_token, ContentAdmission, ContentTokenError,
-    };
+    pub use loonfs_core::content::{mint_content_token, verify_content_token, ContentTokenError};
 }
 
 /// Server-integration seam: the resolved direct-put upload target a serving

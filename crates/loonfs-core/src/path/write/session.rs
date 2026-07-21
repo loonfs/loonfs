@@ -74,12 +74,12 @@ impl PublishPlanningSession {
 mod tests {
     use super::*;
     use crate::commit_engine::{publish_namespace_mutations_batch, NamespaceMutationCandidate};
-    use crate::content::ContentAdmission;
     use crate::context::MutationContext;
     use crate::error::ErrorCode;
     use crate::namespace::bootstrap::bootstrap_namespace;
     use crate::protocol::{load_publish_metadata_view, PublishTailOptions};
     use crate::storage::content::store_bytes_as_content;
+    use crate::storage::content_admission::ContentAdmission;
     use loonfs_api::{CommitId, DeleteDirectoryBehavior, DestinationBehavior};
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use tempfile::tempdir;
@@ -124,7 +124,6 @@ mod tests {
             admissions: vec![ContentAdmission::for_durable_content_write(
                 NamespaceId::parse("demo").expect("valid namespace id"),
                 content_ref,
-                u64::MAX,
             )],
         }
     }

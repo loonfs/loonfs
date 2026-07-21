@@ -4,7 +4,6 @@
 
 use crate::checkpoint::MetadataTableCache;
 use crate::commit::{core_commit_fingerprint_for_v0_request, SemanticMutationIdentity};
-use crate::content::ContentAdmission;
 use crate::context::MutationContext;
 use crate::error::{
     CoreError, MetadataProjectionLoadError, MetadataViewError, Result, WriterFence,
@@ -14,6 +13,7 @@ use crate::namespace::catalog::{load_namespace_catalog_entry, VerifiedNamespaceC
 use crate::namespace::writer_epoch::acquire_writer_epoch;
 use crate::path::write::{path_intent_fingerprint_for_path_intent, PathMutationIntent};
 use crate::protocol::{load_publish_metadata_view, PublishTailOptions, PublishTailProjection};
+use crate::storage::content_admission::ContentAdmission;
 use crate::timing::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_api::v0::{CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse};
 use loonfs_api::wire::control::{AcquiredWriter, HeadState};

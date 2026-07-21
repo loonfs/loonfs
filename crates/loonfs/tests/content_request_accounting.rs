@@ -3,8 +3,7 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
-use loonfs::content_tokens::ContentAdmission;
-use loonfs::publish::{parse_mutation_path, PathMutationIntent};
+use loonfs::publish::{parse_mutation_path, ContentAdmission, PathMutationIntent};
 use loonfs::{
     CommitId, CommitOp, CommitRequest, CoreError, CreateDirectoryOptions, CreateNamespaceOptions,
     DestinationBehavior, ErrorCode, FsWriter, InodeId, NamespaceId, PutFileOptions, RevisionNo,
@@ -419,11 +418,24 @@ async fn build_initialized_writer(
     writer
 }
 
-fn durable_admission(
+/// Full external preparation performs one content HEAD and one full GET.
+async fn prepare_admission(
+    store: &SharedObjectStore,
     namespace_id: &NamespaceId,
     content_ref: &loonfs::ContentRef,
 ) -> ContentAdmission {
-    ContentAdmission::for_durable_content_write(namespace_id.clone(), content_ref.clone(), u64::MAX)
+    let catalog = loonfs_core::control::load_namespace_catalog_entry(store, namespace_id)
+        .await
+        .expect("load namespace catalog");
+    loonfs_core::content::prepare_existing_content_ref(
+        store,
+        namespace_id,
+        catalog.content_store_id(),
+        content_ref.clone(),
+    )
+    .await
+    .expect("prepare existing content")
+    .into_admission()
 }
 
 fn put_intent(commit_id: &str, path: &str, content_ref: loonfs::ContentRef) -> PathMutationIntent {
@@ -669,13 +681,14 @@ async fn commit_id_replay_performs_no_content_operations() {
     let harness = TestHarness::new("receipt-replay").await;
     let content_ref = harness.stage_content(b"replayed content").await;
     let intent = put_intent("replayed-put", "/file.txt", content_ref.clone());
+    let admission = prepare_admission(&harness.store, &harness.namespace_id, &content_ref).await;
     let original = harness
         .writer
         .publisher()
         .submit_path_intent_with_content_admission(
             harness.namespace_id.clone(),
             intent.clone(),
-            vec![durable_admission(&harness.namespace_id, &content_ref)],
+            vec![admission],
         )
         .await
         .expect("publish original put");
@@ -710,7 +723,9 @@ async fn in_flight_duplicate_performs_no_additional_content_operations() {
             .expect("stage content")
             .content_ref;
     let intent = put_intent("in-flight-put", "/file.txt", content_ref.clone());
-    let admission = durable_admission(&namespace_id, &content_ref);
+    // Full preparation deliberately costs one content HEAD and one GET; do it
+    // before the reset so this phase isolates publication and duplicate join.
+    let admission = prepare_admission(&store, &namespace_id, &content_ref).await;
     recording.reset();
 
     blocking.arm_next_head_cas();
@@ -775,7 +790,9 @@ async fn stale_head_retry_preserves_content_admission() {
             .expect("stage content")
             .content_ref;
     let intent = put_intent("retry-put", "/file.txt", content_ref.clone());
-    let admission = durable_admission(&namespace_id, &content_ref);
+    // Full preparation deliberately costs one content HEAD and one GET; do it
+    // before the reset so this phase isolates publication retries.
+    let admission = prepare_admission(&store, &namespace_id, &content_ref).await;
     recording.reset();
     conflicting.fail_next_head_cas();
 
@@ -807,6 +824,9 @@ async fn mixed_batch_publishes_admitted_put_and_rejects_unprepared_put_without_c
             .await
             .expect("stage content")
             .content_ref;
+    // Full preparation deliberately costs one content HEAD and one GET; do it
+    // before the reset so this phase isolates mixed-batch publication.
+    let admission = prepare_admission(&store, &namespace_id, &content_ref).await;
     recording.reset();
 
     blocking.arm_next_head_cas();
@@ -832,7 +852,7 @@ async fn mixed_batch_publishes_admitted_put_and_rejects_unprepared_put_without_c
     let mut admitted = Box::pin(registry.submit_path_intent_with_content_admission(
         namespace_id.clone(),
         put_intent("mixed-admitted", "/admitted.txt", content_ref.clone()),
-        vec![durable_admission(&namespace_id, &content_ref)],
+        vec![admission],
     ));
     assert!(
         futures::poll!(admitted.as_mut()).is_pending(),
@@ -859,33 +879,4 @@ async fn mixed_batch_publishes_admitted_put_and_rejects_unprepared_put_without_c
 
     assert_content_not_prepared(error, &content_ref);
     assert_content_counts(recording.snapshot(), 0, 0, 0, 0);
-}
-
-#[tokio::test]
-async fn expired_content_admission_fails_without_content_io() {
-    let harness = TestHarness::new("expired-admission").await;
-    let bytes = b"expired admission content";
-    let content_ref = harness.stage_content(bytes).await;
-    let expired_admission = ContentAdmission::for_durable_content_write(
-        harness.namespace_id.clone(),
-        content_ref.clone(),
-        0,
-    );
-    harness.recording.reset();
-
-    // Expiry still makes an admission uncovered in this narrow cut. A later
-    // PR removes internal admission expiry and will make this succeed again.
-    let error = harness
-        .writer
-        .publisher()
-        .submit_path_intent_with_content_admission(
-            harness.namespace_id.clone(),
-            put_intent("expired-put", "/file.txt", content_ref.clone()),
-            vec![expired_admission],
-        )
-        .await
-        .expect_err("expired admission must not cover publication");
-
-    assert_content_not_prepared(error, &content_ref);
-    assert_content_counts(harness.recording.snapshot(), 0, 0, 0, 0);
 }

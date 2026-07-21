@@ -1,9 +1,7 @@
 //! Path mutations, commits, and the publication pipeline.
 
 use super::core::{BackgroundTickClaim, FsCore};
-use crate::content_tokens::ContentAdmission;
 use crate::publish::{NamespaceMutationCandidate, PathMutationIntent};
-use crate::time::current_time_ms;
 use crate::{
     ChangeSeq, CommitId, CommitOp, CommitPrecondition, CommitRequest, CommitResponse, ContentRef,
     CopyOptions, CoreError, CreateDirectoryOptions, DeleteOptions, InodeId, MaintenanceTickOptions,
@@ -66,20 +64,19 @@ impl FsCore {
                     .await?
             }
         };
-        // The admission tells batch validation not to re-probe for the blob
-        // whose acked write this handle just observed.
-        let content_admission = ContentAdmission::for_durable_content_write(
-            namespace_id.clone(),
-            stored.content_ref.clone(),
-            current_time_ms()?,
-        );
+        // The acknowledged write is the authority for the prepared proof, so
+        // batch validation does not re-probe the blob this handle just stored.
+        let prepared_content =
+            loonfs_core::content::prepare_stored_content(namespace_id.clone(), stored);
+        let content_ref = prepared_content.content_ref().clone();
+        let content_admission = prepared_content.into_admission();
         self.publish_candidate(
             namespace_id,
             NamespaceMutationCandidate::PathWithContentAdmission {
                 intent: PathMutationIntent::PutFile {
                     commit_id: options.commit_id.unwrap_or_else(CommitId::generate),
                     absolute_path,
-                    content_ref: stored.content_ref,
+                    content_ref,
                     behavior: options.behavior,
                 },
                 admissions: vec![content_admission],
@@ -131,18 +128,16 @@ impl FsCore {
                     .clone()
             }
         };
-        loonfs_core::content::validate_durable_content_reference(
+        let prepared_content = loonfs_core::content::prepare_existing_content_ref(
             &self.inner.store,
+            namespace_id,
             &content_store_id,
-            &content_ref,
+            content_ref,
         )
         .await
         .map_err(CoreError::from)?;
-        let content_admission = ContentAdmission::for_durable_content_write(
-            namespace_id.clone(),
-            content_ref.clone(),
-            current_time_ms()?,
-        );
+        let content_ref = prepared_content.content_ref().clone();
+        let content_admission = prepared_content.into_admission();
         self.publish_candidate(
             namespace_id,
             NamespaceMutationCandidate::PathWithContentAdmission {
