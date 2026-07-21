@@ -27,6 +27,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const DIRECT_PUT_URL_TTL: Duration = Duration::from_secs(15 * 60);
 
+pub(super) enum PutContentPreparation {
+    Absent,
+    Ready(Vec<PreparedContent>),
+    Rejected(ContentTokenError),
+}
+
 #[derive(Debug, serde::Deserialize)]
 pub(super) struct UploadPathParams {
     upload_id: String,
@@ -144,32 +150,40 @@ fn direct_put_presign_time() -> SystemTime {
     SystemTime::now()
 }
 
-pub(super) fn prepared_content_for_put(
+pub(super) fn content_preparation_for_put(
     config: &ServerConfig,
     namespace_id: &NamespaceId,
     content_ref: &ContentRef,
     tokens: &[ValidatedContentToken],
     now_ms: u64,
-) -> Vec<PreparedContent> {
-    tokens
+) -> PutContentPreparation {
+    let mut prepared_content = Vec::new();
+    let mut first_error = None;
+    for token in tokens
         .iter()
         .filter(|token| token.content_ref == *content_ref)
-        .filter_map(|token| {
-            match verify_content_token(config.content_token_secret(), namespace_id, token, now_ms) {
-                Ok(prepared) => Some(prepared),
-                Err(error) => {
-                    // A rejected token contributes no prepared proof, so a put
-                    // with no other matching token fails as unprepared.
-                    tracing::debug!(
-                        namespace_id = %namespace_id,
-                        error = %error,
-                        "content token rejected"
-                    );
-                    None
-                }
+    {
+        match verify_content_token(config.content_token_secret(), namespace_id, token, now_ms) {
+            Ok(prepared) => prepared_content.push(prepared),
+            Err(error) => {
+                tracing::debug!(
+                    namespace_id = %namespace_id,
+                    content_ref_digest = %content_ref.digest,
+                    error = %error,
+                    "content token rejected during put preparation"
+                );
+                first_error.get_or_insert(error);
             }
-        })
-        .collect()
+        }
+    }
+
+    if !prepared_content.is_empty() {
+        PutContentPreparation::Ready(prepared_content)
+    } else if let Some(error) = first_error {
+        PutContentPreparation::Rejected(error)
+    } else {
+        PutContentPreparation::Absent
+    }
 }
 
 fn content_token_error(error: ContentTokenError) -> ApiResponseError {

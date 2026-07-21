@@ -3,13 +3,18 @@
 //! semantic commits, and the committed-change feed.
 
 use super::error::ApiResponseError;
-use super::handlers_uploads::{current_unix_ms, prepared_content_for_put};
+use super::handlers_uploads::{
+    content_preparation_for_put, current_unix_ms, PutContentPreparation,
+};
 use super::{authorize, AppJson, AppPath, AppQuery, AppState, CommitAppJson, NamespaceIdPath};
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use loonfs::publish::{parse_mutation_path, PathMutationIntent};
+use loonfs::publish::{
+    parse_mutation_path, ContentPreparationError, NamespaceMutation, NamespaceMutationCandidate,
+    PathMutationIntent,
+};
 use loonfs::{payload_class, ErrorCode, ListChangesOptions, TraceStoreKind};
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
@@ -470,15 +475,15 @@ pub(super) async fn filesystem_operation(
         )),
         _ => None,
     };
-    let prepared_content = match &operation {
-        FilesystemOperation::PutFile { content_ref, .. } => prepared_content_for_put(
+    let put_content_preparation = match &operation {
+        FilesystemOperation::PutFile { content_ref, .. } => Some(content_preparation_for_put(
             &state.config,
             &namespace_id,
             content_ref,
             &content_tokens,
             current_unix_ms()?,
-        ),
-        _ => Vec::new(),
+        )),
+        _ => None,
     };
     // Wire paths are raw strings; the intent carries validated paths, so
     // this is the convert-once point for the whole remote mutation path.
@@ -562,21 +567,22 @@ pub(super) async fn filesystem_operation(
             payload_class,
         );
         async {
-            if prepared_content.is_empty() {
-                state
-                    .publisher
-                    .submit_path_intent(namespace_id.clone(), intent)
-                    .await
-            } else {
-                state
-                    .publisher
-                    .submit_path_intent_with_prepared_content(
-                        namespace_id.clone(),
-                        intent,
-                        prepared_content,
-                    )
-                    .await
-            }
+            let candidate = match put_content_preparation
+                .expect("put payload class should carry content preparation")
+            {
+                PutContentPreparation::Absent => NamespaceMutationCandidate::path(intent),
+                PutContentPreparation::Ready(prepared_content) => {
+                    NamespaceMutationCandidate::path_prepared(intent, prepared_content)
+                }
+                PutContentPreparation::Rejected(error) => NamespaceMutationCandidate::rejected(
+                    NamespaceMutation::Path(intent),
+                    ContentPreparationError::ContentToken(error),
+                ),
+            };
+            state
+                .publisher
+                .submit_candidate(namespace_id.clone(), candidate)
+                .await
         }
         .instrument(span)
         .await
