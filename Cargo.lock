@@ -1180,6 +1180,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "loonfs-grep"
+version = "0.1.1"
+dependencies = [
+ "ciborium",
+ "loonfs-api",
+ "serde",
+ "serde_bytes",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "loonfs-model"
 version = "0.1.1"
 dependencies = [

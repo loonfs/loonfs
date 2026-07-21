@@ -1,0 +1,25 @@
+[package]
+name = "loonfs-grep"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "The standalone LoonFS full-text grep subsystem."
+repository.workspace = true
+readme = "README.md"
+
+[[bin]]
+name = "loonfs-grep"
+path = "src/main.rs"
+
+[dependencies]
+loonfs-api = { path = "../loonfs-api" }
+serde.workspace = true
+serde_bytes.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+ciborium.workspace = true
+
+[lints]
+workspace = true
