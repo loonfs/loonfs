@@ -4,6 +4,7 @@
 use super::content_write::store_file_bytes_before_metadata_publish;
 use super::intent::PathMutationIntent;
 use crate::commit_engine::NamespaceMutationCandidate;
+use crate::content::ContentAdmission;
 use crate::context::MutationContext;
 use crate::error::CoreError;
 use crate::path::helpers::parse_mutation_path;
@@ -21,12 +22,18 @@ async fn submit_path_intent<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     intent: PathMutationIntent,
+    admissions: Vec<ContentAdmission>,
     context: &MutationContext,
 ) -> Result<CommitResponse, CoreError> {
+    let candidate = if admissions.is_empty() {
+        NamespaceMutationCandidate::Path(intent)
+    } else {
+        NamespaceMutationCandidate::PathWithContentAdmission { intent, admissions }
+    };
     let mut results = crate::commit_engine::publish_namespace_mutations_batch(
         store,
         namespace_id,
-        vec![NamespaceMutationCandidate::Path(intent)],
+        vec![candidate],
         context,
     )
     .await;
@@ -93,16 +100,21 @@ pub(crate) async fn put_file_content_ref<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     commit_id: Option<&CommitId>,
 ) -> Result<CommitResponse, CoreError> {
-    let commit_id = normalized_commit_id(commit_id);
+    let admission = ContentAdmission::for_durable_content_write(
+        namespace_id.clone(),
+        content_ref.clone(),
+        context.now_ms,
+    );
     submit_path_intent(
         store,
         namespace_id,
         PathMutationIntent::PutFile {
-            commit_id,
+            commit_id: normalized_commit_id(commit_id),
             absolute_path: parse_mutation_path(absolute_path)?,
             content_ref,
             behavior,
         },
+        vec![admission],
         context,
     )
     .await
@@ -144,6 +156,7 @@ async fn delete_path_with_behavior<S: ObjectStore + ?Sized>(
             behavior,
             expected_inode_id: None,
         },
+        Vec::new(),
         context,
     )
     .await
@@ -167,6 +180,7 @@ pub(crate) async fn move_path<S: ObjectStore + ?Sized>(
             to_path: parse_mutation_path(to_path)?,
             behavior: DestinationBehavior::NoReplace,
         },
+        Vec::new(),
         context,
     )
     .await
@@ -189,6 +203,7 @@ pub(crate) async fn restore_file_revision<S: ObjectStore + ?Sized>(
             absolute_path: parse_mutation_path(absolute_path)?,
             source_revision_no,
         },
+        Vec::new(),
         context,
     )
     .await

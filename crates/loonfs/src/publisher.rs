@@ -2103,13 +2103,22 @@ mod tests {
         let path_intent = PathMutationIntent::PutFile {
             commit_id: CommitId::parse("path-put").expect("valid commit id"),
             absolute_path: AbsolutePath::parse("/file.txt").expect("path"),
-            content_ref: staged.content_ref,
+            content_ref: staged.content_ref.clone(),
             behavior: DestinationBehavior::NoReplace,
         };
+        let content_admission = ContentAdmission::for_durable_content_write(
+            namespace_id.clone(),
+            staged.content_ref,
+            u64::MAX,
+        );
 
         let (explicit_response, path_response) = tokio::join!(
             registry.submit_commit(namespace_id.clone(), explicit),
-            registry.submit_path_intent(namespace_id.clone(), path_intent)
+            registry.submit_path_intent_with_content_admission(
+                namespace_id.clone(),
+                path_intent,
+                vec![content_admission]
+            )
         );
         assert_eq!(
             explicit_response.expect("explicit response").committed_seq,

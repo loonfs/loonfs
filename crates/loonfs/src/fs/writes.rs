@@ -88,11 +88,11 @@ impl FsCore {
         .await
     }
 
-    /// Publishes a file revision that points at an already-durable content
-    /// ref.
+    /// Publishes a file revision that points at an already-durable content ref.
     ///
-    /// Use this when content was staged separately, for example through the
-    /// upload protocol.
+    /// This explicitly slow helper reads the full object to prove durability
+    /// before publication. Callers that already hold proof should prefer the
+    /// admitted path.
     #[tracing::instrument(
         level = "info",
         name = "loon.put",
@@ -120,13 +120,39 @@ impl FsCore {
                 usize::try_from(content_ref.size_bytes).unwrap_or(usize::MAX),
             ),
         );
-        self.publish_path_intent(
+        let absolute_path = loonfs_core::path::parse_mutation_path(absolute_path)?;
+        let content_store_id = match self.load_namespace_catalog_cached(namespace_id).await? {
+            Some(catalog) => catalog.content_store_id().clone(),
+            None => {
+                loonfs_core::control::load_namespace_catalog_entry(&self.inner.store, namespace_id)
+                    .await
+                    .map_err(CoreError::from)?
+                    .content_store_id()
+                    .clone()
+            }
+        };
+        loonfs_core::content::validate_durable_content_reference(
+            &self.inner.store,
+            &content_store_id,
+            &content_ref,
+        )
+        .await
+        .map_err(CoreError::from)?;
+        let content_admission = ContentAdmission::for_durable_content_write(
+            namespace_id.clone(),
+            content_ref.clone(),
+            current_time_ms()?,
+        );
+        self.publish_candidate(
             namespace_id,
-            PathMutationIntent::PutFile {
-                commit_id: options.commit_id.unwrap_or_else(CommitId::generate),
-                absolute_path: loonfs_core::path::parse_mutation_path(absolute_path)?,
-                content_ref,
-                behavior: options.behavior,
+            NamespaceMutationCandidate::PathWithContentAdmission {
+                intent: PathMutationIntent::PutFile {
+                    commit_id: options.commit_id.unwrap_or_else(CommitId::generate),
+                    absolute_path,
+                    content_ref,
+                    behavior: options.behavior,
+                },
+                admissions: vec![content_admission],
             },
         )
         .await

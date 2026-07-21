@@ -38,6 +38,7 @@ async fn create_checkpoint<S: ObjectStore + ?Sized>(
     .await
 }
 use crate::commit_engine::{NamespaceCommitEngine, NamespaceMutationCandidate};
+use crate::content::ContentAdmission;
 use crate::namespace::bootstrap::bootstrap_namespace;
 use crate::namespace::delete::delete_namespace;
 use crate::namespace::fork::fork_namespace;
@@ -108,14 +109,19 @@ async fn write_file<S: ObjectStore>(
     NamespaceCommitEngine::new(namespace_id.clone())
         .publish_batch(
             store,
-            vec![NamespaceMutationCandidate::Path(
-                PathMutationIntent::PutFile {
+            vec![NamespaceMutationCandidate::PathWithContentAdmission {
+                intent: PathMutationIntent::PutFile {
                     commit_id: CommitId::parse(commit_id).expect("commit id"),
                     absolute_path: AbsolutePath::parse(path).expect("path"),
-                    content_ref,
+                    content_ref: content_ref.clone(),
                     behavior: DestinationBehavior::NoReplace,
                 },
-            )],
+                admissions: vec![ContentAdmission::for_durable_content_write(
+                    namespace_id.clone(),
+                    content_ref,
+                    context.now_ms,
+                )],
+            }],
             context,
         )
         .await

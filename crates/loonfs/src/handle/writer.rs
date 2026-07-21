@@ -142,11 +142,11 @@ impl FsWriter {
             .await
     }
 
-    /// Publishes a file revision that points at an already-durable content
-    /// ref.
+    /// Publishes a file revision that points at an already-durable content ref.
     ///
-    /// Use this when content was staged separately, for example through the
-    /// upload protocol.
+    /// This explicitly slow helper reads the full object to prove durability
+    /// before publication. Callers that already hold proof should prefer the
+    /// admitted path.
     pub async fn put_file_content_ref(
         &self,
         namespace_id: &NamespaceId,

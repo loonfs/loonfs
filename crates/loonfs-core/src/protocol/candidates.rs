@@ -253,52 +253,48 @@ impl CommitContentAdmissions<'_> {
     }
 }
 
-/// Validates that every content ref a candidate commits either was admitted
-/// by the request's presigned content admissions or is provably durable.
+/// Checks external content refs without reading content for path candidates;
+/// explicit commits retain durable validation until their endpoint accepts
+/// content admissions.
 pub(super) async fn validate_commit_content_references<S: ObjectStore + ?Sized>(
     store: &S,
     content_store_id: &ContentStoreId,
     request: &CoreCommitRequest,
-    resolved_restore_content_refs: &[Option<ContentRef>],
     candidate: &NamespaceMutationCandidate,
     now_ms: u64,
     content_validation: &mut ContentValidationTracker,
 ) -> Result<()> {
-    let admissions = CommitContentAdmissions {
-        namespace_id: &request.namespace_id,
-        admissions: candidate_content_admissions(candidate),
-        now_ms,
-    };
-    let mut content_refs = Vec::new();
-    for (index, op) in request.ops.iter().enumerate() {
-        match op {
-            CommitOp::CreateFile { content_ref, .. }
-            | CommitOp::ReplaceFile { content_ref, .. } => {
-                content_refs.push(content_ref);
+    match candidate {
+        NamespaceMutationCandidate::Commit(_) => {
+            for op in &request.ops {
+                let content_ref = match op {
+                    CommitOp::CreateFile { content_ref, .. }
+                    | CommitOp::ReplaceFile { content_ref, .. } => content_ref,
+                    // Restore content is resolved from retained namespace
+                    // metadata, whose durability is already guaranteed.
+                    _ => continue,
+                };
+                content_validation
+                    .ensure_validated(store, content_store_id, content_ref)
+                    .await?;
             }
-            CommitOp::RestoreRevision { .. } => {
-                if let Some(content_ref) = resolved_restore_content_refs
-                    .get(index)
-                    .and_then(|content_ref| content_ref.as_ref())
-                {
-                    content_refs.push(content_ref);
-                }
+        }
+        NamespaceMutationCandidate::Path(intent)
+        | NamespaceMutationCandidate::PathWithContentAdmission { intent, .. } => {
+            let crate::path::write::PathMutationIntent::PutFile { content_ref, .. } = intent else {
+                return Ok(());
+            };
+            let admissions = CommitContentAdmissions {
+                namespace_id: &request.namespace_id,
+                admissions: candidate_content_admissions(candidate),
+                now_ms,
+            };
+            if !admissions.admits(content_ref) {
+                return Err(CoreError::ContentNotPrepared {
+                    content_ref_digest: content_ref.digest.clone(),
+                });
             }
-            _ => {}
         }
-    }
-
-    if content_refs.is_empty() {
-        return Ok(());
-    }
-
-    for content_ref in content_refs {
-        if admissions.admits(content_ref) {
-            continue;
-        }
-        content_validation
-            .ensure_validated(store, content_store_id, content_ref)
-            .await?;
     }
 
     Ok(())

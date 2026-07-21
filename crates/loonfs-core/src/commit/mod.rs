@@ -44,10 +44,7 @@ pub use self::publish::{prepare_commit_head_publish, publish_commit_head};
 pub use self::publish_error::CommitHeadPublishError;
 pub use self::request::CommitRequest;
 pub use self::validate::build_commit_plan;
-pub(crate) use self::validate::{
-    build_commit_plan_for_publish, resolve_restore_content_refs_for_publish,
-    PublishCommitValidationContext,
-};
+pub(crate) use self::validate::{build_commit_plan_for_publish, PublishCommitValidationContext};
 pub use self::validate_error::CommitValidationError;
 
 pub(crate) fn push_unique_invariant(invariants: &mut Vec<InvariantId>, id: InvariantId) {

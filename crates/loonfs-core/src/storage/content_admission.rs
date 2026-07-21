@@ -34,8 +34,8 @@ impl ContentAdmission {
             namespace_id,
             content_ref,
             // Generous on purpose: it must outlive batched publications
-            // and stale-head retries. An expired admission only downgrades
-            // to a durable-validation probe, never to a weaker check.
+            // and stale-head retries. An expired admission no longer covers
+            // the publication.
             expires_at_ms: now_ms.saturating_add(DEFAULT_TOKEN_TTL_MS),
         }
     }

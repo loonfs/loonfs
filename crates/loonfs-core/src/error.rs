@@ -95,6 +95,8 @@ pub enum CoreError {
     DestinationExists(String),
     #[error("commit id conflict for `{0}`")]
     CommitIdReuseConflict(String),
+    #[error("content ref `{content_ref_digest}` is not prepared for publication")]
+    ContentNotPrepared { content_ref_digest: String },
     #[error("commit queue is full; slow down and retry")]
     CommitQueueFull,
     /// The serving front-end closed admission for shutdown. New work is
@@ -359,6 +361,7 @@ impl CoreError {
             CoreError::NamespaceDeleted { .. } => ErrorCode::NamespaceDeleted,
             CoreError::NamespacePartiallyInitialized { .. } => ErrorCode::NamespacePartial,
             CoreError::CommitIdReuseConflict(_) => ErrorCode::CommitIdReuseConflict,
+            CoreError::ContentNotPrepared { .. } => ErrorCode::ContentNotPrepared,
             CoreError::CommitQueueFull => ErrorCode::CommitQueueFull,
             CoreError::ShuttingDown => ErrorCode::ShuttingDown,
             CoreError::CheckpointUnavailable(_) => ErrorCode::CheckpointUnavailable,
@@ -724,6 +727,7 @@ mod tests {
         // Precondition failures are 409 resource-state conflicts in v0
         // (api.md, "Standard error contract"), so the kind is Conflict.
         assert_eq!(ErrorCode::StaleRevision.kind(), ErrorKind::Conflict);
+        assert_eq!(ErrorCode::ContentNotPrepared.kind(), ErrorKind::Conflict);
         assert_eq!(ErrorCode::CommitQueueFull.kind(), ErrorKind::Unavailable);
         assert_eq!(
             ErrorCode::MaintenanceRequired.kind(),
@@ -749,6 +753,13 @@ mod tests {
         assert_eq!(error.code(), ErrorCode::NamespaceExists);
         assert_eq!(error.code().as_str(), "namespace_exists");
         assert!(error.message().contains("already exists"));
+
+        let error = CoreError::ContentNotPrepared {
+            content_ref_digest: "abc123".to_owned(),
+        };
+        assert_eq!(error.kind(), ErrorKind::Conflict);
+        assert_eq!(error.code(), ErrorCode::ContentNotPrepared);
+        assert!(error.message().contains("abc123"));
     }
 
     #[test]

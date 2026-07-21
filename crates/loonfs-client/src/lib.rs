@@ -1094,6 +1094,10 @@ mod tests {
         assert_eq!(error.error_code(), Some(ErrorCode::StaleRevision));
         assert_eq!(error.kind(), Some(ErrorKind::Conflict));
 
+        let error = api_error(409, "content_not_prepared");
+        assert_eq!(error.error_code(), Some(ErrorCode::ContentNotPrepared));
+        assert_eq!(error.kind(), Some(ErrorKind::Conflict));
+
         let error = api_error(410, "namespace_deleted");
         assert_eq!(error.error_code(), Some(ErrorCode::NamespaceDeleted));
         assert_eq!(error.kind(), Some(ErrorKind::Gone));

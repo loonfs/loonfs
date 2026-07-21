@@ -159,12 +159,12 @@ pub(super) fn content_admissions_for_put(
             match verify_content_token(config.content_token_secret(), namespace_id, token, now_ms) {
                 Ok(admission) => Some(admission),
                 Err(error) => {
-                    // A rejected token only loses its fast path: admission
-                    // falls back to durable content validation.
+                    // A rejected token contributes no admission, so a put
+                    // with no other matching token fails as unprepared.
                     tracing::debug!(
                         namespace_id = %namespace_id,
                         error = %error,
-                        "content token rejected; falling back to durable validation"
+                        "content token rejected"
                     );
                     None
                 }

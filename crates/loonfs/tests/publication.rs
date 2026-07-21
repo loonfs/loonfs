@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
+use loonfs::content_tokens::ContentAdmission;
 use loonfs::publish::{parse_mutation_path, PathMutationIntent};
 use loonfs::{
     BeginUploadRequest, CommitId, CommitResponse, CoreError, CreateNamespaceOptions,
@@ -203,10 +204,19 @@ async fn park_two_puts(temp_dir: &Path) -> ParkedPuts {
         let intent = PathMutationIntent::PutFile {
             commit_id: CommitId::parse("parked-second").expect("valid commit id"),
             absolute_path: parse_mutation_path("/b.txt").expect("mutation path"),
-            content_ref: staged.content_ref,
+            content_ref: staged.content_ref.clone(),
             behavior: DestinationBehavior::NoReplace,
         };
-        Box::pin(async move { registry.submit_path_intent(namespace_id, intent).await })
+        let admission = ContentAdmission::for_durable_content_write(
+            namespace_id.clone(),
+            staged.content_ref,
+            u64::MAX,
+        );
+        Box::pin(async move {
+            registry
+                .submit_path_intent_with_content_admission(namespace_id, intent, vec![admission])
+                .await
+        })
     };
     assert!(
         futures::poll!(second.as_mut()).is_pending(),
