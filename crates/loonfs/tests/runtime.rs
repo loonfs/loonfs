@@ -2548,7 +2548,7 @@ fn concurrent_puts_coalesce_into_one_wal_segment() {
                         content_ref,
                         behavior: DestinationBehavior::NoReplace,
                     },
-                    vec![prepared.into_admission()],
+                    vec![prepared],
                 )
             };
         let put_a = admitted_put("batch-a", "/docs/a.txt", content_a);
@@ -2558,22 +2558,22 @@ fn concurrent_puts_coalesce_into_one_wal_segment() {
         let publisher = fs.writer.publisher();
 
         let puts = tokio::join!(
-            publisher.submit_path_intent_with_content_admission(
+            publisher.submit_path_intent_with_prepared_content(
                 namespace_id.clone(),
                 put_a.0,
                 put_a.1,
             ),
-            publisher.submit_path_intent_with_content_admission(
+            publisher.submit_path_intent_with_prepared_content(
                 namespace_id.clone(),
                 put_b.0,
                 put_b.1,
             ),
-            publisher.submit_path_intent_with_content_admission(
+            publisher.submit_path_intent_with_prepared_content(
                 namespace_id.clone(),
                 put_c.0,
                 put_c.1,
             ),
-            publisher.submit_path_intent_with_content_admission(
+            publisher.submit_path_intent_with_prepared_content(
                 namespace_id.clone(),
                 put_d.0,
                 put_d.1,

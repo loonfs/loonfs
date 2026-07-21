@@ -44,8 +44,7 @@ use crate::namespace::fork::fork_namespace;
 use crate::options::DeleteNamespaceOptions;
 use crate::path::read::{load_metadata_view, ReadLoadContext};
 use crate::publish::PathMutationIntent;
-use crate::storage::content::store_bytes_as_content;
-use crate::storage::content_admission::ContentAdmission;
+use crate::storage::content::{prepare_stored_content, store_bytes_as_content};
 use bytes::Bytes;
 use futures::stream::BoxStream;
 use loonfs_api::{AbsolutePath, CommitId, DestinationBehavior};
@@ -102,25 +101,23 @@ async fn write_file<S: ObjectStore>(
     commit_id: &str,
     context: &MutationContext,
 ) {
-    let content_ref = store_bytes_as_content(store, namespace_id, b"body\n")
+    let stored = store_bytes_as_content(store, namespace_id, b"body\n")
         .await
-        .expect("store content")
-        .content_ref;
+        .expect("store content");
+    let content_ref = stored.content_ref.clone();
+    let prepared = prepare_stored_content(namespace_id.clone(), stored);
     NamespaceCommitEngine::new(namespace_id.clone())
         .publish_batch(
             store,
-            vec![NamespaceMutationCandidate::PathWithContentAdmission {
-                intent: PathMutationIntent::PutFile {
+            vec![NamespaceMutationCandidate::path_prepared(
+                PathMutationIntent::PutFile {
                     commit_id: CommitId::parse(commit_id).expect("commit id"),
                     absolute_path: AbsolutePath::parse(path).expect("path"),
                     content_ref: content_ref.clone(),
                     behavior: DestinationBehavior::NoReplace,
                 },
-                admissions: vec![ContentAdmission::for_durable_content_write(
-                    namespace_id.clone(),
-                    content_ref,
-                )],
-            }],
+                vec![prepared],
+            )],
             context,
         )
         .await

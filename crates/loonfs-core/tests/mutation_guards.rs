@@ -131,7 +131,7 @@ fn commit_operations<S: ObjectStore + ?Sized>(
     publish_namespace_mutations_batch(
         store,
         namespace_id,
-        vec![NamespaceMutationCandidate::Commit(request)],
+        vec![NamespaceMutationCandidate::commit(request)],
         context,
     )
     .into_iter()
@@ -150,7 +150,7 @@ fn commit_operations_batch<S: ObjectStore + ?Sized>(
         namespace_id,
         requests
             .into_iter()
-            .map(NamespaceMutationCandidate::Commit)
+            .map(NamespaceMutationCandidate::commit)
             .collect(),
         context,
     )
@@ -270,20 +270,16 @@ fn admitted_candidate<S: ObjectStore + ?Sized>(
         PathMutationIntent::PutFile { content_ref, .. } => {
             let content_store_id =
                 load_namespace_descriptor_state(store, namespace_id).content_store_id;
-            let admission = block_on(prepare_existing_content_ref(
+            let prepared = block_on(prepare_existing_content_ref(
                 store,
                 namespace_id,
                 &content_store_id,
                 content_ref.clone(),
             ))
-            .expect("prepare existing content")
-            .into_admission();
-            NamespaceMutationCandidate::PathWithContentAdmission {
-                admissions: vec![admission],
-                intent,
-            }
+            .expect("prepare existing content");
+            NamespaceMutationCandidate::path_prepared(intent, vec![prepared])
         }
-        _ => NamespaceMutationCandidate::Path(intent),
+        _ => NamespaceMutationCandidate::path(intent),
     }
 }
 
@@ -1686,7 +1682,7 @@ async fn path_put_file_without_admission_fails_without_reading_content() {
     let responses = publish_namespace_mutations_batch(
         &store,
         &namespace_id,
-        vec![NamespaceMutationCandidate::Path(
+        vec![NamespaceMutationCandidate::path(
             PathMutationIntent::PutFile {
                 commit_id: CommitId::parse("put-cold-content").expect("valid commit id"),
                 absolute_path: AbsolutePath::parse("/docs/hello.txt").expect("path"),
@@ -1724,13 +1720,13 @@ async fn path_batch_rejects_repeated_unadmitted_content_without_reading_it() {
         &store,
         &namespace_id,
         vec![
-            NamespaceMutationCandidate::Path(PathMutationIntent::PutFile {
+            NamespaceMutationCandidate::path(PathMutationIntent::PutFile {
                 commit_id: CommitId::parse("put-shared-a").expect("valid commit id"),
                 absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
                 content_ref: content.content_ref.clone(),
                 behavior: DestinationBehavior::NoReplace,
             }),
-            NamespaceMutationCandidate::Path(PathMutationIntent::PutFile {
+            NamespaceMutationCandidate::path(PathMutationIntent::PutFile {
                 commit_id: CommitId::parse("put-shared-b").expect("valid commit id"),
                 absolute_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
                 content_ref: content.content_ref,
@@ -1769,7 +1765,7 @@ async fn valid_content_admission_skips_durable_content_validation() {
         )
         .expect("mint token"),
     };
-    let admission = verify_content_token(
+    let prepared = verify_content_token(
         "test-content-token-secret",
         &namespace_id,
         &token,
@@ -1781,15 +1777,15 @@ async fn valid_content_admission_skips_durable_content_validation() {
     let responses = publish_namespace_mutations_batch(
         &store,
         &namespace_id,
-        vec![NamespaceMutationCandidate::PathWithContentAdmission {
-            intent: PathMutationIntent::PutFile {
+        vec![NamespaceMutationCandidate::path_prepared(
+            PathMutationIntent::PutFile {
                 commit_id: CommitId::parse("put-admitted-content").expect("valid commit id"),
                 absolute_path: AbsolutePath::parse("/docs/admitted.txt").expect("path"),
                 content_ref: content.content_ref,
                 behavior: DestinationBehavior::NoReplace,
             },
-            admissions: vec![admission],
-        }],
+            vec![prepared],
+        )],
         &context,
     );
 
@@ -2050,7 +2046,7 @@ async fn batch_delete_then_recreate_of_a_durable_file_layers_over_cached_state()
     .expect("stage recreated content");
     let results = block_on(
         namespace_engine(&store, &namespace_id, &context).publish_namespace_mutations_batch(vec![
-            NamespaceMutationCandidate::Path(PathMutationIntent::DeletePath {
+            NamespaceMutationCandidate::path(PathMutationIntent::DeletePath {
                 commit_id: CommitId::parse("delete-cycled").expect("valid commit id"),
                 absolute_path: AbsolutePath::parse("/docs/cycled.txt").expect("path"),
                 behavior: DeleteDirectoryBehavior::NonRecursive,
@@ -3019,7 +3015,7 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
     let batch = || {
         vec![
             // Rejected against the durable materialization: nothing was accepted yet.
-            NamespaceMutationCandidate::Path(PathMutationIntent::DeletePath {
+            NamespaceMutationCandidate::path(PathMutationIntent::DeletePath {
                 commit_id: CommitId::parse("reject-materialization").expect("valid commit id"),
                 absolute_path: AbsolutePath::parse("/missing.txt").expect("path"),
                 behavior: DeleteDirectoryBehavior::NonRecursive,
@@ -3049,7 +3045,7 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
                 },
             ),
             // Alias of the materialization-decided rejection.
-            NamespaceMutationCandidate::Path(PathMutationIntent::DeletePath {
+            NamespaceMutationCandidate::path(PathMutationIntent::DeletePath {
                 commit_id: CommitId::parse("reject-materialization").expect("valid commit id"),
                 absolute_path: AbsolutePath::parse("/missing.txt").expect("path"),
                 behavior: DeleteDirectoryBehavior::NonRecursive,
@@ -3117,7 +3113,7 @@ async fn stale_head_cas_fails_rejections_decided_against_in_batch_state() {
 
     let batch = || {
         vec![
-            NamespaceMutationCandidate::Path(PathMutationIntent::DeletePath {
+            NamespaceMutationCandidate::path(PathMutationIntent::DeletePath {
                 commit_id: CommitId::parse("reject-materialization").expect("valid commit id"),
                 absolute_path: AbsolutePath::parse("/missing.txt").expect("path"),
                 behavior: DeleteDirectoryBehavior::NonRecursive,
@@ -3641,7 +3637,7 @@ async fn path_intents_in_one_batch_see_tentative_state() {
                     behavior: DestinationBehavior::NoReplace,
                 },
             ),
-            NamespaceMutationCandidate::Path(PathMutationIntent::MovePath {
+            NamespaceMutationCandidate::path(PathMutationIntent::MovePath {
                 commit_id: CommitId::parse("move-batched-path").expect("valid commit id"),
                 from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
                 to_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
@@ -4647,7 +4643,7 @@ async fn idempotent_path_retry_returns_receipt_before_content_validation() {
     let retry = publish_namespace_mutations_batch(
         &store,
         &namespace_id(),
-        vec![NamespaceMutationCandidate::Path(
+        vec![NamespaceMutationCandidate::path(
             PathMutationIntent::PutFile {
                 commit_id,
                 absolute_path: AbsolutePath::parse("/docs/idempotent.txt").expect("path"),

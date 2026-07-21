@@ -3,7 +3,11 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
-use loonfs::publish::{parse_mutation_path, ContentAdmission, PathMutationIntent};
+use loonfs::content_tokens::ContentTokenError;
+use loonfs::publish::{
+    parse_mutation_path, ContentPreparationError, NamespaceMutation, NamespaceMutationCandidate,
+    PathMutationIntent, PreparedContent,
+};
 use loonfs::{
     CommitId, CommitOp, CommitRequest, CoreError, CreateDirectoryOptions, CreateNamespaceOptions,
     DestinationBehavior, ErrorCode, FsWriter, InodeId, NamespaceId, PutFileOptions, RevisionNo,
@@ -419,11 +423,11 @@ async fn build_initialized_writer(
 }
 
 /// Full external preparation performs one content HEAD and one full GET.
-async fn prepare_admission(
+async fn prepare_content(
     store: &SharedObjectStore,
     namespace_id: &NamespaceId,
     content_ref: &loonfs::ContentRef,
-) -> ContentAdmission {
+) -> PreparedContent {
     let catalog = loonfs_core::control::load_namespace_catalog_entry(store, namespace_id)
         .await
         .expect("load namespace catalog");
@@ -435,7 +439,6 @@ async fn prepare_admission(
     )
     .await
     .expect("prepare existing content")
-    .into_admission()
 }
 
 fn put_intent(commit_id: &str, path: &str, content_ref: loonfs::ContentRef) -> PathMutationIntent {
@@ -466,9 +469,9 @@ fn assert_content_not_prepared(error: CoreError, content_ref: &loonfs::ContentRe
     assert!(
         matches!(
             error,
-            CoreError::ContentNotPrepared {
+            CoreError::ContentPreparation(ContentPreparationError::ContentNotPrepared {
                 ref content_ref_digest
-            } if content_ref_digest == &content_ref.digest
+            }) if content_ref_digest == &content_ref.digest
         ),
         "content-not-prepared error should carry the rejected digest"
     );
@@ -681,14 +684,14 @@ async fn commit_id_replay_performs_no_content_operations() {
     let harness = TestHarness::new("receipt-replay").await;
     let content_ref = harness.stage_content(b"replayed content").await;
     let intent = put_intent("replayed-put", "/file.txt", content_ref.clone());
-    let admission = prepare_admission(&harness.store, &harness.namespace_id, &content_ref).await;
+    let prepared = prepare_content(&harness.store, &harness.namespace_id, &content_ref).await;
     let original = harness
         .writer
         .publisher()
-        .submit_path_intent_with_content_admission(
+        .submit_path_intent_with_prepared_content(
             harness.namespace_id.clone(),
             intent.clone(),
-            vec![admission],
+            vec![prepared],
         )
         .await
         .expect("publish original put");
@@ -702,6 +705,83 @@ async fn commit_id_replay_performs_no_content_operations() {
         .expect("replay put");
 
     assert_eq!(replay, original);
+    assert_content_counts(harness.recording.snapshot(), 0, 0, 0, 0);
+}
+
+#[tokio::test]
+async fn rejected_preparation_replays_durable_receipt_without_content_operations() {
+    let harness = TestHarness::new("rejected-receipt-replay").await;
+    let content_ref = harness.stage_content(b"replayed rejected content").await;
+    let intent = put_intent("rejected-replayed-put", "/file.txt", content_ref.clone());
+    let prepared = prepare_content(&harness.store, &harness.namespace_id, &content_ref).await;
+    let original = harness
+        .writer
+        .publisher()
+        .submit_path_intent_with_prepared_content(
+            harness.namespace_id.clone(),
+            intent.clone(),
+            vec![prepared],
+        )
+        .await
+        .expect("publish original put");
+    harness.recording.reset();
+
+    let replay = harness
+        .writer
+        .publish_namespace_mutations_batch(
+            &harness.namespace_id,
+            vec![NamespaceMutationCandidate::rejected(
+                NamespaceMutation::Path(intent),
+                ContentPreparationError::ContentToken(ContentTokenError::Expired),
+            )],
+        )
+        .await
+        .pop()
+        .expect("one replay result")
+        .expect("rejected preparation must replay the durable receipt");
+
+    assert_eq!(replay, original);
+    assert_content_counts(harness.recording.snapshot(), 0, 0, 0, 0);
+}
+
+#[tokio::test]
+async fn new_rejected_preparation_fails_before_path_planning_without_content_operations() {
+    let harness = TestHarness::new("new-rejected-preparation").await;
+    harness.recording.reset();
+    let intent = PathMutationIntent::CreateDir {
+        commit_id: CommitId::parse("new-rejected").expect("valid commit id"),
+        absolute_path: parse_mutation_path("/missing/child").expect("valid mutation path"),
+        parents: false,
+    };
+
+    let error = harness
+        .writer
+        .publish_namespace_mutations_batch(
+            &harness.namespace_id,
+            vec![NamespaceMutationCandidate::rejected(
+                NamespaceMutation::Path(intent),
+                ContentPreparationError::ContentToken(ContentTokenError::Expired),
+            )],
+        )
+        .await
+        .pop()
+        .expect("one rejected result")
+        .expect_err("new rejected preparation must fail");
+    assert!(
+        matches!(error, loonfs::Error::Core(_)),
+        "expected core content-preparation error"
+    );
+    let loonfs::Error::Core(error) = error else {
+        return;
+    };
+
+    assert_eq!(error.code(), ErrorCode::ContentNotPrepared);
+    assert!(matches!(
+        error,
+        CoreError::ContentPreparation(ContentPreparationError::ContentToken(
+            ContentTokenError::Expired
+        ))
+    ));
     assert_content_counts(harness.recording.snapshot(), 0, 0, 0, 0);
 }
 
@@ -725,7 +805,7 @@ async fn in_flight_duplicate_performs_no_additional_content_operations() {
     let intent = put_intent("in-flight-put", "/file.txt", content_ref.clone());
     // Full preparation deliberately costs one content HEAD and one GET; do it
     // before the reset so this phase isolates publication and duplicate join.
-    let admission = prepare_admission(&store, &namespace_id, &content_ref).await;
+    let prepared = prepare_content(&store, &namespace_id, &content_ref).await;
     recording.reset();
 
     blocking.arm_next_head_cas();
@@ -733,10 +813,10 @@ async fn in_flight_duplicate_performs_no_additional_content_operations() {
         let registry = writer.publisher();
         let namespace_id = namespace_id.clone();
         let intent = intent.clone();
-        let admission = admission.clone();
+        let prepared = prepared.clone();
         tokio::spawn(async move {
             registry
-                .submit_path_intent_with_content_admission(namespace_id, intent, vec![admission])
+                .submit_path_intent_with_prepared_content(namespace_id, intent, vec![prepared])
                 .await
         })
     };
@@ -745,10 +825,10 @@ async fn in_flight_duplicate_performs_no_additional_content_operations() {
     assert_content_counts(primary_counts, 0, 0, 0, 0);
 
     let registry = writer.publisher();
-    let mut duplicate = Box::pin(registry.submit_path_intent_with_content_admission(
+    let mut duplicate = Box::pin(registry.submit_path_intent_with_prepared_content(
         namespace_id.clone(),
         intent,
-        vec![admission],
+        vec![prepared],
     ));
     assert!(
         futures::poll!(duplicate.as_mut()).is_pending(),
@@ -792,13 +872,13 @@ async fn stale_head_retry_preserves_content_admission() {
     let intent = put_intent("retry-put", "/file.txt", content_ref.clone());
     // Full preparation deliberately costs one content HEAD and one GET; do it
     // before the reset so this phase isolates publication retries.
-    let admission = prepare_admission(&store, &namespace_id, &content_ref).await;
+    let prepared = prepare_content(&store, &namespace_id, &content_ref).await;
     recording.reset();
     conflicting.fail_next_head_cas();
 
     writer
         .publisher()
-        .submit_path_intent_with_content_admission(namespace_id, intent, vec![admission])
+        .submit_path_intent_with_prepared_content(namespace_id, intent, vec![prepared])
         .await
         .expect("publish after stale-head retry");
 
@@ -826,7 +906,7 @@ async fn mixed_batch_publishes_admitted_put_and_rejects_unprepared_put_without_c
             .content_ref;
     // Full preparation deliberately costs one content HEAD and one GET; do it
     // before the reset so this phase isolates mixed-batch publication.
-    let admission = prepare_admission(&store, &namespace_id, &content_ref).await;
+    let prepared = prepare_content(&store, &namespace_id, &content_ref).await;
     recording.reset();
 
     blocking.arm_next_head_cas();
@@ -849,10 +929,10 @@ async fn mixed_batch_publishes_admitted_put_and_rejects_unprepared_put_without_c
     blocking.wait_for_blocked_head_cas().await;
 
     let registry = writer.publisher();
-    let mut admitted = Box::pin(registry.submit_path_intent_with_content_admission(
+    let mut admitted = Box::pin(registry.submit_path_intent_with_prepared_content(
         namespace_id.clone(),
         put_intent("mixed-admitted", "/admitted.txt", content_ref.clone()),
-        vec![admission],
+        vec![prepared],
     ));
     assert!(
         futures::poll!(admitted.as_mut()).is_pending(),

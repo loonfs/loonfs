@@ -1,9 +1,10 @@
 //! Producer-only content preparation proofs and short-lived wire tokens.
 //!
 //! A serving session verifies token expiry once when turning a signed wire
-//! token into an in-process [`ContentAdmission`]. Admissions then remain valid
-//! for the process lifetime: they record accepted authoritative evidence that
-//! the identified content is durable, rather than carrying another clock.
+//! token into an opaque [`PreparedContent`]. Its internal admission then
+//! remains valid for the process lifetime: it records accepted authoritative
+//! evidence that the identified content is durable, rather than carrying
+//! another clock.
 
 use base64::Engine as _;
 use loonfs_api::v0::ValidatedContentToken;
@@ -57,8 +58,7 @@ impl PreparedContent {
         &self.content_ref
     }
 
-    /// Consumes the proof and returns its publisher admission.
-    pub fn into_admission(self) -> ContentAdmission {
+    pub(crate) fn into_admission(self) -> ContentAdmission {
         self.admission
     }
 }
@@ -116,7 +116,7 @@ pub fn verify_content_token(
     namespace_id: &NamespaceId,
     token: &ValidatedContentToken,
     now_ms: u64,
-) -> Result<ContentAdmission, ContentTokenError> {
+) -> Result<PreparedContent, ContentTokenError> {
     let (payload_part, signature_part) = token
         .token
         .split_once('.')
@@ -147,10 +147,10 @@ pub fn verify_content_token(
         return Err(ContentTokenError::Expired);
     }
 
-    Ok(ContentAdmission::for_durable_content_write(
-        payload.namespace_id,
-        payload.content_ref,
-    ))
+    let content_ref = payload.content_ref;
+    let admission =
+        ContentAdmission::for_durable_content_write(payload.namespace_id, content_ref.clone());
+    Ok(PreparedContent::from_admission(content_ref, admission))
 }
 
 fn base64_url(bytes: &[u8]) -> String {
@@ -208,10 +208,11 @@ mod tests {
             token,
         };
 
-        let admission =
+        let prepared =
             verify_content_token("secret", &namespace, &token, 1_000).expect("verify token");
 
-        assert!(admission.admits(&namespace, &content));
+        assert_eq!(prepared.content_ref(), &content);
+        assert!(prepared.into_admission().admits(&namespace, &content));
     }
 
     #[test]
@@ -224,7 +225,7 @@ mod tests {
             content_ref: content.clone(),
             token,
         };
-        let admission = verify_content_token(
+        let prepared = verify_content_token(
             "secret",
             &namespace,
             &token,
@@ -232,9 +233,9 @@ mod tests {
         )
         .expect("verify token before expiry");
 
-        // The admission carries no clock: expiry was the token's concern,
-        // checked exactly once by the verification above.
-        assert!(admission.admits(&namespace, &content));
+        // The prepared proof carries no clock: expiry was the token's
+        // concern, checked exactly once by the verification above.
+        assert!(prepared.into_admission().admits(&namespace, &content));
     }
 
     #[test]

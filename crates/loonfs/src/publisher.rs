@@ -48,7 +48,7 @@
 //! drains without closing, so the handle stays usable.
 
 use crate::fs::{FsCore, FsInner};
-use crate::publish::{ContentAdmission, NamespaceMutationCandidate, PathMutationIntent};
+use crate::publish::{NamespaceMutationCandidate, PathMutationIntent, PreparedContent};
 use crate::{CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, RuntimeError};
 use loonfs_api::v0::{CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse};
 use loonfs_api::{CommitId, NamespaceId};
@@ -160,7 +160,7 @@ impl PublisherRegistry {
         namespace_id: NamespaceId,
         request: ApiCommitRequest,
     ) -> CommitResult {
-        self.submit_candidate(namespace_id, NamespaceMutationCandidate::Commit(request))
+        self.submit_candidate(namespace_id, NamespaceMutationCandidate::commit(request))
             .await
     }
 
@@ -171,21 +171,21 @@ impl PublisherRegistry {
         namespace_id: NamespaceId,
         intent: PathMutationIntent,
     ) -> CommitResult {
-        self.submit_candidate(namespace_id, NamespaceMutationCandidate::Path(intent))
+        self.submit_candidate(namespace_id, NamespaceMutationCandidate::path(intent))
             .await
     }
 
-    /// Submits a path-level mutation intent together with the content
-    /// admissions vouching for its already-validated direct-put content.
-    pub async fn submit_path_intent_with_content_admission(
+    /// Submits a path-level mutation intent together with opaque proofs for
+    /// its already-prepared content.
+    pub async fn submit_path_intent_with_prepared_content(
         &self,
         namespace_id: NamespaceId,
         intent: PathMutationIntent,
-        admissions: Vec<ContentAdmission>,
+        content: Vec<PreparedContent>,
     ) -> CommitResult {
         self.submit_candidate(
             namespace_id,
-            NamespaceMutationCandidate::PathWithContentAdmission { intent, admissions },
+            NamespaceMutationCandidate::path_prepared(intent, content),
         )
         .await
     }
@@ -408,9 +408,9 @@ impl NamespacePublisher {
     /// task.
     async fn submit(&self, candidate: NamespaceMutationCandidate) -> CommitResult {
         let commit_id = candidate.commit_id().clone();
-        let operation_class = operation_class(&candidate);
         let enqueued_at = Instant::now();
         let semantic_identity = candidate.semantic_identity(&self.namespace_id)?;
+        let operation_class = operation_class(&semantic_identity);
         let (sender, receiver) = oneshot::channel();
         self.admit(
             commit_id,
@@ -1012,11 +1012,10 @@ fn runtime_error_to_core(error: RuntimeError) -> CoreError {
     }
 }
 
-fn operation_class(candidate: &NamespaceMutationCandidate) -> &'static str {
-    match candidate {
-        NamespaceMutationCandidate::Commit(_) => "explicit_commit",
-        NamespaceMutationCandidate::Path(_)
-        | NamespaceMutationCandidate::PathWithContentAdmission { .. } => "path_mutation",
+fn operation_class(semantic_identity: &SemanticMutationIdentity) -> &'static str {
+    match semantic_identity {
+        SemanticMutationIdentity::CoreCommit(_) => "explicit_commit",
+        SemanticMutationIdentity::PathIntent(_) => "path_mutation",
     }
 }
 
@@ -1067,6 +1066,8 @@ mod tests {
     use super::*;
     use crate::background::{BackgroundWork, FsBackgroundWork};
     use crate::config::FsConfig;
+    use crate::content_tokens::ContentTokenError;
+    use crate::publish::{ContentPreparationError, NamespaceMutation};
     use crate::{
         BeginUploadRequest, CreateNamespaceOptions, ErrorCode, RuntimeCacheConfig,
         SharedObjectStore as SharedStore, TraceMode, TraceStoreKind,
@@ -1524,10 +1525,18 @@ mod tests {
         namespace_id: &NamespaceId,
         request: CommitRequest,
     ) -> Result<oneshot::Receiver<CommitResult>, CoreError> {
-        let commit_id = request.commit_id.clone();
-        let candidate = NamespaceMutationCandidate::Commit(request);
-        let operation_class = operation_class(&candidate);
+        let candidate = NamespaceMutationCandidate::commit(request);
+        try_admit_candidate(publisher, namespace_id, candidate)
+    }
+
+    fn try_admit_candidate(
+        publisher: &NamespacePublisher,
+        namespace_id: &NamespaceId,
+        candidate: NamespaceMutationCandidate,
+    ) -> Result<oneshot::Receiver<CommitResult>, CoreError> {
+        let commit_id = candidate.commit_id().clone();
         let semantic_identity = candidate.semantic_identity(namespace_id)?;
+        let operation_class = operation_class(&semantic_identity);
         let (sender, receiver) = oneshot::channel();
         publisher.admit(
             commit_id,
@@ -1552,18 +1561,25 @@ mod tests {
 
     #[test]
     fn publisher_trace_labels_are_low_cardinality() {
-        let commit = NamespaceMutationCandidate::Commit(create_directory_request(
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let commit = NamespaceMutationCandidate::commit(create_directory_request(
             "commit-trace",
             "private-name",
         ));
-        let path = NamespaceMutationCandidate::Path(PathMutationIntent::CreateDir {
+        let path = NamespaceMutationCandidate::path(PathMutationIntent::CreateDir {
             commit_id: CommitId::parse("path-trace").expect("valid commit id"),
             absolute_path: AbsolutePath::parse("/private/path").expect("path"),
             parents: false,
         });
 
-        assert_eq!(operation_class(&commit), "explicit_commit");
-        assert_eq!(operation_class(&path), "path_mutation");
+        assert_eq!(
+            operation_class(&commit.semantic_identity(&namespace_id).expect("identity")),
+            "explicit_commit"
+        );
+        assert_eq!(
+            operation_class(&path.semantic_identity(&namespace_id).expect("identity")),
+            "path_mutation"
+        );
         assert_eq!(result_label(&Ok::<_, CoreError>(())), "ok");
         assert_eq!(
             result_label(&Err::<(), _>(CoreError::Internal(
@@ -1572,6 +1588,85 @@ mod tests {
             "error"
         );
         assert_eq!(usize_to_u64(7), 7);
+    }
+
+    #[tokio::test]
+    async fn rejected_duplicate_joins_ready_in_flight_primary() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let writer = test_writer(store).await;
+        create_namespace(writer.core(), &namespace_id).await;
+        let registry = writer.publisher();
+        let publisher = registry.publisher_for(&namespace_id).expect("publisher");
+        let intent = PathMutationIntent::CreateDir {
+            commit_id: CommitId::parse("ready-primary").expect("valid commit id"),
+            absolute_path: AbsolutePath::parse("/ready-primary").expect("path"),
+            parents: false,
+        };
+
+        let primary = try_admit_candidate(
+            &publisher,
+            &namespace_id,
+            NamespaceMutationCandidate::path(intent.clone()),
+        )
+        .expect("admit ready primary");
+        let duplicate = try_admit_candidate(
+            &publisher,
+            &namespace_id,
+            NamespaceMutationCandidate::rejected(
+                NamespaceMutation::Path(intent),
+                ContentPreparationError::ContentToken(ContentTokenError::Expired),
+            ),
+        )
+        .expect("join rejected duplicate");
+
+        let primary = primary.await.expect("primary result channel");
+        let duplicate = duplicate.await.expect("duplicate result channel");
+        assert_eq!(
+            duplicate.as_ref().expect("duplicate success"),
+            primary.as_ref().expect("primary success")
+        );
+    }
+
+    #[tokio::test]
+    async fn ready_duplicate_joins_rejected_in_flight_primary() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let writer = test_writer(store).await;
+        create_namespace(writer.core(), &namespace_id).await;
+        let registry = writer.publisher();
+        let publisher = registry.publisher_for(&namespace_id).expect("publisher");
+        let intent = PathMutationIntent::CreateDir {
+            commit_id: CommitId::parse("rejected-primary").expect("valid commit id"),
+            absolute_path: AbsolutePath::parse("/rejected-primary").expect("path"),
+            parents: false,
+        };
+
+        let primary = try_admit_candidate(
+            &publisher,
+            &namespace_id,
+            NamespaceMutationCandidate::rejected(
+                NamespaceMutation::Path(intent.clone()),
+                ContentPreparationError::ContentToken(ContentTokenError::Expired),
+            ),
+        )
+        .expect("admit rejected primary");
+        let duplicate = try_admit_candidate(
+            &publisher,
+            &namespace_id,
+            NamespaceMutationCandidate::path(intent),
+        )
+        .expect("join ready duplicate");
+
+        let primary = primary.await.expect("primary result channel");
+        let duplicate = duplicate.await.expect("duplicate result channel");
+        let primary_error = primary.expect_err("primary preparation error");
+        let duplicate_error = duplicate.expect_err("duplicate inherits preparation error");
+        assert_eq!(primary_error.code(), ErrorCode::ContentNotPrepared);
+        assert_eq!(duplicate_error.code(), primary_error.code());
+        assert_eq!(duplicate_error.to_string(), primary_error.to_string());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2116,14 +2211,12 @@ mod tests {
             content_ref: prepared_content.content_ref().clone(),
             behavior: DestinationBehavior::NoReplace,
         };
-        let content_admission = prepared_content.into_admission();
-
         let (explicit_response, path_response) = tokio::join!(
             registry.submit_commit(namespace_id.clone(), explicit),
-            registry.submit_path_intent_with_content_admission(
+            registry.submit_path_intent_with_prepared_content(
                 namespace_id.clone(),
                 path_intent,
-                vec![content_admission]
+                vec![prepared_content]
             )
         );
         assert_eq!(

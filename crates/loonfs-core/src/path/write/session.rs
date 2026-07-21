@@ -79,7 +79,7 @@ mod tests {
     use crate::namespace::bootstrap::bootstrap_namespace;
     use crate::protocol::{load_publish_metadata_view, PublishTailOptions};
     use crate::storage::content::store_bytes_as_content;
-    use crate::storage::content_admission::ContentAdmission;
+    use crate::storage::content_admission::{ContentAdmission, PreparedContent};
     use loonfs_api::{CommitId, DeleteDirectoryBehavior, DestinationBehavior};
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use tempfile::tempdir;
@@ -114,18 +114,19 @@ mod tests {
         absolute_path: &str,
         content_ref: loonfs_api::ContentRef,
     ) -> NamespaceMutationCandidate {
-        NamespaceMutationCandidate::PathWithContentAdmission {
-            intent: PathMutationIntent::PutFile {
+        let admission = ContentAdmission::for_durable_content_write(
+            NamespaceId::parse("demo").expect("valid namespace id"),
+            content_ref.clone(),
+        );
+        NamespaceMutationCandidate::path_prepared(
+            PathMutationIntent::PutFile {
                 commit_id: CommitId::parse(commit_id).expect("valid commit id"),
                 absolute_path: AbsolutePath::parse(absolute_path).expect("path"),
                 content_ref: content_ref.clone(),
                 behavior: DestinationBehavior::NoReplace,
             },
-            admissions: vec![ContentAdmission::for_durable_content_write(
-                NamespaceId::parse("demo").expect("valid namespace id"),
-                content_ref,
-            )],
-        }
+            vec![PreparedContent::from_admission(content_ref, admission)],
+        )
     }
 
     /// Two plans through one session share the durable-layer memo: the
@@ -278,7 +279,7 @@ mod tests {
                     "/docs/doomed.txt",
                     staged.content_ref.clone(),
                 ),
-                NamespaceMutationCandidate::Path(PathMutationIntent::DeletePath {
+                NamespaceMutationCandidate::path(PathMutationIntent::DeletePath {
                     commit_id: CommitId::parse("delete-doomed").expect("valid commit id"),
                     absolute_path: AbsolutePath::parse("/docs/doomed.txt").expect("path"),
                     behavior: DeleteDirectoryBehavior::NonRecursive,

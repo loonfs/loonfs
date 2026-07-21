@@ -7,7 +7,9 @@ use crate::commit::{
     commit_request_from_v0, core_commit_fingerprint, CommitExecutionContext, CommitIdentitySource,
     CommitOp, CommitRequest as CoreCommitRequest, SemanticMutationIdentity,
 };
-use crate::commit_engine::NamespaceMutationCandidate;
+use crate::commit_engine::{
+    ContentPreparation, ContentPreparationError, NamespaceMutation, NamespaceMutationCandidate,
+};
 use crate::error::{CoreError, Result};
 use crate::metadata::CommitReceiptRecord;
 use crate::path::write::{path_intent_fingerprint_for_path_intent, PublishPlanningSession};
@@ -138,8 +140,8 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
         writer_session_id: acquired_writer.writer_session_id.clone(),
         writer_epoch: acquired_writer.writer_epoch,
     };
-    match candidate {
-        NamespaceMutationCandidate::Commit(request) => {
+    match candidate.mutation() {
+        NamespaceMutation::Commit(request) => {
             validate_commit_id(&request.commit_id)?;
             let request = commit_request_from_v0(conversion_context, request.clone())
                 .map_err(CoreError::from)?;
@@ -159,13 +161,13 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
             {
                 return Ok(admission);
             }
+            reject_failed_content_preparation(candidate)?;
             Ok(CandidateAdmission::Prepared(CandidateCoreRequest {
                 request,
                 identity_source: CommitIdentitySource::CoreCommitRequest,
             }))
         }
-        NamespaceMutationCandidate::Path(intent)
-        | NamespaceMutationCandidate::PathWithContentAdmission { intent, .. } => {
+        NamespaceMutation::Path(intent) => {
             validate_commit_id(intent.commit_id())?;
             let path_intent_fingerprint =
                 path_intent_fingerprint_for_path_intent(namespace_id, intent)?;
@@ -183,6 +185,7 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
             {
                 return Ok(admission);
             }
+            reject_failed_content_preparation(candidate)?;
             let planned = session
                 .plan_path_mutation(namespace_id, intent, view.metadata_view())
                 .await?;
@@ -193,6 +196,13 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
                 identity_source: CommitIdentitySource::PathIntent(planned.path_intent_fingerprint),
             }))
         }
+    }
+}
+
+fn reject_failed_content_preparation(candidate: &NamespaceMutationCandidate) -> Result<()> {
+    match candidate.content_preparation() {
+        ContentPreparation::Ready(_) => Ok(()),
+        ContentPreparation::Rejected(error) => Err(error.clone().into()),
     }
 }
 
@@ -262,8 +272,8 @@ pub(super) async fn validate_commit_content_references<S: ObjectStore + ?Sized>(
     candidate: &NamespaceMutationCandidate,
     content_validation: &mut ContentValidationTracker,
 ) -> Result<()> {
-    match candidate {
-        NamespaceMutationCandidate::Commit(_) => {
+    match candidate.mutation() {
+        NamespaceMutation::Commit(_) => {
             for op in &request.ops {
                 let content_ref = match op {
                     CommitOp::CreateFile { content_ref, .. }
@@ -277,29 +287,29 @@ pub(super) async fn validate_commit_content_references<S: ObjectStore + ?Sized>(
                     .await?;
             }
         }
-        NamespaceMutationCandidate::Path(intent)
-        | NamespaceMutationCandidate::PathWithContentAdmission { intent, .. } => {
+        NamespaceMutation::Path(intent) => {
             let crate::path::write::PathMutationIntent::PutFile { content_ref, .. } = intent else {
                 return Ok(());
             };
             let admissions = CommitContentAdmissions {
                 namespace_id: &request.namespace_id,
-                admissions: candidate_content_admissions(candidate),
+                admissions: match candidate.content_preparation() {
+                    ContentPreparation::Ready(admissions) => admissions,
+                    ContentPreparation::Rejected(_) => {
+                        return Err(CoreError::Internal(
+                            "rejected content preparation reached coverage validation".to_owned(),
+                        ));
+                    }
+                },
             };
             if !admissions.admits(content_ref) {
-                return Err(CoreError::ContentNotPrepared {
+                return Err(ContentPreparationError::ContentNotPrepared {
                     content_ref_digest: content_ref.digest.clone(),
-                });
+                }
+                .into());
             }
         }
     }
 
     Ok(())
-}
-
-fn candidate_content_admissions(candidate: &NamespaceMutationCandidate) -> &[ContentAdmission] {
-    match candidate {
-        NamespaceMutationCandidate::PathWithContentAdmission { admissions, .. } => admissions,
-        NamespaceMutationCandidate::Commit(_) | NamespaceMutationCandidate::Path(_) => &[],
-    }
 }
