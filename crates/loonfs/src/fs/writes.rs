@@ -1,7 +1,7 @@
 //! Path mutations, commits, and the publication pipeline.
 
 use super::core::{BackgroundTickClaim, FsCore};
-use crate::publish::{NamespaceMutationCandidate, PathMutationIntent};
+use crate::publish::{NamespaceMutationCandidate, PathMutationIntent, PreparedContent};
 use crate::{
     ChangeSeq, CommitId, CommitOp, CommitPrecondition, CommitRequest, CommitResponse, ContentRef,
     CopyOptions, CoreError, CreateDirectoryOptions, DeleteOptions, InodeId, MaintenanceTickOptions,
@@ -37,15 +37,36 @@ impl FsCore {
         let span = tracing::Span::current();
         self.record_trace_context(&span);
         span.record("payload_class", crate::trace::payload_class(bytes.len()));
-        // Parse the mutation path before staging content so an invalid or
-        // root path cannot orphan an already-written content blob; the
-        // intent carries the parsed path from here on.
-        let absolute_path = loonfs_core::path::parse_mutation_path(absolute_path)?;
-        // The bytes become durable content before the publish is submitted,
-        // so the publication queue never waits on a content upload and an
-        // upload failure surfaces here with nothing published. A publish
-        // that fails afterward leaves only a GC-covered orphan behind an
-        // unmoved head.
+        let prepared_content = self.prepare_file_bytes(namespace_id, bytes).await?;
+        self.put_file_prepared(namespace_id, absolute_path, prepared_content, options)
+            .await
+    }
+
+    /// Stages file bytes as durable content for later publication.
+    ///
+    /// Preparation performs one content PUT and no content reads. A publish
+    /// that fails afterward leaves only a GC-covered orphan behind an
+    /// unmoved head.
+    #[tracing::instrument(
+        level = "info",
+        name = "loon.prepare",
+        err,
+        skip_all,
+        fields(
+            operation = "prepare",
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+            payload_class = tracing::field::Empty,
+        )
+    )]
+    pub(crate) async fn prepare_file_bytes(
+        &self,
+        namespace_id: &NamespaceId,
+        bytes: &[u8],
+    ) -> Result<PreparedContent> {
+        let span = tracing::Span::current();
+        self.record_trace_context(&span);
+        span.record("payload_class", crate::trace::payload_class(bytes.len()));
         let cached_content_store_id = self
             .load_namespace_catalog_cached(namespace_id)
             .await?
@@ -64,17 +85,50 @@ impl FsCore {
                     .await?
             }
         };
-        // The acknowledged write is the authority for the prepared proof, so
-        // batch validation does not re-probe the blob this handle just stored.
-        let prepared_content =
-            loonfs_core::content::prepare_stored_content(namespace_id.clone(), stored);
+        Ok(loonfs_core::content::prepare_stored_content(
+            namespace_id.clone(),
+            stored,
+        ))
+    }
+
+    /// Publishes a file revision from already-prepared content.
+    ///
+    /// Submission and publication perform no content I/O. `options.behavior`
+    /// selects create-only or replace semantics.
+    #[tracing::instrument(
+        level = "info",
+        name = "loon.put",
+        err,
+        skip_all,
+        fields(
+            operation = "put",
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+            payload_class = tracing::field::Empty,
+        )
+    )]
+    pub(crate) async fn put_file_prepared(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        prepared_content: PreparedContent,
+        options: PutFileOptions,
+    ) -> Result<CommitResponse> {
+        let span = tracing::Span::current();
+        self.record_trace_context(&span);
+        span.record(
+            "payload_class",
+            crate::trace::payload_class(
+                usize::try_from(prepared_content.content_ref().size_bytes).unwrap_or(usize::MAX),
+            ),
+        );
         let content_ref = prepared_content.content_ref().clone();
         self.publish_candidate(
             namespace_id,
             NamespaceMutationCandidate::path_prepared(
                 PathMutationIntent::PutFile {
                     commit_id: options.commit_id.unwrap_or_else(CommitId::generate),
-                    absolute_path,
+                    absolute_path: loonfs_core::path::parse_mutation_path(absolute_path)?,
                     content_ref,
                     behavior: options.behavior,
                 },
@@ -87,8 +141,8 @@ impl FsCore {
     /// Publishes a file revision that points at an already-durable content ref.
     ///
     /// This explicitly slow helper reads the full object to prove durability
-    /// before publication. Callers that already hold proof should prefer the
-    /// admitted path.
+    /// before publication. Callers that already hold proof should prefer
+    /// [`Self::put_file_prepared`].
     #[tracing::instrument(
         level = "info",
         name = "loon.put",
@@ -116,7 +170,41 @@ impl FsCore {
                 usize::try_from(content_ref.size_bytes).unwrap_or(usize::MAX),
             ),
         );
-        let absolute_path = loonfs_core::path::parse_mutation_path(absolute_path)?;
+        let prepared_content = self.prepare_content_ref(namespace_id, content_ref).await?;
+        self.put_file_prepared(namespace_id, absolute_path, prepared_content, options)
+            .await
+    }
+
+    /// Fully validates an existing content ref for later publication.
+    ///
+    /// Preparation performs one content HEAD followed by one full content
+    /// GET and digest check. Later prepared publication performs no content
+    /// I/O.
+    #[tracing::instrument(
+        level = "info",
+        name = "loon.prepare",
+        err,
+        skip_all,
+        fields(
+            operation = "prepare",
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+            payload_class = tracing::field::Empty,
+        )
+    )]
+    pub(crate) async fn prepare_content_ref(
+        &self,
+        namespace_id: &NamespaceId,
+        content_ref: ContentRef,
+    ) -> Result<PreparedContent> {
+        let span = tracing::Span::current();
+        self.record_trace_context(&span);
+        span.record(
+            "payload_class",
+            crate::trace::payload_class(
+                usize::try_from(content_ref.size_bytes).unwrap_or(usize::MAX),
+            ),
+        );
         let content_store_id = match self.load_namespace_catalog_cached(namespace_id).await? {
             Some(catalog) => catalog.content_store_id().clone(),
             None => {
@@ -127,28 +215,14 @@ impl FsCore {
                     .clone()
             }
         };
-        let prepared_content = loonfs_core::content::prepare_existing_content_ref(
+        Ok(loonfs_core::content::prepare_existing_content_ref(
             &self.inner.store,
             namespace_id,
             &content_store_id,
             content_ref,
         )
         .await
-        .map_err(CoreError::from)?;
-        let content_ref = prepared_content.content_ref().clone();
-        self.publish_candidate(
-            namespace_id,
-            NamespaceMutationCandidate::path_prepared(
-                PathMutationIntent::PutFile {
-                    commit_id: options.commit_id.unwrap_or_else(CommitId::generate),
-                    absolute_path,
-                    content_ref,
-                    behavior: options.behavior,
-                },
-                vec![prepared_content],
-            ),
-        )
-        .await
+        .map_err(CoreError::from)?)
     }
 
     /// Creates a directory at an absolute path.
@@ -308,7 +382,8 @@ impl FsCore {
     /// Submits one explicit semantic commit request.
     ///
     /// This is the lower-level surface for clients that need their own commit
-    /// ids, preconditions, and operation lists.
+    /// ids, preconditions, and operation lists. Operations with external
+    /// content refs require [`Self::commit_operations_prepared`].
     pub(crate) async fn commit_operations(
         &self,
         namespace_id: &NamespaceId,
@@ -316,6 +391,23 @@ impl FsCore {
     ) -> Result<CommitResponse> {
         self.publish_candidate(namespace_id, NamespaceMutationCandidate::commit(request))
             .await
+    }
+
+    /// Submits one semantic commit request with prepared content proofs.
+    ///
+    /// Submission and publication perform no content I/O. One prepared value
+    /// covers every operation that uses its content ref.
+    pub(crate) async fn commit_operations_prepared(
+        &self,
+        namespace_id: &NamespaceId,
+        request: CommitRequest,
+        prepared_content: Vec<PreparedContent>,
+    ) -> Result<CommitResponse> {
+        self.publish_candidate(
+            namespace_id,
+            NamespaceMutationCandidate::commit_prepared(request, prepared_content),
+        )
+        .await
     }
 
     /// Submits explicit semantic commit requests, returning one result per

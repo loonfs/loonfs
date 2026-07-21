@@ -9,6 +9,7 @@ use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::namespace::{bootstrap, delete, fork, BootstrapNamespaceError};
 use crate::options::{BootstrapOptions, DeleteNamespaceOptions};
 use crate::path::read::{load_metadata_view, LoadedMetadataView, ReadLoadContext};
+use crate::storage::content_admission::PreparedContent;
 use loonfs_api::generated_id;
 use loonfs_api::v0::{
     BeginUploadRequest, BeginUploadResponse, ChangesResponse, CommitResponse,
@@ -447,6 +448,19 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         upload_id: &UploadId,
         request: &CompleteUploadRequest,
     ) -> CoreResult<CompleteUploadResponse> {
+        let (response, _) = self.complete_upload_prepared(upload_id, request).await?;
+        Ok(response)
+    }
+
+    /// Completes an upload session and returns proof for later publication.
+    ///
+    /// Service-proxied completion performs no content-blob I/O. Direct-put
+    /// completion performs one content-blob HEAD and no content-blob GET.
+    pub async fn complete_upload_prepared(
+        &self,
+        upload_id: &UploadId,
+        request: &CompleteUploadRequest,
+    ) -> CoreResult<(CompleteUploadResponse, PreparedContent)> {
         crate::protocol::complete_upload(
             &self.store,
             &self.namespace_id,

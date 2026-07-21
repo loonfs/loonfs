@@ -293,6 +293,15 @@ This split is deliberate:
 A commit request may therefore be rejected immediately, or tentatively
 accepted into a WAL batch, without yet being a committed or successful change.
 
+The embedded `loonfs::FsWriter` makes the first two stages independently
+drivable. `prepare_file_bytes` stages bytes, while `prepare_content_ref`
+fully validates an existing reference; both return opaque prepared content.
+`put_file_prepared` and `commit_operations_prepared` consume that evidence
+without content-store I/O during publication. `complete_upload_prepared`
+returns the ordinary completion response together with the same evidence.
+These are embedded conveniences, not HTTP operations; hosted clients continue
+to carry validated content tokens on the existing wire requests.
+
 ### 5.1 Commit request envelope
 
 A commit request carries the following logical fields:

@@ -9,9 +9,9 @@ use loonfs::publish::{
     PathMutationIntent, PreparedContent,
 };
 use loonfs::{
-    CommitId, CommitOp, CommitRequest, CoreError, CreateDirectoryOptions, CreateNamespaceOptions,
-    DestinationBehavior, ErrorCode, FsWriter, InodeId, NamespaceId, PutFileOptions, RevisionNo,
-    SharedObjectStore,
+    BeginUploadRequest, CommitId, CommitOp, CommitRequest, CompleteUploadRequest, CoreError,
+    CreateDirectoryOptions, CreateNamespaceOptions, DestinationBehavior, ErrorCode, FsWriter,
+    InodeId, NamespaceId, PutFileOptions, RevisionNo, RuntimeError, SharedObjectStore,
 };
 use loonfs_objectstore::keys::wal_head;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -503,6 +503,197 @@ async fn put_file_content_ref_validates_content_before_publication() {
 }
 
 #[tokio::test]
+async fn prepare_file_bytes_performs_one_content_put_and_no_reads() {
+    let harness = TestHarness::new("prepare-file-bytes").await;
+    let bytes = b"parallel preparation primitive";
+    harness.recording.reset();
+
+    let prepared = harness
+        .writer
+        .prepare_file_bytes(&harness.namespace_id, bytes)
+        .await
+        .expect("prepare file bytes");
+
+    assert_eq!(
+        prepared.content_ref(),
+        &loonfs::ContentRef::whole_file_v0(bytes)
+    );
+    assert_content_counts(harness.recording.snapshot(), 0, 0, 1, 0);
+}
+
+#[tokio::test]
+async fn put_file_prepared_performs_no_content_io() {
+    let harness = TestHarness::new("put-file-prepared").await;
+    let prepared = harness
+        .writer
+        .prepare_file_bytes(&harness.namespace_id, b"already prepared")
+        .await
+        .expect("prepare file bytes");
+    harness.recording.reset();
+
+    harness
+        .writer
+        .put_file_prepared(
+            &harness.namespace_id,
+            "/file.txt",
+            prepared,
+            PutFileOptions::default(),
+        )
+        .await
+        .expect("publish prepared file");
+
+    assert_content_counts(harness.recording.snapshot(), 0, 0, 0, 0);
+}
+
+#[tokio::test]
+async fn prepare_content_ref_reads_once_and_prepared_publication_reads_nothing() {
+    let harness = TestHarness::new("prepare-content-ref").await;
+    let bytes = b"externally staged content";
+    let content_ref = harness.stage_content(bytes).await;
+    harness.recording.reset();
+
+    let prepared = harness
+        .writer
+        .prepare_content_ref(&harness.namespace_id, content_ref)
+        .await
+        .expect("prepare content ref");
+
+    assert_content_counts(harness.recording.snapshot(), 1, 1, 0, bytes.len());
+    harness.recording.reset();
+
+    harness
+        .writer
+        .put_file_prepared(
+            &harness.namespace_id,
+            "/file.txt",
+            prepared,
+            PutFileOptions::default(),
+        )
+        .await
+        .expect("publish prepared content ref");
+
+    assert_content_counts(harness.recording.snapshot(), 0, 0, 0, 0);
+}
+
+#[tokio::test]
+async fn proxied_upload_completion_proof_publishes_without_additional_content_io() {
+    let harness = TestHarness::new("proxied-completion-proof").await;
+    let bytes = b"service proxied upload";
+    let begin = harness
+        .writer
+        .begin_upload(&harness.namespace_id, BeginUploadRequest::default())
+        .await
+        .expect("begin upload");
+    harness.recording.reset();
+
+    let staged = harness
+        .writer
+        .upload_content(&harness.namespace_id, &begin.upload_id, bytes)
+        .await
+        .expect("upload content");
+    let upload_counts = harness.recording.snapshot();
+    assert_eq!(
+        upload_counts.operations(KeyClass::Content),
+        OperationCounts {
+            head: 0,
+            get: 1,
+            put: 1,
+        }
+    );
+    assert!(upload_counts.content_get_bytes > 0);
+    harness.recording.reset();
+
+    let (completed, prepared) = harness
+        .writer
+        .complete_upload_prepared(
+            &harness.namespace_id,
+            &begin.upload_id,
+            &CompleteUploadRequest {
+                content_ref: staged.content_ref,
+            },
+        )
+        .await
+        .expect("complete upload with proof");
+    assert_eq!(prepared.content_ref(), &completed.content_ref);
+    assert_content_counts(harness.recording.snapshot(), 0, 0, 0, 0);
+    harness.recording.reset();
+
+    harness
+        .writer
+        .put_file_prepared(
+            &harness.namespace_id,
+            "/uploaded.txt",
+            prepared,
+            PutFileOptions::default(),
+        )
+        .await
+        .expect("publish uploaded content");
+
+    assert_content_counts(harness.recording.snapshot(), 0, 0, 0, 0);
+}
+
+#[tokio::test]
+async fn direct_put_completion_avoids_blob_get_and_prepared_publish_uses_no_content_io() {
+    let harness = TestHarness::new("direct-completion-proof").await;
+    let bytes = b"direct provider upload";
+    let content_ref = loonfs::ContentRef::whole_file_v0(bytes);
+    let begin = harness
+        .writer
+        .begin_direct_put_upload_target(&harness.namespace_id, content_ref.clone())
+        .await
+        .expect("begin direct put");
+    harness.recording.reset();
+
+    harness
+        .store
+        .put_if_absent(&begin.target.object_key, Bytes::copy_from_slice(bytes))
+        .await
+        .expect("drive direct provider upload");
+    assert_content_counts(harness.recording.snapshot(), 0, 0, 1, 0);
+    harness.recording.reset();
+
+    let (completed, prepared) = harness
+        .writer
+        .complete_upload_prepared(
+            &harness.namespace_id,
+            &begin.upload_id,
+            &CompleteUploadRequest {
+                content_ref: content_ref.clone(),
+            },
+        )
+        .await
+        .expect("complete direct put with proof");
+    assert_eq!(completed.content_ref, content_ref);
+    // Direct-put completion resolves the immutable content-store descriptor
+    // and proves the provider write with one object HEAD; it never reads the
+    // uploaded blob.
+    let completion_counts = harness.recording.snapshot();
+    assert_eq!(
+        completion_counts.operations(KeyClass::Content),
+        OperationCounts {
+            head: 1,
+            get: 1,
+            put: 0,
+        }
+    );
+    assert!(completion_counts.content_get_bytes > 0);
+    harness.recording.reset();
+
+    harness
+        .writer
+        .put_file_prepared(
+            &harness.namespace_id,
+            "/direct.txt",
+            prepared,
+            PutFileOptions::default(),
+        )
+        .await
+        .expect("publish direct uploaded content");
+
+    assert_content_counts(harness.recording.snapshot(), 0, 0, 0, 0);
+}
+
+#[tokio::test]
 async fn plain_path_put_fails_unprepared_without_content_io() {
     let harness = TestHarness::new("plain-path-unprepared").await;
     let content_ref = harness.stage_content(b"unprepared path content").await;
@@ -523,7 +714,7 @@ async fn plain_path_put_fails_unprepared_without_content_io() {
 }
 
 #[tokio::test]
-async fn explicit_create_file_fails_unprepared_without_content_io() {
+async fn commit_operations_with_external_ref_fails_typed_without_content_io() {
     let harness = TestHarness::new("create-unprepared").await;
     let content_ref = harness.stage_content(b"explicit create content").await;
     harness.recording.reset();
@@ -532,9 +723,8 @@ async fn explicit_create_file_fails_unprepared_without_content_io() {
     // publication never rescues an unprepared ref with content I/O.
     let error = harness
         .writer
-        .publisher()
-        .submit_commit(
-            harness.namespace_id.clone(),
+        .commit_operations(
+            &harness.namespace_id,
             CommitRequest {
                 commit_id: CommitId::parse("explicit-create").expect("valid commit id"),
                 preconditions: Vec::new(),
@@ -549,6 +739,13 @@ async fn explicit_create_file_fails_unprepared_without_content_io() {
         .await
         .expect_err("unprepared explicit create must fail");
 
+    assert!(
+        matches!(error, RuntimeError::Core(_)),
+        "expected typed core error, got {error:?}"
+    );
+    let RuntimeError::Core(error) = error else {
+        return;
+    };
     assert_content_not_prepared(error, &content_ref);
     assert_content_counts(harness.recording.snapshot(), 0, 0, 0, 0);
 }
@@ -601,54 +798,67 @@ async fn explicit_replace_file_fails_unprepared_without_content_io() {
     assert_content_counts(harness.recording.snapshot(), 0, 0, 0, 0);
 }
 
-#[tokio::test]
-async fn explicit_commit_with_prepared_distinct_and_repeated_refs_uses_no_publication_content_io() {
+/// The spawned preparations exercise concurrent use of one cloned writer before one commit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn prepared_commit_after_concurrent_preparations_uses_no_publication_content_io() {
     let harness = TestHarness::new("prepared-explicit-many").await;
-    let first = harness.stage_content(b"first prepared content").await;
-    let second = harness.stage_content(b"second prepared content").await;
-    let third = harness.stage_content(b"third prepared content").await;
-    let prepared = vec![
-        prepare_content(&harness.store, &harness.namespace_id, &first).await,
-        prepare_content(&harness.store, &harness.namespace_id, &second).await,
-        prepare_content(&harness.store, &harness.namespace_id, &third).await,
-    ];
+    let preparations = [
+        b"first prepared content" as &'static [u8],
+        b"second prepared content",
+        b"third prepared content",
+    ]
+    .into_iter()
+    .map(|bytes| {
+        let writer = harness.writer.clone();
+        let namespace_id = harness.namespace_id.clone();
+        tokio::spawn(async move { writer.prepare_file_bytes(&namespace_id, bytes).await })
+    });
+    let mut prepared = Vec::new();
+    for preparation in preparations {
+        prepared.push(
+            preparation
+                .await
+                .expect("preparation task")
+                .expect("prepare file bytes"),
+        );
+    }
+    let first = prepared[0].content_ref().clone();
+    let second = prepared[1].content_ref().clone();
+    let third = prepared[2].content_ref().clone();
     harness.recording.reset();
 
     harness
         .writer
-        .publisher()
-        .submit_candidate(
-            harness.namespace_id.clone(),
-            NamespaceMutationCandidate::commit_prepared(
-                CommitRequest {
-                    commit_id: CommitId::parse("prepared-explicit-many").expect("valid commit id"),
-                    preconditions: Vec::new(),
-                    ops: vec![
-                        CommitOp::CreateFile {
-                            parent_inode_id: InodeId(1),
-                            display_name: "first.txt".to_owned(),
-                            content_ref: first.clone(),
-                        },
-                        CommitOp::CreateFile {
-                            parent_inode_id: InodeId(1),
-                            display_name: "first-copy.txt".to_owned(),
-                            content_ref: first,
-                        },
-                        CommitOp::CreateFile {
-                            parent_inode_id: InodeId(1),
-                            display_name: "second.txt".to_owned(),
-                            content_ref: second,
-                        },
-                        CommitOp::CreateFile {
-                            parent_inode_id: InodeId(1),
-                            display_name: "third.txt".to_owned(),
-                            content_ref: third,
-                        },
-                    ],
-                    message: None,
-                },
-                prepared,
-            ),
+        .commit_operations_prepared(
+            &harness.namespace_id,
+            CommitRequest {
+                commit_id: CommitId::parse("prepared-explicit-many").expect("valid commit id"),
+                preconditions: Vec::new(),
+                ops: vec![
+                    CommitOp::CreateFile {
+                        parent_inode_id: InodeId(1),
+                        display_name: "first.txt".to_owned(),
+                        content_ref: first.clone(),
+                    },
+                    CommitOp::CreateFile {
+                        parent_inode_id: InodeId(1),
+                        display_name: "first-copy.txt".to_owned(),
+                        content_ref: first,
+                    },
+                    CommitOp::CreateFile {
+                        parent_inode_id: InodeId(1),
+                        display_name: "second.txt".to_owned(),
+                        content_ref: second,
+                    },
+                    CommitOp::CreateFile {
+                        parent_inode_id: InodeId(1),
+                        display_name: "third.txt".to_owned(),
+                        content_ref: third,
+                    },
+                ],
+                message: None,
+            },
+            prepared,
         )
         .await
         .expect("publish prepared explicit commit");
