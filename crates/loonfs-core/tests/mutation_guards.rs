@@ -36,7 +36,9 @@ use loonfs_core::commit::{
     build_commit_plan, materialize_commit, CommitOp, CommitOpResult, CommitRequest,
     CommitValidationContext, CommitValidationError, PreparedCommit,
 };
-use loonfs_core::content::{mint_content_token, store_bytes_as_content, verify_content_token};
+use loonfs_core::content::{
+    mint_content_token, store_bytes_as_content, verify_content_token, ContentAdmission,
+};
 use loonfs_core::control::{load_namespace_head_control, load_namespace_read_anchor};
 use loonfs_core::metadata::MetadataState;
 use loonfs_core::publish::{NamespaceCommitEngine, NamespaceMutationCandidate, PathMutationIntent};
@@ -259,18 +261,34 @@ fn read_context<S: ObjectStore + ?Sized>(
 
 /// Publishes one path intent through the commit engine — the single publish
 /// pipeline.
+fn admitted_candidate(
+    namespace_id: &NamespaceId,
+    intent: PathMutationIntent,
+) -> NamespaceMutationCandidate {
+    match &intent {
+        PathMutationIntent::PutFile { content_ref, .. } => {
+            NamespaceMutationCandidate::PathWithContentAdmission {
+                admissions: vec![ContentAdmission::for_durable_content_write(
+                    namespace_id.clone(),
+                    content_ref.clone(),
+                    u64::MAX,
+                )],
+                intent,
+            }
+        }
+        _ => NamespaceMutationCandidate::Path(intent),
+    }
+}
+
 async fn submit_intent_async<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     intent: PathMutationIntent,
     context: &MutationContext,
 ) -> Result<loonfs_api::CommitResponse, CoreError> {
+    let candidate = admitted_candidate(namespace_id, intent);
     NamespaceCommitEngine::new(namespace_id.clone())
-        .publish_batch(
-            store,
-            vec![NamespaceMutationCandidate::Path(intent)],
-            context,
-        )
+        .publish_batch(store, vec![candidate], context)
         .await
         .results
         .pop()
@@ -1646,7 +1664,7 @@ async fn complete_upload_rejects_direct_put_session_without_bound_target() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn path_put_file_validates_content_by_reading_it_once() {
+async fn path_put_file_without_admission_fails_without_reading_content() {
     let temp_dir = tempdir().expect("tempdir");
     let store = ContentBlobGetCountingStore::new(temp_dir.path());
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -1672,14 +1690,18 @@ async fn path_put_file_validates_content_by_reading_it_once() {
         &context,
     );
 
-    assert!(responses[0].is_ok());
-    // Durable validation is read-and-hash: one content GET, no provider
-    // checksum shortcut anywhere in the fleet.
-    assert_eq!(store.content_blob_get_count(), 1);
+    assert_eq!(
+        responses[0]
+            .as_ref()
+            .expect_err("unadmitted path put must fail")
+            .code(),
+        ErrorCode::ContentNotPrepared
+    );
+    assert_eq!(store.content_blob_get_count(), 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn path_batch_validates_a_repeated_content_ref_once() {
+async fn path_batch_rejects_repeated_unadmitted_content_without_reading_it() {
     let temp_dir = tempdir().expect("tempdir");
     let store = ContentBlobGetCountingStore::new(temp_dir.path());
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -1711,10 +1733,12 @@ async fn path_batch_validates_a_repeated_content_ref_once() {
         &context,
     );
 
-    assert!(responses.iter().all(Result::is_ok));
-    // Two puts share one content ref: the batch tracker validates it once
-    // (one read-and-hash), and the second candidate reuses the verdict.
-    assert_eq!(store.content_blob_get_count(), 1);
+    assert!(responses.iter().all(|response| {
+        response
+            .as_ref()
+            .is_err_and(|error| error.code() == ErrorCode::ContentNotPrepared)
+    }));
+    assert_eq!(store.content_blob_get_count(), 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1768,7 +1792,7 @@ async fn valid_content_admission_skips_durable_content_validation() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn expired_content_admission_falls_back_to_durable_validation() {
+async fn expired_content_admission_fails_without_durable_validation() {
     let temp_dir = tempdir().expect("tempdir");
     let store = ContentBlobGetCountingStore::new(temp_dir.path());
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -1814,10 +1838,14 @@ async fn expired_content_admission_falls_back_to_durable_validation() {
         &expired_context,
     );
 
-    assert!(responses[0].is_ok());
-    // An expired admission falls back to durable validation, which reads
-    // the bytes.
-    assert_eq!(store.content_blob_get_count(), 1);
+    assert_eq!(
+        responses[0]
+            .as_ref()
+            .expect_err("expired admission must not cover publication")
+            .code(),
+        ErrorCode::ContentNotPrepared
+    );
+    assert_eq!(store.content_blob_get_count(), 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2078,12 +2106,15 @@ async fn batch_delete_then_recreate_of_a_durable_file_layers_over_cached_state()
                 behavior: DeleteDirectoryBehavior::NonRecursive,
                 expected_inode_id: None,
             }),
-            NamespaceMutationCandidate::Path(PathMutationIntent::PutFile {
-                commit_id: CommitId::parse("recreate-cycled").expect("valid commit id"),
-                absolute_path: AbsolutePath::parse("/docs/cycled.txt").expect("path"),
-                content_ref: staged.content_ref,
-                behavior: DestinationBehavior::NoReplace,
-            }),
+            admitted_candidate(
+                &namespace_id,
+                PathMutationIntent::PutFile {
+                    commit_id: CommitId::parse("recreate-cycled").expect("valid commit id"),
+                    absolute_path: AbsolutePath::parse("/docs/cycled.txt").expect("path"),
+                    content_ref: staged.content_ref,
+                    behavior: DestinationBehavior::NoReplace,
+                },
+            ),
         ]),
     );
     results[0]
@@ -3044,20 +3075,26 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
                 expected_inode_id: None,
             }),
             // Accepted into the batch.
-            NamespaceMutationCandidate::Path(PathMutationIntent::PutFile {
-                commit_id: CommitId::parse("accept-a").expect("valid commit id"),
-                absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
-                content_ref: content.content_ref.clone(),
-                behavior: DestinationBehavior::NoReplace,
-            }),
+            admitted_candidate(
+                &namespace_id,
+                PathMutationIntent::PutFile {
+                    commit_id: CommitId::parse("accept-a").expect("valid commit id"),
+                    absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
+                    content_ref: content.content_ref.clone(),
+                    behavior: DestinationBehavior::NoReplace,
+                },
+            ),
             // Rejected only because of the accepted candidate's speculative
             // in-batch create.
-            NamespaceMutationCandidate::Path(PathMutationIntent::PutFile {
-                commit_id: CommitId::parse("reject-speculative").expect("valid commit id"),
-                absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
-                content_ref: content.content_ref.clone(),
-                behavior: DestinationBehavior::NoReplace,
-            }),
+            admitted_candidate(
+                &namespace_id,
+                PathMutationIntent::PutFile {
+                    commit_id: CommitId::parse("reject-speculative").expect("valid commit id"),
+                    absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
+                    content_ref: content.content_ref.clone(),
+                    behavior: DestinationBehavior::NoReplace,
+                },
+            ),
             // Alias of the materialization-decided rejection.
             NamespaceMutationCandidate::Path(PathMutationIntent::DeletePath {
                 commit_id: CommitId::parse("reject-materialization").expect("valid commit id"),
@@ -3133,18 +3170,24 @@ async fn stale_head_cas_fails_rejections_decided_against_in_batch_state() {
                 behavior: DeleteDirectoryBehavior::NonRecursive,
                 expected_inode_id: None,
             }),
-            NamespaceMutationCandidate::Path(PathMutationIntent::PutFile {
-                commit_id: CommitId::parse("accept-a").expect("valid commit id"),
-                absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
-                content_ref: content.content_ref.clone(),
-                behavior: DestinationBehavior::NoReplace,
-            }),
-            NamespaceMutationCandidate::Path(PathMutationIntent::PutFile {
-                commit_id: CommitId::parse("reject-speculative").expect("valid commit id"),
-                absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
-                content_ref: content.content_ref.clone(),
-                behavior: DestinationBehavior::NoReplace,
-            }),
+            admitted_candidate(
+                &namespace_id,
+                PathMutationIntent::PutFile {
+                    commit_id: CommitId::parse("accept-a").expect("valid commit id"),
+                    absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
+                    content_ref: content.content_ref.clone(),
+                    behavior: DestinationBehavior::NoReplace,
+                },
+            ),
+            admitted_candidate(
+                &namespace_id,
+                PathMutationIntent::PutFile {
+                    commit_id: CommitId::parse("reject-speculative").expect("valid commit id"),
+                    absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
+                    content_ref: content.content_ref.clone(),
+                    behavior: DestinationBehavior::NoReplace,
+                },
+            ),
         ]
     };
 
@@ -3633,12 +3676,15 @@ async fn path_intents_in_one_batch_see_tentative_state() {
         &store,
         &namespace_id,
         vec![
-            NamespaceMutationCandidate::Path(PathMutationIntent::PutFile {
-                commit_id: CommitId::parse("put-batched-path").expect("valid commit id"),
-                absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
-                content_ref: content.content_ref,
-                behavior: DestinationBehavior::NoReplace,
-            }),
+            admitted_candidate(
+                &namespace_id,
+                PathMutationIntent::PutFile {
+                    commit_id: CommitId::parse("put-batched-path").expect("valid commit id"),
+                    absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
+                    content_ref: content.content_ref,
+                    behavior: DestinationBehavior::NoReplace,
+                },
+            ),
             NamespaceMutationCandidate::Path(PathMutationIntent::MovePath {
                 commit_id: CommitId::parse("move-batched-path").expect("valid commit id"),
                 from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
@@ -4303,7 +4349,7 @@ async fn fork_target_control_conflict_rechecks_complete_namespace() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn restore_revision_revalidates_durable_content_before_publish() {
+async fn restore_revision_does_not_revalidate_retained_content_before_publish() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
@@ -4360,7 +4406,7 @@ async fn restore_revision_revalidates_durable_content_before_publish() {
         .await
         .expect("delete first content");
 
-    let error = commit_operations(
+    let response = commit_operations(
         &store,
         &namespace_id(),
         ApiCommitRequest {
@@ -4375,13 +4421,8 @@ async fn restore_revision_revalidates_durable_content_before_publish() {
         },
         &context,
     )
-    .expect_err("restore missing durable content");
-    assert!(matches!(
-        error,
-        CoreError::DurableContent(
-            loonfs_core::content::DurableContentValidationError::MissingContentObject { .. }
-        )
-    ));
+    .expect("restore trusts retained content metadata");
+    assert_eq!(response.committed_seq, ChangeSeq(3));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4626,7 +4667,8 @@ async fn idempotent_path_retry_returns_receipt_before_content_validation() {
     let first = publish_namespace_mutations_batch(
         &store,
         &namespace_id(),
-        vec![NamespaceMutationCandidate::Path(
+        vec![admitted_candidate(
+            &namespace_id(),
             PathMutationIntent::PutFile {
                 commit_id: commit_id.clone(),
                 absolute_path: AbsolutePath::parse("/docs/idempotent.txt").expect("path"),

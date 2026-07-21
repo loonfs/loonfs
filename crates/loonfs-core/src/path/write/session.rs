@@ -74,6 +74,7 @@ impl PublishPlanningSession {
 mod tests {
     use super::*;
     use crate::commit_engine::{publish_namespace_mutations_batch, NamespaceMutationCandidate};
+    use crate::content::ContentAdmission;
     use crate::context::MutationContext;
     use crate::error::ErrorCode;
     use crate::namespace::bootstrap::bootstrap_namespace;
@@ -113,12 +114,19 @@ mod tests {
         absolute_path: &str,
         content_ref: loonfs_api::ContentRef,
     ) -> NamespaceMutationCandidate {
-        NamespaceMutationCandidate::Path(PathMutationIntent::PutFile {
-            commit_id: CommitId::parse(commit_id).expect("valid commit id"),
-            absolute_path: AbsolutePath::parse(absolute_path).expect("path"),
-            content_ref,
-            behavior: DestinationBehavior::NoReplace,
-        })
+        NamespaceMutationCandidate::PathWithContentAdmission {
+            intent: PathMutationIntent::PutFile {
+                commit_id: CommitId::parse(commit_id).expect("valid commit id"),
+                absolute_path: AbsolutePath::parse(absolute_path).expect("path"),
+                content_ref: content_ref.clone(),
+                behavior: DestinationBehavior::NoReplace,
+            },
+            admissions: vec![ContentAdmission::for_durable_content_write(
+                NamespaceId::parse("demo").expect("valid namespace id"),
+                content_ref,
+                u64::MAX,
+            )],
+        }
     }
 
     /// Two plans through one session share the durable-layer memo: the

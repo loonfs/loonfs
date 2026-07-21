@@ -12,9 +12,8 @@ use crate::error::CoreError;
 use crate::invariants::InvariantId;
 use crate::metadata::{MetadataState, MetadataView};
 use loonfs_api::wire::control::HeadState;
-use loonfs_api::{ChangeSeq, ContentRef, InodeId, NamePolicy, RevisionNo};
+use loonfs_api::{ChangeSeq, InodeId, NamePolicy};
 use loonfs_objectstore::ObjectStore;
-use std::collections::BTreeMap;
 struct CommitShape {
     assigned_seq: ChangeSeq,
     allocated_inode_ids: Vec<InodeId>,
@@ -26,64 +25,6 @@ pub(crate) struct PublishCommitValidationContext<'a, S: ObjectStore + ?Sized> {
     pub(crate) head: &'a HeadState,
     pub(crate) metadata_view: MetadataView<'a, 'a, S>,
     pub(crate) accepted_rows: &'a MetadataState,
-}
-
-impl<S: ObjectStore + ?Sized> PublishCommitValidationContext<'_, S> {
-    fn metadata_view(&self) -> MetadataView<'_, '_, S> {
-        self.metadata_view
-            .with_overlay(self.accepted_rows, self.head.seq)
-    }
-}
-
-pub(crate) async fn resolve_restore_content_refs_for_publish<S: ObjectStore + ?Sized>(
-    request: &CommitRequest,
-    context: &PublishCommitValidationContext<'_, S>,
-) -> Result<Vec<Option<ContentRef>>, CoreError> {
-    let mut resolved_request_revisions = BTreeMap::<(InodeId, RevisionNo), ContentRef>::new();
-    let metadata_view = context.metadata_view();
-    let mut resolved = Vec::with_capacity(request.ops.len());
-
-    for op in &request.ops {
-        match op {
-            CommitOp::ReplaceFile {
-                inode_id,
-                base_revision_no,
-                content_ref,
-            } => {
-                if let Some(next_revision) = base_revision_no.0.checked_add(1).map(RevisionNo) {
-                    resolved_request_revisions
-                        .insert((*inode_id, next_revision), content_ref.clone());
-                }
-                resolved.push(None);
-            }
-            CommitOp::RestoreRevision {
-                inode_id,
-                source_revision_no,
-                base_revision_no,
-            } => {
-                let content_ref = if let Some(content_ref) =
-                    resolved_request_revisions.get(&(*inode_id, *source_revision_no))
-                {
-                    Some(content_ref.clone())
-                } else {
-                    metadata_view
-                        .revision_at_head(*inode_id, *source_revision_no)
-                        .await?
-                        .map(|revision| revision.content_ref)
-                };
-                if let (Some(next_revision), Some(content_ref)) = (
-                    base_revision_no.0.checked_add(1).map(RevisionNo),
-                    content_ref.clone(),
-                ) {
-                    resolved_request_revisions.insert((*inode_id, next_revision), content_ref);
-                }
-                resolved.push(content_ref);
-            }
-            _ => resolved.push(None),
-        }
-    }
-
-    Ok(resolved)
 }
 
 pub async fn build_commit_plan(

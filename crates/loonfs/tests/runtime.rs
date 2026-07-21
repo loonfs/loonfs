@@ -4,6 +4,8 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
+use loonfs::content_tokens::ContentAdmission;
+use loonfs::publish::{parse_mutation_path, PathMutationIntent};
 use loonfs::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, BeginUploadRequest,
     BeginUploadResponse, ChangeSeq, ChangesResponse, CommitId, CommitOp, CommitRequest,
@@ -2523,31 +2525,48 @@ fn concurrent_puts_coalesce_into_one_wal_segment() {
         }
         let [ref_a, ref_b, ref_c, ref_d] = content_refs.try_into().expect("four staged refs");
         let segments_before = wal_segment_count(&object_store, &namespace_id).await;
+        let admitted_put = |commit_id: &str, path: &str, content_ref: ContentRef| {
+            let admission = ContentAdmission::for_durable_content_write(
+                namespace_id.clone(),
+                content_ref.clone(),
+                u64::MAX,
+            );
+            (
+                PathMutationIntent::PutFile {
+                    commit_id: CommitId::parse(commit_id).expect("valid commit id"),
+                    absolute_path: parse_mutation_path(path).expect("valid mutation path"),
+                    content_ref,
+                    behavior: DestinationBehavior::NoReplace,
+                },
+                vec![admission],
+            )
+        };
+        let put_a = admitted_put("batch-a", "/docs/a.txt", ref_a);
+        let put_b = admitted_put("batch-b", "/docs/b.txt", ref_b);
+        let put_c = admitted_put("batch-c", "/docs/c.txt", ref_c);
+        let put_d = admitted_put("batch-d", "/docs/d.txt", ref_d);
+        let publisher = fs.writer.publisher();
 
         let puts = tokio::join!(
-            fs.put_file_content_ref(
-                &namespace_id,
-                "/docs/a.txt",
-                ref_a,
-                PutFileOptions::default()
+            publisher.submit_path_intent_with_content_admission(
+                namespace_id.clone(),
+                put_a.0,
+                put_a.1,
             ),
-            fs.put_file_content_ref(
-                &namespace_id,
-                "/docs/b.txt",
-                ref_b,
-                PutFileOptions::default()
+            publisher.submit_path_intent_with_content_admission(
+                namespace_id.clone(),
+                put_b.0,
+                put_b.1,
             ),
-            fs.put_file_content_ref(
-                &namespace_id,
-                "/docs/c.txt",
-                ref_c,
-                PutFileOptions::default()
+            publisher.submit_path_intent_with_content_admission(
+                namespace_id.clone(),
+                put_c.0,
+                put_c.1,
             ),
-            fs.put_file_content_ref(
-                &namespace_id,
-                "/docs/d.txt",
-                ref_d,
-                PutFileOptions::default()
+            publisher.submit_path_intent_with_content_admission(
+                namespace_id.clone(),
+                put_d.0,
+                put_d.1,
             ),
         );
         puts.0.expect("put a");
@@ -2555,9 +2574,10 @@ fn concurrent_puts_coalesce_into_one_wal_segment() {
         puts.2.expect("put c");
         puts.3.expect("put d");
 
-        // All four submissions were admitted before the publish task's
-        // first take and published as one batch: one WAL segment, one
-        // head CAS.
+        // The already-proven candidates reach publisher admission together
+        // and publish as one batch: one WAL segment, one head CAS. The slow
+        // content-ref helper validates before admission and is intentionally
+        // outside this batching seam.
         let segments_after = wal_segment_count(&object_store, &namespace_id).await;
         assert_eq!(segments_after - segments_before, 1);
 

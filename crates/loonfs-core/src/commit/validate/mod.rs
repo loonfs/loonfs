@@ -16,7 +16,4 @@ mod plan_build;
 mod view;
 
 pub use plan_build::build_commit_plan;
-pub(crate) use plan_build::{
-    build_commit_plan_for_publish, resolve_restore_content_refs_for_publish,
-    PublishCommitValidationContext,
-};
+pub(crate) use plan_build::{build_commit_plan_for_publish, PublishCommitValidationContext};

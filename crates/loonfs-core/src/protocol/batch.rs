@@ -8,9 +8,8 @@ use super::candidates::{
 use super::publish_view::PublishMetadataView;
 use crate::commit::{
     build_commit_plan_for_publish, materialize_commit, prepare_commit_head_publish,
-    publish_commit_head, resolve_restore_content_refs_for_publish,
-    wal_payload_from_materialized_commit, CommitHeadPublishError, MaterializedCommit,
-    PreparedCommit, PreparedCommitHeadPublish, PublishCommitValidationContext,
+    publish_commit_head, wal_payload_from_materialized_commit, CommitHeadPublishError,
+    MaterializedCommit, PreparedCommit, PreparedCommitHeadPublish, PublishCommitValidationContext,
 };
 use crate::commit_engine::NamespaceMutationCandidate;
 use crate::context::MutationContext;
@@ -145,19 +144,10 @@ pub(crate) async fn publish_namespace_mutations_batch_against_publish_view<
                 accepted_rows: session.accepted_rows(),
             };
             let request = candidate_request.request;
-            let resolved_restore_content_refs =
-                match resolve_restore_content_refs_for_publish(&request, &validation).await {
-                    Ok(value) => value,
-                    Err(error) => {
-                        outcomes[index] = Some(Err(error));
-                        continue;
-                    }
-                };
             if let Err(error) = validate_commit_content_references(
                 store,
                 &view.content_store_id,
                 &request,
-                &resolved_restore_content_refs,
                 candidate,
                 context.now_ms,
                 &mut content_validation,

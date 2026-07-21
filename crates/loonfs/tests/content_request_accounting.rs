@@ -6,8 +6,8 @@ use futures::stream::BoxStream;
 use loonfs::content_tokens::ContentAdmission;
 use loonfs::publish::{parse_mutation_path, PathMutationIntent};
 use loonfs::{
-    CommitId, CommitOp, CommitRequest, CreateDirectoryOptions, CreateNamespaceOptions,
-    DestinationBehavior, FsWriter, InodeId, NamespaceId, PutFileOptions, RevisionNo,
+    CommitId, CommitOp, CommitRequest, CoreError, CreateDirectoryOptions, CreateNamespaceOptions,
+    DestinationBehavior, ErrorCode, FsWriter, InodeId, NamespaceId, PutFileOptions, RevisionNo,
     SharedObjectStore,
 };
 use loonfs_objectstore::keys::wal_head;
@@ -449,14 +449,30 @@ fn assert_content_counts(
     assert_eq!(counts.content_get_bytes, bytes_read);
 }
 
+fn assert_content_not_prepared(error: CoreError, content_ref: &loonfs::ContentRef) {
+    assert_eq!(error.code(), ErrorCode::ContentNotPrepared);
+    assert!(
+        matches!(
+            error,
+            CoreError::ContentNotPrepared {
+                ref content_ref_digest
+            } if content_ref_digest == &content_ref.digest
+        ),
+        "content-not-prepared error should carry the rejected digest"
+    );
+}
+
 #[tokio::test]
-async fn put_file_content_ref_publication_downloads_unadmitted_content() {
-    let harness = TestHarness::new("content-ref-fallback").await;
+async fn put_file_content_ref_validates_content_before_publication() {
+    let harness = TestHarness::new("content-ref-validation").await;
     let bytes = b"pre-staged content";
     let content_ref = harness.stage_content(bytes).await;
     harness.recording.reset();
 
-    // PR B2 deletes this fallback; this case will instead expect a typed content-not-prepared error.
+    // These global counts show the explicitly slow helper still validates
+    // exactly once, but not where. The plain-candidate seam below proves the
+    // publisher itself performs no content-key I/O, locating this read before
+    // publication.
     harness
         .writer
         .put_file_content_ref(
@@ -472,13 +488,34 @@ async fn put_file_content_ref_publication_downloads_unadmitted_content() {
 }
 
 #[tokio::test]
+async fn plain_path_put_fails_unprepared_without_content_io() {
+    let harness = TestHarness::new("plain-path-unprepared").await;
+    let content_ref = harness.stage_content(b"unprepared path content").await;
+    harness.recording.reset();
+
+    let error = harness
+        .writer
+        .publisher()
+        .submit_path_intent(
+            harness.namespace_id.clone(),
+            put_intent("plain-unprepared-put", "/file.txt", content_ref.clone()),
+        )
+        .await
+        .expect_err("plain path put must require prepared content");
+
+    assert_content_not_prepared(error, &content_ref);
+    assert_content_counts(harness.recording.snapshot(), 0, 0, 0, 0);
+}
+
+#[tokio::test]
 async fn explicit_create_file_publication_downloads_unadmitted_content() {
     let harness = TestHarness::new("create-fallback").await;
     let bytes = b"explicit create content";
     let content_ref = harness.stage_content(bytes).await;
     harness.recording.reset();
 
-    // PR B2 deletes this fallback; this case will instead expect a typed content-not-prepared error.
+    // Explicit commit candidates retain durable validation until the later
+    // commit-endpoint admission PR.
     harness
         .writer
         .commit_operations(
@@ -524,7 +561,8 @@ async fn explicit_replace_file_publication_downloads_unadmitted_content() {
     let content_ref = harness.stage_content(bytes).await;
     harness.recording.reset();
 
-    // PR B2 deletes this fallback; this case will instead expect a typed content-not-prepared error.
+    // Explicit commit candidates retain durable validation until the later
+    // commit-endpoint admission PR.
     harness
         .writer
         .commit_operations(
@@ -547,8 +585,8 @@ async fn explicit_replace_file_publication_downloads_unadmitted_content() {
 }
 
 #[tokio::test]
-async fn explicit_restore_revision_publication_downloads_retained_content() {
-    let harness = TestHarness::new("restore-fallback").await;
+async fn explicit_restore_revision_uses_retained_metadata_without_content_io() {
+    let harness = TestHarness::new("restore-retained").await;
     let first = b"first revision";
     harness
         .writer
@@ -582,7 +620,8 @@ async fn explicit_restore_revision_publication_downloads_retained_content() {
         .inode_id;
     harness.recording.reset();
 
-    // PR B2 deletes this fallback; this case will instead expect a typed content-not-prepared error.
+    // Restore resolves content from retained namespace metadata, so
+    // re-downloading the retained blob would prove nothing.
     harness
         .writer
         .commit_operations(
@@ -601,7 +640,7 @@ async fn explicit_restore_revision_publication_downloads_retained_content() {
         .await
         .expect("publish explicit restore");
 
-    assert_content_counts(harness.recording.snapshot(), 1, 1, 0, first.len());
+    assert_content_counts(harness.recording.snapshot(), 0, 0, 0, 0);
 }
 
 #[tokio::test]
@@ -750,8 +789,80 @@ async fn stale_head_retry_preserves_content_admission() {
     assert_content_counts(recording.snapshot(), 0, 0, 0, 0);
 }
 
+/// Holds one publication at its head CAS so the next two candidates are
+/// deterministically collected into the same batch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mixed_batch_publishes_admitted_put_and_rejects_unprepared_put_without_content_io() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("mixed-preparation").expect("valid namespace id");
+    let recording = Arc::new(RecordingStore::new(temp_dir.path()));
+    let blocking = Arc::new(BlockingHeadCasStore::new(
+        Arc::clone(&recording),
+        &namespace_id,
+    ));
+    let store: SharedObjectStore = blocking.clone();
+    let writer = build_initialized_writer(store.clone(), &namespace_id, "mixed-writer").await;
+    let content_ref =
+        loonfs_core::content::store_bytes_as_content(&store, &namespace_id, b"mixed content")
+            .await
+            .expect("stage content")
+            .content_ref;
+    recording.reset();
+
+    blocking.arm_next_head_cas();
+    let blocker = {
+        let registry = writer.publisher();
+        let namespace_id = namespace_id.clone();
+        tokio::spawn(async move {
+            registry
+                .submit_path_intent(
+                    namespace_id,
+                    PathMutationIntent::CreateDir {
+                        commit_id: CommitId::parse("mixed-blocker").expect("valid commit id"),
+                        absolute_path: parse_mutation_path("/hold").expect("valid mutation path"),
+                        parents: false,
+                    },
+                )
+                .await
+        })
+    };
+    blocking.wait_for_blocked_head_cas().await;
+
+    let registry = writer.publisher();
+    let mut admitted = Box::pin(registry.submit_path_intent_with_content_admission(
+        namespace_id.clone(),
+        put_intent("mixed-admitted", "/admitted.txt", content_ref.clone()),
+        vec![durable_admission(&namespace_id, &content_ref)],
+    ));
+    assert!(
+        futures::poll!(admitted.as_mut()).is_pending(),
+        "admitted put must queue behind the blocked publication"
+    );
+    let mut unprepared = Box::pin(registry.submit_path_intent(
+        namespace_id.clone(),
+        put_intent("mixed-unprepared", "/unprepared.txt", content_ref.clone()),
+    ));
+    assert!(
+        futures::poll!(unprepared.as_mut()).is_pending(),
+        "unprepared put must join the pending batch"
+    );
+
+    blocking.release_head_cas();
+    blocker
+        .await
+        .expect("blocker task")
+        .expect("blocker publication");
+    admitted.await.expect("admitted put publishes");
+    let error = unprepared
+        .await
+        .expect_err("unprepared put must fail independently");
+
+    assert_content_not_prepared(error, &content_ref);
+    assert_content_counts(recording.snapshot(), 0, 0, 0, 0);
+}
+
 #[tokio::test]
-async fn expired_content_admission_downloads_content() {
+async fn expired_content_admission_fails_without_content_io() {
     let harness = TestHarness::new("expired-admission").await;
     let bytes = b"expired admission content";
     let content_ref = harness.stage_content(bytes).await;
@@ -762,17 +873,19 @@ async fn expired_content_admission_downloads_content() {
     );
     harness.recording.reset();
 
-    // PR B2 deletes this fallback; this case will instead expect a typed content-not-prepared error.
-    harness
+    // Expiry still makes an admission uncovered in this narrow cut. A later
+    // PR removes internal admission expiry and will make this succeed again.
+    let error = harness
         .writer
         .publisher()
         .submit_path_intent_with_content_admission(
             harness.namespace_id.clone(),
-            put_intent("expired-put", "/file.txt", content_ref),
+            put_intent("expired-put", "/file.txt", content_ref.clone()),
             vec![expired_admission],
         )
         .await
-        .expect("publish with expired admission fallback");
+        .expect_err("expired admission must not cover publication");
 
-    assert_content_counts(harness.recording.snapshot(), 1, 1, 0, bytes.len());
+    assert_content_not_prepared(error, &content_ref);
+    assert_content_counts(harness.recording.snapshot(), 0, 0, 0, 0);
 }

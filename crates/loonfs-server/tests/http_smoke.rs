@@ -2,10 +2,10 @@ use bytes::Bytes;
 use loonfs_api::{
     v0::{
         BeginUploadRequest, CommitDelta, CommitOp, CommitRequest as ApiCommitRequest,
-        CompleteUploadRequest, ValidatedContentToken,
+        CompleteUploadRequest, CompleteUploadResponse, ValidatedContentToken,
     },
     AdvanceRetentionResponse, ApiError, ChangeSeq, CheckpointId, CommitId, CommitResponse,
-    ContentRef, CreateCheckpointResponse, DestinationBehavior, FilesystemOperation,
+    ContentRef, CreateCheckpointResponse, DestinationBehavior, ErrorCode, FilesystemOperation,
     FilesystemOperationRequest, InodeId, InodeKind, ListPathEntriesResponse, ManifestId,
     NamespaceId, RevisionNo, DEFAULT_MAX_PAGE_LIMIT, DEFAULT_PAGE_LIMIT, LIMIT_PAGINATION_DEFAULT,
     LIMIT_PAGINATION_MAX,
@@ -780,7 +780,7 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn path_put_with_bad_content_token_falls_back_to_durable_validation() {
+async fn path_put_with_bad_content_token_fails_content_not_prepared() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
@@ -795,24 +795,7 @@ async fn path_put_with_bad_content_token_falls_back_to_durable_validation() {
             .client
             .create_namespace(&namespace)
             .expect("create namespace");
-        let begin = harness
-            .client
-            .begin_upload(&namespace, &BeginUploadRequest::default())
-            .expect("begin upload");
-        let staged = harness
-            .client
-            .upload_content(&namespace, begin.upload_id.as_str(), b"token fallback")
-            .expect("upload content");
-        let completed = harness
-            .client
-            .complete_upload(
-                &namespace,
-                begin.upload_id.as_str(),
-                &CompleteUploadRequest {
-                    content_ref: staged.content_ref,
-                },
-            )
-            .expect("complete upload");
+        let completed = stage_uploaded_content(&harness.client, &namespace, b"token rejected");
 
         let request = FilesystemOperationRequest {
             commit_id: CommitId::parse("bad-token-put").expect("valid commit id"),
@@ -826,28 +809,147 @@ async fn path_put_with_bad_content_token_falls_back_to_durable_validation() {
                 behavior: DestinationBehavior::NoReplace,
             },
         };
-        let response = ureq::post(&format!(
-            "{}/v0/namespaces/{namespace}/filesystem/operations",
-            harness.server_url
-        ))
-        .set("authorization", "Bearer test-token")
-        .send_json(request)
-        .expect("bad token should fall back to content validation");
-        // Every response carries the correlation id header, success included.
-        let request_id = response
-            .header("x-request-id")
-            .expect("x-request-id header")
-            .to_owned();
-        assert!(request_id.starts_with("req_"), "got `{request_id}`");
+        assert_content_not_prepared_response(
+            send_filesystem_operation(&harness.server_url, &namespace, &request),
+            &request,
+        );
+    })
+    .await
+    .expect("blocking task");
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn path_put_without_content_token_fails_content_not_prepared() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loonfs-server-current",
+        "http-missing-content-token",
+    ))
+    .await;
+
+    tokio::task::spawn_blocking(move || {
+        let namespace = namespace_id("demo");
+        harness
+            .client
+            .create_namespace(&namespace)
+            .expect("create namespace");
+        let completed = stage_uploaded_content(&harness.client, &namespace, b"token missing");
+        let request = FilesystemOperationRequest {
+            commit_id: CommitId::parse("missing-token-put").expect("valid commit id"),
+            content_tokens: Vec::new(),
+            operation: FilesystemOperation::PutFile {
+                path: "/missing-token.txt".to_owned(),
+                content_ref: completed.content_ref,
+                behavior: DestinationBehavior::NoReplace,
+            },
+        };
+
+        assert_content_not_prepared_response(
+            send_filesystem_operation(&harness.server_url, &namespace, &request),
+            &request,
+        );
+    })
+    .await
+    .expect("blocking task");
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn path_put_with_valid_content_token_succeeds() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loonfs-server-current",
+        "http-valid-content-token",
+    ))
+    .await;
+
+    tokio::task::spawn_blocking(move || {
+        let namespace = namespace_id("demo");
+        harness
+            .client
+            .create_namespace(&namespace)
+            .expect("create namespace");
+        let bytes = b"valid token";
+        let completed = stage_uploaded_content(&harness.client, &namespace, bytes);
+        let request = FilesystemOperationRequest {
+            commit_id: CommitId::parse("valid-token-put").expect("valid commit id"),
+            content_tokens: vec![ValidatedContentToken {
+                content_ref: completed.content_ref.clone(),
+                token: completed
+                    .validated_content_token
+                    .expect("completed upload carries token"),
+            }],
+            operation: FilesystemOperation::PutFile {
+                path: "/valid-token.txt".to_owned(),
+                content_ref: completed.content_ref,
+                behavior: DestinationBehavior::NoReplace,
+            },
+        };
+        let response = send_filesystem_operation(&harness.server_url, &namespace, &request)
+            .expect("valid token put");
         let response: CommitResponse =
             serde_json::from_reader(response.into_reader()).expect("decode operation response");
         assert_eq!(response.committed_seq, ChangeSeq(1));
 
-        let target = NamespacePath::parse("demo", "/bad-token.txt").expect("target");
+        let target = NamespacePath::parse("demo", "/valid-token.txt").expect("target");
         assert_eq!(
             harness.client.read_file_bytes(&target).expect("read file"),
-            b"token fallback"
+            bytes
         );
+    })
+    .await
+    .expect("blocking task");
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn landed_path_put_replays_after_content_token_is_absent() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loonfs-server-current",
+        "http-content-token-replay",
+    ))
+    .await;
+
+    tokio::task::spawn_blocking(move || {
+        let namespace = namespace_id("demo");
+        harness
+            .client
+            .create_namespace(&namespace)
+            .expect("create namespace");
+        let completed = stage_uploaded_content(&harness.client, &namespace, b"token replay");
+        let mut request = FilesystemOperationRequest {
+            commit_id: CommitId::parse("token-replay-put").expect("valid commit id"),
+            content_tokens: vec![ValidatedContentToken {
+                content_ref: completed.content_ref.clone(),
+                token: completed
+                    .validated_content_token
+                    .expect("completed upload carries token"),
+            }],
+            operation: FilesystemOperation::PutFile {
+                path: "/token-replay.txt".to_owned(),
+                content_ref: completed.content_ref,
+                behavior: DestinationBehavior::NoReplace,
+            },
+        };
+        let original = send_filesystem_operation(&harness.server_url, &namespace, &request)
+            .expect("original admitted put");
+        let original: CommitResponse =
+            serde_json::from_reader(original.into_reader()).expect("decode original response");
+
+        request.content_tokens.clear();
+        let replay = send_filesystem_operation(&harness.server_url, &namespace, &request)
+            .expect("landed put replays without token");
+        let replay: CommitResponse =
+            serde_json::from_reader(replay.into_reader()).expect("decode replay response");
+        assert_eq!(replay, original);
     })
     .await
     .expect("blocking task");
@@ -2219,11 +2321,50 @@ fn namespace_id(value: &str) -> NamespaceId {
     NamespaceId::parse(value).expect("valid namespace id")
 }
 
-fn stage_uploaded_content_ref(
+fn send_filesystem_operation(
+    server_url: &str,
+    namespace_id: &NamespaceId,
+    request: &FilesystemOperationRequest,
+) -> Result<ureq::Response, Box<ureq::Error>> {
+    ureq::post(&format!(
+        "{server_url}/v0/namespaces/{namespace_id}/filesystem/operations"
+    ))
+    .set("authorization", "Bearer test-token")
+    .send_json(request)
+    .map_err(Box::new)
+}
+
+fn assert_content_not_prepared_response(
+    result: Result<ureq::Response, Box<ureq::Error>>,
+    request: &FilesystemOperationRequest,
+) {
+    match result {
+        Err(error) if matches!(error.as_ref(), ureq::Error::Status(_, _)) => {
+            let ureq::Error::Status(status, response) = *error else {
+                unreachable!("guard requires an HTTP status error");
+            };
+            assert_eq!(status, 409);
+            let error: ApiError =
+                serde_json::from_reader(response.into_reader()).expect("decode api error");
+            assert_eq!(error.code, ErrorCode::ContentNotPrepared.as_str());
+            let FilesystemOperation::PutFile { content_ref, .. } = &request.operation else {
+                unreachable!("content preparation assertion requires a put request");
+            };
+            assert!(error.message.contains(&content_ref.digest));
+            assert_eq!(
+                error.details.and_then(|details| details.commit_id),
+                Some(request.commit_id.clone())
+            );
+        }
+        other => unreachable!("expected content_not_prepared response, got {other:?}"),
+    }
+}
+
+fn stage_uploaded_content(
     client: &Client,
     namespace_id: &NamespaceId,
     file_bytes: &[u8],
-) -> ContentRef {
+) -> CompleteUploadResponse {
     let begin = client
         .begin_upload(namespace_id, &BeginUploadRequest::default())
         .expect("begin upload");
@@ -2244,5 +2385,13 @@ fn stage_uploaded_content_ref(
     assert_eq!(repeated.content_ref, complete.content_ref);
     assert!(complete.validated_content_token.is_some());
     assert!(repeated.validated_content_token.is_some());
-    complete.content_ref
+    complete
+}
+
+fn stage_uploaded_content_ref(
+    client: &Client,
+    namespace_id: &NamespaceId,
+    file_bytes: &[u8],
+) -> ContentRef {
+    stage_uploaded_content(client, namespace_id, file_bytes).content_ref
 }

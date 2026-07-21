@@ -10,6 +10,7 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
+use loonfs::content_tokens::ContentAdmission;
 use loonfs::{
     CreateNamespaceOptions, FsAdmin, FsReader, FsWriter, MaintenanceTickOptions, NamespaceId,
     PageRequest, PaginationPolicy, PutFileOptions, SharedObjectStore,
@@ -222,15 +223,22 @@ async fn warm_phase_request_accounting() {
             .await
             .expect("stage content")
             .content_ref;
-            candidates.push(loonfs::publish::NamespaceMutationCandidate::Path(
-                loonfs::publish::PathMutationIntent::PutFile {
-                    commit_id: loonfs::CommitId::generate(),
-                    absolute_path: AbsolutePath::parse(format!("/hot/file-{index:05}.txt"))
-                        .expect("path"),
-                    content_ref,
-                    behavior: loonfs::DestinationBehavior::NoReplace,
+            candidates.push(
+                loonfs::publish::NamespaceMutationCandidate::PathWithContentAdmission {
+                    intent: loonfs::publish::PathMutationIntent::PutFile {
+                        commit_id: loonfs::CommitId::generate(),
+                        absolute_path: AbsolutePath::parse(format!("/hot/file-{index:05}.txt"))
+                            .expect("path"),
+                        content_ref: content_ref.clone(),
+                        behavior: loonfs::DestinationBehavior::NoReplace,
+                    },
+                    admissions: vec![ContentAdmission::for_durable_content_write(
+                        namespace_id.clone(),
+                        content_ref,
+                        u64::MAX,
+                    )],
                 },
-            ));
+            );
             index += 1;
         }
         for outcome in writer

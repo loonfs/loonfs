@@ -11,6 +11,7 @@
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use loonfs::content_tokens::ContentAdmission;
 use loonfs::{
     CreateNamespaceOptions, FsAdmin, FsReader, FsWriter, MaintenanceTickOptions, NamespaceId,
 };
@@ -144,17 +145,24 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
             .await
             .expect("stage content")
             .content_ref;
-            candidates.push(loonfs::publish::NamespaceMutationCandidate::Path(
-                loonfs::publish::PathMutationIntent::PutFile {
-                    commit_id: loonfs::CommitId::generate(),
-                    absolute_path: AbsolutePath::parse(format!(
-                        "/tree/dir-000000/file-{index:09}.txt"
-                    ))
-                    .expect("path"),
-                    content_ref,
-                    behavior: loonfs::DestinationBehavior::NoReplace,
+            candidates.push(
+                loonfs::publish::NamespaceMutationCandidate::PathWithContentAdmission {
+                    intent: loonfs::publish::PathMutationIntent::PutFile {
+                        commit_id: loonfs::CommitId::generate(),
+                        absolute_path: AbsolutePath::parse(format!(
+                            "/tree/dir-000000/file-{index:09}.txt"
+                        ))
+                        .expect("path"),
+                        content_ref: content_ref.clone(),
+                        behavior: loonfs::DestinationBehavior::NoReplace,
+                    },
+                    admissions: vec![ContentAdmission::for_durable_content_write(
+                        namespace_id.clone(),
+                        content_ref,
+                        u64::MAX,
+                    )],
                 },
-            ));
+            );
         }
         for outcome in writer
             .publish_namespace_mutations_batch(&namespace_id, candidates)
