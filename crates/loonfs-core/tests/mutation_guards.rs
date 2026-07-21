@@ -54,6 +54,7 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
 };
+use std::collections::HashSet;
 use std::future::Future;
 use std::num::NonZeroU32;
 use std::path::Path;
@@ -128,15 +129,11 @@ fn commit_operations<S: ObjectStore + ?Sized>(
     request: ApiCommitRequest,
     context: &MutationContext,
 ) -> Result<loonfs_api::v0::CommitResponse, CoreError> {
-    publish_namespace_mutations_batch(
-        store,
-        namespace_id,
-        vec![NamespaceMutationCandidate::commit(request)],
-        context,
-    )
-    .into_iter()
-    .next()
-    .expect("single commit result")
+    let candidate = prepared_commit_candidate(store, namespace_id, request)?;
+    publish_namespace_mutations_batch(store, namespace_id, vec![candidate], context)
+        .into_iter()
+        .next()
+        .expect("single commit result")
 }
 
 fn commit_operations_batch<S: ObjectStore + ?Sized>(
@@ -145,15 +142,43 @@ fn commit_operations_batch<S: ObjectStore + ?Sized>(
     requests: Vec<ApiCommitRequest>,
     context: &MutationContext,
 ) -> Vec<Result<loonfs_api::v0::CommitResponse, CoreError>> {
-    publish_namespace_mutations_batch(
-        store,
-        namespace_id,
-        requests
-            .into_iter()
-            .map(NamespaceMutationCandidate::commit)
-            .collect(),
-        context,
-    )
+    let request_count = requests.len();
+    let candidates = requests
+        .into_iter()
+        .map(|request| prepared_commit_candidate(store, namespace_id, request))
+        .collect::<Result<Vec<_>, _>>();
+    let candidates = match candidates {
+        Ok(candidates) => candidates,
+        Err(error) => return (0..request_count).map(|_| Err(error.clone())).collect(),
+    };
+    publish_namespace_mutations_batch(store, namespace_id, candidates, context)
+}
+
+fn prepared_commit_candidate<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    request: ApiCommitRequest,
+) -> Result<NamespaceMutationCandidate, CoreError> {
+    let content_store_id = load_namespace_descriptor_state(store, namespace_id).content_store_id;
+    let mut seen = HashSet::new();
+    let mut prepared = Vec::new();
+    for content_ref in request.ops.iter().filter_map(|op| match op {
+        ApiCommitOp::CreateFile { content_ref, .. }
+        | ApiCommitOp::ReplaceFile { content_ref, .. } => Some(content_ref),
+        _ => None,
+    }) {
+        if seen.insert(content_ref.clone()) {
+            prepared.push(block_on(prepare_existing_content_ref(
+                store,
+                namespace_id,
+                &content_store_id,
+                content_ref.clone(),
+            ))?);
+        }
+    }
+    Ok(NamespaceMutationCandidate::commit_prepared(
+        request, prepared,
+    ))
 }
 
 fn publish_namespace_mutations_batch<S: ObjectStore + ?Sized>(
@@ -4419,39 +4444,47 @@ async fn metadata_only_commit_does_not_validate_content_store_refs() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn create_file_prioritizes_missing_durable_content_over_missing_parent() {
+async fn explicit_create_file_fails_unprepared_before_parent_validation_without_content_reads() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
     bootstrap_namespace(&store, &namespace_id(), &context, false).expect("bootstrap namespace");
 
-    let error = commit_operations(
-        &store,
+    let guarded_store = ContentStoreAccessLimitStore::new(temp_dir.path(), 1);
+    let missing_content = content_ref("missing-content");
+    let error = publish_namespace_mutations_batch(
+        &guarded_store,
         &namespace_id(),
-        ApiCommitRequest {
-            commit_id: CommitId::parse("create-missing-parent-missing-content")
+        vec![NamespaceMutationCandidate::commit(ApiCommitRequest {
+            commit_id: CommitId::parse("create-missing-parent-unprepared-content")
                 .expect("valid commit id"),
             preconditions: Vec::new(),
             ops: vec![ApiCommitOp::CreateFile {
                 parent_inode_id: InodeId(99),
                 display_name: "missing.txt".to_owned(),
-                content_ref: content_ref("missing-content"),
+                content_ref: missing_content.clone(),
             }],
             message: None,
-        },
+        })],
         &context,
     )
-    .expect_err("missing content should win before missing parent");
+    .into_iter()
+    .next()
+    .expect("one result")
+    .expect_err("unprepared content should win before missing parent");
     assert!(matches!(
         error,
-        CoreError::DurableContent(
-            loonfs_core::content::DurableContentValidationError::MissingContentObject { .. }
-        )
+        CoreError::ContentPreparation(
+            loonfs_core::publish::ContentPreparationError::ContentNotPrepared {
+                content_ref_digest
+            }
+        ) if content_ref_digest == missing_content.digest
     ));
+    assert_eq!(guarded_store.content_store_access_count(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn replace_file_prioritizes_missing_durable_content_over_stale_revision() {
+async fn explicit_replace_file_fails_unprepared_before_revision_validation_without_content_reads() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
@@ -4469,28 +4502,36 @@ async fn replace_file_prioritizes_missing_durable_content_over_stale_revision() 
         .expect("resolve path")
         .inode_id;
 
-    let error = commit_operations(
-        &store,
+    let guarded_store = ContentStoreAccessLimitStore::new(temp_dir.path(), 1);
+    let missing_content = content_ref("missing-content");
+    let error = publish_namespace_mutations_batch(
+        &guarded_store,
         &namespace_id(),
-        ApiCommitRequest {
+        vec![NamespaceMutationCandidate::commit(ApiCommitRequest {
             commit_id: CommitId::parse("replace-stale-missing-content").expect("valid commit id"),
             preconditions: Vec::new(),
             ops: vec![ApiCommitOp::ReplaceFile {
                 inode_id,
                 base_revision_no: RevisionNo(99),
-                content_ref: content_ref("missing-content"),
+                content_ref: missing_content.clone(),
             }],
             message: None,
-        },
+        })],
         &context,
     )
-    .expect_err("missing content should win before stale revision");
+    .into_iter()
+    .next()
+    .expect("one result")
+    .expect_err("unprepared content should win before stale revision");
     assert!(matches!(
         error,
-        CoreError::DurableContent(
-            loonfs_core::content::DurableContentValidationError::MissingContentObject { .. }
-        )
+        CoreError::ContentPreparation(
+            loonfs_core::publish::ContentPreparationError::ContentNotPrepared {
+                content_ref_digest
+            }
+        ) if content_ref_digest == missing_content.digest
     ));
+    assert_eq!(guarded_store.content_store_access_count(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4529,80 +4570,6 @@ async fn restore_revision_missing_source_is_revision_not_found() {
     )
     .expect_err("missing restore source should fail");
     assert_eq!(error.code(), ErrorCode::RevisionNotFound);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn restore_revision_resolves_same_request_source_before_durable_content_validation() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id(), &context, false).expect("bootstrap namespace");
-
-    let first = store_bytes_as_content(&store, &namespace_id(), b"first")
-        .await
-        .expect("stage first");
-    commit_operations(
-        &store,
-        &namespace_id(),
-        ApiCommitRequest {
-            commit_id: CommitId::parse("resolve-before-durable-check-create")
-                .expect("valid commit id"),
-            preconditions: Vec::new(),
-            ops: vec![ApiCommitOp::CreateFile {
-                parent_inode_id: InodeId(1),
-                display_name: "restore.txt".to_owned(),
-                content_ref: first.content_ref.clone(),
-            }],
-            message: None,
-        },
-        &context,
-    )
-    .expect("create file");
-    let inode_id = resolve_path(&store, &namespace_id(), "/restore.txt")
-        .expect("resolve created file")
-        .inode_id;
-
-    let second = store_bytes_as_content(&store, &namespace_id(), b"second")
-        .await
-        .expect("stage second");
-    store
-        .delete(
-            &content_blob(second.content_store_id.as_str(), &second.content_ref.digest)
-                .expect("second content key"),
-        )
-        .await
-        .expect("delete second content");
-
-    let error = commit_operations(
-        &store,
-        &namespace_id(),
-        ApiCommitRequest {
-            commit_id: CommitId::parse("resolve-before-durable-check-commit")
-                .expect("valid commit id"),
-            preconditions: Vec::new(),
-            ops: vec![
-                ApiCommitOp::ReplaceFile {
-                    inode_id,
-                    base_revision_no: RevisionNo(1),
-                    content_ref: second.content_ref.clone(),
-                },
-                ApiCommitOp::RestoreRevision {
-                    inode_id,
-                    source_revision_no: RevisionNo(2),
-                    base_revision_no: RevisionNo(2),
-                },
-            ],
-            message: None,
-        },
-        &context,
-    )
-    .expect_err("missing same-request content should fail durable-content validation");
-    assert!(matches!(
-        error,
-        CoreError::DurableContent(
-            loonfs_core::content::DurableContentValidationError::MissingContentObject { .. }
-        )
-    ));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

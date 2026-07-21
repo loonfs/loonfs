@@ -68,6 +68,8 @@ pub enum CoreError {
     InvalidNamespaceId(#[from] NamespaceIdValidationError),
     #[error(transparent)]
     InvalidCommitId(#[from] CommitIdValidationError),
+    #[error("invalid commit request: {0}")]
+    InvalidCommitRequest(String),
     #[error(transparent)]
     InvalidUploadId(#[from] GeneratedIdValidationError),
     #[error("path not found `{0}`")]
@@ -354,6 +356,7 @@ impl CoreError {
             }
             CoreError::InvalidNamespaceId(_) => ErrorCode::InvalidRequest,
             CoreError::InvalidCommitId(_) => ErrorCode::InvalidRequest,
+            CoreError::InvalidCommitRequest(_) => ErrorCode::InvalidRequest,
             CoreError::InvalidUploadId(_) => ErrorCode::InvalidRequest,
             CoreError::PathNotFound(_) => ErrorCode::PathNotFound,
             CoreError::RevisionNotFound { .. } => ErrorCode::RevisionNotFound,

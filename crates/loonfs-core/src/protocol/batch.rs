@@ -15,7 +15,6 @@ use crate::commit_engine::NamespaceMutationCandidate;
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result, StoreFailureClass};
 use crate::path::write::PublishPlanningSession;
-use crate::storage::content::ContentValidationTracker;
 use crate::timing::MonotonicTimer;
 use crate::wal::{prepare_wal_segment, PreparedWalSegment};
 use bytes::Bytes;
@@ -104,7 +103,6 @@ pub(crate) async fn publish_namespace_mutations_batch_against_publish_view<
     let mut session = PublishPlanningSession::new(&view.head);
     let mut accepted: Vec<(usize, MaterializedCommit)> = Vec::new();
     let mut dedup = BatchDedup::default();
-    let mut content_validation = ContentValidationTracker::default();
 
     let prepare_span = tracing::info_span!(
         "publisher.batch_prepare",
@@ -144,15 +142,7 @@ pub(crate) async fn publish_namespace_mutations_batch_against_publish_view<
                 accepted_rows: session.accepted_rows(),
             };
             let request = candidate_request.request;
-            if let Err(error) = validate_commit_content_references(
-                store,
-                &view.content_store_id,
-                &request,
-                candidate,
-                &mut content_validation,
-            )
-            .await
-            {
+            if let Err(error) = validate_commit_content_references(&request, candidate) {
                 outcomes[index] = Some(Err(error));
                 continue;
             }

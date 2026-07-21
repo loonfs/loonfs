@@ -523,38 +523,39 @@ async fn plain_path_put_fails_unprepared_without_content_io() {
 }
 
 #[tokio::test]
-async fn explicit_create_file_publication_downloads_unadmitted_content() {
-    let harness = TestHarness::new("create-fallback").await;
-    let bytes = b"explicit create content";
-    let content_ref = harness.stage_content(bytes).await;
+async fn explicit_create_file_fails_unprepared_without_content_io() {
+    let harness = TestHarness::new("create-unprepared").await;
+    let content_ref = harness.stage_content(b"explicit create content").await;
     harness.recording.reset();
 
-    // Explicit commit candidates retain durable validation until the later
-    // commit-endpoint admission PR.
-    harness
+    // Explicit commits use the same in-memory proof coverage as path puts;
+    // publication never rescues an unprepared ref with content I/O.
+    let error = harness
         .writer
-        .commit_operations(
-            &harness.namespace_id,
+        .publisher()
+        .submit_commit(
+            harness.namespace_id.clone(),
             CommitRequest {
                 commit_id: CommitId::parse("explicit-create").expect("valid commit id"),
                 preconditions: Vec::new(),
                 ops: vec![CommitOp::CreateFile {
                     parent_inode_id: InodeId(1),
                     display_name: "file.txt".to_owned(),
-                    content_ref,
+                    content_ref: content_ref.clone(),
                 }],
                 message: None,
             },
         )
         .await
-        .expect("publish explicit create");
+        .expect_err("unprepared explicit create must fail");
 
-    assert_content_counts(harness.recording.snapshot(), 1, 1, 0, bytes.len());
+    assert_content_not_prepared(error, &content_ref);
+    assert_content_counts(harness.recording.snapshot(), 0, 0, 0, 0);
 }
 
 #[tokio::test]
-async fn explicit_replace_file_publication_downloads_unadmitted_content() {
-    let harness = TestHarness::new("replace-fallback").await;
+async fn explicit_replace_file_fails_unprepared_without_content_io() {
+    let harness = TestHarness::new("replace-unprepared").await;
     harness
         .writer
         .put_file_bytes(
@@ -572,31 +573,87 @@ async fn explicit_replace_file_publication_downloads_unadmitted_content() {
         .await
         .expect("stat seeded file")
         .inode_id;
-    let bytes = b"explicit replacement content";
-    let content_ref = harness.stage_content(bytes).await;
+    let content_ref = harness.stage_content(b"explicit replacement content").await;
     harness.recording.reset();
 
-    // Explicit commit candidates retain durable validation until the later
-    // commit-endpoint admission PR.
-    harness
+    // The existing inode does not change proof coverage: a replacement's
+    // external ref must already be prepared before publication.
+    let error = harness
         .writer
-        .commit_operations(
-            &harness.namespace_id,
+        .publisher()
+        .submit_commit(
+            harness.namespace_id.clone(),
             CommitRequest {
                 commit_id: CommitId::parse("explicit-replace").expect("valid commit id"),
                 preconditions: Vec::new(),
                 ops: vec![CommitOp::ReplaceFile {
                     inode_id,
                     base_revision_no: RevisionNo(1),
-                    content_ref,
+                    content_ref: content_ref.clone(),
                 }],
                 message: None,
             },
         )
         .await
-        .expect("publish explicit replacement");
+        .expect_err("unprepared explicit replacement must fail");
 
-    assert_content_counts(harness.recording.snapshot(), 1, 1, 0, bytes.len());
+    assert_content_not_prepared(error, &content_ref);
+    assert_content_counts(harness.recording.snapshot(), 0, 0, 0, 0);
+}
+
+#[tokio::test]
+async fn explicit_commit_with_prepared_distinct_and_repeated_refs_uses_no_publication_content_io() {
+    let harness = TestHarness::new("prepared-explicit-many").await;
+    let first = harness.stage_content(b"first prepared content").await;
+    let second = harness.stage_content(b"second prepared content").await;
+    let third = harness.stage_content(b"third prepared content").await;
+    let prepared = vec![
+        prepare_content(&harness.store, &harness.namespace_id, &first).await,
+        prepare_content(&harness.store, &harness.namespace_id, &second).await,
+        prepare_content(&harness.store, &harness.namespace_id, &third).await,
+    ];
+    harness.recording.reset();
+
+    harness
+        .writer
+        .publisher()
+        .submit_candidate(
+            harness.namespace_id.clone(),
+            NamespaceMutationCandidate::commit_prepared(
+                CommitRequest {
+                    commit_id: CommitId::parse("prepared-explicit-many").expect("valid commit id"),
+                    preconditions: Vec::new(),
+                    ops: vec![
+                        CommitOp::CreateFile {
+                            parent_inode_id: InodeId(1),
+                            display_name: "first.txt".to_owned(),
+                            content_ref: first.clone(),
+                        },
+                        CommitOp::CreateFile {
+                            parent_inode_id: InodeId(1),
+                            display_name: "first-copy.txt".to_owned(),
+                            content_ref: first,
+                        },
+                        CommitOp::CreateFile {
+                            parent_inode_id: InodeId(1),
+                            display_name: "second.txt".to_owned(),
+                            content_ref: second,
+                        },
+                        CommitOp::CreateFile {
+                            parent_inode_id: InodeId(1),
+                            display_name: "third.txt".to_owned(),
+                            content_ref: third,
+                        },
+                    ],
+                    message: None,
+                },
+                prepared,
+            ),
+        )
+        .await
+        .expect("publish prepared explicit commit");
+
+    assert_content_counts(harness.recording.snapshot(), 0, 0, 0, 0);
 }
 
 #[tokio::test]

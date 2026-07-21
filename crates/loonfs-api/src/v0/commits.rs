@@ -3,6 +3,7 @@
 //! deltas those commits produce, and the ordered change feed that exposes
 //! them. Path-oriented convenience operations live in [`super::operations`].
 
+use super::ValidatedContentToken;
 use crate::{
     ChangeSeq, CommitId, ContentRef, InodeId, InodeKind, NameKey, NamespaceId, RevisionNo,
 };
@@ -25,6 +26,22 @@ pub struct CommitRequest {
     /// Optional human-readable note.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+}
+
+/// Transport wrapper for submitting an explicit semantic commit.
+///
+/// The flattened commit fields preserve the original bare request shape,
+/// while `content_tokens` carries transport-only preparation proofs that do
+/// not participate in the semantic commit fingerprint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct CommitSubmissionRequest {
+    /// Semantic commit whose fields remain at the top level on the wire.
+    #[serde(flatten)]
+    pub commit: CommitRequest,
+    /// Proofs for new external content refs introduced by the commit.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub content_tokens: Vec<ValidatedContentToken>,
 }
 
 /// Result of one committed mutation.
@@ -243,8 +260,32 @@ pub struct ChangesResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::{CommitDelta, CommitOp, CommitPrecondition};
-    use crate::{ChangeSeq, InodeId, InodeKind, NameKey};
+    use super::{CommitDelta, CommitOp, CommitPrecondition, CommitSubmissionRequest};
+    use crate::{ChangeSeq, CommitId, InodeId, InodeKind, NameKey};
+
+    #[test]
+    fn bare_commit_body_without_content_tokens_parses_as_submission() {
+        let body = br#"{
+            "commit_id":"commit-a",
+            "preconditions":[],
+            "ops":[{
+                "kind":"create_directory",
+                "parent_inode_id":1,
+                "display_name":"docs"
+            }],
+            "message":"existing body"
+        }"#;
+
+        let submission: CommitSubmissionRequest =
+            serde_json::from_slice(body).expect("parse pre-token commit body");
+
+        assert_eq!(
+            submission.commit.commit_id,
+            CommitId::parse("commit-a").expect("valid commit id")
+        );
+        assert_eq!(submission.commit.ops.len(), 1);
+        assert!(submission.content_tokens.is_empty());
+    }
 
     #[test]
     fn commit_precondition_name_key_serializes_as_plain_string() {

@@ -19,6 +19,7 @@ use loonfs_api::v0::{CommitRequest as ApiCommitRequest, CommitResponse as ApiCom
 use loonfs_api::wire::control::{AcquiredWriter, HeadState};
 use loonfs_api::{ChangeSeq, CommitId, ManifestId, ManifestObjectId, NamespaceId};
 use loonfs_objectstore::ObjectStore;
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
@@ -62,6 +63,20 @@ impl NamespaceMutationCandidate {
         Self {
             mutation: NamespaceMutation::Commit(request),
             content: ContentPreparation::Ready(Vec::new()),
+        }
+    }
+
+    /// Wraps an explicit semantic commit with opaque proofs for its prepared
+    /// content.
+    pub fn commit_prepared(request: ApiCommitRequest, content: Vec<PreparedContent>) -> Self {
+        Self {
+            mutation: NamespaceMutation::Commit(request),
+            content: ContentPreparation::Ready(
+                content
+                    .into_iter()
+                    .map(PreparedContent::into_admission)
+                    .collect(),
+            ),
         }
     }
 
@@ -115,6 +130,7 @@ impl NamespaceMutationCandidate {
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<SemanticMutationIdentity> {
+        self.validate_request_limits()?;
         match &self.mutation {
             NamespaceMutation::Commit(request) => {
                 core_commit_fingerprint_for_v0_request(namespace_id, request)
@@ -128,6 +144,46 @@ impl NamespaceMutationCandidate {
                     .map(SemanticMutationIdentity::PathIntent)
             }
         }
+    }
+
+    pub(crate) fn validate_request_limits(&self) -> Result<()> {
+        let NamespaceMutation::Commit(request) = &self.mutation else {
+            return Ok(());
+        };
+        if request.ops.len() > crate::limits::MAX_COMMIT_OPERATIONS {
+            return Err(CoreError::InvalidCommitRequest(format!(
+                "commit has {} operations; maximum is {}",
+                request.ops.len(),
+                crate::limits::MAX_COMMIT_OPERATIONS
+            )));
+        }
+        let prepared_count = match &self.content {
+            ContentPreparation::Ready(content) => content.len(),
+            ContentPreparation::Rejected(_) => 0,
+        };
+        if prepared_count > crate::limits::MAX_COMMIT_CONTENT_TOKENS {
+            return Err(CoreError::InvalidCommitRequest(format!(
+                "commit has {prepared_count} prepared content proofs; maximum is {}",
+                crate::limits::MAX_COMMIT_CONTENT_TOKENS
+            )));
+        }
+        let distinct_content_refs = request
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                loonfs_api::v0::CommitOp::CreateFile { content_ref, .. }
+                | loonfs_api::v0::CommitOp::ReplaceFile { content_ref, .. } => Some(content_ref),
+                _ => None,
+            })
+            .collect::<HashSet<_>>()
+            .len();
+        if distinct_content_refs > crate::limits::MAX_COMMIT_EXTERNAL_CONTENT_REFS {
+            return Err(CoreError::InvalidCommitRequest(format!(
+                "commit references {distinct_content_refs} distinct external content refs; maximum is {}",
+                crate::limits::MAX_COMMIT_EXTERNAL_CONTENT_REFS
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -521,11 +577,13 @@ pub(crate) async fn publish_namespace_mutations_batch<S: ObjectStore + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::content::{mint_content_token, verify_content_token};
     use crate::error::ErrorCode;
     use crate::namespace::bootstrap::bootstrap_namespace;
     use crate::namespace::control::read_head_object;
     use futures::StreamExt;
-    use loonfs_api::{ChangeSeq, InodeId, WriterEpoch};
+    use loonfs_api::v0::ValidatedContentToken;
+    use loonfs_api::{ChangeSeq, ContentRef, InodeId, WriterEpoch};
     use loonfs_objectstore::keys::wal_segment_prefix;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::ObjectStore;
@@ -559,6 +617,53 @@ mod tests {
             ready.semantic_identity(&namespace_id).expect("identity"),
             rejected.semantic_identity(&namespace_id).expect("identity")
         );
+    }
+
+    #[test]
+    fn candidate_validation_rejects_commit_operation_and_prepared_proof_limits() {
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let oversized_ops = NamespaceMutationCandidate::commit(ApiCommitRequest {
+            commit_id: CommitId::parse("too-many-ops").expect("valid commit id"),
+            preconditions: Vec::new(),
+            ops: (0..=crate::limits::MAX_COMMIT_OPERATIONS)
+                .map(|index| loonfs_api::v0::CommitOp::CreateDirectory {
+                    parent_inode_id: InodeId(1),
+                    display_name: format!("dir-{index}"),
+                })
+                .collect(),
+            message: None,
+        });
+        let operations_error = oversized_ops
+            .semantic_identity(&namespace_id)
+            .expect_err("operation limit must reject before admission");
+        assert_eq!(operations_error.code(), ErrorCode::InvalidRequest);
+
+        let content_ref = ContentRef::whole_file_v0(b"proof");
+        let token =
+            mint_content_token("secret", &namespace_id, &content_ref, 1_000).expect("mint token");
+        let prepared = verify_content_token(
+            "secret",
+            &namespace_id,
+            &ValidatedContentToken { content_ref, token },
+            1_000,
+        )
+        .expect("verify token");
+        let oversized_proofs = NamespaceMutationCandidate::commit_prepared(
+            ApiCommitRequest {
+                commit_id: CommitId::parse("too-many-proofs").expect("valid commit id"),
+                preconditions: Vec::new(),
+                ops: vec![loonfs_api::v0::CommitOp::CreateDirectory {
+                    parent_inode_id: InodeId(1),
+                    display_name: "docs".to_owned(),
+                }],
+                message: None,
+            },
+            vec![prepared; crate::limits::MAX_COMMIT_CONTENT_TOKENS + 1],
+        );
+        let proofs_error = oversized_proofs
+            .semantic_identity(&namespace_id)
+            .expect_err("prepared proof limit must reject before admission");
+        assert_eq!(proofs_error.code(), ErrorCode::InvalidRequest);
     }
 
     fn create_dir(commit_id: &str, display_name: &str) -> NamespaceMutationCandidate {

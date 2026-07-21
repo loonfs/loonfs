@@ -16,9 +16,9 @@ mod transport;
 use loonfs_api::{
     v0::{
         BeginUploadRequest, BeginUploadResponse, ChangesResponse,
-        CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse,
-        CompleteUploadRequest, CompleteUploadResponse, ObjectTransferAccess, UploadContentResponse,
-        UploadMode, ValidatedContentToken,
+        CommitResponse as ApiCommitResponse, CommitSubmissionRequest, CompleteUploadRequest,
+        CompleteUploadResponse, ObjectTransferAccess, UploadContentResponse, UploadMode,
+        ValidatedContentToken,
     },
     AbsolutePath, AdvanceRetentionResponse, AuthoritativePathEntry, CapabilityDocument, ChangeSeq,
     CommitId, ContentRef, CreateCheckpointRequest, CreateCheckpointResponse,
@@ -431,7 +431,7 @@ impl Client {
     pub fn commit_operations(
         &self,
         namespace_id: &NamespaceId,
-        request: &ApiCommitRequest,
+        request: &CommitSubmissionRequest,
     ) -> Result<ApiCommitResponse, ClientError> {
         let url = format!("{}/v0/namespaces/{namespace_id}/commits", self.base_url);
         self.request_json::<_, ApiCommitResponse>(self.agent.post(&url), Some(request))
