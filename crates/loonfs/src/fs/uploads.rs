@@ -1,6 +1,7 @@
 //! Staged uploads and direct-put targets.
 
 use super::core::FsCore;
+use crate::publish::PreparedContent;
 use crate::uploads::BeginDirectPutUploadTargetResponse;
 use crate::Result;
 use crate::{
@@ -54,9 +55,25 @@ impl FsCore {
         upload_id: &UploadId,
         request: &CompleteUploadRequest,
     ) -> Result<CompleteUploadResponse> {
+        let (response, _) = self
+            .complete_upload_prepared(namespace_id, upload_id, request)
+            .await?;
+        Ok(response)
+    }
+
+    /// Completes an upload session and returns proof for later publication.
+    ///
+    /// Service-proxied completion performs no content-blob I/O. Direct-put
+    /// completion performs one content-blob HEAD and no content-blob GET.
+    pub(crate) async fn complete_upload_prepared(
+        &self,
+        namespace_id: &NamespaceId,
+        upload_id: &UploadId,
+        request: &CompleteUploadRequest,
+    ) -> Result<(CompleteUploadResponse, PreparedContent)> {
         Ok(self
             .namespace_engine(namespace_id)
-            .complete_upload(upload_id, request)
+            .complete_upload_prepared(upload_id, request)
             .await?)
     }
 }

@@ -5,7 +5,7 @@ use crate::background::{BackgroundWork, FsBackgroundWork};
 use crate::config::default_writer_version;
 use crate::fs::FsCore;
 use crate::metrics::ObjectStoreMetricsRecorder;
-use crate::publish::NamespaceMutationCandidate;
+use crate::publish::{NamespaceMutationCandidate, PreparedContent};
 use crate::uploads::BeginDirectPutUploadTargetResponse;
 use crate::{
     BeginUploadRequest, BeginUploadResponse, CapabilityDocument, ChangeSeq, CommitRequest,
@@ -142,11 +142,39 @@ impl FsWriter {
             .await
     }
 
+    /// Stages file bytes as durable content for later publication.
+    ///
+    /// This performs one content PUT and no content reads. Preparations may
+    /// run concurrently on this writer; pass the result to
+    /// [`Self::put_file_prepared`] or [`Self::commit_operations_prepared`].
+    pub async fn prepare_file_bytes(
+        &self,
+        namespace_id: &NamespaceId,
+        bytes: &[u8],
+    ) -> Result<PreparedContent> {
+        self.core.prepare_file_bytes(namespace_id, bytes).await
+    }
+
+    /// Publishes a file revision from already-prepared content.
+    ///
+    /// Submission and publication perform no content I/O.
+    pub async fn put_file_prepared(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        prepared_content: PreparedContent,
+        options: PutFileOptions,
+    ) -> Result<CommitResponse> {
+        self.core
+            .put_file_prepared(namespace_id, absolute_path, prepared_content, options)
+            .await
+    }
+
     /// Publishes a file revision that points at an already-durable content ref.
     ///
     /// This explicitly slow helper reads the full object to prove durability
-    /// before publication. Callers that already hold proof should prefer the
-    /// admitted path.
+    /// before publication. Callers that already hold proof should prefer
+    /// [`Self::put_file_prepared`].
     pub async fn put_file_content_ref(
         &self,
         namespace_id: &NamespaceId,
@@ -156,6 +184,20 @@ impl FsWriter {
     ) -> Result<CommitResponse> {
         self.core
             .put_file_content_ref(namespace_id, absolute_path, content_ref, options)
+            .await
+    }
+
+    /// Fully validates an existing content ref for later publication.
+    ///
+    /// This performs one content HEAD followed by one full content GET and
+    /// digest check. Later prepared publication performs no content I/O.
+    pub async fn prepare_content_ref(
+        &self,
+        namespace_id: &NamespaceId,
+        content_ref: ContentRef,
+    ) -> Result<PreparedContent> {
+        self.core
+            .prepare_content_ref(namespace_id, content_ref)
             .await
     }
 
@@ -319,16 +361,49 @@ impl FsWriter {
             .await
     }
 
+    /// Completes an upload session and returns proof for later publication.
+    ///
+    /// Service-proxied completion performs no content-blob I/O. Direct-put
+    /// completion performs one content-blob HEAD and no content-blob GET.
+    /// Publishing the returned proof performs no content I/O.
+    pub async fn complete_upload_prepared(
+        &self,
+        namespace_id: &NamespaceId,
+        upload_id: &UploadId,
+        request: &CompleteUploadRequest,
+    ) -> Result<(CompleteUploadResponse, PreparedContent)> {
+        self.core
+            .complete_upload_prepared(namespace_id, upload_id, request)
+            .await
+    }
+
     /// Submits one explicit semantic commit request.
     ///
     /// This is the lower-level surface for clients that need their own commit
-    /// ids, preconditions, and operation lists.
+    /// ids, preconditions, and operation lists. Operations with external
+    /// content refs fail with `content_not_prepared`; use
+    /// [`Self::commit_operations_prepared`] to attach proofs.
     pub async fn commit_operations(
         &self,
         namespace_id: &NamespaceId,
         request: CommitRequest,
     ) -> Result<CommitResponse> {
         self.core.commit_operations(namespace_id, request).await
+    }
+
+    /// Submits one semantic commit request with prepared content proofs.
+    ///
+    /// Submission and publication perform no content I/O. One prepared value
+    /// covers every operation that uses its content ref.
+    pub async fn commit_operations_prepared(
+        &self,
+        namespace_id: &NamespaceId,
+        request: CommitRequest,
+        prepared_content: Vec<PreparedContent>,
+    ) -> Result<CommitResponse> {
+        self.core
+            .commit_operations_prepared(namespace_id, request, prepared_content)
+            .await
     }
 
     /// Submits explicit semantic commit requests as one publication attempt,

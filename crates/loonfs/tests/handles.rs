@@ -7,8 +7,8 @@
 //! the handles document.
 
 use loonfs::{
-    CreateCheckpointOptions, CreateNamespaceOptions, FsAdmin, FsBackgroundWork, FsReader, FsWriter,
-    MaintenanceTickOptions, ManifestId, NamespaceId, PutFileOptions, RuntimeCacheConfig,
+    CommitId, CreateCheckpointOptions, CreateNamespaceOptions, FsAdmin, FsBackgroundWork, FsReader,
+    FsWriter, MaintenanceTickOptions, ManifestId, NamespaceId, PutFileOptions, RuntimeCacheConfig,
     RuntimeError, StoreConfig,
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
@@ -140,6 +140,70 @@ fn writer_reader_and_admin_share_a_namespace_through_store_config() {
             .shutdown_background()
             .await
             .expect("shut down writer background work");
+    });
+}
+
+#[test]
+fn put_file_bytes_and_prepare_then_put_commit_equivalent_state() {
+    let temp_dir = tempdir().expect("tempdir");
+    block_on(async {
+        let writer = writer(temp_dir.path(), FsBackgroundWork::ManualOnly).await;
+        let simple_namespace = NamespaceId::parse("simple-put").expect("valid simple namespace id");
+        let prepared_namespace =
+            NamespaceId::parse("prepared-put").expect("valid prepared namespace id");
+        for namespace_id in [&simple_namespace, &prepared_namespace] {
+            writer
+                .create_namespace(namespace_id, CreateNamespaceOptions::default())
+                .await
+                .expect("create namespace");
+        }
+        let bytes = b"equivalent content";
+        let commit_id = CommitId::parse("equivalent-put").expect("valid commit id");
+        let options = PutFileOptions {
+            commit_id: Some(commit_id.clone()),
+            ..PutFileOptions::default()
+        };
+
+        let simple = writer
+            .put_file_bytes(&simple_namespace, "/file.txt", bytes, options.clone())
+            .await
+            .expect("put file bytes");
+        let prepared = writer
+            .prepare_file_bytes(&prepared_namespace, bytes)
+            .await
+            .expect("prepare file bytes");
+        let composed = writer
+            .put_file_prepared(&prepared_namespace, "/file.txt", prepared, options)
+            .await
+            .expect("put prepared file");
+
+        assert_eq!(simple.commit_id, commit_id);
+        assert_eq!(composed.commit_id, commit_id);
+        assert_eq!(simple.committed_seq, composed.committed_seq);
+
+        let reader = writer.reader();
+        let simple_stat = reader
+            .stat_path(&simple_namespace, "/file.txt")
+            .await
+            .expect("stat simple put");
+        let prepared_stat = reader
+            .stat_path(&prepared_namespace, "/file.txt")
+            .await
+            .expect("stat prepared put");
+        assert_eq!(simple_stat.revision_no, prepared_stat.revision_no);
+        assert_eq!(simple_stat.size_bytes, prepared_stat.size_bytes);
+        assert_eq!(simple_stat.content_ref, prepared_stat.content_ref);
+
+        let simple_read = reader
+            .read_file_bytes(&simple_namespace, "/file.txt")
+            .await
+            .expect("read simple put");
+        let prepared_read = reader
+            .read_file_bytes(&prepared_namespace, "/file.txt")
+            .await
+            .expect("read prepared put");
+        assert_eq!(simple_read.bytes, bytes);
+        assert_eq!(prepared_read.bytes, bytes);
     });
 }
 

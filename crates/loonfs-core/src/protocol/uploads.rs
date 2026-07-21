@@ -245,7 +245,7 @@ pub(crate) async fn complete_upload<S: ObjectStore + ?Sized>(
     upload_id: &UploadId,
     request: &CompleteUploadRequest,
     context: &MutationContext,
-) -> Result<CompleteUploadResponse> {
+) -> Result<(CompleteUploadResponse, PreparedContent)> {
     update_upload_session(
         store,
         namespace_id,
@@ -259,23 +259,32 @@ pub(crate) async fn complete_upload<S: ObjectStore + ?Sized>(
             async move {
                 if let Some(completed) = &state.completed {
                     if completed.content_ref == request.content_ref {
-                        return Ok(UploadSessionUpdate::Noop(CompleteUploadResponse {
-                            namespace_id,
-                            upload_id,
-                            content_ref: completed.content_ref.clone(),
-                            validated_content_token: None,
-                        }));
+                        let prepared_content = prepare_completed_upload_content(
+                            namespace_id.clone(),
+                            completed.content_ref.clone(),
+                        );
+                        return Ok(UploadSessionUpdate::Noop((
+                            CompleteUploadResponse {
+                                namespace_id,
+                                upload_id,
+                                content_ref: completed.content_ref.clone(),
+                                validated_content_token: None,
+                            },
+                            prepared_content,
+                        )));
                     }
                     return Err(CoreError::UploadAlreadyCompleted { upload_id });
                 }
 
-                let staged_content_ref = match state.staged_content_ref.clone() {
-                    Some(content_ref) => content_ref,
-                    None => stage_direct_put_content_ref(store, &namespace_id, &state, &request)
-                        .await?
-                        .content_ref()
-                        .clone(),
+                let prepared_content = match state.staged_content_ref.clone() {
+                    Some(content_ref) => {
+                        prepare_completed_upload_content(namespace_id.clone(), content_ref)
+                    }
+                    None => {
+                        stage_direct_put_content_ref(store, &namespace_id, &state, &request).await?
+                    }
                 };
+                let staged_content_ref = prepared_content.content_ref().clone();
                 if staged_content_ref != request.content_ref {
                     return Err(CoreError::InvalidUploadContent(
                         "completed content ref does not match staged content".to_owned(),
@@ -291,17 +300,28 @@ pub(crate) async fn complete_upload<S: ObjectStore + ?Sized>(
 
                 Ok(UploadSessionUpdate::Replace {
                     next: Box::new(state),
-                    outcome: CompleteUploadResponse {
-                        namespace_id,
-                        upload_id,
-                        content_ref: request.content_ref.clone(),
-                        validated_content_token: None,
-                    },
+                    outcome: (
+                        CompleteUploadResponse {
+                            namespace_id,
+                            upload_id,
+                            content_ref: request.content_ref.clone(),
+                            validated_content_token: None,
+                        },
+                        prepared_content,
+                    ),
                 })
             }
         },
     )
     .await
+}
+
+fn prepare_completed_upload_content(
+    namespace_id: NamespaceId,
+    content_ref: ContentRef,
+) -> PreparedContent {
+    let admission = ContentAdmission::for_durable_content_write(namespace_id, content_ref.clone());
+    PreparedContent::from_admission(content_ref, admission)
 }
 
 async fn stage_direct_put_content_ref<S: ObjectStore + ?Sized>(
@@ -338,8 +358,8 @@ async fn stage_direct_put_content_ref<S: ObjectStore + ?Sized>(
     probe_durable_content_reference(store, &content_store_id, &request.content_ref)
         .await
         .map_err(|err| CoreError::InvalidUploadContent(err.to_string()))?;
-    let content_ref = request.content_ref.clone();
-    let admission =
-        ContentAdmission::for_durable_content_write(namespace_id.clone(), content_ref.clone());
-    Ok(PreparedContent::from_admission(content_ref, admission))
+    Ok(prepare_completed_upload_content(
+        namespace_id.clone(),
+        request.content_ref.clone(),
+    ))
 }
