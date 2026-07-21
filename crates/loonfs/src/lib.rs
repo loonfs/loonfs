@@ -74,6 +74,9 @@ pub use loonfs_core::{
 /// [`publish::NamespaceMutationCandidate`]s directly. Most embedded users
 /// never need this module.
 pub mod publish {
+    pub use loonfs_core::limits::{
+        MAX_COMMIT_CONTENT_TOKENS, MAX_COMMIT_EXTERNAL_CONTENT_REFS, MAX_COMMIT_OPERATIONS,
+    };
     pub use loonfs_core::path::parse_mutation_path;
     pub use loonfs_core::publish::{
         ContentPreparation, ContentPreparationError, NamespaceMutation, NamespaceMutationCandidate,

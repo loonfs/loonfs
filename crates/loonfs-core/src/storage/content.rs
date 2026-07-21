@@ -10,7 +10,6 @@ use loonfs_api::{sha256_digest, ContentRef, ContentRefKind, ContentStoreId, Name
 use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError, PROVIDER_MULTIPART_THRESHOLD_BYTES};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,28 +40,6 @@ pub struct StoredContent {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StoredContentWriteAcknowledgement;
-
-#[derive(Debug, Clone, Default)]
-pub(crate) struct ContentValidationTracker {
-    validated: HashSet<(ContentStoreId, ContentRef)>,
-}
-
-impl ContentValidationTracker {
-    pub(crate) async fn ensure_validated<S: ObjectStore + ?Sized>(
-        &mut self,
-        store: &S,
-        content_store_id: &ContentStoreId,
-        content_ref: &ContentRef,
-    ) -> Result<(), DurableContentValidationError> {
-        let key = (content_store_id.clone(), content_ref.clone());
-        if self.validated.contains(&key) {
-            return Ok(());
-        }
-        validate_durable_content_reference(store, content_store_id, content_ref).await?;
-        self.validated.insert(key);
-        Ok(())
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
 pub enum DurableContentValidationError {

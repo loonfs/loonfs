@@ -13,14 +13,11 @@ use crate::namespace::catalog::{load_namespace_catalog_entry, VerifiedNamespaceC
 use crate::namespace::control::{read_head_and_metadata_root, ControlObjectLoadError};
 use crate::wal::{load_validated_wal_chain, project_validated_wal_tail, WalChainLoadRequest};
 use loonfs_api::wire::control::{AcquiredWriter, HeadState, NamespaceState};
-use loonfs_api::{
-    ChangeSeq, CommitId, ContentStoreId, ManifestId, ManifestObjectId, NamePolicy, NamespaceId,
-};
+use loonfs_api::{ChangeSeq, CommitId, ManifestId, ManifestObjectId, NamePolicy, NamespaceId};
 use loonfs_objectstore::keys::wal_head;
 use loonfs_objectstore::ObjectStore;
 
 pub(crate) struct PublishMetadataView<'a, S: ObjectStore + ?Sized> {
-    pub(super) content_store_id: ContentStoreId,
     name_policy: NamePolicy,
     pub(super) head: HeadState,
     pub(super) head_etag: String,
@@ -197,7 +194,6 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
 
     Ok((
         PublishMetadataView {
-            content_store_id: catalog_entry.content_store_id,
             name_policy: catalog_entry.namespace_config.name_policy,
             head,
             head_etag,

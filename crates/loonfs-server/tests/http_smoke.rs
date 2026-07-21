@@ -3,7 +3,8 @@ use loonfs::content_tokens::mint_content_token;
 use loonfs_api::{
     v0::{
         BeginUploadRequest, CommitDelta, CommitOp, CommitRequest as ApiCommitRequest,
-        CompleteUploadRequest, CompleteUploadResponse, ValidatedContentToken,
+        CommitSubmissionRequest, CompleteUploadRequest, CompleteUploadResponse,
+        ValidatedContentToken,
     },
     AdvanceRetentionResponse, ApiError, ChangeSeq, CheckpointId, CommitId, CommitResponse,
     ContentRef, CreateCheckpointResponse, DestinationBehavior, ErrorCode, FilesystemOperation,
@@ -17,6 +18,7 @@ use loonfs_objectstore::{ConfiguredObjectStore, ObjectStore};
 use loonfs_server::{app, RuntimeCacheConfigOverrides, ServerConfig, StoreConfig};
 use serde_json::json;
 use std::future::Future;
+use std::io::Read as _;
 use std::path::PathBuf;
 use tempfile::tempdir;
 
@@ -705,17 +707,21 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
             other => unreachable!("expected upload content rejection, got {other:?}"),
         }
 
-        let content_ref = stage_uploaded_content_ref(&harness.client, &namespace, file_bytes);
+        let completed = stage_uploaded_content(&harness.client, &namespace, file_bytes);
+        let content_ref = completed.content_ref.clone();
 
-        let commit_request = ApiCommitRequest {
-            commit_id: CommitId::parse("req-phase-2a-create-file").expect("valid commit id"),
-            preconditions: Vec::new(),
-            ops: vec![CommitOp::CreateFile {
-                parent_inode_id: InodeId(1),
-                display_name: "uploaded.txt".to_owned(),
-                content_ref: content_ref.clone(),
-            }],
-            message: Some("upload over http".to_owned()),
+        let commit_request = CommitSubmissionRequest {
+            commit: ApiCommitRequest {
+                commit_id: CommitId::parse("req-phase-2a-create-file").expect("valid commit id"),
+                preconditions: Vec::new(),
+                ops: vec![CommitOp::CreateFile {
+                    parent_inode_id: InodeId(1),
+                    display_name: "uploaded.txt".to_owned(),
+                    content_ref: content_ref.clone(),
+                }],
+                message: Some("upload over http".to_owned()),
+            },
+            content_tokens: vec![validated_content_token(&completed)],
         };
         let commit = harness
             .client
@@ -756,7 +762,7 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
         let change = &changes.changes[0];
         assert_eq!(change.seq, commit.committed_seq);
         assert_eq!(change.commit_id, commit.commit_id);
-        assert_eq!(change.commit_id, commit_request.commit_id);
+        assert_eq!(change.commit_id, commit_request.commit.commit_id);
         assert_eq!(change.message.as_deref(), Some("upload over http"));
         assert_eq!(change.deltas.len(), 3);
         assert!(matches!(
@@ -1021,6 +1027,358 @@ async fn path_put_with_only_an_irrelevant_token_reports_the_missing_put_proof() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn commit_with_valid_tokens_for_all_distinct_refs_succeeds() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loonfs-server-commit-tokens",
+        "http-commit-valid-tokens",
+    ))
+    .await;
+
+    tokio::task::spawn_blocking(move || {
+        let namespace = namespace_id("demo");
+        harness
+            .client
+            .create_namespace(&namespace)
+            .expect("create namespace");
+        let first = stage_uploaded_content(&harness.client, &namespace, b"first");
+        let second = stage_uploaded_content(&harness.client, &namespace, b"second");
+        let third = stage_uploaded_content(&harness.client, &namespace, b"third");
+        let request = CommitSubmissionRequest {
+            commit: ApiCommitRequest {
+                commit_id: CommitId::parse("commit-all-proofs").expect("valid commit id"),
+                preconditions: Vec::new(),
+                ops: vec![
+                    CommitOp::CreateFile {
+                        parent_inode_id: InodeId(1),
+                        display_name: "first.txt".to_owned(),
+                        content_ref: first.content_ref.clone(),
+                    },
+                    CommitOp::CreateFile {
+                        parent_inode_id: InodeId(1),
+                        display_name: "first-copy.txt".to_owned(),
+                        content_ref: first.content_ref.clone(),
+                    },
+                    CommitOp::CreateFile {
+                        parent_inode_id: InodeId(1),
+                        display_name: "second.txt".to_owned(),
+                        content_ref: second.content_ref.clone(),
+                    },
+                    CommitOp::CreateFile {
+                        parent_inode_id: InodeId(1),
+                        display_name: "third.txt".to_owned(),
+                        content_ref: third.content_ref.clone(),
+                    },
+                ],
+                message: None,
+            },
+            content_tokens: vec![
+                validated_content_token(&first),
+                validated_content_token(&second),
+                validated_content_token(&third),
+                ValidatedContentToken {
+                    content_ref: ContentRef::whole_file_v0(b"irrelevant"),
+                    token: "irrelevant.garbage".to_owned(),
+                },
+            ],
+        };
+
+        let response = harness
+            .client
+            .commit_operations(&namespace, &request)
+            .expect("all distinct refs are prepared");
+        assert_eq!(response.committed_seq, ChangeSeq(1));
+        assert_eq!(
+            harness
+                .client
+                .stat_path(&NamespacePath::parse("demo", "/first-copy.txt").expect("path"))
+                .expect("repeated ref file")
+                .content_ref,
+            Some(first.content_ref)
+        );
+    })
+    .await
+    .expect("blocking task");
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn commit_with_one_missing_proof_reports_first_uncovered_digest() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loonfs-server-commit-missing-token",
+        "http-commit-missing-token",
+    ))
+    .await;
+
+    tokio::task::spawn_blocking(move || {
+        let namespace = namespace_id("demo");
+        harness
+            .client
+            .create_namespace(&namespace)
+            .expect("create namespace");
+        let covered = stage_uploaded_content(&harness.client, &namespace, b"covered");
+        let uncovered = stage_uploaded_content(&harness.client, &namespace, b"uncovered");
+        let request = CommitSubmissionRequest {
+            commit: ApiCommitRequest {
+                commit_id: CommitId::parse("commit-missing-proof").expect("valid commit id"),
+                preconditions: Vec::new(),
+                ops: vec![
+                    CommitOp::CreateFile {
+                        parent_inode_id: InodeId(1),
+                        display_name: "covered.txt".to_owned(),
+                        content_ref: covered.content_ref.clone(),
+                    },
+                    CommitOp::CreateFile {
+                        parent_inode_id: InodeId(1),
+                        display_name: "uncovered.txt".to_owned(),
+                        content_ref: uncovered.content_ref.clone(),
+                    },
+                ],
+                message: None,
+            },
+            content_tokens: vec![validated_content_token(&covered)],
+        };
+
+        assert_commit_content_not_prepared_response(
+            send_commit_submission(&harness.server_url, &namespace, &request),
+            &request.commit.commit_id,
+            &format!(
+                "content ref `{}` is not prepared for publication",
+                uncovered.content_ref.digest
+            ),
+        );
+    })
+    .await
+    .expect("blocking task");
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn commit_with_invalid_relevant_token_reports_token_failure() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loonfs-server-commit-invalid-token",
+        "http-commit-invalid-token",
+    ))
+    .await;
+
+    tokio::task::spawn_blocking(move || {
+        let namespace = namespace_id("demo");
+        harness
+            .client
+            .create_namespace(&namespace)
+            .expect("create namespace");
+        let completed = stage_uploaded_content(&harness.client, &namespace, b"invalid token");
+        let request = CommitSubmissionRequest {
+            commit: ApiCommitRequest {
+                commit_id: CommitId::parse("commit-invalid-token").expect("valid commit id"),
+                preconditions: Vec::new(),
+                ops: vec![CommitOp::CreateFile {
+                    parent_inode_id: InodeId(1),
+                    display_name: "invalid.txt".to_owned(),
+                    content_ref: completed.content_ref.clone(),
+                }],
+                message: None,
+            },
+            content_tokens: vec![ValidatedContentToken {
+                content_ref: completed.content_ref,
+                token: "not.a.valid.token".to_owned(),
+            }],
+        };
+
+        assert_commit_content_not_prepared_response(
+            send_commit_submission(&harness.server_url, &namespace, &request),
+            &request.commit.commit_id,
+            "content token was rejected: content token is malformed",
+        );
+    })
+    .await
+    .expect("blocking task");
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn landed_commit_replays_byte_for_byte_with_absent_expired_or_garbage_tokens() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loonfs-server-commit-token-replay",
+        "http-commit-token-replay",
+    ))
+    .await;
+
+    tokio::task::spawn_blocking(move || {
+        let namespace = namespace_id("demo");
+        harness
+            .client
+            .create_namespace(&namespace)
+            .expect("create namespace");
+        let completed = stage_uploaded_content(&harness.client, &namespace, b"commit replay");
+        let content_ref = completed.content_ref.clone();
+        let mut request = CommitSubmissionRequest {
+            commit: ApiCommitRequest {
+                commit_id: CommitId::parse("commit-token-replay").expect("valid commit id"),
+                preconditions: Vec::new(),
+                ops: vec![CommitOp::CreateFile {
+                    parent_inode_id: InodeId(1),
+                    display_name: "replay.txt".to_owned(),
+                    content_ref: content_ref.clone(),
+                }],
+                message: None,
+            },
+            content_tokens: vec![validated_content_token(&completed)],
+        };
+        let send = |request: &CommitSubmissionRequest| {
+            response_bytes(
+                send_commit_submission(&harness.server_url, &namespace, request)
+                    .expect("landed commit should replay"),
+            )
+        };
+        let original = send(&request);
+
+        request.content_tokens.clear();
+        assert_eq!(send(&request), original);
+
+        request.content_tokens = vec![ValidatedContentToken {
+            content_ref: content_ref.clone(),
+            token: mint_content_token(TEST_CONTENT_TOKEN_SECRET, &namespace, &content_ref, 0)
+                .expect("mint expired token"),
+        }];
+        assert_eq!(send(&request), original);
+
+        request.content_tokens = vec![ValidatedContentToken {
+            content_ref,
+            token: "not.a.valid.token".to_owned(),
+        }];
+        assert_eq!(send(&request), original);
+    })
+    .await
+    .expect("blocking task");
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bare_commit_body_without_content_tokens_still_parses_and_commits_mkdir() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loonfs-server-bare-commit",
+        "http-bare-commit",
+    ))
+    .await;
+
+    tokio::task::spawn_blocking(move || {
+        let namespace = namespace_id("demo");
+        harness
+            .client
+            .create_namespace(&namespace)
+            .expect("create namespace");
+        let body = json!({
+            "commit_id": "bare-commit-mkdir",
+            "preconditions": [],
+            "ops": [{
+                "kind": "create_directory",
+                "parent_inode_id": 1,
+                "display_name": "docs"
+            }],
+            "message": null
+        });
+
+        let response =
+            send_commit_json(&harness.server_url, &namespace, &body).expect("bare commit body");
+        let response: CommitResponse =
+            serde_json::from_reader(response.into_reader()).expect("decode response");
+        assert_eq!(response.committed_seq, ChangeSeq(1));
+        harness
+            .client
+            .stat_path(&NamespacePath::parse("demo", "/docs").expect("path"))
+            .expect("mkdir committed");
+    })
+    .await
+    .expect("blocking task");
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn commit_operation_and_content_token_limits_reject_before_admission() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loonfs-server-commit-limits",
+        "http-commit-limits",
+    ))
+    .await;
+
+    tokio::task::spawn_blocking(move || {
+        let namespace = namespace_id("demo");
+        harness
+            .client
+            .create_namespace(&namespace)
+            .expect("create namespace");
+        let oversized_ops = CommitSubmissionRequest {
+            commit: ApiCommitRequest {
+                commit_id: CommitId::parse("commit-too-many-ops").expect("valid commit id"),
+                preconditions: Vec::new(),
+                ops: (0..4097)
+                    .map(|index| CommitOp::CreateDirectory {
+                        parent_inode_id: InodeId(1),
+                        display_name: format!("dir-{index}"),
+                    })
+                    .collect(),
+                message: None,
+            },
+            content_tokens: Vec::new(),
+        };
+        assert_invalid_commit_limit_response(
+            send_commit_submission(&harness.server_url, &namespace, &oversized_ops),
+            "4097 operations",
+        );
+
+        let irrelevant_ref = ContentRef::whole_file_v0(b"irrelevant");
+        let oversized_tokens = CommitSubmissionRequest {
+            commit: ApiCommitRequest {
+                commit_id: CommitId::parse("commit-too-many-tokens").expect("valid commit id"),
+                preconditions: Vec::new(),
+                ops: vec![CommitOp::CreateDirectory {
+                    parent_inode_id: InodeId(1),
+                    display_name: "never-admitted".to_owned(),
+                }],
+                message: None,
+            },
+            content_tokens: (0..4097)
+                .map(|_| ValidatedContentToken {
+                    content_ref: irrelevant_ref.clone(),
+                    token: "irrelevant".to_owned(),
+                })
+                .collect(),
+        };
+        assert_invalid_commit_limit_response(
+            send_commit_submission(&harness.server_url, &namespace, &oversized_tokens),
+            "4097 content token entries",
+        );
+
+        let changes = harness
+            .client
+            .list_changes_page(&namespace, ChangeSeq(0), None)
+            .expect("list changes");
+        assert!(changes.changes.is_empty());
+    })
+    .await
+    .expect("blocking task");
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
@@ -1038,21 +1396,24 @@ async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
             .create_namespace(&namespace)
             .expect("create namespace");
 
-        let first_content_ref =
-            stage_uploaded_content_ref(&harness.client, &namespace, b"first bytes\n");
+        let first = stage_uploaded_content(&harness.client, &namespace, b"first bytes\n");
+        let first_content_ref = first.content_ref.clone();
         harness
             .client
             .commit_operations(
                 &namespace,
-                &ApiCommitRequest {
-                    commit_id: CommitId::parse("req-restore-create").expect("valid commit id"),
-                    preconditions: Vec::new(),
-                    ops: vec![CommitOp::CreateFile {
-                        parent_inode_id: InodeId(1),
-                        display_name: "restore.txt".to_owned(),
-                        content_ref: first_content_ref.clone(),
-                    }],
-                    message: None,
+                &CommitSubmissionRequest {
+                    commit: ApiCommitRequest {
+                        commit_id: CommitId::parse("req-restore-create").expect("valid commit id"),
+                        preconditions: Vec::new(),
+                        ops: vec![CommitOp::CreateFile {
+                            parent_inode_id: InodeId(1),
+                            display_name: "restore.txt".to_owned(),
+                            content_ref: first_content_ref.clone(),
+                        }],
+                        message: None,
+                    },
+                    content_tokens: vec![validated_content_token(&first)],
                 },
             )
             .expect("create file");
@@ -1062,21 +1423,24 @@ async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
             .expect("stat created file")
             .inode_id;
 
-        let second_content_ref =
-            stage_uploaded_content_ref(&harness.client, &namespace, b"second bytes\n");
+        let second = stage_uploaded_content(&harness.client, &namespace, b"second bytes\n");
+        let second_content_ref = second.content_ref.clone();
         let replace = harness
             .client
             .commit_operations(
                 &namespace,
-                &ApiCommitRequest {
-                    commit_id: CommitId::parse("req-restore-replace").expect("valid commit id"),
-                    preconditions: Vec::new(),
-                    ops: vec![CommitOp::ReplaceFile {
-                        inode_id,
-                        base_revision_no: RevisionNo(1),
-                        content_ref: second_content_ref.clone(),
-                    }],
-                    message: None,
+                &CommitSubmissionRequest {
+                    commit: ApiCommitRequest {
+                        commit_id: CommitId::parse("req-restore-replace").expect("valid commit id"),
+                        preconditions: Vec::new(),
+                        ops: vec![CommitOp::ReplaceFile {
+                            inode_id,
+                            base_revision_no: RevisionNo(1),
+                            content_ref: second_content_ref.clone(),
+                        }],
+                        message: None,
+                    },
+                    content_tokens: vec![validated_content_token(&second)],
                 },
             )
             .expect("replace file");
@@ -1086,15 +1450,18 @@ async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
             .client
             .commit_operations(
                 &namespace,
-                &ApiCommitRequest {
-                    commit_id: CommitId::parse("req-restore-restore").expect("valid commit id"),
-                    preconditions: Vec::new(),
-                    ops: vec![CommitOp::RestoreRevision {
-                        inode_id,
-                        source_revision_no: RevisionNo(1),
-                        base_revision_no: RevisionNo(2),
-                    }],
-                    message: Some("restore revision".to_owned()),
+                &CommitSubmissionRequest {
+                    commit: ApiCommitRequest {
+                        commit_id: CommitId::parse("req-restore-restore").expect("valid commit id"),
+                        preconditions: Vec::new(),
+                        ops: vec![CommitOp::RestoreRevision {
+                            inode_id,
+                            source_revision_no: RevisionNo(1),
+                            base_revision_no: RevisionNo(2),
+                        }],
+                        message: Some("restore revision".to_owned()),
+                    },
+                    content_tokens: Vec::new(),
                 },
             )
             .expect("restore revision");
@@ -1300,22 +1667,24 @@ async fn http_commit_restore_revision_missing_source_returns_revision_not_found(
             .expect("create namespace");
         let target = NamespacePath::parse("demo", "/restore.txt").expect("target");
 
-        let first_content_ref =
-            stage_uploaded_content_ref(&harness.client, &namespace, b"first bytes\n");
+        let first = stage_uploaded_content(&harness.client, &namespace, b"first bytes\n");
         harness
             .client
             .commit_operations(
                 &namespace,
-                &ApiCommitRequest {
-                    commit_id: CommitId::parse("req-restore-missing-source-create")
-                        .expect("valid commit id"),
-                    preconditions: Vec::new(),
-                    ops: vec![CommitOp::CreateFile {
-                        parent_inode_id: InodeId(1),
-                        display_name: "restore.txt".to_owned(),
-                        content_ref: first_content_ref,
-                    }],
-                    message: None,
+                &CommitSubmissionRequest {
+                    commit: ApiCommitRequest {
+                        commit_id: CommitId::parse("req-restore-missing-source-create")
+                            .expect("valid commit id"),
+                        preconditions: Vec::new(),
+                        ops: vec![CommitOp::CreateFile {
+                            parent_inode_id: InodeId(1),
+                            display_name: "restore.txt".to_owned(),
+                            content_ref: first.content_ref.clone(),
+                        }],
+                        message: None,
+                    },
+                    content_tokens: vec![validated_content_token(&first)],
                 },
             )
             .expect("create file");
@@ -1327,16 +1696,19 @@ async fn http_commit_restore_revision_missing_source_returns_revision_not_found(
 
         match harness.client.commit_operations(
             &namespace,
-            &ApiCommitRequest {
-                commit_id: CommitId::parse("req-restore-missing-source-restore")
-                    .expect("valid commit id"),
-                preconditions: Vec::new(),
-                ops: vec![CommitOp::RestoreRevision {
-                    inode_id,
-                    source_revision_no: RevisionNo(99),
-                    base_revision_no: RevisionNo(1),
-                }],
-                message: None,
+            &CommitSubmissionRequest {
+                commit: ApiCommitRequest {
+                    commit_id: CommitId::parse("req-restore-missing-source-restore")
+                        .expect("valid commit id"),
+                    preconditions: Vec::new(),
+                    ops: vec![CommitOp::RestoreRevision {
+                        inode_id,
+                        source_revision_no: RevisionNo(99),
+                        base_revision_no: RevisionNo(1),
+                    }],
+                    message: None,
+                },
+                content_tokens: Vec::new(),
             },
         ) {
             Err(ClientError::Api { status, code, .. }) => {
@@ -1369,34 +1741,38 @@ async fn http_commit_rejects_same_commit_id_with_different_payload() {
             .create_namespace(&namespace)
             .expect("create namespace");
 
-        let first_content_ref =
-            stage_uploaded_content_ref(&harness.client, &namespace, b"first payload\n");
-        let first_request = ApiCommitRequest {
-            commit_id: CommitId::parse("req-phase-2a-conflict").expect("valid commit id"),
-            preconditions: Vec::new(),
-            ops: vec![CommitOp::CreateFile {
-                parent_inode_id: InodeId(1),
-                display_name: "first.txt".to_owned(),
-                content_ref: first_content_ref,
-            }],
-            message: Some("first commit".to_owned()),
+        let first = stage_uploaded_content(&harness.client, &namespace, b"first payload\n");
+        let first_request = CommitSubmissionRequest {
+            commit: ApiCommitRequest {
+                commit_id: CommitId::parse("req-phase-2a-conflict").expect("valid commit id"),
+                preconditions: Vec::new(),
+                ops: vec![CommitOp::CreateFile {
+                    parent_inode_id: InodeId(1),
+                    display_name: "first.txt".to_owned(),
+                    content_ref: first.content_ref.clone(),
+                }],
+                message: Some("first commit".to_owned()),
+            },
+            content_tokens: vec![validated_content_token(&first)],
         };
         harness
             .client
             .commit_operations(&namespace, &first_request)
             .expect("first commit");
 
-        let second_content_ref =
-            stage_uploaded_content_ref(&harness.client, &namespace, b"second payload\n");
-        let conflicting_request = ApiCommitRequest {
-            commit_id: first_request.commit_id.clone(),
-            preconditions: first_request.preconditions.clone(),
-            ops: vec![CommitOp::CreateFile {
-                parent_inode_id: InodeId(1),
-                display_name: "second.txt".to_owned(),
-                content_ref: second_content_ref,
-            }],
-            message: Some("second commit".to_owned()),
+        let second = stage_uploaded_content(&harness.client, &namespace, b"second payload\n");
+        let conflicting_request = CommitSubmissionRequest {
+            commit: ApiCommitRequest {
+                commit_id: first_request.commit.commit_id.clone(),
+                preconditions: first_request.commit.preconditions.clone(),
+                ops: vec![CommitOp::CreateFile {
+                    parent_inode_id: InodeId(1),
+                    display_name: "second.txt".to_owned(),
+                    content_ref: second.content_ref.clone(),
+                }],
+                message: Some("second commit".to_owned()),
+            },
+            content_tokens: vec![validated_content_token(&second)],
         };
 
         match harness
@@ -1414,7 +1790,10 @@ async fn http_commit_rejects_same_commit_id_with_different_payload() {
                 // structured fields, not prose (API spec, "Standard error
                 // contract").
                 let details = details.expect("structured details");
-                assert_eq!(details.commit_id, Some(first_request.commit_id.clone()));
+                assert_eq!(
+                    details.commit_id,
+                    Some(first_request.commit.commit_id.clone())
+                );
                 let request_id = request_id.expect("request id");
                 assert!(request_id.starts_with("req_"), "got `{request_id}`");
             }
@@ -1444,35 +1823,43 @@ async fn http_commit_name_collision_reports_readable_error_message() {
             .create_namespace(&namespace)
             .expect("create namespace");
 
-        let content_ref = stage_uploaded_content_ref(&harness.client, &namespace, b"taken bytes\n");
+        let completed = stage_uploaded_content(&harness.client, &namespace, b"taken bytes\n");
+        let content_ref = completed.content_ref.clone();
         harness
             .client
             .commit_operations(
                 &namespace,
-                &ApiCommitRequest {
-                    commit_id: CommitId::parse("req-collision-create").expect("valid commit id"),
-                    preconditions: Vec::new(),
-                    ops: vec![CommitOp::CreateFile {
-                        parent_inode_id: InodeId(1),
-                        display_name: "taken.txt".to_owned(),
-                        content_ref: content_ref.clone(),
-                    }],
-                    message: None,
+                &CommitSubmissionRequest {
+                    commit: ApiCommitRequest {
+                        commit_id: CommitId::parse("req-collision-create")
+                            .expect("valid commit id"),
+                        preconditions: Vec::new(),
+                        ops: vec![CommitOp::CreateFile {
+                            parent_inode_id: InodeId(1),
+                            display_name: "taken.txt".to_owned(),
+                            content_ref: content_ref.clone(),
+                        }],
+                        message: None,
+                    },
+                    content_tokens: vec![validated_content_token(&completed)],
                 },
             )
             .expect("create file");
 
         match harness.client.commit_operations(
             &namespace,
-            &ApiCommitRequest {
-                commit_id: CommitId::parse("req-collision-repeat").expect("valid commit id"),
-                preconditions: Vec::new(),
-                ops: vec![CommitOp::CreateFile {
-                    parent_inode_id: InodeId(1),
-                    display_name: "taken.txt".to_owned(),
-                    content_ref,
-                }],
-                message: None,
+            &CommitSubmissionRequest {
+                commit: ApiCommitRequest {
+                    commit_id: CommitId::parse("req-collision-repeat").expect("valid commit id"),
+                    preconditions: Vec::new(),
+                    ops: vec![CommitOp::CreateFile {
+                        parent_inode_id: InodeId(1),
+                        display_name: "taken.txt".to_owned(),
+                        content_ref,
+                    }],
+                    message: None,
+                },
+                content_tokens: vec![validated_content_token(&completed)],
             },
         ) {
             Err(ClientError::Api {
@@ -2397,6 +2784,83 @@ fn send_filesystem_operation(
     .map_err(Box::new)
 }
 
+fn send_commit_submission(
+    server_url: &str,
+    namespace_id: &NamespaceId,
+    request: &CommitSubmissionRequest,
+) -> Result<ureq::Response, Box<ureq::Error>> {
+    send_commit_json(server_url, namespace_id, request)
+}
+
+fn send_commit_json(
+    server_url: &str,
+    namespace_id: &NamespaceId,
+    request: &impl serde::Serialize,
+) -> Result<ureq::Response, Box<ureq::Error>> {
+    ureq::post(&format!(
+        "{server_url}/v0/namespaces/{namespace_id}/commits"
+    ))
+    .set("authorization", "Bearer test-token")
+    .send_json(request)
+    .map_err(Box::new)
+}
+
+fn response_bytes(response: ureq::Response) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    response
+        .into_reader()
+        .read_to_end(&mut bytes)
+        .expect("read response bytes");
+    bytes
+}
+
+fn assert_commit_content_not_prepared_response(
+    result: Result<ureq::Response, Box<ureq::Error>>,
+    commit_id: &CommitId,
+    expected_message: &str,
+) {
+    match result {
+        Err(error) if matches!(error.as_ref(), ureq::Error::Status(_, _)) => {
+            let ureq::Error::Status(status, response) = *error else {
+                unreachable!("guard requires an HTTP status error");
+            };
+            assert_eq!(status, 409);
+            let error: ApiError =
+                serde_json::from_reader(response.into_reader()).expect("decode api error");
+            assert_eq!(error.code, ErrorCode::ContentNotPrepared.as_str());
+            assert_eq!(error.message, expected_message);
+            assert_eq!(
+                error.details.and_then(|details| details.commit_id),
+                Some(commit_id.clone())
+            );
+        }
+        other => unreachable!("expected content_not_prepared response, got {other:?}"),
+    }
+}
+
+fn assert_invalid_commit_limit_response(
+    result: Result<ureq::Response, Box<ureq::Error>>,
+    expected_message_fragment: &str,
+) {
+    match result {
+        Err(error) if matches!(error.as_ref(), ureq::Error::Status(_, _)) => {
+            let ureq::Error::Status(status, response) = *error else {
+                unreachable!("guard requires an HTTP status error");
+            };
+            assert_eq!(status, 400);
+            let error: ApiError =
+                serde_json::from_reader(response.into_reader()).expect("decode api error");
+            assert_eq!(error.code, ErrorCode::InvalidRequest.as_str());
+            assert!(
+                error.message.contains(expected_message_fragment),
+                "expected `{expected_message_fragment}` in `{}`",
+                error.message
+            );
+        }
+        other => unreachable!("expected invalid_request response, got {other:?}"),
+    }
+}
+
 fn assert_content_not_prepared_response(
     result: Result<ureq::Response, Box<ureq::Error>>,
     request: &FilesystemOperationRequest,
@@ -2459,10 +2923,12 @@ fn stage_uploaded_content(
     complete
 }
 
-fn stage_uploaded_content_ref(
-    client: &Client,
-    namespace_id: &NamespaceId,
-    file_bytes: &[u8],
-) -> ContentRef {
-    stage_uploaded_content(client, namespace_id, file_bytes).content_ref
+fn validated_content_token(completed: &CompleteUploadResponse) -> ValidatedContentToken {
+    ValidatedContentToken {
+        content_ref: completed.content_ref.clone(),
+        token: completed
+            .validated_content_token
+            .clone()
+            .expect("completed upload carries token"),
+    }
 }

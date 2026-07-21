@@ -1061,7 +1061,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/CommitRequest"
+                "$ref": "#/components/schemas/CommitSubmissionRequest"
               }
             }
           },
@@ -3447,6 +3447,27 @@
             "description": "Namespace that changed."
           }
         }
+      },
+      "CommitSubmissionRequest": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CommitRequest",
+            "description": "Semantic commit whose fields remain at the top level on the wire."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "content_tokens": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ValidatedContentToken"
+                },
+                "description": "Proofs for new external content refs introduced by the commit."
+              }
+            }
+          }
+        ],
+        "description": "Transport wrapper for submitting an explicit semantic commit.\n\nThe flattened commit fields preserve the original bare request shape,\nwhile `content_tokens` carries transport-only preparation proofs that do\nnot participate in the semantic commit fingerprint."
       },
       "CommittedChange": {
         "type": "object",

@@ -11,8 +11,8 @@ use loonfs_api::{
     v0::{
         BeginUploadRequest, BeginUploadResponse, ChangesResponse,
         CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse,
-        CompleteUploadRequest, CompleteUploadResponse, DirectPutUpload, ObjectTransferAccess,
-        UploadContentResponse, UploadMode, ValidatedContentToken,
+        CommitSubmissionRequest, CompleteUploadRequest, CompleteUploadResponse, DirectPutUpload,
+        ObjectTransferAccess, UploadContentResponse, UploadMode, ValidatedContentToken,
     },
     AdvanceRetentionResponse, ApiError, ContentRef, CreateCheckpointRequest,
     CreateCheckpointResponse, CreateNamespaceRequest, FilesystemOperation,
@@ -116,6 +116,7 @@ pub fn openapi_json_pretty() -> Result<String, serde_json::Error> {
         ObjectTransferAccess,
         UploadMode,
         ValidatedContentToken,
+        CommitSubmissionRequest,
         ApiCommitRequest,
         ApiCommitResponse,
         loonfs_api::v0::CommitOp,

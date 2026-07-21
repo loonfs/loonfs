@@ -77,6 +77,7 @@ therefore identical for both backends.
     "query.grep": true
   },
   "limits": {
+    "commit.max_operations": 4096,
     "maintenance.gc.min_grace_window_ms": 1230000,
     "pagination.default_limit": 1000,
     "pagination.max_limit": 1000,
@@ -118,6 +119,7 @@ Registered limit keys:
 | `upload.max_concurrent` | How many service-proxied upload bodies the deployment buffers at once; requests past the cap answer `server_busy`. |
 | `download.max_concurrent` | How many service-proxied content reads the deployment materializes at once; requests past the cap answer `server_busy`. |
 | `commit.max_body_bytes` | Largest JSON body accepted by `POST .../commits`. Commit bodies are metadata only — file bytes ride uploads — so over-limit commits should be split into smaller batches, not routed through `direct_put`. |
+| `commit.max_operations` | Largest number of semantic operations accepted in one explicit commit. Larger transactions answer `invalid_request`; the whole request is rejected and must be split before retry. |
 | `maintenance.gc.min_grace_window_ms` | Smallest accepted `grace_window_ms` on a `gc` request; smaller values answer `invalid_request`. Derived from the publication budgets, not tuned. |
 | `query.grep.default_limit` | Matches per grep page when the request omits `limit`. |
 | `query.grep.max_limit` | Largest accepted grep page limit; invalid limits are rejected as `invalid_request`. Distinct from the pagination keys because a grep item costs a verified file read, not a row. |
@@ -213,7 +215,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 
 | Code | HTTP status | Meaning |
 | --- | --- | --- |
-| `invalid_request` | 400 | The request is malformed: a path, id, cursor, parameter, staged content reference, or configuration value fails validation. The message names the offending field. |
+| `invalid_request` | 400 | The request is malformed: a path, id, cursor, parameter, staged content reference, configuration value, or commit request limit fails validation. The message names the offending field or limit. |
 | `unauthorized` | 401 | Missing or wrong credentials. |
 | `permission_denied` | 403 | The backing object store rejected the deployment's storage credentials for this operation. Fix the storage credentials or bucket policy; retrying unchanged will not succeed. |
 | `content_too_large` | 413 | The request body exceeds the deployment's limit: `upload.max_content_bytes` for proxied uploads, `commit.max_body_bytes` for commit bodies. Served file content past `download.max_content_bytes` reports it too. For uploads, send a smaller payload or use `direct_put`; for commits, split the batch; for reads, the deployment limit must be raised. |
@@ -226,7 +228,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `upload_not_found` | 404 | No upload session with this id. |
 | `namespace_exists` | 409 | The create target already exists. |
 | `namespace_partial` | 409 | The namespace is partially initialized and unusable. |
-| `content_not_prepared` | 409 | A path put references external content without a matching admission. Prepare the content and retry with its proof. |
+| `content_not_prepared` | 409 | A path put or explicit create/replace operation references external content without a matching admission, or carries a rejected relevant token. Prepare the content and retry with its proof. |
 | `path_conflict` | 409 | The destination path is already bound. |
 | `directory_not_empty` | 409 | The directory has children and the operation is not recursive. |
 | `stale_head` | 409 | The write raced a head advance; retry against fresh state. |
@@ -480,12 +482,12 @@ clients.
 ```
 
 Path-oriented `put_file` operations then reference the completed `content_ref`.
-Publishing validates the durable content reference before metadata becomes
-visible. If the client has a matching `validated_content_token`, it may include
-that token in `content_tokens` so the server can skip repeated durable-content
-validation on the hot publish path. Missing, malformed, expired, or non-matching
-tokens are ignored and the server falls back to normal durable-content
-validation.
+The client includes the matching `validated_content_token` in `content_tokens`;
+the server verifies it before admission and publication checks only the
+resulting in-memory proof. A missing proof answers `content_not_prepared`
+without reading the content object. A malformed or expired token that names
+the put's ref also answers `content_not_prepared`; tokens naming other refs are
+ignored.
 
 ```json
 {
@@ -804,14 +806,14 @@ The semantic rule is:
 - `complete` finalizes the upload session only when the expected `content_ref`
   exactly matches the service-computed staged ref; and
 - the returned `content_ref` is then safe to reference from a commit. Remote
-  servers may also return an opaque `validated_content_token` for hot-path
-  admission; the token is an optimization hint, not a correctness requirement.
+  servers may also return an opaque `validated_content_token` that remote
+  create/replace mutations carry back as their content-preparation proof.
 
 Repeating `PUT /content` with the same bytes for the same upload id is
 idempotent. Repeating it with different bytes is a conflict. Completing an
 upload fails if no content was staged or if the expected `content_ref` differs
-from the staged one. Commits that reference arbitrary `content_ref`s still
-pass the write protocol's durable-content validation.
+from the staged one. Publication never downloads an arbitrary external ref to
+rescue a missing proof.
 
 Representative begin-upload response:
 
@@ -894,12 +896,37 @@ Representative request:
         "size_bytes": 20591
       }
     }
+  ],
+  "content_tokens": [
+    {
+      "content_ref": {
+        "kind": "whole_file_v0",
+        "digest": "sha256:7ab...",
+        "size_bytes": 20591
+      },
+      "token": "opaque-server-token"
+    }
   ]
 }
 ```
 
-A request may be rejected immediately. A successful response is returned only
-after the request is committed (section 5.1).
+`content_tokens` is an optional sibling of `commit_id`, `preconditions`, `ops`,
+and `message`; omitting it preserves the pre-token request shape. It is
+transport-only and is excluded from the semantic commit fingerprint. Each
+distinct external `content_ref` introduced by `create_file` or `replace_file`
+must have a verified proof; one token covers every operation using the same
+ref. `restore_revision` resolves retained namespace metadata and needs no
+proof. Tokens naming refs outside the commit are ignored. If coverage is
+incomplete, the first rejected relevant token is reported when present;
+otherwise `content_not_prepared` names the first uncovered digest. A retry of
+an already-landed semantic commit replays its durable receipt even when tokens
+are then absent, expired, or malformed.
+
+One submission accepts at most 4096 operations, 4096 `content_tokens` entries,
+and 4096 distinct new external refs. A violation answers `invalid_request`
+before publisher admission; the server never splits the commit. These bounds
+protect serialized publisher occupancy, not commit correctness. A successful
+response is returned only after the request is committed (section 5.1).
 
 Representative response:
 

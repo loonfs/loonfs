@@ -13,18 +13,26 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use loonfs::publish::{
     parse_mutation_path, ContentPreparationError, NamespaceMutation, NamespaceMutationCandidate,
-    PathMutationIntent,
+    PathMutationIntent, PreparedContent, MAX_COMMIT_CONTENT_TOKENS,
+    MAX_COMMIT_EXTERNAL_CONTENT_REFS, MAX_COMMIT_OPERATIONS,
 };
-use loonfs::{payload_class, ErrorCode, ListChangesOptions, TraceStoreKind};
+use loonfs::{
+    content_tokens::{verify_content_token, ContentTokenError},
+    payload_class, CoreError, ErrorCode, ListChangesOptions, TraceStoreKind,
+};
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
 use loonfs_api::{
     decode_directory_cursor, decode_file_revisions_cursor,
-    v0::{ChangesResponse, CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse},
-    DirectoryPageCursor, FileRevisionsPageCursor, FilesystemOperation, FilesystemOperationRequest,
-    InodeId, LimitError, ListFileRevisionsResponse, PageCursorError, PageRequest, PaginationPolicy,
-    RestoreFileRevisionRequest, RevisionNo,
+    v0::{
+        ChangesResponse, CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse,
+        CommitSubmissionRequest, ValidatedContentToken,
+    },
+    ContentRef, DirectoryPageCursor, FileRevisionsPageCursor, FilesystemOperation,
+    FilesystemOperationRequest, InodeId, LimitError, ListFileRevisionsResponse, PageCursorError,
+    PageRequest, PaginationPolicy, RestoreFileRevisionRequest, RevisionNo,
 };
+use std::collections::HashSet;
 use tracing::Instrument;
 
 #[derive(Debug, serde::Deserialize)]
@@ -608,7 +616,7 @@ pub(super) async fn filesystem_operation(
         summary = "Commit operations",
         description = "Applies an explicit semantic commit containing ordered inode-level operations and optional preconditions. Use this for advanced cases that require inode-specificity, preconditions, or batch transactions.",
         params(("namespace" = String, Path, description = "Namespace id")),
-        request_body = ApiCommitRequest,
+        request_body = CommitSubmissionRequest,
         responses(
             (status = 200, description = "Commit accepted", body = ApiCommitResponse),
             (status = 400, description = "Invalid commit request", body = ApiError),
@@ -624,18 +632,138 @@ pub(super) async fn filesystem_operation(
 pub(super) async fn commit_operations(
     State(state): State<AppState>,
     namespace: NamespaceIdPath,
-    CommitAppJson(request): CommitAppJson<ApiCommitRequest>,
+    CommitAppJson(submission): CommitAppJson<CommitSubmissionRequest>,
 ) -> Result<Json<ApiCommitResponse>, ApiResponseError> {
+    let CommitSubmissionRequest {
+        commit: request,
+        content_tokens,
+    } = submission;
     let namespace_id = namespace.into_id()?;
     let commit_id = request.commit_id.clone();
+    let external_content_refs = distinct_external_content_refs(&request);
+    validate_commit_submission_limits(&request, content_tokens.len(), external_content_refs.len())
+        .map_err(|error| {
+            ApiResponseError::core_for_namespace(&namespace_id, error).with_commit_id(&commit_id)
+        })?;
+    let content_preparation = prepare_commit_content(
+        &state.config,
+        &namespace_id,
+        &external_content_refs,
+        &content_tokens,
+    )?;
+    let candidate = match content_preparation {
+        CommitContentPreparation::Ready(content) => {
+            NamespaceMutationCandidate::commit_prepared(request, content)
+        }
+        CommitContentPreparation::Rejected(error) => NamespaceMutationCandidate::rejected(
+            NamespaceMutation::Commit(request),
+            ContentPreparationError::ContentToken(error),
+        ),
+    };
     let response = state
         .publisher
-        .submit_commit(namespace_id.clone(), request)
+        .submit_candidate(namespace_id.clone(), candidate)
         .await
         .map_err(|error| {
             ApiResponseError::core_for_namespace(&namespace_id, error).with_commit_id(&commit_id)
         })?;
     Ok(Json(response))
+}
+
+enum CommitContentPreparation {
+    Ready(Vec<PreparedContent>),
+    Rejected(ContentTokenError),
+}
+
+fn distinct_external_content_refs(request: &ApiCommitRequest) -> Vec<ContentRef> {
+    let mut seen = HashSet::new();
+    let mut refs = Vec::new();
+    for content_ref in request.ops.iter().filter_map(|op| match op {
+        loonfs_api::v0::CommitOp::CreateFile { content_ref, .. }
+        | loonfs_api::v0::CommitOp::ReplaceFile { content_ref, .. } => Some(content_ref),
+        _ => None,
+    }) {
+        if seen.insert(content_ref.clone()) {
+            refs.push(content_ref.clone());
+        }
+    }
+    refs
+}
+
+fn validate_commit_submission_limits(
+    request: &ApiCommitRequest,
+    content_token_count: usize,
+    external_content_ref_count: usize,
+) -> Result<(), CoreError> {
+    if request.ops.len() > MAX_COMMIT_OPERATIONS {
+        return Err(CoreError::InvalidCommitRequest(format!(
+            "commit has {} operations; maximum is {MAX_COMMIT_OPERATIONS}",
+            request.ops.len()
+        )));
+    }
+    if content_token_count > MAX_COMMIT_CONTENT_TOKENS {
+        return Err(CoreError::InvalidCommitRequest(format!(
+            "commit has {content_token_count} content token entries; maximum is {MAX_COMMIT_CONTENT_TOKENS}"
+        )));
+    }
+    if external_content_ref_count > MAX_COMMIT_EXTERNAL_CONTENT_REFS {
+        return Err(CoreError::InvalidCommitRequest(format!(
+            "commit references {external_content_ref_count} distinct external content refs; maximum is {MAX_COMMIT_EXTERNAL_CONTENT_REFS}"
+        )));
+    }
+    Ok(())
+}
+
+fn prepare_commit_content(
+    config: &crate::config::ServerConfig,
+    namespace_id: &loonfs_api::NamespaceId,
+    external_content_refs: &[ContentRef],
+    content_tokens: &[ValidatedContentToken],
+) -> Result<CommitContentPreparation, ApiResponseError> {
+    let relevant_refs = external_content_refs
+        .iter()
+        .cloned()
+        .collect::<HashSet<_>>();
+    let relevant_tokens = content_tokens
+        .iter()
+        .filter(|token| relevant_refs.contains(&token.content_ref));
+    let mut relevant_tokens = relevant_tokens.peekable();
+    if relevant_tokens.peek().is_none() {
+        return Ok(CommitContentPreparation::Ready(Vec::new()));
+    }
+
+    let now_ms = current_unix_ms()?;
+    let mut prepared = Vec::new();
+    let mut prepared_refs = HashSet::new();
+    let mut first_error = None;
+    for token in relevant_tokens {
+        match verify_content_token(config.content_token_secret(), namespace_id, token, now_ms) {
+            Ok(content) => {
+                prepared_refs.insert(content.content_ref().clone());
+                prepared.push(content);
+            }
+            Err(error) => {
+                tracing::debug!(
+                    namespace_id = %namespace_id,
+                    content_ref_digest = %token.content_ref.digest,
+                    error = %error,
+                    "content token rejected during commit preparation"
+                );
+                first_error.get_or_insert(error);
+            }
+        }
+    }
+
+    if external_content_refs
+        .iter()
+        .all(|content_ref| prepared_refs.contains(content_ref))
+    {
+        Ok(CommitContentPreparation::Ready(prepared))
+    } else if let Some(error) = first_error {
+        Ok(CommitContentPreparation::Rejected(error))
+    } else {
+        Ok(CommitContentPreparation::Ready(prepared))
+    }
 }
 
 #[cfg_attr(

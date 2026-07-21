@@ -765,6 +765,10 @@ async fn capability_document_advertises_the_upload_limit() {
             Some(8 * 1024 * 1024)
         );
         assert_eq!(
+            capabilities.limits.get("commit.max_operations").copied(),
+            Some(4096)
+        );
+        assert_eq!(
             capabilities
                 .limits
                 .get("query.grep.scan_budget_files")

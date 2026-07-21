@@ -11,6 +11,20 @@
 
 use loonfs_objectstore::{PROVIDER_ATTEMPT_TIMEOUT, PROVIDER_OP_DEADLINE};
 
+/// Maximum semantic operations in one explicit commit, bounding how long one
+/// request can occupy the serialized publisher during planning and
+/// materialization.
+pub const MAX_COMMIT_OPERATIONS: usize = 4096;
+
+/// Maximum content-token or prepared-proof entries carried by one explicit
+/// commit, bounding its preparation work and retained publisher admission
+/// state.
+pub const MAX_COMMIT_CONTENT_TOKENS: usize = 4096;
+
+/// Maximum distinct new external content refs in one explicit commit, bounding
+/// its in-memory coverage work while it occupies the serialized publisher.
+pub const MAX_COMMIT_EXTERNAL_CONTENT_REFS: usize = 4096;
+
 /// Provider operation deadline, in milliseconds (`loonfs-objectstore`
 /// consumes it across every retry of one single-request operation).
 /// Multipart transfers of large immutable payloads carry no

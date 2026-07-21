@@ -13,10 +13,9 @@ use crate::commit_engine::{
 use crate::error::{CoreError, Result};
 use crate::metadata::CommitReceiptRecord;
 use crate::path::write::{path_intent_fingerprint_for_path_intent, PublishPlanningSession};
-use crate::storage::content::ContentValidationTracker;
 use crate::storage::content_admission::ContentAdmission;
 use loonfs_api::v0::CommitResponse as ApiCommitResponse;
-use loonfs_api::{CommitId, ContentRef, ContentStoreId, NamespaceId};
+use loonfs_api::{CommitId, ContentRef, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 use std::collections::HashMap;
 
@@ -130,6 +129,7 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
     index: usize,
     dedup: &mut BatchDedup,
 ) -> Result<CandidateAdmission> {
+    candidate.validate_request_limits()?;
     let acquired_writer = view
         .acquired_writer
         .as_ref()
@@ -262,54 +262,53 @@ impl CommitContentAdmissions<'_> {
     }
 }
 
-/// Checks external content refs without reading content for path candidates;
-/// explicit commits retain durable validation until their endpoint accepts
-/// content admissions.
-pub(super) async fn validate_commit_content_references<S: ObjectStore + ?Sized>(
-    store: &S,
-    content_store_id: &ContentStoreId,
+/// Checks every new external content ref against in-memory preparation proofs.
+pub(super) fn validate_commit_content_references(
     request: &CoreCommitRequest,
     candidate: &NamespaceMutationCandidate,
-    content_validation: &mut ContentValidationTracker,
 ) -> Result<()> {
+    let admissions = CommitContentAdmissions {
+        namespace_id: &request.namespace_id,
+        admissions: match candidate.content_preparation() {
+            ContentPreparation::Ready(admissions) => admissions,
+            ContentPreparation::Rejected(_) => {
+                return Err(CoreError::Internal(
+                    "rejected content preparation reached coverage validation".to_owned(),
+                ));
+            }
+        },
+    };
     match candidate.mutation() {
         NamespaceMutation::Commit(_) => {
-            for op in &request.ops {
-                let content_ref = match op {
-                    CommitOp::CreateFile { content_ref, .. }
-                    | CommitOp::ReplaceFile { content_ref, .. } => content_ref,
-                    // Restore content is resolved from retained namespace
-                    // metadata, whose durability is already guaranteed.
-                    _ => continue,
-                };
-                content_validation
-                    .ensure_validated(store, content_store_id, content_ref)
-                    .await?;
+            for content_ref in request.ops.iter().filter_map(|op| match op {
+                CommitOp::CreateFile { content_ref, .. }
+                | CommitOp::ReplaceFile { content_ref, .. } => Some(content_ref),
+                // Restore content is resolved from retained namespace metadata,
+                // whose durability is already guaranteed.
+                _ => None,
+            }) {
+                require_content_admission(&admissions, content_ref)?;
             }
         }
-        NamespaceMutation::Path(intent) => {
-            let crate::path::write::PathMutationIntent::PutFile { content_ref, .. } = intent else {
-                return Ok(());
-            };
-            let admissions = CommitContentAdmissions {
-                namespace_id: &request.namespace_id,
-                admissions: match candidate.content_preparation() {
-                    ContentPreparation::Ready(admissions) => admissions,
-                    ContentPreparation::Rejected(_) => {
-                        return Err(CoreError::Internal(
-                            "rejected content preparation reached coverage validation".to_owned(),
-                        ));
-                    }
-                },
-            };
-            if !admissions.admits(content_ref) {
-                return Err(ContentPreparationError::ContentNotPrepared {
-                    content_ref_digest: content_ref.digest.clone(),
-                }
-                .into());
-            }
-        }
+        NamespaceMutation::Path(crate::path::write::PathMutationIntent::PutFile {
+            content_ref,
+            ..
+        }) => require_content_admission(&admissions, content_ref)?,
+        NamespaceMutation::Path(_) => return Ok(()),
     }
 
     Ok(())
+}
+
+fn require_content_admission(
+    admissions: &CommitContentAdmissions<'_>,
+    content_ref: &ContentRef,
+) -> Result<()> {
+    if admissions.admits(content_ref) {
+        return Ok(());
+    }
+    Err(ContentPreparationError::ContentNotPrepared {
+        content_ref_digest: content_ref.digest.clone(),
+    }
+    .into())
 }

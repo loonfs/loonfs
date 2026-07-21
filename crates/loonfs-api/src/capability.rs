@@ -43,6 +43,8 @@ pub const LIMIT_DOWNLOAD_MAX_CONCURRENT: &str = "download.max_concurrent";
 /// Advisory limit: the largest JSON body the commits endpoint accepts.
 /// Metadata-only; file bytes ride uploads, not commit bodies.
 pub const LIMIT_COMMIT_MAX_BODY_BYTES: &str = "commit.max_body_bytes";
+/// Advisory limit: the most semantic operations one explicit commit accepts.
+pub const LIMIT_COMMIT_MAX_OPERATIONS: &str = "commit.max_operations";
 /// Advisory limit: the smallest accepted `grace_window_ms` on a `gc`
 /// request; smaller values answer `invalid_request`. Derived from the
 /// publication budgets, not tuned.
