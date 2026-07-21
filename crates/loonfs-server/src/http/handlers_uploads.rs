@@ -10,7 +10,7 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
 use loonfs::content_tokens::{mint_content_token, verify_content_token, ContentTokenError};
-use loonfs::publish::ContentAdmission;
+use loonfs::publish::PreparedContent;
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
 use loonfs_api::ErrorCode;
@@ -144,21 +144,21 @@ fn direct_put_presign_time() -> SystemTime {
     SystemTime::now()
 }
 
-pub(super) fn content_admissions_for_put(
+pub(super) fn prepared_content_for_put(
     config: &ServerConfig,
     namespace_id: &NamespaceId,
     content_ref: &ContentRef,
     tokens: &[ValidatedContentToken],
     now_ms: u64,
-) -> Vec<ContentAdmission> {
+) -> Vec<PreparedContent> {
     tokens
         .iter()
         .filter(|token| token.content_ref == *content_ref)
         .filter_map(|token| {
             match verify_content_token(config.content_token_secret(), namespace_id, token, now_ms) {
-                Ok(admission) => Some(admission),
+                Ok(prepared) => Some(prepared),
                 Err(error) => {
-                    // A rejected token contributes no admission, so a put
+                    // A rejected token contributes no prepared proof, so a put
                     // with no other matching token fails as unprepared.
                     tracing::debug!(
                         namespace_id = %namespace_id,

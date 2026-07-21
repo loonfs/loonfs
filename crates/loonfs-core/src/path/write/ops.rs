@@ -7,7 +7,7 @@ use crate::commit_engine::NamespaceMutationCandidate;
 use crate::context::MutationContext;
 use crate::error::CoreError;
 use crate::path::helpers::parse_mutation_path;
-use crate::storage::content_admission::{ContentAdmission, PreparedContent};
+use crate::storage::content_admission::PreparedContent;
 use loonfs_api::{
     CommitId, CommitResponse, DeleteDirectoryBehavior, DestinationBehavior, NamespaceId, RevisionNo,
 };
@@ -21,13 +21,13 @@ async fn submit_path_intent<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     intent: PathMutationIntent,
-    admissions: Vec<ContentAdmission>,
+    prepared_content: Vec<PreparedContent>,
     context: &MutationContext,
 ) -> Result<CommitResponse, CoreError> {
-    let candidate = if admissions.is_empty() {
-        NamespaceMutationCandidate::Path(intent)
+    let candidate = if prepared_content.is_empty() {
+        NamespaceMutationCandidate::path(intent)
     } else {
-        NamespaceMutationCandidate::PathWithContentAdmission { intent, admissions }
+        NamespaceMutationCandidate::path_prepared(intent, prepared_content)
     };
     let mut results = crate::commit_engine::publish_namespace_mutations_batch(
         store,
@@ -109,7 +109,7 @@ async fn put_prepared_file_content<S: ObjectStore + ?Sized>(
             content_ref,
             behavior,
         },
-        vec![prepared_content.into_admission()],
+        vec![prepared_content],
         context,
     )
     .await

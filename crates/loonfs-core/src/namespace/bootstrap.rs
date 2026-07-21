@@ -536,7 +536,7 @@ mod tests {
         engine
             .publish_batch(
                 store,
-                vec![NamespaceMutationCandidate::Commit(ApiCommitRequest {
+                vec![NamespaceMutationCandidate::commit(ApiCommitRequest {
                     commit_id: CommitId::generate(),
                     preconditions: Vec::new(),
                     ops: vec![ApiCommitOp::CreateDirectory {

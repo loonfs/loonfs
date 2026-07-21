@@ -69,18 +69,17 @@ impl FsCore {
         let prepared_content =
             loonfs_core::content::prepare_stored_content(namespace_id.clone(), stored);
         let content_ref = prepared_content.content_ref().clone();
-        let content_admission = prepared_content.into_admission();
         self.publish_candidate(
             namespace_id,
-            NamespaceMutationCandidate::PathWithContentAdmission {
-                intent: PathMutationIntent::PutFile {
+            NamespaceMutationCandidate::path_prepared(
+                PathMutationIntent::PutFile {
                     commit_id: options.commit_id.unwrap_or_else(CommitId::generate),
                     absolute_path,
                     content_ref,
                     behavior: options.behavior,
                 },
-                admissions: vec![content_admission],
-            },
+                vec![prepared_content],
+            ),
         )
         .await
     }
@@ -137,18 +136,17 @@ impl FsCore {
         .await
         .map_err(CoreError::from)?;
         let content_ref = prepared_content.content_ref().clone();
-        let content_admission = prepared_content.into_admission();
         self.publish_candidate(
             namespace_id,
-            NamespaceMutationCandidate::PathWithContentAdmission {
-                intent: PathMutationIntent::PutFile {
+            NamespaceMutationCandidate::path_prepared(
+                PathMutationIntent::PutFile {
                     commit_id: options.commit_id.unwrap_or_else(CommitId::generate),
                     absolute_path,
                     content_ref,
                     behavior: options.behavior,
                 },
-                admissions: vec![content_admission],
-            },
+                vec![prepared_content],
+            ),
         )
         .await
     }
@@ -316,7 +314,7 @@ impl FsCore {
         namespace_id: &NamespaceId,
         request: CommitRequest,
     ) -> Result<CommitResponse> {
-        self.publish_candidate(namespace_id, NamespaceMutationCandidate::Commit(request))
+        self.publish_candidate(namespace_id, NamespaceMutationCandidate::commit(request))
             .await
     }
 
@@ -332,7 +330,7 @@ impl FsCore {
             namespace_id,
             requests
                 .into_iter()
-                .map(NamespaceMutationCandidate::Commit)
+                .map(NamespaceMutationCandidate::commit)
                 .collect(),
         )
         .await
@@ -343,7 +341,7 @@ impl FsCore {
         namespace_id: &NamespaceId,
         intent: PathMutationIntent,
     ) -> Result<CommitResponse> {
-        self.publish_candidate(namespace_id, NamespaceMutationCandidate::Path(intent))
+        self.publish_candidate(namespace_id, NamespaceMutationCandidate::path(intent))
             .await
     }
 

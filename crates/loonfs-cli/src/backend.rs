@@ -718,9 +718,11 @@ mod tests {
 
         assert_eq!(error.code, ErrorCode::RevisionNotFound.as_str());
 
-        let error = map_core_error(CoreError::ContentNotPrepared {
-            content_ref_digest: "abc123".to_owned(),
-        });
+        let error = map_core_error(CoreError::ContentPreparation(
+            loonfs::publish::ContentPreparationError::ContentNotPrepared {
+                content_ref_digest: "abc123".to_owned(),
+            },
+        ));
         assert_eq!(error.code, ErrorCode::ContentNotPrepared.as_str());
         assert!(error.message.contains("abc123"));
     }

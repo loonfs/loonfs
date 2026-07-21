@@ -232,18 +232,16 @@ async fn warm_phase_request_accounting() {
             .await
             .expect("prepare existing content");
             let content_ref = prepared.content_ref().clone();
-            candidates.push(
-                loonfs::publish::NamespaceMutationCandidate::PathWithContentAdmission {
-                    intent: loonfs::publish::PathMutationIntent::PutFile {
-                        commit_id: loonfs::CommitId::generate(),
-                        absolute_path: AbsolutePath::parse(format!("/hot/file-{index:05}.txt"))
-                            .expect("path"),
-                        content_ref: content_ref.clone(),
-                        behavior: loonfs::DestinationBehavior::NoReplace,
-                    },
-                    admissions: vec![prepared.into_admission()],
+            candidates.push(loonfs::publish::NamespaceMutationCandidate::path_prepared(
+                loonfs::publish::PathMutationIntent::PutFile {
+                    commit_id: loonfs::CommitId::generate(),
+                    absolute_path: AbsolutePath::parse(format!("/hot/file-{index:05}.txt"))
+                        .expect("path"),
+                    content_ref: content_ref.clone(),
+                    behavior: loonfs::DestinationBehavior::NoReplace,
                 },
-            );
+                vec![prepared],
+            ));
             index += 1;
         }
         for outcome in writer

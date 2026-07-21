@@ -152,20 +152,18 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
             .await
             .expect("prepare existing content");
             let content_ref = prepared.content_ref().clone();
-            candidates.push(
-                loonfs::publish::NamespaceMutationCandidate::PathWithContentAdmission {
-                    intent: loonfs::publish::PathMutationIntent::PutFile {
-                        commit_id: loonfs::CommitId::generate(),
-                        absolute_path: AbsolutePath::parse(format!(
-                            "/tree/dir-000000/file-{index:09}.txt"
-                        ))
-                        .expect("path"),
-                        content_ref: content_ref.clone(),
-                        behavior: loonfs::DestinationBehavior::NoReplace,
-                    },
-                    admissions: vec![prepared.into_admission()],
+            candidates.push(loonfs::publish::NamespaceMutationCandidate::path_prepared(
+                loonfs::publish::PathMutationIntent::PutFile {
+                    commit_id: loonfs::CommitId::generate(),
+                    absolute_path: AbsolutePath::parse(format!(
+                        "/tree/dir-000000/file-{index:09}.txt"
+                    ))
+                    .expect("path"),
+                    content_ref: content_ref.clone(),
+                    behavior: loonfs::DestinationBehavior::NoReplace,
                 },
-            );
+                vec![prepared],
+            ));
         }
         for outcome in writer
             .publish_namespace_mutations_batch(&namespace_id, candidates)

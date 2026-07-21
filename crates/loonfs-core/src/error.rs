@@ -7,6 +7,7 @@
 
 use crate::checkpoint::ManifestLoadError;
 use crate::commit::{CommitConversionError, CommitHeadPublishError, CommitValidationError};
+use crate::commit_engine::ContentPreparationError;
 use crate::metadata::VisiblePathError;
 use crate::namespace::catalog::NamespaceCatalogLoadError;
 use crate::namespace::control::ControlObjectLoadError;
@@ -95,8 +96,8 @@ pub enum CoreError {
     DestinationExists(String),
     #[error("commit id conflict for `{0}`")]
     CommitIdReuseConflict(String),
-    #[error("content ref `{content_ref_digest}` is not prepared for publication")]
-    ContentNotPrepared { content_ref_digest: String },
+    #[error(transparent)]
+    ContentPreparation(#[from] ContentPreparationError),
     #[error("commit queue is full; slow down and retry")]
     CommitQueueFull,
     /// The serving front-end closed admission for shutdown. New work is
@@ -361,7 +362,7 @@ impl CoreError {
             CoreError::NamespaceDeleted { .. } => ErrorCode::NamespaceDeleted,
             CoreError::NamespacePartiallyInitialized { .. } => ErrorCode::NamespacePartial,
             CoreError::CommitIdReuseConflict(_) => ErrorCode::CommitIdReuseConflict,
-            CoreError::ContentNotPrepared { .. } => ErrorCode::ContentNotPrepared,
+            CoreError::ContentPreparation(_) => ErrorCode::ContentNotPrepared,
             CoreError::CommitQueueFull => ErrorCode::CommitQueueFull,
             CoreError::ShuttingDown => ErrorCode::ShuttingDown,
             CoreError::CheckpointUnavailable(_) => ErrorCode::CheckpointUnavailable,
@@ -713,6 +714,8 @@ mod tests {
     use super::{
         CommitValidationError, CoreError, ErrorCode, ErrorKind, MetadataViewError, WriterFence,
     };
+    use crate::commit_engine::ContentPreparationError;
+    use crate::storage::content_admission::ContentTokenError;
     use loonfs_api::{
         ChangeSeq, CommitId, InodeId, ManifestId, NamespaceId, RevisionNo, WriterEpoch,
     };
@@ -754,12 +757,21 @@ mod tests {
         assert_eq!(error.code().as_str(), "namespace_exists");
         assert!(error.message().contains("already exists"));
 
-        let error = CoreError::ContentNotPrepared {
+        let error = CoreError::ContentPreparation(ContentPreparationError::ContentNotPrepared {
             content_ref_digest: "abc123".to_owned(),
-        };
+        });
         assert_eq!(error.kind(), ErrorKind::Conflict);
         assert_eq!(error.code(), ErrorCode::ContentNotPrepared);
         assert!(error.message().contains("abc123"));
+    }
+
+    #[test]
+    fn rejected_content_token_maps_to_content_not_prepared() {
+        let error = CoreError::from(ContentPreparationError::ContentToken(
+            ContentTokenError::Expired,
+        ));
+
+        assert_eq!(error.code(), ErrorCode::ContentNotPrepared);
     }
 
     #[test]

@@ -50,15 +50,15 @@ async fn put_file<S: ObjectStore + ?Sized>(
     NamespaceCommitEngine::new(namespace_id.clone())
         .publish_batch(
             store,
-            vec![NamespaceMutationCandidate::PathWithContentAdmission {
-                intent: PathMutationIntent::PutFile {
+            vec![NamespaceMutationCandidate::path_prepared(
+                PathMutationIntent::PutFile {
                     commit_id: loonfs_api::CommitId::generate(),
                     absolute_path: AbsolutePath::parse(absolute_path).expect("path"),
                     content_ref,
                     behavior: loonfs_api::DestinationBehavior::NoReplace,
                 },
-                admissions: vec![prepared.into_admission()],
-            }],
+                vec![prepared],
+            )],
             context,
         )
         .await

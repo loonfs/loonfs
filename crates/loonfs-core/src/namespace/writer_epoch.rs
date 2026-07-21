@@ -167,7 +167,7 @@ mod tests {
         engine
             .publish_batch(
                 store,
-                vec![NamespaceMutationCandidate::Commit(request)],
+                vec![NamespaceMutationCandidate::commit(request)],
                 context,
             )
             .await

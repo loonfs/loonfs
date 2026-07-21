@@ -76,16 +76,17 @@ pub use loonfs_core::{
 pub mod publish {
     pub use loonfs_core::path::parse_mutation_path;
     pub use loonfs_core::publish::{
-        ContentAdmission, NamespaceMutationCandidate, PathMutationIntent,
+        ContentPreparation, ContentPreparationError, NamespaceMutation, NamespaceMutationCandidate,
+        PathMutationIntent, PreparedContent,
     };
 }
 
-/// Server-integration seam for producer-only content admissions.
+/// Server-integration seam for producer-only content preparation proofs.
 ///
 /// A serving session mints short-lived wire tokens after durable preparation
-/// and verifies expiry once before yielding an opaque publisher admission.
-/// The in-process admission records accepted durability evidence and does not
-/// expire. Most embedded users never need this module.
+/// and verifies expiry once before yielding opaque prepared content. Its
+/// internal admission records accepted durability evidence and does not expire.
+/// Most embedded users never need this module.
 pub mod content_tokens {
     pub use loonfs_core::content::{mint_content_token, verify_content_token, ContentTokenError};
 }

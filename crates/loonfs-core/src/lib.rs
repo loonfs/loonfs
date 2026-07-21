@@ -43,7 +43,7 @@
 //! let mut publisher = NamespaceCommitEngine::new(namespace);
 //! let _ = publisher.publish_batch(
 //!     &publish_store,
-//!     vec![NamespaceMutationCandidate::Path(PathMutationIntent::CreateDir {
+//!     vec![NamespaceMutationCandidate::path(PathMutationIntent::CreateDir {
 //!         commit_id: CommitId::generate(),
 //!         absolute_path: AbsolutePath::parse("/plans").expect("path"),
 //!         parents: false,
@@ -101,12 +101,13 @@ pub mod control {
 pub mod publish {
     pub use crate::commit::{CommitHeadPublishError, SemanticMutationIdentity};
     pub use crate::commit_engine::{
-        NamespaceCommitEngine, NamespaceCommitEnginePublishResult, NamespaceMutationCandidate,
+        ContentPreparation, ContentPreparationError, NamespaceCommitEngine,
+        NamespaceCommitEnginePublishResult, NamespaceMutation, NamespaceMutationCandidate,
         ResultingReadState, SharedWriterSessionState, WalTailPolicy, WriterSessionState,
     };
     pub use crate::path::write::PathMutationIntent;
     pub use crate::protocol::PublishTailOptions;
-    pub use crate::storage::content_admission::ContentAdmission;
+    pub use crate::storage::content_admission::PreparedContent;
 }
 
 pub use checkpoint::{

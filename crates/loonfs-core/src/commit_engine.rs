@@ -13,45 +13,117 @@ use crate::namespace::catalog::{load_namespace_catalog_entry, VerifiedNamespaceC
 use crate::namespace::writer_epoch::acquire_writer_epoch;
 use crate::path::write::{path_intent_fingerprint_for_path_intent, PathMutationIntent};
 use crate::protocol::{load_publish_metadata_view, PublishTailOptions, PublishTailProjection};
-use crate::storage::content_admission::ContentAdmission;
+use crate::storage::content_admission::{ContentAdmission, ContentTokenError, PreparedContent};
 use crate::timing::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_api::v0::{CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse};
 use loonfs_api::wire::control::{AcquiredWriter, HeadState};
 use loonfs_api::{ChangeSeq, CommitId, ManifestId, ManifestObjectId, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 use std::sync::{Arc, Mutex};
+use thiserror::Error;
 
+/// One namespace mutation together with the result of preparing any content
+/// it references.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum NamespaceMutationCandidate {
+pub struct NamespaceMutationCandidate {
+    mutation: NamespaceMutation,
+    content: ContentPreparation,
+}
+
+/// The semantic mutation carried by a publication candidate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NamespaceMutation {
     Commit(ApiCommitRequest),
     Path(PathMutationIntent),
-    PathWithContentAdmission {
-        intent: PathMutationIntent,
-        admissions: Vec<ContentAdmission>,
-    },
+}
+
+/// The result of preparing external content referenced by a mutation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContentPreparation {
+    Ready(Vec<ContentAdmission>),
+    Rejected(ContentPreparationError),
+}
+
+/// A typed failure to prepare content referenced by a mutation candidate.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
+pub enum ContentPreparationError {
+    /// A supplied wire token was rejected before publication.
+    #[error("content token was rejected: {0}")]
+    ContentToken(#[from] ContentTokenError),
+    /// No prepared proof covers the referenced content.
+    #[error("content ref `{content_ref_digest}` is not prepared for publication")]
+    ContentNotPrepared { content_ref_digest: String },
 }
 
 impl NamespaceMutationCandidate {
-    pub fn commit_id(&self) -> &CommitId {
-        match self {
-            Self::Commit(request) => &request.commit_id,
-            Self::Path(intent) | Self::PathWithContentAdmission { intent, .. } => {
-                intent.commit_id()
-            }
+    /// Wraps an explicit semantic commit with no attached content proofs.
+    pub fn commit(request: ApiCommitRequest) -> Self {
+        Self {
+            mutation: NamespaceMutation::Commit(request),
+            content: ContentPreparation::Ready(Vec::new()),
         }
     }
 
+    /// Wraps a path mutation with no attached content proofs.
+    pub fn path(intent: PathMutationIntent) -> Self {
+        Self {
+            mutation: NamespaceMutation::Path(intent),
+            content: ContentPreparation::Ready(Vec::new()),
+        }
+    }
+
+    /// Wraps a path mutation with opaque proofs for its prepared content.
+    pub fn path_prepared(intent: PathMutationIntent, content: Vec<PreparedContent>) -> Self {
+        Self {
+            mutation: NamespaceMutation::Path(intent),
+            content: ContentPreparation::Ready(
+                content
+                    .into_iter()
+                    .map(PreparedContent::into_admission)
+                    .collect(),
+            ),
+        }
+    }
+
+    /// Wraps a semantic mutation whose content preparation failed.
+    pub fn rejected(mutation: NamespaceMutation, error: ContentPreparationError) -> Self {
+        Self {
+            mutation,
+            content: ContentPreparation::Rejected(error),
+        }
+    }
+
+    pub(crate) fn mutation(&self) -> &NamespaceMutation {
+        &self.mutation
+    }
+
+    pub(crate) fn content_preparation(&self) -> &ContentPreparation {
+        &self.content
+    }
+
+    /// Returns the idempotency key carried by the semantic mutation.
+    pub fn commit_id(&self) -> &CommitId {
+        match &self.mutation {
+            NamespaceMutation::Commit(request) => &request.commit_id,
+            NamespaceMutation::Path(intent) => intent.commit_id(),
+        }
+    }
+
+    /// Computes semantic identity from the mutation alone.
     pub fn semantic_identity(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<SemanticMutationIdentity> {
-        match self {
-            Self::Commit(request) => core_commit_fingerprint_for_v0_request(namespace_id, request)
-                .map(SemanticMutationIdentity::CoreCommit)
-                .map_err(|err| {
-                    CoreError::Internal(format!("failed to fingerprint commit request: {err}"))
-                }),
-            Self::Path(intent) | Self::PathWithContentAdmission { intent, .. } => {
+        match &self.mutation {
+            NamespaceMutation::Commit(request) => {
+                core_commit_fingerprint_for_v0_request(namespace_id, request)
+                    .map(SemanticMutationIdentity::CoreCommit)
+                    .map_err(|err| {
+                        CoreError::Internal(format!("failed to fingerprint commit request: {err}"))
+                    })
+            }
+            NamespaceMutation::Path(intent) => {
                 path_intent_fingerprint_for_path_intent(namespace_id, intent)
                     .map(SemanticMutationIdentity::PathIntent)
             }
@@ -469,8 +541,28 @@ mod tests {
         }
     }
 
+    #[test]
+    fn semantic_identity_excludes_content_preparation() {
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let intent = PathMutationIntent::CreateDir {
+            commit_id: CommitId::parse("same-mutation").expect("valid commit id"),
+            absolute_path: loonfs_api::AbsolutePath::parse("/docs").expect("path"),
+            parents: false,
+        };
+        let ready = NamespaceMutationCandidate::path(intent.clone());
+        let rejected = NamespaceMutationCandidate::rejected(
+            NamespaceMutation::Path(intent),
+            ContentPreparationError::ContentToken(ContentTokenError::Expired),
+        );
+
+        assert_eq!(
+            ready.semantic_identity(&namespace_id).expect("identity"),
+            rejected.semantic_identity(&namespace_id).expect("identity")
+        );
+    }
+
     fn create_dir(commit_id: &str, display_name: &str) -> NamespaceMutationCandidate {
-        NamespaceMutationCandidate::Commit(ApiCommitRequest {
+        NamespaceMutationCandidate::commit(ApiCommitRequest {
             commit_id: CommitId::parse(commit_id).expect("valid commit id"),
             preconditions: Vec::new(),
             ops: vec![loonfs_api::v0::CommitOp::CreateDirectory {

@@ -193,7 +193,6 @@ async fn park_two_puts(temp_dir: &Path) -> ParkedPuts {
     .await
     .expect("prepare second put content");
     let prepared_content_ref = prepared.content_ref().clone();
-    let admission = prepared.into_admission();
 
     store_impl.arm();
     let first = {
@@ -221,7 +220,7 @@ async fn park_two_puts(temp_dir: &Path) -> ParkedPuts {
         };
         Box::pin(async move {
             registry
-                .submit_path_intent_with_content_admission(namespace_id, intent, vec![admission])
+                .submit_path_intent_with_prepared_content(namespace_id, intent, vec![prepared])
                 .await
         })
     };
