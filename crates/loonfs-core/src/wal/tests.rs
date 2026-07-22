@@ -2,10 +2,11 @@
 
 use super::*;
 use crate::commit::{
-    materialize_commit, wal_payload_from_materialized_commit, CommitOp, CommitPlan, CommitRequest,
+    materialize_commit, wal_payload_from_materialized_commit, CommitPlan, CommitRequest,
     MaterializedCommit, PreparedCommit, ValidatedOp,
 };
 use bytes::Bytes;
+use loonfs_api::v0::CommitOp;
 use loonfs_api::wire::control::WalSegmentPointer;
 use loonfs_api::wire::wal::{encode_wal_segment_envelope_zstd, WalSegmentEnvelope};
 use loonfs_api::{ChangeSeq, CommitId, InodeId, NameKey, NamespaceId, WalSegmentId, WriterEpoch};

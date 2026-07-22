@@ -4,8 +4,8 @@
 
 use super::publish_view::PublishMetadataView;
 use crate::commit::{
-    commit_request_from_v0, core_commit_fingerprint, CommitExecutionContext, CommitIdentitySource,
-    CommitOp, CommitRequest as CoreCommitRequest, SemanticMutationIdentity,
+    core_commit_fingerprint, CommitExecutionContext, CommitIdentitySource,
+    CommitRequest as CoreCommitRequest, SemanticMutationIdentity,
 };
 use crate::commit_engine::{
     ContentPreparation, ContentPreparationError, NamespaceMutation, NamespaceMutationCandidate,
@@ -14,7 +14,7 @@ use crate::error::{CoreError, Result};
 use crate::metadata::CommitReceiptRecord;
 use crate::path::write::{path_intent_fingerprint_for_path_intent, PublishPlanningSession};
 use crate::storage::content_admission::ContentAdmission;
-use loonfs_api::v0::CommitResponse as ApiCommitResponse;
+use loonfs_api::v0::{CommitOp, CommitResponse as ApiCommitResponse};
 use loonfs_api::{CommitId, ContentRef, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 use std::collections::HashMap;
@@ -143,8 +143,7 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
     match candidate.mutation() {
         NamespaceMutation::Commit(request) => {
             validate_commit_id(&request.commit_id)?;
-            let request = commit_request_from_v0(conversion_context, request.clone())
-                .map_err(CoreError::from)?;
+            let request = CoreCommitRequest::from_v0(conversion_context, request.clone());
             let semantic_identity = core_commit_fingerprint(&request).map_err(|error| {
                 CoreError::Internal(format!("failed to fingerprint commit request: {error}"))
             })?;
@@ -189,8 +188,7 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
             let planned = session
                 .plan_path_mutation(namespace_id, intent, view.metadata_view())
                 .await?;
-            let request = commit_request_from_v0(conversion_context, planned.commit_request)
-                .map_err(CoreError::from)?;
+            let request = CoreCommitRequest::from_v0(conversion_context, planned.commit_request);
             Ok(CandidateAdmission::Prepared(CandidateCoreRequest {
                 request,
                 identity_source: CommitIdentitySource::PathIntent(planned.path_intent_fingerprint),

@@ -36,8 +36,9 @@ pub(crate) fn wal_payload_from_materialized_commit(
 mod tests {
     use super::*;
     use crate::commit::{
-        materialize_commit, CommitOp, CommitPlan, CommitRequest, PreparedCommit, ValidatedOp,
+        materialize_commit, CommitPlan, CommitRequest, PreparedCommit, ValidatedOp,
     };
+    use loonfs_api::v0::CommitOp;
     use loonfs_api::{ChangeSeq, CommitId, InodeId, NameKey, NamespaceId, WriterEpoch};
 
     #[test]

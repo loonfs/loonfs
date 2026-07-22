@@ -5,15 +5,12 @@
 //! for publication. Submodules follow that pipeline; `identity` defines
 //! the fingerprints that make reused commit ids safe to compare.
 
-mod api_adapter;
 mod durable_adapter;
 mod frame;
 mod identity;
 mod materialize;
 mod metadata_overlay;
-mod operation;
 mod plan;
-mod precondition;
 mod prepared;
 mod publish;
 mod publish_error;
@@ -23,7 +20,6 @@ mod validate_error;
 
 use crate::invariants::InvariantId;
 
-pub use self::api_adapter::{commit_request_from_v0, CommitConversionError};
 pub(crate) use self::durable_adapter::wal_payload_from_materialized_commit;
 pub use self::identity::{
     core_commit_fingerprint, core_commit_fingerprint_for_v0_request, CommitFingerprintError,
@@ -33,10 +29,8 @@ pub(crate) use self::identity::{fingerprint_digest, PATH_INTENT_FINGERPRINT_DOMA
 pub use self::materialize::{
     materialize_commit, CommitOpResult, MaterializedCommit, MaterializedCommitDelta,
 };
-pub use self::operation::CommitOp;
 pub(crate) use self::plan::ValidatedOp;
-pub use self::plan::{CommitPlan, CommitValidationContext};
-pub use self::precondition::{Precondition, ResolvedBinding};
+pub use self::plan::{CommitPlan, CommitValidationContext, ResolvedBinding};
 pub(crate) use self::prepared::CommitIdentitySource;
 pub use self::prepared::{CommitExecutionContext, CommitPrepareError, PreparedCommit};
 pub(crate) use self::publish::PreparedCommitHeadPublish;

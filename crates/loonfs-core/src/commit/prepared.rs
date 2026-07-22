@@ -9,6 +9,10 @@ use loonfs_api::{NamespaceId, WriterEpoch};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+/// Execution-only commit context, kept separate from the canonical API
+/// operation and precondition vocabulary. Writer identity, session, epoch,
+/// and commit time never enter those vocabulary types or the semantic
+/// fingerprint; namespace scopes the fingerprint separately.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitExecutionContext {
     pub namespace_id: NamespaceId,
@@ -82,7 +86,8 @@ impl PreparedCommit {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commit::{materialize_commit, CommitOp, CommitOpResult, ValidatedOp};
+    use crate::commit::{materialize_commit, CommitOpResult, ValidatedOp};
+    use loonfs_api::v0::CommitOp;
     use loonfs_api::wire::wal::WalDelta;
     use loonfs_api::NameKey;
     use loonfs_api::{ChangeSeq, CommitId, InodeId};

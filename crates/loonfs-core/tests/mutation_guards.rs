@@ -7,7 +7,7 @@ use futures::stream::BoxStream;
 use loonfs_api::{
     sha256_digest,
     v0::{
-        CommitDelta, CommitOp as ApiCommitOp, CommitPrecondition,
+        CommitDelta, CommitOp, CommitOp as ApiCommitOp, CommitPrecondition,
         CommitRequest as ApiCommitRequest, CompleteUploadRequest, UploadMode,
         ValidatedContentToken,
     },
@@ -33,8 +33,8 @@ use loonfs_core::cache::{
     DEFAULT_WAL_TAIL_PROJECTION_ROWS,
 };
 use loonfs_core::commit::{
-    build_commit_plan, materialize_commit, CommitOp, CommitOpResult, CommitRequest,
-    CommitValidationContext, CommitValidationError, PreparedCommit,
+    build_commit_plan, core_commit_fingerprint_for_v0_request, materialize_commit, CommitOpResult,
+    CommitRequest, CommitValidationContext, CommitValidationError, PreparedCommit,
 };
 use loonfs_core::content::{
     mint_content_token, prepare_existing_content_ref, store_bytes_as_content, verify_content_token,
@@ -2648,6 +2648,66 @@ async fn batch_commit_writes_one_segment_and_expands_change_feed() {
             ..
         } if name_key.as_str() == "alpha" && display_name == "alpha"
     ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wire_name_key_stays_typed_through_planning_and_fingerprint() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    let request: ApiCommitRequest = serde_json::from_slice(
+        br#"{
+            "commit_id":"typed-name-key",
+            "preconditions":[{
+                "kind":"child_name_absent",
+                "parent_inode_id":1,
+                "name_key":"caf\u00e9"
+            }],
+            "ops":[{
+                "kind":"create_directory",
+                "parent_inode_id":1,
+                "display_name":"Caf\u00e9"
+            }],
+            "message":"typed boundary"
+        }"#,
+    )
+    .expect("deserialize wire commit request");
+    let expected_name_key = NameKey::parse("café").expect("valid name key");
+    assert!(matches!(
+        request.preconditions.as_slice(),
+        [CommitPrecondition::ChildNameAbsent { name_key, .. }]
+            if name_key == &expected_name_key
+    ));
+    let expected_fingerprint = core_commit_fingerprint_for_v0_request(&namespace_id, &request)
+        .expect("fingerprint wire request");
+
+    commit_operations(&store, &namespace_id, request, &context).expect("commit typed name key");
+
+    let wal_keys = store
+        .list_prefix("namespaces/demo/wal/segments/")
+        .await
+        .expect("list wal");
+    assert_eq!(wal_keys.len(), 1);
+    let wal_bytes = store
+        .get(&wal_keys[0], None)
+        .await
+        .expect("read wal")
+        .expect("wal exists");
+    let segment = decode_wal_segment_envelope_zstd(&wal_bytes).expect("decode segment");
+    assert_eq!(segment.payload.records.len(), 1);
+    assert_eq!(
+        segment.payload.records[0].semantic_commit_fingerprint,
+        expected_fingerprint.as_str()
+    );
+    assert!(segment.payload.records[0]
+        .deltas
+        .iter()
+        .any(|delta| matches!(
+            &delta.delta,
+            WalDelta::BindDirentry { name_key, .. } if name_key == &expected_name_key
+        )));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -5,12 +5,12 @@
 //! call site keeps its exact wire-visible variant.
 
 use super::super::{
-    push_unique_invariant, CommitOp, CommitRequest, CommitValidationError, Precondition,
-    ResolvedBinding, ValidatedOp,
+    push_unique_invariant, CommitRequest, CommitValidationError, ResolvedBinding, ValidatedOp,
 };
 use super::view::CommitValidationView;
 use crate::invariants::InvariantId;
 use crate::metadata::{BindingIdentity, InodeRecord, RevisionRecord, SubtreeTombstoneRecord};
+use loonfs_api::v0::{CommitOp, CommitPrecondition};
 use loonfs_api::{ChangeSeq, DisplayName, InodeId, InodeKind, NameKey, NamePolicy, RevisionNo};
 
 pub(super) struct ValidatedMetadataOps {
@@ -357,30 +357,30 @@ pub(super) async fn validate_metadata_preconditions<V: CommitValidationView>(
 }
 
 async fn validate_explicit_preconditions<V: CommitValidationView>(
-    preconditions: &[Precondition],
+    preconditions: &[CommitPrecondition],
     metadata_state: &V,
     checked_invariants: &mut Vec<InvariantId>,
 ) -> Result<(), V::Error> {
     for precondition in preconditions {
         match precondition {
-            Precondition::InodeRevisionIs {
+            CommitPrecondition::InodeRevisionIs {
                 inode_id,
                 revision_no,
             } => {
                 validate_inode_revision_is(metadata_state, *inode_id, *revision_no).await?;
             }
-            Precondition::AncestorsNotSubtreeDeleted { inode_id } => {
+            CommitPrecondition::AncestorsNotSubtreeDeleted { inode_id } => {
                 validate_replace_target_not_covered(metadata_state, *inode_id, checked_invariants)
                     .await?;
             }
-            Precondition::ChildNameAbsent {
+            CommitPrecondition::ChildNameAbsent {
                 parent_inode_id,
                 name_key,
             } => {
                 validate_child_name_absent_precondition(metadata_state, *parent_inode_id, name_key)
                     .await?;
             }
-            Precondition::BindingIs {
+            CommitPrecondition::BindingIs {
                 parent_inode_id,
                 name_key,
                 child_inode_id,
@@ -397,7 +397,7 @@ async fn validate_explicit_preconditions<V: CommitValidationView>(
                 )
                 .await?;
             }
-            Precondition::DirectoryEmpty { inode_id } => {
+            CommitPrecondition::DirectoryEmpty { inode_id } => {
                 validate_directory_empty_precondition(metadata_state, *inode_id).await?;
             }
         }
@@ -602,17 +602,17 @@ async fn validate_rename_target_name_absent<V: CommitValidationView>(
 async fn validate_child_name_absent_precondition<V: CommitValidationView>(
     metadata_state: &V,
     parent_inode_id: InodeId,
-    name_key: &str,
+    name_key: &NameKey,
 ) -> Result<(), V::Error> {
     validate_name_precondition_parent(metadata_state, parent_inode_id).await?;
 
     if let Some(existing) = metadata_state
-        .visible_child(parent_inode_id, name_key)
+        .visible_child(parent_inode_id, name_key.as_str())
         .await?
     {
         return Err(CommitValidationError::CreateChildNameCollision {
             parent_inode_id,
-            name_key: name_key.to_owned(),
+            name_key: name_key.as_str().to_owned(),
             child_inode_id: existing.child_inode_id,
         }
         .into());
@@ -625,7 +625,7 @@ async fn validate_child_name_absent_precondition<V: CommitValidationView>(
 async fn validate_binding_is_precondition<V: CommitValidationView>(
     metadata_state: &V,
     parent_inode_id: InodeId,
-    name_key: &str,
+    name_key: &NameKey,
     child_inode_id: InodeId,
     bind_seq: ChangeSeq,
     bind_delta_index: u32,
@@ -633,12 +633,12 @@ async fn validate_binding_is_precondition<V: CommitValidationView>(
     validate_name_precondition_parent(metadata_state, parent_inode_id).await?;
 
     let Some(existing) = metadata_state
-        .visible_child(parent_inode_id, name_key)
+        .visible_child(parent_inode_id, name_key.as_str())
         .await?
     else {
         return Err(CommitValidationError::BindingPreconditionMissing {
             parent_inode_id,
-            name_key: name_key.to_owned(),
+            name_key: name_key.as_str().to_owned(),
         }
         .into());
     };
@@ -647,7 +647,7 @@ async fn validate_binding_is_precondition<V: CommitValidationView>(
     // remaining binding-identity fields.
     let expected = BindingIdentity {
         parent_inode_id,
-        name_key,
+        name_key: name_key.as_str(),
         child_inode_id,
         bind_seq,
         bind_delta_index,
@@ -655,7 +655,7 @@ async fn validate_binding_is_precondition<V: CommitValidationView>(
     if BindingIdentity::from(&existing) != expected {
         return Err(CommitValidationError::BindingPreconditionMismatch {
             parent_inode_id,
-            name_key: name_key.to_owned(),
+            name_key: name_key.as_str().to_owned(),
             expected_child_inode_id: child_inode_id,
             actual_child_inode_id: Some(existing.child_inode_id),
         }

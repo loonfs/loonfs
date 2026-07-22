@@ -3,7 +3,7 @@
 
 use super::super::frame::validate_commit_request_frame;
 use super::super::{
-    push_unique_invariant, CommitOp, CommitPlan, CommitRequest, CommitValidationContext,
+    push_unique_invariant, CommitPlan, CommitRequest, CommitValidationContext,
     CommitValidationError,
 };
 use super::checks::validate_metadata_preconditions;
@@ -11,6 +11,7 @@ use super::view::{CommitValidationView, InMemoryValidationView, PublishValidatio
 use crate::error::CoreError;
 use crate::invariants::InvariantId;
 use crate::metadata::{MetadataState, MetadataView};
+use loonfs_api::v0::CommitOp;
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::{ChangeSeq, InodeId, NamePolicy};
 use loonfs_objectstore::ObjectStore;
