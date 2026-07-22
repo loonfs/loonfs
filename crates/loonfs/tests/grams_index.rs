@@ -486,7 +486,7 @@ impl IndexSegmentGetCountingStore {
     }
 
     fn record_if_index_segment(&self, key: &str) {
-        if key.starts_with("grep/v0/") && key.contains("/segments/") {
+        if key.contains("/extensions/grep/segments/") && key.ends_with(".sst.zst") {
             self.index_segment_gets.fetch_add(1, Ordering::SeqCst);
         }
     }
@@ -1108,7 +1108,7 @@ impl InFlightIndexGetProbeStore {
     where
         F: std::future::Future<Output = T>,
     {
-        if !key.starts_with("grep/v0/") || !key.contains("/segments/") {
+        if !key.contains("/extensions/grep/segments/") || !key.ends_with(".sst.zst") {
             return read.await;
         }
         let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;

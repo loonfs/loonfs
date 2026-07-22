@@ -4,6 +4,13 @@ use loonfs_api::{IndexSegmentId, NamespaceId};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("invalid grep manifest id {value:?}: {reason}")]
+pub struct GrepManifestIdError {
+    pub(crate) value: String,
+    pub(crate) reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum GrepRootStateError {
     #[error("unsupported grep index format version `{found}`: this build supports `{supported}`")]
@@ -63,6 +70,8 @@ pub enum GrepRootCodecError {
     StalePayloadChecksum { checksum: String, actual: String },
     #[error("invalid grep root state: {0}")]
     InvalidState(#[from] GrepRootStateError),
+    #[error("invalid grep manifest id: {0}")]
+    InvalidManifestId(#[from] GrepManifestIdError),
 }
 
 /// Failure to load or publish a grep root.
@@ -73,6 +82,11 @@ pub enum GrepRootError {
     Store { object_key: String, message: String },
     #[error("grep root `{object_key}` is corrupt: {message}")]
     Corrupt { object_key: String, message: String },
+    #[error("grep root `{root_key}` names missing manifest `{manifest_key}`")]
+    MissingManifest {
+        root_key: String,
+        manifest_key: String,
+    },
     #[error(
         "grep root `{object_key}` names namespace `{actual}` instead of requested namespace \
          `{expected}`"

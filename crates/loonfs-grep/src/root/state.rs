@@ -1,13 +1,149 @@
-//! Constructor-validated state carried by the grep root payload.
+//! Constructor-validated grep manifest payload and its root pointer.
 
-use super::error::GrepRootStateError;
+use super::error::{GrepManifestIdError, GrepRootStateError};
+use loonfs_api::sha256_digest;
 use loonfs_api::wire::sst_blocks::BlockHandle;
 use loonfs_api::{ChangeSeq, CheckpointId, IndexSegmentId, NamespaceId};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
+use std::str::FromStr;
 
-/// Version of the grep index state nested inside a v0 root.
+const SHA256_PREFIX: &str = "sha256:";
+const SHA256_HEX_LEN: usize = 64;
+
+/// Version of the grep index state nested inside a v0 manifest.
 pub const GREP_INDEX_FORMAT_VERSION: u32 = 0;
+
+/// Content-derived identity of one immutable grep manifest payload.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct GrepManifestId(String);
+
+impl GrepManifestId {
+    /// Parses the manifest id's 64-character lowercase SHA-256 hex form.
+    pub fn parse(value: impl AsRef<str>) -> Result<Self, GrepManifestIdError> {
+        let value = value.as_ref();
+        if value.len() != SHA256_HEX_LEN {
+            return Err(GrepManifestIdError {
+                value: value.to_owned(),
+                reason: format!("must contain exactly {SHA256_HEX_LEN} lowercase hex characters"),
+            });
+        }
+        if !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(GrepManifestIdError {
+                value: value.to_owned(),
+                reason: "must contain only lowercase hex characters".to_owned(),
+            });
+        }
+        Ok(Self(value.to_owned()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub(crate) fn for_payload(payload: &[u8]) -> Self {
+        let digest = sha256_digest(payload);
+        Self(
+            digest
+                .strip_prefix(SHA256_PREFIX)
+                .expect("sha256_digest should carry the sha256 prefix")
+                .to_owned(),
+        )
+    }
+
+    pub(crate) fn payload_checksum(&self) -> String {
+        format!("{SHA256_PREFIX}{}", self.0)
+    }
+}
+
+impl AsRef<str> for GrepManifestId {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::borrow::Borrow<str> for GrepManifestId {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl fmt::Display for GrepManifestId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for GrepManifestId {
+    type Err = GrepManifestIdError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::parse(value)
+    }
+}
+
+impl TryFrom<&str> for GrepManifestId {
+    type Error = GrepManifestIdError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Self::parse(value)
+    }
+}
+
+impl TryFrom<String> for GrepManifestId {
+    type Error = GrepManifestIdError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::parse(value)
+    }
+}
+
+impl Serialize for GrepManifestId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for GrepManifestId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(value).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Small mutable control payload installed at `extensions/grep/root.json`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GrepRootPointer {
+    namespace_id: NamespaceId,
+    manifest_id: GrepManifestId,
+}
+
+impl GrepRootPointer {
+    pub fn new(namespace_id: NamespaceId, manifest_id: GrepManifestId) -> Self {
+        Self {
+            namespace_id,
+            manifest_id,
+        }
+    }
+
+    pub fn namespace_id(&self) -> &NamespaceId {
+        &self.namespace_id
+    }
+
+    pub fn manifest_id(&self) -> &GrepManifestId {
+        &self.manifest_id
+    }
+}
 
 /// Durable lifecycle of grep indexing for one namespace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -93,9 +229,9 @@ pub struct GrepSegmentRef {
     pub payload_checksum: String,
 }
 
-/// One namespace's complete grep control state.
+/// One namespace's complete immutable grep manifest state.
 ///
-/// Fields stay private so every constructed or decoded root passes the
+/// Fields stay private so every constructed or decoded manifest passes the
 /// inexpensive fold/segment and run-allocation checks in [`Self::new`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GrepRootState {

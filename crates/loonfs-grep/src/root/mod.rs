@@ -1,15 +1,15 @@
-//! The atomic grep root and its durable publication boundary.
+//! The atomic grep root pointer, immutable manifests, and publication boundary.
 //!
-//! One root pairs the query-visible segment set with its
+//! One immutable manifest pairs the query-visible segment set with its
 //! `built_through_seq` watermark, lifecycle, in-progress fold, and run
-//! ordinal allocation. Publication replaces that whole set in one object
-//! store compare-and-swap, so a reader never observes a watermark without
-//! the segments that implement it.
+//! ordinal allocation. Publication writes that manifest create-if-absent,
+//! then installs a tiny pointer in one object-store compare-and-swap, so a
+//! reader never observes a watermark without the segments that implement it.
 //!
-//! Segment objects are immutable derived data written before the root CAS.
-//! A CAS loser therefore leaks only unreachable derived objects; it never
-//! changes visible grep state. [`crate::GrepWorker`] garbage collection
-//! reclaims those unreachable objects after its grace window.
+//! Segment and manifest objects are immutable derived data written before
+//! the pointer CAS. A CAS loser therefore leaks only unreachable derived
+//! objects; it never changes visible grep state. [`crate::GrepWorker`]
+//! garbage collection reclaims those objects after its grace window.
 
 mod codec;
 mod error;
@@ -17,11 +17,18 @@ mod state;
 mod store;
 
 pub use codec::{
-    decode_grep_root, encode_grep_root, GrepRootEnvelope, GREP_ROOT_FORMAT_VERSION, GREP_ROOT_KIND,
+    decode_grep_manifest, decode_grep_root, encode_grep_manifest, encode_grep_root,
+    GrepManifestEnvelope, GrepRootEnvelope, GREP_MANIFEST_FORMAT_VERSION, GREP_MANIFEST_KIND,
+    GREP_ROOT_FORMAT_VERSION, GREP_ROOT_KIND,
 };
-pub use error::{GrepRootCodecError, GrepRootError, GrepRootStateError, Result};
+pub use error::{
+    GrepManifestIdError, GrepRootCodecError, GrepRootError, GrepRootStateError, Result,
+};
 pub use state::{
-    GrepFoldState, GrepIndexState, GrepLifecycle, GrepRootState, GrepSegmentRef,
-    GREP_INDEX_FORMAT_VERSION,
+    GrepFoldState, GrepIndexState, GrepLifecycle, GrepManifestId, GrepRootPointer, GrepRootState,
+    GrepSegmentRef, GREP_INDEX_FORMAT_VERSION,
 };
-pub use store::{advance_grep_root, load_grep_root, seed_grep_root, LoadedGrepRoot};
+pub use store::{
+    advance_grep_root, load_grep_manifest, load_grep_root, load_grep_root_pointer, seed_grep_root,
+    LoadedGrepRoot, LoadedGrepRootPointer,
+};

@@ -1,4 +1,4 @@
-//! Fair all-namespaces scheduling for [`crate::GrepWorker`] steps and GC.
+//! Registered scheduling plus rare whole-store grep-root rediscovery and GC.
 
 use crate::keyspace::{all_namespaces_prefix, parse_key, GrepKeyKind};
 use crate::{GrepGcReport, GrepWorker, GrepWorkerConfig};
@@ -17,7 +17,7 @@ const MAX_NAMESPACE_BACKOFF_SWEEPS: u64 = 64;
 /// Counts from one complete build/fold sweep and optional GC pass.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct GrepSweepReport {
-    /// Exact grep roots discovered under the all-namespaces prefix.
+    /// Registered namespaces considered by this sweep.
     pub namespaces_seen: u64,
     /// Namespaces whose build and fold steps both completed.
     pub namespaces_completed: u64,
@@ -120,6 +120,9 @@ impl<S: ObjectStore + Clone> GrepWorkerLoop<S> {
     pub async fn run_once(
         &mut self,
     ) -> std::result::Result<GrepSweepReport, GrepWorkerRunOnceError> {
+        self.rediscover_namespaces()
+            .await
+            .map_err(GrepWorkerRunOnceError::Sweep)?;
         let mut report = self
             .sweep(false)
             .await
@@ -146,14 +149,28 @@ impl<S: ObjectStore + Clone> GrepWorkerLoop<S> {
     pub async fn run(mut self) {
         let step_interval = Duration::from_millis(self.config.step_interval_ms);
         let gc_interval = Duration::from_millis(self.config.gc_interval_ms);
+        let rescan_interval = Duration::from_millis(self.config.rescan_interval_ms);
         let mut next_gc = tokio::time::Instant::now();
+        let mut next_rescan = tokio::time::Instant::now();
         while !self.shutdown.requested() {
+            let now = tokio::time::Instant::now();
+            if now >= next_rescan {
+                if let Err(error) = self.rediscover_namespaces().await {
+                    tracing::warn!(
+                        phase = "grep_worker_rediscovery",
+                        result = "error",
+                        error = %error,
+                        "grep worker could not rediscover roots; retaining registrations"
+                    );
+                }
+                next_rescan = tokio::time::Instant::now() + rescan_interval;
+            }
             if let Err(error) = self.sweep(true).await {
                 tracing::warn!(
                     phase = "grep_worker_sweep",
                     result = "error",
                     error = %error,
-                    "grep worker could not enumerate namespaces; retrying"
+                    "grep worker sweep failed; retrying"
                 );
             }
             if self.shutdown.requested() {
@@ -189,7 +206,7 @@ impl<S: ObjectStore + Clone> GrepWorkerLoop<S> {
 
     async fn sweep(&mut self, honor_shutdown: bool) -> Result<GrepSweepReport> {
         self.sweep_number = self.sweep_number.saturating_add(1);
-        let namespace_ids = self.namespace_ids().await?;
+        let namespace_ids = self.worker.registered_namespace_ids();
         let discovered: BTreeSet<NamespaceId> = namespace_ids.iter().cloned().collect();
         self.namespace_failures
             .retain(|namespace_id, _| discovered.contains(namespace_id));
@@ -232,7 +249,8 @@ impl<S: ObjectStore + Clone> GrepWorkerLoop<S> {
         Ok(report)
     }
 
-    async fn namespace_ids(&self) -> Result<Vec<NamespaceId>> {
+    async fn rediscover_namespaces(&self) -> Result<()> {
+        let scan_started_at_generation = self.worker.namespace_registration_generation();
         let keys = self
             .store
             .list_prefix(all_namespaces_prefix())
@@ -242,15 +260,16 @@ impl<S: ObjectStore + Clone> GrepWorkerLoop<S> {
                 message: error.message(),
                 class: StoreFailureClass::of(&error),
             })?;
-        Ok(keys
+        let namespace_ids = keys
             .into_iter()
             .filter_map(|key| {
                 let parsed = parse_key(&key)?;
                 matches!(parsed.kind, GrepKeyKind::Root).then_some(parsed.namespace_id)
             })
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect())
+            .collect::<BTreeSet<_>>();
+        self.worker
+            .reconcile_namespaces(namespace_ids, scan_started_at_generation);
+        Ok(())
     }
 
     fn namespace_is_backed_off(&self, namespace_id: &NamespaceId) -> bool {

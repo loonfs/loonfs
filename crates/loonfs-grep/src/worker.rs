@@ -3,7 +3,7 @@
 use crate::cache::{GrepBlockCache, MAX_CACHED_GREP_BLOCKS};
 use crate::codec::{extract_grams, Gram, GramPosting, IndexRow, INDEX_GRAMS_MAX_FILE_BYTES};
 use crate::index_read::{load_data_block, load_index_block};
-use crate::keyspace::{all_namespaces_prefix, root_key, segment_key};
+use crate::keyspace::{all_namespaces_prefix, manifest_key, root_key, segment_key};
 use crate::root::{
     advance_grep_root, load_grep_root, seed_grep_root, GrepFoldState, GrepIndexState,
     GrepLifecycle, GrepRootError, GrepRootState, GrepSegmentRef, LoadedGrepRoot,
@@ -35,6 +35,7 @@ use loonfs_objectstore::{
     ObjectStore, ObjectStoreError, PutMode, PROVIDER_MULTIPART_THRESHOLD_BYTES,
 };
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// User-checkpoint lifetime used by one backfill attempt. An expired attempt
@@ -194,13 +195,25 @@ pub struct GrepGcReport {
 ///
 /// Calls are explicit and bounded. A later standalone process or server mode
 /// can drive the same methods without changing the durable protocol.
-#[derive(Debug)]
+#[derive(Debug, Default)]
+struct GrepNamespaceRegistry {
+    state: Mutex<GrepNamespaceRegistryState>,
+}
+
+#[derive(Debug, Default)]
+struct GrepNamespaceRegistryState {
+    namespace_generations: BTreeMap<NamespaceId, u64>,
+    generation: u64,
+}
+
+#[derive(Debug, Clone)]
 pub struct GrepWorker<S> {
     store: S,
     writer_id: String,
     writer_session_id: String,
     writer_version: String,
-    block_cache: GrepBlockCache,
+    block_cache: Arc<GrepBlockCache>,
+    namespace_registry: Arc<GrepNamespaceRegistry>,
 }
 
 impl<S: ObjectStore + Clone> GrepWorker<S> {
@@ -216,8 +229,64 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             writer_id: writer_id.into(),
             writer_session_id: writer_session_id.into(),
             writer_version: writer_version.into(),
-            block_cache: GrepBlockCache::new(MAX_CACHED_GREP_BLOCKS),
+            block_cache: Arc::new(GrepBlockCache::new(MAX_CACHED_GREP_BLOCKS)),
+            namespace_registry: Arc::new(GrepNamespaceRegistry::default()),
         }
+    }
+
+    pub(crate) fn registered_namespace_ids(&self) -> Vec<NamespaceId> {
+        self.namespace_registry
+            .state
+            .lock()
+            .expect("grep namespace registry lock poisoned")
+            .namespace_generations
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    pub(crate) fn namespace_registration_generation(&self) -> u64 {
+        self.namespace_registry
+            .state
+            .lock()
+            .expect("grep namespace registry lock poisoned")
+            .generation
+    }
+
+    pub(crate) fn reconcile_namespaces(
+        &self,
+        discovered: BTreeSet<NamespaceId>,
+        scan_started_at_generation: u64,
+    ) {
+        let mut registry = self
+            .namespace_registry
+            .state
+            .lock()
+            .expect("grep namespace registry lock poisoned");
+        registry
+            .namespace_generations
+            .retain(|namespace_id, generation| {
+                discovered.contains(namespace_id) || *generation > scan_started_at_generation
+            });
+        for namespace_id in discovered {
+            registry
+                .namespace_generations
+                .entry(namespace_id)
+                .or_default();
+        }
+    }
+
+    fn register_namespace(&self, namespace_id: &NamespaceId) {
+        let mut registry = self
+            .namespace_registry
+            .state
+            .lock()
+            .expect("grep namespace registry lock poisoned");
+        registry.generation = registry.generation.saturating_add(1);
+        let generation = registry.generation;
+        registry
+            .namespace_generations
+            .insert(namespace_id.clone(), generation);
     }
 
     /// Enables grep by pinning a checkpoint and CAS-publishing a fresh
@@ -228,6 +297,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             .map_err(core_root_error)?
         {
             if !matches!(current.state().lifecycle(), GrepLifecycle::Disabled) {
+                self.register_namespace(namespace_id);
                 return Ok(GrepEnableOutcome::AlreadyEnabled {
                     built_through_seq: current.state().index().built_through_seq,
                 });
@@ -246,6 +316,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                     current.state(),
                 )
                 .await?;
+                self.register_namespace(namespace_id);
                 return Ok(GrepEnableOutcome::AlreadyEnabled {
                     built_through_seq: current.state().index().built_through_seq,
                 });
@@ -261,10 +332,8 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             next_run_ordinal,
         )?;
         let published = match current {
-            Some(current) => {
-                advance_grep_root(&self.store, &current, &next, &self.writer_version).await
-            }
-            None => seed_grep_root(&self.store, &next, &self.writer_version).await,
+            Some(current) => self.advance_root(&current, &next).await,
+            None => self.seed_root(&next).await,
         };
         match published {
             Ok(_) => Ok(GrepEnableOutcome::Enabled {
@@ -315,7 +384,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             Vec::new(),
         )
         .map_err(core_state_error)?;
-        match advance_grep_root(&self.store, &current, &next, &self.writer_version).await {
+        match self.advance_root(&current, &next).await {
             Ok(_) => {
                 if let Some(checkpoint_id) = checkpoint_id {
                     self.engine(namespace_id)?
@@ -426,6 +495,22 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             })
     }
 
+    async fn seed_root(&self, state: &GrepRootState) -> crate::root::Result<LoadedGrepRoot> {
+        let loaded = seed_grep_root(&self.store, state, &self.writer_version).await?;
+        self.register_namespace(state.namespace_id());
+        Ok(loaded)
+    }
+
+    async fn advance_root(
+        &self,
+        current: &LoadedGrepRoot,
+        next: &GrepRootState,
+    ) -> crate::root::Result<LoadedGrepRoot> {
+        let loaded = advance_grep_root(&self.store, current, next, &self.writer_version).await?;
+        self.register_namespace(next.namespace_id());
+        Ok(loaded)
+    }
+
     async fn create_backfill_checkpoint(
         &self,
         namespace_id: &NamespaceId,
@@ -468,7 +553,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             checkpoint.checkpoint_id.clone(),
             current.state().index().next_run_ordinal,
         )?;
-        match advance_grep_root(&self.store, current, &next, &self.writer_version).await {
+        match self.advance_root(current, &next).await {
             Ok(_) => {
                 if let Some(previous_checkpoint_id) = previous_checkpoint_id {
                     if previous_checkpoint_id != checkpoint.checkpoint_id {
@@ -553,7 +638,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         )
         .map_err(core_state_error)?;
         ensure_publication_budget(&timer, publication_started_ms)?;
-        match advance_grep_root(&self.store, &current, &next, &self.writer_version).await {
+        match self.advance_root(&current, &next).await {
             Ok(_) => {
                 if let Some(checkpoint_id) = completed_checkpoint_id {
                     self.engine(namespace_id)?
@@ -1019,7 +1104,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         )
         .map_err(core_state_error)?;
         ensure_publication_budget(&timer, publication_started_ms)?;
-        match advance_grep_root(&self.store, &current, &next, &self.writer_version).await {
+        match self.advance_root(&current, &next).await {
             Ok(_) => Ok(fold_report(
                 namespace_id,
                 GrepFoldOutcome::StepPublished {
@@ -1368,13 +1453,18 @@ async fn ensure_live_namespace<S: ObjectStore + ?Sized>(
 
 fn namespace_id_from_grep_key(key: &str) -> Option<NamespaceId> {
     let suffix = key.strip_prefix(all_namespaces_prefix())?;
-    let (namespace, _) = suffix.split_once('/')?;
-    NamespaceId::parse(namespace).ok()
+    let (namespace, object) = suffix.split_once('/')?;
+    object
+        .starts_with("extensions/grep/")
+        .then(|| NamespaceId::parse(namespace).ok())?
 }
 
 fn live_grep_keys(root: &LoadedGrepRoot) -> BTreeSet<String> {
     let namespace_id = root.state().namespace_id();
-    let mut live = BTreeSet::from([root_key(namespace_id)]);
+    let mut live = BTreeSet::from([
+        root_key(namespace_id),
+        manifest_key(namespace_id, root.manifest_envelope().manifest_id()),
+    ]);
     live.extend(
         root.state()
             .segments()

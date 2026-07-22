@@ -20,8 +20,13 @@ use loonfs_core::cache::{
 };
 use loonfs_core::control::{load_namespace_checkpoint_record_control, load_namespace_read_anchor};
 use loonfs_core::{NamespaceEngine, RuntimeReadContext};
-use loonfs_grep::keyspace::{namespace_prefix, segment_key};
-use loonfs_grep::root::{load_grep_root, GrepLifecycle};
+use loonfs_grep::keyspace::{
+    manifest_key, manifests_prefix, namespace_prefix, root_key, segment_key,
+};
+use loonfs_grep::root::{
+    encode_grep_root, load_grep_root, GrepLifecycle, GrepManifestId, GrepRootEnvelope,
+    GrepRootPointer,
+};
 use loonfs_grep::{
     GrepBuildOutcome, GrepFoldOutcome, GrepIndexSnapshot, GrepService, GrepWorker,
     GREP_GC_GRACE_WINDOW_MS,
@@ -114,13 +119,9 @@ async fn new_query(
         .expect("new query engine");
     let context = read_context(store, namespace_id).await;
     let view = engine.load_grep_view_with_runtime_context(&context).await?;
-    let root = load_grep_root(&**store, namespace_id)
-        .await
-        .map_err(|error| loonfs_core::Error::NamespaceCorrupt(error.to_string()))?;
-    let snapshot = GrepIndexSnapshot::from_grep_root(root.as_ref().map(|root| root.state()));
-    GrepService::new()
-        .query(grep_request, &snapshot, &view, store)
-        .await
+    let service = GrepService::new();
+    let snapshot = GrepIndexSnapshot::from_grep_root(&**store, namespace_id, &service).await;
+    service.query(grep_request, &snapshot, &view, store).await
 }
 
 fn normalize_namespace(mut response: GrepResponse, namespace_id: &NamespaceId) -> GrepResponse {
@@ -386,7 +387,63 @@ async fn grep_root_lifecycle_pins_not_materialized_error_surface() {
         "disabled",
         new_reader.grep(&namespace_id, &request("needle")).await,
     );
+
+    let missing_manifest_id =
+        GrepManifestId::parse("1111111111111111111111111111111111111111111111111111111111111111")
+            .expect("valid manifest id");
+    write_pointer(&*store, &namespace_id, missing_manifest_id).await;
+    assert_not_materialized_error(
+        "missing manifest",
+        new_reader.grep(&namespace_id, &request("needle")).await,
+    );
+
+    let corrupt_manifest_id =
+        GrepManifestId::parse("2222222222222222222222222222222222222222222222222222222222222222")
+            .expect("valid manifest id");
+    store
+        .put_overwrite(
+            &manifest_key(&namespace_id, &corrupt_manifest_id),
+            Bytes::from_static(b"corrupt manifest"),
+        )
+        .await
+        .expect("write corrupt manifest");
+    write_pointer(&*store, &namespace_id, corrupt_manifest_id).await;
+    assert_not_materialized_error(
+        "corrupt manifest",
+        new_reader.grep(&namespace_id, &request("needle")).await,
+    );
+
+    store
+        .put_overwrite(
+            &root_key(&namespace_id),
+            Bytes::from_static(b"corrupt pointer"),
+        )
+        .await
+        .expect("write corrupt pointer");
+    assert_not_materialized_error(
+        "corrupt pointer",
+        new_reader.grep(&namespace_id, &request("needle")).await,
+    );
     writer.shutdown_background().await.expect("shutdown");
+}
+
+async fn write_pointer(
+    store: &dyn ObjectStore,
+    namespace_id: &NamespaceId,
+    manifest_id: GrepManifestId,
+) {
+    let envelope = GrepRootEnvelope::from_pointer(
+        "grep-error-surface-test/0.1",
+        GrepRootPointer::new(namespace_id.clone(), manifest_id),
+    )
+    .expect("build pointer");
+    store
+        .put_overwrite(
+            &root_key(namespace_id),
+            Bytes::from(encode_grep_root(&envelope).expect("encode pointer")),
+        )
+        .await
+        .expect("write pointer");
 }
 
 fn assert_not_materialized_error(case: &str, result: loonfs::Result<GrepResponse>) {
@@ -783,6 +840,7 @@ async fn grep_gc_retains_live_roots_reaps_deleted_namespaces_and_never_crosses_k
     let store: SharedObjectStore = aged_store.clone();
     let live_namespace = NamespaceId::parse("gc-live").expect("namespace id");
     let deleted_namespace = NamespaceId::parse("gc-deleted").expect("namespace id");
+    let corrupt_namespace = NamespaceId::parse("gc-corrupt").expect("namespace id");
     let absent_namespace = NamespaceId::parse("gc-absent").expect("namespace id");
     let writer = FsWriter::builder_with_store(store.clone())
         .writer_id("gc-writer")
@@ -795,7 +853,7 @@ async fn grep_gc_retains_live_roots_reaps_deleted_namespaces_and_never_crosses_k
         .build()
         .await
         .expect("admin");
-    for namespace_id in [&live_namespace, &deleted_namespace] {
+    for namespace_id in [&live_namespace, &deleted_namespace, &corrupt_namespace] {
         writer
             .create_namespace(namespace_id, CreateNamespaceOptions::default())
             .await
@@ -811,7 +869,7 @@ async fn grep_gc_retains_live_roots_reaps_deleted_namespaces_and_never_crosses_k
             .expect("write file");
     }
     let worker = worker(&store);
-    for namespace_id in [&live_namespace, &deleted_namespace] {
+    for namespace_id in [&live_namespace, &deleted_namespace, &corrupt_namespace] {
         worker.enable(namespace_id).await.expect("enable");
         drive_worker_to_current(&worker, namespace_id, GramIndexBuildPolicy::default()).await;
     }
@@ -821,6 +879,8 @@ async fn grep_gc_retains_live_roots_reaps_deleted_namespaces_and_never_crosses_k
         .expect("root exists");
     let live_segment_key =
         segment_key(&live_namespace, &live_root.state().segments()[0].segment_id);
+    let live_manifest_key =
+        manifest_key(&live_namespace, live_root.manifest_envelope().manifest_id());
     let orphan_key = segment_key(&live_namespace, &IndexSegmentId::generate());
     store
         .put(
@@ -849,6 +909,17 @@ async fn grep_gc_retains_live_roots_reaps_deleted_namespaces_and_never_crosses_k
         )
         .await
         .expect("write absent namespace grep state");
+    let corrupt_keys = store
+        .list_prefix(&namespace_prefix(&corrupt_namespace))
+        .await
+        .expect("list corrupt namespace grep state");
+    store
+        .put_overwrite(
+            &root_key(&corrupt_namespace),
+            Bytes::from_static(b"corrupt root pointer"),
+        )
+        .await
+        .expect("corrupt root pointer");
 
     writer
         .delete_namespace(&deleted_namespace, DeleteNamespaceOptions::default())
@@ -859,11 +930,25 @@ async fn grep_gc_retains_live_roots_reaps_deleted_namespaces_and_never_crosses_k
         .await
         .expect("grep gc");
     assert!(report.deleted_segments >= 1);
+    assert!(report.degraded_namespaces >= 1);
     assert!(store
         .head(&live_segment_key)
         .await
         .expect("head live")
         .is_some());
+    assert!(store
+        .head(&live_manifest_key)
+        .await
+        .expect("head live manifest")
+        .is_some());
+    assert_eq!(
+        store
+            .list_prefix(&manifests_prefix(&live_namespace))
+            .await
+            .expect("list retained live manifests"),
+        vec![live_manifest_key],
+        "only the root-referenced manifest remains live"
+    );
     assert!(store
         .head(&orphan_key)
         .await
@@ -879,6 +964,16 @@ async fn grep_gc_retains_live_roots_reaps_deleted_namespaces_and_never_crosses_k
         .await
         .expect("list absent grep prefix")
         .is_empty());
+    for key in corrupt_keys {
+        assert!(
+            store
+                .head(&key)
+                .await
+                .expect("head degraded-retained key")
+                .is_some(),
+            "corrupt live grep state must degrade to retention for `{key}`"
+        );
+    }
     assert!(store
         .head(&non_grep_key)
         .await

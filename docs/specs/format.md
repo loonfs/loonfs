@@ -98,8 +98,9 @@ recovery authority. `wal/head.json` and `wal/floor.json` live outside the
 only segment keys.
 
 WAL and metadata-table deletion is reachability-driven from the live
-manifest, checkpoint records, and the retention floor. Grep objects live in
-the independent `grep/v0` keyspace and are never core-GC candidates.
+manifest, checkpoint records, and the retention floor. Extension-owned
+objects below `namespaces/{namespace_id}/extensions/` are foreign to the core
+key parser and are never core-GC candidates.
 
 ### 1.3 Durable naming conventions
 
@@ -1228,8 +1229,9 @@ Two rules make these envelopes evolvable:
 | --- | --- | --- | --- |
 | WAL segment | `namespace_wal_segment` | CBOR envelope, zstd-compressed; CBOR payload | 1 |
 | Metadata segment | none (section 4.2.1) | block sections, per-block zstd + CRC32C | 1 (via manifest) |
-| Grep root | `grep_root` | JSON, uncompressed | `v0` |
-| Grep segment | none (section 4.2.2) | block sections, per-block zstd + CRC32C | `v0` (via the grep root) |
+| Grep root pointer | `grep_root` | JSON, uncompressed | `v0` |
+| Grep manifest | `grep_manifest` | JSON, uncompressed | `v0` |
+| Grep segment | none (section 4.2.2) | block sections, per-block zstd + CRC32C | `v0` (via the grep manifest) |
 | Namespace manifest | `namespace_manifest` | JSON, uncompressed | 1 |
 | Control objects (head, descriptors, upload session) | per-kind snake_case names | JSON, uncompressed | 1 (tracked per kind) |
 
@@ -1268,17 +1270,40 @@ out-of-order index entries, and checksum failures as malformed. The segment
 format is versioned by the manifest that references it (`namespace_manifest`
 `format_version`), since a segment is unreachable except through a manifest.
 
-#### 4.2.2 Grep roots and gram-index segments
+#### 4.2.2 Grep roots, manifests, and gram-index segments
 
-`loonfs-grep` owns all grep durability under
-`grep/v0/namespaces/{namespace_id}/`: one atomic `root.json` and immutable
-segments under `segments/{segment_id}.sst`. Namespace manifests carry no
-grep root, watermark, lifecycle, or segment references. A fork consequently
+`loonfs-grep` owns all grep durability under the namespace extension prefix:
+
+```text
+namespaces/{namespace_id}/extensions/grep/
+├── root.json
+├── manifests/{manifest_id}.manifest.json
+└── segments/{segment_id}.sst.zst
+```
+
+`manifest_id` is the 64-character lowercase hex portion of the SHA-256 digest
+of the exact manifest payload fragment. The manifest envelope's
+`payload_checksum` is `sha256:{manifest_id}`. Namespace manifests carry no
+grep pointer, watermark, lifecycle, or segment references. A fork therefore
 starts without grep state until grep is enabled for the target.
+
+`root.json` is a small mutable pointer envelope with these fields, in order:
+
+- envelope: `kind = "grep_root"`, `format_version = "v0"`, informational
+  `writer_version`, `payload_checksum`, and raw JSON `payload`;
+- payload: `namespace_id` and `manifest_id`.
+
+Each immutable manifest has the same envelope grammar with
+`kind = "grep_manifest"` and `format_version = "v0"`. Its payload is the full
+grep state: `namespace_id`, `lifecycle`, nested `index` bookkeeping, and the
+`segments` descriptors. Both decoders verify the checksum over the exact
+stored payload fragment before decoding, reject unknown versions and kind
+mismatches without fallback, and validate namespace, manifest-id, lifecycle,
+fold, run-allocation, and segment invariants at every boundary.
 
 A gram-index segment uses the section 4.2.1 block grammar unchanged —
 prefix-compressed data blocks, one bloom filter block, one index block,
-handles and checksums in the grep-root descriptor — with a grep-owned row
+handles and checksums in the grep-manifest descriptor — with a grep-owned row
 payload instead of metadata rows. The tokenizer, row shapes, and posting
 encoding below are frozen by grep format `v0`; changing them requires a new
 grep format and a rebuild, which is always legal for derived work
@@ -1301,10 +1326,27 @@ grep format and a rebuild, which is always legal for derived work
 - Several rows may carry the same gram (within a segment and across
   segments); readers union their batches.
 
-The grep root carries the query-visible watermark, lifecycle, fold state,
-and segment descriptors. Grep's worker alone publishes and collects that
-state. Core maintenance does not list `grep/v0`, and grep maintenance does
-not list or sweep core-owned collections.
+Publication writes segments first, writes the content-derived manifest with
+create-if-absent semantics, and finally installs `root.json` with one etag
+compare-and-swap (or create-if-absent for the first pointer). A pointer-CAS
+loser's manifest and segments remain unreachable derived garbage; grep GC
+reclaims them after its grace window. Query readers load the pointer afresh,
+then load the immutable manifest it names; decoded manifests may be cached by
+manifest id.
+
+The namespace-scoped layout has no cheap all-grep listing. At worker startup
+and periodically, grep discovery lists the whole `namespaces/` prefix and
+filters exact `namespaces/{namespace_id}/extensions/grep/root.json` keys.
+That scan is proportional to the store's total key count and is the price of
+the layout until a namespace catalog exists, so the default interval is five
+minutes. In-process enablement also registers its namespace directly with the
+embedded loop and does not wait for rediscovery. Grep GC performs the same
+whole-namespace-prefix discovery on its own interval, retains the verified
+pointer, referenced manifest, and referenced segments, degrades to retention
+on corruption or ambiguity, and reaps the whole `extensions/grep/` prefix for
+a tombstoned or absent namespace. Core maintenance does not recognize or
+sweep `extensions/` keys, and grep maintenance does not sweep core-owned
+collections.
 
 ### 4.3 Evolution rules
 
@@ -1462,8 +1504,8 @@ manifest roots every object key its `metadata_files` list names. The pass also s
 session whose provider age exceeds the reap window is deleted whatever its
 state — the abort-incomplete-upload convention. A `complete` after the
 window answers session-not-found.
-Core GC never lists or deletes any object below `grep/v0`; grep collection is
-owned by `loonfs-grep`.
+Core GC never recognizes, lists specifically, or deletes any object below a
+namespace's `extensions/` prefix; grep collection is owned by `loonfs-grep`.
 Because floor, root, and checkpoint publication no longer serialize through
 one head CAS, two cross-object races must be closed explicitly —
 create-vs-collect (a record written while GC concludes its basis is

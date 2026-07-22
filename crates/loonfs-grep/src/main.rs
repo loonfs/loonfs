@@ -16,7 +16,7 @@ struct Args {
     /// TOML file containing `[store]` and optional `[grep]` tables.
     #[arg(long)]
     config: PathBuf,
-    /// Run exactly one all-namespaces build/fold/GC sweep and exit.
+    /// Rediscover grep roots, run one build/fold/GC sweep, and exit.
     #[arg(long)]
     once: bool,
 }

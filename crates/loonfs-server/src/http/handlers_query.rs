@@ -11,6 +11,7 @@ use loonfs_api::v0::{
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
 use loonfs_api::FEATURE_QUERY_GREP;
+use loonfs_grep::{GrepDisableOutcome, GrepEnableOutcome};
 
 #[cfg_attr(
     feature = "openapi",
@@ -75,7 +76,7 @@ pub(super) async fn grep_not_supported(
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
             (status = 501, description = "Grep serving is disabled for this deployment", body = ApiError),
-            (status = 503, description = "Lost a manifest publication race; retry", body = ApiError)
+            (status = 503, description = "Lost a grep root-pointer publication race; retry", body = ApiError)
         )
     )
 )]
@@ -86,11 +87,38 @@ pub(super) async fn enable_grams_index(
 ) -> Result<Json<EnableGramsIndexResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let namespace_id = namespace.into_id()?;
-    let response = state
-        .admin
-        .enable_grams_index(&namespace_id)
+    let outcome = state
+        .grep_worker
+        .as_ref()
+        .expect("grep routes should carry a grep worker")
+        .enable(&namespace_id)
         .await
-        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+        .map_err(|error| {
+            ApiResponseError::runtime_for_namespace(
+                &namespace_id,
+                loonfs::RuntimeError::Core(error),
+            )
+        })?;
+    let response = match outcome {
+        GrepEnableOutcome::Enabled { target_seq } => EnableGramsIndexResponse {
+            namespace_id: namespace_id.clone(),
+            built_through_seq: target_seq,
+            already_enabled: false,
+        },
+        GrepEnableOutcome::AlreadyEnabled { built_through_seq } => EnableGramsIndexResponse {
+            namespace_id: namespace_id.clone(),
+            built_through_seq,
+            already_enabled: true,
+        },
+        GrepEnableOutcome::Superseded => {
+            return Err(ApiResponseError::runtime_for_namespace(
+                &namespace_id,
+                loonfs::RuntimeError::Core(loonfs::CoreError::CheckpointUnavailable(
+                    "enabling grep lost a root publication race; retry".to_owned(),
+                )),
+            ));
+        }
+    };
     Ok(Json(response))
 }
 
@@ -108,7 +136,7 @@ pub(super) async fn enable_grams_index(
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
             (status = 501, description = "Grep serving is disabled for this deployment", body = ApiError),
-            (status = 503, description = "Lost a manifest publication race; retry", body = ApiError)
+            (status = 503, description = "Lost a grep root-pointer publication race; retry", body = ApiError)
         )
     )
 )]
@@ -119,10 +147,35 @@ pub(super) async fn disable_grams_index(
 ) -> Result<Json<DisableGramsIndexResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let namespace_id = namespace.into_id()?;
-    let response = state
-        .admin
-        .disable_grams_index(&namespace_id)
+    let outcome = state
+        .grep_worker
+        .as_ref()
+        .expect("grep routes should carry a grep worker")
+        .disable(&namespace_id)
         .await
-        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+        .map_err(|error| {
+            ApiResponseError::runtime_for_namespace(
+                &namespace_id,
+                loonfs::RuntimeError::Core(error),
+            )
+        })?;
+    let response = match outcome {
+        GrepDisableOutcome::Disabled => DisableGramsIndexResponse {
+            namespace_id: namespace_id.clone(),
+            was_enabled: true,
+        },
+        GrepDisableOutcome::NotEnabled => DisableGramsIndexResponse {
+            namespace_id: namespace_id.clone(),
+            was_enabled: false,
+        },
+        GrepDisableOutcome::Superseded => {
+            return Err(ApiResponseError::runtime_for_namespace(
+                &namespace_id,
+                loonfs::RuntimeError::Core(loonfs::CoreError::CheckpointUnavailable(
+                    "disabling grep lost a root publication race; retry".to_owned(),
+                )),
+            ));
+        }
+    };
     Ok(Json(response))
 }

@@ -8,6 +8,8 @@ use thiserror::Error;
 pub const DEFAULT_GREP_STEP_INTERVAL_MS: u64 = 1_000;
 /// Default delay between grep-owned garbage-collection passes.
 pub const DEFAULT_GREP_GC_INTERVAL_MS: u64 = 60_000;
+/// Default delay between whole-store namespace-extension rediscovery scans.
+pub const DEFAULT_GREP_RESCAN_INTERVAL_MS: u64 = 300_000;
 
 /// Pacing and bounded-work policy shared by embedded and standalone workers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -17,6 +19,14 @@ pub struct GrepWorkerConfig {
     pub step_interval_ms: u64,
     /// Delay between grep-owned garbage-collection passes.
     pub gc_interval_ms: u64,
+    /// Delay between grep root rediscovery scans.
+    ///
+    /// Each scan lists the whole `namespaces/` keyspace and is therefore
+    /// proportional to the store's total key count. This is the cost of the
+    /// namespace-scoped extension layout until a namespace catalog exists;
+    /// the default keeps the scan rare. Standalone workers and serve-only
+    /// deployments rely on it to observe enablements from another process.
+    pub rescan_interval_ms: u64,
     /// Revisions examined per build step.
     pub max_files_per_step: usize,
     /// Content bytes read per build step.
@@ -58,6 +68,12 @@ impl GrepWorkerConfig {
                 reason: "must be greater than zero".to_owned(),
             });
         }
+        if self.rescan_interval_ms == 0 {
+            return Err(GrepWorkerConfigError::InvalidField {
+                field: "rescan_interval_ms",
+                reason: "must be greater than zero".to_owned(),
+            });
+        }
         if let Some(field) = self.build_policy().zero_budget_field() {
             return Err(GrepWorkerConfigError::InvalidField {
                 field,
@@ -74,6 +90,7 @@ impl Default for GrepWorkerConfig {
         Self {
             step_interval_ms: DEFAULT_GREP_STEP_INTERVAL_MS,
             gc_interval_ms: DEFAULT_GREP_GC_INTERVAL_MS,
+            rescan_interval_ms: DEFAULT_GREP_RESCAN_INTERVAL_MS,
             max_files_per_step: policy.max_files_per_step,
             max_content_bytes_per_step: policy.max_content_bytes_per_step,
             max_rows_per_segment: policy.max_rows_per_segment,
@@ -108,6 +125,7 @@ mod tests {
 
         assert_eq!(config.step_interval_ms, 1_000);
         assert_eq!(config.gc_interval_ms, 60_000);
+        assert_eq!(config.rescan_interval_ms, 300_000);
         assert_eq!(config.build_policy(), GramIndexBuildPolicy::default());
         assert_eq!(config.validate(), Ok(()));
     }
@@ -126,6 +144,13 @@ mod tests {
                 "gc_interval_ms",
                 GrepWorkerConfig {
                     gc_interval_ms: 0,
+                    ..GrepWorkerConfig::default()
+                },
+            ),
+            (
+                "rescan_interval_ms",
+                GrepWorkerConfig {
+                    rescan_interval_ms: 0,
                     ..GrepWorkerConfig::default()
                 },
             ),
