@@ -13,12 +13,15 @@ use crate::namespace::catalog::{load_namespace_catalog_entry, VerifiedNamespaceC
 use crate::namespace::control::{read_head_and_metadata_root, ControlObjectLoadError};
 use crate::wal::{load_validated_wal_chain, project_validated_wal_tail, WalChainLoadRequest};
 use loonfs_api::wire::control::{AcquiredWriter, HeadState, NamespaceState};
-use loonfs_api::{ChangeSeq, CommitId, ManifestId, ManifestObjectId, NamePolicy, NamespaceId};
+use loonfs_api::{
+    ChangeSeq, CommitId, ContentStoreId, ManifestId, ManifestObjectId, NamePolicy, NamespaceId,
+};
 use loonfs_objectstore::keys::wal_head;
 use loonfs_objectstore::ObjectStore;
 
 pub(crate) struct PublishMetadataView<'a, S: ObjectStore + ?Sized> {
     name_policy: NamePolicy,
+    content_store_id: ContentStoreId,
     pub(super) head: HeadState,
     pub(super) head_etag: String,
     pub(super) acquired_writer: Option<AcquiredWriter>,
@@ -39,6 +42,10 @@ impl<S: ObjectStore + ?Sized> PublishMetadataView<'_, S> {
             &self.manifest_tables,
             &self.tail_state,
         )
+    }
+
+    pub(crate) fn content_store_id(&self) -> &ContentStoreId {
+        &self.content_store_id
     }
 
     pub(super) async fn find_commit_receipt(
@@ -195,6 +202,7 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
     Ok((
         PublishMetadataView {
             name_policy: catalog_entry.namespace_config.name_policy,
+            content_store_id: catalog_entry.content_store_id,
             head,
             head_etag,
             acquired_writer,

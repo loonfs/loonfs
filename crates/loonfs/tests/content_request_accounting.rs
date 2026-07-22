@@ -13,7 +13,11 @@ use loonfs::{
     CreateDirectoryOptions, CreateNamespaceOptions, DestinationBehavior, ErrorCode, FsWriter,
     InodeId, NamespaceId, PutFileOptions, RevisionNo, RuntimeError, SharedObjectStore,
 };
-use loonfs_objectstore::keys::wal_head;
+use loonfs_api::wire::control::{
+    encode_control_object, ControlObjectKind, NamespaceConfigEnvelope, NamespaceConfigState,
+};
+use loonfs_api::{ContentStoreId, NamePolicy};
+use loonfs_objectstore::keys::{namespace_config, wal_head};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
@@ -422,6 +426,30 @@ async fn build_initialized_writer(
     writer
 }
 
+async fn bind_namespace_to_content_store(
+    store: &SharedObjectStore,
+    namespace_id: &NamespaceId,
+    content_store_id: ContentStoreId,
+) {
+    let descriptor = NamespaceConfigEnvelope::from_state(
+        ControlObjectKind::NamespaceConfig,
+        "content-request-accounting/0.1",
+        NamespaceConfigState {
+            namespace_id: namespace_id.clone(),
+            content_store_id,
+            name_policy: NamePolicy::default(),
+        },
+    )
+    .expect("build namespace descriptor");
+    store
+        .put_overwrite(
+            &namespace_config(namespace_id.as_str()),
+            Bytes::from(encode_control_object(&descriptor).expect("encode namespace descriptor")),
+        )
+        .await
+        .expect("replace namespace descriptor");
+}
+
 /// Full external preparation performs one content HEAD and one full GET.
 async fn prepare_content(
     store: &SharedObjectStore,
@@ -431,14 +459,9 @@ async fn prepare_content(
     let catalog = loonfs_core::control::load_namespace_catalog_entry(store, namespace_id)
         .await
         .expect("load namespace catalog");
-    loonfs_core::content::prepare_existing_content_ref(
-        store,
-        namespace_id,
-        catalog.content_store_id(),
-        content_ref.clone(),
-    )
-    .await
-    .expect("prepare existing content")
+    loonfs_core::content::prepare_existing_content_ref(store, &catalog, content_ref.clone())
+        .await
+        .expect("prepare existing content")
 }
 
 fn put_intent(commit_id: &str, path: &str, content_ref: loonfs::ContentRef) -> PathMutationIntent {
@@ -543,6 +566,142 @@ async fn put_file_prepared_performs_no_content_io() {
         .expect("publish prepared file");
 
     assert_content_counts(harness.recording.snapshot(), 0, 0, 0, 0);
+}
+
+#[tokio::test]
+async fn prepared_content_for_another_store_is_rejected_without_content_io() {
+    let temp_dir = tempdir().expect("tempdir");
+    let recording = Arc::new(RecordingStore::new(temp_dir.path()));
+    let store: SharedObjectStore = recording.clone();
+    let source = NamespaceId::parse("source-store").expect("source namespace id");
+    let target = NamespaceId::parse("target-store").expect("target namespace id");
+    let writer = build_initialized_writer(store.clone(), &source, "cross-store-writer").await;
+    writer
+        .create_namespace(&target, CreateNamespaceOptions::default())
+        .await
+        .expect("create target namespace");
+    writer
+        .create_directory(
+            &target,
+            "/catalog-warmup",
+            CreateDirectoryOptions::default(),
+        )
+        .await
+        .expect("warm target catalog");
+    let prepared = writer
+        .prepare_file_bytes(&source, b"source-store-only")
+        .await
+        .expect("prepare source content");
+    let content_ref = prepared.content_ref().clone();
+    recording.reset();
+
+    let error = writer
+        .put_file_prepared(&target, "/file.txt", prepared, PutFileOptions::default())
+        .await
+        .expect_err("another store must reject the admission");
+    assert!(
+        matches!(error, RuntimeError::Core(_)),
+        "expected core content-preparation error"
+    );
+    let RuntimeError::Core(error) = error else {
+        return;
+    };
+
+    assert_content_not_prepared(error, &content_ref);
+    assert_content_counts(recording.snapshot(), 0, 0, 0, 0);
+}
+
+#[tokio::test]
+async fn independent_namespaces_sharing_a_store_share_prepared_content() {
+    let temp_dir = tempdir().expect("tempdir");
+    let recording = Arc::new(RecordingStore::new(temp_dir.path()));
+    let store: SharedObjectStore = recording.clone();
+    let source = NamespaceId::parse("shared-source").expect("source namespace id");
+    let target = NamespaceId::parse("shared-target").expect("target namespace id");
+    let writer = build_initialized_writer(store.clone(), &source, "shared-store-writer").await;
+    writer
+        .create_namespace(&target, CreateNamespaceOptions::default())
+        .await
+        .expect("create independent target namespace");
+    let source_catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &source)
+        .await
+        .expect("load source catalog");
+    bind_namespace_to_content_store(&store, &target, source_catalog.content_store_id().clone())
+        .await;
+    writer
+        .create_directory(
+            &target,
+            "/catalog-warmup",
+            CreateDirectoryOptions::default(),
+        )
+        .await
+        .expect("warm shared target catalog");
+    let prepared = writer
+        .prepare_file_bytes(&source, b"independently shared")
+        .await
+        .expect("prepare through source namespace");
+    recording.reset();
+
+    writer
+        .put_file_prepared(&target, "/shared.txt", prepared, PutFileOptions::default())
+        .await
+        .expect("shared-store target accepts source proof");
+
+    assert_content_counts(recording.snapshot(), 0, 0, 0, 0);
+}
+
+#[tokio::test]
+async fn fork_and_source_share_prepared_content_in_both_directions() {
+    let temp_dir = tempdir().expect("tempdir");
+    let recording = Arc::new(RecordingStore::new(temp_dir.path()));
+    let store: SharedObjectStore = recording.clone();
+    let source = NamespaceId::parse("fork-source").expect("source namespace id");
+    let fork = NamespaceId::parse("fork-target").expect("fork namespace id");
+    let writer = build_initialized_writer(store, &source, "fork-sharing-writer").await;
+    let prepared_for_fork = writer
+        .prepare_file_bytes(&source, b"prepared before fork")
+        .await
+        .expect("prepare through source namespace");
+    writer
+        .fork_namespace(&source, &fork)
+        .await
+        .expect("fork namespace");
+    writer
+        .create_directory(
+            &fork,
+            "/fork-catalog-warmup",
+            CreateDirectoryOptions::default(),
+        )
+        .await
+        .expect("warm fork catalog");
+    recording.reset();
+
+    writer
+        .put_file_prepared(
+            &fork,
+            "/from-source.txt",
+            prepared_for_fork,
+            PutFileOptions::default(),
+        )
+        .await
+        .expect("fork accepts source proof");
+    assert_content_counts(recording.snapshot(), 0, 0, 0, 0);
+
+    let prepared_for_source = writer
+        .prepare_file_bytes(&fork, b"prepared through fork")
+        .await
+        .expect("prepare through fork namespace");
+    recording.reset();
+    writer
+        .put_file_prepared(
+            &source,
+            "/from-fork.txt",
+            prepared_for_source,
+            PutFileOptions::default(),
+        )
+        .await
+        .expect("source accepts fork proof");
+    assert_content_counts(recording.snapshot(), 0, 0, 0, 0);
 }
 
 #[tokio::test]
@@ -664,19 +823,19 @@ async fn direct_put_completion_avoids_blob_get_and_prepared_publish_uses_no_cont
         .await
         .expect("complete direct put with proof");
     assert_eq!(completed.content_ref, content_ref);
-    // Direct-put completion resolves the immutable content-store descriptor
+    // The session path reuses the runtime-resolved immutable store binding
     // and proves the provider write with one object HEAD; it never reads the
-    // uploaded blob.
+    // uploaded blob or reloads the content-store descriptor.
     let completion_counts = harness.recording.snapshot();
     assert_eq!(
         completion_counts.operations(KeyClass::Content),
         OperationCounts {
             head: 1,
-            get: 1,
+            get: 0,
             put: 0,
         }
     );
-    assert!(completion_counts.content_get_bytes > 0);
+    assert_eq!(completion_counts.content_get_bytes, 0);
     harness.recording.reset();
 
     harness

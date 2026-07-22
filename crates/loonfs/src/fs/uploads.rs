@@ -71,9 +71,12 @@ impl FsCore {
         upload_id: &UploadId,
         request: &CompleteUploadRequest,
     ) -> Result<(CompleteUploadResponse, PreparedContent)> {
+        let catalog = self
+            .load_namespace_catalog_for_content_preparation(namespace_id)
+            .await?;
         Ok(self
             .namespace_engine(namespace_id)
-            .complete_upload_prepared(upload_id, request)
+            .complete_upload_prepared_with_catalog(&catalog, upload_id, request)
             .await?)
     }
 }

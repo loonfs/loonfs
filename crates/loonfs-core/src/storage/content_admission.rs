@@ -6,9 +6,10 @@
 //! evidence that the identified content is durable, rather than carrying
 //! another clock.
 
+use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use base64::Engine as _;
 use loonfs_api::v0::ValidatedContentToken;
-use loonfs_api::{ContentRef, NamespaceId};
+use loonfs_api::{ContentRef, ContentStoreId, NamespaceId};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use thiserror::Error;
@@ -18,44 +19,44 @@ const DEFAULT_TOKEN_TTL_MS: u64 = 60 * 60 * 1000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContentAdmission {
-    namespace_id: NamespaceId,
+    content_store_id: ContentStoreId,
     content_ref: ContentRef,
 }
 
 impl ContentAdmission {
     pub(crate) fn for_durable_content_write(
-        namespace_id: NamespaceId,
+        content_store_id: ContentStoreId,
         content_ref: ContentRef,
     ) -> Self {
         Self {
-            namespace_id,
+            content_store_id,
             content_ref,
         }
     }
 
-    pub(crate) fn admits(&self, namespace_id: &NamespaceId, content_ref: &ContentRef) -> bool {
-        self.namespace_id == *namespace_id && self.content_ref == *content_ref
+    pub(crate) fn admits(
+        &self,
+        content_store_id: &ContentStoreId,
+        content_ref: &ContentRef,
+    ) -> bool {
+        self.content_store_id == *content_store_id && self.content_ref == *content_ref
     }
 }
 
 /// Opaque evidence that a content reference was prepared for publication.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedContent {
-    content_ref: ContentRef,
     admission: ContentAdmission,
 }
 
 impl PreparedContent {
-    pub(crate) fn from_admission(content_ref: ContentRef, admission: ContentAdmission) -> Self {
-        Self {
-            content_ref,
-            admission,
-        }
+    pub(crate) fn from_admission(admission: ContentAdmission) -> Self {
+        Self { admission }
     }
 
     /// Returns the prepared content reference.
     pub fn content_ref(&self) -> &ContentRef {
-        &self.content_ref
+        &self.admission.content_ref
     }
 
     pub(crate) fn into_admission(self) -> ContentAdmission {
@@ -113,7 +114,7 @@ pub fn mint_content_token(
 
 pub fn verify_content_token(
     secret: &str,
-    namespace_id: &NamespaceId,
+    catalog: &VerifiedNamespaceCatalogEntry,
     token: &ValidatedContentToken,
     now_ms: u64,
 ) -> Result<PreparedContent, ContentTokenError> {
@@ -137,7 +138,7 @@ pub fn verify_content_token(
     if payload.version != TOKEN_VERSION {
         return Err(ContentTokenError::Malformed);
     }
-    if payload.namespace_id != *namespace_id {
+    if payload.namespace_id != *catalog.namespace_id() {
         return Err(ContentTokenError::NamespaceMismatch);
     }
     if payload.content_ref != token.content_ref {
@@ -148,9 +149,11 @@ pub fn verify_content_token(
     }
 
     let content_ref = payload.content_ref;
-    let admission =
-        ContentAdmission::for_durable_content_write(payload.namespace_id, content_ref.clone());
-    Ok(PreparedContent::from_admission(content_ref, admission))
+    let admission = ContentAdmission::for_durable_content_write(
+        catalog.content_store_id().clone(),
+        content_ref,
+    );
+    Ok(PreparedContent::from_admission(admission))
 }
 
 fn base64_url(bytes: &[u8]) -> String {
@@ -195,8 +198,25 @@ mod tests {
         );
     }
     use super::{mint_content_token, verify_content_token};
+    use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
     use loonfs_api::v0::ValidatedContentToken;
-    use loonfs_api::{ContentRef, NamespaceId};
+    use loonfs_api::wire::control::NamespaceConfigState;
+    use loonfs_api::{ContentRef, ContentStoreId, NamePolicy, NamespaceId};
+
+    fn catalog_entry(
+        namespace_id: NamespaceId,
+        content_store: &str,
+    ) -> VerifiedNamespaceCatalogEntry {
+        let content_store_id = ContentStoreId::parse(content_store).expect("content store id");
+        VerifiedNamespaceCatalogEntry {
+            namespace_config: NamespaceConfigState {
+                namespace_id,
+                content_store_id: content_store_id.clone(),
+                name_policy: NamePolicy::default(),
+            },
+            content_store_id,
+        }
+    }
 
     #[test]
     fn token_round_trips_and_admits_matching_content() {
@@ -207,12 +227,15 @@ mod tests {
             content_ref: content.clone(),
             token,
         };
+        let catalog = catalog_entry(namespace, "cs_00000000000000000000000000000001");
 
         let prepared =
-            verify_content_token("secret", &namespace, &token, 1_000).expect("verify token");
+            verify_content_token("secret", &catalog, &token, 1_000).expect("verify token");
 
         assert_eq!(prepared.content_ref(), &content);
-        assert!(prepared.into_admission().admits(&namespace, &content));
+        assert!(prepared
+            .into_admission()
+            .admits(catalog.content_store_id(), &content));
     }
 
     #[test]
@@ -225,9 +248,10 @@ mod tests {
             content_ref: content.clone(),
             token,
         };
+        let catalog = catalog_entry(namespace, "cs_00000000000000000000000000000001");
         let prepared = verify_content_token(
             "secret",
-            &namespace,
+            &catalog,
             &token,
             issued_at_ms + DEFAULT_TOKEN_TTL_MS,
         )
@@ -235,7 +259,9 @@ mod tests {
 
         // The prepared proof carries no clock: expiry was the token's
         // concern, checked exactly once by the verification above.
-        assert!(prepared.into_admission().admits(&namespace, &content));
+        assert!(prepared
+            .into_admission()
+            .admits(catalog.content_store_id(), &content));
     }
 
     #[test]
@@ -249,12 +275,18 @@ mod tests {
             content_ref: content.clone(),
             token,
         };
+        let catalog = catalog_entry(namespace, "cs_00000000000000000000000000000001");
+        let other_catalog = catalog_entry(other_namespace, "cs_00000000000000000000000000000001");
 
-        assert!(verify_content_token("other", &namespace, &token, 1_000).is_err());
-        assert!(verify_content_token("secret", &other_namespace, &token, 1_000).is_err());
+        assert!(verify_content_token("other", &catalog, &token, 1_000).is_err());
+        assert_eq!(
+            verify_content_token("secret", &other_catalog, &token, 1_000),
+            Err(ContentTokenError::NamespaceMismatch),
+            "sharing a content store must not share token authorization"
+        );
         assert!(verify_content_token(
             "secret",
-            &namespace,
+            &catalog,
             &ValidatedContentToken {
                 content_ref: other_content,
                 token: token.token.clone(),
@@ -263,7 +295,7 @@ mod tests {
         )
         .is_err());
         assert!(
-            verify_content_token("secret", &namespace, &token, 1_000 + 60 * 60 * 1000 + 1).is_err()
+            verify_content_token("secret", &catalog, &token, 1_000 + 60 * 60 * 1000 + 1).is_err()
         );
     }
 }

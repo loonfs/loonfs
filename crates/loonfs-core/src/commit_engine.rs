@@ -577,13 +577,11 @@ pub(crate) async fn publish_namespace_mutations_batch<S: ObjectStore + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::content::{mint_content_token, verify_content_token};
     use crate::error::ErrorCode;
     use crate::namespace::bootstrap::bootstrap_namespace;
     use crate::namespace::control::read_head_object;
     use futures::StreamExt;
-    use loonfs_api::v0::ValidatedContentToken;
-    use loonfs_api::{ChangeSeq, ContentRef, InodeId, WriterEpoch};
+    use loonfs_api::{ChangeSeq, ContentRef, ContentStoreId, InodeId, WriterEpoch};
     use loonfs_objectstore::keys::wal_segment_prefix;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::ObjectStore;
@@ -639,15 +637,11 @@ mod tests {
         assert_eq!(operations_error.code(), ErrorCode::InvalidRequest);
 
         let content_ref = ContentRef::whole_file_v0(b"proof");
-        let token =
-            mint_content_token("secret", &namespace_id, &content_ref, 1_000).expect("mint token");
-        let prepared = verify_content_token(
-            "secret",
-            &namespace_id,
-            &ValidatedContentToken { content_ref, token },
-            1_000,
-        )
-        .expect("verify token");
+        let admission = ContentAdmission::for_durable_content_write(
+            ContentStoreId::parse("cs_00000000000000000000000000000001").expect("content store id"),
+            content_ref,
+        );
+        let prepared = PreparedContent::from_admission(admission);
         let oversized_proofs = NamespaceMutationCandidate::commit_prepared(
             ApiCommitRequest {
                 commit_id: CommitId::parse("too-many-proofs").expect("valid commit id"),

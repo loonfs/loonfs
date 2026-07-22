@@ -2514,8 +2514,7 @@ fn concurrent_puts_coalesce_into_one_wal_segment() {
             prepared_contents.push(
                 loonfs_core::content::prepare_existing_content_ref(
                     &object_store,
-                    &namespace_id,
-                    catalog.content_store_id(),
+                    &catalog,
                     completed.content_ref,
                 )
                 .await

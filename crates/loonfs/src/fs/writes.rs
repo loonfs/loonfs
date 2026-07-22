@@ -67,28 +67,19 @@ impl FsCore {
         let span = tracing::Span::current();
         self.record_trace_context(&span);
         span.record("payload_class", crate::trace::payload_class(bytes.len()));
-        let cached_content_store_id = self
-            .load_namespace_catalog_cached(namespace_id)
-            .await?
-            .map(|catalog| catalog.content_store_id().clone());
-        let stored = match cached_content_store_id {
-            Some(content_store_id) => {
-                loonfs_core::content::store_bytes_as_content_with_store_id(
-                    &self.inner.store,
-                    content_store_id,
-                    bytes,
-                )
-                .await?
-            }
-            None => {
-                loonfs_core::content::store_bytes_as_content(&self.inner.store, namespace_id, bytes)
-                    .await?
-            }
-        };
-        Ok(loonfs_core::content::prepare_stored_content(
-            namespace_id.clone(),
-            stored,
-        ))
+        let catalog = self
+            .load_namespace_catalog_for_content_preparation(namespace_id)
+            .await?;
+        let stored = loonfs_core::content::store_bytes_as_content_with_store_id(
+            &self.inner.store,
+            catalog.content_store_id().clone(),
+            bytes,
+        )
+        .await?;
+        Ok(
+            loonfs_core::content::prepare_stored_content(&catalog, stored)
+                .map_err(CoreError::from)?,
+        )
     }
 
     /// Publishes a file revision from already-prepared content.
@@ -205,24 +196,46 @@ impl FsCore {
                 usize::try_from(content_ref.size_bytes).unwrap_or(usize::MAX),
             ),
         );
-        let content_store_id = match self.load_namespace_catalog_cached(namespace_id).await? {
-            Some(catalog) => catalog.content_store_id().clone(),
-            None => {
-                loonfs_core::control::load_namespace_catalog_entry(&self.inner.store, namespace_id)
-                    .await
-                    .map_err(CoreError::from)?
-                    .content_store_id()
-                    .clone()
-            }
-        };
+        let catalog = self
+            .load_namespace_catalog_for_content_preparation(namespace_id)
+            .await?;
         Ok(loonfs_core::content::prepare_existing_content_ref(
             &self.inner.store,
-            namespace_id,
-            &content_store_id,
+            &catalog,
             content_ref,
         )
         .await
         .map_err(CoreError::from)?)
+    }
+
+    pub(crate) async fn prepare_content_token(
+        &self,
+        namespace_id: &NamespaceId,
+        secret: &str,
+        token: &loonfs_api::v0::ValidatedContentToken,
+        now_ms: u64,
+    ) -> Result<std::result::Result<PreparedContent, loonfs_core::content::ContentTokenError>> {
+        let catalog = self
+            .load_namespace_catalog_for_content_preparation(namespace_id)
+            .await?;
+        Ok(loonfs_core::content::verify_content_token(
+            secret, &catalog, token, now_ms,
+        ))
+    }
+
+    pub(crate) async fn load_namespace_catalog_for_content_preparation(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<loonfs_core::control::VerifiedNamespaceCatalogEntry> {
+        match self.load_namespace_catalog_cached(namespace_id).await? {
+            Some(catalog) => Ok(catalog),
+            None => {
+                loonfs_core::control::load_namespace_catalog_entry(&self.inner.store, namespace_id)
+                    .await
+                    .map_err(CoreError::from)
+                    .map_err(RuntimeError::from)
+            }
+        }
     }
 
     /// Creates a directory at an absolute path.

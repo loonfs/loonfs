@@ -201,6 +201,20 @@ impl FsWriter {
             .await
     }
 
+    /// Verifies a namespace-authorized wire token and binds its proof to the
+    /// namespace's verified content store.
+    pub async fn prepare_content_token(
+        &self,
+        namespace_id: &NamespaceId,
+        secret: &str,
+        token: &loonfs_api::v0::ValidatedContentToken,
+        now_ms: u64,
+    ) -> Result<std::result::Result<PreparedContent, loonfs_core::content::ContentTokenError>> {
+        self.core
+            .prepare_content_token(namespace_id, secret, token, now_ms)
+            .await
+    }
+
     /// Creates a directory at an absolute path.
     pub async fn create_directory(
         &self,

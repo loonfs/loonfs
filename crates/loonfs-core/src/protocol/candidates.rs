@@ -15,7 +15,7 @@ use crate::metadata::CommitReceiptRecord;
 use crate::path::write::{path_intent_fingerprint_for_path_intent, PublishPlanningSession};
 use crate::storage::content_admission::ContentAdmission;
 use loonfs_api::v0::{CommitOp, CommitResponse as ApiCommitResponse};
-use loonfs_api::{CommitId, ContentRef, NamespaceId};
+use loonfs_api::{CommitId, ContentRef, ContentStoreId, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 use std::collections::HashMap;
 
@@ -248,7 +248,7 @@ fn commit_response_from_commit_receipt(
 }
 
 struct CommitContentAdmissions<'a> {
-    namespace_id: &'a NamespaceId,
+    content_store_id: &'a ContentStoreId,
     admissions: &'a [ContentAdmission],
 }
 
@@ -256,7 +256,7 @@ impl CommitContentAdmissions<'_> {
     fn admits(&self, content_ref: &ContentRef) -> bool {
         self.admissions
             .iter()
-            .any(|admission| admission.admits(self.namespace_id, content_ref))
+            .any(|admission| admission.admits(self.content_store_id, content_ref))
     }
 }
 
@@ -264,9 +264,10 @@ impl CommitContentAdmissions<'_> {
 pub(super) fn validate_commit_content_references(
     request: &CoreCommitRequest,
     candidate: &NamespaceMutationCandidate,
+    content_store_id: &ContentStoreId,
 ) -> Result<()> {
     let admissions = CommitContentAdmissions {
-        namespace_id: &request.namespace_id,
+        content_store_id,
         admissions: match candidate.content_preparation() {
             ContentPreparation::Ready(admissions) => admissions,
             ContentPreparation::Rejected(_) => {

@@ -142,7 +142,9 @@ pub(crate) async fn publish_namespace_mutations_batch_against_publish_view<
                 accepted_rows: session.accepted_rows(),
             };
             let request = candidate_request.request;
-            if let Err(error) = validate_commit_content_references(&request, candidate) {
+            if let Err(error) =
+                validate_commit_content_references(&request, candidate, view.content_store_id())
+            {
                 outcomes[index] = Some(Err(error));
                 continue;
             }

@@ -125,6 +125,9 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
         .await
         .expect("create namespace");
+    let catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &namespace_id)
+        .await
+        .expect("load namespace catalog");
 
     // Three commit batches, checkpointed one L0 run each, with names
     // interleaved by stride so every run's direntry key range straddles the
@@ -145,8 +148,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
             .expect("stage content");
             let prepared = loonfs_core::content::prepare_existing_content_ref(
                 &store,
-                &namespace_id,
-                &stored.content_store_id,
+                &catalog,
                 stored.content_ref,
             )
             .await

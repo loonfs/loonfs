@@ -112,10 +112,11 @@ mod tests {
     fn put_file_candidate(
         commit_id: &str,
         absolute_path: &str,
+        content_store_id: &loonfs_api::ContentStoreId,
         content_ref: loonfs_api::ContentRef,
     ) -> NamespaceMutationCandidate {
         let admission = ContentAdmission::for_durable_content_write(
-            NamespaceId::parse("demo").expect("valid namespace id"),
+            content_store_id.clone(),
             content_ref.clone(),
         );
         NamespaceMutationCandidate::path_prepared(
@@ -125,7 +126,7 @@ mod tests {
                 content_ref: content_ref.clone(),
                 behavior: DestinationBehavior::NoReplace,
             },
-            vec![PreparedContent::from_admission(content_ref, admission)],
+            vec![PreparedContent::from_admission(admission)],
         )
     }
 
@@ -145,6 +146,7 @@ mod tests {
             vec![put_file_candidate(
                 "seed-docs",
                 "/docs/seed.txt",
+                &staged.content_store_id,
                 staged.content_ref.clone(),
             )],
             &context,
@@ -214,8 +216,18 @@ mod tests {
             &store,
             &namespace_id,
             vec![
-                put_file_candidate("create-wide-a", "/wide/a.txt", staged.content_ref.clone()),
-                put_file_candidate("create-wide-b", "/wide/b.txt", staged.content_ref.clone()),
+                put_file_candidate(
+                    "create-wide-a",
+                    "/wide/a.txt",
+                    &staged.content_store_id,
+                    staged.content_ref.clone(),
+                ),
+                put_file_candidate(
+                    "create-wide-b",
+                    "/wide/b.txt",
+                    &staged.content_store_id,
+                    staged.content_ref.clone(),
+                ),
             ],
             &context,
         )
@@ -250,8 +262,18 @@ mod tests {
             &store,
             &namespace_id,
             vec![
-                put_file_candidate("create-a-first", "/docs/a.txt", staged.content_ref.clone()),
-                put_file_candidate("create-a-second", "/docs/a.txt", staged.content_ref.clone()),
+                put_file_candidate(
+                    "create-a-first",
+                    "/docs/a.txt",
+                    &staged.content_store_id,
+                    staged.content_ref.clone(),
+                ),
+                put_file_candidate(
+                    "create-a-second",
+                    "/docs/a.txt",
+                    &staged.content_store_id,
+                    staged.content_ref.clone(),
+                ),
             ],
             &context,
         )
@@ -277,6 +299,7 @@ mod tests {
                 put_file_candidate(
                     "create-doomed",
                     "/docs/doomed.txt",
+                    &staged.content_store_id,
                     staged.content_ref.clone(),
                 ),
                 NamespaceMutationCandidate::path(PathMutationIntent::DeletePath {

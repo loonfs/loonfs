@@ -34,6 +34,11 @@ pub struct VerifiedNamespaceCatalogEntry {
 }
 
 impl VerifiedNamespaceCatalogEntry {
+    /// Returns the namespace whose immutable catalog binding was verified.
+    pub fn namespace_id(&self) -> &NamespaceId {
+        &self.namespace_config.namespace_id
+    }
+
     pub fn content_store_id(&self) -> &ContentStoreId {
         &self.content_store_id
     }

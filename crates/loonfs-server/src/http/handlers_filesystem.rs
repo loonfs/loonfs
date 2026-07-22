@@ -17,8 +17,8 @@ use loonfs::publish::{
     MAX_COMMIT_EXTERNAL_CONTENT_REFS, MAX_COMMIT_OPERATIONS,
 };
 use loonfs::{
-    content_tokens::{verify_content_token, ContentTokenError},
-    payload_class, CoreError, ErrorCode, ListChangesOptions, TraceStoreKind,
+    content_tokens::ContentTokenError, payload_class, CoreError, ErrorCode, ListChangesOptions,
+    TraceStoreKind,
 };
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
@@ -484,13 +484,17 @@ pub(super) async fn filesystem_operation(
         _ => None,
     };
     let put_content_preparation = match &operation {
-        FilesystemOperation::PutFile { content_ref, .. } => Some(content_preparation_for_put(
-            &state.config,
-            &namespace_id,
-            content_ref,
-            &content_tokens,
-            current_unix_ms()?,
-        )),
+        FilesystemOperation::PutFile { content_ref, .. } => Some(
+            content_preparation_for_put(
+                &state.writer,
+                &state.config,
+                &namespace_id,
+                content_ref,
+                &content_tokens,
+                current_unix_ms()?,
+            )
+            .await?,
+        ),
         _ => None,
     };
     // Wire paths are raw strings; the intent carries validated paths, so
@@ -646,11 +650,13 @@ pub(super) async fn commit_operations(
             ApiResponseError::core_for_namespace(&namespace_id, error).with_commit_id(&commit_id)
         })?;
     let content_preparation = prepare_commit_content(
+        &state.writer,
         &state.config,
         &namespace_id,
         &external_content_refs,
         &content_tokens,
-    )?;
+    )
+    .await?;
     let candidate = match content_preparation {
         CommitContentPreparation::Ready(content) => {
             NamespaceMutationCandidate::commit_prepared(request, content)
@@ -714,7 +720,8 @@ fn validate_commit_submission_limits(
     Ok(())
 }
 
-fn prepare_commit_content(
+async fn prepare_commit_content(
+    writer: &loonfs::FsWriter,
     config: &crate::config::ServerConfig,
     namespace_id: &loonfs_api::NamespaceId,
     external_content_refs: &[ContentRef],
@@ -726,9 +733,10 @@ fn prepare_commit_content(
         .collect::<HashSet<_>>();
     let relevant_tokens = content_tokens
         .iter()
-        .filter(|token| relevant_refs.contains(&token.content_ref));
-    let mut relevant_tokens = relevant_tokens.peekable();
-    if relevant_tokens.peek().is_none() {
+        .filter(|token| relevant_refs.contains(&token.content_ref))
+        .cloned()
+        .collect::<Vec<_>>();
+    if relevant_tokens.is_empty() {
         return Ok(CommitContentPreparation::Ready(Vec::new()));
     }
 
@@ -736,8 +744,12 @@ fn prepare_commit_content(
     let mut prepared = Vec::new();
     let mut prepared_refs = HashSet::new();
     let mut first_error = None;
-    for token in relevant_tokens {
-        match verify_content_token(config.content_token_secret(), namespace_id, token, now_ms) {
+    for token in &relevant_tokens {
+        match writer
+            .prepare_content_token(namespace_id, config.content_token_secret(), token, now_ms)
+            .await
+            .map_err(|error| ApiResponseError::runtime_for_namespace(namespace_id, error))?
+        {
             Ok(content) => {
                 prepared_refs.insert(content.content_ref().clone());
                 prepared.push(content);
