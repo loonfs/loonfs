@@ -8,8 +8,8 @@
 //!
 //! Segment objects are immutable derived data written before the root CAS.
 //! A CAS loser therefore leaks only unreachable derived objects; it never
-//! changes visible grep state. Grep-owned garbage collection will reclaim
-//! those objects in a later change.
+//! changes visible grep state. [`crate::GrepWorker`] garbage collection
+//! reclaims those unreachable objects after its grace window.
 
 mod codec;
 mod error;

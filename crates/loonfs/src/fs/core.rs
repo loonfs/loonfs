@@ -56,12 +56,6 @@ pub(crate) struct FsInner {
     /// Session-owned writer state (acquired epochs, fencing), deliberately
     /// outside every rebuildable cache; see [`crate::writer_session`].
     pub(crate) writer_sessions: WriterSessionRegistry,
-    /// Per-namespace gram-index enablement, learned in-process: `None`
-    /// until any tick, enable, or disable observes the namespace. Publishes
-    /// consult it so index catch-up is scheduled by index lag, not only by
-    /// the WAL-segment threshold — one publish can add more tail files
-    /// than a grep will scan without ever crossing that threshold.
-    pub(crate) grams_enabled_hints: Mutex<BTreeMap<NamespaceId, bool>>,
 }
 
 /// Lock accessors for the runtime caches.
@@ -128,7 +122,6 @@ impl FsCore {
                     trace_store_kind,
                 ),
                 writer_sessions: WriterSessionRegistry::default(),
-                grams_enabled_hints: Mutex::new(BTreeMap::new()),
             }),
         })
     }
@@ -251,25 +244,11 @@ impl FsCore {
 pub(super) struct BackgroundTickClaim {
     pub(super) fs: FsCore,
     pub(super) namespace_id: NamespaceId,
-    pub(super) releases_on_drop: bool,
-}
-
-impl BackgroundTickClaim {
-    pub(super) fn finish_tick(&mut self) -> bool {
-        // Disarm before releasing the slot so a new owner cannot claim it
-        // and then be accidentally released by this guard's later drop.
-        self.releases_on_drop = false;
-        let run_deferred_full_tick = self.fs.inner.background.finish_tick(&self.namespace_id);
-        self.releases_on_drop = run_deferred_full_tick;
-        run_deferred_full_tick
-    }
 }
 
 impl Drop for BackgroundTickClaim {
     fn drop(&mut self) {
-        if self.releases_on_drop {
-            self.fs.inner.background.release(&self.namespace_id);
-        }
+        self.fs.inner.background.release(&self.namespace_id);
     }
 }
 

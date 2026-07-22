@@ -279,23 +279,17 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             .join("\n"),
         CommandData::GramsIndexEnabled {
             enabled: response,
-            backfill_tick,
+            backfill_tick: _,
         } => {
             if response.already_enabled {
                 format!(
-                    "gram index already enabled on {} (built through seq {}); ran a maintenance \
-                     tick to continue the backfill",
+                    "gram index already enabled on {} (built through seq {}); grep worker \
+                     maintenance continues independently",
                     response.namespace_id, response.built_through_seq.0
-                )
-            } else if backfill_tick.is_some() {
-                format!(
-                    "gram index enabled on {}; ran a maintenance tick to start the \
-                     backfill (later ticks continue it)",
-                    response.namespace_id
                 )
             } else {
                 format!(
-                    "gram index enabled on {}; backfill covers seq <= {} on upcoming ticks",
+                    "gram index enabled on {}; grep worker backfill targets seq <= {}",
                     response.namespace_id, response.built_through_seq.0
                 )
             }

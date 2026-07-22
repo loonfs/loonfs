@@ -1105,7 +1105,7 @@ fn namespace_delete_without_yes_fails_cleanly_when_not_interactive() {
 }
 
 #[test]
-fn index_enable_runs_a_tick_when_the_index_is_already_enabled() {
+fn index_enable_leaves_core_maintenance_decoupled() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");
     assert_success(&harness.run(&["namespace", "create", "demo"]));
@@ -1113,12 +1113,12 @@ fn index_enable_runs_a_tick_when_the_index_is_already_enabled() {
 
     let enabled = harness.run(&["--json", "admin", "index-enable"]);
     assert_success(&enabled);
-    assert!(json_data(&enabled)["backfill_tick"].is_object());
+    assert!(json_data(&enabled)["backfill_tick"].is_null());
 
     let retried = harness.run(&["--json", "admin", "index-enable"]);
     assert_success(&retried);
     assert_eq!(json_data(&retried)["already_enabled"], true);
-    assert!(json_data(&retried)["backfill_tick"].is_object());
+    assert!(json_data(&retried)["backfill_tick"].is_null());
 }
 
 #[test]

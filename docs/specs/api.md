@@ -26,7 +26,7 @@ within a plane is expressed as **named features** (section 2).
 | --- | --- | --- | --- |
 | `core/v0` | Data plane | Path reads and mutations (stat, list, content, revisions, path operations), staged uploads, explicit commits, the change feed, namespace status by id, `GET /v0/config`, and the standard error contract. Namespace `list`, `create`, `fork`, and `delete` are **features** within this profile. | **Mandatory** for any conforming deployment |
 | `admin/v0` | Maintenance plane | Trigger WAL flushes; create and release checkpoints; trigger retention-floor advancement; run one-shot maintenance ticks; run garbage collection. Future maintenance triggers (compaction, index builds) arrive as features in this plane. | Optional |
-| `query/v0` | Query plane | Content search over derived indexes (`POST /v0/namespaces/{namespace}/query/grep`). Gram-index search is the `query.grep` **feature** within this profile; using it also requires the namespace's `index.grams` feature entry (format spec, "Namespace features map"). | Optional |
+| `query/v0` | Query plane | Content search over derived indexes (`POST /v0/namespaces/{namespace}/query/grep`). Gram-index search is the `query.grep` **feature** within this profile; using it also requires a materialized steady-state grep root for the namespace. | Optional |
 | `acl/v0` | Authorization plane | — | **Reserved name only.** Do not specify ops yet. Clients must tolerate unknown error codes, so authorization errors can land with this plane without breaking anyone. |
 
 Notes:
@@ -138,7 +138,7 @@ hoc.
 | `core.namespaces.fork` | Forking namespaces (`POST /v0/namespaces/{ns}/forks`). | |
 | `core.namespaces.delete` | Deleting namespaces (`DELETE /v0/namespaces/{ns}`). | Terminal, and the id is permanently retired. Deletion does not reclaim storage in v0. A deployment may still advertise `false` and answer `not_supported`. |
 | `core.uploads.direct_put` | Starting presigned `direct_put` upload sessions (`POST /v0/namespaces/{ns}/uploads`). | The server returns a short-lived presigned PUT capability for the exact content object. Raw object keys and caller-managed object-store writes are not part of this feature. |
-| `query.grep` | Content search (`POST /v0/namespaces/{ns}/query/grep`). | The serving half of a data-dependent capability: the request also requires the namespace's `index.grams` feature entry, and a namespace without it answers `not_supported` whatever this key advertises. |
+| `query.grep` | Content search (`POST /v0/namespaces/{ns}/query/grep`). | The serving half of a data-dependent capability: the request also requires a materialized steady-state grep root, and a namespace without one answers `not_supported` whatever this key advertises. |
 
 `admin/v0` currently has required ops only and no feature keys. `acl.*` keys
 are unregistered until that plane materializes.
@@ -249,7 +249,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `shutting_down` | 503 | The serving process closed admission for shutdown; work admitted earlier still settles. Retry against a live instance. |
 | `checkpoint_unavailable` | 503 | Required checkpoint state is unavailable: not yet published, changed during the operation, or referenced material is missing. Retry after maintenance. |
 | `maintenance_required` | 503 | Namespace metadata requires maintenance before the request can be served; run maintenance and retry. |
-| `index_lagging` | 503 | The gram index trails the head past the exhaustive-scan budget; run maintenance (or set `allow_stale`) and retry. |
+| `index_lagging` | 503 | The gram index trails the head past the exhaustive-scan budget; let the grep worker catch up (or set `allow_stale`) and retry. |
 | `namespace_corrupt` | 500 | Durable namespace state failed validation. |
 | `server_error` | 500 | Unclassified internal failure. |
 
@@ -421,9 +421,9 @@ A representative v0 binding is shown below.
 | Advance the retention floor | `POST /v0/admin/namespaces/{ns}/retention/advance` |
 | Run a maintenance tick | `POST /v0/admin/namespaces/{ns}/maintenance/tick` (optional body overrides `max_wal_tail_segments` and opts into `gc`; an override above the write-rejection threshold is rejected as `invalid_request`; flush races surface as outcomes, not errors) |
 | Collect garbage | `POST /v0/admin/namespaces/{ns}/gc` (optional body overrides `grace_window_ms`/`reap_window_ms`; a grace window below the derived safety floor is rejected as `invalid_request`; nothing sweeps without an explicit call) |
-| Content search | `POST /v0/namespaces/{ns}/query/grep` (feature `query.grep`; requires the namespace's `index.grams` feature entry) |
-| Enable the gram index | `POST /v0/admin/namespaces/{ns}/index/grams/enable` (publishes the `index.grams` feature entry; backfill and upkeep run through maintenance ticks; idempotent) |
-| Disable the gram index | `POST /v0/admin/namespaces/{ns}/index/grams/disable` (removes the feature entry and segment references; garbage collection reclaims the segments; idempotent) |
+| Content search | `POST /v0/namespaces/{ns}/query/grep` (feature `query.grep`; requires a materialized steady-state grep root) |
+| Enable the gram index | `POST /v0/admin/namespaces/{ns}/index/grams/enable` (CAS-publishes the independent grep root into checkpointed backfill; explicit `GrepWorker` steps perform backfill and upkeep; idempotent) |
+| Disable the gram index | `POST /v0/admin/namespaces/{ns}/index/grams/disable` (CAS-publishes the grep root as disabled; grep-owned garbage collection later reclaims unreferenced segments; idempotent) |
 
 Routes under `/v0/admin/` belong to the `admin/v0` profile and routes under
 `/v0/namespaces/{ns}/query/` to `query/v0`; everything else shown belongs to

@@ -478,7 +478,7 @@ pub(crate) enum AdminCommand {
     Flush(AdminNamespaceArgs),
     /// Advance the retention floor to reclaim old history.
     RetentionAdvance(AdminNamespaceArgs),
-    /// Run one maintenance tick (checkpoint, folds, index catch-up).
+    /// Run one core maintenance tick (WAL flush and metadata folds).
     Tick(AdminTickArgs),
     /// Run a mark-and-sweep garbage-collection pass.
     Gc(AdminGcArgs),

@@ -1,22 +1,18 @@
 #![allow(clippy::panic)]
 // Lifecycle assertions use panic for precise failure diagnostics.
 
-//! Handle-level lifecycle of the gram index: enable through `FsAdmin`,
-//! build through maintenance ticks, query through `FsReader`, disable.
+//! Handle lifecycle plus direct `GrepWorker` building and folding.
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
 use loonfs::{
-    ChangeSeq, CreateNamespaceOptions, ErrorCode, FsAdmin, FsBackgroundWork, FsReader, FsWriter,
-    GramIndexBuildPolicy, GrepRequest, MaintenanceTickOptions, NamespaceId, PutFileOptions,
+    ChangeSeq, CreateNamespaceOptions, ErrorCode, FsAdmin, FsReader, FsWriter,
+    GramIndexBuildPolicy, GrepRequest, NamespaceId, PutFileOptions,
 };
 use loonfs_api::decode_grep_cursor;
-use loonfs_api::wire::index_grams::{
-    IndexGramsFeature, INDEX_GRAMS_FEATURE_KEY, INDEX_GRAMS_MAX_FILE_BYTES,
-};
-use loonfs_api::wire::manifest::decode_namespace_manifest_json;
-use loonfs_objectstore::keys::metadata_manifest_object;
+use loonfs_api::wire::index_grams::INDEX_GRAMS_MAX_FILE_BYTES;
+use loonfs_grep::GrepWorker;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
@@ -51,34 +47,46 @@ async fn content_blob_keys(store: &loonfs::SharedObjectStore) -> BTreeSet<String
         .collect()
 }
 
-/// The `index.grams` watermark from the namespace's current manifest.
+fn grep_worker(store: &loonfs::SharedObjectStore) -> GrepWorker<loonfs::SharedObjectStore> {
+    GrepWorker::new(
+        store.clone(),
+        "grams-test-worker",
+        "grams-test-session",
+        "grams-test/0.1",
+    )
+}
+
+async fn drive_worker_step(
+    worker: &GrepWorker<loonfs::SharedObjectStore>,
+    namespace_id: &NamespaceId,
+    policy: GramIndexBuildPolicy,
+) {
+    worker
+        .build_step(namespace_id, policy)
+        .await
+        .expect("grep build step");
+    worker
+        .fold_step(namespace_id, policy)
+        .await
+        .expect("grep fold step");
+}
+
+/// The watermark from the namespace's verified grep root.
 async fn grams_built_through_seq(
     store: &loonfs::SharedObjectStore,
     namespace_id: &NamespaceId,
 ) -> ChangeSeq {
-    let root = loonfs_core::control::load_namespace_metadata_root_control(&**store, namespace_id)
+    loonfs_grep::root::load_grep_root(&**store, namespace_id)
         .await
-        .expect("metadata root");
-    let manifest_key =
-        metadata_manifest_object(namespace_id.as_str(), &root.state.manifest_object_id);
-    let manifest_bytes = store
-        .get(&manifest_key, None)
-        .await
-        .expect("read namespace manifest")
-        .expect("namespace manifest exists");
-    let manifest = decode_namespace_manifest_json(&manifest_bytes).expect("decode manifest");
-    let value = manifest
-        .payload
-        .features
-        .get(INDEX_GRAMS_FEATURE_KEY)
-        .expect("index.grams feature present");
-    IndexGramsFeature::from_value(value)
-        .expect("decode feature value")
+        .expect("load grep root")
+        .expect("grep root exists")
+        .state()
+        .index()
         .built_through_seq
 }
 
 #[tokio::test]
-async fn maintenance_ticks_build_the_gram_index_once_enabled() {
+async fn grep_worker_builds_the_gram_index_once_enabled() {
     let temp_dir = tempdir().expect("tempdir");
     let store: loonfs::SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
@@ -99,6 +107,7 @@ async fn maintenance_ticks_build_the_gram_index_once_enabled() {
         .build()
         .await
         .expect("build reader");
+    let grep_worker = grep_worker(&store);
 
     writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
@@ -158,13 +167,9 @@ async fn maintenance_ticks_build_the_gram_index_once_enabled() {
         .expect("re-enable");
     assert!(again.already_enabled);
 
-    // Explicit maintenance ticks run the backfill and keep the watermark
-    // current; two ticks comfortably cover backfill plus catch-up here.
+    // Explicit worker steps run the backfill and keep the watermark current.
     for _ in 0..2 {
-        admin
-            .maintenance_tick_namespace(&namespace_id, MaintenanceTickOptions::default())
-            .await
-            .expect("maintenance tick");
+        drive_worker_step(&grep_worker, &namespace_id, GramIndexBuildPolicy::default()).await;
     }
 
     let response = reader
@@ -190,10 +195,7 @@ async fn maintenance_ticks_build_the_gram_index_once_enabled() {
         .await
         .expect("grep with tail");
     assert_eq!(response.matches.len(), 2);
-    admin
-        .maintenance_tick_namespace(&namespace_id, MaintenanceTickOptions::default())
-        .await
-        .expect("tick after write");
+    drive_worker_step(&grep_worker, &namespace_id, GramIndexBuildPolicy::default()).await;
     let response = reader
         .grep(&namespace_id, &grep_request("needle"))
         .await
@@ -218,11 +220,10 @@ async fn maintenance_ticks_build_the_gram_index_once_enabled() {
     writer.shutdown_background().await.expect("writer shutdown");
 }
 
-/// Index catch-up is scheduled by index lag, not by the WAL-segment
-/// threshold: one small publish must still get the index built in the
-/// background, with no explicit ticks and a tail far below the threshold.
+/// Runtime background maintenance is metadata-only: a small publish leaves
+/// grep backfilling until an explicit worker step runs.
 #[tokio::test]
-async fn a_publish_below_the_wal_threshold_still_schedules_index_catch_up() {
+async fn a_publish_below_the_wal_threshold_does_not_schedule_grep_work() {
     let temp_dir = tempdir().expect("tempdir");
     let store: loonfs::SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
@@ -231,7 +232,6 @@ async fn a_publish_below_the_wal_threshold_still_schedules_index_catch_up() {
     let writer = FsWriter::builder_with_store(store.clone())
         .writer_id("grams-auto-writer")
         .min_publish_interval_ms(0)
-        .background_work(FsBackgroundWork::Enabled)
         .build()
         .await
         .expect("build writer");
@@ -244,6 +244,7 @@ async fn a_publish_below_the_wal_threshold_still_schedules_index_catch_up() {
         .build()
         .await
         .expect("build reader");
+    let grep_worker = grep_worker(&store);
 
     writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
@@ -254,8 +255,6 @@ async fn a_publish_below_the_wal_threshold_still_schedules_index_catch_up() {
         .await
         .expect("enable");
 
-    // The writer runtime has not observed this namespace's feature yet, so
-    // this publish exercises the discovery path of the scheduling hint.
     writer
         .put_file_bytes(
             &namespace_id,
@@ -270,36 +269,49 @@ async fn a_publish_below_the_wal_threshold_still_schedules_index_catch_up() {
         .await
         .expect("background work quiesces");
 
-    let status = admin.namespace_status(&namespace_id).await.expect("status");
-    assert!(
-        status.wal_tail_segments < MaintenanceTickOptions::default().max_wal_tail_segments,
-        "the tail must stay below the flush threshold for this test to \
-         exercise index-only scheduling: {status:?}"
-    );
+    let root = loonfs_grep::root::load_grep_root(&*store, &namespace_id)
+        .await
+        .expect("load grep root")
+        .expect("grep root exists");
+    assert!(matches!(
+        root.state().lifecycle(),
+        loonfs_grep::root::GrepLifecycle::Backfilling { .. }
+    ));
+    let error = reader
+        .grep(&namespace_id, &grep_request("needle"))
+        .await
+        .expect_err("background metadata work must not materialize grep");
+    let loonfs::Error::Core(core) = error else {
+        panic!("expected core error, got {error:?}");
+    };
+    assert_eq!(core.code(), ErrorCode::NotSupported);
 
-    // A stale grep serves from the index alone, so a match here proves the
-    // background drain advanced the watermark past the publish.
+    drive_worker_step(&grep_worker, &namespace_id, GramIndexBuildPolicy::default()).await;
+    drive_worker_step(&grep_worker, &namespace_id, GramIndexBuildPolicy::default()).await;
+
+    // A stale grep serves from the index alone, proving only the explicit
+    // worker advanced the watermark past the publish.
     let mut stale = grep_request("needle");
     stale.allow_stale = true;
     let response = reader
         .grep(&namespace_id, &stale)
         .await
-        .expect("stale grep after background catch-up");
+        .expect("stale grep after explicit worker catch-up");
     assert_eq!(response.matches.len(), 1);
     assert_eq!(response.matches[0].absolute_path, "/delta.txt");
 
     writer.shutdown_background().await.expect("writer shutdown");
 }
 
-/// A build policy set through the handle builder reaches the maintenance
-/// tick path: with `max_files_per_step: 3`, one tick's build step consumes
+/// A policy passed to the worker bounds each explicit build step: with
+/// `max_files_per_step: 3`, one step consumes
 /// exactly three of the five pending file commits — the watermark lands on
 /// the third put's committed seq — and the next tick consumes the rest.
 /// Under the default 256-file budget the first tick would have caught up
 /// to the head outright, so the intermediate watermark is exactly the
 /// configured budget observed in effect.
 #[tokio::test]
-async fn a_configured_build_policy_bounds_each_ticks_build_step() {
+async fn a_worker_policy_bounds_each_build_step() {
     let temp_dir = tempdir().expect("tempdir");
     let store: loonfs::SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
@@ -313,13 +325,14 @@ async fn a_configured_build_policy_bounds_each_ticks_build_step() {
         .expect("build writer");
     let admin = FsAdmin::builder_with_store(store.clone())
         .actor_id("grams-config-admin")
-        .gram_index_build(GramIndexBuildPolicy {
-            max_files_per_step: 3,
-            ..GramIndexBuildPolicy::default()
-        })
         .build()
         .await
         .expect("build admin");
+    let grep_worker = grep_worker(&store);
+    let policy = GramIndexBuildPolicy {
+        max_files_per_step: 3,
+        ..GramIndexBuildPolicy::default()
+    };
 
     writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
@@ -329,12 +342,9 @@ async fn a_configured_build_policy_bounds_each_ticks_build_step() {
         .enable_grams_index(&namespace_id)
         .await
         .expect("enable");
-    // Materialize the (empty) backfill so the ticks below run pure WAL
+    // Materialize the empty backfill so the steps below run pure WAL
     // catch-up, where the file budget maps one-to-one onto the puts.
-    admin
-        .maintenance_tick_namespace(&namespace_id, MaintenanceTickOptions::default())
-        .await
-        .expect("materializing tick");
+    drive_worker_step(&grep_worker, &namespace_id, policy).await;
 
     let mut put_seqs = Vec::new();
     for index in 0..5u32 {
@@ -350,10 +360,7 @@ async fn a_configured_build_policy_bounds_each_ticks_build_step() {
         put_seqs.push(result.committed_seq);
     }
 
-    admin
-        .maintenance_tick_namespace(&namespace_id, MaintenanceTickOptions::default())
-        .await
-        .expect("first bounded tick");
+    drive_worker_step(&grep_worker, &namespace_id, policy).await;
     let after_first = grams_built_through_seq(&store, &namespace_id).await;
     assert_eq!(
         after_first, put_seqs[2],
@@ -361,10 +368,7 @@ async fn a_configured_build_policy_bounds_each_ticks_build_step() {
          third put's commit"
     );
 
-    admin
-        .maintenance_tick_namespace(&namespace_id, MaintenanceTickOptions::default())
-        .await
-        .expect("second bounded tick");
+    drive_worker_step(&grep_worker, &namespace_id, policy).await;
     let after_second = grams_built_through_seq(&store, &namespace_id).await;
     assert_eq!(
         after_second, put_seqs[4],
@@ -375,7 +379,7 @@ async fn a_configured_build_policy_bounds_each_ticks_build_step() {
 }
 
 /// Ten one-file rounds cross the default delta-fold threshold, so the
-/// maintenance ticks tier the index (delta segments fold into a mid run)
+/// worker steps tier the index (delta segments fold into a mid run)
 /// while the rounds run. Grep must answer identically before, across, and
 /// after the transition — levels are fold bookkeeping the read path never
 /// sees.
@@ -401,6 +405,7 @@ async fn grep_answers_identically_across_tiered_folds() {
         .build()
         .await
         .expect("build reader");
+    let grep_worker = grep_worker(&store);
 
     writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
@@ -423,10 +428,7 @@ async fn grep_answers_identically_across_tiered_folds() {
             )
             .await
             .expect("write file");
-        admin
-            .maintenance_tick_namespace(&namespace_id, MaintenanceTickOptions::default())
-            .await
-            .expect("maintenance tick");
+        drive_worker_step(&grep_worker, &namespace_id, GramIndexBuildPolicy::default()).await;
         expected_paths.push(path);
 
         let response = reader
@@ -446,23 +448,15 @@ async fn grep_answers_identically_across_tiered_folds() {
     }
 
     // The premise of the test: the rounds really did tier the layout.
-    let root = loonfs_core::control::load_namespace_metadata_root_control(&*store, &namespace_id)
+    let root = loonfs_grep::root::load_grep_root(&*store, &namespace_id)
         .await
-        .expect("metadata root");
-    let manifest_key =
-        metadata_manifest_object(namespace_id.as_str(), &root.state.manifest_object_id);
-    let manifest_bytes = store
-        .get(&manifest_key, None)
-        .await
-        .expect("read namespace manifest")
-        .expect("namespace manifest exists");
-    let manifest = decode_namespace_manifest_json(&manifest_bytes).expect("decode manifest");
-    let grams_levels: Vec<u32> = manifest
-        .payload
-        .index_files
+        .expect("load grep root")
+        .expect("grep root exists");
+    let grams_levels: Vec<u32> = root
+        .state()
+        .segments()
         .iter()
-        .filter(|descriptor| descriptor.family == "grams")
-        .map(|descriptor| descriptor.level)
+        .map(|segment| segment.level)
         .collect();
     assert!(
         grams_levels.contains(&1),
@@ -493,7 +487,7 @@ impl IndexSegmentGetCountingStore {
     }
 
     fn record_if_index_segment(&self, key: &str) {
-        if key.contains("/metadata/indexes/") {
+        if key.starts_with("grep/v0/") && key.contains("/segments/") {
             self.index_segment_gets.fetch_add(1, Ordering::SeqCst);
         }
     }
@@ -549,6 +543,7 @@ async fn repeated_grep_serves_posting_blocks_from_the_grep_cache() {
     let raw_store = Arc::new(IndexSegmentGetCountingStore::new(temp_dir.path()));
     let store: loonfs::SharedObjectStore = raw_store.clone();
     let namespace_id = NamespaceId::parse("grams-cache").expect("namespace id");
+    let grep_worker = grep_worker(&store);
 
     let writer = FsWriter::builder_with_store(store.clone())
         .writer_id("grams-cache-writer")
@@ -594,10 +589,7 @@ async fn repeated_grep_serves_posting_blocks_from_the_grep_cache() {
         .await
         .expect("enable");
     for _ in 0..2 {
-        admin
-            .maintenance_tick_namespace(&namespace_id, MaintenanceTickOptions::default())
-            .await
-            .expect("maintenance tick");
+        drive_worker_step(&grep_worker, &namespace_id, GramIndexBuildPolicy::default()).await;
     }
 
     let before_first = raw_store.index_segment_get_count();
@@ -653,6 +645,7 @@ async fn a_failed_candidate_read_surfaces_in_traversal_order() {
         .build()
         .await
         .expect("build reader");
+    let grep_worker = grep_worker(&store);
 
     writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
@@ -693,10 +686,7 @@ async fn a_failed_candidate_read_surfaces_in_traversal_order() {
         .await
         .expect("enable");
     for _ in 0..2 {
-        admin
-            .maintenance_tick_namespace(&namespace_id, MaintenanceTickOptions::default())
-            .await
-            .expect("maintenance tick");
+        drive_worker_step(&grep_worker, &namespace_id, GramIndexBuildPolicy::default()).await;
     }
     let healthy = reader
         .grep(&namespace_id, &grep_request("needle"))
@@ -854,6 +844,7 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
         .build()
         .await
         .expect("build reader");
+    let grep_worker = grep_worker(&store);
 
     writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
@@ -873,10 +864,7 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
         .await
         .expect("enable");
     for _ in 0..2 {
-        admin
-            .maintenance_tick_namespace(&namespace_id, MaintenanceTickOptions::default())
-            .await
-            .expect("maintenance tick");
+        drive_worker_step(&grep_worker, &namespace_id, GramIndexBuildPolicy::default()).await;
     }
 
     // Oversized and full of matches: were it ever fetched and scanned, it
@@ -972,7 +960,7 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
 /// caches: warming grep must not warm core's maintenance cache.
 ///
 /// Two identically shaped delta folds run through one runtime — eight
-/// one-file rounds each, background ticks folding on the eighth. The
+/// one-file rounds each, explicit worker steps folding on the eighth. The
 /// first fold runs cold and is the in-test control; before the second, a
 /// grep warms seven of its eight inputs in the grep-private cache. The two
 /// identically shaped folds must therefore issue the same core-cache reads.
@@ -986,18 +974,18 @@ async fn a_fold_does_not_reuse_grep_private_index_blocks() {
     let writer = FsWriter::builder_with_store(store.clone())
         .writer_id("grams-fold-writer")
         .min_publish_interval_ms(0)
-        .background_work(FsBackgroundWork::Enabled)
         .build()
         .await
         .expect("build writer");
-    // The derived reader shares the writer's runtime core, so its greps
-    // fill the cache the writer's background fold steps read through.
+    // The derived reader shares the runtime grep service, while the worker
+    // retains a separate folding cache.
     let reader = writer.reader();
     let admin = FsAdmin::builder_with_store(store.clone())
         .actor_id("grams-fold-admin")
         .build()
         .await
         .expect("build admin");
+    let grep_worker = grep_worker(&store);
 
     writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
@@ -1007,13 +995,14 @@ async fn a_fold_does_not_reuse_grep_private_index_blocks() {
         .enable_grams_index(&namespace_id)
         .await
         .expect("enable");
+    drive_worker_step(&grep_worker, &namespace_id, GramIndexBuildPolicy::default()).await;
 
-    // One delta segment per round: every put schedules a background drain
-    // that builds exactly the new revision, and the drain's fold step
-    // tiers the deltas into a mid run on the eighth round.
+    // One delta segment per round; the explicit fold step tiers the deltas
+    // into a mid run on the eighth round.
     let put_round = |round: u32| {
         let writer = writer.clone();
         let namespace_id = namespace_id.clone();
+        let grep_worker = &grep_worker;
         async move {
             writer
                 .put_file_bytes(
@@ -1024,10 +1013,7 @@ async fn a_fold_does_not_reuse_grep_private_index_blocks() {
                 )
                 .await
                 .expect("write file");
-            writer
-                .wait_for_background_work()
-                .await
-                .expect("background work quiesces");
+            drive_worker_step(grep_worker, &namespace_id, GramIndexBuildPolicy::default()).await;
         }
     };
 
@@ -1069,23 +1055,15 @@ async fn a_fold_does_not_reuse_grep_private_index_blocks() {
 
     // The premise of the comparison: both rounds really did fold, leaving
     // two mid runs and no deltas.
-    let root = loonfs_core::control::load_namespace_metadata_root_control(&*store, &namespace_id)
+    let root = loonfs_grep::root::load_grep_root(&*store, &namespace_id)
         .await
-        .expect("metadata root");
-    let manifest_key =
-        metadata_manifest_object(namespace_id.as_str(), &root.state.manifest_object_id);
-    let manifest_bytes = store
-        .get(&manifest_key, None)
-        .await
-        .expect("read namespace manifest")
-        .expect("namespace manifest exists");
-    let manifest = decode_namespace_manifest_json(&manifest_bytes).expect("decode manifest");
-    let grams: Vec<(u32, u64)> = manifest
-        .payload
-        .index_files
+        .expect("load grep root")
+        .expect("grep root exists");
+    let grams: Vec<(u32, u64)> = root
+        .state()
+        .segments()
         .iter()
-        .filter(|descriptor| descriptor.family == "grams")
-        .map(|descriptor| (descriptor.level, descriptor.run_seq.0))
+        .map(|segment| (segment.level, segment.run_ordinal))
         .collect();
     assert!(
         grams.iter().all(|(level, _)| *level == 1),
@@ -1131,7 +1109,7 @@ impl InFlightIndexGetProbeStore {
     where
         F: std::future::Future<Output = T>,
     {
-        if !key.contains("/metadata/indexes/") {
+        if !key.starts_with("grep/v0/") || !key.contains("/segments/") {
             return read.await;
         }
         let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
@@ -1198,6 +1176,7 @@ async fn a_cold_fold_fans_out_its_segment_opens_within_the_io_cap() {
     let raw_store = Arc::new(InFlightIndexGetProbeStore::new(temp_dir.path()));
     let store: loonfs::SharedObjectStore = raw_store.clone();
     let namespace_id = NamespaceId::parse("grams-fold-fan-out").expect("namespace id");
+    let grep_worker = grep_worker(&store);
 
     let writer = FsWriter::builder_with_store(store.clone())
         .writer_id("grams-fan-out-writer")
@@ -1240,10 +1219,7 @@ async fn a_cold_fold_fans_out_its_segment_opens_within_the_io_cap() {
             )
             .await
             .expect("write file");
-        admin
-            .maintenance_tick_namespace(&namespace_id, MaintenanceTickOptions::default())
-            .await
-            .expect("maintenance tick");
+        drive_worker_step(&grep_worker, &namespace_id, GramIndexBuildPolicy::default()).await;
     }
 
     let peak = raw_store.peak_in_flight();
@@ -1258,23 +1234,15 @@ async fn a_cold_fold_fans_out_its_segment_opens_within_the_io_cap() {
 
     // The premise of the probe: the reads the peak observed were a real
     // delta fold, which leaves a mid run behind.
-    let root = loonfs_core::control::load_namespace_metadata_root_control(&*store, &namespace_id)
+    let root = loonfs_grep::root::load_grep_root(&*store, &namespace_id)
         .await
-        .expect("metadata root");
-    let manifest_key =
-        metadata_manifest_object(namespace_id.as_str(), &root.state.manifest_object_id);
-    let manifest_bytes = store
-        .get(&manifest_key, None)
-        .await
-        .expect("read namespace manifest")
-        .expect("namespace manifest exists");
-    let manifest = decode_namespace_manifest_json(&manifest_bytes).expect("decode manifest");
-    let grams: Vec<u32> = manifest
-        .payload
-        .index_files
+        .expect("load grep root")
+        .expect("grep root exists");
+    let grams: Vec<u32> = root
+        .state()
+        .segments()
         .iter()
-        .filter(|descriptor| descriptor.family == "grams")
-        .map(|descriptor| descriptor.level)
+        .map(|segment| segment.level)
         .collect();
     assert!(
         grams.contains(&1),

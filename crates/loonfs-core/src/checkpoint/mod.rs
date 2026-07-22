@@ -30,6 +30,7 @@ mod cache;
 mod create;
 mod error;
 mod flush;
+mod grep_read;
 mod index_build;
 mod index_read;
 mod load;
@@ -52,6 +53,10 @@ pub use self::cache::{
     DEFAULT_WAL_TAIL_PROJECTION_ROWS,
 };
 pub use self::error::{ManifestLoadError, ManifestLoadFailureClass};
+pub use self::grep_read::{
+    load_grep_change_feed, load_grep_checkpoint_revision_page, GrepChangeFeed,
+    GrepCheckpointRevisionPage,
+};
 pub use self::index_build::{
     GramIndexBuildOutcome, GramIndexBuildPolicy, GramIndexBuildReport, GramIndexDisableOutcome,
     GramIndexEnableOutcome, GramIndexFoldOutcome, GramIndexFoldReport,
