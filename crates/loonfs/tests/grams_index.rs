@@ -11,7 +11,7 @@ use loonfs::{
     GramIndexBuildPolicy, GrepRequest, NamespaceId, PutFileOptions,
 };
 use loonfs_api::decode_grep_cursor;
-use loonfs_api::wire::index_grams::INDEX_GRAMS_MAX_FILE_BYTES;
+use loonfs_grep::codec::INDEX_GRAMS_MAX_FILE_BYTES;
 use loonfs_grep::GrepWorker;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{
@@ -132,9 +132,8 @@ async fn grep_worker_builds_the_gram_index_once_enabled() {
         .await
         .expect("write bravo");
 
-    // Request validation precedes feature materialization in the reference
-    // executor; snapshot construction in the delegated path must preserve
-    // that error ordering.
+    // Request validation precedes feature materialization; snapshot
+    // construction must preserve that error ordering.
     let mut invalid_limit = grep_request("needle");
     invalid_limit.limit = Some(0);
     let error = reader
@@ -957,13 +956,13 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
 }
 
 /// Fold steps and grep queries deliberately use separate decoded-block
-/// caches: warming grep must not warm core's maintenance cache.
+/// caches: warming grep must not warm the worker's folding cache.
 ///
 /// Two identically shaped delta folds run through one runtime — eight
 /// one-file rounds each, explicit worker steps folding on the eighth. The
 /// first fold runs cold and is the in-test control; before the second, a
 /// grep warms seven of its eight inputs in the grep-private cache. The two
-/// identically shaped folds must therefore issue the same core-cache reads.
+/// identically shaped folds must therefore issue the same section reads.
 #[tokio::test]
 async fn a_fold_does_not_reuse_grep_private_index_blocks() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1048,7 +1047,7 @@ async fn a_fold_does_not_reuse_grep_private_index_blocks() {
     );
     assert_eq!(
         warm_fold_gets, cold_fold_gets,
-        "grep-private cache entries must not alter core fold reads: cold \
+        "grep-private cache entries must not alter worker fold reads: cold \
          fold read {cold_fold_gets} sections, query-warmed fold read \
          {warm_fold_gets}"
     );

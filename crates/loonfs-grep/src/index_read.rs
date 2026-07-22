@@ -1,7 +1,7 @@
 //! Cached reads of gram-index segment filter, index, and data blocks.
 
 use crate::cache::{DecodedGrepBlock, GrepBlockCache, GrepBlockCacheKey, GrepBlockKind};
-use loonfs_api::wire::index_grams::IndexRow;
+use crate::codec::IndexRow;
 use loonfs_api::wire::sst_blocks::{
     decode_data_block_rows, decode_filter_block, decode_index_block, BlockHandle, DecodedDataBlock,
     SegmentFilter, SegmentIndexEntry,

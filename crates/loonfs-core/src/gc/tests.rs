@@ -14,8 +14,8 @@ use loonfs_api::wire::control::{
 };
 use loonfs_api::NamespaceId;
 use loonfs_objectstore::keys::{
-    checkpoint_prefix, index_segment_prefix, metadata_manifest_object, metadata_manifest_prefix,
-    metadata_table_prefix, namespace_config, wal_segment_prefix,
+    checkpoint_prefix, metadata_manifest_object, metadata_manifest_prefix, metadata_table_prefix,
+    namespace_config, wal_segment_prefix,
 };
 use loonfs_objectstore::ObjectStore;
 
@@ -1525,116 +1525,4 @@ async fn gc_degrades_to_retention_when_a_pin_checkpoint_is_unreadable() {
     assert!(report.degraded_retention);
     assert_eq!(report.deleted_manifests, 0);
     assert_eq!(report.deleted_metadata_tables, 0);
-}
-
-async fn drain_grams_index(
-    store: &LocalFsStore,
-    namespace_id: &NamespaceId,
-    context: &MutationContext,
-) {
-    crate::checkpoint::enable_grams_index(store, namespace_id, context)
-        .await
-        .expect("enable grams index");
-    loop {
-        let report = crate::checkpoint::build_grams_index_step(
-            store,
-            None,
-            namespace_id,
-            context,
-            crate::GramIndexBuildPolicy::default(),
-        )
-        .await
-        .expect("build grams index step");
-        if matches!(
-            report.outcome,
-            crate::GramIndexBuildOutcome::UpToDate { .. }
-        ) {
-            return;
-        }
-        assert!(
-            matches!(
-                report.outcome,
-                crate::GramIndexBuildOutcome::Published { .. }
-            ),
-            "unexpected build outcome: {:?}",
-            report.outcome
-        );
-    }
-}
-
-async fn index_segment_keys(store: &LocalFsStore, namespace_id: &NamespaceId) -> Vec<String> {
-    list_prefix(store, &index_segment_prefix(namespace_id.as_str()))
-        .await
-        .expect("list index segments")
-}
-
-#[tokio::test]
-async fn gc_retains_live_index_segments() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let setup = context(1_000);
-    bootstrap_namespace(&store, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
-    write_file(&store, &namespace_id, "/docs/one.txt", "searchable", &setup).await;
-    create_checkpoint(&store, &namespace_id, &setup)
-        .await
-        .expect("checkpoint");
-    drain_grams_index(&store, &namespace_id, &setup).await;
-    let segments = index_segment_keys(&store, &namespace_id).await;
-    assert!(!segments.is_empty());
-
-    let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
-    let report = gc_namespace(&store, &namespace_id, &config(), &aged)
-        .await
-        .expect("gc pass");
-
-    assert_eq!(report.deleted_index_segments, 0);
-    assert_eq!(
-        index_segment_keys(&store, &namespace_id).await,
-        segments,
-        "live index segments must survive the sweep"
-    );
-    assert!(!report.degraded_retention);
-}
-
-#[tokio::test]
-async fn gc_reclaims_index_segments_after_disable() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let setup = context(1_000);
-    bootstrap_namespace(&store, &namespace_id, &setup, false)
-        .await
-        .expect("bootstrap");
-    write_file(&store, &namespace_id, "/docs/one.txt", "searchable", &setup).await;
-    create_checkpoint(&store, &namespace_id, &setup)
-        .await
-        .expect("checkpoint");
-    drain_grams_index(&store, &namespace_id, &setup).await;
-    let segments = index_segment_keys(&store, &namespace_id).await;
-    assert!(!segments.is_empty());
-
-    let disabled = crate::checkpoint::disable_grams_index(&store, &namespace_id, &setup)
-        .await
-        .expect("disable");
-    assert_eq!(disabled, crate::GramIndexDisableOutcome::Disabled);
-
-    // Superseded manifests still reference the segments until they age
-    // out; sweeping data and manifests in one aged pass clears both.
-    let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
-    let first = gc_namespace(&store, &namespace_id, &config(), &aged)
-        .await
-        .expect("first gc pass");
-    let second = gc_namespace(&store, &namespace_id, &config(), &aged)
-        .await
-        .expect("second gc pass");
-
-    assert_eq!(
-        first.deleted_index_segments + second.deleted_index_segments,
-        segments.len() as u64,
-        "disable makes every index segment collectable"
-    );
-    assert!(index_segment_keys(&store, &namespace_id).await.is_empty());
 }

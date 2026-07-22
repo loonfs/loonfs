@@ -50,13 +50,6 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         self.manifest.as_ref()
     }
 
-    /// The shared decoded-block cache this view was loaded with, if any,
-    /// for readers of manifest-referenced segments outside the metadata
-    /// families (the gram index).
-    pub(crate) fn table_cache(&self) -> Option<&MetadataTableCache> {
-        self.table_cache
-    }
-
     pub(crate) async fn get_for_lookup(
         &self,
         family: MetadataTableFamily,

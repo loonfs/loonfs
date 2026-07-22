@@ -11,8 +11,8 @@ use crate::context::MutationContext;
 use crate::error::CoreError;
 use loonfs_api::{ManifestObjectId, NamespaceId};
 use loonfs_objectstore::keys::{
-    checkpoint_prefix, index_segment_prefix, metadata_manifest_prefix, metadata_table_prefix,
-    namespace_config, upload_session_prefix, wal_segment_prefix,
+    checkpoint_prefix, metadata_manifest_prefix, metadata_table_prefix, namespace_config,
+    upload_session_prefix, wal_segment_prefix,
 };
 use loonfs_objectstore::ObjectStore;
 use std::collections::BTreeSet;
@@ -21,9 +21,6 @@ use std::collections::BTreeSet;
 pub(super) struct LiveSet {
     pub(super) manifests: BTreeSet<ManifestObjectId>,
     pub(super) tables: BTreeSet<String>,
-    /// Derived-index segments named by any live manifest's `index_files`,
-    /// protected whatever their family (format spec, section 4.2.2).
-    pub(super) index_segments: BTreeSet<String>,
     pub(super) wal_segments: BTreeSet<String>,
     pub(super) checkpoint_keys: BTreeSet<String>,
     /// Still-active records whose basis manifest is verifiably absent —
@@ -78,8 +75,6 @@ pub(super) async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
     let candidate_segments = list_prefix(store, &wal_segment_prefix(namespace_id.as_str())).await?;
     let candidate_tables =
         list_prefix(store, &metadata_table_prefix(namespace_id.as_str())).await?;
-    let candidate_index_segments =
-        list_prefix(store, &index_segment_prefix(namespace_id.as_str())).await?;
     let candidate_manifests =
         list_prefix(store, &metadata_manifest_prefix(namespace_id.as_str())).await?;
     let candidate_checkpoints =
@@ -94,10 +89,6 @@ pub(super) async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
     let table_candidates: Vec<String> = candidate_tables
         .into_iter()
         .filter(|key| !mark.tables.contains(key))
-        .collect();
-    let index_segment_candidates: Vec<String> = candidate_index_segments
-        .into_iter()
-        .filter(|key| !mark.index_segments.contains(key))
         .collect();
     let manifest_candidates: Vec<String> = candidate_manifests
         .into_iter()
@@ -148,24 +139,6 @@ pub(super) async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
         }
         if delete_if_aged(store, &key, config.grace_window_ms, context, &mut report).await? {
             report.deleted_metadata_tables += 1;
-        }
-    }
-    for key in index_segment_candidates {
-        sweep
-            .refresh_if_due(store, namespace_id, config, context)
-            .await?;
-        // Index segments follow the table rules: ambiguous roots suppress
-        // deletion, live manifests protect every listed key.
-        if sweep.degraded {
-            report.retained_candidates += 1;
-            continue;
-        }
-        if sweep.live.index_segments.contains(&key) {
-            report.retained_candidates += 1;
-            continue;
-        }
-        if delete_if_aged(store, &key, config.grace_window_ms, context, &mut report).await? {
-            report.deleted_index_segments += 1;
         }
     }
     for key in manifest_candidates {

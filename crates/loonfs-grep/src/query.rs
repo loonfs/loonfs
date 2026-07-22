@@ -17,7 +17,7 @@
 //! optional or repeated subexpressions contribute their inner constraints
 //! only when they must occur.
 
-use loonfs_api::wire::index_grams::{extract_grams, Gram, GRAM_LEN};
+use crate::codec::{extract_grams, Gram, GRAM_LEN};
 use regex_syntax::hir::{Class, Hir, HirKind, Look, Repetition};
 use std::collections::BTreeSet;
 

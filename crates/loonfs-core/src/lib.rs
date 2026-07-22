@@ -68,7 +68,6 @@ pub mod namespace;
 mod options;
 pub mod path;
 mod protocol;
-mod query;
 mod storage;
 pub mod timing;
 mod wal;
@@ -110,11 +109,7 @@ pub mod publish {
     pub use crate::storage::content_admission::PreparedContent;
 }
 
-pub use checkpoint::{
-    is_indexable_text_content, GramIndexBuildOutcome, GramIndexBuildPolicy, GramIndexBuildReport,
-    GramIndexDisableOutcome, GramIndexEnableOutcome, GramIndexFoldOutcome, GramIndexFoldReport,
-    MetadataReorganizeOutcome, MetadataReorganizeReport,
-};
+pub use checkpoint::{MetadataReorganizeOutcome, MetadataReorganizeReport};
 pub use context::MutationContext;
 pub use engine::RuntimeReadContext;
 pub use engine::{BeginDirectPutUploadTargetResponse, DirectPutUploadTarget};
@@ -127,13 +122,6 @@ pub use gc::{gc_namespace, GcConfig, GcReport};
 pub use namespace::BootstrapNamespaceError;
 pub use options::{BootstrapOptions, DeleteNamespaceOptions, WriteOptions};
 pub use timing::{MonotonicTimer, StdMonotonicTimer};
-
-/// Grep page-limit defaults, advertised through the capability document.
-pub mod grep_limits {
-    pub use crate::path::read::{
-        DEFAULT_GREP_PAGE_LIMIT, MAX_GREP_PAGE_LIMIT, MAX_GREP_SCAN_FILES, MAX_GREP_TAIL_FILES,
-    };
-}
 
 /// Concrete read-view types consumed by `loonfs-grep`.
 pub mod grep {

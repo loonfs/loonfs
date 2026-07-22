@@ -239,7 +239,6 @@ pub(crate) async fn build_initial_namespace_manifest<S: ObjectStore + ?Sized>(
             fork: None,
             features: BTreeMap::new(),
             metadata_files: flatten_manifest_tables(run_tables),
-            index_files: Vec::new(),
         },
     )
     .map_err(|err| {

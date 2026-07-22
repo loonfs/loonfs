@@ -29,6 +29,8 @@ pub enum DurableObjectFamily {
     MetadataRoot,
     MetadataManifest,
     MetadataTable,
+    /// Retained only because the frozen `loonfs-sim` contract exhaustively
+    /// matches this public enum; no key grammar classifies this family.
     IndexSegment,
     CheckpointRecord,
     /// Retired protocol family: fork protection lives on fork-owned
@@ -146,17 +148,6 @@ impl ObjectLayout {
         format!("namespaces/{namespace}/metadata/tables/")
     }
 
-    /// Derived-index segment (format spec, "Derived work"): same block
-    /// grammar as a metadata table, feature-owned row payload, referenced
-    /// from the manifest's `index_files` list.
-    pub fn index_segment(&self, namespace: &str, segment_id: &str) -> String {
-        format!("namespaces/{namespace}/metadata/indexes/{segment_id}.idx.zst")
-    }
-
-    pub fn index_segment_prefix(&self, namespace: &str) -> String {
-        format!("namespaces/{namespace}/metadata/indexes/")
-    }
-
     /// Durable stable-view pin to a metadata manifest.
     pub fn checkpoint_record(&self, namespace: &str, checkpoint_id: &str) -> String {
         format!("namespaces/{namespace}/checkpoints/{checkpoint_id}.json")
@@ -236,11 +227,6 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
         }
         ["namespaces", namespace, "metadata", "tables", table] if table.ends_with(".sst.zst") => {
             parsed(DurableObjectFamily::MetadataTable, Some(namespace))
-        }
-        ["namespaces", namespace, "metadata", "indexes", segment]
-            if segment.ends_with(".idx.zst") =>
-        {
-            parsed(DurableObjectFamily::IndexSegment, Some(namespace))
         }
         ["namespaces", namespace, "checkpoints", checkpoint] if checkpoint.ends_with(".json") => {
             parsed(DurableObjectFamily::CheckpointRecord, Some(namespace))
@@ -434,10 +420,6 @@ mod tests {
             (
                 layout.metadata_table("ns-1", "tbl_abc"),
                 DurableObjectFamily::MetadataTable,
-            ),
-            (
-                layout.index_segment("ns-1", "idx_abc"),
-                DurableObjectFamily::IndexSegment,
             ),
             (
                 layout.checkpoint_record("ns-1", "chk_00000000000000000000000000000001"),

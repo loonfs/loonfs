@@ -57,13 +57,7 @@ pub(crate) enum CommandData {
     RetentionAdvanced(AdvanceRetentionResponse),
     MaintenanceTicked(MaintenanceTickResponse),
     GarbageCollected(GcResponse),
-    GramsIndexEnabled {
-        #[serde(flatten)]
-        enabled: EnableGramsIndexResponse,
-        /// Legacy v1 output slot. Always absent now that grep backfill is
-        /// independent of core maintenance ticks.
-        backfill_tick: Option<MaintenanceTickResponse>,
-    },
+    GramsIndexEnabled(EnableGramsIndexResponse),
     GramsIndexDisabled(DisableGramsIndexResponse),
     Changes(ChangesResponse),
     PathEntries {

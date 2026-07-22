@@ -164,8 +164,8 @@ impl FsCore {
         let root = loonfs_grep::root::load_grep_root(self.store(), namespace_id).await;
         let snapshot = match root {
             Ok(root) => GrepIndexSnapshot::from_grep_root(root.as_ref().map(|root| root.state())),
-            Err(error) => GrepIndexSnapshot::from_core_parts(Err(CoreError::NamespaceCorrupt(
-                format!("grep state for `{namespace_id}` is unreadable: {error}"),
+            Err(error) => GrepIndexSnapshot::from_error(CoreError::NamespaceCorrupt(format!(
+                "grep state for `{namespace_id}` is unreadable: {error}"
             ))),
         };
         let response = self

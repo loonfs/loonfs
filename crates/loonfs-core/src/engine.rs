@@ -20,9 +20,8 @@ use loonfs_api::EffectiveLimit;
 use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq,
     CheckpointId, ContentRef, CreateCheckpointResponse, DirectoryPageCursor, FileRevision,
-    FileRevisionsPageCursor, FlushWalResponse, GrepRequest, GrepResponse, InodeId, ManifestId,
-    ManifestObjectId, NamespaceId, NamespaceSummary, Page, PageRequest, ReleaseCheckpointResponse,
-    RevisionNo, UploadId,
+    FileRevisionsPageCursor, FlushWalResponse, InodeId, ManifestId, ManifestObjectId, NamespaceId,
+    NamespaceSummary, Page, PageRequest, ReleaseCheckpointResponse, RevisionNo, UploadId,
 };
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
@@ -206,26 +205,9 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         .await
     }
 
-    /// Runs one content-search page through core's reference executor.
-    ///
-    /// Retained for differential testing until the final core-deletion PR;
-    /// the production runtime delegates content search to `loonfs-grep`.
-    pub async fn grep_with_runtime_context(
-        &self,
-        request: &GrepRequest,
-        options: &RuntimeReadContext,
-    ) -> CoreResult<GrepResponse> {
-        let view = self
-            .load_read_view(runtime_read_load_context(options))
-            .await?;
-        view.grep(&self.store, request).await
-    }
-
     /// Loads the coherent read view passed to `loonfs-grep`.
     ///
-    /// This is part of the read surface consumed by `loonfs-grep`. The old
-    /// [`Self::grep_with_runtime_context`] remains callable only as the
-    /// differential-test reference until the final core-deletion change.
+    /// This is part of the read surface consumed by `loonfs-grep`.
     pub async fn load_grep_view_with_runtime_context<'a>(
         &'a self,
         options: &'a RuntimeReadContext,
@@ -540,81 +522,6 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     pub async fn flush_wal(&self) -> CoreResult<FlushWalResponse> {
         crate::checkpoint::flush_wal(&self.store, &self.namespace_id, &self.mutation_context()?)
             .await
-    }
-
-    /// Publishes the `index.grams` feature entry, scheduling gram index
-    /// backfill over the namespace's existing revisions (format spec,
-    /// sections 4.2.2 and 5). Idempotent for an already-enabled namespace.
-    pub async fn enable_grams_index(
-        &self,
-    ) -> CoreResult<crate::checkpoint::GramIndexEnableOutcome> {
-        crate::checkpoint::enable_grams_index(
-            &self.store,
-            &self.namespace_id,
-            &self.mutation_context()?,
-        )
-        .await
-    }
-
-    /// Removes the `index.grams` feature entry and every index segment
-    /// reference; the segments become garbage-collection candidates.
-    pub async fn disable_grams_index(
-        &self,
-    ) -> CoreResult<crate::checkpoint::GramIndexDisableOutcome> {
-        crate::checkpoint::disable_grams_index(
-            &self.store,
-            &self.namespace_id,
-            &self.mutation_context()?,
-        )
-        .await
-    }
-
-    /// Runs at most one gram index build unit: backfill while initial
-    /// materialization is walking existing revisions, WAL-replay catch-up
-    /// after, each unit ending in one manifest publication that advances
-    /// the `index.grams` watermark. Callers invoke this repeatedly, like
-    /// [`Self::reorganize_metadata`].
-    ///
-    /// `table_cache` is the runtime's shared decoded-block cache, passed
-    /// alongside the policy the way reads pass [`RuntimeReadContext`];
-    /// the step's segment reads resolve through it when attached.
-    pub async fn build_grams_index_step(
-        &self,
-        policy: crate::checkpoint::GramIndexBuildPolicy,
-        table_cache: Option<&MetadataTableCache>,
-    ) -> CoreResult<crate::checkpoint::GramIndexBuildReport> {
-        crate::checkpoint::build_grams_index_step(
-            &self.store,
-            table_cache,
-            &self.namespace_id,
-            &self.mutation_context()?,
-            policy,
-        )
-        .await
-    }
-
-    /// Runs at most one gram index fold unit: delta runs past the policy
-    /// threshold merge into a fresh mid run, and accumulated mid runs
-    /// merge together with the base into a fresh base, each fold ending
-    /// in manifest publications that swap the consumed references out
-    /// for the outputs.
-    ///
-    /// `table_cache` is the runtime's shared decoded-block cache, passed
-    /// alongside the policy the way reads pass [`RuntimeReadContext`];
-    /// the fold's merge reads resolve through it when attached.
-    pub async fn fold_grams_index_step(
-        &self,
-        policy: crate::checkpoint::GramIndexBuildPolicy,
-        table_cache: Option<&MetadataTableCache>,
-    ) -> CoreResult<crate::checkpoint::GramIndexFoldReport> {
-        crate::checkpoint::fold_grams_index_step(
-            &self.store,
-            table_cache,
-            &self.namespace_id,
-            &self.mutation_context()?,
-            policy,
-        )
-        .await
     }
 
     /// Runs at most one metadata reorganization unit: folds one family

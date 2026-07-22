@@ -21,9 +21,6 @@ use loonfs_api::wire::control::{
     HeadStateEnvelope, MetadataRootEnvelope, MetadataRootState, NamespaceConfigEnvelope,
     NamespaceConfigState, NamespaceState, WalFloorEnvelope, WalFloorState, WriterBlock,
 };
-use loonfs_api::wire::index_grams::{
-    IndexGramsCodecError, IndexGramsFeature, INDEX_GRAMS_FEATURE_KEY,
-};
 use loonfs_api::wire::manifest::{
     NamespaceManifestEnvelope, NamespaceManifestFork, NamespaceManifestPayload,
 };
@@ -331,9 +328,8 @@ async fn complete_post_head_fork<S: ObjectStore + ?Sized>(
 }
 
 /// Builds the fork target's manifest payload from the pinned source
-/// checkpoint. The target adopts the source's feature declarations and
-/// metadata file references verbatim: it must be readable under exactly the
-/// capabilities the source declared for those tables.
+/// checkpoint. The target adopts the source's generic feature declarations
+/// and metadata file references verbatim.
 fn fork_target_manifest_payload(
     new_namespace_id: &NamespaceId,
     target_manifest_id: ManifestId,
@@ -343,48 +339,6 @@ fn fork_target_manifest_payload(
     source_record: &CheckpointRecordState,
 ) -> Result<NamespaceManifestPayload> {
     let fork_seq = source_record.manifest_head_seq;
-    // The target adopts the source's gram index, with one repair: the
-    // target does not inherit the source WAL, so a source index that
-    // trails the fork point could never replay the gap. Keeping the
-    // segments but restarting the backfill cursor rebuilds the gap from
-    // the copied metadata tables; duplicate postings from the re-walk are
-    // harmless because readers union batches and folds re-batch them.
-    let mut features = source_manifest.payload.features.clone();
-    if let Some(value) = features.get(INDEX_GRAMS_FEATURE_KEY) {
-        match IndexGramsFeature::from_value(value) {
-            Ok(feature) if feature.built_through_seq < fork_seq || !feature.is_materialized() => {
-                features.insert(
-                    INDEX_GRAMS_FEATURE_KEY.to_owned(),
-                    IndexGramsFeature {
-                        version: feature.version,
-                        built_through_seq: fork_seq,
-                        backfill_cursor: Some(String::new()),
-                        // The restarted backfill re-covers everything a
-                        // half-finished fold would have; its inputs and
-                        // outputs all remain referenced, and the next fold
-                        // re-snapshots them.
-                        fold: None,
-                        // The fork inherits the source's segments verbatim,
-                        // run ordinals included; carrying the counter
-                        // forward keeps the target's future runs distinct
-                        // from the inherited ones.
-                        next_run_ordinal: feature.next_run_ordinal,
-                    }
-                    .to_value(),
-                );
-            }
-            Ok(_) => {}
-            // A feature version this build does not implement is preserved
-            // verbatim; its own specification owns fork semantics.
-            Err(IndexGramsCodecError::UnsupportedFeatureVersion { .. }) => {}
-            Err(error) => {
-                return Err(CoreError::NamespaceCorrupt(format!(
-                    "fork source `{}` carries an unreadable index.grams feature value: {error}",
-                    source_namespace_id.as_str()
-                )));
-            }
-        }
-    }
     Ok(NamespaceManifestPayload {
         namespace_id: new_namespace_id.clone(),
         manifest_id: target_manifest_id,
@@ -403,9 +357,8 @@ fn fork_target_manifest_payload(
             source_manifest_object_id: source_record.manifest_object_id.clone(),
             source_head_seq: source_record.manifest_head_seq,
         }),
-        features,
+        features: source_manifest.payload.features.clone(),
         metadata_files: source_manifest.payload.metadata_files.clone(),
-        index_files: source_manifest.payload.index_files.clone(),
     })
 }
 
@@ -472,7 +425,6 @@ mod tests {
                 fork: None,
                 features: BTreeMap::new(),
                 metadata_files: Vec::new(),
-                index_files: Vec::new(),
             },
         )
         .expect("manifest")

@@ -48,14 +48,6 @@ pub fn metadata_table(namespace: &str, table_id: &str) -> String {
     ObjectLayout::new().metadata_table(namespace, table_id)
 }
 
-pub fn index_segment(namespace: &str, segment_id: &str) -> String {
-    ObjectLayout::new().index_segment(namespace, segment_id)
-}
-
-pub fn index_segment_prefix(namespace: &str) -> String {
-    ObjectLayout::new().index_segment_prefix(namespace)
-}
-
 pub fn checkpoint_record(namespace: &str, checkpoint_id: &str) -> String {
     ObjectLayout::new().checkpoint_record(namespace, checkpoint_id)
 }
@@ -83,9 +75,9 @@ pub fn content_blob(content_store: &str, digest: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        checkpoint_record, content_blob, content_store_descriptor, index_segment,
-        metadata_manifest_object, metadata_root, metadata_table, namespace_config, upload_session,
-        wal_floor, wal_head, wal_segment, wal_segment_id_from_key, wal_segment_prefix,
+        checkpoint_record, content_blob, content_store_descriptor, metadata_manifest_object,
+        metadata_root, metadata_table, namespace_config, upload_session, wal_floor, wal_head,
+        wal_segment, wal_segment_id_from_key, wal_segment_prefix,
     };
     use loonfs_api::ManifestObjectId;
 
@@ -143,7 +135,6 @@ mod tests {
                 )
                 .replace("{checkpoint_id}", "chk-1")
                 .replace("{table_id}", "tbl-1")
-                .replace("{segment_id}", "idx-1")
                 .replace("{upload_id}", "up-1")
                 .replace("{hex[0..2]}", &HEX[0..2])
                 .replace("{hex[2..4]}", &HEX[2..4])
@@ -167,7 +158,6 @@ mod tests {
             ),
             ("Checkpoint records", checkpoint_record("ns-1", "chk-1")),
             ("Metadata tables", metadata_table("ns-1", "tbl-1")),
-            ("Index segments", index_segment("ns-1", "idx-1")),
             ("Upload sessions", upload_session("ns-1", "up-1")),
             ("Content-store descriptor", content_store_descriptor("cs-1")),
             ("Metadata root", metadata_root("ns-1")),
@@ -232,10 +222,6 @@ mod tests {
         assert_eq!(
             metadata_table("ns-1", "tbl_00000000000000000000000000000001"),
             "namespaces/ns-1/metadata/tables/tbl_00000000000000000000000000000001.sst.zst"
-        );
-        assert_eq!(
-            index_segment("ns-1", "idx_00000000000000000000000000000001"),
-            "namespaces/ns-1/metadata/indexes/idx_00000000000000000000000000000001.idx.zst"
         );
         assert_eq!(
             checkpoint_record("ns-1", "chk_00000000000000000000000000000001"),

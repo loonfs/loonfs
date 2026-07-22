@@ -1,7 +1,7 @@
 #![allow(clippy::panic)]
-// Cross-world and lifecycle diagnostics deliberately panic with both outcomes.
+// Lifecycle diagnostics deliberately panic with the full unexpected outcome.
 
-//! GrepWorker lifecycle, rebootstrap, GC, and old/new cross-world equivalence.
+//! GrepWorker lifecycle, rebootstrap, query contracts, and GC boundaries.
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -26,13 +26,17 @@ use loonfs_grep::{
     GrepBuildOutcome, GrepFoldOutcome, GrepIndexSnapshot, GrepService, GrepWorker,
     GREP_GC_GRACE_WINDOW_MS,
 };
+use loonfs_objectstore::keys::{
+    checkpoint_prefix, metadata_manifest_object, metadata_manifest_prefix, metadata_table_prefix,
+    upload_session_prefix, wal_segment_prefix,
+};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
 };
 use std::collections::BTreeSet;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
 
 fn request(pattern: &str) -> GrepRequest {
@@ -96,32 +100,6 @@ async fn drive_worker_to_current(
         }
     }
     panic!("worker backlog must drain");
-}
-
-async fn drive_old_step(engine: &NamespaceEngine<SharedObjectStore>, policy: GramIndexBuildPolicy) {
-    engine
-        .build_grams_index_step(policy, None)
-        .await
-        .expect("old build step");
-    engine
-        .fold_grams_index_step(policy, None)
-        .await
-        .expect("old fold step");
-}
-
-async fn old_query(
-    store: &SharedObjectStore,
-    namespace_id: &NamespaceId,
-    grep_request: &GrepRequest,
-) -> loonfs_core::Result<GrepResponse> {
-    let engine = NamespaceEngine::builder(store.clone())
-        .namespace_id(namespace_id.clone())
-        .writer_id("old-query")
-        .build()
-        .expect("old query engine");
-    engine
-        .grep_with_runtime_context(grep_request, &read_context(store, namespace_id).await)
-        .await
 }
 
 async fn new_query(
@@ -377,143 +355,114 @@ async fn retention_gap_and_vanished_checkpoint_restart_fresh_backfill() {
 }
 
 #[tokio::test]
-async fn grep_root_lifecycle_matches_old_not_materialized_error_surface() {
+async fn grep_root_lifecycle_pins_not_materialized_error_surface() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
-    let old_namespace = NamespaceId::parse("error-old").expect("namespace id");
-    let new_namespace = NamespaceId::parse("error-new").expect("namespace id");
+    let namespace_id = NamespaceId::parse("error-surface").expect("namespace id");
     let writer = FsWriter::builder_with_store(store.clone())
         .writer_id("error-writer")
         .build()
         .await
         .expect("writer");
     let new_reader = writer.reader();
-    for namespace_id in [&old_namespace, &new_namespace] {
-        writer
-            .create_namespace(namespace_id, CreateNamespaceOptions::default())
-            .await
-            .expect("create namespace");
-    }
-    let old_engine = NamespaceEngine::builder(store.clone())
-        .namespace_id(old_namespace.clone())
-        .writer_id("error-old-index")
-        .build()
-        .expect("old engine");
+    writer
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
     let worker = worker(&store);
 
-    assert_same_runtime_error(
+    assert_not_materialized_error(
         "never enabled",
-        old_query(&store, &old_namespace, &request("needle")).await,
-        new_reader.grep(&new_namespace, &request("needle")).await,
+        new_reader.grep(&namespace_id, &request("needle")).await,
     );
-    old_engine.enable_grams_index().await.expect("old enable");
-    worker.enable(&new_namespace).await.expect("new enable");
-    assert_same_runtime_error(
+    worker.enable(&namespace_id).await.expect("enable");
+    assert_not_materialized_error(
         "backfilling",
-        old_query(&store, &old_namespace, &request("needle")).await,
-        new_reader.grep(&new_namespace, &request("needle")).await,
+        new_reader.grep(&namespace_id, &request("needle")).await,
     );
-    old_engine.disable_grams_index().await.expect("old disable");
-    worker.disable(&new_namespace).await.expect("new disable");
-    assert_same_runtime_error(
+    worker.disable(&namespace_id).await.expect("disable");
+    assert_not_materialized_error(
         "disabled",
-        old_query(&store, &old_namespace, &request("needle")).await,
-        new_reader.grep(&new_namespace, &request("needle")).await,
+        new_reader.grep(&namespace_id, &request("needle")).await,
     );
     writer.shutdown_background().await.expect("shutdown");
 }
 
-fn assert_same_runtime_error(
-    case: &str,
-    old: loonfs_core::Result<GrepResponse>,
-    new: loonfs::Result<GrepResponse>,
-) {
-    match (old, new) {
-        (Err(old), Err(loonfs::Error::Core(new))) => {
-            assert_eq!(old.code(), ErrorCode::NotSupported, "old code for {case}");
-            assert_eq!(new.code(), old.code(), "new code for {case}");
-            assert_eq!(new.to_string(), old.to_string(), "error text for {case}");
+fn assert_not_materialized_error(case: &str, result: loonfs::Result<GrepResponse>) {
+    match result {
+        Err(loonfs::Error::Core(error)) => {
+            assert_eq!(error.code(), ErrorCode::NotSupported, "code for {case}");
+            assert_eq!(
+                error.to_string(),
+                "feature `index.grams` is not materialized on this namespace",
+                "error text for {case}"
+            );
         }
-        outcomes => panic!("expected matching errors for {case}, got {outcomes:?}"),
+        outcome => panic!("expected not-materialized error for {case}, got {outcome:?}"),
     }
 }
 
 #[tokio::test]
-async fn grep_worker_matches_old_pipeline_across_folds_tail_and_pagination() {
+async fn grep_worker_pins_fold_tail_and_pagination_results() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
-    let old_namespace = NamespaceId::parse("cross-old").expect("namespace id");
-    let new_namespace = NamespaceId::parse("cross-new").expect("namespace id");
+    let namespace_id = NamespaceId::parse("worker-results").expect("namespace id");
     let writer = FsWriter::builder_with_store(store.clone())
-        .writer_id("cross-writer")
+        .writer_id("worker-results-writer")
         .min_publish_interval_ms(0)
         .build()
         .await
         .expect("writer");
-    for namespace_id in [&old_namespace, &new_namespace] {
-        writer
-            .create_namespace(namespace_id, CreateNamespaceOptions::default())
-            .await
-            .expect("create namespace");
-    }
-    let old_engine = NamespaceEngine::builder(store.clone())
-        .namespace_id(old_namespace.clone())
-        .writer_id("cross-old-index")
-        .build()
-        .expect("old engine");
+    writer
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
     let worker = worker(&store);
     let policy = GramIndexBuildPolicy {
         max_l0_runs: 2,
         max_mid_runs: 2,
         ..GramIndexBuildPolicy::default()
     };
-    old_engine.enable_grams_index().await.expect("old enable");
-    worker.enable(&new_namespace).await.expect("new enable");
-    drive_old_step(&old_engine, policy).await;
-    drive_worker_to_current(&worker, &new_namespace, policy).await;
+    worker.enable(&namespace_id).await.expect("enable");
+    drive_worker_to_current(&worker, &namespace_id, policy).await;
 
     for round in 0..6u32 {
-        for namespace_id in [&old_namespace, &new_namespace] {
-            writer
-                .put_file_bytes(
-                    namespace_id,
-                    &format!("/docs/file-{round}.txt"),
-                    format!("shared needle {round}\nshared needle again {round}\n").as_bytes(),
-                    PutFileOptions::default(),
-                )
-                .await
-                .expect("write indexed file");
-        }
-        drive_old_step(&old_engine, policy).await;
-        worker
-            .build_step(&new_namespace, policy)
-            .await
-            .expect("new build");
-        worker
-            .fold_step(&new_namespace, policy)
-            .await
-            .expect("new fold");
-    }
-    drive_worker_to_current(&worker, &new_namespace, policy).await;
-
-    for namespace_id in [&old_namespace, &new_namespace] {
         writer
             .put_file_bytes(
-                namespace_id,
-                "/tail.txt",
-                b"tail-only needle\n",
+                &namespace_id,
+                &format!("/docs/file-{round}.txt"),
+                format!("shared needle {round}\nshared needle again {round}\n").as_bytes(),
                 PutFileOptions::default(),
             )
             .await
-            .expect("write tail file");
+            .expect("write indexed file");
+        worker
+            .build_step(&namespace_id, policy)
+            .await
+            .expect("new build");
+        worker
+            .fold_step(&namespace_id, policy)
+            .await
+            .expect("new fold");
     }
+    drive_worker_to_current(&worker, &namespace_id, policy).await;
 
-    let root = load_grep_root(&*store, &new_namespace)
+    writer
+        .put_file_bytes(
+            &namespace_id,
+            "/tail.txt",
+            b"tail-only needle\n",
+            PutFileOptions::default(),
+        )
         .await
-        .expect("load new root")
-        .expect("new root exists");
+        .expect("write tail file");
+
+    let root = load_grep_root(&*store, &namespace_id)
+        .await
+        .expect("load root")
+        .expect("root exists");
     let levels: BTreeSet<u32> = root
         .state()
         .segments()
@@ -525,37 +474,154 @@ async fn grep_worker_matches_old_pipeline_across_folds_tail_and_pagination() {
         "levels: {levels:?}"
     );
 
-    for pattern in ["shared needle", "tail-only needle", "absent needle"] {
-        let old = old_query(&store, &old_namespace, &request(pattern))
-            .await
-            .expect("old query");
-        let new = new_query(&store, &new_namespace, &request(pattern))
-            .await
-            .expect("new query");
-        assert_eq!(normalize_namespace(new, &old_namespace), old, "{pattern}");
+    let shared = new_query(&store, &namespace_id, &request("shared needle"))
+        .await
+        .expect("shared query");
+    assert_eq!(shared.namespace_id, namespace_id);
+    assert_eq!(shared.matches.len(), 12);
+    assert!(shared.tail_scanned);
+    assert!(shared.built_through_seq < shared.head_seq);
+    assert!(shared.next_cursor.is_none());
+    for found in &shared.matches {
+        assert!(found.absolute_path.starts_with("/docs/file-"));
+        assert!(matches!(found.line_number, 1 | 2));
+        assert_eq!(
+            found.byte_offset,
+            if found.line_number == 1 { 0 } else { 16 }
+        );
+        assert!(found.line.starts_with("shared needle"));
+        assert!(!found.line_truncated);
     }
 
-    let mut old_request = request("shared needle");
-    let mut new_request = old_request.clone();
-    old_request.limit = Some(1);
-    new_request.limit = Some(1);
+    let tail = new_query(&store, &namespace_id, &request("tail-only needle"))
+        .await
+        .expect("tail query");
+    assert_eq!(tail.matches.len(), 1);
+    assert_eq!(tail.matches[0].absolute_path, "/tail.txt");
+    assert_eq!(tail.matches[0].line_number, 1);
+    assert_eq!(tail.matches[0].byte_offset, 0);
+    assert_eq!(tail.matches[0].line, "tail-only needle");
+    assert!(tail.tail_scanned);
+    assert!(tail.next_cursor.is_none());
+
+    let absent = new_query(&store, &namespace_id, &request("absent needle"))
+        .await
+        .expect("absent query");
+    assert!(absent.matches.is_empty());
+    assert!(absent.next_cursor.is_none());
+
+    let mut page_request = request("shared needle");
+    page_request.limit = Some(1);
+    let mut found_matches = BTreeSet::new();
+    let mut cursors = BTreeSet::new();
     loop {
-        let old = old_query(&store, &old_namespace, &old_request)
+        let page = new_query(&store, &namespace_id, &page_request)
             .await
-            .expect("old page");
-        let new = new_query(&store, &new_namespace, &new_request)
-            .await
-            .expect("new page");
-        assert_eq!(normalize_namespace(new.clone(), &old_namespace), old);
-        match (old.next_cursor, new.next_cursor) {
-            (Some(old_cursor), Some(new_cursor)) => {
-                old_request.cursor = Some(old_cursor);
-                new_request.cursor = Some(new_cursor);
-            }
-            (None, None) => break,
-            cursors => panic!("pagination diverged: {cursors:?}"),
-        }
+            .expect("query page");
+        assert_eq!(page.namespace_id, namespace_id);
+        assert_eq!(page.matches.len(), 1);
+        let found = &page.matches[0];
+        assert!(found_matches.insert((found.absolute_path.clone(), found.line_number)));
+        let Some(cursor) = page.next_cursor else {
+            break;
+        };
+        assert!(cursors.insert(cursor.clone()));
+        page_request.cursor = Some(cursor);
     }
+    assert_eq!(found_matches.len(), 12);
+    assert_eq!(cursors.len(), 11);
+    writer.shutdown_background().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn fork_of_grep_enabled_namespace_starts_unmaterialized_without_manifest_state() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store: SharedObjectStore =
+        Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
+    let source = NamespaceId::parse("grep-fork-source").expect("source namespace");
+    let target = NamespaceId::parse("grep-fork-target").expect("target namespace");
+    let writer = FsWriter::builder_with_store(store.clone())
+        .writer_id("fork-writer")
+        .min_publish_interval_ms(0)
+        .build()
+        .await
+        .expect("writer");
+    writer
+        .create_namespace(&source, CreateNamespaceOptions::default())
+        .await
+        .expect("create source");
+    writer
+        .put_file_bytes(
+            &source,
+            "/source.txt",
+            b"fork needle\n",
+            PutFileOptions::default(),
+        )
+        .await
+        .expect("write source");
+    let worker = worker(&store);
+    worker.enable(&source).await.expect("enable source");
+    drive_worker_to_current(&worker, &source, GramIndexBuildPolicy::default()).await;
+    let source_root_before = load_grep_root(&*store, &source)
+        .await
+        .expect("load source root")
+        .expect("source root exists")
+        .state()
+        .clone();
+
+    writer
+        .fork_namespace(&source, &target)
+        .await
+        .expect("fork source");
+
+    assert!(
+        load_grep_root(&*store, &target)
+            .await
+            .expect("load target root")
+            .is_none(),
+        "fork target must have no grep root until explicitly enabled"
+    );
+    let target_reader = writer.reader();
+    assert_not_materialized_error(
+        "fork target",
+        target_reader.grep(&target, &request("needle")).await,
+    );
+
+    let (_, target_metadata_root) = load_namespace_read_anchor(&*store, &target)
+        .await
+        .expect("load target read anchor");
+    let manifest_key = metadata_manifest_object(
+        target.as_str(),
+        &target_metadata_root.state.manifest_object_id,
+    );
+    let manifest_bytes = store
+        .get(&manifest_key, None)
+        .await
+        .expect("read target manifest")
+        .expect("target manifest exists");
+    let document: serde_json::Value =
+        serde_json::from_slice(&manifest_bytes).expect("decode target manifest JSON");
+    let payload = document["payload"].as_object().expect("manifest payload");
+    assert!(!payload.contains_key("index_files"));
+    assert!(payload
+        .get("features")
+        .and_then(serde_json::Value::as_object)
+        .is_none_or(|features| features
+            .keys()
+            .all(|feature| !feature.contains("grep") && feature != "index.grams")));
+
+    let source_root_after = load_grep_root(&*store, &source)
+        .await
+        .expect("reload source root")
+        .expect("source root still exists")
+        .state()
+        .clone();
+    assert_eq!(source_root_after, source_root_before);
+    let source_response = new_query(&store, &source, &request("fork needle"))
+        .await
+        .expect("source query after fork");
+    assert_eq!(source_response.matches.len(), 1);
+    assert_eq!(source_response.matches[0].absolute_path, "/source.txt");
     writer.shutdown_background().await.expect("shutdown");
 }
 
@@ -639,18 +705,28 @@ async fn checkpoint_backfill_matches_incremental_worker_results() {
 #[derive(Debug)]
 struct AgedMetadataStore {
     inner: LocalFsStore,
+    listed_prefixes: Mutex<Vec<String>>,
 }
 
 impl AgedMetadataStore {
     fn new(root: &Path) -> Self {
         Self {
             inner: LocalFsStore::new(root).expect("local store"),
+            listed_prefixes: Mutex::new(Vec::new()),
         }
     }
 
     fn age(mut metadata: ObjectMetadata) -> ObjectMetadata {
         metadata.last_modified_ms = Some(0);
         metadata
+    }
+
+    fn clear_listed_prefixes(&self) {
+        self.listed_prefixes.lock().expect("prefix lock").clear();
+    }
+
+    fn listed_prefixes(&self) -> Vec<String> {
+        self.listed_prefixes.lock().expect("prefix lock").clone()
     }
 }
 
@@ -692,6 +768,10 @@ impl ObjectStore for AgedMetadataStore {
         &self,
         prefix: &str,
     ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+        self.listed_prefixes
+            .lock()
+            .expect("prefix lock")
+            .push(prefix.to_owned());
         self.inner.list_prefix_stream(prefix)
     }
 }
@@ -699,7 +779,8 @@ impl ObjectStore for AgedMetadataStore {
 #[tokio::test]
 async fn grep_gc_retains_live_roots_reaps_deleted_namespaces_and_never_crosses_keyspaces() {
     let temp_dir = tempdir().expect("tempdir");
-    let store: SharedObjectStore = Arc::new(AgedMetadataStore::new(temp_dir.path()));
+    let aged_store = Arc::new(AgedMetadataStore::new(temp_dir.path()));
+    let store: SharedObjectStore = aged_store.clone();
     let live_namespace = NamespaceId::parse("gc-live").expect("namespace id");
     let deleted_namespace = NamespaceId::parse("gc-deleted").expect("namespace id");
     let absent_namespace = NamespaceId::parse("gc-absent").expect("namespace id");
@@ -749,7 +830,8 @@ async fn grep_gc_retains_live_roots_reaps_deleted_namespaces_and_never_crosses_k
         )
         .await
         .expect("write orphan");
-    let non_grep_key = format!("namespaces/{live_namespace}/metadata/indexes/sentinel.sst");
+    let non_grep_key =
+        format!("namespaces/{live_namespace}/metadata/tables/grep-gc-sentinel.sst.zst");
     store
         .put(
             &non_grep_key,
@@ -812,10 +894,23 @@ async fn grep_gc_retains_live_roots_reaps_deleted_namespaces_and_never_crosses_k
         )
         .await
         .expect("write grep sentinel");
+    aged_store.clear_listed_prefixes();
     admin
         .gc_namespace(&live_namespace, &GcConfig::default())
         .await
         .expect("core gc");
+    assert_eq!(
+        aged_store.listed_prefixes(),
+        vec![
+            checkpoint_prefix(live_namespace.as_str()),
+            wal_segment_prefix(live_namespace.as_str()),
+            metadata_table_prefix(live_namespace.as_str()),
+            metadata_manifest_prefix(live_namespace.as_str()),
+            checkpoint_prefix(live_namespace.as_str()),
+            upload_session_prefix(live_namespace.as_str()),
+        ],
+        "core GC must list only its six core prefixes"
+    );
     assert!(
         store
             .head(&core_only_grep_key)

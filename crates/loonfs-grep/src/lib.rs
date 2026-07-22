@@ -17,12 +17,12 @@ mod service;
 mod worker;
 
 pub use service::{
-    is_indexable_text_content, GrepIndexSnapshot, GrepService, DEFAULT_GREP_PAGE_LIMIT,
-    MAX_GREP_PAGE_LIMIT, MAX_GREP_SCAN_FILES, MAX_GREP_TAIL_FILES,
+    GrepIndexSnapshot, GrepService, DEFAULT_GREP_PAGE_LIMIT, MAX_GREP_PAGE_LIMIT,
+    MAX_GREP_SCAN_FILES, MAX_GREP_TAIL_FILES,
 };
 pub use worker::{
-    GrepBuildOutcome, GrepBuildReport, GrepDisableOutcome, GrepEnableOutcome, GrepFoldOutcome,
-    GrepFoldReport, GrepGcReport, GrepWorker, GREP_BACKFILL_CHECKPOINT_TTL_MS,
+    GramIndexBuildPolicy, GrepBuildOutcome, GrepBuildReport, GrepDisableOutcome, GrepEnableOutcome,
+    GrepFoldOutcome, GrepFoldReport, GrepGcReport, GrepWorker, GREP_BACKFILL_CHECKPOINT_TTL_MS,
     GREP_GC_GRACE_WINDOW_MS,
 };
 

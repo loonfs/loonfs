@@ -1,6 +1,7 @@
 //! [`GrepService`]: query planning and execution over a core read view.
 
 use crate::cache::{GrepBlockCache, MAX_CACHED_GREP_BLOCKS};
+use crate::codec::{lookup, Gram, IndexRow, INDEX_GRAMS_MAX_FILE_BYTES};
 use crate::index_read::{
     index_segment_corrupt, load_data_block, load_filter_block, load_index_block,
 };
@@ -8,10 +9,7 @@ use crate::keyspace::segment_key;
 use crate::query::{plan_pattern, GramPlanOutcome, GramQueryPlan};
 use crate::root::{GrepLifecycle, GrepRootState};
 use futures::future::{join_all, try_join_all};
-use loonfs_api::wire::index_grams::{
-    lookup, Gram, IndexRow, INDEX_FAMILY_GRAMS, INDEX_GRAMS_MAX_FILE_BYTES,
-};
-use loonfs_api::wire::manifest::{hex_decode_bytes, IndexFileRef};
+use loonfs_api::wire::manifest::hex_decode_bytes;
 use loonfs_api::wire::sst_blocks::{decode_filter_block, index_blocks_for_key_range};
 use loonfs_api::wire::wal::WalDelta;
 use loonfs_api::{
@@ -78,28 +76,24 @@ pub struct GrepIndexSnapshot {
 #[derive(Debug, Clone)]
 struct MaterializedGrepIndexSnapshot {
     built_through_seq: ChangeSeq,
-    segments: Vec<IndexFileRef>,
+    segments: Vec<GrepQuerySegment>,
+}
+
+#[derive(Debug, Clone)]
+struct GrepQuerySegment {
+    object_key: String,
+    min_key: String,
+    max_key: String,
+    index_block: loonfs_api::wire::sst_blocks::BlockHandle,
+    filter_block: loonfs_api::wire::sst_blocks::BlockHandle,
+    filter_inline: Option<String>,
+    payload_checksum: String,
 }
 
 impl GrepIndexSnapshot {
-    /// Builds a materialized snapshot from its watermark and gram segments.
-    pub fn new(built_through_seq: ChangeSeq, segments: Vec<IndexFileRef>) -> Self {
-        Self {
-            state: Ok(MaterializedGrepIndexSnapshot {
-                built_through_seq,
-                segments,
-            }),
-        }
-    }
-
-    /// Captures core's snapshot load result without changing request-error
-    /// precedence; [`GrepService::query`] resolves it after limit and cursor
-    /// validation at the same point the reference executor loaded the feature.
-    pub fn from_core_parts(parts: Result<(ChangeSeq, Vec<IndexFileRef>)>) -> Self {
-        match parts {
-            Ok((built_through_seq, segments)) => Self::new(built_through_seq, segments),
-            Err(error) => Self { state: Err(error) },
-        }
+    /// Captures an unreadable grep root while preserving request-error precedence.
+    pub fn from_error(error: CoreError) -> Self {
+        Self { state: Err(error) }
     }
 
     /// Builds a query snapshot from one verified grep-owned root.
@@ -108,26 +102,16 @@ impl GrepIndexSnapshot {
     /// `index.grams` not-materialized surface as the former manifest feature.
     pub fn from_grep_root(root: Option<&GrepRootState>) -> Self {
         let Some(root) = root else {
-            return Self::from_core_parts(Err(feature_not_materialized()));
+            return Self::from_error(feature_not_materialized());
         };
         if !matches!(root.lifecycle(), GrepLifecycle::Steady) {
-            return Self::from_core_parts(Err(feature_not_materialized()));
+            return Self::from_error(feature_not_materialized());
         }
         let segments = root
             .segments()
             .iter()
-            .map(|segment| IndexFileRef {
-                owner_namespace_id: root.namespace_id().clone(),
-                segment_id: segment.segment_id.clone(),
+            .map(|segment| GrepQuerySegment {
                 object_key: segment_key(root.namespace_id(), &segment.segment_id),
-                family: INDEX_FAMILY_GRAMS.to_owned(),
-                run_seq: segment.run_seq,
-                run_ordinal: segment.run_ordinal,
-                level: segment.level,
-                segment_index: segment.segment_index,
-                // Query execution does not consult this writer-side count;
-                // v0 grep roots intentionally omit it.
-                row_count: 0,
                 min_key: segment.min_row_key.clone(),
                 max_key: segment.max_row_key.clone(),
                 index_block: segment.index_block,
@@ -136,7 +120,12 @@ impl GrepIndexSnapshot {
                 payload_checksum: segment.payload_checksum.clone(),
             })
             .collect();
-        Self::new(root.index().built_through_seq, segments)
+        Self {
+            state: Ok(MaterializedGrepIndexSnapshot {
+                built_through_seq: root.index().built_through_seq,
+                segments,
+            }),
+        }
     }
 
     fn materialized(&self) -> Result<&MaterializedGrepIndexSnapshot> {
@@ -146,7 +135,7 @@ impl GrepIndexSnapshot {
 
 fn feature_not_materialized() -> CoreError {
     CoreError::FeatureNotMaterialized {
-        feature: loonfs_api::wire::index_grams::INDEX_GRAMS_FEATURE_KEY.to_owned(),
+        feature: "index.grams".to_owned(),
     }
 }
 
@@ -224,7 +213,7 @@ impl GrepCandidates {
 async fn indexed_candidates<S: ObjectStore + ?Sized>(
     store: &S,
     block_cache: &GrepBlockCache,
-    segments: &[IndexFileRef],
+    segments: &[GrepQuerySegment],
     plan: &GramQueryPlan,
 ) -> Result<BTreeMap<InodeId, BTreeSet<RevisionNo>>> {
     let mut intersection: Option<BTreeSet<(InodeId, RevisionNo)>> = None;
@@ -232,12 +221,9 @@ async fn indexed_candidates<S: ObjectStore + ?Sized>(
         // Lookup keys derive once per gram; the key-range prune is free
         // (already in the descriptor), so only surviving probes fan out.
         let lookups: Vec<GramLookup> = or_set.iter().map(|gram| GramLookup::new(*gram)).collect();
-        let mut probes: Vec<(&GramLookup, &IndexFileRef)> = Vec::new();
+        let mut probes: Vec<(&GramLookup, &GrepQuerySegment)> = Vec::new();
         for gram_lookup in &lookups {
             for descriptor in segments {
-                if descriptor.family != INDEX_FAMILY_GRAMS {
-                    continue;
-                }
                 if descriptor.max_key.as_str() < gram_lookup.probe.as_str()
                     || gram_lookup
                         .upper
@@ -334,7 +320,7 @@ fn string_prefix_upper_bound(prefix: &str) -> Option<String> {
 async fn segment_postings_for_gram<S: ObjectStore + ?Sized>(
     store: &S,
     block_cache: &GrepBlockCache,
-    descriptor: &IndexFileRef,
+    descriptor: &GrepQuerySegment,
     gram_lookup: &GramLookup,
 ) -> Result<BTreeSet<(InodeId, RevisionNo)>> {
     let mut postings = BTreeSet::new();
@@ -971,7 +957,7 @@ async fn scan_candidate_inodes<S: ObjectStore + ?Sized>(
 /// and text by the grep-family sniff (no NUL byte and valid UTF-8 in the
 /// leading sample; a sample that ends inside a multi-byte character still
 /// counts as valid).
-pub fn is_indexable_text_content(content: &[u8]) -> bool {
+pub(crate) fn is_indexable_text_content(content: &[u8]) -> bool {
     const ELIGIBILITY_SAMPLE_BYTES: usize = 8 * 1024;
 
     if content.len() as u64 > INDEX_GRAMS_MAX_FILE_BYTES {
