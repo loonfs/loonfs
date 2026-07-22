@@ -103,6 +103,22 @@ async fn standalone_once_advances_the_index_is_idempotent_and_rejects_bad_config
     assert!(stderr.contains("invalid grep config"), "{stderr}");
     assert!(stderr.contains("step_interval_ms"), "{stderr}");
     assert!(stderr.contains("greater than zero"), "{stderr}");
+
+    let bad_rescan_config_path = temp_dir.path().join("bad-rescan-worker.toml");
+    write_config(
+        &bad_rescan_config_path,
+        &store_root,
+        "rescan_interval_ms = 0\n",
+    );
+    let bad_rescan = run_once(&bad_rescan_config_path);
+    assert!(
+        !bad_rescan.status.success(),
+        "zero rescan interval must exit nonzero"
+    );
+    let stderr = String::from_utf8_lossy(&bad_rescan.stderr);
+    assert!(stderr.contains("invalid grep config"), "{stderr}");
+    assert!(stderr.contains("rescan_interval_ms"), "{stderr}");
+    assert!(stderr.contains("greater than zero"), "{stderr}");
 }
 
 async fn put_file(

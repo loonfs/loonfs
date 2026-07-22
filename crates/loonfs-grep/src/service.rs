@@ -1,20 +1,22 @@
 //! [`GrepService`]: query planning and execution over a core read view.
 
-use crate::cache::{GrepBlockCache, MAX_CACHED_GREP_BLOCKS};
+use crate::cache::{
+    DecodedGrepBlock, GrepBlockCache, GrepBlockCacheKey, GrepBlockKind, MAX_CACHED_GREP_BLOCKS,
+};
 use crate::codec::{lookup, Gram, IndexRow, INDEX_GRAMS_MAX_FILE_BYTES};
 use crate::index_read::{
     index_segment_corrupt, load_data_block, load_filter_block, load_index_block,
 };
 use crate::keyspace::segment_key;
 use crate::query::{plan_pattern, GramPlanOutcome, GramQueryPlan};
-use crate::root::{GrepLifecycle, GrepRootState};
+use crate::root::{load_grep_manifest, load_grep_root_pointer, GrepLifecycle, GrepRootState};
 use futures::future::{join_all, try_join_all};
 use loonfs_api::wire::manifest::hex_decode_bytes;
 use loonfs_api::wire::sst_blocks::{decode_filter_block, index_blocks_for_key_range};
 use loonfs_api::wire::wal::WalDelta;
 use loonfs_api::{
     decode_grep_cursor, encode_grep_cursor, AbsolutePath, ChangeSeq, GrepMatch, GrepPageCursor,
-    GrepRequest, GrepResponse, InodeId, RevisionNo,
+    GrepRequest, GrepResponse, InodeId, NamespaceId, RevisionNo,
 };
 use loonfs_core::content::read_durable_content_bytes;
 use loonfs_core::grep::{LoadedMetadataView, MetadataViewSession};
@@ -91,16 +93,57 @@ struct GrepQuerySegment {
 }
 
 impl GrepIndexSnapshot {
-    /// Captures an unreadable grep root while preserving request-error precedence.
+    /// Captures unreadable grep extension state while preserving error precedence.
     pub fn from_error(error: CoreError) -> Self {
         Self { state: Err(error) }
     }
 
-    /// Builds a query snapshot from one verified grep-owned root.
+    /// Freshly loads the grep pointer, then loads or reuses its immutable manifest.
     ///
-    /// A missing, disabled, or still-backfilling root has the same
-    /// `index.grams` not-materialized surface as the former manifest feature.
-    pub fn from_grep_root(root: Option<&GrepRootState>) -> Self {
+    /// Missing or corrupt pointers/manifests and disabled or backfilling
+    /// lifecycles all collapse to the same `index.grams` not-materialized
+    /// surface. Grep-private corruption never changes core read behavior.
+    pub async fn from_grep_root<S: ObjectStore + ?Sized>(
+        store: &S,
+        namespace_id: &NamespaceId,
+        service: &GrepService,
+    ) -> Self {
+        let pointer = match load_grep_root_pointer(store, namespace_id).await {
+            Ok(Some(pointer)) => pointer,
+            Ok(None) | Err(_) => return Self::from_error(feature_not_materialized()),
+        };
+        let manifest_id = pointer.pointer().manifest_id();
+        let cache_key = GrepBlockCacheKey {
+            payload_checksum: manifest_id.payload_checksum(),
+            block_kind: GrepBlockKind::Manifest,
+            block_offset: 0,
+        };
+        let state = match service.block_cache.get(&cache_key) {
+            Some(DecodedGrepBlock::Manifest(state)) => state,
+            Some(
+                DecodedGrepBlock::Filter(_)
+                | DecodedGrepBlock::Index(_)
+                | DecodedGrepBlock::Data(_),
+            ) => return Self::from_error(feature_not_materialized()),
+            None => {
+                let manifest = match load_grep_manifest(store, namespace_id, manifest_id).await {
+                    Ok(Some(manifest)) => manifest,
+                    Ok(None) | Err(_) => return Self::from_error(feature_not_materialized()),
+                };
+                let state = std::sync::Arc::new(manifest.state().clone());
+                service
+                    .block_cache
+                    .insert(cache_key, DecodedGrepBlock::Manifest(state.clone()));
+                state
+            }
+        };
+        if state.namespace_id() != namespace_id {
+            return Self::from_error(feature_not_materialized());
+        }
+        Self::from_state(Some(&state))
+    }
+
+    fn from_state(root: Option<&GrepRootState>) -> Self {
         let Some(root) = root else {
             return Self::from_error(feature_not_materialized());
         };

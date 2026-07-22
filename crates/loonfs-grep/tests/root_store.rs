@@ -2,10 +2,11 @@
 
 use bytes::Bytes;
 use loonfs_api::{ChangeSeq, NamespaceId};
-use loonfs_grep::keyspace::root_key;
+use loonfs_grep::keyspace::{manifest_key, manifests_prefix, root_key};
 use loonfs_grep::root::{
-    advance_grep_root, encode_grep_root, load_grep_root, seed_grep_root, GrepIndexState,
-    GrepLifecycle, GrepRootEnvelope, GrepRootError, GrepRootState,
+    advance_grep_root, encode_grep_manifest, encode_grep_root, load_grep_root, seed_grep_root,
+    GrepIndexState, GrepLifecycle, GrepManifestEnvelope, GrepRootEnvelope, GrepRootError,
+    GrepRootPointer, GrepRootState,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectStore, PutMode};
@@ -16,8 +17,22 @@ async fn load_rejects_namespace_identity_mismatch() {
     let store = LocalFsStore::new(temp_dir.path()).expect("local store");
     let requested = namespace_id("requested");
     let wrong = root(namespace_id("other"), ChangeSeq(0));
-    let envelope = GrepRootEnvelope::from_state("test", wrong).expect("envelope");
-    let bytes = encode_grep_root(&envelope).expect("encode");
+    let manifest = GrepManifestEnvelope::from_state("test", wrong).expect("manifest envelope");
+    let manifest_bytes = encode_grep_manifest(&manifest).expect("encode manifest");
+    store
+        .put(
+            &manifest_key(&requested, manifest.manifest_id()),
+            Bytes::from(manifest_bytes),
+            PutMode::CreateIfAbsent,
+        )
+        .await
+        .expect("write mismatched manifest");
+    let envelope = GrepRootEnvelope::from_pointer(
+        "test",
+        GrepRootPointer::new(requested.clone(), manifest.manifest_id().clone()),
+    )
+    .expect("pointer envelope");
+    let bytes = encode_grep_root(&envelope).expect("encode pointer");
     let key = root_key(&requested);
     store
         .put(&key, Bytes::from(bytes), PutMode::CreateIfAbsent)
@@ -69,6 +84,15 @@ async fn racing_advancers_have_one_winner_and_loser_can_reload_and_retry() {
             .filter(|result| matches!(result, Err(GrepRootError::Conflict { .. })))
             .count(),
         1
+    );
+    assert_eq!(
+        store
+            .list_prefix(&manifests_prefix(&namespace_id))
+            .await
+            .expect("list candidate manifests")
+            .len(),
+        3,
+        "the seed, winner, and CAS loser's immutable manifests remain durable"
     );
 
     let reloaded = load_grep_root(&store, &namespace_id)

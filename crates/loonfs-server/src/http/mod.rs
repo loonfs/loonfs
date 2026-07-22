@@ -107,6 +107,7 @@ struct AppState {
     admin: FsAdmin,
     publisher: PublisherRegistry,
     transfer_issuer: Option<Arc<dyn ObjectTransferIssuer>>,
+    grep_worker: Option<GrepWorker<SharedObjectStore>>,
     /// Bounds concurrently buffered proxied-upload bodies; with the
     /// per-request body limit this makes worst-case upload memory
     /// `max_concurrent_uploads * max_upload_bytes`. Requests past the cap
@@ -153,13 +154,11 @@ struct GrepBackgroundWork {
 }
 
 impl GrepBackgroundWork {
-    fn spawn(config: &ServerConfig, store: SharedObjectStore) -> Result<Self, ServerConfigError> {
-        let worker = GrepWorker::new(
-            store.clone(),
-            format!("{}-grep", config.writer_id),
-            loonfs_api::generated_id("wrs"),
-            config.writer_version.clone(),
-        );
+    fn spawn(
+        config: &ServerConfig,
+        worker: GrepWorker<SharedObjectStore>,
+        store: SharedObjectStore,
+    ) -> Result<Self, ServerConfigError> {
         let worker_loop = GrepWorkerLoop::new(worker, store, config.grep.worker_config());
         let shutdown = worker_loop.shutdown_handle();
         let runtime = tokio::runtime::Handle::try_current().map_err(|error| {
@@ -223,8 +222,23 @@ async fn app_with_store_and_transfer_issuer(
     transfer_issuer: Option<Arc<dyn ObjectTransferIssuer>>,
 ) -> Result<(Router, ServerLifecycle, AppState), ServerConfigError> {
     let (writer, reader, admin) = build_handles(&config, store.clone()).await?;
+    let grep_worker = config.grep.mode.serves_grep().then(|| {
+        GrepWorker::new(
+            store.clone(),
+            format!("{}-grep", config.writer_id),
+            loonfs_api::generated_id("wrs"),
+            config.writer_version.clone(),
+        )
+    });
     let grep = if config.grep.mode.runs_worker() {
-        Some(GrepBackgroundWork::spawn(&config, store)?)
+        Some(GrepBackgroundWork::spawn(
+            &config,
+            grep_worker
+                .as_ref()
+                .expect("worker-running grep mode should serve grep")
+                .clone(),
+            store,
+        )?)
     } else {
         None
     };
@@ -248,6 +262,7 @@ async fn app_with_store_and_transfer_issuer(
         admin,
         publisher,
         transfer_issuer,
+        grep_worker,
     };
     Ok((router(state.clone()), lifecycle, state))
 }

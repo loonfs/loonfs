@@ -83,10 +83,9 @@ impl ServiceHarness {
             .engine
             .load_grep_view_with_runtime_context(&context)
             .await?;
-        let root = load_grep_root(&*self.store, &self.namespace_id)
-            .await
-            .map_err(|error| CoreError::NamespaceCorrupt(error.to_string()))?;
-        let snapshot = GrepIndexSnapshot::from_grep_root(root.as_ref().map(|root| root.state()));
+        let snapshot =
+            GrepIndexSnapshot::from_grep_root(&*self.store, &self.namespace_id, &self.service)
+                .await;
         self.service
             .query(grep_request, &snapshot, &view, &self.store)
             .await

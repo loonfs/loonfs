@@ -1,12 +1,14 @@
 //! LoonFS full-text grep subsystem.
 //!
-//! Grep durable state lives under a grep-owned keyspace and is independent
-//! of the namespace manifest. A missing or corrupt grep root disables grep
-//! work for that namespace; it must never affect core filesystem operation.
-//! Query execution reads a caller-provided core snapshot. [`GrepWorker`]
-//! owns explicitly driven storage maintenance, while [`GrepWorkerLoop`]
-//! supplies the shared all-namespaces driving loop used by server-embedded
-//! and standalone hosts.
+//! Grep durable state lives under each namespace's `extensions/grep/`
+//! prefix and is independent of the namespace manifest. A missing or corrupt
+//! grep root disables grep work for that namespace; it never affects core
+//! filesystem operation. [`GrepWorker`] registers in-process enablements
+//! directly with its loop. Startup and periodic rediscovery must list the
+//! whole `namespaces/` keyspace and are proportional to the store's total key
+//! count—the price of the namespace-scoped layout until a namespace catalog
+//! exists. [`GrepWorkerLoop`] keeps that scan rare and drives the same bounded
+//! work for server-embedded and standalone hosts.
 
 mod cache;
 pub mod codec;
@@ -21,7 +23,7 @@ mod worker_loop;
 
 pub use config::{
     GrepWorkerConfig, GrepWorkerConfigError, DEFAULT_GREP_GC_INTERVAL_MS,
-    DEFAULT_GREP_STEP_INTERVAL_MS,
+    DEFAULT_GREP_RESCAN_INTERVAL_MS, DEFAULT_GREP_STEP_INTERVAL_MS,
 };
 pub use service::{
     GrepIndexSnapshot, GrepService, DEFAULT_GREP_PAGE_LIMIT, MAX_GREP_PAGE_LIMIT,

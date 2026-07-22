@@ -56,6 +56,8 @@ writer_version = "loonfs-server/0.1.0"
 #mode = "embedded"
 #step_interval_ms = 1000
 #gc_interval_ms = 60000
+# Whole-store `namespaces/` scan; proportional to total key count until a namespace catalog exists.
+#rescan_interval_ms = 300000
 # Bounded build/fold budgets; every value must be greater than zero.
 #max_files_per_step = 256
 #max_content_bytes_per_step = 67108864

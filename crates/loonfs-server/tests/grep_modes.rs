@@ -11,7 +11,9 @@ use loonfs_api::{
     LIMIT_QUERY_GREP_TAIL_BUDGET_FILES,
 };
 use loonfs_grep::root::{load_grep_root, GrepLifecycle};
-use loonfs_grep::{GramIndexBuildPolicy, GrepBuildOutcome, GrepWorker};
+use loonfs_grep::{
+    GramIndexBuildPolicy, GrepBuildOutcome, GrepWorker, GrepWorkerConfig, GrepWorkerLoop,
+};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::SharedObjectStore;
 use loonfs_server::{
@@ -53,12 +55,13 @@ async fn disabled_mode_returns_not_supported_and_omits_grep_capabilities() {
 }
 
 #[tokio::test]
-async fn embedded_mode_indexes_written_files_without_manual_ticks() {
+async fn embedded_mode_registers_fresh_enablement_without_waiting_for_rescan() {
     let temp_dir = tempdir().expect("store tempdir");
     let (_store, writer, namespace_id) = seed_namespace(temp_dir.path(), "embedded").await;
     let (router, lifecycle) = app(test_config(temp_dir.path(), GrepMode::Embedded))
         .await
         .expect("build app");
+    wait_for_worker_opportunity().await;
     assert_eq!(enable_grep(&router, &namespace_id).await, StatusCode::OK);
     writer
         .put_file_bytes(
@@ -81,6 +84,54 @@ async fn embedded_mode_indexes_written_files_without_manual_ticks() {
     assert_eq!(response.matches.len(), 1);
     assert_eq!(response.matches[0].absolute_path, "/note.txt");
     assert_eq!(response.built_through_seq, response.head_seq);
+    lifecycle.shutdown().await.expect("drain lifecycle");
+}
+
+#[tokio::test]
+async fn standalone_worker_rediscovers_server_enablement_within_one_rescan() {
+    let temp_dir = tempdir().expect("store tempdir");
+    let (store, writer, namespace_id) = seed_namespace(temp_dir.path(), "rediscovered").await;
+    let (router, lifecycle) = app(test_config(temp_dir.path(), GrepMode::ServeOnly))
+        .await
+        .expect("build app");
+
+    let external_worker = GrepWorker::new(
+        store.clone(),
+        "standalone-rediscovery-worker",
+        "standalone-rediscovery-session",
+        "standalone-rediscovery/0.1",
+    );
+    let worker_loop = GrepWorkerLoop::new(
+        external_worker,
+        store,
+        GrepWorkerConfig {
+            step_interval_ms: 5,
+            gc_interval_ms: 60_000,
+            rescan_interval_ms: 10,
+            ..GrepWorkerConfig::default()
+        },
+    );
+    let shutdown = worker_loop.shutdown_handle();
+    let worker_task = tokio::spawn(worker_loop.run());
+    wait_for_worker_opportunity().await;
+
+    assert_eq!(enable_grep(&router, &namespace_id).await, StatusCode::OK);
+    writer
+        .put_file_bytes(
+            &namespace_id,
+            "/note.txt",
+            b"rediscovered needle\n",
+            PutFileOptions::default(),
+        )
+        .await
+        .expect("write file");
+
+    let response = wait_for_grep(&router, &namespace_id, "rediscovered needle").await;
+    assert_eq!(response.matches.len(), 1);
+    assert_eq!(response.matches[0].absolute_path, "/note.txt");
+
+    shutdown.request_shutdown();
+    worker_task.await.expect("standalone worker loop joins");
     lifecycle.shutdown().await.expect("drain lifecycle");
 }
 
@@ -173,6 +224,7 @@ fn test_config(store_root: &Path, mode: GrepMode) -> ServerConfig {
             mode,
             step_interval_ms: 5,
             gc_interval_ms: 25,
+            rescan_interval_ms: 60_000,
             ..GrepConfig::default()
         },
         background_maintenance: true,
@@ -299,6 +351,7 @@ async fn wait_for_grep(router: &Router, namespace_id: &NamespaceId, pattern: &st
 
 #[allow(clippy::disallowed_methods)]
 async fn wait_for_worker_opportunity() {
-    // Five server step intervals are long enough to prove serve_only did not spawn the loop.
+    // Five step intervals let an embedded/standalone loop finish startup work,
+    // and are long enough to prove serve_only did not spawn a loop.
     tokio::time::sleep(std::time::Duration::from_millis(25)).await;
 }

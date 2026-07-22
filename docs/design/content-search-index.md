@@ -98,7 +98,7 @@ one gram sort together, and batches from different runs for the
 same gram are unioned by readers, so merges never need to combine
 payloads to stay correct.
 
-## Segments and the grep root
+## Segments, manifests, and the grep root pointer
 
 Index segments reuse the metadata segment layout described in
 `metadata-block-storage.md` — prefix-compressed keys,
@@ -110,16 +110,24 @@ for this gram", which is exactly the pruning a query wants. The
 block builder is generalized over the row payload to make this
 possible; metadata families keep byte-identical output.
 
-Segments live under the grep-owned
-`grep/v0/namespaces/{namespace}/segments/` family. One atomic
-`grep/v0/namespaces/{namespace}/root.json` names the query-visible
-segments and records `built_through_seq`, lifecycle, run-ordinal
-allocation, and any in-progress fold snapshot, outputs, and cursor.
-The root is independent of the namespace manifest, so an older core
-reader never has to understand grep state to read the filesystem.
+Segments live under
+`namespaces/{namespace}/extensions/grep/segments/`. The small mutable
+`extensions/grep/root.json` pointer names an immutable, content-derived
+manifest under `extensions/grep/manifests/`; that manifest records the
+query-visible segments, `built_through_seq`, lifecycle, run-ordinal
+allocation, and any in-progress fold snapshot, outputs, and cursor. The
+pointer and manifests are independent of the namespace manifest, so core
+never has to understand grep state to read the filesystem.
 
-Disabling CAS-publishes a root with lifecycle `disabled` and no segment
-references. The objects become candidates for grep-owned collection;
+Publication writes the immutable manifest first and installs the pointer by
+one etag CAS. A CAS loser's manifest and segments are unreachable derived
+garbage for grep GC. Embedded enablement registers directly with the worker
+loop. Standalone rediscovery lists the whole `namespaces/` prefix at startup
+and on a rare interval; this is proportional to total store keys until a
+namespace catalog exists.
+
+Disabling writes a manifest with lifecycle `disabled` and no segment
+references, then CAS-publishes its pointer. The old objects become candidates for grep-owned collection;
 the disable call never deletes them synchronously. Grep GC retains every
 object named by a verified live root and deletes unreferenced grep objects
 only after its grace window. A fork does not copy a grep root, so it begins
@@ -176,7 +184,7 @@ Fold triggers count logical runs, never physical segments. Every
 publish that creates gram segments — a WAL or backfill build
 unit, a delta fold's outputs, a base fold's outputs — stamps one
 run ordinal on the whole batch, allocated from a counter in the
-grep root and incremented in the same root publication,
+grep manifest and incremented in the same pointer publication,
 so allocation is atomic with the root swap. The per-segment row
 cap can therefore split a run into any number of segments without
 changing fold cadence, and backfill units — which all carry the
@@ -195,7 +203,7 @@ readers that union them see duplicates, never gaps — and segments
 that arrive during the fold stay out of the snapshot and survive
 it. The completing step swaps the snapshot out for the outputs; a
 fold interrupted anywhere resumes from the cursor the last
-published root carries. The step's row budget is soft: rows
+published manifest carries. The step's row budget is soft: rows
 with equal keys are consumed as one atomic group, because the
 resume cursor is the last merged key plus a terminator and
 splitting the group would strand its tail behind the cursor.
@@ -203,7 +211,7 @@ splitting the group would strand its tail behind the cursor.
 The tiering and run identity are durable writer-side bookkeeping,
 invisible to reads:
 
-- Descriptor `level` in the grep root's segment list: `0` for the
+- Descriptor `level` in the grep manifest's segment list: `0` for the
   delta segments build units write, `1` for a delta fold's mid
   runs, and `2` for the base.
 - Descriptor `run_ordinal`: the batch-wide run identity described
@@ -333,7 +341,7 @@ Following the segment-format convention, two different contracts:
 - **Format constants.** The tokenizer (ASCII-case-folded byte
   trigrams), the eligibility rule (the 8 MiB cap and the text
   sniff), the posting row key shape, and the batch encoding are
-  pinned by the grep root/index and segment codec versions. Changing any
+  pinned by the grep pointer/manifest and segment codec versions. Changing any
   of them is a format-version bump and a rebuild — cheap by
   construction, since the index is derived work.
 - **Writer-side defaults.** The per-step build budgets (256
@@ -341,7 +349,7 @@ Following the segment-format convention, two different contracts:
   eight mid runs), the fold step's row budget, the posting
   batch target (about 256), page limits, the verified-candidate
   budget, and the query tail budget are writer- or server-side
-  tunables; readers take what the grep root and descriptors
+  tunables; readers take what the grep manifest and descriptors
   describe.
 
 ## Deferred, with intent

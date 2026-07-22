@@ -1,27 +1,30 @@
-//! Loading and single-attempt CAS publication for grep roots.
+//! Two-step grep root loading and manifest-first pointer publication.
 //!
-//! Publication intentionally does not retry: a compare-and-swap loser gets
-//! [`GrepRootError::Conflict`](super::GrepRootError), reloads the now-current
-//! root, and rebuilds its candidate. Any immutable segments written for the
-//! losing candidate remain unreachable garbage for grep-owned collection.
+//! Publication intentionally does not retry: a pointer compare-and-swap
+//! loser gets [`GrepRootError::Conflict`](super::GrepRootError), reloads the
+//! current root, and rebuilds its candidate. The losing immutable manifest
+//! remains unreachable derived garbage for grep-owned collection.
 
-use super::codec::{decode_grep_root, encode_grep_root, GrepRootEnvelope};
+use super::codec::{
+    decode_grep_manifest, decode_grep_root, encode_grep_manifest, encode_grep_root,
+    GrepManifestEnvelope, GrepRootEnvelope,
+};
 use super::error::{GrepRootError, Result};
-use super::state::GrepRootState;
-use crate::keyspace::root_key;
+use super::state::{GrepManifestId, GrepRootPointer, GrepRootState};
+use crate::keyspace::{manifest_key, root_key};
 use bytes::Bytes;
 use loonfs_api::NamespaceId;
 use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
 
-/// A verified grep root and the metadata from the same object-store read.
+/// A verified grep root pointer and metadata from the same store read.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LoadedGrepRoot {
+pub struct LoadedGrepRootPointer {
     object_key: String,
     envelope: GrepRootEnvelope,
     metadata: ObjectMetadata,
 }
 
-impl LoadedGrepRoot {
+impl LoadedGrepRootPointer {
     pub fn object_key(&self) -> &str {
         &self.object_key
     }
@@ -30,8 +33,8 @@ impl LoadedGrepRoot {
         &self.envelope
     }
 
-    pub fn state(&self) -> &GrepRootState {
-        self.envelope.state()
+    pub fn pointer(&self) -> &GrepRootPointer {
+        self.envelope.pointer()
     }
 
     pub fn metadata(&self) -> &ObjectMetadata {
@@ -39,12 +42,40 @@ impl LoadedGrepRoot {
     }
 }
 
-/// Loads and verifies one namespace's grep root, returning `None` when the
-/// independent grep subsystem has not seeded it.
-pub async fn load_grep_root<S: ObjectStore + ?Sized>(
+/// A verified pointer and the immutable manifest it names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadedGrepRoot {
+    pointer: LoadedGrepRootPointer,
+    manifest: GrepManifestEnvelope,
+}
+
+impl LoadedGrepRoot {
+    pub fn object_key(&self) -> &str {
+        self.pointer.object_key()
+    }
+
+    pub fn envelope(&self) -> &GrepRootEnvelope {
+        self.pointer.envelope()
+    }
+
+    pub fn manifest_envelope(&self) -> &GrepManifestEnvelope {
+        &self.manifest
+    }
+
+    pub fn state(&self) -> &GrepRootState {
+        self.manifest.state()
+    }
+
+    pub fn metadata(&self) -> &ObjectMetadata {
+        self.pointer.metadata()
+    }
+}
+
+/// Loads and verifies one namespace's mutable grep root pointer.
+pub async fn load_grep_root_pointer<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-) -> Result<Option<LoadedGrepRoot>> {
+) -> Result<Option<LoadedGrepRootPointer>> {
     let object_key = root_key(namespace_id);
     let Some(body) = store
         .get_with_metadata(&object_key)
@@ -57,6 +88,47 @@ pub async fn load_grep_root<S: ObjectStore + ?Sized>(
         object_key: object_key.clone(),
         message: error.to_string(),
     })?;
+    if envelope.pointer().namespace_id() != namespace_id {
+        return Err(GrepRootError::IdentityMismatch {
+            object_key,
+            expected: namespace_id.clone(),
+            actual: envelope.pointer().namespace_id().clone(),
+        });
+    }
+    Ok(Some(LoadedGrepRootPointer {
+        object_key,
+        envelope,
+        metadata: body.metadata,
+    }))
+}
+
+/// Loads and verifies one immutable manifest when it is present.
+pub async fn load_grep_manifest<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    manifest_id: &GrepManifestId,
+) -> Result<Option<GrepManifestEnvelope>> {
+    let object_key = manifest_key(namespace_id, manifest_id);
+    let Some(bytes) = store
+        .get(&object_key, None)
+        .await
+        .map_err(|error| store_error(&object_key, &error))?
+    else {
+        return Ok(None);
+    };
+    let envelope = decode_grep_manifest(&bytes).map_err(|error| GrepRootError::Corrupt {
+        object_key: object_key.clone(),
+        message: error.to_string(),
+    })?;
+    if envelope.manifest_id() != manifest_id {
+        return Err(GrepRootError::Corrupt {
+            object_key,
+            message: format!(
+                "manifest id mismatch: key names `{manifest_id}`, payload derives `{}`",
+                envelope.manifest_id()
+            ),
+        });
+    }
     if envelope.state().namespace_id() != namespace_id {
         return Err(GrepRootError::IdentityMismatch {
             object_key,
@@ -64,34 +136,44 @@ pub async fn load_grep_root<S: ObjectStore + ?Sized>(
             actual: envelope.state().namespace_id().clone(),
         });
     }
-    Ok(Some(LoadedGrepRoot {
-        object_key,
-        envelope,
-        metadata: body.metadata,
-    }))
+    Ok(Some(envelope))
 }
 
-/// Seeds a grep root with create-if-absent semantics.
+/// Loads a fresh pointer and then its immutable manifest.
+pub async fn load_grep_root<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+) -> Result<Option<LoadedGrepRoot>> {
+    let Some(pointer) = load_grep_root_pointer(store, namespace_id).await? else {
+        return Ok(None);
+    };
+    let manifest_id = pointer.pointer().manifest_id();
+    let Some(manifest) = load_grep_manifest(store, namespace_id, manifest_id).await? else {
+        return Err(GrepRootError::MissingManifest {
+            root_key: pointer.object_key.clone(),
+            manifest_key: manifest_key(namespace_id, manifest_id),
+        });
+    };
+    Ok(Some(LoadedGrepRoot { pointer, manifest }))
+}
+
+/// Seeds grep by writing an immutable manifest, then creating its pointer.
 ///
-/// An existing root is a typed conflict, even when it carries identical
-/// bytes; callers seed exactly once and load thereafter.
+/// An existing pointer is a typed conflict even when it carries identical
+/// bytes. Its candidate manifest remains valid derived garbage for GC.
 pub async fn seed_grep_root<S: ObjectStore + ?Sized>(
     store: &S,
     state: &GrepRootState,
     writer_version: &str,
 ) -> Result<LoadedGrepRoot> {
+    let manifest = write_grep_manifest(store, state, writer_version).await?;
     let object_key = root_key(state.namespace_id());
-    let envelope =
-        GrepRootEnvelope::from_state(writer_version, state.clone()).map_err(|error| {
-            GrepRootError::Corrupt {
-                object_key: object_key.clone(),
-                message: error.to_string(),
-            }
-        })?;
-    let bytes = encode_grep_root(&envelope).map_err(|error| GrepRootError::Corrupt {
-        object_key: object_key.clone(),
-        message: error.to_string(),
-    })?;
+    let envelope = GrepRootEnvelope::from_pointer(
+        writer_version,
+        GrepRootPointer::new(state.namespace_id().clone(), manifest.manifest_id().clone()),
+    )
+    .map_err(|error| corrupt(&object_key, error))?;
+    let bytes = encode_grep_root(&envelope).map_err(|error| corrupt(&object_key, error))?;
     let metadata = match store
         .put(&object_key, Bytes::from(bytes), PutMode::CreateIfAbsent)
         .await
@@ -103,23 +185,26 @@ pub async fn seed_grep_root<S: ObjectStore + ?Sized>(
         Err(error) => return Err(store_error(&object_key, &error)),
     };
     Ok(LoadedGrepRoot {
-        object_key,
-        envelope,
-        metadata,
+        pointer: LoadedGrepRootPointer {
+            object_key,
+            envelope,
+            metadata,
+        },
+        manifest,
     })
 }
 
-/// Advances a loaded grep root in one etag compare-and-swap attempt.
+/// Writes a successor manifest, then advances the pointer in one etag CAS.
 ///
 /// A conflict is never retried against the stale candidate: the caller must
-/// reload and recompute the whole atomic root state.
+/// reload and recompute the whole atomic manifest state.
 pub async fn advance_grep_root<S: ObjectStore + ?Sized>(
     store: &S,
     current: &LoadedGrepRoot,
     next: &GrepRootState,
     writer_version: &str,
 ) -> Result<LoadedGrepRoot> {
-    let expected_namespace_id = current.envelope.state().namespace_id();
+    let expected_namespace_id = current.pointer.pointer().namespace_id();
     if next.namespace_id() != expected_namespace_id {
         return Err(GrepRootError::AdvanceIdentityMismatch {
             expected: expected_namespace_id.clone(),
@@ -127,33 +212,33 @@ pub async fn advance_grep_root<S: ObjectStore + ?Sized>(
         });
     }
     let expected_key = root_key(expected_namespace_id);
-    if current.object_key != expected_key {
+    if current.pointer.object_key != expected_key {
         return Err(GrepRootError::Corrupt {
-            object_key: current.object_key.clone(),
+            object_key: current.pointer.object_key.clone(),
             message: format!("loaded root key does not match `{expected_key}`"),
         });
     }
     let expected_etag =
         current
+            .pointer
             .metadata
             .etag
             .as_deref()
             .ok_or_else(|| GrepRootError::MissingEtag {
-                object_key: current.object_key.clone(),
+                object_key: current.pointer.object_key.clone(),
             })?;
-    let envelope = GrepRootEnvelope::from_state(writer_version, next.clone()).map_err(|error| {
-        GrepRootError::Corrupt {
-            object_key: current.object_key.clone(),
-            message: error.to_string(),
-        }
-    })?;
-    let bytes = encode_grep_root(&envelope).map_err(|error| GrepRootError::Corrupt {
-        object_key: current.object_key.clone(),
-        message: error.to_string(),
-    })?;
+
+    let manifest = write_grep_manifest(store, next, writer_version).await?;
+    let envelope = GrepRootEnvelope::from_pointer(
+        writer_version,
+        GrepRootPointer::new(next.namespace_id().clone(), manifest.manifest_id().clone()),
+    )
+    .map_err(|error| corrupt(&current.pointer.object_key, error))?;
+    let bytes =
+        encode_grep_root(&envelope).map_err(|error| corrupt(&current.pointer.object_key, error))?;
     let metadata = match store
         .put(
-            &current.object_key,
+            &current.pointer.object_key,
             Bytes::from(bytes),
             PutMode::CompareAndSwap {
                 expected_etag: expected_etag.to_owned(),
@@ -164,16 +249,61 @@ pub async fn advance_grep_root<S: ObjectStore + ?Sized>(
         Ok(metadata) => metadata,
         Err(ObjectStoreError::PreconditionFailed { .. } | ObjectStoreError::Conflict { .. }) => {
             return Err(GrepRootError::Conflict {
-                object_key: current.object_key.clone(),
+                object_key: current.pointer.object_key.clone(),
             });
         }
-        Err(error) => return Err(store_error(&current.object_key, &error)),
+        Err(error) => return Err(store_error(&current.pointer.object_key, &error)),
     };
     Ok(LoadedGrepRoot {
-        object_key: current.object_key.clone(),
-        envelope,
-        metadata,
+        pointer: LoadedGrepRootPointer {
+            object_key: current.pointer.object_key.clone(),
+            envelope,
+            metadata,
+        },
+        manifest,
     })
+}
+
+async fn write_grep_manifest<S: ObjectStore + ?Sized>(
+    store: &S,
+    state: &GrepRootState,
+    writer_version: &str,
+) -> Result<GrepManifestEnvelope> {
+    let envelope = GrepManifestEnvelope::from_state(writer_version, state.clone())
+        .map_err(|error| corrupt(&root_key(state.namespace_id()), error))?;
+    let object_key = manifest_key(state.namespace_id(), envelope.manifest_id());
+    let bytes = encode_grep_manifest(&envelope).map_err(|error| corrupt(&object_key, error))?;
+    match store.put_if_absent(&object_key, Bytes::from(bytes)).await {
+        Ok(_) => Ok(envelope),
+        Err(ObjectStoreError::PreconditionFailed { .. } | ObjectStoreError::Conflict { .. }) => {
+            let existing = load_grep_manifest(store, state.namespace_id(), envelope.manifest_id())
+                .await?
+                .ok_or_else(|| GrepRootError::MissingManifest {
+                    root_key: root_key(state.namespace_id()),
+                    manifest_key: object_key.clone(),
+                })?;
+            if existing.payload_checksum() == envelope.payload_checksum() {
+                Ok(existing)
+            } else {
+                Err(GrepRootError::Corrupt {
+                    object_key,
+                    message: format!(
+                        "manifest conflict: expected payload checksum {}, actual {}",
+                        envelope.payload_checksum(),
+                        existing.payload_checksum()
+                    ),
+                })
+            }
+        }
+        Err(error) => Err(store_error(&object_key, &error)),
+    }
+}
+
+fn corrupt(object_key: &str, error: impl ToString) -> GrepRootError {
+    GrepRootError::Corrupt {
+        object_key: object_key.to_owned(),
+        message: error.to_string(),
+    }
 }
 
 fn store_error(object_key: &str, error: &ObjectStoreError) -> GrepRootError {
