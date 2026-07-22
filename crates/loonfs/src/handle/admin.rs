@@ -8,9 +8,9 @@ use crate::metrics::ObjectStoreMetricsRecorder;
 use crate::{
     AdvanceRetentionResponse, CheckpointId, CreateCheckpointOptions, CreateCheckpointResponse,
     DisableGramsIndexResponse, EnableGramsIndexResponse, FlushWalResponse, GcConfig, GcReport,
-    GramIndexBuildPolicy, MaintenanceTickOptions, MaintenanceTickResult, NamespaceId,
-    NamespaceStatusResponse, ReleaseCheckpointResponse, Result, RuntimeCacheConfig,
-    RuntimeCacheStats, RuntimeError, SharedObjectStore, StoreConfig, TraceMode, TraceStoreKind,
+    MaintenanceTickOptions, MaintenanceTickResult, NamespaceId, NamespaceStatusResponse,
+    ReleaseCheckpointResponse, Result, RuntimeCacheConfig, RuntimeCacheStats, RuntimeError,
+    SharedObjectStore, StoreConfig, TraceMode, TraceStoreKind,
 };
 use std::sync::Arc;
 
@@ -198,14 +198,6 @@ impl FsAdminBuilder {
     /// Sets runtime cache behavior.
     pub fn runtime_cache(mut self, runtime_cache: RuntimeCacheConfig) -> Self {
         self.core.runtime_cache = runtime_cache;
-        self
-    }
-
-    /// Retains the gram-index policy setting for configuration compatibility.
-    /// Core maintenance no longer consumes it; explicit `GrepWorker` callers
-    /// pass their policy to each build and fold step.
-    pub fn gram_index_build(mut self, policy: GramIndexBuildPolicy) -> Self {
-        self.core.gram_index_build = policy;
         self
     }
 

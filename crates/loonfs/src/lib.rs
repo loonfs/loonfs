@@ -66,7 +66,7 @@ pub use loonfs_core::{
     BootstrapNamespaceError, DeleteNamespaceOptions, Error as CoreError, ErrorCode, ErrorKind,
     GcConfig, GcReport, WriterFence,
 };
-pub use loonfs_grep::GramIndexBuildPolicy;
+pub use publisher::PublishObserver;
 
 /// Integration seam: the vocabulary for handing classified mutation work to
 /// the runtime's batch publication surface. The server's filesystem

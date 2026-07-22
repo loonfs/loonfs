@@ -1,32 +1,13 @@
-//! Shared pacing and step-budget configuration for grep worker hosts.
+//! Bounded step configuration for per-namespace grep drivers.
 
 use crate::GramIndexBuildPolicy;
 use serde::Deserialize;
 use thiserror::Error;
 
-/// Default delay between all-namespace build/fold sweeps.
-pub const DEFAULT_GREP_STEP_INTERVAL_MS: u64 = 1_000;
-/// Default delay between grep-owned garbage-collection passes.
-pub const DEFAULT_GREP_GC_INTERVAL_MS: u64 = 60_000;
-/// Default delay between whole-store namespace-extension rediscovery scans.
-pub const DEFAULT_GREP_RESCAN_INTERVAL_MS: u64 = 300_000;
-
-/// Pacing and bounded-work policy shared by embedded and standalone workers.
+/// Bounded-work policy shared by embedded and standalone drivers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GrepWorkerConfig {
-    /// Delay between all-namespace build/fold sweeps.
-    pub step_interval_ms: u64,
-    /// Delay between grep-owned garbage-collection passes.
-    pub gc_interval_ms: u64,
-    /// Delay between grep root rediscovery scans.
-    ///
-    /// Each scan lists the whole `namespaces/` keyspace and is therefore
-    /// proportional to the store's total key count. This is the cost of the
-    /// namespace-scoped extension layout until a namespace catalog exists;
-    /// the default keeps the scan rare. Standalone workers and serve-only
-    /// deployments rely on it to observe enablements from another process.
-    pub rescan_interval_ms: u64,
     /// Revisions examined per build step.
     pub max_files_per_step: usize,
     /// Content bytes read per build step.
@@ -54,26 +35,8 @@ impl GrepWorkerConfig {
         }
     }
 
-    /// Rejects zero pacing intervals and zero step budgets.
+    /// Rejects zero step budgets.
     pub fn validate(self) -> Result<(), GrepWorkerConfigError> {
-        if self.step_interval_ms == 0 {
-            return Err(GrepWorkerConfigError::InvalidField {
-                field: "step_interval_ms",
-                reason: "must be greater than zero".to_owned(),
-            });
-        }
-        if self.gc_interval_ms == 0 {
-            return Err(GrepWorkerConfigError::InvalidField {
-                field: "gc_interval_ms",
-                reason: "must be greater than zero".to_owned(),
-            });
-        }
-        if self.rescan_interval_ms == 0 {
-            return Err(GrepWorkerConfigError::InvalidField {
-                field: "rescan_interval_ms",
-                reason: "must be greater than zero".to_owned(),
-            });
-        }
         if let Some(field) = self.build_policy().zero_budget_field() {
             return Err(GrepWorkerConfigError::InvalidField {
                 field,
@@ -88,9 +51,6 @@ impl Default for GrepWorkerConfig {
     fn default() -> Self {
         let policy = GramIndexBuildPolicy::default();
         Self {
-            step_interval_ms: DEFAULT_GREP_STEP_INTERVAL_MS,
-            gc_interval_ms: DEFAULT_GREP_GC_INTERVAL_MS,
-            rescan_interval_ms: DEFAULT_GREP_RESCAN_INTERVAL_MS,
             max_files_per_step: policy.max_files_per_step,
             max_content_bytes_per_step: policy.max_content_bytes_per_step,
             max_rows_per_segment: policy.max_rows_per_segment,
@@ -120,44 +80,55 @@ mod tests {
     use super::*;
 
     #[test]
-    fn defaults_match_the_build_policy_and_worker_pacing() {
+    fn defaults_match_the_build_policy() {
         let config = GrepWorkerConfig::default();
 
-        assert_eq!(config.step_interval_ms, 1_000);
-        assert_eq!(config.gc_interval_ms, 60_000);
-        assert_eq!(config.rescan_interval_ms, 300_000);
         assert_eq!(config.build_policy(), GramIndexBuildPolicy::default());
         assert_eq!(config.validate(), Ok(()));
     }
 
     #[test]
-    fn zero_pacing_and_policy_fields_are_rejected() {
+    fn zero_policy_fields_are_rejected() {
         for (field, config) in [
-            (
-                "step_interval_ms",
-                GrepWorkerConfig {
-                    step_interval_ms: 0,
-                    ..GrepWorkerConfig::default()
-                },
-            ),
-            (
-                "gc_interval_ms",
-                GrepWorkerConfig {
-                    gc_interval_ms: 0,
-                    ..GrepWorkerConfig::default()
-                },
-            ),
-            (
-                "rescan_interval_ms",
-                GrepWorkerConfig {
-                    rescan_interval_ms: 0,
-                    ..GrepWorkerConfig::default()
-                },
-            ),
             (
                 "max_files_per_step",
                 GrepWorkerConfig {
                     max_files_per_step: 0,
+                    ..GrepWorkerConfig::default()
+                },
+            ),
+            (
+                "max_content_bytes_per_step",
+                GrepWorkerConfig {
+                    max_content_bytes_per_step: 0,
+                    ..GrepWorkerConfig::default()
+                },
+            ),
+            (
+                "max_rows_per_segment",
+                GrepWorkerConfig {
+                    max_rows_per_segment: 0,
+                    ..GrepWorkerConfig::default()
+                },
+            ),
+            (
+                "max_l0_runs",
+                GrepWorkerConfig {
+                    max_l0_runs: 0,
+                    ..GrepWorkerConfig::default()
+                },
+            ),
+            (
+                "max_mid_runs",
+                GrepWorkerConfig {
+                    max_mid_runs: 0,
+                    ..GrepWorkerConfig::default()
+                },
+            ),
+            (
+                "max_fold_rows_per_step",
+                GrepWorkerConfig {
+                    max_fold_rows_per_step: 0,
                     ..GrepWorkerConfig::default()
                 },
             ),

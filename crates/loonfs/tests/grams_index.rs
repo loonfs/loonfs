@@ -7,12 +7,12 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
 use loonfs::{
-    ChangeSeq, CreateNamespaceOptions, ErrorCode, FsAdmin, FsReader, FsWriter,
-    GramIndexBuildPolicy, GrepRequest, NamespaceId, PutFileOptions,
+    ChangeSeq, CreateNamespaceOptions, ErrorCode, FsAdmin, FsReader, FsWriter, GrepRequest,
+    NamespaceId, PutFileOptions,
 };
 use loonfs_api::decode_grep_cursor;
 use loonfs_grep::codec::INDEX_GRAMS_MAX_FILE_BYTES;
-use loonfs_grep::GrepWorker;
+use loonfs_grep::{GramIndexBuildPolicy, GrepWorker};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,

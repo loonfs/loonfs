@@ -2,7 +2,7 @@
 //! sizing, with the defaults the rest of the crate advertises.
 
 use crate::trace::{TraceMode, TraceStoreKind};
-use crate::{GramIndexBuildPolicy, MetadataTableCacheConfig, Result, RuntimeError};
+use crate::{MetadataTableCacheConfig, Result, RuntimeError};
 
 /// Default maximum namespaces retained in runtime caches.
 pub(crate) const DEFAULT_MAX_CACHED_NAMESPACES: usize = 64;
@@ -44,10 +44,6 @@ pub(crate) struct FsConfig {
     pub max_read_content_bytes: Option<u64>,
     /// Cache configuration.
     pub runtime_cache: RuntimeCacheConfig,
-    /// Budgets for the gram index build and fold steps this runtime's
-    /// maintenance ticks run. Every budget must be at least one unit; zero
-    /// budgets are rejected when the handle opens.
-    pub gram_index_build: GramIndexBuildPolicy,
     /// Tracing mode label.
     pub trace_mode: TraceMode,
     /// Object-store kind label used by tracing.
@@ -114,11 +110,6 @@ pub(crate) fn validate_config(config: &FsConfig) -> Result<()> {
         return Err(RuntimeError::Config(
             "writer_version must not be empty".to_owned(),
         ));
-    }
-    if let Some(budget) = config.gram_index_build.zero_budget_field() {
-        return Err(RuntimeError::Config(format!(
-            "gram index build budget `{budget}` must be greater than zero"
-        )));
     }
     Ok(())
 }

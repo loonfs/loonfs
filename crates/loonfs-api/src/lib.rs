@@ -86,8 +86,8 @@ pub use v0::{
     CreateNamespaceRequest, DeleteDirectoryBehavior, DeleteNamespaceResponse, DestinationBehavior,
     DisableGramsIndexResponse, EnableGramsIndexResponse, ErrorDetails, FileRevision,
     FilesystemOperation, FilesystemOperationRequest, FlushWalOutcome, FlushWalResponse,
-    ForkNamespaceRequest, GcRequest, GcResponse, GrepMatch, GrepRequest, GrepResponse,
-    ListFileRevisionsResponse, ListPathEntriesResponse, MaintenanceTickOutcome,
+    ForkNamespaceRequest, GcRequest, GcResponse, GrepGcResponse, GrepMatch, GrepRequest,
+    GrepResponse, ListFileRevisionsResponse, ListPathEntriesResponse, MaintenanceTickOutcome,
     MaintenanceTickRequest, MaintenanceTickResponse, NamespaceStatusResponse, NamespaceSummary,
     ReleaseCheckpointResponse, RestoreFileRevisionRequest,
 };

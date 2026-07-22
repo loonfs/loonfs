@@ -179,11 +179,6 @@ impl GrepMode {
 #[serde(default, deny_unknown_fields)]
 pub struct GrepConfig {
     pub mode: GrepMode,
-    pub step_interval_ms: u64,
-    pub gc_interval_ms: u64,
-    /// Whole-store grep rediscovery interval. Each scan is proportional to
-    /// all keys below `namespaces/` until a namespace catalog exists.
-    pub rescan_interval_ms: u64,
     pub max_files_per_step: usize,
     pub max_content_bytes_per_step: u64,
     pub max_rows_per_segment: usize,
@@ -193,12 +188,9 @@ pub struct GrepConfig {
 }
 
 impl GrepConfig {
-    /// Returns the shared worker-loop configuration represented by this table.
+    /// Returns the shared bounded-step configuration represented by this table.
     pub fn worker_config(self) -> GrepWorkerConfig {
         GrepWorkerConfig {
-            step_interval_ms: self.step_interval_ms,
-            gc_interval_ms: self.gc_interval_ms,
-            rescan_interval_ms: self.rescan_interval_ms,
             max_files_per_step: self.max_files_per_step,
             max_content_bytes_per_step: self.max_content_bytes_per_step,
             max_rows_per_segment: self.max_rows_per_segment,
@@ -214,9 +206,6 @@ impl Default for GrepConfig {
         let worker = GrepWorkerConfig::default();
         Self {
             mode: GrepMode::Embedded,
-            step_interval_ms: worker.step_interval_ms,
-            gc_interval_ms: worker.gc_interval_ms,
-            rescan_interval_ms: worker.rescan_interval_ms,
             max_files_per_step: worker.max_files_per_step,
             max_content_bytes_per_step: worker.max_content_bytes_per_step,
             max_rows_per_segment: worker.max_rows_per_segment,
@@ -1166,12 +1155,12 @@ root = "/tmp/loonfs-server"
         assert_eq!(config.grep.mode, super::GrepMode::Embedded);
         assert_eq!(
             config.grep.worker_config().build_policy(),
-            loonfs::GramIndexBuildPolicy::default()
+            loonfs_grep::GramIndexBuildPolicy::default()
         );
     }
 
     #[test]
-    fn load_applies_grep_mode_pacing_and_policy() {
+    fn load_applies_grep_mode_and_policy() {
         let path = write_config(
             r#"
 bind = "127.0.0.1:9400"
@@ -1181,9 +1170,6 @@ writer_version = "loonfs-server/0.1.0"
 
 [grep]
 mode = "serve_only"
-step_interval_ms = 25
-gc_interval_ms = 500
-rescan_interval_ms = 750
 max_files_per_step = 4096
 max_content_bytes_per_step = 536870912
 max_rows_per_segment = 131072
@@ -1199,9 +1185,6 @@ root = "/tmp/loonfs-server"
 
         let grep = load_server_config(&path).expect("load config").grep;
         assert_eq!(grep.mode, super::GrepMode::ServeOnly);
-        assert_eq!(grep.step_interval_ms, 25);
-        assert_eq!(grep.gc_interval_ms, 500);
-        assert_eq!(grep.rescan_interval_ms, 750);
         let policy = grep.worker_config().build_policy();
         assert_eq!(policy.max_files_per_step, 4096);
         assert_eq!(policy.max_content_bytes_per_step, 536_870_912);
@@ -1241,7 +1224,7 @@ root = "/tmp/loonfs-server"
         assert_eq!(policy.max_l0_runs, 3);
         assert_eq!(
             policy.max_mid_runs,
-            loonfs::GramIndexBuildPolicy::default().max_mid_runs,
+            loonfs_grep::GramIndexBuildPolicy::default().max_mid_runs,
             "untouched budgets keep their defaults"
         );
     }

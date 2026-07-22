@@ -1334,19 +1334,17 @@ reclaims them after its grace window. Query readers load the pointer afresh,
 then load the immutable manifest it names; decoded manifests may be cached by
 manifest id.
 
-The namespace-scoped layout has no cheap all-grep listing. At worker startup
-and periodically, grep discovery lists the whole `namespaces/` prefix and
-filters exact `namespaces/{namespace_id}/extensions/grep/root.json` keys.
-That scan is proportional to the store's total key count and is the price of
-the layout until a namespace catalog exists, so the default interval is five
-minutes. In-process enablement also registers its namespace directly with the
-embedded loop and does not wait for rediscovery. Grep GC performs the same
-whole-namespace-prefix discovery on its own interval, retains the verified
-pointer, referenced manifest, and referenced segments, degrades to retention
-on corruption or ambiguity, and reaps the whole `extensions/grep/` prefix for
-a tombstoned or absent namespace. Core maintenance does not recognize or
-sweep `extensions/` keys, and grep maintenance does not sweep core-owned
-collections.
+The namespace-scoped layout is maintained only when that namespace is named
+by an enable, publish, query, detached assignment, or explicit GC operation;
+grep never enumerates namespaces. Embedded drivers are event-driven and use
+no recurring timer. A detached `loonfs-grep` deployment polls the head of each
+explicitly assigned namespace at its configured `poll_interval_ms`, analogous
+to a detached SlateDB manifest poll. Grep GC is explicit and per namespace: it
+retains the verified pointer, referenced manifest, and referenced segments,
+degrades to retention on corruption or ambiguity, and reaps the whole
+`extensions/grep/` prefix when explicitly pointed at a tombstoned or absent
+namespace. Core maintenance does not recognize or collect `extensions/` keys,
+and grep maintenance does not collect core-owned objects.
 
 ### 4.3 Evolution rules
 

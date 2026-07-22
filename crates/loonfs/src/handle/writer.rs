@@ -11,10 +11,10 @@ use crate::{
     BeginUploadRequest, BeginUploadResponse, CapabilityDocument, ChangeSeq, CommitRequest,
     CommitResponse, CompleteUploadRequest, CompleteUploadResponse, ContentRef, CopyOptions,
     CreateDirectoryOptions, CreateNamespaceOptions, DeleteNamespaceOptions,
-    DeleteNamespaceResponse, DeleteOptions, GramIndexBuildPolicy, InodeId, MoveOptions,
-    NamespaceId, NamespaceSummary, PutFileOptions, RestoreRevisionOptions, Result, RevisionNo,
-    RuntimeCacheConfig, RuntimeCacheStats, RuntimeError, SharedObjectStore, StoreConfig, TraceMode,
-    TraceStoreKind, UndeleteOptions, UploadContentResponse, UploadId,
+    DeleteNamespaceResponse, DeleteOptions, InodeId, MoveOptions, NamespaceId, NamespaceSummary,
+    PutFileOptions, RestoreRevisionOptions, Result, RevisionNo, RuntimeCacheConfig,
+    RuntimeCacheStats, RuntimeError, SharedObjectStore, StoreConfig, TraceMode, TraceStoreKind,
+    UndeleteOptions, UploadContentResponse, UploadId,
 };
 use std::sync::Arc;
 
@@ -551,16 +551,6 @@ impl FsWriterBuilder {
         self
     }
 
-    /// Sets the gram index build budgets this writer's maintenance runs —
-    /// the background catch-up ticks scheduled after writes — instead of
-    /// [`GramIndexBuildPolicy::default`]. Bulk backfills raise the
-    /// per-step budgets so a tick indexes more files per manifest publish.
-    /// Values are normalized to at least one unit per budget.
-    pub fn gram_index_build(mut self, policy: GramIndexBuildPolicy) -> Self {
-        self.core.gram_index_build = policy;
-        self
-    }
-
     /// Sets the tracing mode label.
     pub fn trace_mode(mut self, trace_mode: TraceMode) -> Self {
         self.core.trace_mode = trace_mode;
@@ -582,6 +572,21 @@ impl FsWriterBuilder {
     /// need to construct an instrumented store manually.
     pub fn metrics_recorder(mut self, recorder: Arc<dyn ObjectStoreMetricsRecorder>) -> Self {
         self.core.metrics_recorder = Some(recorder);
+        self
+    }
+
+    /// Registers a synchronous observer called after each successful durable
+    /// publication with the namespace and the batch's highest committed
+    /// sequence.
+    ///
+    /// The observer runs on the publication task and must not block. Use a
+    /// non-blocking channel send to hand work to another task. Writers that
+    /// register no observer retain the default publication behavior.
+    pub fn publish_observer(
+        mut self,
+        observer: impl Fn(&NamespaceId, ChangeSeq) + Send + Sync + 'static,
+    ) -> Self {
+        self.core.publish_observer = Some(Arc::new(observer));
         self
     }
 

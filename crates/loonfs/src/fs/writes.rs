@@ -550,7 +550,8 @@ impl FsCore {
                 .results
                 .into_iter()
                 .map(|result| result.map_err(RuntimeError::Core))
-                .collect();
+                .collect::<Vec<_>>();
+            self.notify_publish_observer(namespace_id, &results);
             self.maybe_auto_tick_after_publish(namespace_id, wal_tail_segments);
             return results;
         }
@@ -580,8 +581,27 @@ impl FsCore {
             .entered();
             self.invalidate_namespace_cache_after_batch(namespace_id, &results);
         }
+        self.notify_publish_observer(namespace_id, &results);
         self.maybe_auto_tick_after_publish(namespace_id, wal_tail_segments);
         results
+    }
+
+    fn notify_publish_observer(
+        &self,
+        namespace_id: &NamespaceId,
+        results: &[Result<CommitResponse>],
+    ) {
+        let Some(observer) = &self.inner.publish_observer else {
+            return;
+        };
+        if let Some(committed_seq) = results
+            .iter()
+            .filter_map(|result| result.as_ref().ok())
+            .map(|response| response.committed_seq)
+            .max()
+        {
+            observer(namespace_id, committed_seq);
+        }
     }
 
     /// Schedules a maintenance tick after a publish that observed the WAL

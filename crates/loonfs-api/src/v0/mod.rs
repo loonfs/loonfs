@@ -34,7 +34,8 @@ pub use operations::{
 };
 pub use reads::{AuthoritativeFileBytes, AuthoritativePathEntry, ListPathEntriesResponse};
 pub use search::{
-    DisableGramsIndexResponse, EnableGramsIndexResponse, GrepMatch, GrepRequest, GrepResponse,
+    DisableGramsIndexResponse, EnableGramsIndexResponse, GrepGcResponse, GrepMatch, GrepRequest,
+    GrepResponse,
 };
 pub use uploads::{
     BeginUploadRequest, BeginUploadResponse, CompleteUploadRequest, CompleteUploadResponse,

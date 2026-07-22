@@ -124,3 +124,21 @@ pub struct DisableGramsIndexResponse {
     /// False when the namespace had no feature entry to remove.
     pub was_enabled: bool,
 }
+
+/// Result of one explicit gram-index garbage-collection pass (admin plane).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct GrepGcResponse {
+    /// Namespace whose grep-owned keyspace was inspected.
+    pub namespace_id: NamespaceId,
+    /// Unreferenced grep segments deleted after the grace window.
+    pub deleted_segments: u64,
+    /// Other unreferenced grep objects deleted after the grace window.
+    pub deleted_other_objects: u64,
+    /// Whether an absent or tombstoned namespace had extension state reaped.
+    pub namespace_reaped: bool,
+    /// Young or concurrently revived candidates retained by the pass.
+    pub retained_candidates: u64,
+    /// Whether unreadable namespace or grep state forced conservative retention.
+    pub namespace_degraded: bool,
+}

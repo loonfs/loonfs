@@ -25,9 +25,10 @@ use loonfs_api::{
     CreateNamespaceRequest, DeleteDirectoryBehavior, DeleteNamespaceResponse, DestinationBehavior,
     DisableGramsIndexResponse, EnableGramsIndexResponse, ErrorCode, FilesystemOperation,
     FilesystemOperationRequest, FlushWalResponse, ForkNamespaceRequest, GcRequest, GcResponse,
-    GrepRequest, GrepResponse, InodeId, ListFileRevisionsResponse, ListPathEntriesResponse,
-    MaintenanceTickRequest, MaintenanceTickResponse, NamespaceId, NamespaceStatusResponse,
-    NamespaceSummary, ReleaseCheckpointResponse, RestoreFileRevisionRequest, RevisionNo,
+    GrepGcResponse, GrepRequest, GrepResponse, InodeId, ListFileRevisionsResponse,
+    ListPathEntriesResponse, MaintenanceTickRequest, MaintenanceTickResponse, NamespaceId,
+    NamespaceStatusResponse, NamespaceSummary, ReleaseCheckpointResponse,
+    RestoreFileRevisionRequest, RevisionNo,
 };
 use std::sync::{Arc, OnceLock};
 
@@ -549,8 +550,8 @@ impl Client {
         self.request_json(self.agent.post(&url), Some(request))
     }
 
-    /// Publishes the `index.grams` feature entry (admin plane); backfill
-    /// runs through grep worker sweeps. Idempotent.
+    /// Publishes the `index.grams` feature entry (admin plane); embedded
+    /// mode starts that namespace's event-driven backfill. Idempotent.
     pub fn enable_grams_index(
         &self,
         namespace_id: &NamespaceId,
@@ -573,6 +574,18 @@ impl Client {
             self.base_url
         );
         self.request_json::<(), DisableGramsIndexResponse>(self.agent.post(&url), None)
+    }
+
+    /// Runs one explicit gram-index garbage-collection pass for a namespace.
+    pub fn gc_grams_index(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<GrepGcResponse, ClientError> {
+        let url = format!(
+            "{}/v0/admin/namespaces/{namespace_id}/index/grams/gc",
+            self.base_url
+        );
+        self.request_json::<(), GrepGcResponse>(self.agent.post(&url), None)
     }
 
     fn apply_filesystem_operation(
