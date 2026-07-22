@@ -1338,9 +1338,9 @@ The namespace-scoped layout is maintained only when that namespace is named
 by an enable, publish, query, detached assignment, or explicit GC operation;
 grep never enumerates namespaces. Embedded drivers are event-driven and use
 no recurring timer. A detached `loonfs-grep` deployment polls the head of each
-explicitly assigned namespace at its configured `poll_interval_ms`, analogous
-to a detached SlateDB manifest poll. Grep GC is explicit and per namespace: it
-retains the verified pointer, referenced manifest, and referenced segments,
+explicitly assigned namespace at its configured `poll_interval_ms`. Grep GC
+is explicit and per namespace: it retains the verified pointer, referenced
+manifest, and referenced segments,
 degrades to retention on corruption or ambiguity, and reaps the whole
 `extensions/grep/` prefix when explicitly pointed at a tombstoned or absent
 namespace. Core maintenance does not recognize or collect `extensions/` keys,

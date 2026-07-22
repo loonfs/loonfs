@@ -14,9 +14,9 @@ loonfs-grep --config loonfs-grep.toml --namespace docs --once --gc
 
 `--once` drives each named namespace to a caught-up steady root and exits, making it suitable for
 cron. Without `--once`, each assigned namespace polls only its own durable head at the configured
-`poll_interval_ms`; a head advance nudges that namespace's parked driver. This is the grep analog
-of SlateDB's detached manifest poll: one small read per assigned namespace per interval, never a
-namespace scan. `--gc` explicitly collects each named namespace's grep-owned keyspace once before
+`poll_interval_ms`; a head advance nudges that namespace's parked driver. Each poll is one small
+read per assigned namespace per interval, and the process never scans namespaces. `--gc`
+explicitly collects each named namespace's grep-owned keyspace once before
 maintenance starts, including reaping aged extension state for an absent or tombstoned namespace.
 
 The strict config keeps the provider under `[store]`, puts the one detached-deployment timer at the
