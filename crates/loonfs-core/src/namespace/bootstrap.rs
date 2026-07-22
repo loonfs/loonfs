@@ -3,9 +3,10 @@
 
 use crate::checkpoint::{
     build_initial_namespace_manifest, load_namespace_manifest_envelope, write_namespace_manifest,
+    ManifestLoadFailureClass,
 };
 use crate::context::MutationContext;
-use crate::error::CoreError;
+use crate::error::{CoreError, MetadataProjectionLoadError};
 use crate::limits::GC_MIN_GRACE_WINDOW_MS;
 use crate::metadata::{InodeRecord, MetadataState};
 use crate::namespace::catalog::{
@@ -39,7 +40,7 @@ pub enum BootstrapNamespaceError {
     EmptyWriterVersion,
     #[error("namespace `{namespace_id}` already exists")]
     NamespaceAlreadyExists { namespace_id: NamespaceId },
-    #[error("namespace `{namespace_id}` is partially initialized")]
+    #[error("namespace `{namespace_id}` is partially initialized; run admin repair explicitly")]
     NamespacePartiallyInitialized { namespace_id: NamespaceId },
     #[error("namespace `{namespace_id}` is deleted and its id is retired")]
     NamespaceDeleted { namespace_id: NamespaceId },
@@ -88,52 +89,34 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
         return Err(BootstrapNamespaceError::EmptyWriterVersion);
     }
 
-    let mut recovered_debris = false;
-    loop {
-        match namespace_initialization_state(store, namespace_id)
-            .await
-            .map_err(map_namespace_initialization_error_to_core)?
-        {
-            NamespaceInitializationState::Complete => {
-                let head = read_head_object(store, namespace_id).await?;
-                // A deleted namespace retires its id permanently; re-creation is
-                // refused as deleted, not as existing.
-                if head.envelope.state.state == NamespaceState::Deleted {
-                    return Err(BootstrapNamespaceError::NamespaceDeleted {
-                        namespace_id: namespace_id.clone(),
-                    });
-                }
-                if allow_existing {
-                    return Ok(NamespaceSummary {
-                        namespace_id: namespace_id.clone(),
-                    });
-                }
-                return Err(BootstrapNamespaceError::NamespaceAlreadyExists {
+    match namespace_initialization_state(store, namespace_id)
+        .await
+        .map_err(map_namespace_initialization_error_to_core)?
+    {
+        NamespaceInitializationState::Complete => {
+            let head = read_head_object(store, namespace_id).await?;
+            // A deleted namespace retires its id permanently; re-creation is
+            // refused as deleted, not as existing.
+            if head.envelope.state.state == NamespaceState::Deleted {
+                return Err(BootstrapNamespaceError::NamespaceDeleted {
                     namespace_id: namespace_id.clone(),
                 });
             }
-            NamespaceInitializationState::Partial => {
-                return complete_post_head_bootstrap(store, namespace_id, context).await;
+            if allow_existing {
+                return Ok(NamespaceSummary {
+                    namespace_id: namespace_id.clone(),
+                });
             }
-            NamespaceInitializationState::PreHeadDebris => {
-                // A crashed attempt's pre-head objects block a fresh
-                // create's put-if-absent writes. Aged debris is cleaned and
-                // the classification re-runs once; young debris may be a
-                // concurrent create mid-flight, so the honest answer is
-                // partial, not a race against it.
-                if recovered_debris
-                    || recover_pre_head_debris(store, namespace_id, context.now_ms).await?
-                        == PreHeadRecovery::InFlight
-                {
-                    return Err(BootstrapNamespaceError::NamespacePartiallyInitialized {
-                        namespace_id: namespace_id.clone(),
-                    });
-                }
-                recovered_debris = true;
-                continue;
-            }
-            NamespaceInitializationState::Absent => break,
+            return Err(BootstrapNamespaceError::NamespaceAlreadyExists {
+                namespace_id: namespace_id.clone(),
+            });
         }
+        NamespaceInitializationState::Partial | NamespaceInitializationState::PreHeadDebris => {
+            return Err(BootstrapNamespaceError::NamespacePartiallyInitialized {
+                namespace_id: namespace_id.clone(),
+            });
+        }
+        NamespaceInitializationState::Absent => {}
     }
 
     let mut initial_head = HeadState::initial(namespace_id.clone());
@@ -253,12 +236,10 @@ pub(super) enum PreHeadRecovery {
     InFlight,
 }
 
-/// Deletes a crashed attempt's pre-head objects once they are older than
-/// the derived grace floor — nothing published within the floor can still
-/// be mid-flight — re-checking head absence immediately before every
-/// delete, the same discipline the abandoned-bootstrap reap uses. Pre-head
-/// objects are unreachable until a head exists, so deletion can strand no
-/// reader.
+/// Deletes a crashed attempt's pre-head objects when explicit admin repair
+/// finds them older than the derived safety floor. Repair re-checks head
+/// absence immediately before every delete. Pre-head objects are unreachable
+/// until a head exists, so deletion can strand no reader.
 pub(super) async fn recover_pre_head_debris<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -307,29 +288,32 @@ pub(super) async fn recover_pre_head_debris<S: ObjectStore + ?Sized>(
     Ok(PreHeadRecovery::Cleaned)
 }
 
-/// Finishes a create that crashed after its head write: the head is the
-/// linearization point, so the retry writes the missing descriptor and
-/// reports success. Guarded to genesis trees only — the head must be the
+/// Finishes a create that crashed after its head write when explicit admin
+/// repair invokes it. Guarded to genesis trees only — the head must be the
 /// unmodified initial state and the root manifest must carry no fork block;
 /// anything else answers partial. The crashed attempt's content-store
 /// descriptor (written after the head, before the namespace descriptor)
 /// may remain as a tiny orphan; nothing references it.
-async fn complete_post_head_bootstrap<S: ObjectStore + ?Sized>(
+pub(super) async fn complete_post_head_bootstrap<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
 ) -> Result<NamespaceSummary, BootstrapNamespaceError> {
     // Completion is strictly best-effort: a tree whose head, root, or
     // manifest cannot be loaded and validated is not completable, and the
-    // honest answer stays `namespace_partial` — exactly what every partial
-    // tree answered before completion existed. A transient read failure
-    // answers partial and the next retry completes.
+    // honest answer stays `namespace_partial` so repair can apply the
+    // non-completable debris policy.
     let partial = || BootstrapNamespaceError::NamespacePartiallyInitialized {
         namespace_id: namespace_id.clone(),
     };
     let head = read_head_object(store, namespace_id)
         .await
-        .map_err(|_| partial())?
+        .map_err(|error| match error {
+            ControlObjectLoadError::Store { .. } => BootstrapNamespaceError::Core(
+                CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error)),
+            ),
+            _ => partial(),
+        })?
         .envelope
         .state;
     let genesis = head.state == NamespaceState::Active
@@ -340,12 +324,22 @@ async fn complete_post_head_bootstrap<S: ObjectStore + ?Sized>(
     }
     let root = read_metadata_root_object(store, namespace_id)
         .await
-        .map_err(|_| partial())?
+        .map_err(|error| match error {
+            ControlObjectLoadError::Store { .. } => BootstrapNamespaceError::Core(
+                CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error)),
+            ),
+            _ => partial(),
+        })?
         .envelope
         .state;
     let manifest = load_namespace_manifest_envelope(store, namespace_id, &root.manifest_object_id)
         .await
-        .map_err(|_| partial())?;
+        .map_err(|error| match error.failure_class() {
+            ManifestLoadFailureClass::Store => BootstrapNamespaceError::Core(
+                CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error)),
+            ),
+            ManifestLoadFailureClass::Corrupt => partial(),
+        })?;
     if manifest.payload.fork.is_some() {
         // A crashed fork target must be completed by the fork path, which
         // knows the source; a create finishing it would bind the wrong
@@ -443,8 +437,10 @@ mod tests {
     use crate::commit_engine::{NamespaceCommitEngine, NamespaceMutationCandidate};
     use crate::namespace::catalog::load_namespace_descriptor;
     use crate::namespace::fork::fork_namespace;
+    use crate::namespace::repair::repair_namespace;
+    use crate::namespace::status::load_namespace_head_summary;
     use loonfs_api::v0::{CommitOp as ApiCommitOp, CommitRequest as ApiCommitRequest};
-    use loonfs_api::{CommitId, ManifestId, ManifestObjectId};
+    use loonfs_api::{CommitId, ManifestId, ManifestObjectId, RepairNamespaceOutcome};
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use tempfile::tempdir;
 
@@ -531,6 +527,13 @@ mod tests {
         newest + offset_ms
     }
 
+    async fn namespace_keys(store: &LocalFsStore, namespace_id: &NamespaceId) -> Vec<String> {
+        store
+            .list_prefix(&format!("namespaces/{}/", namespace_id.as_str()))
+            .await
+            .expect("list namespace")
+    }
+
     async fn commit_directory(store: &LocalFsStore, namespace_id: &NamespaceId, name: &str) {
         let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
         engine
@@ -555,7 +558,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_retry_cleans_aged_pre_head_debris_and_succeeds() {
+    async fn create_on_aged_pre_head_debris_stays_partial_until_repair_reaps() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -564,9 +567,20 @@ mod tests {
         let aged = context(
             now_after_newest_object(&store, &namespace_id, GC_MIN_GRACE_WINDOW_MS + 1).await,
         );
+        let keys_before = namespace_keys(&store, &namespace_id).await;
+        let error = bootstrap_namespace(&store, &namespace_id, &aged, false)
+            .await
+            .expect_err("normal create never cleans aged debris");
+        assert_eq!(error.code(), ErrorCode::NamespacePartial);
+        assert_eq!(namespace_keys(&store, &namespace_id).await, keys_before);
+
+        let report = repair_namespace(&store, &namespace_id, &aged)
+            .await
+            .expect("repair reaps aged debris");
+        assert_eq!(report.outcome, RepairNamespaceOutcome::Reaped);
         bootstrap_namespace(&store, &namespace_id, &aged, false)
             .await
-            .expect("retry past the grace floor cleans the debris and creates");
+            .expect("create succeeds after explicit reap");
         assert_eq!(
             namespace_initialization_state(&store, &namespace_id)
                 .await
@@ -576,7 +590,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_retry_inside_the_grace_floor_answers_namespace_partial() {
+    async fn young_debris_stays_partial_until_repair_safety_window_expires() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -587,7 +601,11 @@ mod tests {
             .await
             .expect_err("young debris may be a concurrent create");
         assert_eq!(error.code(), ErrorCode::NamespacePartial);
-        // The debris is untouched: recovery never races a live attempt.
+        let report = repair_namespace(&store, &namespace_id, &young)
+            .await
+            .expect("young repair is a typed refusal");
+        assert_eq!(report.outcome, RepairNamespaceOutcome::InFlight);
+        // The debris is untouched: repair never races a live attempt.
         assert!(store
             .head(&metadata_root(namespace_id.as_str()))
             .await
@@ -598,10 +616,18 @@ mod tests {
             .await
             .expect("head floor")
             .is_some());
+
+        let aged = context(
+            now_after_newest_object(&store, &namespace_id, GC_MIN_GRACE_WINDOW_MS + 1).await,
+        );
+        let report = repair_namespace(&store, &namespace_id, &aged)
+            .await
+            .expect("aged repair reaps");
+        assert_eq!(report.outcome, RepairNamespaceOutcome::Reaped);
     }
 
     #[tokio::test]
-    async fn create_finishes_a_headed_tree_missing_its_descriptor() {
+    async fn create_reports_partial_until_repair_completes_the_headed_tree() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -613,9 +639,16 @@ mod tests {
             .await
             .expect("simulate crash before the completion marker");
 
-        bootstrap_namespace(&store, &namespace_id, &context(2_000), false)
+        let keys_before = namespace_keys(&store, &namespace_id).await;
+        let error = bootstrap_namespace(&store, &namespace_id, &context(2_000), false)
             .await
-            .expect("retry finishes the genesis tree");
+            .expect_err("normal create leaves the partial tree untouched");
+        assert_eq!(error.code(), ErrorCode::NamespacePartial);
+        assert_eq!(namespace_keys(&store, &namespace_id).await, keys_before);
+        let report = repair_namespace(&store, &namespace_id, &context(2_000))
+            .await
+            .expect("repair completes genesis tree");
+        assert_eq!(report.outcome, RepairNamespaceOutcome::Completed);
         assert_eq!(
             namespace_initialization_state(&store, &namespace_id)
                 .await
@@ -626,10 +659,15 @@ mod tests {
             .await
             .expect_err("the completed namespace exists");
         assert_eq!(error.code(), ErrorCode::NamespaceExists);
+        commit_directory(&store, &namespace_id, "docs").await;
+        let status = load_namespace_head_summary(&store, &namespace_id)
+            .await
+            .expect("repaired namespace remains readable");
+        assert_eq!(status.head_seq, ChangeSeq(1));
     }
 
     #[tokio::test]
-    async fn create_refuses_to_finish_a_tree_with_history() {
+    async fn non_completable_headed_tree_is_reaped_only_by_aged_repair() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -646,10 +684,26 @@ mod tests {
             .await
             .expect_err("a non-genesis tree is not a crashed create");
         assert_eq!(error.code(), ErrorCode::NamespacePartial);
+        let young = context(now_after_newest_object(&store, &namespace_id, 1).await);
+        let report = repair_namespace(&store, &namespace_id, &young)
+            .await
+            .expect("young repair refuses to reap");
+        assert_eq!(report.outcome, RepairNamespaceOutcome::InFlight);
+
+        let aged = context(
+            now_after_newest_object(&store, &namespace_id, GC_MIN_GRACE_WINDOW_MS + 1).await,
+        );
+        let report = repair_namespace(&store, &namespace_id, &aged)
+            .await
+            .expect("aged repair reaps non-completable tree");
+        assert_eq!(report.outcome, RepairNamespaceOutcome::Reaped);
+        bootstrap_namespace(&store, &namespace_id, &aged, false)
+            .await
+            .expect("namespace is creatable after reap");
     }
 
     #[tokio::test]
-    async fn fork_finishes_its_headed_target_and_create_refuses_it() {
+    async fn fork_reports_partial_until_repair_completes_its_headed_target() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let source = NamespaceId::parse("source").expect("namespace id");
@@ -665,6 +719,7 @@ mod tests {
             .delete(&namespace_config(clone.as_str()))
             .await
             .expect("simulate crash before the completion marker");
+        let keys_before = namespace_keys(&store, &clone).await;
 
         // A create must not adopt a fork tree: it would bind the wrong
         // content store.
@@ -672,10 +727,21 @@ mod tests {
             .await
             .expect_err("create refuses the fork tree");
         assert_eq!(error.code(), ErrorCode::NamespacePartial);
+        assert_eq!(namespace_keys(&store, &clone).await, keys_before);
 
-        fork_namespace(&store, &source, &clone, &context(3_000))
+        let error = fork_namespace(&store, &source, &clone, &context(3_000))
             .await
-            .expect("fork retry finishes its own tree");
+            .expect_err("normal fork leaves its partial target untouched");
+        assert_eq!(error.code(), ErrorCode::NamespacePartial);
+        assert_eq!(namespace_keys(&store, &clone).await, keys_before);
+        let report = repair_namespace(&store, &clone, &context(3_000))
+            .await
+            .expect("repair completes fork target");
+        assert_eq!(report.outcome, RepairNamespaceOutcome::Completed);
+        let error = fork_namespace(&store, &source, &clone, &context(4_000))
+            .await
+            .expect_err("completed fork target exists");
+        assert_eq!(error.code(), ErrorCode::NamespaceExists);
         let source_config = load_namespace_descriptor(&store, &source)
             .await
             .expect("source descriptor");
@@ -689,7 +755,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fork_retry_cleans_aged_target_debris_and_succeeds() {
+    async fn fork_on_aged_target_debris_stays_partial_until_repair_reaps() {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let source = NamespaceId::parse("source").expect("namespace id");
@@ -702,14 +768,44 @@ mod tests {
 
         let aged =
             context(now_after_newest_object(&store, &clone, GC_MIN_GRACE_WINDOW_MS + 1).await);
+        let keys_before = namespace_keys(&store, &clone).await;
+        let error = fork_namespace(&store, &source, &clone, &aged)
+            .await
+            .expect_err("normal fork never cleans aged target debris");
+        assert_eq!(error.code(), ErrorCode::NamespacePartial);
+        assert_eq!(namespace_keys(&store, &clone).await, keys_before);
+        let report = repair_namespace(&store, &clone, &aged)
+            .await
+            .expect("repair reaps aged target debris");
+        assert_eq!(report.outcome, RepairNamespaceOutcome::Reaped);
         fork_namespace(&store, &source, &clone, &aged)
             .await
-            .expect("fork retry cleans aged target debris");
+            .expect("fork succeeds after explicit reap");
         assert_eq!(
             namespace_initialization_state(&store, &clone)
                 .await
                 .expect("probe"),
             NamespaceInitializationState::Complete
         );
+    }
+
+    #[tokio::test]
+    async fn repair_reports_already_complete_and_absent_is_not_found() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let complete = NamespaceId::parse("complete").expect("namespace id");
+        let absent = NamespaceId::parse("absent").expect("namespace id");
+        bootstrap_namespace(&store, &complete, &context(1_000), false)
+            .await
+            .expect("bootstrap");
+
+        let report = repair_namespace(&store, &complete, &context(2_000))
+            .await
+            .expect("complete repair is a no-op");
+        assert_eq!(report.outcome, RepairNamespaceOutcome::AlreadyComplete);
+        let error = repair_namespace(&store, &absent, &context(2_000))
+            .await
+            .expect_err("absent namespace is not found");
+        assert_eq!(error.code(), ErrorCode::NamespaceNotFound);
     }
 }

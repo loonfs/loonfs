@@ -144,8 +144,8 @@ pub enum CheckpointOwner {
     /// may carry the same name over different bases.
     User { name: String },
     /// A fork target keeping its source basis alive. Released only once the
-    /// target namespace is terminally deleted or its abandoned bootstrap is
-    /// proven dead.
+    /// target namespace is terminally deleted or its installation tree is
+    /// proven absent.
     Fork { target_namespace_id: NamespaceId },
 }
 

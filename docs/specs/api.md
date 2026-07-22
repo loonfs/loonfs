@@ -227,7 +227,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `revision_not_found` | 404 | The file has no such revision. |
 | `upload_not_found` | 404 | No upload session with this id. |
 | `namespace_exists` | 409 | The create target already exists. |
-| `namespace_partial` | 409 | The namespace is partially initialized and unusable. |
+| `namespace_partial` | 409 | The namespace is partially initialized and unusable; run explicit admin repair. |
 | `content_not_prepared` | 409 | A path put or explicit create/replace operation references external content without a matching admission, or carries a rejected relevant token. Prepare the content and retry with its proof. |
 | `path_conflict` | 409 | The destination path is already bound. |
 | `directory_not_empty` | 409 | The directory has children and the operation is not recursive. |
@@ -430,6 +430,7 @@ A representative v0 binding is shown below.
 | Advance the retention floor | `POST /v0/admin/namespaces/{ns}/retention/advance` |
 | Run a maintenance tick | `POST /v0/admin/namespaces/{ns}/maintenance/tick` (optional body overrides `max_wal_tail_segments` and opts into `gc`; an override above the write-rejection threshold is rejected as `invalid_request`; flush races surface as outcomes, not errors) |
 | Collect garbage | `POST /v0/admin/namespaces/{ns}/gc` (optional body overrides `grace_window_ms`/`reap_window_ms`; a grace window below the derived safety floor is rejected as `invalid_request`; nothing sweeps without an explicit call) |
+| Repair an incomplete namespace | `POST /v0/admin/namespaces/{ns}/repair` (no body or options; reports `already_complete`, `completed`, `reaped`, or `in_flight`; an absent namespace reports `namespace_not_found`) |
 | Content search | `POST /v0/namespaces/{ns}/query/grep` (feature `query.grep`; requires a materialized steady-state grep root) |
 | Enable the gram index | `POST /v0/admin/namespaces/{ns}/index/grams/enable` (CAS-publishes the independent grep root into checkpointed backfill; embedded mode starts that namespace's event-driven driver; idempotent) |
 | Disable the gram index | `POST /v0/admin/namespaces/{ns}/index/grams/disable` (CAS-publishes the grep root as disabled; grep-owned garbage collection later reclaims unreferenced segments; idempotent) |
@@ -438,6 +439,13 @@ A representative v0 binding is shown below.
 Routes under `/v0/admin/` belong to the `admin/v0` profile and routes under
 `/v0/namespaces/{ns}/query/` to `query/v0`; everything else shown belongs to
 `core/v0`.
+
+Namespace repair is deterministic and takes no request body. Its response is
+`{"namespace_id":"...","outcome":"..."}`: `already_complete` is a no-op,
+`completed` published a derivable create/fork completion descriptor, `reaped`
+removed aged non-completable install debris, and `in_flight` left younger
+debris untouched. An absent namespace returns `namespace_not_found` instead
+of a report.
 
 For `direct_put`, the client requests a presigned upload capability:
 

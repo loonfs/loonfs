@@ -24,7 +24,8 @@ use loonfs_api::{
     DestinationBehavior, DisableGramsIndexResponse, EnableGramsIndexResponse, ErrorCode,
     ErrorDetails, FlushWalResponse, GcRequest, GcResponse, GrepRequest, GrepResponse, InodeId,
     ListFileRevisionsResponse, MaintenanceTickRequest, MaintenanceTickResponse, NamespaceId,
-    NamespaceStatusResponse, NamespaceSummary, ReleaseCheckpointResponse, RevisionNo,
+    NamespaceStatusResponse, NamespaceSummary, ReleaseCheckpointResponse, RepairNamespaceResponse,
+    RevisionNo,
 };
 use thiserror::Error;
 
@@ -302,6 +303,11 @@ pub trait Backend {
         namespace_id: &NamespaceId,
         request: GcRequest,
     ) -> Result<GcResponse, BackendError>;
+    /// Explicitly repairs one incomplete namespace installation.
+    async fn repair_namespace(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<RepairNamespaceResponse, BackendError>;
     /// Reads the ordered change feed after the `after_seq` cursor.
     async fn list_changes_page(
         &self,
@@ -608,6 +614,15 @@ impl Backend for RemoteBackend {
     ) -> Result<GcResponse, BackendError> {
         let namespace_id = namespace_id.clone();
         self.wire(move |client| client.gc_namespace(&namespace_id, &request))
+            .await
+    }
+
+    async fn repair_namespace(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<RepairNamespaceResponse, BackendError> {
+        let namespace_id = namespace_id.clone();
+        self.wire(move |client| client.repair_namespace(&namespace_id))
             .await
     }
 

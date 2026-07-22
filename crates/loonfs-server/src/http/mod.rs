@@ -36,6 +36,7 @@ use self::handlers_filesystem::{
 use self::handlers_namespace::{
     advance_retention, create_checkpoint, create_namespace, delete_namespace, flush_wal,
     fork_namespace, gc_namespace, maintenance_tick, namespace_status, release_checkpoint,
+    repair_namespace,
 };
 use self::handlers_query::{
     disable_grams_index, enable_grams_index, gc_grams_index, grep, grep_not_supported,
@@ -375,6 +376,10 @@ fn router(state: AppState) -> Router {
             post(maintenance_tick),
         )
         .route("/v0/admin/namespaces/:namespace/gc", post(gc_namespace))
+        .route(
+            "/v0/admin/namespaces/:namespace/repair",
+            post(repair_namespace),
+        )
         // Unmatched paths and wrong methods answer inside the error
         // contract instead of axum's empty default bodies.
         .fallback(route_not_found)

@@ -29,8 +29,8 @@ pub use operations::{
     ErrorDetails, FileRevision, FilesystemOperation, FilesystemOperationRequest, FlushWalOutcome,
     FlushWalResponse, ForkNamespaceRequest, GcRequest, GcResponse, ListFileRevisionsResponse,
     MaintenanceTickOutcome, MaintenanceTickRequest, MaintenanceTickResponse,
-    NamespaceStatusResponse, NamespaceSummary, ReleaseCheckpointResponse,
-    RestoreFileRevisionRequest,
+    NamespaceStatusResponse, NamespaceSummary, ReleaseCheckpointResponse, RepairNamespaceOutcome,
+    RepairNamespaceResponse, RestoreFileRevisionRequest,
 };
 pub use reads::{AuthoritativeFileBytes, AuthoritativePathEntry, ListPathEntriesResponse};
 pub use search::{

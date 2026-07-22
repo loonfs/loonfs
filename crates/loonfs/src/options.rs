@@ -64,11 +64,11 @@ pub fn gc_response_from_report(namespace_id: NamespaceId, report: GcReport) -> G
         deleted_manifests: report.deleted_manifests,
         deleted_checkpoint_records: report.deleted_checkpoint_records,
         released_fork_checkpoints: report.released_fork_checkpoints,
-        reaped_abandoned_objects: report.reaped_abandoned_objects,
         deleted_upload_sessions: report.deleted_upload_sessions,
         released_missing_basis_checkpoints: report.released_missing_basis_checkpoints,
         retained_candidates: report.retained_candidates,
         degraded_retention: report.degraded_retention,
+        incomplete_namespace_ignored: report.incomplete_namespace_ignored,
     }
 }
 

@@ -3,11 +3,14 @@
 use crate::args::CommandKind;
 use crate::commands::{CommandData, CommandFailure, CommandOutput};
 use crate::error::CliError;
-use loonfs_api::{FlushWalOutcome, GcResponse, MaintenanceTickOutcome};
+use loonfs_api::{FlushWalOutcome, GcResponse, MaintenanceTickOutcome, RepairNamespaceOutcome};
 use serde::Serialize;
 use std::io::{self, Write};
 
 fn gc_summary(report: &GcResponse) -> String {
+    if report.incomplete_namespace_ignored {
+        return "gc ignored incomplete namespace".to_owned();
+    }
     let mut summary = format!(
         "gc deleted {} wal segments, {} tables, {} manifests, {} checkpoint records ({} retained)",
         report.deleted_wal_segments,
@@ -242,6 +245,15 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
         }
         CommandData::GarbageCollected(response) => {
             format!("gc for {}: {}", response.namespace_id, gc_summary(response))
+        }
+        CommandData::NamespaceRepaired(response) => {
+            let outcome = match response.outcome {
+                RepairNamespaceOutcome::AlreadyComplete => "already complete",
+                RepairNamespaceOutcome::Completed => "completed",
+                RepairNamespaceOutcome::Reaped => "reaped",
+                RepairNamespaceOutcome::InFlight => "in flight",
+            };
+            format!("repair for {}: {outcome}", response.namespace_id)
         }
         CommandData::Changes(response) => {
             let mut lines = vec![

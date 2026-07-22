@@ -9,8 +9,8 @@ use crate::{
     AdvanceRetentionResponse, CheckpointId, CreateCheckpointOptions, CreateCheckpointResponse,
     DisableGramsIndexResponse, EnableGramsIndexResponse, FlushWalResponse, GcConfig, GcReport,
     MaintenanceTickOptions, MaintenanceTickResult, NamespaceId, NamespaceStatusResponse,
-    ReleaseCheckpointResponse, Result, RuntimeCacheConfig, RuntimeCacheStats, RuntimeError,
-    SharedObjectStore, StoreConfig, TraceMode, TraceStoreKind,
+    ReleaseCheckpointResponse, RepairNamespaceResponse, Result, RuntimeCacheConfig,
+    RuntimeCacheStats, RuntimeError, SharedObjectStore, StoreConfig, TraceMode, TraceStoreKind,
 };
 use std::sync::Arc;
 
@@ -18,8 +18,9 @@ use std::sync::Arc;
 ///
 /// `FsAdmin` owns the explicit maintenance surface: namespace status and
 /// inspection, checkpoint creation, retention advancement, garbage
-/// collection, and one-shot maintenance ticks. Every call runs in the
-/// caller's async task — the admin handle starts no workers of its own.
+/// collection, incomplete-installation repair, and one-shot maintenance
+/// ticks. Every call runs in the caller's async task — the admin handle starts
+/// no workers of its own.
 ///
 /// Admin operations that mutate durable control state carry the builder's
 /// `actor_id` for tracing, reports, and auditability.
@@ -156,6 +157,18 @@ impl FsAdmin {
         config: &GcConfig,
     ) -> Result<GcReport> {
         self.core.gc_namespace(namespace_id, config).await
+    }
+
+    /// Repairs one incomplete namespace installation explicitly.
+    ///
+    /// Completable post-head installs receive their missing completion
+    /// descriptor. Non-completable debris is reaped only after the fixed
+    /// repair safety window; younger debris is reported as in flight.
+    pub async fn repair_namespace(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<RepairNamespaceResponse> {
+        self.core.repair_namespace(namespace_id).await
     }
 
     /// Shuts down handle-owned background work. Admin calls are one-shot in

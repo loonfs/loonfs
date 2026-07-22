@@ -11,7 +11,7 @@
 //!   the writer schedules non-destructive maintenance after writes.
 //! - [`FsReader`] for read-only latest views.
 //! - [`FsAdmin`] for explicit maintenance: status, checkpoints, retention,
-//!   and garbage collection.
+//!   garbage collection, and incomplete-installation repair.
 //!
 //! ```no_run
 //! # async fn open(store_config: loonfs::StoreConfig) -> loonfs::Result<()> {
@@ -56,10 +56,10 @@ pub use loonfs_api::{
     FlushWalResponse, GrepMatch, GrepRequest, GrepResponse, InodeId, InodeKind,
     ListFileRevisionsResponse, ListPathEntriesResponse, ManifestId, NameKey, NamespaceId,
     NamespaceStatusResponse, NamespaceSummary, Page, PageRequest, PaginationPolicy,
-    ReleaseCheckpointResponse, RevisionNo, UploadId, FEATURE_NAMESPACES_CREATE,
-    FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK, FEATURE_QUERY_GREP,
-    FEATURE_UPLOADS_DIRECT_PUT, PROFILE_ADMIN_V0, PROFILE_CORE_V0, PROFILE_QUERY_V0,
-    PROTOCOL_VERSION,
+    ReleaseCheckpointResponse, RepairNamespaceOutcome, RepairNamespaceResponse, RevisionNo,
+    UploadId, FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK,
+    FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_PUT, PROFILE_ADMIN_V0, PROFILE_CORE_V0,
+    PROFILE_QUERY_V0, PROTOCOL_VERSION,
 };
 pub use loonfs_core::cache::MetadataTableCacheConfig;
 pub use loonfs_core::{

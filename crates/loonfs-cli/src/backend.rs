@@ -23,7 +23,7 @@ use loonfs_api::{
     FlushWalResponse, GcRequest, GcResponse, GrepRequest, GrepResponse, InodeId,
     ListFileRevisionsResponse, MaintenanceTickRequest, MaintenanceTickResponse, NamespaceId,
     NamespaceStatusResponse, NamespaceSummary, PaginationPolicy, ReleaseCheckpointResponse,
-    RevisionNo,
+    RepairNamespaceResponse, RevisionNo,
 };
 use loonfs_client::{Client, ClientConfig, NamespacePath};
 use std::sync::Arc;
@@ -476,6 +476,16 @@ impl Backend for EmbeddedBackend {
             .await
             .map(|report| gc_response_from_report(namespace_id.clone(), report))
             .map_err(map_runtime_error)
+    }
+
+    async fn repair_namespace(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<RepairNamespaceResponse, BackendError> {
+        self.admin
+            .repair_namespace(namespace_id)
+            .await
+            .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
     }
 
     async fn list_changes_page(

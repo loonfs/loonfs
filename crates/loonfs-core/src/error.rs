@@ -175,7 +175,7 @@ pub enum CoreError {
     NamespaceAlreadyExists { namespace_id: NamespaceId },
     #[error("namespace `{namespace_id}` is deleted")]
     NamespaceDeleted { namespace_id: NamespaceId },
-    #[error("namespace `{namespace_id}` is partially initialized")]
+    #[error("namespace `{namespace_id}` is partially initialized; run admin repair explicitly")]
     NamespacePartiallyInitialized { namespace_id: NamespaceId },
 }
 
