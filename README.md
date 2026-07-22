@@ -45,7 +45,7 @@ cargo build -p loonfs-server
 ./target/debug/loonfs-server --config configs/loonfs-server.local-fs.example.toml
 ```
 
-Commented example configs for every supported store live in [configs/](configs) (`local-fs`, `aws-s3`, `gcp-gcs`, `cloudflare-r2`, `azure-abs`). The required fields are `bind`, `writer_id`, `writer_version`, and a `[store]` block; everything else defaults. Connect a client:
+Commented example configs for every supported store live in [configs/](configs) (`local-fs`, `aws-s3`, `gcp-gcs`, `cloudflare-r2`, `azure-abs`). The required fields are `bind`, `writer_id`, `writer_version`, and a `[store]` block; everything else defaults. The optional `[grep]` table selects `mode = "disabled" | "embedded" | "serve_only"` (default `embedded`), worker intervals (`step_interval_ms = 1000`, `gc_interval_ms = 60000`), and the bounded build/fold policy shown in the local-fs example. Connect a client:
 
 ```bash
 export LOONFS_AUTH_TOKEN={auth_token}

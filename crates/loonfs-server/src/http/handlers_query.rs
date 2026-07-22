@@ -10,6 +10,7 @@ use loonfs_api::v0::{
 };
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
+use loonfs_api::FEATURE_QUERY_GREP;
 
 #[cfg_attr(
     feature = "openapi",
@@ -18,7 +19,7 @@ use loonfs_api::ApiError;
         path = "/v0/namespaces/{namespace}/query/grep",
         tag = "query",
         summary = "Content search",
-        description = "Searches file content with a regular expression, accelerated by the namespace's gram index (`index.grams`). Matches are verified against the real pattern and returned in ascending `(inode_id, byte_offset)` order; revisions committed after the index watermark are scanned exhaustively unless `allow_stale` skips them. Requires the index to be materialized on the namespace.",
+        description = "Searches file content with a regular expression, accelerated by the namespace's gram index (`index.grams`). Matches are verified against the real pattern and returned in ascending `(inode_id, byte_offset)` order; revisions committed after the index watermark are scanned exhaustively unless `allow_stale` skips them. Requires this deployment to serve grep and the index to be materialized on the namespace.",
         params(("namespace" = String, Path, description = "Namespace id")),
         request_body = GrepRequest,
         responses(
@@ -27,7 +28,7 @@ use loonfs_api::ApiError;
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
             (status = 410, description = "Namespace deleted", body = ApiError),
-            (status = 501, description = "The gram index is not materialized on this namespace", body = ApiError),
+            (status = 501, description = "Grep serving is disabled or the gram index is not materialized on this namespace", body = ApiError),
             (status = 503, description = "The index trails the head past the scan budget", body = ApiError)
         )
     )
@@ -48,6 +49,18 @@ pub(super) async fn grep(
     Ok(Json(response))
 }
 
+/// Uniform absent-capability response for every grep-owned HTTP operation.
+pub(super) async fn grep_not_supported(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiResponseError> {
+    authorize(&state.config, &headers)?;
+    Err(ApiResponseError::not_supported(
+        FEATURE_QUERY_GREP,
+        "grep is disabled for this deployment; set `[grep].mode` to `embedded` or `serve_only`",
+    ))
+}
+
 #[cfg_attr(
     feature = "openapi",
     utoipa::path(
@@ -55,12 +68,13 @@ pub(super) async fn grep(
         path = "/v0/admin/namespaces/{namespace}/index/grams/enable",
         tag = "admin",
         summary = "Enable the gram index",
-        description = "Publishes the namespace's index.grams feature entry. Backfill over existing revisions starts on the next maintenance tick and the index stays current from then on. Idempotent.",
+        description = "Publishes the namespace's index.grams feature entry. Backfill over existing revisions starts on the next grep worker sweep and the index stays current from then on. Idempotent.",
         params(("namespace" = String, Path, description = "Namespace id")),
         responses(
             (status = 200, description = "Feature entry published or already present", body = EnableGramsIndexResponse),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
+            (status = 501, description = "Grep serving is disabled for this deployment", body = ApiError),
             (status = 503, description = "Lost a manifest publication race; retry", body = ApiError)
         )
     )
@@ -93,6 +107,7 @@ pub(super) async fn enable_grams_index(
             (status = 200, description = "Feature entry removed or already absent", body = DisableGramsIndexResponse),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
+            (status = 501, description = "Grep serving is disabled for this deployment", body = ApiError),
             (status = 503, description = "Lost a manifest publication race; retry", body = ApiError)
         )
     )

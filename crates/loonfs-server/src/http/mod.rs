@@ -37,7 +37,7 @@ use self::handlers_namespace::{
     advance_retention, create_checkpoint, create_namespace, delete_namespace, flush_wal,
     fork_namespace, gc_namespace, maintenance_tick, namespace_status, release_checkpoint,
 };
-use self::handlers_query::{disable_grams_index, enable_grams_index, grep};
+use self::handlers_query::{disable_grams_index, enable_grams_index, grep, grep_not_supported};
 use self::handlers_uploads::{begin_upload, complete_upload, upload_content};
 use crate::config::{ServerConfig, ServerConfigError};
 use axum::async_trait;
@@ -59,6 +59,7 @@ use loonfs::{
     TraceStoreKind,
 };
 use loonfs_api::NamespaceId;
+use loonfs_grep::{GrepWorker, GrepWorkerLoop, GrepWorkerLoopShutdown};
 use loonfs_objectstore::presign::ObjectTransferIssuer;
 use std::convert::Infallible;
 use std::ffi::OsString;
@@ -117,9 +118,8 @@ struct AppState {
     download_permits: Arc<Semaphore>,
 }
 
-/// Everything the app spawns that must settle at shutdown: the publisher
-/// registry's in-flight publications and the writer's scheduled background
-/// maintenance.
+/// Everything the app spawns that must settle at shutdown: the optional
+/// embedded grep loop, publisher publications, and writer maintenance.
 ///
 /// [`serve`] drives this itself. A host embedding the [`Router`] on its own
 /// HTTP server must call [`ServerLifecycle::shutdown`] after its listener
@@ -128,17 +128,55 @@ struct AppState {
 pub struct ServerLifecycle {
     writer: FsWriter,
     publisher: PublisherRegistry,
+    grep: Option<GrepBackgroundWork>,
 }
 
 impl ServerLifecycle {
-    /// Settles the app's spawned work, in dependency order: publisher
-    /// admission closes (later submissions fail with `shutting_down`),
-    /// admitted publications finish, then writer-scheduled maintenance
-    /// settles. Panicked tasks surface as the returned error.
+    /// Settles the app's spawned work in dependency order: the grep loop
+    /// stops between bounded steps, publisher admission closes, admitted
+    /// publications finish, then writer-scheduled maintenance settles.
+    /// Panicked tasks surface as the returned error.
     pub async fn shutdown(self) -> Result<(), loonfs::RuntimeError> {
+        if let Some(grep) = self.grep {
+            grep.shutdown().await?;
+        }
         self.publisher.close_admission();
         self.publisher.drain().await?;
         self.writer.shutdown_background().await
+    }
+}
+
+/// One server-owned grep loop and the stop handle that lets shutdown join it.
+struct GrepBackgroundWork {
+    shutdown: GrepWorkerLoopShutdown,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl GrepBackgroundWork {
+    fn spawn(config: &ServerConfig, store: SharedObjectStore) -> Result<Self, ServerConfigError> {
+        let worker = GrepWorker::new(
+            store.clone(),
+            format!("{}-grep", config.writer_id),
+            loonfs_api::generated_id("wrs"),
+            config.writer_version.clone(),
+        );
+        let worker_loop = GrepWorkerLoop::new(worker, store, config.grep.worker_config());
+        let shutdown = worker_loop.shutdown_handle();
+        let runtime = tokio::runtime::Handle::try_current().map_err(|error| {
+            ServerConfigError::InvalidField {
+                field: "runtime",
+                reason: format!("server app must be built inside a Tokio runtime: {error}"),
+            }
+        })?;
+        let task = runtime.spawn(worker_loop.run());
+        Ok(Self { shutdown, task })
+    }
+
+    async fn shutdown(self) -> Result<(), loonfs::RuntimeError> {
+        self.shutdown.request_shutdown();
+        self.task.await.map_err(|error| {
+            loonfs::RuntimeError::RuntimeTask(format!("grep worker task failed: {error}"))
+        })
     }
 }
 
@@ -184,12 +222,18 @@ async fn app_with_store_and_transfer_issuer(
     store: SharedObjectStore,
     transfer_issuer: Option<Arc<dyn ObjectTransferIssuer>>,
 ) -> Result<(Router, ServerLifecycle, AppState), ServerConfigError> {
-    let (writer, reader, admin) = build_handles(&config, store).await?;
+    let (writer, reader, admin) = build_handles(&config, store.clone()).await?;
+    let grep = if config.grep.mode.runs_worker() {
+        Some(GrepBackgroundWork::spawn(&config, store)?)
+    } else {
+        None
+    };
     let config = Arc::new(config);
     let publisher = writer.publisher();
     let lifecycle = ServerLifecycle {
         writer: writer.clone(),
         publisher: publisher.clone(),
+        grep,
     };
     let state = AppState {
         upload_permits: Arc::new(Semaphore::new(
@@ -215,6 +259,21 @@ fn router(state: AppState) -> Router {
     let max_upload_bytes = usize::try_from(state.config.max_upload_bytes).unwrap_or(usize::MAX);
     let max_commit_body_bytes =
         usize::try_from(state.config.max_commit_body_bytes).unwrap_or(usize::MAX);
+    let grep_route = if state.config.grep.mode.serves_grep() {
+        post(grep)
+    } else {
+        post(grep_not_supported)
+    };
+    let enable_grep_route = if state.config.grep.mode.serves_grep() {
+        post(enable_grams_index)
+    } else {
+        post(grep_not_supported)
+    };
+    let disable_grep_route = if state.config.grep.mode.serves_grep() {
+        post(disable_grams_index)
+    } else {
+        post(grep_not_supported)
+    };
     Router::new()
         .route("/health", get(health))
         .route("/health/ready", get(health_ready))
@@ -236,14 +295,14 @@ fn router(state: AppState) -> Router {
             "/v0/namespaces/:namespace/filesystem/content",
             get(get_content),
         )
-        .route("/v0/namespaces/:namespace/query/grep", post(grep))
+        .route("/v0/namespaces/:namespace/query/grep", grep_route)
         .route(
             "/v0/admin/namespaces/:namespace/index/grams/enable",
-            post(enable_grams_index),
+            enable_grep_route,
         )
         .route(
             "/v0/admin/namespaces/:namespace/index/grams/disable",
-            post(disable_grams_index),
+            disable_grep_route,
         )
         .route(
             "/v0/namespaces/:namespace/filesystem/revisions",
@@ -371,7 +430,6 @@ async fn build_handles_with_metrics_jsonl_path(
         .max_read_content_bytes(config.max_download_bytes)
         .max_concurrent_maintenance(config.max_concurrent_maintenance)
         .runtime_cache(config.runtime_cache_config())
-        .gram_index_build(config.gram_index_build_policy())
         .trace_mode(TraceMode::Remote)
         .trace_store_kind(trace_store_kind);
     if let Some(recorder) = metrics_recorder.clone() {
@@ -388,7 +446,6 @@ async fn build_handles_with_metrics_jsonl_path(
         // reuses blocks reader traffic already decoded instead of
         // populating a second, default-sized cache.
         .runtime_cache(config.runtime_cache_config())
-        .gram_index_build(config.gram_index_build_policy())
         .shared_metadata_table_cache(&writer)
         .trace_mode(TraceMode::Remote)
         .trace_store_kind(trace_store_kind);
@@ -436,9 +493,9 @@ pub enum ServeError {
 }
 
 /// Serves until ctrl-c or SIGTERM, then shuts down gracefully: the listener
-/// stops accepting, in-flight requests drain, publisher admission closes
-/// and admitted publications finish, and the writer's scheduled background
-/// maintenance settles before this returns.
+/// stops accepting, in-flight requests drain, the embedded grep loop stops,
+/// publisher work finishes, and writer maintenance settles before this
+/// returns.
 pub async fn serve(config: ServerConfig) -> Result<(), ServeError> {
     serve_with_shutdown(config, shutdown_signal()).await
 }
@@ -466,10 +523,10 @@ async fn serve_on(
         .with_graceful_shutdown(shutdown)
         .await
         .map_err(ServeError::Serve)?;
-    // The listener has drained; close publisher admission, finish admitted
-    // publications, then settle writer-owned maintenance so neither a
-    // publication nor a checkpoint tick is torn down mid-write. Panicked
-    // tasks surface here rather than disappearing with the process.
+    // The listener has drained; stop grep between bounded steps, close
+    // publisher admission, finish admitted publications, then settle
+    // writer-owned maintenance. Panicked tasks surface here rather than
+    // disappearing with the process.
     lifecycle.shutdown().await.map_err(ServeError::Shutdown)
 }
 

@@ -1,7 +1,8 @@
 //! Server configuration: strict TOML decoding of the listen address,
 //! store, and runtime cache overrides.
 
-use loonfs::{GramIndexBuildPolicy, RuntimeCacheConfig};
+use loonfs::RuntimeCacheConfig;
+use loonfs_grep::GrepWorkerConfig;
 use loonfs_objectstore::{ConfiguredObjectStore, SecretString, StoreConfigError};
 use serde::Deserialize;
 use std::env;
@@ -39,13 +40,9 @@ pub struct ServerConfig {
     pub writer_version: String,
     #[serde(default)]
     pub runtime_cache: RuntimeCacheConfigOverrides,
-    /// Budgets for the gram index build and fold steps run by this
-    /// server's maintenance (background catch-up after writes and explicit
-    /// ticks). Omitted fields keep the runtime defaults; bulk backfills
-    /// typically raise the per-step budgets so each tick indexes more
-    /// files per manifest publish. Zero budgets are rejected at startup.
+    /// Grep serving mode plus worker pacing and bounded-step budgets.
     #[serde(default)]
-    pub gram_index_build: GramIndexBuildPolicyOverrides,
+    pub grep: GrepConfig,
     /// Whether the server writer schedules maintenance (checkpoints and
     /// reorganization folds) after writes that cross the WAL-tail
     /// threshold. On by default; set `false` on write-serving nodes when a
@@ -152,17 +149,77 @@ pub struct RuntimeCacheConfigOverrides {
     pub metadata_table_cache_max_decoded_bytes: Option<usize>,
 }
 
-/// Optional `[gram_index_build]` overrides, field-for-field the budgets of
-/// [`GramIndexBuildPolicy`]; omitted fields keep that policy's defaults.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct GramIndexBuildPolicyOverrides {
-    pub max_files_per_step: Option<usize>,
-    pub max_content_bytes_per_step: Option<u64>,
-    pub max_rows_per_segment: Option<usize>,
-    pub max_l0_runs: Option<usize>,
-    pub max_mid_runs: Option<usize>,
-    pub max_fold_rows_per_step: Option<usize>,
+/// Whether this server serves grep and owns grep background maintenance.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GrepMode {
+    /// Neither serve grep nor run its worker.
+    Disabled,
+    /// Serve grep and run the shared worker loop in this server process.
+    #[default]
+    Embedded,
+    /// Serve grep while an external process owns worker maintenance.
+    ServeOnly,
+}
+
+impl GrepMode {
+    /// Whether grep query and index-administration endpoints are supported.
+    pub fn serves_grep(self) -> bool {
+        self != Self::Disabled
+    }
+
+    /// Whether this server process owns the grep worker loop.
+    pub fn runs_worker(self) -> bool {
+        self == Self::Embedded
+    }
+}
+
+/// The server's `[grep]` table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GrepConfig {
+    pub mode: GrepMode,
+    pub step_interval_ms: u64,
+    pub gc_interval_ms: u64,
+    pub max_files_per_step: usize,
+    pub max_content_bytes_per_step: u64,
+    pub max_rows_per_segment: usize,
+    pub max_l0_runs: usize,
+    pub max_mid_runs: usize,
+    pub max_fold_rows_per_step: usize,
+}
+
+impl GrepConfig {
+    /// Returns the shared worker-loop configuration represented by this table.
+    pub fn worker_config(self) -> GrepWorkerConfig {
+        GrepWorkerConfig {
+            step_interval_ms: self.step_interval_ms,
+            gc_interval_ms: self.gc_interval_ms,
+            max_files_per_step: self.max_files_per_step,
+            max_content_bytes_per_step: self.max_content_bytes_per_step,
+            max_rows_per_segment: self.max_rows_per_segment,
+            max_l0_runs: self.max_l0_runs,
+            max_mid_runs: self.max_mid_runs,
+            max_fold_rows_per_step: self.max_fold_rows_per_step,
+        }
+    }
+}
+
+impl Default for GrepConfig {
+    fn default() -> Self {
+        let worker = GrepWorkerConfig::default();
+        Self {
+            mode: GrepMode::Embedded,
+            step_interval_ms: worker.step_interval_ms,
+            gc_interval_ms: worker.gc_interval_ms,
+            max_files_per_step: worker.max_files_per_step,
+            max_content_bytes_per_step: worker.max_content_bytes_per_step,
+            max_rows_per_segment: worker.max_rows_per_segment,
+            max_l0_runs: worker.max_l0_runs,
+            max_mid_runs: worker.max_mid_runs,
+            max_fold_rows_per_step: worker.max_fold_rows_per_step,
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -220,29 +277,6 @@ impl ServerConfig {
             config.metadata_table_cache.max_decoded_bytes = value;
         }
         config
-    }
-
-    pub fn gram_index_build_policy(&self) -> GramIndexBuildPolicy {
-        let mut policy = GramIndexBuildPolicy::default();
-        if let Some(value) = self.gram_index_build.max_files_per_step {
-            policy.max_files_per_step = value;
-        }
-        if let Some(value) = self.gram_index_build.max_content_bytes_per_step {
-            policy.max_content_bytes_per_step = value;
-        }
-        if let Some(value) = self.gram_index_build.max_rows_per_segment {
-            policy.max_rows_per_segment = value;
-        }
-        if let Some(value) = self.gram_index_build.max_l0_runs {
-            policy.max_l0_runs = value;
-        }
-        if let Some(value) = self.gram_index_build.max_mid_runs {
-            policy.max_mid_runs = value;
-        }
-        if let Some(value) = self.gram_index_build.max_fold_rows_per_step {
-            policy.max_fold_rows_per_step = value;
-        }
-        policy
     }
 
     pub fn object_store(&self) -> Result<ConfiguredObjectStore, ServerConfigError> {
@@ -321,10 +355,10 @@ impl ServerConfig {
                     .to_owned(),
             });
         }
-        if let Some(budget) = self.gram_index_build_policy().zero_budget_field() {
+        if let Err(error) = self.grep.worker_config().validate() {
             return Err(ServerConfigError::InvalidField {
-                field: "gram_index_build",
-                reason: format!("`{budget}` must be greater than zero"),
+                field: "grep",
+                reason: error.to_string(),
             });
         }
         require_non_empty("content_token_secret", self.content_token_secret.expose())?;
@@ -347,10 +381,17 @@ impl From<StoreConfigError> for ServerConfigError {
 
 pub fn load_server_config(path: impl AsRef<Path>) -> Result<ServerConfig, ServerConfigError> {
     let bytes = fs::read(path.as_ref()).map_err(|err| ServerConfigError::Io(err.to_string()))?;
-    let mut config: ServerConfig = toml::from_str(
-        std::str::from_utf8(&bytes).map_err(|err| ServerConfigError::Decode(err.to_string()))?,
-    )
-    .map_err(|err| ServerConfigError::Decode(err.to_string()))?;
+    let source =
+        std::str::from_utf8(&bytes).map_err(|err| ServerConfigError::Decode(err.to_string()))?;
+    let table: toml::Table =
+        toml::from_str(source).map_err(|err| ServerConfigError::Decode(err.to_string()))?;
+    if table.contains_key("gram_index_build") {
+        return Err(ServerConfigError::Decode(
+            "removed `[gram_index_build]` table; move these fields under `[grep]`".to_owned(),
+        ));
+    }
+    let mut config: ServerConfig =
+        toml::from_str(source).map_err(|err| ServerConfigError::Decode(err.to_string()))?;
     config.apply_env_fallbacks(
         env::var(AUTH_TOKEN_ENV).ok(),
         env::var(CONTENT_TOKEN_SECRET_ENV).ok(),
@@ -828,7 +869,7 @@ auth_token = "dev-token"
 writer_id = "loonfs-server"
 writer_version = "loonfs-server/0.1.0"
 
-[gram_index_build]
+[grep]
 max_fold_rows_per_step = 0
 
 [store]
@@ -837,7 +878,7 @@ root = "/tmp/loonfs-server"
 "#,
         );
         let error = load_server_config(&path).expect_err("zero gram budget must be rejected");
-        assert_invalid_field(error, "gram_index_build");
+        assert_invalid_field(error, "grep");
     }
 
     #[test]
@@ -963,14 +1004,14 @@ kind = "local-fs"
 root = "/tmp/loonfs-server"
 "#,
         );
-        let gram_index_build_level = write_config(
+        let grep_level = write_config(
             r#"
 bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 writer_id = "loonfs-server"
 writer_version = "loonfs-server/0.1.0"
 
-[gram_index_build]
+[grep]
 max_files_per_stepp = 3
 
 [store]
@@ -983,7 +1024,7 @@ root = "/tmp/loonfs-server"
             (top_level, "lease_duration"),
             (store_level, "key_prefiks"),
             (runtime_cache_level, "max_cached_namespacs"),
-            (gram_index_build_level, "max_files_per_stepp"),
+            (grep_level, "max_files_per_stepp"),
         ] {
             let error = load_server_config(&path).expect_err("typo'd key must be rejected");
             match error {
@@ -1108,7 +1149,7 @@ root = "/tmp/loonfs-server"
     }
 
     #[test]
-    fn load_uses_default_gram_index_build_policy_when_omitted() {
+    fn load_uses_embedded_grep_defaults_when_table_is_omitted() {
         let path = write_config(
             r#"
 bind = "127.0.0.1:9400"
@@ -1123,14 +1164,16 @@ root = "/tmp/loonfs-server"
         );
 
         let config = load_server_config(&path).expect("load config");
+        assert_eq!(config.grep, super::GrepConfig::default());
+        assert_eq!(config.grep.mode, super::GrepMode::Embedded);
         assert_eq!(
-            config.gram_index_build_policy(),
+            config.grep.worker_config().build_policy(),
             loonfs::GramIndexBuildPolicy::default()
         );
     }
 
     #[test]
-    fn load_applies_gram_index_build_overrides() {
+    fn load_applies_grep_mode_pacing_and_policy() {
         let path = write_config(
             r#"
 bind = "127.0.0.1:9400"
@@ -1138,7 +1181,10 @@ auth_token = "dev-token"
 writer_id = "loonfs-server"
 writer_version = "loonfs-server/0.1.0"
 
-[gram_index_build]
+[grep]
+mode = "serve_only"
+step_interval_ms = 25
+gc_interval_ms = 500
 max_files_per_step = 4096
 max_content_bytes_per_step = 536870912
 max_rows_per_segment = 131072
@@ -1152,9 +1198,11 @@ root = "/tmp/loonfs-server"
 "#,
         );
 
-        let policy = load_server_config(&path)
-            .expect("load config")
-            .gram_index_build_policy();
+        let grep = load_server_config(&path).expect("load config").grep;
+        assert_eq!(grep.mode, super::GrepMode::ServeOnly);
+        assert_eq!(grep.step_interval_ms, 25);
+        assert_eq!(grep.gc_interval_ms, 500);
+        let policy = grep.worker_config().build_policy();
         assert_eq!(policy.max_files_per_step, 4096);
         assert_eq!(policy.max_content_bytes_per_step, 536_870_912);
         assert_eq!(policy.max_rows_per_segment, 131_072);
@@ -1164,8 +1212,8 @@ root = "/tmp/loonfs-server"
     }
 
     #[test]
-    fn gram_index_build_overrides_apply_verbatim() {
-        // The policy handed to the runtime is exactly the configured one:
+    fn grep_policy_overrides_apply_verbatim() {
+        // The policy handed to the worker is exactly the configured one:
         // zero budgets are rejected by validation, never rewritten.
         let path = write_config(
             r#"
@@ -1174,7 +1222,7 @@ auth_token = "dev-token"
 writer_id = "loonfs-server"
 writer_version = "loonfs-server/0.1.0"
 
-[gram_index_build]
+[grep]
 max_files_per_step = 1024
 max_l0_runs = 3
 
@@ -1186,7 +1234,9 @@ root = "/tmp/loonfs-server"
 
         let policy = load_server_config(&path)
             .expect("load config")
-            .gram_index_build_policy();
+            .grep
+            .worker_config()
+            .build_policy();
         assert_eq!(policy.max_files_per_step, 1024);
         assert_eq!(policy.max_l0_runs, 3);
         assert_eq!(
@@ -1194,6 +1244,34 @@ root = "/tmp/loonfs-server"
             loonfs::GramIndexBuildPolicy::default().max_mid_runs,
             "untouched budgets keep their defaults"
         );
+    }
+
+    #[test]
+    fn removed_gram_index_build_table_names_grep_replacement() {
+        let path = write_config(
+            r#"
+bind = "127.0.0.1:9400"
+auth_token = "dev-token"
+writer_id = "loonfs-server"
+writer_version = "loonfs-server/0.1.0"
+
+[gram_index_build]
+max_files_per_step = 4
+
+[store]
+kind = "local-fs"
+root = "/tmp/loonfs-server"
+"#,
+        );
+
+        let error = load_server_config(&path).expect_err("removed table must fail");
+        match error {
+            ServerConfigError::Decode(message) => {
+                assert!(message.contains("[gram_index_build]"), "{message}");
+                assert!(message.contains("[grep]"), "{message}");
+            }
+            other => panic!("expected decode error, got {other:?}"),
+        }
     }
 
     #[test]

@@ -48,11 +48,15 @@ writer_version = "loonfs-server/0.1.0"
 # Decoded-byte budget for the metadata table cache; unlimited by default.
 #metadata_table_cache_max_decoded_bytes = 268435456
 
-# Optional gram index build budgets; omitted fields keep the runtime
-# defaults. Each maintenance tick runs one build step and one fold step
-# under these budgets — bulk backfills raise the per-step budgets so a
-# tick indexes more files per manifest publish.
-#[gram_index_build]
+# Grep defaults to embedded: this server serves queries and owns background
+# indexing. `disabled` serves uniform `not_supported` responses and advertises
+# no `query.grep` feature or limits; `serve_only` serves an index maintained by
+# an external `loonfs-grep` process.
+#[grep]
+#mode = "embedded"
+#step_interval_ms = 1000
+#gc_interval_ms = 60000
+# Bounded build/fold budgets; every value must be greater than zero.
 #max_files_per_step = 256
 #max_content_bytes_per_step = 67108864
 #max_rows_per_segment = 65536

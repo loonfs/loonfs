@@ -76,6 +76,8 @@ use loonfs::{
 use loonfs_api::ErrorCode;
 use loonfs_api::{ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior, NamespaceId};
 use loonfs_client::{Client, ClientConfig, ClientError, MutationOptions, NamespacePath};
+use loonfs_grep::keyspace::root_key as grep_root_key;
+use loonfs_grep::GrepWorker;
 use loonfs_objectstore::keys::wal_head;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{
@@ -85,6 +87,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tempfile::tempdir;
+use tokio::sync::Notify;
 
 #[derive(Debug)]
 struct StaleHeadOnceStore {
@@ -135,6 +138,74 @@ impl ObjectStore for StaleHeadOnceStore {
                 let _ = self.inner.put_overwrite(key, existing).await?;
             }
         }
+        self.inner.put(key, bytes, mode).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        self.inner.delete(key).await
+    }
+
+    fn list_prefix_stream(
+        &self,
+        prefix: &str,
+    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+        self.inner.list_prefix_stream(prefix)
+    }
+}
+
+#[derive(Debug)]
+struct BlockGrepRootOnceStore {
+    inner: LocalFsStore,
+    root_key: String,
+    armed: AtomicBool,
+    entered: Notify,
+    release: Notify,
+}
+
+impl BlockGrepRootOnceStore {
+    fn new(root: impl AsRef<Path>, namespace_id: &NamespaceId) -> Self {
+        Self {
+            inner: LocalFsStore::new(root.as_ref()).expect("construct local store"),
+            root_key: grep_root_key(namespace_id),
+            armed: AtomicBool::new(false),
+            entered: Notify::new(),
+            release: Notify::new(),
+        }
+    }
+
+    fn arm(&self) {
+        self.armed.store(true, Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl ObjectStore for BlockGrepRootOnceStore {
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head(key).await
+    }
+
+    async fn get(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<Option<Bytes>, ObjectStoreError> {
+        self.inner.get(key, range).await
+    }
+
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        if key == self.root_key && self.armed.swap(false, Ordering::SeqCst) {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        self.inner.get_with_metadata(key).await
+    }
+
+    async fn put(
+        &self,
+        key: &str,
+        bytes: Bytes,
+        mode: PutMode,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
         self.inner.put(key, bytes, mode).await
     }
 
@@ -231,6 +302,49 @@ async fn graceful_shutdown_drains_requests_and_settles_the_writer() {
         std::net::TcpStream::connect(addr).is_err(),
         "listener should refuse connections after shutdown"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn embedded_shutdown_drains_an_active_grep_step() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace_id("grep-shutdown");
+    let blocking_store = Arc::new(BlockGrepRootOnceStore::new(temp_dir.path(), &namespace_id));
+    let store = blocking_store.clone() as SharedObjectStore;
+    let writer = test_runtime(store.clone(), "grep-shutdown-seed").await;
+    writer
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
+    GrepWorker::new(
+        store.clone(),
+        "grep-shutdown-enable",
+        "grep-shutdown-enable-session",
+        "grep-shutdown-enable/0.1",
+    )
+    .enable(&namespace_id)
+    .await
+    .expect("enable grep");
+
+    blocking_store.arm();
+    let mut config = test_config(temp_dir.path(), "grep-shutdown-server");
+    config.grep.step_interval_ms = 1;
+    let (_router, lifecycle, _state) =
+        super::app_with_store_and_transfer_issuer(config, store, None)
+            .await
+            .expect("build app");
+    blocking_store.entered.notified().await;
+
+    let shutdown = tokio::runtime::Handle::current().spawn(lifecycle.shutdown());
+    tokio::task::yield_now().await;
+    assert!(
+        !shutdown.is_finished(),
+        "shutdown must wait for the active bounded grep step"
+    );
+    blocking_store.release.notify_one();
+    shutdown
+        .await
+        .expect("join shutdown")
+        .expect("drain grep step");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1303,7 +1417,7 @@ fn test_config(root: &Path, writer_id: &str) -> ServerConfig {
         writer_id: writer_id.to_owned(),
         writer_version: format!("{writer_id}/0.1.0"),
         runtime_cache: RuntimeCacheConfigOverrides::default(),
-        gram_index_build: crate::config::GramIndexBuildPolicyOverrides::default(),
+        grep: crate::config::GrepConfig::default(),
         background_maintenance: true,
         min_publish_interval_ms: 0,
         max_upload_bytes: 256 * 1024 * 1024,

@@ -4,18 +4,25 @@
 //! of the namespace manifest. A missing or corrupt grep root disables grep
 //! work for that namespace; it must never affect core filesystem operation.
 //! Query execution reads a caller-provided core snapshot. [`GrepWorker`]
-//! owns explicitly driven storage maintenance; its standalone process arrives
-//! in a later change.
+//! owns explicitly driven storage maintenance, while [`GrepWorkerLoop`]
+//! supplies the shared all-namespaces driving loop used by server-embedded
+//! and standalone hosts.
 
 mod cache;
 pub mod codec;
+mod config;
 mod index_read;
 pub mod keyspace;
 mod query;
 pub mod root;
 mod service;
 mod worker;
+mod worker_loop;
 
+pub use config::{
+    GrepWorkerConfig, GrepWorkerConfigError, DEFAULT_GREP_GC_INTERVAL_MS,
+    DEFAULT_GREP_STEP_INTERVAL_MS,
+};
 pub use service::{
     GrepIndexSnapshot, GrepService, DEFAULT_GREP_PAGE_LIMIT, MAX_GREP_PAGE_LIMIT,
     MAX_GREP_SCAN_FILES, MAX_GREP_TAIL_FILES,
@@ -25,15 +32,6 @@ pub use worker::{
     GrepFoldOutcome, GrepFoldReport, GrepGcReport, GrepWorker, GREP_BACKFILL_CHECKPOINT_TTL_MS,
     GREP_GC_GRACE_WINDOW_MS,
 };
-
-use std::io::Write as _;
-use std::process::ExitCode;
-
-/// Entry point for the standalone `loonfs-grep` binary.
-pub fn main() -> ExitCode {
-    let _ = writeln!(
-        std::io::stderr().lock(),
-        "usage: loonfs-grep (the standalone worker arrives in a later change)"
-    );
-    ExitCode::FAILURE
-}
+pub use worker_loop::{
+    GrepSweepReport, GrepWorkerLoop, GrepWorkerLoopShutdown, GrepWorkerRunOnceError,
+};

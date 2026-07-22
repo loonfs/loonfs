@@ -550,7 +550,7 @@ impl Client {
     }
 
     /// Publishes the `index.grams` feature entry (admin plane); backfill
-    /// runs through maintenance ticks. Idempotent.
+    /// runs through grep worker sweeps. Idempotent.
     pub fn enable_grams_index(
         &self,
         namespace_id: &NamespaceId,
