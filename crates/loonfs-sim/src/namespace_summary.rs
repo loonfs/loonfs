@@ -1,4 +1,7 @@
+//! Namespace object inventory for deterministic oracle assertions.
+
 use loonfs_api::NamespaceId;
+use loonfs_grep::keyspace::{parse_key as parse_grep_key, GrepKeyKind};
 use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily, ObjectLayout};
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 use serde::{Deserialize, Serialize};
@@ -11,8 +14,9 @@ pub struct SimNamespaceObjectSummary {
     pub wal_objects: usize,
     pub manifest_objects: usize,
     pub compacted_metadata_objects: usize,
-    pub gc_pin_objects: usize,
-    pub content_blob_count_hint: Option<usize>,
+    pub grep_root_objects: usize,
+    pub grep_manifest_objects: usize,
+    pub grep_segment_objects: usize,
 }
 
 pub async fn summarize_namespace_objects<S: ObjectStore + ?Sized>(
@@ -29,44 +33,54 @@ pub async fn summarize_namespace_objects<S: ObjectStore + ?Sized>(
         wal_objects: 0,
         manifest_objects: 0,
         compacted_metadata_objects: 0,
-        gc_pin_objects: 0,
-        content_blob_count_hint: None,
+        grep_root_objects: 0,
+        grep_manifest_objects: 0,
+        grep_segment_objects: 0,
     };
 
     for key in keys {
-        let Some(parsed) = parse_object_key(&key) else {
+        if let Some(parsed) = parse_object_key(&key) {
+            if parsed.owner_namespace_id() != Some(namespace_id.as_str()) {
+                continue;
+            }
+            summary.namespace_objects += 1;
+            match parsed.family() {
+                DurableObjectFamily::WalHead => {
+                    summary.control_objects += 1;
+                }
+                DurableObjectFamily::WalSegment => {
+                    summary.wal_objects += 1;
+                }
+                DurableObjectFamily::MetadataManifest => {
+                    summary.manifest_objects += 1;
+                }
+                DurableObjectFamily::MetadataTable => {
+                    summary.compacted_metadata_objects += 1;
+                }
+                DurableObjectFamily::NamespaceConfig
+                | DurableObjectFamily::WalFloor
+                | DurableObjectFamily::WalIndex
+                | DurableObjectFamily::WalIndexRun
+                | DurableObjectFamily::MetadataRoot
+                | DurableObjectFamily::CheckpointRecord
+                | DurableObjectFamily::UploadSession
+                | DurableObjectFamily::ContentStoreDescriptor
+                | DurableObjectFamily::ContentBlob => {}
+            }
+            continue;
+        }
+
+        let Some(parsed) = parse_grep_key(&key) else {
             continue;
         };
-        if parsed.owner_namespace_id() != Some(namespace_id.as_str()) {
+        if parsed.namespace_id != *namespace_id {
             continue;
         }
         summary.namespace_objects += 1;
-        match parsed.family() {
-            DurableObjectFamily::WalHead => {
-                summary.control_objects += 1;
-            }
-            DurableObjectFamily::WalSegment => {
-                summary.wal_objects += 1;
-            }
-            DurableObjectFamily::MetadataManifest => {
-                summary.manifest_objects += 1;
-            }
-            DurableObjectFamily::MetadataTable => {
-                summary.compacted_metadata_objects += 1;
-            }
-            DurableObjectFamily::Pin => {
-                summary.gc_pin_objects += 1;
-            }
-            DurableObjectFamily::NamespaceConfig
-            | DurableObjectFamily::WalFloor
-            | DurableObjectFamily::WalIndex
-            | DurableObjectFamily::WalIndexRun
-            | DurableObjectFamily::MetadataRoot
-            | DurableObjectFamily::CheckpointRecord
-            | DurableObjectFamily::IndexSegment
-            | DurableObjectFamily::UploadSession
-            | DurableObjectFamily::ContentStoreDescriptor
-            | DurableObjectFamily::ContentBlob => {}
+        match parsed.kind {
+            GrepKeyKind::Root => summary.grep_root_objects += 1,
+            GrepKeyKind::Manifest { .. } => summary.grep_manifest_objects += 1,
+            GrepKeyKind::Segment { .. } => summary.grep_segment_objects += 1,
         }
     }
 
@@ -77,10 +91,13 @@ pub async fn summarize_namespace_objects<S: ObjectStore + ?Sized>(
 mod tests {
     use super::*;
     use bytes::Bytes;
+    use loonfs_api::IndexSegmentId;
+    use loonfs_grep::keyspace::{manifest_key, root_key, segment_key};
+    use loonfs_grep::root::GrepManifestId;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
 
     #[tokio::test]
-    async fn namespace_object_summary_counts_known_key_families() {
+    async fn namespace_object_summary_counts_core_and_grep_key_families() {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let store = LocalFsStore::new(temp_dir.path()).expect("local store");
         let namespace_id = NamespaceId::parse("sim").expect("valid namespace id");
@@ -106,19 +123,38 @@ mod tests {
             .await
             .expect("wal");
         store
+            .put_overwrite(&root_key(&namespace_id), Bytes::from_static(b"grep root"))
+            .await
+            .expect("grep root");
+        let grep_manifest_id = GrepManifestId::parse(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .expect("valid grep manifest id");
+        store
             .put_overwrite(
-                layout.pin(namespace_id.as_str(), "pin_abc").as_str(),
-                Bytes::from_static(b"pin"),
+                &manifest_key(&namespace_id, &grep_manifest_id),
+                Bytes::from_static(b"grep manifest"),
             )
             .await
-            .expect("pin");
+            .expect("grep manifest");
+        let grep_segment_id = IndexSegmentId::parse("idx_00000000000000000000000000000001")
+            .expect("valid grep segment id");
+        store
+            .put_overwrite(
+                &segment_key(&namespace_id, &grep_segment_id),
+                Bytes::from_static(b"grep segment"),
+            )
+            .await
+            .expect("grep segment");
 
         let summary = summarize_namespace_objects(&store, &namespace_id)
             .await
             .expect("summary");
-        assert_eq!(summary.namespace_objects, 3);
+        assert_eq!(summary.namespace_objects, 5);
         assert_eq!(summary.control_objects, 1);
         assert_eq!(summary.wal_objects, 1);
-        assert_eq!(summary.gc_pin_objects, 1);
+        assert_eq!(summary.grep_root_objects, 1);
+        assert_eq!(summary.grep_manifest_objects, 1);
+        assert_eq!(summary.grep_segment_objects, 1);
     }
 }

@@ -1,3 +1,5 @@
+//! Simulation scenario configuration and execution contract.
+
 use crate::failure::SimFailure;
 use crate::rng::SimSeed;
 use serde::{Deserialize, Serialize};

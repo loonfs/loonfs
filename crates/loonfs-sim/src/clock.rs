@@ -1,3 +1,5 @@
+//! Deterministic virtual clock primitives for simulation scenarios.
+
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 

@@ -106,12 +106,12 @@ pub struct GrepResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct EnableGramsIndexResponse {
-    /// Namespace the feature entry was published for.
+    /// Namespace whose grep root was enabled.
     pub namespace_id: NamespaceId,
     /// Backfill covers commits at or below this sequence; later commits
     /// arrive through WAL replay once backfill completes.
     pub built_through_seq: ChangeSeq,
-    /// True when the namespace already carried the feature entry.
+    /// True when the namespace already carried an enabled grep root.
     pub already_enabled: bool,
 }
 
@@ -119,9 +119,9 @@ pub struct EnableGramsIndexResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct DisableGramsIndexResponse {
-    /// Namespace the feature entry was removed from.
+    /// Namespace whose grep root was disabled.
     pub namespace_id: NamespaceId,
-    /// False when the namespace had no feature entry to remove.
+    /// False when the namespace had no enabled grep root.
     pub was_enabled: bool,
 }
 

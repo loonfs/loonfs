@@ -25,7 +25,6 @@ use loonfs_api::wire::control::{
 use loonfs_api::wire::manifest::{NamespaceManifestEnvelope, NamespaceManifestPayload};
 use loonfs_api::{ChangeSeq, CreateCheckpointResponse, ManifestId, ManifestObjectId, NamespaceId};
 use loonfs_objectstore::ObjectStore;
-use std::collections::BTreeMap;
 
 #[cfg(test)]
 use super::load::append_rows_to_metadata;
@@ -238,7 +237,6 @@ pub(crate) async fn build_initial_namespace_manifest<S: ObjectStore + ?Sized>(
             // below the genesis seq.
             retention_floor_seq: ChangeSeq(0),
             fork: None,
-            features: BTreeMap::new(),
             metadata_files: flatten_manifest_tables(run_tables),
         },
     )

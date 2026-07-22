@@ -29,15 +29,7 @@ pub enum DurableObjectFamily {
     MetadataRoot,
     MetadataManifest,
     MetadataTable,
-    /// Retained only because the frozen `loonfs-sim` contract exhaustively
-    /// matches this public enum; no key grammar classifies this family.
-    IndexSegment,
     CheckpointRecord,
-    /// Retired protocol family: fork protection lives on fork-owned
-    /// checkpoint records, and nothing writes
-    /// `pins/`. The grammar stays parseable because the frozen `loonfs-sim`
-    /// contract classifies and counts it.
-    Pin,
     UploadSession,
     ContentStoreDescriptor,
     ContentBlob,
@@ -157,16 +149,6 @@ impl ObjectLayout {
         format!("namespaces/{namespace}/checkpoints/")
     }
 
-    /// Explicit reachability pin, stored under the **source** namespace —
-    /// the namespace whose objects it protects.
-    pub fn pin(&self, source_namespace: &str, pin_id: &str) -> String {
-        format!("namespaces/{source_namespace}/pins/{pin_id}.json")
-    }
-
-    pub fn pin_prefix(&self, source_namespace: &str) -> String {
-        format!("namespaces/{source_namespace}/pins/")
-    }
-
     pub fn upload_session(&self, namespace: &str, upload_id: &str) -> String {
         format!("namespaces/{namespace}/uploads/{upload_id}.json")
     }
@@ -230,9 +212,6 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
         }
         ["namespaces", namespace, "checkpoints", checkpoint] if checkpoint.ends_with(".json") => {
             parsed(DurableObjectFamily::CheckpointRecord, Some(namespace))
-        }
-        ["namespaces", namespace, "pins", pin] if pin.ends_with(".json") => {
-            parsed(DurableObjectFamily::Pin, Some(namespace))
         }
         ["namespaces", namespace, "uploads", upload] if upload.ends_with(".json") => {
             parsed(DurableObjectFamily::UploadSession, Some(namespace))
@@ -340,12 +319,6 @@ mod tests {
         );
         assert_eq!(
             layout
-                .pin("source-ns", "pin_00000000000000000000000000000001")
-                .as_str(),
-            "namespaces/source-ns/pins/pin_00000000000000000000000000000001.json"
-        );
-        assert_eq!(
-            layout
                 .upload_session("ns-1", "upl_00000000000000000000000000000001")
                 .as_str(),
             "namespaces/ns-1/uploads/upl_00000000000000000000000000000001.json"
@@ -426,10 +399,6 @@ mod tests {
                 DurableObjectFamily::CheckpointRecord,
             ),
             (
-                layout.pin("ns-1", "pin_00000000000000000000000000000001"),
-                DurableObjectFamily::Pin,
-            ),
-            (
                 layout.upload_session("ns-1", "upl_00000000000000000000000000000001"),
                 DurableObjectFamily::UploadSession,
             ),
@@ -453,6 +422,7 @@ mod tests {
             "namespaces/ns-1/tables/metadata/tbl_abc.sst.zst",
             "namespaces/ns-1/gc/manifest.boundary.json",
             "namespaces/ns-1/gc/pins/pin_00000000000000000000000000000001.json",
+            "namespaces/ns-1/pins/pin_00000000000000000000000000000001.json",
         ] {
             assert!(
                 parse_object_key(old).is_none(),

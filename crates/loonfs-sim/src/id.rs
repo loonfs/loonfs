@@ -1,3 +1,5 @@
+//! Replayable identifier generation for simulation actors.
+
 use crate::rng::{DeterministicRng, SimRng, SimSeed};
 
 #[derive(Debug, Clone)]

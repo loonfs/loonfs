@@ -1271,6 +1271,7 @@ dependencies = [
  "bytes",
  "futures",
  "loonfs-api",
+ "loonfs-grep",
  "loonfs-objectstore",
  "serde",
  "serde_json",

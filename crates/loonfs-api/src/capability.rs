@@ -25,7 +25,7 @@ pub const FEATURE_NAMESPACES_DELETE: &str = "core.namespaces.delete";
 /// Gates direct upload sessions that are authorized with short-lived presigned URLs.
 pub const FEATURE_UPLOADS_DIRECT_PUT: &str = "core.uploads.direct_put";
 /// Gates gram-index content search: the serving half of the capability;
-/// the namespace's `index.grams` feature entry is the data half.
+/// the namespace's verified steady-state grep root is the data half.
 pub const FEATURE_QUERY_GREP: &str = "query.grep";
 
 /// Advisory limit: the largest request body accepted for service-proxied

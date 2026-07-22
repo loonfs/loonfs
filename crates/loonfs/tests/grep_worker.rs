@@ -745,12 +745,7 @@ async fn fork_of_grep_enabled_namespace_starts_unmaterialized_without_manifest_s
         serde_json::from_slice(&manifest_bytes).expect("decode target manifest JSON");
     let payload = document["payload"].as_object().expect("manifest payload");
     assert!(!payload.contains_key("index_files"));
-    assert!(payload
-        .get("features")
-        .and_then(serde_json::Value::as_object)
-        .is_none_or(|features| features
-            .keys()
-            .all(|feature| !feature.contains("grep") && feature != "index.grams")));
+    assert!(!payload.contains_key("features"));
 
     let source_root_after = load_grep_root(&*store, &source)
         .await

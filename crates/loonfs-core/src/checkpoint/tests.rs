@@ -56,7 +56,7 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
@@ -2061,7 +2061,6 @@ async fn manifest_run_rejects_rows_after_run_seq() {
             next_inode_id: materialization.head.next_inode_id,
             retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
             fork: None,
-            features: BTreeMap::new(),
             metadata_files,
         },
     )
@@ -4554,7 +4553,6 @@ async fn lower_seq_root_publication_yields_to_the_newer_root() {
             next_inode_id: materialization_before.head.next_inode_id,
             retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
             fork: None,
-            features: BTreeMap::new(),
             metadata_files: flatten_manifest_tables(tables),
         },
     )
@@ -5719,7 +5717,6 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
             next_inode_id: head.next_inode_id,
             retention_floor_seq: source.retention_floor_seq,
             fork: None,
-            features: BTreeMap::new(),
             metadata_files,
         },
     )

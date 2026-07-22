@@ -1,3 +1,5 @@
+//! Serializable regression seeds and replay command formatting.
+
 use crate::fault::FaultSchedule;
 use crate::rng::SimSeed;
 use serde::{Deserialize, Serialize};

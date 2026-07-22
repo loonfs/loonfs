@@ -1,15 +1,20 @@
+//! Deterministic object-store fault injection with operation tracing.
+
 use crate::fault::{FaultSchedule, ObjectStoreFault, ScheduledFault};
 use crate::object_op::{ObjectOp, ObjectOpKind};
 use crate::trace::{RunId, SharedSimTrace, SimEventResult, SimTrace, SimTraceEvent};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
+use futures::Stream;
 use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
 };
 use std::collections::HashMap;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::task::{Context, Poll};
 
 #[derive(Debug)]
 pub struct FaultInjectingObjectStore<S> {
@@ -68,16 +73,7 @@ impl<S> FaultInjectingObjectStore<S> {
         fault: Option<ObjectStoreFault>,
         result: SimEventResult,
     ) {
-        self.trace.push(SimTraceEvent {
-            step: op.step,
-            actor: None,
-            operation: operation.into(),
-            object_op: Some(op),
-            injected_fault: fault,
-            result,
-            model_hash: None,
-            core_hash: None,
-        });
+        push_trace_event(&self.trace, op, operation, fault, result);
     }
 
     fn scheduled_fault(&self, op: &ObjectOp) -> Option<ScheduledFault> {
@@ -487,8 +483,118 @@ where
         &self,
         prefix: &str,
     ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        self.inner.list_prefix_stream(prefix)
+        let op = self.next_object_op(ObjectOpKind::ListPrefix, prefix);
+        let scheduled = self.scheduled_fault(&op);
+        let (operation, fault, omit_key, skipped_reason) =
+            match scheduled.as_ref().map(|fault| &fault.fault) {
+                Some(ObjectStoreFault::ListOmitsRecentObject) => (
+                    "list_prefix_stream_omits_recent_object",
+                    Some(ObjectStoreFault::ListOmitsRecentObject),
+                    recent_key_for_prefix(
+                        prefix,
+                        &self
+                            .recent_writes
+                            .lock()
+                            .expect("recent writes lock poisoned"),
+                    )
+                    .map(str::to_owned),
+                    None,
+                ),
+                Some(incompatible) => (
+                    "list_prefix_stream_fault_skipped",
+                    Some(incompatible.clone()),
+                    None,
+                    Some("fault_not_applicable_to_operation"),
+                ),
+                None => ("list_prefix_stream", None, None, None),
+            };
+
+        Box::pin(TracedListStream {
+            inner: self.inner.list_prefix_stream(prefix),
+            trace: self.trace.clone(),
+            op: Some(op),
+            operation,
+            fault,
+            omit_key,
+            skipped_reason,
+        })
     }
+}
+
+struct TracedListStream {
+    inner: BoxStream<'static, Result<String, ObjectStoreError>>,
+    trace: SharedSimTrace,
+    op: Option<ObjectOp>,
+    operation: &'static str,
+    fault: Option<ObjectStoreFault>,
+    omit_key: Option<String>,
+    skipped_reason: Option<&'static str>,
+}
+
+impl TracedListStream {
+    fn finish(&mut self, result: SimEventResult) {
+        let Some(op) = self.op.take() else {
+            return;
+        };
+        let result = self
+            .skipped_reason
+            .map_or(result, |reason| SimEventResult::Skipped {
+                reason: reason.to_owned(),
+            });
+        push_trace_event(&self.trace, op, self.operation, self.fault.clone(), result);
+    }
+}
+
+impl Stream for TracedListStream {
+    type Item = Result<String, ObjectStoreError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        loop {
+            match self.inner.as_mut().poll_next(context) {
+                Poll::Ready(Some(Ok(key))) if self.omit_key.as_deref() == Some(key.as_str()) => {
+                    self.omit_key = None;
+                }
+                Poll::Ready(Some(Ok(key))) => return Poll::Ready(Some(Ok(key))),
+                Poll::Ready(Some(Err(error))) => {
+                    self.finish(error_result_class(&error));
+                    return Poll::Ready(Some(Err(error)));
+                }
+                Poll::Ready(None) => {
+                    self.finish(SimEventResult::Ok);
+                    return Poll::Ready(None);
+                }
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+    }
+}
+
+impl Drop for TracedListStream {
+    fn drop(&mut self) {
+        if self.op.is_some() {
+            self.skipped_reason = Some("stream_dropped_before_completion");
+            self.finish(SimEventResult::Ok);
+        }
+    }
+}
+
+fn push_trace_event(
+    trace: &SharedSimTrace,
+    op: ObjectOp,
+    operation: impl Into<String>,
+    fault: Option<ObjectStoreFault>,
+    result: SimEventResult,
+) {
+    trace.push(SimTraceEvent {
+        step: op.step,
+        actor: None,
+        operation: operation.into(),
+        object_op: Some(op),
+        injected_fault: fault,
+        result,
+        model_hash: None,
+        core_hash: None,
+    });
 }
 
 fn put_mode_kind(mode: &PutMode) -> ObjectOpKind {
@@ -519,43 +625,54 @@ fn apply_range(
 }
 
 fn recent_key_to_omit(keys: &[String], prefix: &str, recent_writes: &[String]) -> Option<usize> {
+    recent_key_for_prefix(prefix, recent_writes)
+        .and_then(|recent| keys.iter().position(|key| key == recent))
+}
+
+fn recent_key_for_prefix<'a>(prefix: &str, recent_writes: &'a [String]) -> Option<&'a str> {
     recent_writes
         .iter()
         .rev()
         .find(|key| key.starts_with(prefix))
-        .and_then(|recent| keys.iter().position(|key| key == recent))
+        .map(String::as_str)
 }
 
 fn result_class<T>(result: &Result<T, ObjectStoreError>) -> SimEventResult {
     match result {
         Ok(_) => SimEventResult::Ok,
-        Err(ObjectStoreError::NotFound { .. }) => SimEventResult::Error {
+        Err(error) => error_result_class(error),
+    }
+}
+
+fn error_result_class(error: &ObjectStoreError) -> SimEventResult {
+    match error {
+        ObjectStoreError::NotFound { .. } => SimEventResult::Error {
             class: "not_found".to_owned(),
         },
-        Err(ObjectStoreError::InvalidKey { .. }) => SimEventResult::Error {
+        ObjectStoreError::InvalidKey { .. } => SimEventResult::Error {
             class: "invalid_key".to_owned(),
         },
-        Err(ObjectStoreError::InvalidRange { .. }) => SimEventResult::Error {
+        ObjectStoreError::InvalidRange { .. } => SimEventResult::Error {
             class: "invalid_range".to_owned(),
         },
-        Err(ObjectStoreError::PreconditionFailed { .. }) => SimEventResult::Error {
+        ObjectStoreError::PreconditionFailed { .. } => SimEventResult::Error {
             class: "precondition_failed".to_owned(),
         },
-        Err(ObjectStoreError::PermissionDenied { .. }) => SimEventResult::Error {
+        ObjectStoreError::PermissionDenied { .. } => SimEventResult::Error {
             class: "permission_denied".to_owned(),
         },
-        Err(ObjectStoreError::Conflict { .. }) => SimEventResult::Error {
+        ObjectStoreError::Conflict { .. } => SimEventResult::Error {
             class: "conflict".to_owned(),
         },
-        Err(ObjectStoreError::Unsupported(_)) => SimEventResult::Error {
+        ObjectStoreError::Unsupported(_) => SimEventResult::Error {
             class: "unsupported".to_owned(),
         },
-        Err(ObjectStoreError::Transport { .. }) => SimEventResult::Error {
+        ObjectStoreError::Transport { .. } => SimEventResult::Error {
             class: "transport".to_owned(),
         },
         // Keep the label set low-cardinality for error kinds this build
         // does not know yet.
-        Err(_) => SimEventResult::Error {
+        _ => SimEventResult::Error {
             class: "other".to_owned(),
         },
     }
@@ -566,6 +683,7 @@ mod tests {
     use super::*;
     use crate::fault::ScheduledFault;
     use crate::rng::SimSeed;
+    use futures::TryStreamExt;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
 
     fn temp_store() -> (tempfile::TempDir, LocalFsStore) {
@@ -700,5 +818,52 @@ mod tests {
         let keys = store.list_prefix("prefix/").await.expect("list");
 
         assert_eq!(keys, vec!["prefix/a".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn list_stream_omission_fault_is_deterministic_and_traced() {
+        let (_temp_dir, store) = temp_store();
+        let schedule = FaultSchedule {
+            seed: SimSeed(1),
+            faults: vec![ScheduledFault {
+                step: 3,
+                op_kind: Some(ObjectOpKind::ListPrefix),
+                key_contains: Some("prefix/".to_owned()),
+                fault: ObjectStoreFault::ListOmitsRecentObject,
+            }],
+        };
+        let store = FaultInjectingObjectStore::new(store, schedule);
+
+        store
+            .put_overwrite("prefix/a", Bytes::from_static(b"a"))
+            .await
+            .expect("put a");
+        store
+            .put_overwrite("prefix/b", Bytes::from_static(b"b"))
+            .await
+            .expect("put b");
+        let keys = store
+            .list_prefix_stream("prefix/")
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("stream list");
+
+        assert_eq!(keys, vec!["prefix/a".to_owned()]);
+        let trace = store.trace().snapshot();
+        let event = trace.events.last().expect("stream list trace event");
+        assert_eq!(event.operation, "list_prefix_stream_omits_recent_object");
+        assert_eq!(
+            event.injected_fault,
+            Some(ObjectStoreFault::ListOmitsRecentObject)
+        );
+        assert_eq!(event.result, SimEventResult::Ok);
+        assert_eq!(
+            event
+                .object_op
+                .as_ref()
+                .expect("stream list object op")
+                .kind,
+            ObjectOpKind::ListPrefix
+        );
     }
 }
