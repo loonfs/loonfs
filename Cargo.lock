@@ -1183,11 +1183,16 @@ dependencies = [
 name = "loonfs-grep"
 version = "0.1.1"
 dependencies = [
+ "bytes",
  "ciborium",
  "loonfs-api",
+ "loonfs-objectstore",
  "serde",
  "serde_bytes",
+ "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]
