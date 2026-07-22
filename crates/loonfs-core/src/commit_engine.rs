@@ -125,12 +125,12 @@ impl NamespaceMutationCandidate {
         }
     }
 
-    /// Computes semantic identity from the mutation alone.
+    /// Computes semantic identity from the mutation alone, without applying
+    /// current operational request limits.
     pub fn semantic_identity(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<SemanticMutationIdentity> {
-        self.validate_request_limits()?;
         match &self.mutation {
             NamespaceMutation::Commit(request) => {
                 core_commit_fingerprint_for_v0_request(namespace_id, request)
@@ -618,7 +618,7 @@ mod tests {
     }
 
     #[test]
-    fn candidate_validation_rejects_commit_operation_and_prepared_proof_limits() {
+    fn semantic_identity_ignores_current_request_limits() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let oversized_ops = NamespaceMutationCandidate::commit(ApiCommitRequest {
             commit_id: CommitId::parse("too-many-ops").expect("valid commit id"),
@@ -631,10 +631,9 @@ mod tests {
                 .collect(),
             message: None,
         });
-        let operations_error = oversized_ops
+        oversized_ops
             .semantic_identity(&namespace_id)
-            .expect_err("operation limit must reject before admission");
-        assert_eq!(operations_error.code(), ErrorCode::InvalidRequest);
+            .expect("operation limits must not affect identity");
 
         let content_ref = ContentRef::whole_file_v0(b"proof");
         let admission = ContentAdmission::for_durable_content_write(
@@ -654,10 +653,9 @@ mod tests {
             },
             vec![prepared; crate::limits::MAX_COMMIT_CONTENT_TOKENS + 1],
         );
-        let proofs_error = oversized_proofs
+        oversized_proofs
             .semantic_identity(&namespace_id)
-            .expect_err("prepared proof limit must reject before admission");
-        assert_eq!(proofs_error.code(), ErrorCode::InvalidRequest);
+            .expect("prepared proof limits must not affect identity");
     }
 
     fn create_dir(commit_id: &str, display_name: &str) -> NamespaceMutationCandidate {
