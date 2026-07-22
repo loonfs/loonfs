@@ -29,11 +29,10 @@ pub struct ClientConfig {
     /// failures: the retryable-unavailability codes (`server_busy`,
     /// `commit_queue_full`, `shutting_down` — a draining process telling the
     /// caller to retry against the next one) and network-level transport
-    /// errors (connect failures, timeouts, resets). Off by default — the
-    /// retry runs — because every request the client sends is idempotent to
-    /// resend: mutations carry their commit id in the body and staging
-    /// repeats are recognized, so resending after an ambiguous transport
-    /// failure is safe by construction.
+    /// errors (connect failures, timeouts, resets). Off by default. The retry
+    /// applies only to reads, mutations with durable replay identity, and
+    /// operations whose repeat semantics are idempotent; lifecycle mutations
+    /// and upload-session creation are always single-attempt.
     #[serde(default)]
     pub disable_transient_retry: bool,
 }

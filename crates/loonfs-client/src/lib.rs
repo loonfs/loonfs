@@ -140,7 +140,8 @@ impl Client {
         namespace_id: &NamespaceId,
     ) -> Result<NamespaceSummary, ClientError> {
         let url = format!("{}/v0/namespaces", self.base_url);
-        self.request_json::<_, NamespaceSummary>(
+        // Namespace creation has no durable request identity to reconcile an ambiguous success.
+        self.request_json_once::<_, NamespaceSummary>(
             self.agent.post(&url),
             Some(&CreateNamespaceRequest {
                 namespace_id: namespace_id.clone(),
@@ -172,7 +173,8 @@ impl Client {
         if let Some(expected) = expected_head_seq {
             url.push_str(&format!("?expected_head_seq={}", expected.0));
         }
-        self.request_json::<(), DeleteNamespaceResponse>(self.agent.delete(&url), None)
+        // The expected head is a precondition, not an idempotency key for an ambiguous delete.
+        self.request_json_once::<(), DeleteNamespaceResponse>(self.agent.delete(&url), None)
     }
 
     pub fn fork_namespace(
@@ -184,7 +186,8 @@ impl Client {
             "{}/v0/namespaces/{source_namespace_id}/forks",
             self.base_url
         );
-        self.request_json::<_, NamespaceSummary>(
+        // Namespace forks have no durable request identity to replay after an ambiguous success.
+        self.request_json_once::<_, NamespaceSummary>(
             self.agent.post(&url),
             Some(&ForkNamespaceRequest {
                 new_namespace_id: new_namespace_id.clone(),
@@ -341,7 +344,7 @@ impl Client {
     pub fn health(&self) -> Result<(), ClientError> {
         let url = format!("{}/health", self.base_url);
         let request = self.authenticated(self.agent.get(&url));
-        request.call().map_err(|err| self.map_error(err))?;
+        self.call_with_transient_retry(&request, None)?;
         Ok(())
     }
 
@@ -351,7 +354,8 @@ impl Client {
         request: &BeginUploadRequest,
     ) -> Result<BeginUploadResponse, ClientError> {
         let url = format!("{}/v0/namespaces/{namespace_id}/uploads", self.base_url);
-        self.request_json::<_, BeginUploadResponse>(self.agent.post(&url), Some(request))
+        // Beginning an upload mints a new session id, so a resend could create a second session.
+        self.request_json_once::<_, BeginUploadResponse>(self.agent.post(&url), Some(request))
     }
 
     pub fn begin_direct_put(
@@ -390,10 +394,8 @@ impl Client {
         for (name, value) in headers {
             request = request.set(name, value);
         }
-        request
-            .send_bytes(bytes)
-            .map(|_| ())
-            .map_err(|err| self.map_error(err))
+        // A successful create-only PUT may replay as a provider precondition error, not success.
+        self.call_once(&request, Some(bytes)).map(|_| ())
     }
 
     pub fn upload_content(
@@ -426,6 +428,7 @@ impl Client {
             "{}/v0/namespaces/{namespace_id}/uploads/{upload_id}/complete",
             self.base_url
         );
+        // The durable completed-session record replays an identical completion without new effect.
         self.request_json::<_, CompleteUploadResponse>(self.agent.post(&url), Some(request))
     }
 
@@ -435,6 +438,7 @@ impl Client {
         request: &CommitSubmissionRequest,
     ) -> Result<ApiCommitResponse, ClientError> {
         let url = format!("{}/v0/namespaces/{namespace_id}/commits", self.base_url);
+        // The request's commit id resolves an ambiguous resend through a durable receipt.
         self.request_json::<_, ApiCommitResponse>(self.agent.post(&url), Some(request))
     }
 
@@ -597,6 +601,7 @@ impl Client {
             "{}/v0/namespaces/{namespace_id}/filesystem/operations",
             self.base_url
         );
+        // The request's commit id resolves an ambiguous resend through a durable receipt.
         self.request_json::<_, ApiCommitResponse>(self.agent.post(&url), Some(request))
     }
 
@@ -1001,37 +1006,14 @@ mod tests {
         ));
     }
 
-    /// A connection the server drops before answering is a transport
-    /// failure: with the retry enabled the client resends up to the attempt
-    /// cap; with it disabled the first failure surfaces.
+    /// A network-level transport failure resends up to the attempt cap when
+    /// retry is enabled; with it disabled the first failure surfaces.
     #[test]
     fn transport_failures_resend_up_to_the_attempt_cap() {
-        use std::io::Read;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
-        let addr = listener.local_addr().expect("listener addr");
-        let accepted = Arc::new(AtomicUsize::new(0));
-        let counter = Arc::clone(&accepted);
-        let total_expected = MAX_TRANSIENT_ATTEMPTS as usize + 1;
-        let server = std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(mut stream) = stream else { break };
-                let seen = counter.fetch_add(1, Ordering::SeqCst) + 1;
-                // Read a little so the request bytes are on the wire, then
-                // drop the connection without answering.
-                let mut buf = [0u8; 256];
-                let _ = stream.read(&mut buf);
-                drop(stream);
-                if seen >= total_expected {
-                    break;
-                }
-            }
-        });
-
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let transport = crate::transport::test_transport::failures(MAX_TRANSIENT_ATTEMPTS as usize);
         let retrying = Client::new(ClientConfig {
-            server_url: format!("http://{addr}"),
+            server_url: "http://example.invalid".to_owned(),
             auth_token: None,
             request_timeout_ms: None,
             disable_transient_retry: false,
@@ -1041,13 +1023,12 @@ mod tests {
             .namespace_status(&namespace_id)
             .expect_err("dropped connections must fail");
         assert!(matches!(error, ClientError::Http(_)), "{error:?}");
-        assert_eq!(
-            accepted.load(Ordering::SeqCst),
-            MAX_TRANSIENT_ATTEMPTS as usize
-        );
+        assert_eq!(transport.attempts(), MAX_TRANSIENT_ATTEMPTS as usize);
+        drop(transport);
 
+        let transport = crate::transport::test_transport::failures(1);
         let single_shot = Client::new(ClientConfig {
-            server_url: format!("http://{addr}"),
+            server_url: "http://example.invalid".to_owned(),
             auth_token: None,
             request_timeout_ms: None,
             disable_transient_retry: true,
@@ -1056,11 +1037,168 @@ mod tests {
         single_shot
             .namespace_status(&namespace_id)
             .expect_err("dropped connection must fail without retry");
-        assert_eq!(
-            accepted.load(Ordering::SeqCst),
-            MAX_TRANSIENT_ATTEMPTS as usize + 1
+        assert_eq!(transport.attempts(), 1);
+    }
+
+    fn retry_policy_client() -> Client {
+        Client::new(ClientConfig {
+            server_url: "http://example.invalid".to_owned(),
+            auth_token: None,
+            request_timeout_ms: None,
+            disable_transient_retry: false,
+        })
+        .expect("valid client config")
+    }
+
+    fn assert_transport_failure_after_one_attempt<T>(
+        call: impl FnOnce(&Client) -> Result<T, ClientError>,
+    ) {
+        let transport = crate::transport::test_transport::failure_then_success(b"{}".to_vec());
+        let client = retry_policy_client();
+        let result = call(&client);
+        assert!(
+            matches!(result, Err(ClientError::Http(_))),
+            "expected the first transport failure to surface"
         );
-        server.join().expect("server thread");
+        assert_eq!(transport.attempts(), 1);
+    }
+
+    #[test]
+    fn retry_policy_lifecycle_mutations_are_single_attempt() {
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        assert_transport_failure_after_one_attempt(|client| client.create_namespace(&namespace_id));
+        assert_transport_failure_after_one_attempt(|client| {
+            client.fork_namespace(
+                &namespace_id,
+                &NamespaceId::parse("fork").expect("valid id"),
+            )
+        });
+        assert_transport_failure_after_one_attempt(|client| {
+            client.delete_namespace(&namespace_id, Some(ChangeSeq(7)))
+        });
+    }
+
+    #[test]
+    fn retry_policy_commit_id_filesystem_mutation_retries() {
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let commit_id =
+            CommitId::parse("c_00000000000000000000000000000001").expect("valid commit id");
+        let response = ApiCommitResponse {
+            namespace_id: namespace_id.clone(),
+            commit_id: commit_id.clone(),
+            committed_seq: ChangeSeq(1),
+        };
+        let transport = crate::transport::test_transport::failure_then_success(
+            serde_json::to_vec(&response).expect("serialize response"),
+        );
+        let client = retry_policy_client();
+        let spec = NamespacePath::parse("demo", "/docs").expect("valid namespace path");
+
+        let actual = client
+            .create_directory(&spec, false, &MutationOptions::with_commit_id(commit_id))
+            .expect("commit-id mutation should retry");
+        assert_eq!(actual, response);
+        assert_eq!(transport.attempts(), 2);
+    }
+
+    #[test]
+    fn retry_policy_read_retries() {
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let response = NamespaceStatusResponse {
+            namespace_id: namespace_id.clone(),
+            head_seq: ChangeSeq(0),
+            current_manifest_id: None,
+            wal_tail_segments: 0,
+            retention_floor_seq: ChangeSeq(0),
+        };
+        let transport = crate::transport::test_transport::failure_then_success(
+            serde_json::to_vec(&response).expect("serialize response"),
+        );
+        let client = retry_policy_client();
+
+        let actual = client
+            .namespace_status(&namespace_id)
+            .expect("read should retry");
+        assert_eq!(actual, response);
+        assert_eq!(transport.attempts(), 2);
+    }
+
+    #[test]
+    fn retry_policy_upload_begins_are_single_attempt() {
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        assert_transport_failure_after_one_attempt(|client| {
+            client.begin_upload(&namespace_id, &BeginUploadRequest::default())
+        });
+        assert_transport_failure_after_one_attempt(|client| {
+            client.begin_direct_put(&namespace_id, ContentRef::whole_file_v0(b"direct"))
+        });
+    }
+
+    #[test]
+    fn retry_policy_presigned_upload_is_single_attempt() {
+        let transport = crate::transport::test_transport::failure_then_success(Vec::new());
+        let client = retry_policy_client();
+        let access = ObjectTransferAccess::PresignedUrl {
+            method: "PUT".to_owned(),
+            url: "http://example.invalid/upload".to_owned(),
+            headers: std::collections::BTreeMap::new(),
+            expires_at_ms: 1,
+        };
+
+        let result = client.upload_via_presigned_url(&access, b"direct");
+
+        assert!(matches!(result, Err(ClientError::Http(_))), "{result:?}");
+        assert_eq!(transport.attempts(), 1);
+    }
+
+    #[test]
+    fn retry_policy_proxied_upload_content_retries() {
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let upload_id = loonfs_api::UploadId::parse("upl_00000000000000000000000000000001")
+            .expect("valid upload id");
+        let response = UploadContentResponse {
+            namespace_id: namespace_id.clone(),
+            upload_id: upload_id.clone(),
+            content_ref: ContentRef::whole_file_v0(b"content"),
+        };
+        let transport = crate::transport::test_transport::failure_then_success(
+            serde_json::to_vec(&response).expect("serialize response"),
+        );
+        let client = retry_policy_client();
+
+        let actual = client
+            .upload_content(&namespace_id, upload_id.as_str(), b"content")
+            .expect("identical content staging should retry");
+        assert_eq!(actual, response);
+        assert_eq!(transport.attempts(), 2);
+    }
+
+    #[test]
+    fn retry_policy_upload_completion_retries() {
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let upload_id = loonfs_api::UploadId::parse("upl_00000000000000000000000000000001")
+            .expect("valid upload id");
+        let content_ref = ContentRef::whole_file_v0(b"content");
+        let response = CompleteUploadResponse {
+            namespace_id: namespace_id.clone(),
+            upload_id: upload_id.clone(),
+            content_ref: content_ref.clone(),
+            validated_content_token: None,
+        };
+        let transport = crate::transport::test_transport::failure_then_success(
+            serde_json::to_vec(&response).expect("serialize response"),
+        );
+        let client = retry_policy_client();
+
+        let actual = client
+            .complete_upload(
+                &namespace_id,
+                upload_id.as_str(),
+                &CompleteUploadRequest { content_ref },
+            )
+            .expect("completed-session replay should retry");
+        assert_eq!(actual, response);
+        assert_eq!(transport.attempts(), 2);
     }
 
     /// An intermediary answering with a non-envelope body (a load balancer's
