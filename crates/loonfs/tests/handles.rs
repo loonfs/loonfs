@@ -6,19 +6,28 @@
 //! handle from one runtime fixture, matching the runtime-ownership contract
 //! the handles document.
 
+use async_trait::async_trait;
+use bytes::Bytes;
+use futures::stream::BoxStream;
 use loonfs::{
     CommitId, CreateCheckpointOptions, CreateNamespaceOptions, FsAdmin, FsBackgroundWork, FsReader,
     FsWriter, MaintenanceTickOptions, ManifestId, NamespaceId, PutFileOptions, RuntimeCacheConfig,
-    RuntimeError, StoreConfig,
+    RuntimeError, SharedObjectStore, StoreConfig,
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
 use loonfs_core::control::load_namespace_metadata_root_control;
-use loonfs_objectstore::keys::metadata_manifest_object;
+use loonfs_objectstore::keys::{metadata_manifest_object, metadata_root};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_objectstore::ObjectStore;
+use loonfs_objectstore::{
+    ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
+};
 use std::future::Future;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tempfile::tempdir;
+use tokio::sync::Notify;
+use tokio::time::{timeout, Duration};
 
 fn store_config(root: &Path) -> StoreConfig {
     StoreConfig::LocalFs {
@@ -60,6 +69,182 @@ async fn fill_wal_tail_past_threshold(writer: &FsWriter, namespace_id: &Namespac
             .await
             .expect("put file");
     }
+}
+
+/// Holds a maintenance tick mid-run by blocking the namespace's metadata
+/// root compare-and-swap; publishes keep flowing (they CAS the WAL head, a
+/// different key). Bounded-wait pattern as in publication.rs.
+#[derive(Debug)]
+struct BlockingRootCasStore {
+    inner: LocalFsStore,
+    root_key: String,
+    block_next: AtomicBool,
+    blocked: AtomicBool,
+    released: AtomicBool,
+    blocked_notify: Notify,
+    release_notify: Notify,
+}
+
+impl BlockingRootCasStore {
+    fn new(root: &Path, namespace_id: &NamespaceId) -> Self {
+        Self {
+            inner: LocalFsStore::new(root).expect("create local-fs store"),
+            root_key: metadata_root(namespace_id.as_str()),
+            block_next: AtomicBool::new(false),
+            blocked: AtomicBool::new(false),
+            released: AtomicBool::new(false),
+            blocked_notify: Notify::new(),
+            release_notify: Notify::new(),
+        }
+    }
+
+    fn arm_next_root_cas(&self) {
+        self.released.store(false, Ordering::SeqCst);
+        self.blocked.store(false, Ordering::SeqCst);
+        self.block_next.store(true, Ordering::SeqCst);
+    }
+
+    async fn wait_for_blocked_root_cas(&self) {
+        timeout(Duration::from_secs(10), async {
+            while !self.blocked.load(Ordering::SeqCst) {
+                let notified = self.blocked_notify.notified();
+                if self.blocked.load(Ordering::SeqCst) {
+                    break;
+                }
+                let _ = timeout(Duration::from_millis(50), notified).await;
+            }
+        })
+        .await
+        .expect("a metadata root CAS must reach the block");
+    }
+
+    fn release_root_cas(&self) {
+        self.released.store(true, Ordering::SeqCst);
+        self.release_notify.notify_waiters();
+    }
+}
+
+#[async_trait]
+impl ObjectStore for BlockingRootCasStore {
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head(key).await
+    }
+
+    async fn get(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<Option<Bytes>, ObjectStoreError> {
+        self.inner.get(key, range).await
+    }
+
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        self.inner.get_with_metadata(key).await
+    }
+
+    async fn put(
+        &self,
+        key: &str,
+        bytes: Bytes,
+        mode: PutMode,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        let should_block = key == self.root_key
+            && matches!(mode, PutMode::CompareAndSwap { .. })
+            && self.block_next.swap(false, Ordering::SeqCst);
+        if should_block {
+            self.blocked.store(true, Ordering::SeqCst);
+            self.blocked_notify.notify_waiters();
+            while !self.released.load(Ordering::SeqCst) {
+                let notified = self.release_notify.notified();
+                if self.released.load(Ordering::SeqCst) {
+                    break;
+                }
+                let _ = timeout(Duration::from_millis(50), notified).await;
+            }
+            self.blocked.store(false, Ordering::SeqCst);
+        }
+        self.inner.put(key, bytes, mode).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        self.inner.delete(key).await
+    }
+
+    fn list_prefix_stream(
+        &self,
+        prefix: &str,
+    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+        self.inner.list_prefix_stream(prefix)
+    }
+}
+
+#[test]
+fn a_threshold_crossing_during_an_active_tick_still_bounds_the_tail() {
+    // The interleaving behind the CI failures on the extraction stack: the
+    // first crossing's tick is mid-run when more publishes cross the
+    // threshold. Their requests must defer and rerun the tick — dropping
+    // them leaves the tail unbounded when those were the last writes before
+    // an idle period.
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace_id();
+    block_on(async {
+        let blocking = Arc::new(BlockingRootCasStore::new(temp_dir.path(), &namespace_id));
+        let store: SharedObjectStore = blocking.clone();
+        let writer = FsWriter::builder_with_store(store)
+            .writer_id("handle-test-writer")
+            .background_work(FsBackgroundWork::Enabled)
+            .build()
+            .await
+            .expect("build writer");
+        writer
+            .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+            .await
+            .expect("create namespace");
+
+        // The 32nd publish crosses the threshold and spawns the tick; the
+        // armed store holds that tick at its metadata root CAS.
+        blocking.arm_next_root_cas();
+        fill_wal_tail_past_threshold(&writer, &namespace_id).await;
+        blocking.wait_for_blocked_root_cas().await;
+
+        // A full second threshold's worth of publishes lands while the tick
+        // is held; every crossing defers to the running tick.
+        for round in 0..33u32 {
+            writer
+                .put_file_bytes(
+                    &namespace_id,
+                    &format!("/docs/held/file-{round}.txt"),
+                    b"body",
+                    PutFileOptions::default(),
+                )
+                .await
+                .expect("put file during held tick");
+        }
+
+        blocking.release_root_cas();
+        writer
+            .wait_for_background_work()
+            .await
+            .expect("background maintenance quiesces");
+
+        let admin = FsAdmin::builder_with_store(blocking.clone() as SharedObjectStore)
+            .actor_id("handle-test-admin")
+            .build()
+            .await
+            .expect("build admin");
+        let status = admin
+            .namespace_status(&namespace_id)
+            .await
+            .expect("status after deferred rerun");
+        assert!(
+            status.wal_tail_segments < 32,
+            "deferred crossings must rerun the tick and bound the tail: {status:?}"
+        );
+        writer
+            .shutdown_background()
+            .await
+            .expect("shut down writer background work");
+    });
 }
 
 #[test]
