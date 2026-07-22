@@ -52,6 +52,7 @@ enum PathFingerprintInput {
         namespace_id: NamespaceId,
         absolute_path: String,
         behavior: DeleteDirectoryBehavior,
+        expected_inode_id: Option<InodeId>,
     },
     MovePath {
         namespace_id: NamespaceId,
@@ -120,18 +121,21 @@ pub(crate) fn path_intent_fingerprint_for_path_intent(
             behavior: *behavior,
             content_ref: content_ref.clone(),
         },
-        // `expected_inode_id` is deliberately outside the preimage: it is
-        // a precondition on current state, not part of the mutation's
-        // semantic identity (same stance as explicit commit preconditions
-        // vs the path-op vocabulary).
+        // Path-intent identity covers the complete caller-visible logical
+        // request. A changed delete guard must conflict instead of replaying
+        // the old receipt without checking the new guard, and including it
+        // matches explicit-commit identity, which already covers request
+        // preconditions.
         PathMutationIntent::DeletePath {
             absolute_path,
             behavior,
+            expected_inode_id,
             ..
         } => PathFingerprintInput::DeletePath {
             namespace_id: namespace_id.clone(),
             absolute_path: absolute_path.as_str().to_owned(),
             behavior: *behavior,
+            expected_inode_id: *expected_inode_id,
         },
         PathMutationIntent::MovePath {
             from_path,
@@ -966,6 +970,28 @@ mod tests {
             // value); post-release this literal only moves with a scheme
             // tag bump.
             "v0:sha256:06414b716b076c98e7a61e465ae729b2340045c133437a557c76902d73a5f33b"
+        );
+    }
+
+    /// Pins the exact stored fingerprint encoding for a guarded delete.
+    #[test]
+    fn guarded_delete_path_fingerprint_value_is_pinned() {
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let intent = PathMutationIntent::DeletePath {
+            commit_id: CommitId::parse("c_00000000000000000000000000000043").expect("commit id"),
+            absolute_path: AbsolutePath::parse("/docs").expect("path"),
+            behavior: DeleteDirectoryBehavior::NonRecursive,
+            expected_inode_id: Some(InodeId(42)),
+        };
+
+        let fingerprint =
+            path_intent_fingerprint_for_path_intent(&namespace_id, &intent).expect("fingerprint");
+
+        assert_eq!(
+            fingerprint.as_str(),
+            // Added pre-release when the delete guard became semantic
+            // request content; no deployed receipts use the prior preimage.
+            "v0:sha256:6b233b1fa124c36c09104446f8a1de60b6bec76fccf6fc41e72e064c60f47715"
         );
     }
 

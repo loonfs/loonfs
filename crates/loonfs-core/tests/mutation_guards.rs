@@ -433,6 +433,27 @@ fn delete_path_non_recursive<S: ObjectStore + ?Sized>(
     )
 }
 
+fn delete_path_non_recursive_expecting<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    absolute_path: &str,
+    expected_inode_id: Option<InodeId>,
+    context: &MutationContext,
+    commit_id: &str,
+) -> Result<loonfs_api::CommitResponse, CoreError> {
+    submit_intent(
+        store,
+        namespace_id,
+        PathMutationIntent::DeletePath {
+            commit_id: CommitId::parse(commit_id).expect("valid test commit id"),
+            absolute_path: AbsolutePath::parse(absolute_path).expect("path"),
+            behavior: DeleteDirectoryBehavior::NonRecursive,
+            expected_inode_id,
+        },
+        context,
+    )
+}
+
 fn move_path<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -3635,6 +3656,186 @@ async fn path_publishes_use_durable_path_commit_receipt_index() {
         .await
         .expect("list wal");
     assert_eq!(wal_keys.len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delete_path_commit_id_reuse_includes_expected_inode_id() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+
+    let seeded_paths = [
+        ("/same-guard.txt", "seed-same-guard"),
+        ("/changed-guard.txt", "seed-changed-guard"),
+        ("/removed-guard.txt", "seed-removed-guard"),
+        ("/added-guard.txt", "seed-added-guard"),
+    ];
+    for (path, commit_id) in seeded_paths {
+        write_file_bytes(
+            &store,
+            &namespace_id,
+            path,
+            b"hello",
+            &context,
+            Some(commit_id),
+        )
+        .expect("seed guarded delete target");
+    }
+
+    let same_inode = resolve_path(&store, &namespace_id, "/same-guard.txt")
+        .expect("resolve same-guard target")
+        .inode_id;
+    let first = delete_path_non_recursive_expecting(
+        &store,
+        &namespace_id,
+        "/same-guard.txt",
+        Some(same_inode),
+        &context,
+        "delete-same-guard",
+    )
+    .expect("first guarded delete");
+    let retry = delete_path_non_recursive_expecting(
+        &store,
+        &namespace_id,
+        "/same-guard.txt",
+        Some(same_inode),
+        &context,
+        "delete-same-guard",
+    )
+    .expect("identical guarded delete retry");
+    assert_eq!(retry, first);
+
+    let changed_inode = resolve_path(&store, &namespace_id, "/changed-guard.txt")
+        .expect("resolve changed-guard target")
+        .inode_id;
+    let removed_inode = resolve_path(&store, &namespace_id, "/removed-guard.txt")
+        .expect("resolve removed-guard target")
+        .inode_id;
+    let added_inode = resolve_path(&store, &namespace_id, "/added-guard.txt")
+        .expect("resolve added-guard target")
+        .inode_id;
+    let conflicts = [
+        (
+            "delete-changed-guard",
+            "/changed-guard.txt",
+            Some(changed_inode),
+            Some(InodeId(1)),
+        ),
+        (
+            "delete-removed-guard",
+            "/removed-guard.txt",
+            Some(removed_inode),
+            None,
+        ),
+        (
+            "delete-added-guard",
+            "/added-guard.txt",
+            None,
+            Some(added_inode),
+        ),
+    ];
+    for (commit_id, path, first_guard, retry_guard) in conflicts {
+        delete_path_non_recursive_expecting(
+            &store,
+            &namespace_id,
+            path,
+            first_guard,
+            &context,
+            commit_id,
+        )
+        .expect("first delete");
+
+        let error = delete_path_non_recursive_expecting(
+            &store,
+            &namespace_id,
+            path,
+            retry_guard,
+            &context,
+            commit_id,
+        )
+        .expect_err("changed guard must conflict");
+        assert!(matches!(
+            error,
+            CoreError::CommitIdReuseConflict(reused) if reused == commit_id
+        ));
+    }
+
+    let head = load_namespace_head_control(&store, &namespace_id)
+        .await
+        .expect("load head");
+    assert_eq!(head.state.seq, ChangeSeq(8));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fresh_delete_path_expected_inode_guard_still_matches_or_rejects() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/matching-guard.txt",
+        b"matching",
+        &context,
+        Some("seed-matching-guard"),
+    )
+    .expect("seed matching target");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/mismatching-guard.txt",
+        b"mismatching",
+        &context,
+        Some("seed-mismatching-guard"),
+    )
+    .expect("seed mismatching target");
+    let matching_inode = resolve_path(&store, &namespace_id, "/matching-guard.txt")
+        .expect("resolve matching target")
+        .inode_id;
+    let mismatching_inode = resolve_path(&store, &namespace_id, "/mismatching-guard.txt")
+        .expect("resolve mismatching target")
+        .inode_id;
+
+    delete_path_non_recursive_expecting(
+        &store,
+        &namespace_id,
+        "/matching-guard.txt",
+        Some(matching_inode),
+        &context,
+        "delete-matching-guard",
+    )
+    .expect("matching guard deletes");
+    let missing = resolve_path(&store, &namespace_id, "/matching-guard.txt")
+        .expect_err("matching target is deleted");
+    assert_eq!(missing.code(), ErrorCode::PathNotFound);
+
+    let error = delete_path_non_recursive_expecting(
+        &store,
+        &namespace_id,
+        "/mismatching-guard.txt",
+        Some(InodeId(1)),
+        &context,
+        "delete-mismatching-guard",
+    )
+    .expect_err("mismatching guard must fail planning");
+    assert!(matches!(
+        error,
+        CoreError::CommitValidation(CommitValidationError::BindingPreconditionMismatch {
+            expected_child_inode_id: InodeId(1),
+            actual_child_inode_id: Some(actual),
+            ..
+        }) if actual == mismatching_inode
+    ));
+    assert_eq!(
+        resolve_path(&store, &namespace_id, "/mismatching-guard.txt")
+            .expect("mismatching target remains")
+            .inode_id,
+        mismatching_inode
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
