@@ -14,8 +14,10 @@ use loonfs_api::{
     AdvanceRetentionResponse, CheckpointId, CreateCheckpointRequest, CreateCheckpointResponse,
     CreateNamespaceRequest, ErrorCode, FlushWalResponse, ForkNamespaceRequest, GcRequest,
     GcResponse, MaintenanceTickRequest, MaintenanceTickResponse, ReleaseCheckpointResponse,
-    FEATURE_UPLOADS_DIRECT_PUT, LIMIT_COMMIT_MAX_BODY_BYTES, LIMIT_DOWNLOAD_MAX_CONCURRENT,
-    LIMIT_DOWNLOAD_MAX_CONTENT_BYTES, LIMIT_UPLOAD_MAX_CONCURRENT, LIMIT_UPLOAD_MAX_CONTENT_BYTES,
+    FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_PUT, LIMIT_COMMIT_MAX_BODY_BYTES,
+    LIMIT_DOWNLOAD_MAX_CONCURRENT, LIMIT_DOWNLOAD_MAX_CONTENT_BYTES, LIMIT_QUERY_GREP_DEFAULT,
+    LIMIT_QUERY_GREP_MAX, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES, LIMIT_QUERY_GREP_TAIL_BUDGET_FILES,
+    LIMIT_UPLOAD_MAX_CONCURRENT, LIMIT_UPLOAD_MAX_CONTENT_BYTES,
 };
 
 #[derive(Debug, serde::Deserialize)]
@@ -73,6 +75,17 @@ pub(super) async fn config(
         LIMIT_COMMIT_MAX_BODY_BYTES.to_owned(),
         state.config.max_commit_body_bytes,
     );
+    if !state.config.grep.mode.serves_grep() {
+        capabilities.features.remove(FEATURE_QUERY_GREP);
+        for limit in [
+            LIMIT_QUERY_GREP_DEFAULT,
+            LIMIT_QUERY_GREP_MAX,
+            LIMIT_QUERY_GREP_SCAN_BUDGET_FILES,
+            LIMIT_QUERY_GREP_TAIL_BUDGET_FILES,
+        ] {
+            capabilities.limits.remove(limit);
+        }
+    }
     Ok(Json(capabilities))
 }
 

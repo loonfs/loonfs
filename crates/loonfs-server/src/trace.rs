@@ -8,7 +8,8 @@ use tracing_subscriber::EnvFilter;
 
 const TRACE_ENV: &str = "LOONFS_TRACE";
 const RUST_LOG_ENV: &str = "RUST_LOG";
-const DEFAULT_TRACE_FILTER: &str = "loonfs_server=info,loonfs=info,loonfs_core=info";
+const DEFAULT_TRACE_FILTER: &str =
+    "loonfs_server=info,loonfs_grep=info,loonfs=info,loonfs_core=info";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TraceConfig {

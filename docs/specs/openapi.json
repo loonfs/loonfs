@@ -360,6 +360,16 @@
               }
             }
           },
+          "501": {
+            "description": "Grep serving is disabled for this deployment",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
           "503": {
             "description": "Lost a manifest publication race; retry",
             "content": {
@@ -379,7 +389,7 @@
           "admin"
         ],
         "summary": "Enable the gram index",
-        "description": "Publishes the namespace's index.grams feature entry. Backfill over existing revisions starts on the next maintenance tick and the index stays current from then on. Idempotent.",
+        "description": "Publishes the namespace's index.grams feature entry. Backfill over existing revisions starts on the next grep worker sweep and the index stays current from then on. Idempotent.",
         "operationId": "enable_grams_index",
         "parameters": [
           {
@@ -415,6 +425,16 @@
           },
           "404": {
             "description": "Namespace not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "Grep serving is disabled for this deployment",
             "content": {
               "application/json": {
                 "schema": {
@@ -2078,7 +2098,7 @@
           "query"
         ],
         "summary": "Content search",
-        "description": "Searches file content with a regular expression, accelerated by the namespace's gram index (`index.grams`). Matches are verified against the real pattern and returned in ascending `(inode_id, byte_offset)` order; revisions committed after the index watermark are scanned exhaustively unless `allow_stale` skips them. Requires the index to be materialized on the namespace.",
+        "description": "Searches file content with a regular expression, accelerated by the namespace's gram index (`index.grams`). Matches are verified against the real pattern and returned in ascending `(inode_id, byte_offset)` order; revisions committed after the index watermark are scanned exhaustively unless `allow_stale` skips them. Requires this deployment to serve grep and the index to be materialized on the namespace.",
         "operationId": "grep",
         "parameters": [
           {
@@ -2153,7 +2173,7 @@
             }
           },
           "501": {
-            "description": "The gram index is not materialized on this namespace",
+            "description": "Grep serving is disabled or the gram index is not materialized on this namespace",
             "content": {
               "application/json": {
                 "schema": {
