@@ -124,17 +124,14 @@ The namespace tree's lifecycle can be read off its grammar:
 - **`namespace.json` is the existence marker**: written last at creation as
   the completion marker, kept forever after deletion as half of the
   tombstone pair that retires the namespace id.
-- **Creation and forking are crash-resumable.** The head write is the
-  linearization point. A retry that finds pre-head debris (a metadata root
-  or WAL floor with no head) cleans it once the debris is older than the
-  derived grace floor — nothing published within the floor can still be in
-  flight — re-checking head absence immediately before every delete;
-  younger debris answers `namespace_partial`, never a race. A retry that
-  finds a head without a descriptor finishes the create or fork by writing
-  the missing descriptor, guarded by the tree itself: a genesis head with a
-  fork-free root manifest completes as a create, a root manifest whose fork
-  block names the requested source completes as that fork, and anything
-  else answers `namespace_partial`.
+- **Creation and forking never repair partial namespace state.** The head
+  write remains the linearization point, but a normal create or fork that
+  finds any pre-head debris or a head without a descriptor answers
+  `namespace_partial` without writing or deleting anything, regardless of
+  age. Explicit per-namespace admin repair owns recovery: it completes a
+  genesis create or fork target whose immutable tree proves the missing
+  descriptor, reaps non-completable debris only after the derived safety
+  floor, and reports younger debris as `in_flight` without touching it.
 
 Names are never authority anywhere — recovery follows the head and its
 references.
@@ -148,9 +145,9 @@ The load-bearing invariants of this layout, in one place:
 > **Fencing authority is writer epoch plus CAS.** Wall-clock time never
 > gates commit validity, and fenced sessions never reacquire on their own.
 
-> **Nothing correct depends on listing.** GC and floor advancement alone
-> list — under a grace window, with delete-time re-verification, and with
-> retention winning every ambiguous race.
+> **Nothing correct depends on listing.** GC, floor advancement, and explicit
+> namespace repair alone list — under a safety window, with delete-time
+> re-verification, and with retention winning every ambiguous race.
 
 > **Throughput is group commit; deadlines are local monotonic budgets a
 > writer applies to itself.** No validator ever compares clocks, and
@@ -1490,9 +1487,10 @@ material to support readers from the new floor forward.
 
 Delete is tombstone-first. Garbage collection is the separate process that
 eventually reclaims content or metadata that is no longer reachable and no
-longer protected by retention policy. GC and floor advancement are the only
-consumers of listing, and nothing sweeps by default: a pass runs only through
-the admin endpoint or an explicit maintenance-tick opt-in.
+longer protected by retention policy. GC, floor advancement, and explicit
+namespace repair are the only consumers of listing, and nothing sweeps by
+default: a pass runs only through the admin endpoint or an explicit
+maintenance-tick opt-in.
 
 v1 GC is listing mark-and-sweep. Its inputs are `wal/head.json`,
 `wal/floor.json`, `metadata/root.json`, and the `metadata/manifests/`,
@@ -1562,12 +1560,17 @@ publishing CAS) — under these rules:
 8. **Retention wins residual races.** If the floor is ever observed ahead of
    an active checkpoint's basis, the checkpoint's objects remain protected;
    reconciling the floor is an explicit recovery action.
-9. **Abandoned bootstraps.** A namespace tree with no `namespace.json` whose
-   newest object is older than the reap window `R` (`R >= T`) may be reaped,
-   re-checking the marker's absence immediately before deleting. A fork-owned
-   checkpoint record whose target tree is completely gone is released under
-   the same window: the record must be older than `R`, since a live fork
-   retry freshens it before writing any target object.
+9. **Incomplete namespaces and abandoned forks.** Core GC ignores a namespace
+   without a complete head-and-descriptor pair: it performs no listing or
+   deletion and reports that the incomplete namespace was ignored. Explicit
+   per-namespace repair first attempts guarded create/fork completion, then
+   may reap a non-completable tree whose newest object is older than the
+   derived safety floor `T`, re-checking that the head-and-descriptor pair is
+   not complete before deletion; younger debris is reported as `in_flight`.
+   A fork-owned checkpoint record whose target tree is completely gone remains
+   GC-owned and is released under the reap window `R` (`R >= T`): the record
+   must be older than `R`, since a live fork retry freshens it before writing
+   any target object.
 
 Deletion proceeds data first, records last, so a crash mid-sweep leaves
 orphaned data for the next pass rather than a record whose data vanished.

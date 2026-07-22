@@ -1,5 +1,5 @@
-//! `loon admin` commands: status, checkpoints, retention, gc, indexes,
-//! and the change feed.
+//! `loon admin` commands: checkpoints, retention, GC, namespace repair,
+//! indexes, and the change feed.
 
 use super::context::resolve_command_context;
 use super::output::{CommandData, CommandFailure, CommandOutput};
@@ -22,9 +22,30 @@ pub(crate) async fn run_admin_command(
         AdminCommand::RetentionAdvance(args) => run_admin_retention_advance(kind, args).await,
         AdminCommand::Tick(args) => run_admin_tick(kind, args).await,
         AdminCommand::Gc(args) => run_admin_gc(kind, args).await,
+        AdminCommand::Repair(args) => run_admin_repair(kind, args).await,
         AdminCommand::IndexEnable(args) => run_admin_index_enable(kind, args).await,
         AdminCommand::IndexDisable(args) => run_admin_index_disable(kind, args).await,
     }
+}
+
+async fn run_admin_repair(
+    kind: CommandKind,
+    args: AdminNamespaceArgs,
+) -> Result<CommandOutput, CommandFailure> {
+    let context = resolve_command_context(kind, &args.target).await?;
+    let response = context
+        .target
+        .backend()
+        .repair_namespace(&context.namespace)
+        .await
+        .map_err(|error| context.fail(kind, error))?;
+
+    Ok(CommandOutput {
+        kind,
+        profile: Some(context.profile_name),
+        mode: Some(context.mode),
+        data: CommandData::NamespaceRepaired(response),
+    })
 }
 
 async fn run_admin_tick(

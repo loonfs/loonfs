@@ -6,13 +6,17 @@ use super::fork_checkpoints::{
     maybe_release_fork_checkpoint, release_missing_basis_checkpoint, ForkCheckpointSweep,
 };
 use super::live_set::{collect_live_set, SweepVerifier};
-use super::reap::{delete_if_aged, list_prefix, manifest_object_id_of, reap_abandoned_bootstrap};
+use super::reap::{delete_if_aged, list_prefix, manifest_object_id_of};
 use crate::context::MutationContext;
 use crate::error::CoreError;
+use crate::namespace::catalog::{
+    map_namespace_initialization_error_to_core, namespace_initialization_state,
+    NamespaceInitializationState,
+};
 use loonfs_api::{ManifestObjectId, NamespaceId};
 use loonfs_objectstore::keys::{
-    checkpoint_prefix, metadata_manifest_prefix, metadata_table_prefix, namespace_config,
-    upload_session_prefix, wal_segment_prefix,
+    checkpoint_prefix, metadata_manifest_prefix, metadata_table_prefix, upload_session_prefix,
+    wal_segment_prefix,
 };
 use loonfs_objectstore::ObjectStore;
 use std::collections::BTreeSet;
@@ -57,14 +61,14 @@ pub(super) async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
     reverify_chunk: usize,
 ) -> Result<GcReport, CoreError> {
     config.validate()?;
-    let config_key = namespace_config(namespace_id.as_str());
-    let namespace_complete = store
-        .head(&config_key)
+    let initialization_state = namespace_initialization_state(store, namespace_id)
         .await
-        .map_err(|error| CoreError::store(&config_key, &error))?
-        .is_some();
-    if !namespace_complete {
-        return reap_abandoned_bootstrap(store, namespace_id, config, context).await;
+        .map_err(map_namespace_initialization_error_to_core)?;
+    if initialization_state != NamespaceInitializationState::Complete {
+        return Ok(GcReport {
+            incomplete_namespace_ignored: true,
+            ..GcReport::default()
+        });
     }
 
     // Mark: select sweep candidates against one live-set snapshot. The

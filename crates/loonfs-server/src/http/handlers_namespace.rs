@@ -14,10 +14,11 @@ use loonfs_api::{
     AdvanceRetentionResponse, CheckpointId, CreateCheckpointRequest, CreateCheckpointResponse,
     CreateNamespaceRequest, ErrorCode, FlushWalResponse, ForkNamespaceRequest, GcRequest,
     GcResponse, MaintenanceTickRequest, MaintenanceTickResponse, ReleaseCheckpointResponse,
-    FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_PUT, LIMIT_COMMIT_MAX_BODY_BYTES,
-    LIMIT_DOWNLOAD_MAX_CONCURRENT, LIMIT_DOWNLOAD_MAX_CONTENT_BYTES, LIMIT_QUERY_GREP_DEFAULT,
-    LIMIT_QUERY_GREP_MAX, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES, LIMIT_QUERY_GREP_TAIL_BUDGET_FILES,
-    LIMIT_UPLOAD_MAX_CONCURRENT, LIMIT_UPLOAD_MAX_CONTENT_BYTES,
+    RepairNamespaceResponse, FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_PUT,
+    LIMIT_COMMIT_MAX_BODY_BYTES, LIMIT_DOWNLOAD_MAX_CONCURRENT, LIMIT_DOWNLOAD_MAX_CONTENT_BYTES,
+    LIMIT_QUERY_GREP_DEFAULT, LIMIT_QUERY_GREP_MAX, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES,
+    LIMIT_QUERY_GREP_TAIL_BUDGET_FILES, LIMIT_UPLOAD_MAX_CONCURRENT,
+    LIMIT_UPLOAD_MAX_CONTENT_BYTES,
 };
 
 #[derive(Debug, serde::Deserialize)]
@@ -236,6 +237,38 @@ pub(super) async fn fork_namespace(
     feature = "openapi",
     utoipa::path(
         post,
+        path = "/v0/admin/namespaces/{namespace}/repair",
+        tag = "admin",
+        summary = "Repair namespace",
+        description = "Explicitly completes a recoverable partial namespace, or reaps non-completable installation debris after the fixed safety window. Younger debris is left untouched and reported as in flight.",
+        params(("namespace" = String, Path, description = "Namespace id")),
+        responses(
+            (status = 200, description = "Namespace repair inspected or changed the namespace", body = RepairNamespaceResponse),
+            (status = 400, description = "Invalid namespace id", body = ApiError),
+            (status = 401, description = "Unauthorized", body = ApiError),
+            (status = 404, description = "Namespace not found", body = ApiError)
+        )
+    )
+)]
+pub(super) async fn repair_namespace(
+    State(state): State<AppState>,
+    namespace: NamespaceIdPath,
+    headers: HeaderMap,
+) -> Result<Json<RepairNamespaceResponse>, ApiResponseError> {
+    authorize(&state.config, &headers)?;
+    let namespace_id = namespace.into_id()?;
+    let response = state
+        .admin
+        .repair_namespace(&namespace_id)
+        .await
+        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+    Ok(Json(response))
+}
+
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        post,
         path = "/v0/admin/namespaces/{namespace}/checkpoints",
         tag = "admin",
         summary = "Create checkpoint",
@@ -398,7 +431,7 @@ pub(super) async fn advance_retention(
         path = "/v0/admin/namespaces/{namespace}/gc",
         tag = "admin",
         summary = "Collect garbage",
-        description = "Runs one mark-and-sweep garbage-collection pass under the format's safety rules (grace window, delete-time re-verification, retention wins). Nothing sweeps without this explicit call or a maintenance-tick opt-in.",
+        description = "Runs one mark-and-sweep garbage-collection pass under the format's safety rules (grace window, delete-time re-verification, retention wins). Incomplete namespaces are ignored without listing or deletion. Nothing sweeps without this explicit call or a maintenance-tick opt-in.",
         params(("namespace" = String, Path, description = "Namespace id")),
         request_body(content = GcRequest, description = "Optional window overrides"),
         responses(

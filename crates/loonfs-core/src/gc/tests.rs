@@ -15,7 +15,7 @@ use loonfs_api::wire::control::{
 use loonfs_api::NamespaceId;
 use loonfs_objectstore::keys::{
     checkpoint_prefix, metadata_manifest_object, metadata_manifest_prefix, metadata_table_prefix,
-    namespace_config, wal_segment_prefix,
+    namespace_config, wal_head, wal_segment_prefix,
 };
 use loonfs_objectstore::ObjectStore;
 
@@ -50,6 +50,7 @@ use futures::stream::BoxStream;
 use loonfs_api::{AbsolutePath, CommitId, DestinationBehavior};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ByteRange, ObjectBody, ObjectMetadata, ObjectStoreError, PutMode};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tempfile::tempdir;
 
 const GRACE_MS: u64 = 60 * 60 * 1000;
@@ -188,6 +189,54 @@ impl ObjectStore for TimestamplessStore {
     }
 }
 
+#[derive(Debug)]
+struct IncompleteGcAccountingStore {
+    inner: LocalFsStore,
+    deletes: AtomicUsize,
+    lists: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl ObjectStore for IncompleteGcAccountingStore {
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head(key).await
+    }
+
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        self.inner.get_with_metadata(key).await
+    }
+
+    async fn get(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<Option<Bytes>, ObjectStoreError> {
+        self.inner.get(key, range).await
+    }
+
+    async fn put(
+        &self,
+        key: &str,
+        bytes: Bytes,
+        mode: PutMode,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        self.inner.put(key, bytes, mode).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        self.deletes.fetch_add(1, Ordering::SeqCst);
+        self.inner.delete(key).await
+    }
+
+    fn list_prefix_stream(
+        &self,
+        prefix: &str,
+    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+        self.lists.fetch_add(1, Ordering::SeqCst);
+        self.inner.list_prefix_stream(prefix)
+    }
+}
+
 /// The derived floor is enforced at validation: a pass configured below
 /// it is rejected as an invalid request before touching the store.
 #[tokio::test]
@@ -249,6 +298,7 @@ async fn gc_reaps_below_floor_segments_after_the_grace_window() {
     // The only segment sits at the floor with no replay gap above it.
     assert_eq!(report.deleted_wal_segments, 1);
     assert!(!report.degraded_retention);
+    assert!(!report.incomplete_namespace_ignored);
     stat_root(&store, &namespace_id).await;
 }
 
@@ -1456,37 +1506,36 @@ async fn gc_sweep_reverification_chunks_preserve_outcomes() {
 }
 
 #[tokio::test]
-async fn gc_reaps_an_abandoned_bootstrap_tree_after_the_reap_window() {
+async fn gc_ignores_incomplete_namespace_without_listing_or_deleting() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("orphan").expect("namespace id");
     // A partial tree: a head object but no namespace.json completion
     // marker.
-    store
+    inner
         .put_if_absent(
             &format!("namespaces/{}/wal/head.json", namespace_id.as_str()),
             bytes::Bytes::from_static(b"{}"),
         )
         .await
         .expect("write partial head");
+    let store = IncompleteGcAccountingStore {
+        inner,
+        deletes: AtomicUsize::new(0),
+        lists: AtomicUsize::new(0),
+    };
 
-    let young = context(now_after_newest_object(&store, &namespace_id, GRACE_MS).await);
-    let retained = gc_namespace(&store, &namespace_id, &config(), &young)
+    let report = gc_namespace(&store, &namespace_id, &config(), &context(u64::MAX))
         .await
-        .expect("gc young tree");
-    assert_eq!(retained.reaped_abandoned_objects, 0);
-    assert!(retained.retained_candidates > 0);
-
-    let aged = context(now_after_newest_object(&store, &namespace_id, REAP_MS + 1).await);
-    let report = gc_namespace(&store, &namespace_id, &config(), &aged)
-        .await
-        .expect("gc aged tree");
-    assert_eq!(report.reaped_abandoned_objects, 1);
+        .expect("gc incomplete tree");
+    assert!(report.incomplete_namespace_ignored);
+    assert_eq!(store.lists.load(Ordering::SeqCst), 0);
+    assert_eq!(store.deletes.load(Ordering::SeqCst), 0);
     assert!(store
-        .list_prefix(&format!("namespaces/{}/", namespace_id.as_str()))
+        .head(&wal_head(namespace_id.as_str()))
         .await
-        .expect("list")
-        .is_empty());
+        .expect("head partial object")
+        .is_some());
 }
 
 #[tokio::test]

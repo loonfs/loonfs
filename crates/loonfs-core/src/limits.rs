@@ -73,13 +73,15 @@ const fn max_u64(left: u64, right: u64) -> u64 {
     }
 }
 
-/// The derived minimum GC grace window (format spec, "Garbage collection",
-/// rule 1). Every acknowledged publication starts its final
-/// compare-and-swap within a publication budget measured from its first
-/// object write, and that compare-and-swap completes within one provider
-/// operation bound. So an object older than this window that is still
-/// unreachable at delete time cannot belong to a publication that might
-/// yet succeed. `GcConfig::validate` rejects smaller windows.
+/// The derived minimum GC grace window and explicit namespace-repair safety
+/// window (format spec, "Garbage collection", rule 1). Every acknowledged
+/// publication starts its final compare-and-swap within a publication budget
+/// measured from its first object write, and that compare-and-swap completes
+/// within one provider operation bound. So an object older than this window
+/// that is still unreachable at delete time cannot belong to a publication
+/// that might yet succeed. `GcConfig::validate` rejects smaller windows, and
+/// namespace repair uses the same bound before reaping non-completable install
+/// debris.
 pub const GC_MIN_GRACE_WINDOW_MS: u64 = max_u64(
     max_u64(WAL_PUBLISH_BUDGET_MS, CHECKPOINT_VERIFY_BUDGET_MS),
     METADATA_PUBLICATION_BUDGET_MS,

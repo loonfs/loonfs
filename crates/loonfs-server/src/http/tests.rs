@@ -76,11 +76,12 @@ use loonfs::{
 use loonfs_api::ErrorCode;
 use loonfs_api::{
     ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior, GrepRequest, NamespaceId,
+    RepairNamespaceOutcome,
 };
 use loonfs_client::{Client, ClientConfig, ClientError, MutationOptions, NamespacePath};
 use loonfs_grep::keyspace::root_key as grep_root_key;
 use loonfs_grep::{GrepDriverParked, GrepWorker};
-use loonfs_objectstore::keys::wal_head;
+use loonfs_objectstore::keys::{metadata_root, namespace_config, wal_head};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
@@ -96,6 +97,56 @@ struct StaleHeadOnceStore {
     inner: LocalFsStore,
     head_key: String,
     armed: AtomicBool,
+}
+
+#[derive(Debug)]
+struct AgedMetadataStore(LocalFsStore);
+
+fn age_metadata(mut metadata: ObjectMetadata) -> ObjectMetadata {
+    metadata.last_modified_ms = Some(0);
+    metadata
+}
+
+#[async_trait]
+impl ObjectStore for AgedMetadataStore {
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        Ok(self.0.head(key).await?.map(age_metadata))
+    }
+
+    async fn get(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<Option<Bytes>, ObjectStoreError> {
+        self.0.get(key, range).await
+    }
+
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        Ok(self.0.get_with_metadata(key).await?.map(|mut body| {
+            body.metadata = age_metadata(body.metadata);
+            body
+        }))
+    }
+
+    async fn put(
+        &self,
+        key: &str,
+        bytes: Bytes,
+        mode: PutMode,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        Ok(age_metadata(self.0.put(key, bytes, mode).await?))
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        self.0.delete(key).await
+    }
+
+    fn list_prefix_stream(
+        &self,
+        prefix: &str,
+    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+        self.0.list_prefix_stream(prefix)
+    }
 }
 
 impl StaleHeadOnceStore {
@@ -555,6 +606,83 @@ async fn http_missing_namespace_reads_return_namespace_not_found() {
     .expect("join blocking task");
 
     harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_admin_repair_reports_completed_already_complete_in_flight_and_not_found() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let shared = store.clone() as SharedObjectStore;
+    let partial = namespace_id("partial");
+    bootstrap_namespace(&shared, "seed-writer", &partial).await;
+    store
+        .delete(&namespace_config(partial.as_str()))
+        .await
+        .expect("remove completion descriptor");
+    let young = namespace_id("young");
+    store
+        .put_if_absent(
+            &metadata_root(young.as_str()),
+            Bytes::from_static(b"pre-head debris"),
+        )
+        .await
+        .expect("write young debris");
+    let harness = start_server(shared, temp_dir.path(), "server-writer").await;
+
+    tokio::task::spawn_blocking(move || {
+        let completed = harness
+            .client
+            .repair_namespace(&partial)
+            .expect("repair partial namespace");
+        assert_eq!(completed.outcome, RepairNamespaceOutcome::Completed);
+        let already = harness
+            .client
+            .repair_namespace(&partial)
+            .expect("repeat repair");
+        assert_eq!(already.outcome, RepairNamespaceOutcome::AlreadyComplete);
+        let in_flight = harness
+            .client
+            .repair_namespace(&young)
+            .expect("repair young debris");
+        assert_eq!(in_flight.outcome, RepairNamespaceOutcome::InFlight);
+        assert_api_error(
+            harness.client.repair_namespace(&namespace_id("absent")),
+            404,
+            "namespace_not_found",
+            Some("namespace `absent` does not exist"),
+        );
+        harness.server.abort();
+    })
+    .await
+    .expect("join blocking task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_admin_repair_reports_reaped_for_aged_debris() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(AgedMetadataStore(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+    ));
+    let namespace_id = namespace_id("aged");
+    let root_key = metadata_root(namespace_id.as_str());
+    store
+        .put_if_absent(&root_key, Bytes::from_static(b"pre-head debris"))
+        .await
+        .expect("write aged debris");
+    let shared = store.clone() as SharedObjectStore;
+    let harness = start_server(shared, temp_dir.path(), "server-writer").await;
+
+    tokio::task::spawn_blocking(move || {
+        let reaped = harness
+            .client
+            .repair_namespace(&namespace_id)
+            .expect("repair aged debris");
+        assert_eq!(reaped.outcome, RepairNamespaceOutcome::Reaped);
+        harness.server.abort();
+    })
+    .await
+    .expect("join blocking task");
+    assert!(store.head(&root_key).await.expect("head debris").is_none());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -69,6 +69,7 @@ fn openapi_documents_current_server_paths() {
         ("/v0/admin/namespaces/{namespace}/retention/advance", "post"),
         ("/v0/admin/namespaces/{namespace}/maintenance/tick", "post"),
         ("/v0/admin/namespaces/{namespace}/gc", "post"),
+        ("/v0/admin/namespaces/{namespace}/repair", "post"),
     ] {
         assert_path_method(paths, path, method);
     }

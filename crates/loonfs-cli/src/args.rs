@@ -482,6 +482,8 @@ pub(crate) enum AdminCommand {
     Tick(AdminTickArgs),
     /// Run a mark-and-sweep garbage-collection pass.
     Gc(AdminGcArgs),
+    /// Repair one incomplete namespace installation explicitly.
+    Repair(AdminNamespaceArgs),
     /// Enable the gram content index and start its backfill.
     IndexEnable(AdminNamespaceArgs),
     /// Disable the gram content index.
@@ -536,8 +538,8 @@ pub(crate) struct AdminGcArgs {
     /// omitted).
     #[arg(long)]
     pub grace_window_ms: Option<u64>,
-    /// Abandoned bootstrap trees older than this may be reaped (server
-    /// default when omitted).
+    /// Old upload sessions and abandoned fork records wait at least this long
+    /// (server default when omitted).
     #[arg(long)]
     pub reap_window_ms: Option<u64>,
 }
@@ -605,6 +607,7 @@ pub(crate) enum CommandKind {
     AdminRetentionAdvance,
     AdminTick,
     AdminGc,
+    AdminRepair,
     AdminIndexEnable,
     AdminIndexDisable,
     ConfigPath,
@@ -647,6 +650,7 @@ impl CommandKind {
             CommandKind::AdminRetentionAdvance => "admin_retention_advance",
             CommandKind::AdminTick => "admin_tick",
             CommandKind::AdminGc => "admin_gc",
+            CommandKind::AdminRepair => "admin_repair",
             CommandKind::AdminIndexEnable => "admin_index_enable",
             CommandKind::AdminIndexDisable => "admin_index_disable",
             CommandKind::ConfigPath => "config_path",
@@ -700,6 +704,7 @@ impl Cli {
                 AdminCommand::RetentionAdvance(_) => CommandKind::AdminRetentionAdvance,
                 AdminCommand::Tick(_) => CommandKind::AdminTick,
                 AdminCommand::Gc(_) => CommandKind::AdminGc,
+                AdminCommand::Repair(_) => CommandKind::AdminRepair,
                 AdminCommand::IndexEnable(_) => CommandKind::AdminIndexEnable,
                 AdminCommand::IndexDisable(_) => CommandKind::AdminIndexDisable,
             },

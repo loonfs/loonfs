@@ -2,10 +2,10 @@
 //! source checkpoint, sharing content bytes and copying metadata
 //! references.
 
-use super::bootstrap::{recover_pre_head_debris, PreHeadRecovery};
 use crate::checkpoint::{
     create_checkpoint, freshen_fork_checkpoint, load_namespace_manifest_envelope,
     load_verified_manifest_tables, read_checkpoint_record, write_namespace_manifest,
+    ManifestLoadFailureClass,
 };
 use crate::context::MutationContext;
 use crate::error::MetadataProjectionLoadError;
@@ -34,56 +34,28 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     new_namespace_id: &NamespaceId,
     context: &MutationContext,
 ) -> Result<NamespaceSummary> {
-    let mut recovered_debris = false;
-    loop {
-        match namespace_initialization_state(store, new_namespace_id)
-            .await
-            .map_err(map_namespace_initialization_error_to_core)?
-        {
-            NamespaceInitializationState::Absent => break,
-            NamespaceInitializationState::Complete => {
-                let head = read_head_object(store, new_namespace_id)
-                    .await
-                    .map_err(|error| CoreError::MetadataProjection(error.into()))?;
-                if head.envelope.state.state == NamespaceState::Deleted {
-                    return Err(CoreError::NamespaceDeleted {
-                        namespace_id: new_namespace_id.clone(),
-                    });
-                }
-                return Err(CoreError::NamespaceAlreadyExists {
+    match namespace_initialization_state(store, new_namespace_id)
+        .await
+        .map_err(map_namespace_initialization_error_to_core)?
+    {
+        NamespaceInitializationState::Absent => {}
+        NamespaceInitializationState::Complete => {
+            let head = read_head_object(store, new_namespace_id)
+                .await
+                .map_err(|error| CoreError::MetadataProjection(error.into()))?;
+            if head.envelope.state.state == NamespaceState::Deleted {
+                return Err(CoreError::NamespaceDeleted {
                     namespace_id: new_namespace_id.clone(),
                 });
             }
-            NamespaceInitializationState::Partial => {
-                return complete_post_head_fork(
-                    store,
-                    source_namespace_id,
-                    new_namespace_id,
-                    context,
-                )
-                .await;
-            }
-            NamespaceInitializationState::PreHeadDebris => {
-                // A crashed fork's pre-head target objects block a fresh
-                // attempt. Aged debris is cleaned and classification
-                // re-runs once; young debris may be a concurrent attempt.
-                if recovered_debris {
-                    return Err(CoreError::NamespacePartiallyInitialized {
-                        namespace_id: new_namespace_id.clone(),
-                    });
-                }
-                match recover_pre_head_debris(store, new_namespace_id, context.now_ms).await? {
-                    PreHeadRecovery::Cleaned => {
-                        recovered_debris = true;
-                        continue;
-                    }
-                    PreHeadRecovery::InFlight => {
-                        return Err(CoreError::NamespacePartiallyInitialized {
-                            namespace_id: new_namespace_id.clone(),
-                        });
-                    }
-                }
-            }
+            return Err(CoreError::NamespaceAlreadyExists {
+                namespace_id: new_namespace_id.clone(),
+            });
+        }
+        NamespaceInitializationState::Partial | NamespaceInitializationState::PreHeadDebris => {
+            return Err(CoreError::NamespacePartiallyInitialized {
+                namespace_id: new_namespace_id.clone(),
+            });
         }
     }
 
@@ -255,14 +227,11 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     })
 }
 
-/// Finishes a fork that crashed after its target head write. The head is
-/// the linearization point and everything before it exists, so the retry
-/// only writes the missing descriptor — derived, exactly as the crashed
-/// attempt derived it, from the immutable parts of the source config. The
-/// guard is the target root manifest's fork block naming the same source;
-/// any other tree answers partial (a crashed plain create is completed by
-/// the create path, which binds a fresh content store).
-async fn complete_post_head_fork<S: ObjectStore + ?Sized>(
+/// Finishes a fork that crashed after its target head write when explicit
+/// admin repair invokes it. The missing descriptor is derived from the
+/// immutable parts of the source config. The guard is the target root
+/// manifest's fork block naming that source; any other tree answers partial.
+pub(super) async fn complete_post_head_fork<S: ObjectStore + ?Sized>(
     store: &S,
     source_namespace_id: &NamespaceId,
     new_namespace_id: &NamespaceId,
@@ -275,7 +244,12 @@ async fn complete_post_head_fork<S: ObjectStore + ?Sized>(
     };
     let head = read_head_object(store, new_namespace_id)
         .await
-        .map_err(|_| partial())?
+        .map_err(|error| match error {
+            crate::namespace::control::ControlObjectLoadError::Store { .. } => {
+                CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
+            }
+            _ => partial(),
+        })?
         .envelope
         .state;
     if head.state == NamespaceState::Deleted {
@@ -285,13 +259,23 @@ async fn complete_post_head_fork<S: ObjectStore + ?Sized>(
     }
     let root = read_metadata_root_object(store, new_namespace_id)
         .await
-        .map_err(|_| partial())?
+        .map_err(|error| match error {
+            crate::namespace::control::ControlObjectLoadError::Store { .. } => {
+                CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
+            }
+            _ => partial(),
+        })?
         .envelope
         .state;
     let manifest =
         load_namespace_manifest_envelope(store, new_namespace_id, &root.manifest_object_id)
             .await
-            .map_err(|_| partial())?;
+            .map_err(|error| match error.failure_class() {
+                ManifestLoadFailureClass::Store => {
+                    CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
+                }
+                ManifestLoadFailureClass::Corrupt => partial(),
+            })?;
     let names_this_source = manifest
         .payload
         .fork

@@ -4,11 +4,10 @@ use crate::error::CoreError;
 use crate::limits::GC_MIN_GRACE_WINDOW_MS;
 use serde::{Deserialize, Serialize};
 
-/// Grace and reap windows for the sweep (format spec, "Garbage collection",
-/// rules 1 and 9). Both are wall-clock cleanup policy, never validity
-/// inputs. The defaults are conservative: every object gets one hour of
-/// unconditional protection, and an abandoned bootstrap tree must sit
-/// untouched for seven days before it may be reaped.
+/// Grace and reap windows for the sweep (format spec, "Garbage collection").
+/// Both are wall-clock cleanup policy, never validity inputs. The defaults
+/// are conservative: every object gets one hour of unconditional protection,
+/// while old upload sessions and abandoned fork records wait seven days.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GcConfig {
     pub grace_window_ms: u64,
@@ -52,11 +51,9 @@ pub struct GcReport {
     pub deleted_manifests: u64,
     pub deleted_checkpoint_records: u64,
     /// Fork-owned checkpoint records flipped to released because their
-    /// target namespace is provably gone (terminally deleted, or an
-    /// abandoned bootstrap past the reap window).
+    /// target namespace is provably gone (terminally deleted, or its
+    /// installation tree is absent past the reap window).
     pub released_fork_checkpoints: u64,
-    /// Objects removed while reaping an abandoned bootstrap tree (rule 9).
-    pub reaped_abandoned_objects: u64,
     /// Upload-session control objects deleted after the reap window.
     #[serde(default)]
     pub deleted_upload_sessions: u64,
@@ -72,4 +69,7 @@ pub struct GcReport {
     /// suppresses manifest and table deletion for the whole pass (rule 5:
     /// ambiguous roots cause retention).
     pub degraded_retention: bool,
+    /// The namespace lacked a complete head-and-descriptor pair, so GC
+    /// deliberately skipped it without listing or deleting any objects.
+    pub incomplete_namespace_ignored: bool,
 }

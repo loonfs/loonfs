@@ -27,7 +27,7 @@ use loonfs_api::{
     FilesystemOperationRequest, FlushWalResponse, ForkNamespaceRequest, GcRequest, GcResponse,
     GrepGcResponse, GrepRequest, GrepResponse, InodeId, ListFileRevisionsResponse,
     ListPathEntriesResponse, MaintenanceTickRequest, MaintenanceTickResponse, NamespaceId,
-    NamespaceStatusResponse, NamespaceSummary, ReleaseCheckpointResponse,
+    NamespaceStatusResponse, NamespaceSummary, ReleaseCheckpointResponse, RepairNamespaceResponse,
     RestoreFileRevisionRequest, RevisionNo,
 };
 use std::sync::{Arc, OnceLock};
@@ -539,6 +539,20 @@ impl Client {
     ) -> Result<GcResponse, ClientError> {
         let url = format!("{}/v0/admin/namespaces/{namespace_id}/gc", self.base_url);
         self.request_json(self.agent.post(&url), Some(request))
+    }
+
+    /// Explicitly repairs one incomplete namespace installation.
+    pub fn repair_namespace(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<RepairNamespaceResponse, ClientError> {
+        let url = format!(
+            "{}/v0/admin/namespaces/{namespace_id}/repair",
+            self.base_url
+        );
+        // Repair can reap a namespace, so a lost success cannot be replayed
+        // into the same outcome without a durable request identity.
+        self.request_json_once::<(), RepairNamespaceResponse>(self.agent.post(&url), None)
     }
 
     /// Content search over the namespace's gram index (query plane).
@@ -1076,6 +1090,7 @@ mod tests {
         assert_transport_failure_after_one_attempt(|client| {
             client.delete_namespace(&namespace_id, Some(ChangeSeq(7)))
         });
+        assert_transport_failure_after_one_attempt(|client| client.repair_namespace(&namespace_id));
     }
 
     #[test]
