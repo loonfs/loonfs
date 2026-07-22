@@ -2,11 +2,11 @@
 //! lifecycle.
 //!
 //! Release flips the record `active` -> `released` by compare-and-swap and
-//! returns. The record itself is reaped by a later garbage-collection pass,
-//! and its basis becomes collectable only on the pass after that
-//! (records-last; format spec, "Garbage collection"). Fork-owned records are
-//! not releasable here: their release is decided by garbage collection from
-//! the fork target's fate.
+//! returns. Garbage collection later flips `released` -> `condemned` before
+//! deleting the record, and its basis becomes collectable only on the pass
+//! after that (records-last; format spec, "Garbage collection"). Fork-owned
+//! records are not releasable here: their release is decided by garbage
+//! collection from the fork target's fate.
 
 use super::record::{read_checkpoint_record, set_checkpoint_record_state};
 use crate::context::MutationContext;
@@ -38,6 +38,12 @@ pub(crate) async fn release_checkpoint<S: ObjectStore + ?Sized>(
             "checkpoint `{checkpoint_id}` is owned by fork target `{target_namespace_id}`; \
              it is released by deleting that namespace, not by this operation"
         )));
+    }
+    if loaded.state.state == CheckpointRecordLifecycle::Condemned {
+        return Err(CoreError::CheckpointStateConflict {
+            checkpoint_id: checkpoint_id.clone(),
+            state: loaded.state.state,
+        });
     }
     if loaded.state.state == CheckpointRecordLifecycle::Released {
         return Ok(ReleaseCheckpointResponse {

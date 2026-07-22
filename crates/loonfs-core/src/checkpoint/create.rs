@@ -60,7 +60,8 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
     //    the basis and the basis manifest still loads, under the verify
     //    budget.
     // 4. On verification failure, flip the record to released and retry
-    //    against a newer basis.
+    //    against a newer basis. An existing condemned record is absorbing:
+    //    renewal refuses it until the next GC pass deletes the name.
     validate_checkpoint_owner(&owner, expires_at_ms)?;
     let timer = StdMonotonicTimer::default();
     let mut saw_root_cas_race = false;

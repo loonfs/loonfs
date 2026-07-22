@@ -7,11 +7,13 @@ use crate::checkpoint::{
 };
 use crate::context::MutationContext;
 use crate::error::{CoreError, MetadataProjectionLoadError};
+#[cfg(test)]
 use crate::limits::GC_MIN_GRACE_WINDOW_MS;
 use crate::metadata::{InodeRecord, MetadataState};
 use crate::namespace::catalog::{
     map_namespace_initialization_error_to_core, namespace_initialization_state,
-    put_completion_descriptor, put_target_namespace_control_object, NamespaceInitializationState,
+    put_completion_descriptor, put_namespace_install_gate, put_target_namespace_control_object,
+    NamespaceInitializationState, NamespaceInstallGate,
 };
 use crate::namespace::control::ControlObjectLoadError;
 use crate::namespace::control::{read_head_object, read_metadata_root_object};
@@ -26,8 +28,10 @@ use loonfs_api::{
     ChangeSeq, ContentStoreId, ErrorCode, InodeId, InodeKind, NamePolicy, NamespaceId,
     NamespaceSummary,
 };
+#[cfg(test)]
+use loonfs_objectstore::keys::wal_head;
 use loonfs_objectstore::keys::{
-    content_store_descriptor, metadata_root, namespace_config, wal_floor, wal_head,
+    content_store_descriptor, metadata_root, namespace_config, wal_floor,
 };
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 use thiserror::Error;
@@ -136,6 +140,21 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
         .await
         .map_err(CoreError::MetadataProjection)?;
 
+    // The head create-if-absent is the first fixed-key conditional install
+    // write and therefore the admission gate. No fixed-key prerequisite is
+    // written unless this attempt owns that state. Repair condemns this same
+    // key and removes it last.
+    let initial_seq = initial_head.seq;
+    let head_envelope = HeadStateEnvelope::from_state(
+        ControlObjectKind::WalHead,
+        &context.writer_version,
+        initial_head,
+    )
+    .map_err(|err| CoreError::Internal(format!("failed to build head envelope: {err}")))?;
+    let head_bytes = encode_control_object(&head_envelope)
+        .map_err(|err| CoreError::Internal(format!("failed to encode head object: {err}")))?;
+    let gate = put_namespace_install_gate(store, namespace_id, &head_bytes).await?;
+
     let root_envelope = MetadataRootEnvelope::from_state(
         ControlObjectKind::MetadataRoot,
         &context.writer_version,
@@ -143,7 +162,7 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
             namespace_id: namespace_id.clone(),
             manifest_id: initial_manifest.payload.manifest_id,
             manifest_object_id: initial_manifest.payload.manifest_object_id.clone(),
-            manifest_head_seq: initial_head.seq,
+            manifest_head_seq: initial_seq,
             manifest_payload_checksum: initial_manifest.payload_checksum.clone(),
             updated_at_ms: context.now_ms,
         },
@@ -164,7 +183,7 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
         &context.writer_version,
         WalFloorState {
             namespace_id: namespace_id.clone(),
-            floor_seq: initial_head.seq,
+            floor_seq: initial_seq,
             verified_at_ms: context.now_ms,
             updated_at_ms: context.now_ms,
         },
@@ -180,20 +199,12 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     )
     .await?;
 
-    let head_envelope = HeadStateEnvelope::from_state(
-        ControlObjectKind::WalHead,
-        &context.writer_version,
-        initial_head,
-    )
-    .map_err(|err| CoreError::Internal(format!("failed to build head envelope: {err}")))?;
-    put_target_namespace_control_object(
-        store,
-        namespace_id,
-        &wal_head(namespace_id.as_str()),
-        &encode_control_object(&head_envelope)
-            .map_err(|err| CoreError::Internal(format!("failed to encode head object: {err}")))?,
-    )
-    .await?;
+    if gate == NamespaceInstallGate::ExistingPartial {
+        return Err(CoreError::NamespacePartiallyInitialized {
+            namespace_id: namespace_id.clone(),
+        }
+        .into());
+    }
 
     let content_store_id = create_new_content_store(store, context).await?;
     let namespace_descriptor_envelope = NamespaceConfigEnvelope::from_state(
@@ -225,67 +236,6 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     Ok(NamespaceSummary {
         namespace_id: namespace_id.clone(),
     })
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum PreHeadRecovery {
-    /// Aged debris was deleted; re-classify and proceed.
-    Cleaned,
-    /// The debris is younger than the grace window, carries no provider
-    /// timestamp, or a head appeared mid-cleanup: leave it alone.
-    InFlight,
-}
-
-/// Deletes a crashed attempt's pre-head objects when explicit admin repair
-/// finds them older than the derived safety floor. Repair re-checks head
-/// absence immediately before every delete. Pre-head objects are unreachable
-/// until a head exists, so deletion can strand no reader.
-pub(super) async fn recover_pre_head_debris<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    now_ms: u64,
-) -> Result<PreHeadRecovery, CoreError> {
-    let prefix = format!("namespaces/{}/", namespace_id.as_str());
-    let head_key = wal_head(namespace_id.as_str());
-    let keys = store
-        .list_prefix(&prefix)
-        .await
-        .map_err(|err| CoreError::store(&prefix, &err))?;
-    let mut newest = 0u64;
-    for key in &keys {
-        let Some(metadata) = store
-            .head(key)
-            .await
-            .map_err(|err| CoreError::store(key.as_str(), &err))?
-        else {
-            continue;
-        };
-        let Some(last_modified_ms) = metadata.last_modified_ms else {
-            // No provider timestamp reads as young (GC rule 1).
-            return Ok(PreHeadRecovery::InFlight);
-        };
-        newest = newest.max(last_modified_ms);
-    }
-    if now_ms.saturating_sub(newest) < GC_MIN_GRACE_WINDOW_MS {
-        return Ok(PreHeadRecovery::InFlight);
-    }
-    for key in &keys {
-        let head_exists = store
-            .head(&head_key)
-            .await
-            .map_err(|err| CoreError::store(&head_key, &err))?
-            .is_some();
-        if head_exists {
-            // A concurrent attempt linearized while this one was cleaning;
-            // the caller re-classifies against the now-real namespace.
-            return Ok(PreHeadRecovery::InFlight);
-        }
-        store
-            .delete(key)
-            .await
-            .map_err(|err| CoreError::store(key.as_str(), &err))?;
-    }
-    Ok(PreHeadRecovery::Cleaned)
 }
 
 /// Finishes a create that crashed after its head write when explicit admin
@@ -439,12 +389,144 @@ mod tests {
     use crate::namespace::fork::fork_namespace;
     use crate::namespace::repair::repair_namespace;
     use crate::namespace::status::load_namespace_head_summary;
+    use futures::stream::BoxStream;
     use loonfs_api::v0::{CommitOp as ApiCommitOp, CommitRequest as ApiCommitRequest};
+    use loonfs_api::wire::control::decode_control_object;
     use loonfs_api::{CommitId, ManifestId, ManifestObjectId, RepairNamespaceOutcome};
     use loonfs_objectstore::local_fs_store::LocalFsStore;
+    use loonfs_objectstore::{ByteRange, ObjectBody, ObjectMetadata, ObjectStoreError, PutMode};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use tempfile::tempdir;
+    use tokio::sync::Semaphore;
 
     const WRITER_VERSION: &str = "writer/0.1.0";
+
+    #[derive(Debug)]
+    struct BlockingRepairDeleteStore {
+        inner: LocalFsStore,
+        gate_key: String,
+        install_blocked_once: AtomicBool,
+        install_entered: Semaphore,
+        install_release: Semaphore,
+        install_finished: Semaphore,
+        delete_blocked_once: AtomicBool,
+        delete_entered: Semaphore,
+        delete_release: Semaphore,
+    }
+
+    impl BlockingRepairDeleteStore {
+        fn new(inner: LocalFsStore, gate_key: String) -> Self {
+            Self {
+                inner,
+                gate_key,
+                install_blocked_once: AtomicBool::new(false),
+                install_entered: Semaphore::new(0),
+                install_release: Semaphore::new(0),
+                install_finished: Semaphore::new(0),
+                delete_blocked_once: AtomicBool::new(false),
+                delete_entered: Semaphore::new(0),
+                delete_release: Semaphore::new(0),
+            }
+        }
+
+        async fn wait_until_install_blocked(&self) {
+            self.install_entered
+                .acquire()
+                .await
+                .expect("blocking store remains open")
+                .forget();
+        }
+
+        fn unblock_install(&self) {
+            self.install_release.add_permits(1);
+        }
+
+        async fn wait_until_install_finished(&self) {
+            self.install_finished
+                .acquire()
+                .await
+                .expect("blocking store remains open")
+                .forget();
+        }
+
+        async fn wait_until_delete_blocked(&self) {
+            self.delete_entered
+                .acquire()
+                .await
+                .expect("blocking store remains open")
+                .forget();
+        }
+
+        fn unblock_delete(&self) {
+            self.delete_release.add_permits(1);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStore for BlockingRepairDeleteStore {
+        async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+            self.inner.head(key).await
+        }
+
+        async fn get_with_metadata(
+            &self,
+            key: &str,
+        ) -> Result<Option<ObjectBody>, ObjectStoreError> {
+            self.inner.get_with_metadata(key).await
+        }
+
+        async fn get(
+            &self,
+            key: &str,
+            range: Option<ByteRange>,
+        ) -> Result<Option<Bytes>, ObjectStoreError> {
+            self.inner.get(key, range).await
+        }
+
+        async fn put(
+            &self,
+            key: &str,
+            bytes: Bytes,
+            mode: PutMode,
+        ) -> Result<ObjectMetadata, ObjectStoreError> {
+            let installing_active_head = key == self.gate_key
+                && matches!(&mode, PutMode::CreateIfAbsent)
+                && decode_control_object::<HeadState>(&bytes, ControlObjectKind::WalHead)
+                    .is_ok_and(|envelope| envelope.state.state == NamespaceState::Active)
+                && !self.install_blocked_once.swap(true, Ordering::SeqCst);
+            if installing_active_head {
+                self.install_entered.add_permits(1);
+                self.install_release
+                    .acquire()
+                    .await
+                    .expect("blocking store remains open")
+                    .forget();
+                let result = self.inner.put(key, bytes, mode).await;
+                self.install_finished.add_permits(1);
+                return result;
+            }
+            self.inner.put(key, bytes, mode).await
+        }
+
+        async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+            if key != self.gate_key && !self.delete_blocked_once.swap(true, Ordering::SeqCst) {
+                self.delete_entered.add_permits(1);
+                self.delete_release
+                    .acquire()
+                    .await
+                    .expect("blocking store remains open")
+                    .forget();
+            }
+            self.inner.delete(key).await
+        }
+
+        fn list_prefix_stream(
+            &self,
+            prefix: &str,
+        ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+            self.inner.list_prefix_stream(prefix)
+        }
+    }
 
     fn context(now_ms: u64) -> MutationContext {
         MutationContext {
@@ -455,9 +537,9 @@ mod tests {
         }
     }
 
-    /// Simulates a create or fork that crashed after its root and floor
-    /// writes but before its head write. The root's manifest pointer is a
-    /// dangling dummy: recovery deletes debris without reading through it.
+    /// Simulates legacy create/fork debris with root and floor but no gating
+    /// head. The root's manifest pointer is a dangling dummy: repair deletes
+    /// this debris without reading through it.
     async fn write_pre_head_debris(store: &LocalFsStore, namespace_id: &NamespaceId) {
         let root = MetadataRootEnvelope::from_state(
             ControlObjectKind::MetadataRoot,
@@ -700,6 +782,50 @@ mod tests {
         bootstrap_namespace(&store, &namespace_id, &aged, false)
             .await
             .expect("namespace is creatable after reap");
+    }
+
+    #[tokio::test]
+    async fn repair_condemns_the_install_gate_before_a_racing_create() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+        let store = BlockingRepairDeleteStore::new(store, wal_head(namespace_id.as_str()));
+
+        let create_context = context(1_000);
+        let create = bootstrap_namespace(&store, &namespace_id, &create_context, false);
+        let repair = async {
+            store.wait_until_install_blocked().await;
+            // The create passed its absent probe and prepared its immutable
+            // manifest, but is paused at the first fixed-key conditional
+            // install write.
+            let repair_context = context(u64::MAX);
+            let repair = repair_namespace(&store, &namespace_id, &repair_context);
+            let coordinate = async {
+                store.wait_until_delete_blocked().await;
+                let head = read_head_object(&store, &namespace_id)
+                    .await
+                    .expect("condemned gate is durable before subtree deletion");
+                assert_eq!(head.envelope.state.state, NamespaceState::Condemned);
+                store.unblock_install();
+                store.wait_until_install_finished().await;
+                store.unblock_delete();
+            };
+            let (repair, ()) = tokio::join!(repair, coordinate);
+            repair
+        };
+        let (create, repair) = tokio::join!(create, repair);
+
+        assert_eq!(
+            create.expect_err("racing create sees the gate").code(),
+            ErrorCode::NamespacePartial
+        );
+        assert_eq!(
+            repair.expect("repair completes").outcome,
+            RepairNamespaceOutcome::Reaped
+        );
+        bootstrap_namespace(&store, &namespace_id, &context(2_000), false)
+            .await
+            .expect("fresh create succeeds after gate-last deletion");
     }
 
     #[tokio::test]

@@ -23,8 +23,9 @@ use loonfs_grep::keyspace::{
     manifest_key, manifests_prefix, namespace_prefix, root_key, segment_key,
 };
 use loonfs_grep::root::{
-    encode_grep_root, load_grep_root, GrepLifecycle, GrepManifestId, GrepRootEnvelope,
-    GrepRootPointer,
+    advance_grep_root, encode_grep_manifest, encode_grep_root, load_grep_root, GrepIndexState,
+    GrepLifecycle, GrepManifestEnvelope, GrepManifestId, GrepRootEnvelope, GrepRootPointer,
+    GrepRootState,
 };
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepBuildOutcome, GrepFoldOutcome, GrepIndexSnapshot, GrepService,
@@ -40,8 +41,10 @@ use loonfs_objectstore::{
 };
 use std::collections::BTreeSet;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
+use tokio::sync::Semaphore;
 
 fn request(pattern: &str) -> GrepRequest {
     GrepRequest {
@@ -121,6 +124,89 @@ async fn new_query(
     let service = GrepService::new();
     let snapshot = GrepIndexSnapshot::from_grep_root(&**store, namespace_id, &service).await;
     service.query(grep_request, &snapshot, &view, store).await
+}
+
+#[derive(Debug)]
+struct BlockingGrepRootCasStore {
+    inner: SharedObjectStore,
+    root_key: String,
+    blocked_once: AtomicBool,
+    entered: Semaphore,
+    release: Semaphore,
+}
+
+impl BlockingGrepRootCasStore {
+    fn new(inner: SharedObjectStore, root_key: String) -> Self {
+        Self {
+            inner,
+            root_key,
+            blocked_once: AtomicBool::new(false),
+            entered: Semaphore::new(0),
+            release: Semaphore::new(0),
+        }
+    }
+
+    async fn wait_until_blocked(&self) {
+        self.entered
+            .acquire()
+            .await
+            .expect("blocking store remains open")
+            .forget();
+    }
+
+    fn unblock(&self) {
+        self.release.add_permits(1);
+    }
+}
+
+#[async_trait]
+impl ObjectStore for BlockingGrepRootCasStore {
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head(key).await
+    }
+
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        self.inner.get_with_metadata(key).await
+    }
+
+    async fn get(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<Option<Bytes>, ObjectStoreError> {
+        self.inner.get(key, range).await
+    }
+
+    async fn put(
+        &self,
+        key: &str,
+        bytes: Bytes,
+        mode: PutMode,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        let should_block = key == self.root_key
+            && matches!(&mode, PutMode::CompareAndSwap { .. })
+            && !self.blocked_once.swap(true, Ordering::SeqCst);
+        if should_block {
+            self.entered.add_permits(1);
+            self.release
+                .acquire()
+                .await
+                .expect("blocking store remains open")
+                .forget();
+        }
+        self.inner.put(key, bytes, mode).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        self.inner.delete(key).await
+    }
+
+    fn list_prefix_stream(
+        &self,
+        prefix: &str,
+    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+        self.inner.list_prefix_stream(prefix)
+    }
 }
 
 fn normalize_namespace(mut response: GrepResponse, namespace_id: &NamespaceId) -> GrepResponse {
@@ -756,6 +842,106 @@ async fn checkpoint_backfill_matches_incremental_worker_results() {
         backfill
     );
     writer.shutdown_background().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn pointer_advance_heals_a_manifest_deleted_after_already_exists() {
+    let temp_dir = tempdir().expect("tempdir");
+    let base: SharedObjectStore =
+        Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
+    let namespace_id = NamespaceId::parse("manifest-heal").expect("namespace id");
+    let writer = FsWriter::builder_with_store(base.clone())
+        .writer_id("manifest-heal-writer")
+        .min_publish_interval_ms(0)
+        .build()
+        .await
+        .expect("writer");
+    writer
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
+    writer
+        .put_file_bytes(
+            &namespace_id,
+            "/needle.txt",
+            b"verify and heal needle\n",
+            PutFileOptions::default(),
+        )
+        .await
+        .expect("write indexed file");
+    let initial_worker = worker(&base);
+    initial_worker.enable(&namespace_id).await.expect("enable");
+    drive_worker_to_current(
+        &initial_worker,
+        &namespace_id,
+        GramIndexBuildPolicy::default(),
+    )
+    .await;
+    writer.shutdown_background().await.expect("shutdown writer");
+
+    let current = load_grep_root(&*base, &namespace_id)
+        .await
+        .expect("load current root")
+        .expect("root exists");
+    let current_state = current.state();
+    let next = GrepRootState::new(
+        namespace_id.clone(),
+        current_state.lifecycle().clone(),
+        GrepIndexState::new(
+            current_state.index().built_through_seq,
+            current_state.index().fold.clone(),
+            current_state.index().next_run_ordinal + 1,
+        ),
+        current_state.segments().to_vec(),
+    )
+    .expect("valid successor state");
+    let candidate = GrepManifestEnvelope::from_state("manifest-heal-test/0.1", next.clone())
+        .expect("candidate manifest");
+    let candidate_key = manifest_key(&namespace_id, candidate.manifest_id());
+    base.put_if_absent(
+        &candidate_key,
+        Bytes::from(encode_grep_manifest(&candidate).expect("encode candidate")),
+    )
+    .await
+    .expect("pre-land the content-addressed candidate");
+
+    let blocking = Arc::new(BlockingGrepRootCasStore::new(
+        base.clone(),
+        root_key(&namespace_id),
+    ));
+    let store: SharedObjectStore = blocking.clone();
+    let advance = advance_grep_root(&*store, &current, &next, "manifest-heal-test/0.1");
+    let collect = async {
+        blocking.wait_until_blocked().await;
+        let report = worker(&store)
+            .garbage_collect_namespace(&namespace_id, u64::MAX)
+            .await;
+        let candidate_after_gc = store.head(&candidate_key).await;
+        blocking.unblock();
+        (report, candidate_after_gc)
+    };
+    let (advanced, (report, candidate_after_gc)) = tokio::join!(advance, collect);
+
+    assert!(
+        report
+            .expect("grep GC wins the manifest race")
+            .deleted_other_objects
+            >= 1
+    );
+    assert!(candidate_after_gc
+        .expect("head candidate after GC")
+        .is_none());
+    advanced.expect("pointer advance verifies and heals its manifest");
+    assert!(store
+        .head(&candidate_key)
+        .await
+        .expect("head healed manifest")
+        .is_some());
+    let response = new_query(&store, &namespace_id, &request("verify and heal needle"))
+        .await
+        .expect("query follows the healed pointer");
+    assert_eq!(response.matches.len(), 1);
+    assert_eq!(response.matches[0].absolute_path, "/needle.txt");
 }
 
 #[derive(Debug)]

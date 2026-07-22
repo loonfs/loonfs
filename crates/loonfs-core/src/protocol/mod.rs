@@ -36,5 +36,6 @@ pub(crate) use self::changes::list_changes_after;
 pub use self::publish_view::PublishTailOptions;
 pub(crate) use self::publish_view::{load_publish_metadata_view, PublishTailProjection};
 pub(crate) use self::uploads::{
-    begin_direct_put_upload_target, begin_upload, complete_upload, upload_content,
+    begin_direct_put_upload_target, begin_upload, complete_upload, condemn_upload_session_if_aged,
+    upload_content, UploadSessionSweep,
 };

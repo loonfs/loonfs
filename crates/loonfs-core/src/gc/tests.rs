@@ -1,7 +1,7 @@
 //! Behavior tests for namespace GC.
 
 use super::config::GcConfig;
-use super::reap::list_prefix;
+use super::reap::{condemn_checkpoint_if_aged, list_prefix, CheckpointCondemn};
 use super::run::{gc_namespace, gc_namespace_with_reverify_chunk};
 use crate::checkpoint::advance_retention_floor;
 use crate::checkpoint::record::set_checkpoint_record_state;
@@ -10,9 +10,9 @@ use crate::error::CoreError;
 use crate::limits::GC_MIN_GRACE_WINDOW_MS;
 use loonfs_api::wire::control::{
     decode_control_object, CheckpointOwner, CheckpointRecordLifecycle, CheckpointRecordState,
-    ControlObjectKind,
+    ControlObjectKind, UploadSessionLifecycle, UploadSessionState,
 };
-use loonfs_api::NamespaceId;
+use loonfs_api::{ContentRef, ContentStoreId, NamespaceId, UploadId};
 use loonfs_objectstore::keys::{
     checkpoint_prefix, metadata_manifest_object, metadata_manifest_prefix, metadata_table_prefix,
     namespace_config, wal_head, wal_segment_prefix,
@@ -50,8 +50,9 @@ use futures::stream::BoxStream;
 use loonfs_api::{AbsolutePath, CommitId, DestinationBehavior};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ByteRange, ObjectBody, ObjectMetadata, ObjectStoreError, PutMode};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tempfile::tempdir;
+use tokio::sync::Semaphore;
 
 const GRACE_MS: u64 = 60 * 60 * 1000;
 const REAP_MS: u64 = 7 * 24 * 60 * 60 * 1000;
@@ -199,6 +200,135 @@ struct IncompleteGcAccountingStore {
     lists: AtomicUsize,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum BlockingControlCasTarget {
+    CheckpointActive,
+    CheckpointCondemned,
+    UploadCompleted,
+    UploadCondemned,
+}
+
+#[derive(Debug)]
+struct BlockingControlCasStore {
+    inner: LocalFsStore,
+    target: BlockingControlCasTarget,
+    blocked_once: AtomicBool,
+    entered: Semaphore,
+    release: Semaphore,
+}
+
+impl BlockingControlCasStore {
+    fn new(inner: LocalFsStore, target: BlockingControlCasTarget) -> Self {
+        Self {
+            inner,
+            target,
+            blocked_once: AtomicBool::new(false),
+            entered: Semaphore::new(0),
+            release: Semaphore::new(0),
+        }
+    }
+
+    async fn wait_until_blocked(&self) {
+        self.entered
+            .acquire()
+            .await
+            .expect("blocking store remains open")
+            .forget();
+    }
+
+    fn unblock(&self) {
+        self.release.add_permits(1);
+    }
+
+    fn matches_target(&self, bytes: &[u8]) -> bool {
+        match self.target {
+            BlockingControlCasTarget::CheckpointActive
+            | BlockingControlCasTarget::CheckpointCondemned => {
+                let Ok(envelope) = decode_control_object::<CheckpointRecordState>(
+                    bytes,
+                    ControlObjectKind::CheckpointRecord,
+                ) else {
+                    return false;
+                };
+                let target = match self.target {
+                    BlockingControlCasTarget::CheckpointActive => CheckpointRecordLifecycle::Active,
+                    BlockingControlCasTarget::CheckpointCondemned => {
+                        CheckpointRecordLifecycle::Condemned
+                    }
+                    _ => return false,
+                };
+                envelope.state.state == target
+            }
+            BlockingControlCasTarget::UploadCompleted
+            | BlockingControlCasTarget::UploadCondemned => {
+                let Ok(envelope) = decode_control_object::<UploadSessionState>(
+                    bytes,
+                    ControlObjectKind::UploadSession,
+                ) else {
+                    return false;
+                };
+                match self.target {
+                    BlockingControlCasTarget::UploadCompleted => envelope.state.completed.is_some(),
+                    BlockingControlCasTarget::UploadCondemned => {
+                        envelope.state.state == UploadSessionLifecycle::Condemned
+                    }
+                    _ => false,
+                }
+            }
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ObjectStore for BlockingControlCasStore {
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head(key).await
+    }
+
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        self.inner.get_with_metadata(key).await
+    }
+
+    async fn get(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<Option<Bytes>, ObjectStoreError> {
+        self.inner.get(key, range).await
+    }
+
+    async fn put(
+        &self,
+        key: &str,
+        bytes: Bytes,
+        mode: PutMode,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        let should_block = matches!(&mode, PutMode::CompareAndSwap { .. })
+            && self.matches_target(&bytes)
+            && !self.blocked_once.swap(true, Ordering::SeqCst);
+        if should_block {
+            self.entered.add_permits(1);
+            self.release
+                .acquire()
+                .await
+                .expect("blocking store remains open")
+                .forget();
+        }
+        self.inner.put(key, bytes, mode).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        self.inner.delete(key).await
+    }
+
+    fn list_prefix_stream(
+        &self,
+        prefix: &str,
+    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+        self.inner.list_prefix_stream(prefix)
+    }
+}
+
 #[async_trait::async_trait]
 impl ObjectStore for IncompleteGcAccountingStore {
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
@@ -316,6 +446,7 @@ async fn write_upload_session(store: &LocalFsStore, namespace_id: &NamespaceId) 
         staged_content_ref: None,
         completed: None,
         created_at_ms: 1_000,
+        state: loonfs_api::wire::control::UploadSessionLifecycle::Active,
     };
     let envelope = loonfs_api::wire::control::UploadSessionEnvelope::from_state(
         loonfs_api::wire::control::ControlObjectKind::UploadSession,
@@ -331,6 +462,49 @@ async fn write_upload_session(store: &LocalFsStore, namespace_id: &NamespaceId) 
         .await
         .expect("write session");
     key
+}
+
+async fn stage_upload<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    context: &MutationContext,
+) -> (UploadId, ContentRef, ContentStoreId) {
+    let begin = crate::protocol::begin_upload(
+        store,
+        namespace_id,
+        loonfs_api::v0::BeginUploadRequest::default(),
+        context,
+    )
+    .await
+    .expect("begin upload");
+    let staged = crate::protocol::upload_content(
+        store,
+        namespace_id,
+        &begin.upload_id,
+        b"racing upload\n",
+        context,
+    )
+    .await
+    .expect("stage upload");
+    let content_store_id =
+        crate::namespace::catalog::load_namespace_content_store_id(store, namespace_id)
+            .await
+            .expect("content store id");
+    (begin.upload_id, staged.content_ref, content_store_id)
+}
+
+async fn read_upload_session<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    upload_id: &UploadId,
+) -> Option<UploadSessionState> {
+    let key = loonfs_objectstore::keys::upload_session(namespace_id.as_str(), upload_id.as_str());
+    let body = store.get(&key, None).await.expect("read upload session")?;
+    Some(
+        decode_control_object::<UploadSessionState>(&body, ControlObjectKind::UploadSession)
+            .expect("decode upload session")
+            .state,
+    )
 }
 
 #[tokio::test]
@@ -579,8 +753,8 @@ async fn upload_sessions_reap_after_the_window_and_survive_inside_it() {
         .expect("head session")
         .is_some());
 
-    // Past the reap window the session is dead whatever its state:
-    // age is the whole decision, and the pass counts the deletion.
+    // Past the reap window GC condemns the abandoned session under its etag,
+    // then deletes the now-absorbing object.
     let aged = context(now_after_newest_object(&store, &namespace_id, REAP_MS + 1).await);
     let report = gc_namespace(&store, &namespace_id, &config(), &aged)
         .await
@@ -598,6 +772,88 @@ async fn upload_sessions_reap_after_the_window_and_survive_inside_it() {
         .await
         .expect("gc pass after the sweep");
     assert_eq!(report.deleted_upload_sessions, 0);
+}
+
+#[tokio::test]
+async fn upload_completion_wins_before_condemn_and_the_session_is_retained() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = context(1_000);
+    bootstrap_namespace(&store, &namespace_id, &setup, false)
+        .await
+        .expect("bootstrap");
+    let (upload_id, content_ref, content_store_id) =
+        stage_upload(&store, &namespace_id, &setup).await;
+    let aged = context(now_after_newest_object(&store, &namespace_id, REAP_MS + 1).await);
+    let store = BlockingControlCasStore::new(store, BlockingControlCasTarget::UploadCondemned);
+    let gc_config = config();
+    let gc = gc_namespace(&store, &namespace_id, &gc_config, &aged);
+    let complete = async {
+        store.wait_until_blocked().await;
+        let result = crate::protocol::complete_upload(
+            &store,
+            &namespace_id,
+            &content_store_id,
+            &upload_id,
+            &loonfs_api::v0::CompleteUploadRequest {
+                content_ref: content_ref.clone(),
+            },
+            &setup,
+        )
+        .await;
+        store.unblock();
+        result
+    };
+    let (report, completion) = tokio::join!(gc, complete);
+    completion.expect("completion wins the blocked condemn CAS");
+    let report = report.expect("gc pass");
+    assert_eq!(report.deleted_upload_sessions, 0);
+    let session = read_upload_session(&store, &namespace_id, &upload_id)
+        .await
+        .expect("completed session retained");
+    assert!(session.completed.is_some());
+    assert_eq!(session.state, UploadSessionLifecycle::Active);
+}
+
+#[tokio::test]
+async fn upload_condemn_wins_before_completion_and_completion_reports_not_found() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = context(1_000);
+    bootstrap_namespace(&store, &namespace_id, &setup, false)
+        .await
+        .expect("bootstrap");
+    let (upload_id, content_ref, content_store_id) =
+        stage_upload(&store, &namespace_id, &setup).await;
+    let aged = context(now_after_newest_object(&store, &namespace_id, REAP_MS + 1).await);
+    let store = BlockingControlCasStore::new(store, BlockingControlCasTarget::UploadCompleted);
+    let request = loonfs_api::v0::CompleteUploadRequest {
+        content_ref: content_ref.clone(),
+    };
+    let completion = crate::protocol::complete_upload(
+        &store,
+        &namespace_id,
+        &content_store_id,
+        &upload_id,
+        &request,
+        &setup,
+    );
+    let condemn = async {
+        store.wait_until_blocked().await;
+        let report = gc_namespace(&store, &namespace_id, &config(), &aged).await;
+        store.unblock();
+        report
+    };
+    let (completion, report) = tokio::join!(completion, condemn);
+    let error = completion.expect_err("condemned session is logically absent");
+    assert!(matches!(&error, CoreError::UploadNotFound { .. }));
+    assert_eq!(error.code(), crate::error::ErrorCode::UploadNotFound);
+    assert_eq!(report.expect("gc pass").deleted_upload_sessions, 1);
+    assert!(read_upload_session(&store, &namespace_id, &upload_id)
+        .await
+        .is_none());
 }
 
 #[tokio::test]
@@ -888,6 +1144,157 @@ async fn gc_reaps_released_checkpoints_before_their_basis_across_passes() {
             .expect("release after reap");
     assert!(!after_reap.was_active);
     stat_root(&store, &namespace_id).await;
+}
+
+#[tokio::test]
+async fn checkpoint_revival_wins_before_condemn_and_keeps_its_basis_pinned() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = context(1_000);
+    bootstrap_namespace(&store, &namespace_id, &setup, false)
+        .await
+        .expect("bootstrap");
+    write_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
+    let checkpoint = create_checkpoint(&store, &namespace_id, &setup)
+        .await
+        .expect("checkpoint");
+    let basis =
+        crate::checkpoint::read_checkpoint_record(&store, &namespace_id, &checkpoint.checkpoint_id)
+            .await
+            .expect("read checkpoint")
+            .expect("checkpoint exists")
+            .state;
+    crate::checkpoint::release_checkpoint(&store, &namespace_id, &checkpoint.checkpoint_id, &setup)
+        .await
+        .expect("release checkpoint");
+    let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
+    let store = BlockingControlCasStore::new(store, BlockingControlCasTarget::CheckpointCondemned);
+    let gc_config = config();
+    let gc = gc_namespace(&store, &namespace_id, &gc_config, &aged);
+    let revive = async {
+        store.wait_until_blocked().await;
+        let revived = create_checkpoint(&store, &namespace_id, &setup).await;
+        store.unblock();
+        revived
+    };
+    let (report, revived) = tokio::join!(gc, revive);
+    assert_eq!(
+        revived.expect("revival wins").checkpoint_id,
+        checkpoint.checkpoint_id
+    );
+    assert_eq!(report.expect("gc pass").deleted_checkpoint_records, 0);
+
+    // Move the root to another manifest, then run a complete later pass: the
+    // revived record is now the only reason its old basis survives.
+    write_file(&store, &namespace_id, "/docs/two.txt", "gc-two", &setup).await;
+    create_checkpoint(&store, &namespace_id, &setup)
+        .await
+        .expect("advance metadata root");
+    let aged = context(now_after_newest_object(&store.inner, &namespace_id, GRACE_MS + 1).await);
+    gc_namespace(&store, &namespace_id, &config(), &aged)
+        .await
+        .expect("full pass after revival");
+    crate::checkpoint::load_namespace_manifest_envelope(
+        &store,
+        &namespace_id,
+        &basis.manifest_object_id,
+    )
+    .await
+    .expect("revived checkpoint basis survives");
+}
+
+#[tokio::test]
+async fn checkpoint_condemn_wins_before_revival_then_gc_frees_the_name() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = context(1_000);
+    bootstrap_namespace(&store, &namespace_id, &setup, false)
+        .await
+        .expect("bootstrap");
+    let checkpoint = create_checkpoint(&store, &namespace_id, &setup)
+        .await
+        .expect("checkpoint");
+    crate::checkpoint::release_checkpoint(&store, &namespace_id, &checkpoint.checkpoint_id, &setup)
+        .await
+        .expect("release checkpoint");
+    let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
+    let key = loonfs_objectstore::keys::checkpoint_record(
+        namespace_id.as_str(),
+        checkpoint.checkpoint_id.as_str(),
+    );
+    let store = BlockingControlCasStore::new(store, BlockingControlCasTarget::CheckpointActive);
+    let revival = create_checkpoint(&store, &namespace_id, &setup);
+    let condemn = async {
+        store.wait_until_blocked().await;
+        let outcome =
+            condemn_checkpoint_if_aged(&store, &namespace_id, &key, GRACE_MS, false, &aged).await;
+        store.unblock();
+        outcome
+    };
+    let (revival, condemn) = tokio::join!(revival, condemn);
+    assert_eq!(condemn.expect("condemn CAS"), CheckpointCondemn::Delete);
+    let error = revival.expect_err("condemned lifecycle is absorbing");
+    assert!(matches!(
+        &error,
+        CoreError::CheckpointStateConflict {
+            state: CheckpointRecordLifecycle::Condemned,
+            ..
+        }
+    ));
+    assert_eq!(error.code(), crate::error::ErrorCode::CheckpointUnavailable);
+
+    let report = gc_namespace(&store, &namespace_id, &config(), &aged)
+        .await
+        .expect("next GC pass");
+    assert_eq!(report.deleted_checkpoint_records, 1);
+    let recreated = create_checkpoint(&store, &namespace_id, &setup)
+        .await
+        .expect("name is usable after condemned record deletion");
+    assert_eq!(recreated.checkpoint_id, checkpoint.checkpoint_id);
+}
+
+#[tokio::test]
+async fn checkpoint_condemn_crash_residue_is_deleted_by_the_next_pass() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = context(1_000);
+    bootstrap_namespace(&store, &namespace_id, &setup, false)
+        .await
+        .expect("bootstrap");
+    let checkpoint = create_checkpoint(&store, &namespace_id, &setup)
+        .await
+        .expect("checkpoint");
+    crate::checkpoint::release_checkpoint(&store, &namespace_id, &checkpoint.checkpoint_id, &setup)
+        .await
+        .expect("release checkpoint");
+    let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
+    let key = loonfs_objectstore::keys::checkpoint_record(
+        namespace_id.as_str(),
+        checkpoint.checkpoint_id.as_str(),
+    );
+    assert_eq!(
+        condemn_checkpoint_if_aged(&store, &namespace_id, &key, GRACE_MS, false, &aged)
+            .await
+            .expect("condemn only"),
+        CheckpointCondemn::Delete
+    );
+    let condemned =
+        crate::checkpoint::read_checkpoint_record(&store, &namespace_id, &checkpoint.checkpoint_id)
+            .await
+            .expect("read condemned record")
+            .expect("crash residue exists");
+    assert_eq!(condemned.state.state, CheckpointRecordLifecycle::Condemned);
+
+    let report = gc_namespace(&store, &namespace_id, &config(), &aged)
+        .await
+        .expect("next pass deletes crash residue");
+    assert_eq!(report.deleted_checkpoint_records, 1);
+    create_checkpoint(&store, &namespace_id, &setup)
+        .await
+        .expect("checkpoint name is reusable");
 }
 
 /// An expiring pin protects until its expiry, then follows the same
@@ -1292,7 +1699,7 @@ async fn gc_releases_abandoned_fork_checkpoints_after_the_reap_window() {
         .expect("fork");
     let fork_record = read_fork_record(&store, &source).await;
 
-    // Simulate rule 9 having reaped the abandoned target bootstrap.
+    // Simulate rule 10 having reaped the abandoned target bootstrap.
     for key in store
         .list_prefix(&format!("namespaces/{}/", clone.as_str()))
         .await

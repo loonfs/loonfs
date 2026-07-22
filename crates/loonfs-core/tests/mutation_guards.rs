@@ -1696,6 +1696,7 @@ async fn complete_upload_rejects_direct_put_session_without_bound_target() {
         staged_content_ref: None,
         completed: None,
         created_at_ms: context.now_ms,
+        state: loonfs_api::wire::control::UploadSessionLifecycle::Active,
     };
     let envelope =
         UploadSessionEnvelope::from_state(ControlObjectKind::UploadSession, "test", state)

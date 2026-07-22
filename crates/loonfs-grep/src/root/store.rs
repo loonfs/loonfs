@@ -166,7 +166,8 @@ pub async fn seed_grep_root<S: ObjectStore + ?Sized>(
     state: &GrepRootState,
     writer_version: &str,
 ) -> Result<LoadedGrepRoot> {
-    let manifest = write_grep_manifest(store, state, writer_version).await?;
+    let written = write_grep_manifest(store, state, writer_version).await?;
+    let manifest = written.envelope;
     let object_key = root_key(state.namespace_id());
     let envelope = GrepRootEnvelope::from_pointer(
         writer_version,
@@ -228,10 +229,13 @@ pub async fn advance_grep_root<S: ObjectStore + ?Sized>(
                 object_key: current.pointer.object_key.clone(),
             })?;
 
-    let manifest = write_grep_manifest(store, next, writer_version).await?;
+    let written = write_grep_manifest(store, next, writer_version).await?;
     let envelope = GrepRootEnvelope::from_pointer(
         writer_version,
-        GrepRootPointer::new(next.namespace_id().clone(), manifest.manifest_id().clone()),
+        GrepRootPointer::new(
+            next.namespace_id().clone(),
+            written.envelope.manifest_id().clone(),
+        ),
     )
     .map_err(|error| corrupt(&current.pointer.object_key, error))?;
     let bytes =
@@ -254,27 +258,38 @@ pub async fn advance_grep_root<S: ObjectStore + ?Sized>(
         }
         Err(error) => return Err(store_error(&current.pointer.object_key, &error)),
     };
+    // A content-addressed manifest observed through AlreadyExists may be
+    // deleted by grep GC before this pointer CAS lands. Verify after the CAS;
+    // if GC won, the candidate bytes are still in memory and recreate the
+    // same manifest id before the successful advance is returned.
+    verify_and_heal_advanced_manifest(store, next.namespace_id(), &written).await?;
     Ok(LoadedGrepRoot {
         pointer: LoadedGrepRootPointer {
             object_key: current.pointer.object_key.clone(),
             envelope,
             metadata,
         },
-        manifest,
+        manifest: written.envelope,
     })
+}
+
+struct WrittenGrepManifest {
+    envelope: GrepManifestEnvelope,
+    bytes: Bytes,
 }
 
 async fn write_grep_manifest<S: ObjectStore + ?Sized>(
     store: &S,
     state: &GrepRootState,
     writer_version: &str,
-) -> Result<GrepManifestEnvelope> {
+) -> Result<WrittenGrepManifest> {
     let envelope = GrepManifestEnvelope::from_state(writer_version, state.clone())
         .map_err(|error| corrupt(&root_key(state.namespace_id()), error))?;
     let object_key = manifest_key(state.namespace_id(), envelope.manifest_id());
-    let bytes = encode_grep_manifest(&envelope).map_err(|error| corrupt(&object_key, error))?;
-    match store.put_if_absent(&object_key, Bytes::from(bytes)).await {
-        Ok(_) => Ok(envelope),
+    let bytes =
+        Bytes::from(encode_grep_manifest(&envelope).map_err(|error| corrupt(&object_key, error))?);
+    match store.put_if_absent(&object_key, bytes.clone()).await {
+        Ok(_) => Ok(WrittenGrepManifest { envelope, bytes }),
         Err(ObjectStoreError::PreconditionFailed { .. } | ObjectStoreError::Conflict { .. }) => {
             let existing = load_grep_manifest(store, state.namespace_id(), envelope.manifest_id())
                 .await?
@@ -283,13 +298,59 @@ async fn write_grep_manifest<S: ObjectStore + ?Sized>(
                     manifest_key: object_key.clone(),
                 })?;
             if existing.payload_checksum() == envelope.payload_checksum() {
-                Ok(existing)
+                Ok(WrittenGrepManifest {
+                    envelope: existing,
+                    bytes,
+                })
             } else {
                 Err(GrepRootError::Corrupt {
                     object_key,
                     message: format!(
                         "manifest conflict: expected payload checksum {}, actual {}",
                         envelope.payload_checksum(),
+                        existing.payload_checksum()
+                    ),
+                })
+            }
+        }
+        Err(error) => Err(store_error(&object_key, &error)),
+    }
+}
+
+async fn verify_and_heal_advanced_manifest<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    written: &WrittenGrepManifest,
+) -> Result<()> {
+    let object_key = manifest_key(namespace_id, written.envelope.manifest_id());
+    if store
+        .head(&object_key)
+        .await
+        .map_err(|error| store_error(&object_key, &error))?
+        .is_some()
+    {
+        return Ok(());
+    }
+    match store
+        .put_if_absent(&object_key, written.bytes.clone())
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(ObjectStoreError::PreconditionFailed { .. } | ObjectStoreError::Conflict { .. }) => {
+            let existing = load_grep_manifest(store, namespace_id, written.envelope.manifest_id())
+                .await?
+                .ok_or_else(|| GrepRootError::MissingManifest {
+                    root_key: root_key(namespace_id),
+                    manifest_key: object_key.clone(),
+                })?;
+            if existing.payload_checksum() == written.envelope.payload_checksum() {
+                Ok(())
+            } else {
+                Err(GrepRootError::Corrupt {
+                    object_key,
+                    message: format!(
+                        "manifest heal conflict: expected payload checksum {}, actual {}",
+                        written.envelope.payload_checksum(),
                         existing.payload_checksum()
                     ),
                 })

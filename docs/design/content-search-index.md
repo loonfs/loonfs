@@ -255,8 +255,18 @@ Grep garbage collection is also explicit and per namespace. The standalone
 binary runs it only when passed `--gc`; the server exposes
 `POST /v0/admin/namespaces/{ns}/index/grams/gc`, a sibling of core's explicit
 per-namespace GC endpoint. Pointing that operation at an absent or tombstoned
-namespace reaps its aged `extensions/grep/` state. Driver activity never runs
-GC.
+namespace reaps its aged `extensions/grep/` state. The core namespace head's
+deleted tombstone is already the absorbing gate: enable refuses it, so pointer
+deletion under a reverified tombstone needs no grep-specific condemned state.
+Driver activity never runs GC.
+
+Grep manifests are content-addressed, so two identical builders derive the
+same manifest id. A worker that observes its create-if-absent as already
+present can race GC deleting that unreachable candidate before the worker's
+pointer CAS. Every successful pointer advance therefore HEADs its manifest
+after the CAS and, if absent, re-puts the still-buffered bytes with
+create-if-absent before returning. This verify-and-heal step closes the race
+without adding mutable state to an immutable family.
 
 Postings for revisions that later become unobservable are not
 dropped in the first version. They are harmless — verification

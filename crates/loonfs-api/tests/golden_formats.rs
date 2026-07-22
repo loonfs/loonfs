@@ -22,7 +22,7 @@ use loonfs_api::wire::control::{
     decode_control_object, encode_control_object, CheckpointOwner, CheckpointRecordLifecycle,
     CheckpointRecordState, CompletedUpload, ContentStoreDescriptorState, ControlObjectEnvelope,
     ControlObjectKind, HeadState, MetadataRootState, NamespaceConfigState, NamespaceState,
-    UploadSessionState, WalFloorState, WalSegmentPointer, WriterBlock,
+    UploadSessionLifecycle, UploadSessionState, WalFloorState, WalSegmentPointer, WriterBlock,
 };
 use loonfs_api::wire::envelope::EnvelopeCodecError;
 use loonfs_api::wire::manifest::{
@@ -300,6 +300,13 @@ fn sample_deleted_head_state() -> HeadState {
     }
 }
 
+fn sample_condemned_head_state() -> HeadState {
+    HeadState {
+        state: NamespaceState::Condemned,
+        ..sample_head_state()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Encode/decode round trips against committed fixtures
 // ---------------------------------------------------------------------------
@@ -374,6 +381,9 @@ fn head_state_reading_is_fail_closed_on_unknown_lifecycle_states() {
 
     let deleted = serde_json::to_string(&sample_deleted_head_state()).expect("encode deleted");
     assert!(deleted.contains("\"state\":\"deleted\""));
+    let condemned =
+        serde_json::to_string(&sample_condemned_head_state()).expect("encode condemned");
+    assert!(condemned.contains("\"state\":\"condemned\""));
 }
 
 #[test]
@@ -387,6 +397,11 @@ fn control_objects_match_golden_bytes() {
         "control_namespace_head.deleted.v1.json",
         ControlObjectKind::WalHead,
         sample_deleted_head_state(),
+    );
+    check_control_golden(
+        "control_namespace_head.condemned.v1.json",
+        ControlObjectKind::WalHead,
+        sample_condemned_head_state(),
     );
     check_control_golden(
         "control_namespace_descriptor.v1.json",
@@ -428,7 +443,7 @@ fn control_objects_match_golden_bytes() {
         },
     );
     check_control_golden(
-        "control_checkpoint_record.v1.json",
+        "control_checkpoint_record.v2.json",
         ControlObjectKind::CheckpointRecord,
         CheckpointRecordState {
             checkpoint_id: checkpoint_id("chk_00000000000000000000000000000002"),
@@ -450,7 +465,7 @@ fn control_objects_match_golden_bytes() {
     // The fork owner is a durable encoding of its own: the tagged `owner`
     // changes the document.
     check_control_golden(
-        "control_checkpoint_record_fork.v1.json",
+        "control_checkpoint_record_fork.v2.json",
         ControlObjectKind::CheckpointRecord,
         CheckpointRecordState {
             checkpoint_id: checkpoint_id("chk_00000000000000000000000000000004"),
@@ -470,7 +485,7 @@ fn control_objects_match_golden_bytes() {
         },
     );
     check_control_golden(
-        "control_upload_session.v1.json",
+        "control_upload_session.v2.json",
         ControlObjectKind::UploadSession,
         UploadSessionState {
             namespace_id: namespace_id(),
@@ -483,12 +498,13 @@ fn control_objects_match_golden_bytes() {
                 content_ref: sample_content_ref(),
             }),
             created_at_ms: 1_000,
+            state: UploadSessionLifecycle::Active,
         },
     );
     // The released lifecycle and the direct-put session shape are durable
     // encodings of their own: `state` and `mode` change the document.
     check_control_golden(
-        "control_checkpoint_record_released.v1.json",
+        "control_checkpoint_record_released.v2.json",
         ControlObjectKind::CheckpointRecord,
         CheckpointRecordState {
             checkpoint_id: checkpoint_id("chk_00000000000000000000000000000003"),
@@ -508,7 +524,27 @@ fn control_objects_match_golden_bytes() {
         },
     );
     check_control_golden(
-        "control_upload_session_direct_put.v1.json",
+        "control_checkpoint_record_condemned.v2.json",
+        ControlObjectKind::CheckpointRecord,
+        CheckpointRecordState {
+            checkpoint_id: checkpoint_id("chk_00000000000000000000000000000005"),
+            namespace_id: namespace_id(),
+            manifest_id: ManifestId(5),
+            manifest_object_id: manifest_object_id(5, "0123456789abcdef"),
+            manifest_head_seq: ChangeSeq(5),
+            manifest_payload_checksum:
+                "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_owned(),
+            head_commit_id: commit_id(),
+            created_at_ms: 3_000,
+            expires_at_ms: None,
+            owner: CheckpointOwner::User {
+                name: "nightly".to_owned(),
+            },
+            state: CheckpointRecordLifecycle::Condemned,
+        },
+    );
+    check_control_golden(
+        "control_upload_session_direct_put.v2.json",
         ControlObjectKind::UploadSession,
         UploadSessionState {
             namespace_id: namespace_id(),
@@ -519,8 +555,83 @@ fn control_objects_match_golden_bytes() {
             staged_content_ref: None,
             completed: None,
             created_at_ms: 1_000,
+            state: UploadSessionLifecycle::Active,
         },
     );
+    check_control_golden(
+        "control_upload_session_condemned.v2.json",
+        ControlObjectKind::UploadSession,
+        UploadSessionState {
+            namespace_id: namespace_id(),
+            upload_id: UploadId::parse("upl_11111111111111111111111111111111")
+                .expect("valid upload id"),
+            mode: UploadMode::ServiceProxied,
+            direct_put_content_ref: None,
+            staged_content_ref: None,
+            completed: None,
+            created_at_ms: 1_000,
+            state: UploadSessionLifecycle::Condemned,
+        },
+    );
+}
+
+#[test]
+fn condemned_control_families_reject_predecessor_versions_without_fallback() {
+    let cases = [
+        (
+            ControlObjectKind::CheckpointRecord,
+            serde_json::to_value(CheckpointRecordState {
+                checkpoint_id: checkpoint_id("chk_00000000000000000000000000000005"),
+                namespace_id: namespace_id(),
+                manifest_id: ManifestId(5),
+                manifest_object_id: manifest_object_id(5, "0123456789abcdef"),
+                manifest_head_seq: ChangeSeq(5),
+                manifest_payload_checksum: sha256_digest(b"manifest"),
+                head_commit_id: commit_id(),
+                created_at_ms: 3_000,
+                expires_at_ms: None,
+                owner: CheckpointOwner::User {
+                    name: "nightly".to_owned(),
+                },
+                state: CheckpointRecordLifecycle::Condemned,
+            })
+            .expect("checkpoint state"),
+        ),
+        (
+            ControlObjectKind::UploadSession,
+            serde_json::to_value(UploadSessionState {
+                namespace_id: namespace_id(),
+                upload_id: UploadId::parse("upl_11111111111111111111111111111111")
+                    .expect("valid upload id"),
+                mode: UploadMode::ServiceProxied,
+                direct_put_content_ref: None,
+                staged_content_ref: None,
+                completed: None,
+                created_at_ms: 1_000,
+                state: UploadSessionLifecycle::Condemned,
+            })
+            .expect("upload state"),
+        ),
+    ];
+    for (kind, state) in cases {
+        let envelope = ControlObjectEnvelope::from_state(kind, WRITER_VERSION, state)
+            .expect("control envelope");
+        let encoded = encode_control_object(&envelope).expect("encode control");
+        let mut document: serde_json::Value =
+            serde_json::from_slice(&encoded).expect("decode document");
+        document["format_version"] = serde_json::Value::from(1);
+        let predecessor = serde_json::to_vec(&document).expect("encode predecessor");
+        let error = decode_control_object::<serde_json::Value>(&predecessor, kind)
+            .expect_err("v1 must not fall back");
+        assert!(matches!(
+            error,
+            EnvelopeCodecError::UnsupportedFormatVersion {
+                found: 1,
+                supported: 2,
+                ..
+            }
+        ));
+    }
 }
 
 #[test]

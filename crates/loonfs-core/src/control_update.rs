@@ -29,6 +29,12 @@ pub(crate) enum UploadSessionUpdate<T> {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum UploadSessionCas<T> {
+    Applied(T),
+    Conflict,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub(crate) enum ControlUpdateError {
     #[error(transparent)]
@@ -109,43 +115,69 @@ where
     Fut: Future<Output = Result<UploadSessionUpdate<T>, CoreError>>,
 {
     for _attempt in 0..max_attempts {
-        let loaded = read_upload_session_object(store, namespace_id, upload_id).await?;
-        let expected_etag = required_etag_core(&loaded.metadata, &loaded.object_key)?;
-
-        match update(loaded.envelope.state).await? {
-            UploadSessionUpdate::Noop(outcome) => return Ok(outcome),
-            UploadSessionUpdate::Replace { next, outcome } => {
-                let envelope = UploadSessionEnvelope::from_state(
-                    ControlObjectKind::UploadSession,
-                    writer_version,
-                    *next,
-                )
-                .map_err(|err| {
-                    CoreError::Internal(format!("failed to build upload session envelope: {err}"))
-                })?;
-                let encoded = encode_control_object(&envelope).map_err(|err| {
-                    CoreError::Internal(format!("failed to encode upload session envelope: {err}"))
-                })?;
-                match store
-                    .compare_and_swap(&loaded.object_key, expected_etag, Bytes::from(encoded))
-                    .await
-                {
-                    Ok(_) => return Ok(outcome),
-                    Err(
-                        ObjectStoreError::PreconditionFailed { .. }
-                        | ObjectStoreError::Conflict { .. },
-                    ) => {
-                        continue;
-                    }
-                    Err(error) => return Err(CoreError::store(&loaded.object_key, &error)),
-                }
-            }
+        match try_update_upload_session(
+            store,
+            namespace_id,
+            upload_id,
+            writer_version,
+            |state, _metadata| update(state),
+        )
+        .await?
+        {
+            UploadSessionCas::Applied(outcome) => return Ok(outcome),
+            UploadSessionCas::Conflict => continue,
         }
     }
 
     Err(CoreError::Internal(
         "upload session compare-and-swap retry exhausted".to_owned(),
     ))
+}
+
+/// Applies at most one upload-session compare-and-swap against the state and
+/// metadata loaded together. Callers that must act only on one inspection
+/// (garbage collection) retain on [`UploadSessionCas::Conflict`]; ordinary
+/// upload operations wrap this helper in their bounded retry loop above.
+pub(crate) async fn try_update_upload_session<S, T, F, Fut>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    upload_id: &UploadId,
+    writer_version: &str,
+    update: F,
+) -> Result<UploadSessionCas<T>, CoreError>
+where
+    S: ObjectStore + ?Sized,
+    F: FnOnce(UploadSessionState, ObjectMetadata) -> Fut,
+    Fut: Future<Output = Result<UploadSessionUpdate<T>, CoreError>>,
+{
+    let loaded = read_upload_session_object(store, namespace_id, upload_id).await?;
+    let expected_etag = required_etag_core(&loaded.metadata, &loaded.object_key)?.to_owned();
+    match update(loaded.envelope.state, loaded.metadata).await? {
+        UploadSessionUpdate::Noop(outcome) => Ok(UploadSessionCas::Applied(outcome)),
+        UploadSessionUpdate::Replace { next, outcome } => {
+            let envelope = UploadSessionEnvelope::from_state(
+                ControlObjectKind::UploadSession,
+                writer_version,
+                *next,
+            )
+            .map_err(|err| {
+                CoreError::Internal(format!("failed to build upload session envelope: {err}"))
+            })?;
+            let encoded = encode_control_object(&envelope).map_err(|err| {
+                CoreError::Internal(format!("failed to encode upload session envelope: {err}"))
+            })?;
+            match store
+                .compare_and_swap(&loaded.object_key, &expected_etag, Bytes::from(encoded))
+                .await
+            {
+                Ok(_) => Ok(UploadSessionCas::Applied(outcome)),
+                Err(
+                    ObjectStoreError::PreconditionFailed { .. } | ObjectStoreError::Conflict { .. },
+                ) => Ok(UploadSessionCas::Conflict),
+                Err(error) => Err(CoreError::store(&loaded.object_key, &error)),
+            }
+        }
+    }
 }
 
 fn encode_head(writer_version: &str, next: HeadState) -> Result<Vec<u8>, ControlUpdateError> {

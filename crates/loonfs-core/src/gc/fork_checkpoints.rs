@@ -171,7 +171,7 @@ pub(super) async fn maybe_release_fork_checkpoint<S: ObjectStore + ?Sized>(
     }
 }
 
-/// Proves a fork target namespace is gone (rule 9's fork arm). Either its
+/// Proves a fork target namespace is gone (rule 10's fork arm). Either its
 /// head object says the namespace is terminally deleted, or nothing exists
 /// under the target prefix at all and the record has aged past the reap
 /// window. The age matters because a live fork retry would have freshened
@@ -190,7 +190,7 @@ pub(super) async fn fork_target_proven_gone<S: ObjectStore + ?Sized>(
             let target_prefix = format!("namespaces/{}/", target_namespace_id.as_str());
             let tree = list_prefix(store, &target_prefix).await?;
             if !tree.is_empty() {
-                // Either a bootstrap is in progress or rule 9 has not
+                // Either a bootstrap is in progress or rule 10 has not
                 // reaped the partial tree yet; ambiguity retains.
                 return Ok(false);
             }

@@ -12,8 +12,8 @@ use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
 use crate::namespace::catalog::{
     load_namespace_descriptor, map_namespace_initialization_error_to_core,
-    namespace_initialization_state, put_completion_descriptor, put_target_namespace_control_object,
-    NamespaceInitializationState,
+    namespace_initialization_state, put_completion_descriptor, put_namespace_install_gate,
+    put_target_namespace_control_object, NamespaceInitializationState, NamespaceInstallGate,
 };
 use crate::namespace::control::{read_head_object, read_metadata_root_object};
 use loonfs_api::wire::control::{
@@ -25,7 +25,7 @@ use loonfs_api::wire::manifest::{
     NamespaceManifestEnvelope, NamespaceManifestFork, NamespaceManifestPayload,
 };
 use loonfs_api::{ManifestId, ManifestObjectId, NamespaceId, NamespaceSummary, WriterEpoch};
-use loonfs_objectstore::keys::{metadata_root, namespace_config, wal_head};
+use loonfs_objectstore::keys::{metadata_root, namespace_config};
 use loonfs_objectstore::ObjectStore;
 
 pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
@@ -131,7 +131,6 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         initial_head,
     )
     .map_err(|err| CoreError::Internal(format!("failed to build fork control envelope: {err}")))?;
-    let head_key = wal_head(new_namespace_id.as_str());
     let descriptor_key = namespace_config(new_namespace_id.as_str());
     let target_manifest = NamespaceManifestEnvelope::from_payload(
         &context.writer_version,
@@ -160,6 +159,13 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     write_namespace_manifest(store, &target_manifest)
         .await
         .map_err(CoreError::MetadataProjection)?;
+    // The target head is the first fixed-key conditional install write. Once
+    // it lands, the grace window protects this attempt while it writes root
+    // and floor; if repair condemned it first, no fixed-key prerequisite write
+    // may follow.
+    let head_bytes = encode_control_object(&head)
+        .map_err(|err| CoreError::Internal(format!("failed to encode head object: {err}")))?;
+    let gate = put_namespace_install_gate(store, new_namespace_id, &head_bytes).await?;
     let target_root = MetadataRootEnvelope::from_state(
         ControlObjectKind::MetadataRoot,
         &context.writer_version,
@@ -202,14 +208,11 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         })?,
     )
     .await?;
-    put_target_namespace_control_object(
-        store,
-        new_namespace_id,
-        &head_key,
-        &encode_control_object(&head)
-            .map_err(|err| CoreError::Internal(format!("failed to encode head object: {err}")))?,
-    )
-    .await?;
+    if gate == NamespaceInstallGate::ExistingPartial {
+        return Err(CoreError::NamespacePartiallyInitialized {
+            namespace_id: new_namespace_id.clone(),
+        });
+    }
     put_target_namespace_control_object(
         store,
         new_namespace_id,
@@ -256,6 +259,9 @@ pub(super) async fn complete_post_head_fork<S: ObjectStore + ?Sized>(
         return Err(CoreError::NamespaceDeleted {
             namespace_id: new_namespace_id.clone(),
         });
+    }
+    if head.state != NamespaceState::Active {
+        return Err(partial());
     }
     let root = read_metadata_root_object(store, new_namespace_id)
         .await

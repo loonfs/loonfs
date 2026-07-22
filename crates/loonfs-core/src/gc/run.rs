@@ -6,14 +6,18 @@ use super::fork_checkpoints::{
     maybe_release_fork_checkpoint, release_missing_basis_checkpoint, ForkCheckpointSweep,
 };
 use super::live_set::{collect_live_set, SweepVerifier};
-use super::reap::{delete_if_aged, list_prefix, manifest_object_id_of};
+use super::reap::{
+    condemn_checkpoint_if_aged, delete_if_aged, list_prefix, manifest_object_id_of,
+    CheckpointCondemn,
+};
 use crate::context::MutationContext;
 use crate::error::CoreError;
 use crate::namespace::catalog::{
     map_namespace_initialization_error_to_core, namespace_initialization_state,
     NamespaceInitializationState,
 };
-use loonfs_api::{ManifestObjectId, NamespaceId};
+use crate::protocol::{condemn_upload_session_if_aged, UploadSessionSweep};
+use loonfs_api::{ManifestObjectId, NamespaceId, UploadId};
 use loonfs_objectstore::keys::{
     checkpoint_prefix, metadata_manifest_prefix, metadata_table_prefix, upload_session_prefix,
     wal_segment_prefix,
@@ -34,6 +38,8 @@ pub(super) struct LiveSet {
     /// Record resolution failed somewhere: manifest/table deletion must not
     /// proceed on this pass.
     pub(super) degraded: bool,
+    /// The inspected namespace head is the terminal, absorbing tombstone.
+    pub(super) namespace_deleted: bool,
 }
 
 pub async fn gc_namespace<S: ObjectStore + ?Sized>(
@@ -115,6 +121,11 @@ pub(super) async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
     // never also delete the data that record was protecting. A crash
     // mid-sweep leaves orphaned data for the next pass — never a record
     // whose data vanished underneath it.
+    // WAL segments, metadata tables, and namespace manifests are immutable:
+    // one key can only ever be recreated with identical bytes under their
+    // create-if-absent protocols. Deleting an unreferenced, grace-aged key is
+    // therefore safe without condemnation; a zombie retry can only restore
+    // the same unreferenced bytes for a later pass.
     for key in segment_candidates {
         sweep
             .refresh_if_due(store, namespace_id, config, context)
@@ -169,11 +180,9 @@ pub(super) async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
             report.retained_candidates += 1;
             continue;
         }
-        // Active fork-owned records are released by compare-and-swap,
-        // never deleted outright, so a fork retrying at the same moment
-        // finds a released record it can revive instead of a vanished one.
-        // Everything else (released records, expired user records) goes
-        // through the normal age-gated delete.
+        // Active fork-owned records are released by compare-and-swap. Every
+        // collectable mutable record is then condemned under the exact etag
+        // inspected with its age before physical deletion.
         match maybe_release_fork_checkpoint(store, &key, config, context).await? {
             ForkCheckpointSweep::Released => {
                 report.released_fork_checkpoints += 1;
@@ -185,8 +194,24 @@ pub(super) async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
             }
             ForkCheckpointSweep::NotAnActiveFork => {}
         }
-        if delete_if_aged(store, &key, config.grace_window_ms, context, &mut report).await? {
-            report.deleted_checkpoint_records += 1;
+        match condemn_checkpoint_if_aged(
+            store,
+            namespace_id,
+            &key,
+            config.grace_window_ms,
+            sweep.live.namespace_deleted,
+            context,
+        )
+        .await?
+        {
+            CheckpointCondemn::Delete => {
+                store
+                    .delete(&key)
+                    .await
+                    .map_err(|error| CoreError::store(&key, &error))?;
+                report.deleted_checkpoint_records += 1;
+            }
+            CheckpointCondemn::Retain => report.retained_candidates += 1,
         }
     }
     // Zombie release: an active record whose basis manifest is verifiably
@@ -203,18 +228,41 @@ pub(super) async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
         }
     }
 
-    // Upload sessions root nothing and nothing durable references them, so
-    // provider age past the reap window is the whole decision — the
-    // AbortIncompleteMultipartUpload convention. A session that old is dead
-    // whatever its state: presigned grants expired long ago, and a
-    // `complete` after the window answers session-not-found by design.
-    // Writer clocks are never consulted (rule 1: provider timestamps only).
+    // Upload sessions root nothing and nothing durable references them. An
+    // aged active session is first condemned by one exact-etag CAS; completed
+    // and condemned sessions are already absorbing. A completion that loses
+    // to condemnation observes `upload_not_found`, while a condemn CAS that
+    // loses is retained for a later pass. Writer clocks are never consulted.
     for key in candidate_upload_sessions {
-        if delete_if_aged(store, &key, config.reap_window_ms, context, &mut report).await? {
-            report.deleted_upload_sessions += 1;
+        let Some(upload_id) = upload_id_of(&key) else {
+            report.retained_candidates += 1;
+            continue;
+        };
+        match condemn_upload_session_if_aged(
+            store,
+            namespace_id,
+            &upload_id,
+            config.reap_window_ms,
+            context,
+        )
+        .await?
+        {
+            UploadSessionSweep::Delete => {
+                store
+                    .delete(&key)
+                    .await
+                    .map_err(|error| CoreError::store(&key, &error))?;
+                report.deleted_upload_sessions += 1;
+            }
+            UploadSessionSweep::Retain => report.retained_candidates += 1,
         }
     }
     report.degraded_retention = sweep.degraded;
 
     Ok(report)
+}
+
+fn upload_id_of(key: &str) -> Option<UploadId> {
+    let name = key.rsplit('/').next()?.strip_suffix(".json")?;
+    UploadId::parse(name).ok()
 }
