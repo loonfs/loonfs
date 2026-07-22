@@ -1090,6 +1090,7 @@ dependencies = [
  "futures",
  "loonfs-api",
  "loonfs-core",
+ "loonfs-grep",
  "loonfs-objectstore",
  "serde_json",
  "tempfile",
@@ -1185,14 +1186,19 @@ version = "0.1.1"
 dependencies = [
  "bytes",
  "ciborium",
+ "futures",
  "loonfs-api",
+ "loonfs-core",
  "loonfs-objectstore",
+ "regex",
+ "regex-syntax",
  "serde",
  "serde_bytes",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

@@ -73,7 +73,11 @@ pub(crate) struct MetadataViewSessionCounters {
     pub(crate) list_preload_child_lookups: u64,
 }
 
-pub(crate) struct MetadataViewSession<'a, 'store, S: ObjectStore + ?Sized> {
+/// One loaded-view session with memoized visibility reads.
+///
+/// This is part of the read surface consumed by `loonfs-grep`; construction
+/// stays on the loaded view so callers cannot assemble incoherent sessions.
+pub struct MetadataViewSession<'a, 'store, S: ObjectStore + ?Sized> {
     base: MetadataView<'a, 'store, S>,
     inode_at_seq_cache: HashMap<InodeId, Option<InodeRecord>>,
     visible_inode_cache: HashMap<InodeId, Option<InodeRecord>>,
@@ -393,7 +397,10 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
     /// have fetched. The canonical rules then decide over cache hits, so a
     /// cold resolution costs one round-trip wave per path component instead
     /// of five-plus sequential lookups each.
-    pub(crate) async fn resolve_visible_path(
+    /// Resolves a path under the loaded view's visibility rules.
+    ///
+    /// This is part of the read surface consumed by `loonfs-grep`.
+    pub async fn resolve_visible_path(
         &mut self,
         absolute_path: &AbsolutePath,
         prefetch_leaf_revision: bool,
@@ -596,7 +603,10 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         visibility::visible_child(self, parent_inode_id, name_key).await
     }
 
-    pub(crate) async fn visible_inode(
+    /// Returns the inode when it is visible in this session's snapshot.
+    ///
+    /// This is part of the read surface consumed by `loonfs-grep`.
+    pub async fn visible_inode(
         &mut self,
         inode_id: InodeId,
     ) -> Result<Option<InodeRecord>, CoreError> {
@@ -629,7 +639,10 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
     /// child-binds scan and tombstone probe per entry on a wide listing,
     /// and it can never disagree with the enumeration that just admitted
     /// the entry at the same seq.
-    pub(crate) async fn latest_revision_head_of_visible(
+    /// Returns the latest revision for an inode already proven visible.
+    ///
+    /// This is part of the read surface consumed by `loonfs-grep`.
+    pub async fn latest_revision_head_of_visible(
         &mut self,
         inode_id: InodeId,
     ) -> Result<Option<RevisionRecord>, CoreError> {
@@ -655,7 +668,10 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
             .await
     }
 
-    pub(crate) async fn current_parent_binding_for_child(
+    /// Returns the child's active parent binding at the visible sequence.
+    ///
+    /// This is part of the read surface consumed by `loonfs-grep`.
+    pub async fn current_parent_binding_for_child(
         &mut self,
         child_inode_id: InodeId,
     ) -> Result<Option<DirentryBindRecord>, CoreError> {

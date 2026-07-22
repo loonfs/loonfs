@@ -123,6 +123,20 @@ async fn maintenance_ticks_build_the_gram_index_once_enabled() {
         .await
         .expect("write bravo");
 
+    // Request validation precedes feature materialization in the reference
+    // executor; snapshot construction in the delegated path must preserve
+    // that error ordering.
+    let mut invalid_limit = grep_request("needle");
+    invalid_limit.limit = Some(0);
+    let error = reader
+        .grep(&namespace_id, &invalid_limit)
+        .await
+        .expect_err("invalid limit must win before the missing feature");
+    let loonfs::Error::Core(core) = &error else {
+        panic!("expected a core error, got {error:?}");
+    };
+    assert_eq!(core.code(), ErrorCode::InvalidRequest);
+
     // Before enablement, grep names the missing data half.
     let error = reader
         .grep(&namespace_id, &grep_request("needle"))
@@ -526,11 +540,11 @@ impl ObjectStore for IndexSegmentGetCountingStore {
     }
 }
 
-/// Index segment blocks are immutable and keyed by payload checksum, so a
-/// reader's decoded-block cache must serve a repeated query's posting
+/// Index segment blocks are immutable and keyed by payload checksum, so the
+/// grep-private decoded-block cache must serve a repeated query's posting
 /// probes without re-fetching the segments it already decoded.
 #[tokio::test]
-async fn repeated_grep_serves_posting_blocks_from_the_table_cache() {
+async fn repeated_grep_serves_posting_blocks_from_the_grep_cache() {
     let temp_dir = tempdir().expect("tempdir");
     let raw_store = Arc::new(IndexSegmentGetCountingStore::new(temp_dir.path()));
     let store: loonfs::SharedObjectStore = raw_store.clone();
@@ -954,22 +968,16 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
     writer.shutdown_background().await.expect("writer shutdown");
 }
 
-/// Fold steps resolve their merge reads through the same decoded-block
-/// cache queries fill: a reader derived from the writer shares its
-/// runtime core, so a grep that decoded the delta segments must spare the
-/// next fold those segments' store reads.
+/// Fold steps and grep queries deliberately use separate decoded-block
+/// caches: warming grep must not warm core's maintenance cache.
 ///
 /// Two identically shaped delta folds run through one runtime — eight
 /// one-file rounds each, background ticks folding on the eighth. The
-/// first fold runs cold (nothing read those segments before) and is the
-/// in-test control; before the second, a grep warms seven of its eight
-/// inputs. Only the tick that triggers a fold can write its eighth delta,
-/// so that segment is always cold and a zero-read fold is unreachable
-/// through the runtime; strictly fewer reads than the identically shaped
-/// cold fold is the deterministic form of "already-warm blocks are not
-/// re-fetched", and it stays true if segment block layout changes.
+/// first fold runs cold and is the in-test control; before the second, a
+/// grep warms seven of its eight inputs in the grep-private cache. The two
+/// identically shaped folds must therefore issue the same core-cache reads.
 #[tokio::test]
-async fn a_fold_reuses_the_index_blocks_a_grep_already_decoded() {
+async fn a_fold_does_not_reuse_grep_private_index_blocks() {
     let temp_dir = tempdir().expect("tempdir");
     let raw_store = Arc::new(IndexSegmentGetCountingStore::new(temp_dir.path()));
     let store: loonfs::SharedObjectStore = raw_store.clone();
@@ -1052,11 +1060,11 @@ async fn a_fold_reuses_the_index_blocks_a_grep_already_decoded() {
         warm_fold_gets > 0,
         "the sixteenth round's fold must still read the delta its own tick wrote"
     );
-    assert!(
-        warm_fold_gets < cold_fold_gets,
-        "a fold whose snapshot a grep already decoded must serve those \
-         blocks from the table cache: cold fold read {cold_fold_gets} \
-         sections, query-warmed fold read {warm_fold_gets}"
+    assert_eq!(
+        warm_fold_gets, cold_fold_gets,
+        "grep-private cache entries must not alter core fold reads: cold \
+         fold read {cold_fold_gets} sections, query-warmed fold read \
+         {warm_fold_gets}"
     );
 
     // The premise of the comparison: both rounds really did fold, leaving

@@ -256,7 +256,10 @@ pub enum GramIndexFoldOutcome {
 /// leading sample; a sample that ends inside a multi-byte character still
 /// counts as valid). The query path applies the same rule to unindexed
 /// data, so eligibility is uniform whether or not a revision was indexed.
-pub(crate) fn is_indexable_text_content(content: &[u8]) -> bool {
+/// This is part of the read surface consumed by `loonfs-grep`; the build
+/// and query copies are kept public together until their equality test can
+/// be retired with the old core grep implementation.
+pub fn is_indexable_text_content(content: &[u8]) -> bool {
     if content.len() as u64 > INDEX_GRAMS_MAX_FILE_BYTES {
         return false;
     }

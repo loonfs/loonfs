@@ -25,6 +25,7 @@ use loonfs_core::cache::{
     MetadataTableCache, WalTailProjectionCache, WalTailProjectionCacheConfig,
 };
 use loonfs_core::{MutationContext, NamespaceEngine};
+use loonfs_grep::GrepService;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -45,6 +46,7 @@ pub(crate) struct FsInner {
     pub(crate) control_cache: Mutex<RuntimeControlCache>,
     pub(crate) metadata_table_cache: Arc<MetadataTableCache>,
     pub(crate) wal_tail_projection_cache: Arc<WalTailProjectionCache>,
+    pub(crate) grep_service: GrepService,
     pub(crate) cache_stats: RuntimeCacheStatsInner,
     pub(crate) background: BackgroundWork,
     /// The core's publication service: every mutation — direct handle
@@ -116,6 +118,7 @@ impl FsCore {
                 control_cache: Mutex::new(RuntimeControlCache::default()),
                 metadata_table_cache,
                 wal_tail_projection_cache,
+                grep_service: GrepService::new(),
                 cache_stats: RuntimeCacheStatsInner::default(),
                 background,
                 publisher: PublisherRegistry::from_core(
@@ -172,19 +175,19 @@ impl FsCore {
                 let mut limits = PaginationPolicy::default().capability_limits();
                 limits.insert(
                     LIMIT_QUERY_GREP_DEFAULT.to_owned(),
-                    loonfs_core::grep_limits::DEFAULT_GREP_PAGE_LIMIT as u64,
+                    loonfs_grep::DEFAULT_GREP_PAGE_LIMIT as u64,
                 );
                 limits.insert(
                     LIMIT_QUERY_GREP_MAX.to_owned(),
-                    loonfs_core::grep_limits::MAX_GREP_PAGE_LIMIT as u64,
+                    loonfs_grep::MAX_GREP_PAGE_LIMIT as u64,
                 );
                 limits.insert(
                     LIMIT_QUERY_GREP_SCAN_BUDGET_FILES.to_owned(),
-                    loonfs_core::grep_limits::MAX_GREP_SCAN_FILES as u64,
+                    loonfs_grep::MAX_GREP_SCAN_FILES as u64,
                 );
                 limits.insert(
                     LIMIT_QUERY_GREP_TAIL_BUDGET_FILES.to_owned(),
-                    loonfs_core::grep_limits::MAX_GREP_TAIL_FILES as u64,
+                    loonfs_grep::MAX_GREP_TAIL_FILES as u64,
                 );
                 limits.insert(
                     LIMIT_GC_MIN_GRACE_WINDOW_MS.to_owned(),
