@@ -6,7 +6,7 @@
 //! without those constraints (server, CLI) prefer `#[source]` chains instead.
 
 use crate::checkpoint::ManifestLoadError;
-use crate::commit::{CommitConversionError, CommitHeadPublishError, CommitValidationError};
+use crate::commit::{CommitHeadPublishError, CommitValidationError};
 use crate::commit_engine::ContentPreparationError;
 use crate::metadata::VisiblePathError;
 use crate::namespace::catalog::NamespaceCatalogLoadError;
@@ -259,14 +259,6 @@ impl From<NamespaceCatalogLoadError> for MetadataProjectionLoadError {
             NamespaceCatalogLoadError::LoadContentStoreDescriptor(error) => {
                 Self::LoadContentStoreDescriptor(error)
             }
-        }
-    }
-}
-
-impl From<CommitConversionError> for CoreError {
-    fn from(value: CommitConversionError) -> Self {
-        match value {
-            CommitConversionError::InvalidCommitId(error) => Self::InvalidCommitId(error),
         }
     }
 }

@@ -301,6 +301,17 @@ mod tests {
     }
 
     #[test]
+    fn commit_precondition_rejects_invalid_name_key() {
+        let encoded = r#"{
+            "kind":"child_name_absent",
+            "parent_inode_id":1,
+            "name_key":"invalid/name"
+        }"#;
+
+        assert!(serde_json::from_str::<CommitPrecondition>(encoded).is_err());
+    }
+
+    #[test]
     fn commit_delta_name_key_serializes_as_plain_string() {
         let delta = CommitDelta::BindDirentry {
             semantic_op_index: 0,

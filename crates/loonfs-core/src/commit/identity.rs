@@ -3,10 +3,10 @@
 //! decide whether a reused commit id carries the same mutation or a
 //! conflicting one.
 
-use super::api_adapter::{commit_op_from_v0, commit_precondition_from_v0};
-use super::{CommitOp, CommitRequest, Precondition};
-use loonfs_api::v0 as api_v0;
-use loonfs_api::NamespaceId;
+use super::CommitRequest;
+use loonfs_api::v0::{CommitOp, CommitPrecondition, CommitRequest as ApiCommitRequest};
+use loonfs_api::{ContentRef, NamespaceId};
+use serde::ser::{SerializeMap, SerializeSeq, SerializeStruct};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
@@ -17,11 +17,10 @@ pub(crate) const PATH_INTENT_FINGERPRINT_DOMAIN: &str = "loonfs.path.intent.sema
 
 /// Scheme-and-algorithm tag carried by every stored fingerprint value.
 ///
-/// `v0` names the canonicalization rules (domain string plus the v0 wire
-/// encoding of the preimage; format spec, "Commit identity fingerprints")
-/// and `sha256` the digest
-/// algorithm, so either can change later without re-interpreting values
-/// already stored in WAL records and commit receipts.
+/// `v0` names the canonicalization rules (domain string plus the frozen v0
+/// preimage encoding; format spec, "Commit identity fingerprints") and
+/// `sha256` the digest algorithm, so either can change later without
+/// re-interpreting values already stored in WAL records and commit receipts.
 const FINGERPRINT_SCHEME: &str = "v0:sha256";
 
 /// Computes a stored fingerprint value (`v0:sha256:<64 lowercase hex>`) from
@@ -34,14 +33,18 @@ where
     T: Serialize,
 {
     let bytes = serde_json::to_vec(preimage)?;
-    let digest = Sha256::digest(&bytes);
+    Ok(fingerprint_bytes(&bytes))
+}
+
+fn fingerprint_bytes(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
     let mut value = String::with_capacity(FINGERPRINT_SCHEME.len() + 1 + digest.len() * 2);
     value.push_str(FINGERPRINT_SCHEME);
     value.push(':');
     for byte in digest {
         write!(&mut value, "{byte:02x}").expect("writing to a String should not fail");
     }
-    Ok(value)
+    value
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -91,6 +94,251 @@ pub enum CommitFingerprintError {
     Codec(String),
 }
 
+/// Encodes the frozen v0 semantic-commit preimage.
+///
+/// This JSON encoding is a durable format. Its field order, tags, and value
+/// representations must not change when the API vocabulary's serde encoding
+/// evolves. A new fingerprint scheme is required for any format change.
+fn encode_core_commit_preimage(
+    namespace_id: &NamespaceId,
+    preconditions: &[CommitPrecondition],
+    ops: &[CommitOp],
+    message: &Option<String>,
+) -> Result<Vec<u8>, serde_json::Error> {
+    serde_json::to_vec(&FrozenCoreCommitPreimage {
+        namespace_id,
+        preconditions,
+        ops,
+        message,
+    })
+}
+
+struct FrozenCoreCommitPreimage<'a> {
+    namespace_id: &'a NamespaceId,
+    preconditions: &'a [CommitPrecondition],
+    ops: &'a [CommitOp],
+    message: &'a Option<String>,
+}
+
+impl Serialize for FrozenCoreCommitPreimage<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut state = serializer.serialize_struct("CoreCommitPreimage", 5)?;
+        state.serialize_field("domain", CORE_COMMIT_FINGERPRINT_DOMAIN)?;
+        state.serialize_field("namespace_id", self.namespace_id.as_str())?;
+        state.serialize_field(
+            "preconditions",
+            &FrozenCommitPreconditions(self.preconditions),
+        )?;
+        state.serialize_field("ops", &FrozenCommitOps(self.ops))?;
+        state.serialize_field("message", self.message)?;
+        state.end()
+    }
+}
+
+struct FrozenCommitPreconditions<'a>(&'a [CommitPrecondition]);
+
+impl Serialize for FrozenCommitPreconditions<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut sequence = serializer.serialize_seq(Some(self.0.len()))?;
+        for precondition in self.0 {
+            sequence.serialize_element(&FrozenCommitPrecondition(precondition))?;
+        }
+        sequence.end()
+    }
+}
+
+struct FrozenCommitPrecondition<'a>(&'a CommitPrecondition);
+
+impl Serialize for FrozenCommitPrecondition<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self.0 {
+            CommitPrecondition::InodeRevisionIs {
+                inode_id,
+                revision_no,
+            } => {
+                let mut map = serializer.serialize_map(Some(3))?;
+                map.serialize_entry("kind", "inode_revision_is")?;
+                map.serialize_entry("inode_id", &inode_id.0)?;
+                map.serialize_entry("revision_no", &revision_no.0)?;
+                map.end()
+            }
+            CommitPrecondition::AncestorsNotSubtreeDeleted { inode_id } => {
+                let mut map = serializer.serialize_map(Some(2))?;
+                map.serialize_entry("kind", "ancestors_not_subtree_deleted")?;
+                map.serialize_entry("inode_id", &inode_id.0)?;
+                map.end()
+            }
+            CommitPrecondition::ChildNameAbsent {
+                parent_inode_id,
+                name_key,
+            } => {
+                let mut map = serializer.serialize_map(Some(3))?;
+                map.serialize_entry("kind", "child_name_absent")?;
+                map.serialize_entry("parent_inode_id", &parent_inode_id.0)?;
+                map.serialize_entry("name_key", name_key.as_str())?;
+                map.end()
+            }
+            CommitPrecondition::BindingIs {
+                parent_inode_id,
+                name_key,
+                child_inode_id,
+                bind_seq,
+                bind_delta_index,
+            } => {
+                let mut map = serializer.serialize_map(Some(6))?;
+                map.serialize_entry("kind", "binding_is")?;
+                map.serialize_entry("parent_inode_id", &parent_inode_id.0)?;
+                map.serialize_entry("name_key", name_key.as_str())?;
+                map.serialize_entry("child_inode_id", &child_inode_id.0)?;
+                map.serialize_entry("bind_seq", &bind_seq.0)?;
+                map.serialize_entry("bind_delta_index", bind_delta_index)?;
+                map.end()
+            }
+            CommitPrecondition::DirectoryEmpty { inode_id } => {
+                let mut map = serializer.serialize_map(Some(2))?;
+                map.serialize_entry("kind", "directory_empty")?;
+                map.serialize_entry("inode_id", &inode_id.0)?;
+                map.end()
+            }
+        }
+    }
+}
+
+struct FrozenCommitOps<'a>(&'a [CommitOp]);
+
+impl Serialize for FrozenCommitOps<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut sequence = serializer.serialize_seq(Some(self.0.len()))?;
+        for op in self.0 {
+            sequence.serialize_element(&FrozenCommitOp(op))?;
+        }
+        sequence.end()
+    }
+}
+
+struct FrozenCommitOp<'a>(&'a CommitOp);
+
+impl Serialize for FrozenCommitOp<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self.0 {
+            CommitOp::CreateDirectory {
+                parent_inode_id,
+                display_name,
+            } => {
+                let mut map = serializer.serialize_map(Some(3))?;
+                map.serialize_entry("kind", "create_directory")?;
+                map.serialize_entry("parent_inode_id", &parent_inode_id.0)?;
+                map.serialize_entry("display_name", display_name)?;
+                map.end()
+            }
+            CommitOp::CreateFile {
+                parent_inode_id,
+                display_name,
+                content_ref,
+            } => {
+                let mut map = serializer.serialize_map(Some(4))?;
+                map.serialize_entry("kind", "create_file")?;
+                map.serialize_entry("parent_inode_id", &parent_inode_id.0)?;
+                map.serialize_entry("display_name", display_name)?;
+                map.serialize_entry("content_ref", &FrozenContentRef(content_ref))?;
+                map.end()
+            }
+            CommitOp::ReplaceFile {
+                inode_id,
+                base_revision_no,
+                content_ref,
+            } => {
+                let mut map = serializer.serialize_map(Some(4))?;
+                map.serialize_entry("kind", "replace_file")?;
+                map.serialize_entry("inode_id", &inode_id.0)?;
+                map.serialize_entry("base_revision_no", &base_revision_no.0)?;
+                map.serialize_entry("content_ref", &FrozenContentRef(content_ref))?;
+                map.end()
+            }
+            CommitOp::RestoreRevision {
+                inode_id,
+                source_revision_no,
+                base_revision_no,
+            } => {
+                let mut map = serializer.serialize_map(Some(4))?;
+                map.serialize_entry("kind", "restore_revision")?;
+                map.serialize_entry("inode_id", &inode_id.0)?;
+                map.serialize_entry("source_revision_no", &source_revision_no.0)?;
+                map.serialize_entry("base_revision_no", &base_revision_no.0)?;
+                map.end()
+            }
+            CommitOp::DeleteFile { inode_id } => {
+                let mut map = serializer.serialize_map(Some(2))?;
+                map.serialize_entry("kind", "delete_file")?;
+                map.serialize_entry("inode_id", &inode_id.0)?;
+                map.end()
+            }
+            CommitOp::Rename {
+                inode_id,
+                new_parent_inode_id,
+                new_display_name,
+            } => {
+                let mut map = serializer.serialize_map(Some(4))?;
+                map.serialize_entry("kind", "rename")?;
+                map.serialize_entry("inode_id", &inode_id.0)?;
+                map.serialize_entry("new_parent_inode_id", &new_parent_inode_id.0)?;
+                map.serialize_entry("new_display_name", new_display_name)?;
+                map.end()
+            }
+            CommitOp::DeleteSubtree { root_inode_id } => {
+                let mut map = serializer.serialize_map(Some(2))?;
+                map.serialize_entry("kind", "delete_subtree")?;
+                map.serialize_entry("root_inode_id", &root_inode_id.0)?;
+                map.end()
+            }
+            CommitOp::Undelete {
+                inode_id,
+                deleted_at_seq,
+                parent_inode_id,
+                display_name,
+            } => {
+                let mut map = serializer.serialize_map(Some(5))?;
+                map.serialize_entry("kind", "undelete")?;
+                map.serialize_entry("inode_id", &inode_id.0)?;
+                map.serialize_entry("deleted_at_seq", &deleted_at_seq.0)?;
+                map.serialize_entry("parent_inode_id", &parent_inode_id.0)?;
+                map.serialize_entry("display_name", display_name)?;
+                map.end()
+            }
+        }
+    }
+}
+
+struct FrozenContentRef<'a>(&'a ContentRef);
+
+impl Serialize for FrozenContentRef<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut state = serializer.serialize_struct("ContentRef", 3)?;
+        state.serialize_field("kind", self.0.kind.as_str())?;
+        state.serialize_field("digest", self.0.digest.as_str())?;
+        state.serialize_field("size_bytes", &self.0.size_bytes)?;
+        state.end()
+    }
+}
+
 pub fn core_commit_fingerprint(
     request: &CommitRequest,
 ) -> Result<CoreCommitFingerprint, CommitFingerprintError> {
@@ -104,58 +352,36 @@ pub fn core_commit_fingerprint(
 
 pub fn core_commit_fingerprint_for_v0_request(
     namespace_id: &NamespaceId,
-    request: &api_v0::CommitRequest,
+    request: &ApiCommitRequest,
 ) -> Result<CoreCommitFingerprint, CommitFingerprintError> {
-    let preconditions = request
-        .preconditions
-        .iter()
-        .cloned()
-        .map(commit_precondition_from_v0)
-        .collect::<Vec<_>>();
-    let ops = request
-        .ops
-        .iter()
-        .cloned()
-        .map(commit_op_from_v0)
-        .collect::<Vec<_>>();
-    core_commit_fingerprint_from_parts(namespace_id, &preconditions, &ops, &request.message)
+    core_commit_fingerprint_from_parts(
+        namespace_id,
+        &request.preconditions,
+        &request.ops,
+        &request.message,
+    )
 }
 
 fn core_commit_fingerprint_from_parts(
     namespace_id: &NamespaceId,
-    preconditions: &[Precondition],
+    preconditions: &[CommitPrecondition],
     ops: &[CommitOp],
     message: &Option<String>,
 ) -> Result<CoreCommitFingerprint, CommitFingerprintError> {
-    // This struct's compact JSON is the v0 fingerprint preimage (format
-    // spec, "Commit identity fingerprints"): field order, field names, and
-    // the v0-mirroring encodings of
-    // `Precondition` and `CommitOp` are all durable contract.
-    #[derive(Serialize)]
-    struct CanonicalCoreCommit<'a> {
-        domain: &'static str,
-        namespace_id: &'a NamespaceId,
-        preconditions: &'a [Precondition],
-        ops: &'a [CommitOp],
-        message: &'a Option<String>,
-    }
-
-    fingerprint_digest(&CanonicalCoreCommit {
-        domain: CORE_COMMIT_FINGERPRINT_DOMAIN,
-        namespace_id,
-        preconditions,
-        ops,
-        message,
-    })
-    .map(CoreCommitFingerprint::new_unchecked)
-    .map_err(|err| CommitFingerprintError::Codec(err.to_string()))
+    encode_core_commit_preimage(namespace_id, preconditions, ops, message)
+        .map(|bytes| CoreCommitFingerprint::new_unchecked(fingerprint_bytes(&bytes)))
+        .map_err(|err| CommitFingerprintError::Codec(err.to_string()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commit::{CommitOp, CommitRequest};
-    use loonfs_api::{CommitId, InodeId, NamespaceId, WriterEpoch};
+    use crate::commit::{CommitExecutionContext, CommitRequest};
+    use loonfs_api::v0::{CommitOp, CommitPrecondition, CommitRequest as ApiCommitRequest};
+    use loonfs_api::{
+        ChangeSeq, CommitId, ContentRef, DisplayName, InodeId, NameKey, NamePolicy, NamespaceId,
+        RevisionNo, WriterEpoch,
+    };
 
     fn core_request(writer_epoch: WriterEpoch) -> CommitRequest {
         CommitRequest {
@@ -173,6 +399,83 @@ mod tests {
         }
     }
 
+    fn representative_request() -> CommitRequest {
+        let content_ref = ContentRef::whole_file_v0(b"fingerprint bytes");
+        let name_key = NameKey::for_display_name(
+            NamePolicy::default(),
+            &DisplayName::parse("Docs").expect("display name"),
+        );
+        CommitRequest {
+            namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
+            commit_id: CommitId::parse("commit-representative").expect("valid commit id"),
+            writer_id: "writer-a".to_owned(),
+            writer_session_id: "wrs_test".to_owned(),
+            writer_epoch: WriterEpoch(9),
+            preconditions: vec![
+                CommitPrecondition::InodeRevisionIs {
+                    inode_id: InodeId(5),
+                    revision_no: RevisionNo(1),
+                },
+                CommitPrecondition::AncestorsNotSubtreeDeleted {
+                    inode_id: InodeId(5),
+                },
+                CommitPrecondition::ChildNameAbsent {
+                    parent_inode_id: InodeId(1),
+                    name_key: name_key.clone(),
+                },
+                CommitPrecondition::BindingIs {
+                    parent_inode_id: InodeId(1),
+                    name_key,
+                    child_inode_id: InodeId(5),
+                    bind_seq: ChangeSeq(7),
+                    bind_delta_index: 3,
+                },
+                CommitPrecondition::DirectoryEmpty {
+                    inode_id: InodeId(9),
+                },
+            ],
+            ops: vec![
+                CommitOp::CreateDirectory {
+                    parent_inode_id: InodeId(1),
+                    display_name: "Docs".to_owned(),
+                },
+                CommitOp::CreateFile {
+                    parent_inode_id: InodeId(1),
+                    display_name: "a.txt".to_owned(),
+                    content_ref: content_ref.clone(),
+                },
+                CommitOp::ReplaceFile {
+                    inode_id: InodeId(5),
+                    base_revision_no: RevisionNo(1),
+                    content_ref,
+                },
+                CommitOp::RestoreRevision {
+                    inode_id: InodeId(5),
+                    source_revision_no: RevisionNo(1),
+                    base_revision_no: RevisionNo(2),
+                },
+                CommitOp::DeleteFile {
+                    inode_id: InodeId(5),
+                },
+                CommitOp::Rename {
+                    inode_id: InodeId(5),
+                    new_parent_inode_id: InodeId(2),
+                    new_display_name: "b.txt".to_owned(),
+                },
+                CommitOp::DeleteSubtree {
+                    root_inode_id: InodeId(9),
+                },
+                CommitOp::Undelete {
+                    inode_id: InodeId(9),
+                    deleted_at_seq: ChangeSeq(11),
+                    parent_inode_id: InodeId(1),
+                    display_name: "restored".to_owned(),
+                },
+            ],
+            message: Some("all operations and preconditions".to_owned()),
+        }
+    }
+
     #[test]
     fn core_commit_fingerprint_is_stable_for_same_logical_commit() {
         let left =
@@ -183,7 +486,8 @@ mod tests {
         assert_eq!(left, right);
     }
 
-    /// Pins the exact stored fingerprint for a fixed logical commit.
+    /// Pins the exact stored fingerprint captured from the pre-unification
+    /// implementation for a representative logical commit.
     ///
     /// If this fails, the canonical preimage changed (format spec, "Commit
     /// identity fingerprints") and every
@@ -192,100 +496,44 @@ mod tests {
     /// bumping the fingerprint scheme tag.
     #[test]
     fn core_commit_fingerprint_value_is_pinned() {
-        let fingerprint =
-            core_commit_fingerprint(&core_request(WriterEpoch(1))).expect("fingerprint");
+        let fingerprint = core_commit_fingerprint(&representative_request()).expect("fingerprint");
 
         assert_eq!(
             fingerprint.as_str(),
-            "v0:sha256:47b8951d2684f60b5f3a679d4ca40a575e5c9da91cb8ed3a7d1dc0433a39e409"
+            "v0:sha256:1dd0ebc0070ba30946d9f29aa08b09c89404d2db05a1f7ab21197bc6feff118a"
         );
     }
 
-    /// The internal commit vocabulary must serialize exactly like the v0 wire
-    /// vocabulary: the fingerprint preimage is defined over the v0 encoding.
+    /// Pins the complete durable preimage captured before the unified API
+    /// vocabulary stopped participating through its derived serializer.
     #[test]
-    fn internal_commit_vocabulary_matches_v0_wire_encoding() {
-        let content_ref = loonfs_api::ContentRef::whole_file_v0(b"fingerprint bytes");
-        let name_key = loonfs_api::NameKey::for_display_name(
-            loonfs_api::NamePolicy::default(),
-            &loonfs_api::DisplayName::parse("Docs").expect("display name"),
+    fn core_commit_preimage_bytes_are_frozen() {
+        let request = representative_request();
+        let preimage = encode_core_commit_preimage(
+            &request.namespace_id,
+            &request.preconditions,
+            &request.ops,
+            &request.message,
+        )
+        .expect("encode preimage");
+        let expected = concat!(
+            r#"{"domain":"loonfs.core.commit.semantic.v0","namespace_id":"demo","preconditions":["#,
+            r#"{"kind":"inode_revision_is","inode_id":5,"revision_no":1},"#,
+            r#"{"kind":"ancestors_not_subtree_deleted","inode_id":5},"#,
+            r#"{"kind":"child_name_absent","parent_inode_id":1,"name_key":"docs"},"#,
+            r#"{"kind":"binding_is","parent_inode_id":1,"name_key":"docs","child_inode_id":5,"bind_seq":7,"bind_delta_index":3},"#,
+            r#"{"kind":"directory_empty","inode_id":9}],"ops":["#,
+            r#"{"kind":"create_directory","parent_inode_id":1,"display_name":"Docs"},"#,
+            r#"{"kind":"create_file","parent_inode_id":1,"display_name":"a.txt","content_ref":{"kind":"whole_file_v0","digest":"sha256:f332dea40056a654e2ec6201ce338e01123e67722207e67c4c950d02ba9fb4bb","size_bytes":17}},"#,
+            r#"{"kind":"replace_file","inode_id":5,"base_revision_no":1,"content_ref":{"kind":"whole_file_v0","digest":"sha256:f332dea40056a654e2ec6201ce338e01123e67722207e67c4c950d02ba9fb4bb","size_bytes":17}},"#,
+            r#"{"kind":"restore_revision","inode_id":5,"source_revision_no":1,"base_revision_no":2},"#,
+            r#"{"kind":"delete_file","inode_id":5},"#,
+            r#"{"kind":"rename","inode_id":5,"new_parent_inode_id":2,"new_display_name":"b.txt"},"#,
+            r#"{"kind":"delete_subtree","root_inode_id":9},"#,
+            r#"{"kind":"undelete","inode_id":9,"deleted_at_seq":11,"parent_inode_id":1,"display_name":"restored"}],"message":"all operations and preconditions"}"#,
         );
-        let v0_ops = vec![
-            api_v0::CommitOp::CreateDirectory {
-                parent_inode_id: InodeId(1),
-                display_name: "Docs".to_owned(),
-            },
-            api_v0::CommitOp::CreateFile {
-                parent_inode_id: InodeId(1),
-                display_name: "a.txt".to_owned(),
-                content_ref: content_ref.clone(),
-            },
-            api_v0::CommitOp::ReplaceFile {
-                inode_id: InodeId(5),
-                base_revision_no: loonfs_api::RevisionNo(1),
-                content_ref: content_ref.clone(),
-            },
-            api_v0::CommitOp::RestoreRevision {
-                inode_id: InodeId(5),
-                source_revision_no: loonfs_api::RevisionNo(1),
-                base_revision_no: loonfs_api::RevisionNo(2),
-            },
-            api_v0::CommitOp::DeleteFile {
-                inode_id: InodeId(5),
-            },
-            api_v0::CommitOp::Rename {
-                inode_id: InodeId(5),
-                new_parent_inode_id: InodeId(2),
-                new_display_name: "b.txt".to_owned(),
-            },
-            api_v0::CommitOp::DeleteSubtree {
-                root_inode_id: InodeId(9),
-            },
-            api_v0::CommitOp::Undelete {
-                inode_id: InodeId(9),
-                deleted_at_seq: loonfs_api::ChangeSeq(11),
-                parent_inode_id: InodeId(1),
-                display_name: "restored".to_owned(),
-            },
-        ];
-        let v0_preconditions = vec![
-            api_v0::CommitPrecondition::InodeRevisionIs {
-                inode_id: InodeId(5),
-                revision_no: loonfs_api::RevisionNo(1),
-            },
-            api_v0::CommitPrecondition::AncestorsNotSubtreeDeleted {
-                inode_id: InodeId(5),
-            },
-            api_v0::CommitPrecondition::ChildNameAbsent {
-                parent_inode_id: InodeId(1),
-                name_key: name_key.clone(),
-            },
-            api_v0::CommitPrecondition::BindingIs {
-                parent_inode_id: InodeId(1),
-                name_key,
-                child_inode_id: InodeId(5),
-                bind_seq: loonfs_api::ChangeSeq(7),
-                bind_delta_index: 3,
-            },
-            api_v0::CommitPrecondition::DirectoryEmpty {
-                inode_id: InodeId(9),
-            },
-        ];
 
-        for v0_op in v0_ops {
-            let internal = commit_op_from_v0(v0_op.clone());
-            assert_eq!(
-                serde_json::to_value(&internal).expect("internal op"),
-                serde_json::to_value(&v0_op).expect("v0 op"),
-            );
-        }
-        for v0_precondition in v0_preconditions {
-            let internal = commit_precondition_from_v0(v0_precondition.clone());
-            assert_eq!(
-                serde_json::to_value(&internal).expect("internal precondition"),
-                serde_json::to_value(&v0_precondition).expect("v0 precondition"),
-            );
-        }
+        assert_eq!(preimage, expected.as_bytes());
     }
 
     #[test]
@@ -331,25 +579,24 @@ mod tests {
     #[test]
     fn v0_core_commit_fingerprint_matches_core_commit_fingerprint() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let api_request = api_v0::CommitRequest {
+        let api_request = ApiCommitRequest {
             commit_id: CommitId::parse("commit-a").expect("valid commit id"),
             preconditions: Vec::new(),
-            ops: vec![api_v0::CommitOp::CreateDirectory {
+            ops: vec![CommitOp::CreateDirectory {
                 parent_inode_id: InodeId(1),
                 display_name: "docs".to_owned(),
             }],
             message: Some("create docs".to_owned()),
         };
-        let core = super::super::commit_request_from_v0(
-            super::super::CommitExecutionContext {
+        let core = CommitRequest::from_v0(
+            CommitExecutionContext {
                 namespace_id: namespace_id.clone(),
                 writer_id: "writer-a".to_owned(),
                 writer_session_id: "wrs_test".to_owned(),
                 writer_epoch: WriterEpoch(1),
             },
             api_request.clone(),
-        )
-        .expect("core request");
+        );
 
         assert_eq!(
             core_commit_fingerprint_for_v0_request(&namespace_id, &api_request)

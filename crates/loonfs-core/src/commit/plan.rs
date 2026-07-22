@@ -1,7 +1,6 @@
 //! [`CommitPlan`]: the output of validation — every op checked and
 //! resolved, ready to materialize into WAL deltas.
 
-use super::ResolvedBinding;
 use crate::invariants::InvariantId;
 use crate::metadata::MetadataState;
 use loonfs_api::wire::control::HeadState;
@@ -19,6 +18,16 @@ pub struct CommitPlan {
     pub(crate) validated_ops: Vec<ValidatedOp>,
     pub resulting_next_inode_id: InodeId,
     pub checked_invariants: Vec<InvariantId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedBinding {
+    pub parent_inode_id: InodeId,
+    pub name_key: NameKey,
+    pub display_name: String,
+    pub child_inode_id: InodeId,
+    pub bind_seq: ChangeSeq,
+    pub bind_delta_index: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
