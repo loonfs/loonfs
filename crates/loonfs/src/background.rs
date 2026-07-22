@@ -51,6 +51,11 @@ pub(crate) struct BackgroundWork {
 struct BackgroundState {
     closed: bool,
     inflight: BTreeSet<NamespaceId>,
+    /// Namespaces whose over-threshold publish arrived while their tick was
+    /// already running. The running tick consumes this through
+    /// [`BackgroundWork::finish_or_rerun`] and runs again, so the last write
+    /// before an idle period cannot leave the tail unbounded.
+    pending: BTreeSet<NamespaceId>,
     tasks: Vec<JoinHandle<()>>,
 }
 
@@ -69,6 +74,7 @@ impl BackgroundWork {
             state: Mutex::new(BackgroundState {
                 closed: false,
                 inflight: BTreeSet::new(),
+                pending: BTreeSet::new(),
                 tasks: Vec::new(),
             }),
         }
@@ -90,6 +96,9 @@ impl BackgroundWork {
             return false;
         }
         if state.inflight.contains(namespace_id) {
+            // The running tick re-checks pending before releasing its slot,
+            // so this request is deferred, not dropped.
+            state.pending.insert(namespace_id.clone());
             return false;
         }
         if state.inflight.len() >= self.max_concurrent {
@@ -108,6 +117,22 @@ impl BackgroundWork {
     pub(crate) fn release(&self, namespace_id: &NamespaceId) {
         let mut state = self.lock_state();
         state.inflight.remove(namespace_id);
+    }
+
+    /// Ends one tick run for the namespace. When another over-threshold
+    /// publish deferred a request during the run, that request is consumed,
+    /// the singleflight slot stays held, and the caller must run again; only
+    /// a quiet finish releases the slot. Checking and releasing under the
+    /// one state lock closes the window where a request could land between
+    /// a final pending check and the release.
+    pub(crate) fn finish_or_rerun(&self, namespace_id: &NamespaceId) -> bool {
+        let mut state = self.lock_state();
+        if !state.closed && state.pending.remove(namespace_id) {
+            return true;
+        }
+        state.pending.remove(namespace_id);
+        state.inflight.remove(namespace_id);
+        false
     }
 
     /// Rejects any further background scheduling.
@@ -190,6 +215,45 @@ mod tests {
         fn drop(&mut self) {
             self.0.store(true, Ordering::SeqCst);
         }
+    }
+
+    #[test]
+    fn a_request_during_an_active_tick_defers_and_reruns_exactly_once() {
+        let background = BackgroundWork::new(FsBackgroundWork::Enabled, None, 8);
+        let namespace_id = namespace_id();
+
+        assert!(background.try_claim(&namespace_id), "first claim spawns");
+        assert!(
+            !background.try_claim(&namespace_id),
+            "a request during the active tick defers instead of claiming"
+        );
+        assert!(
+            background.finish_or_rerun(&namespace_id),
+            "the deferred request keeps the slot held and reruns the tick"
+        );
+        assert!(
+            !background.finish_or_rerun(&namespace_id),
+            "a quiet finish releases the slot"
+        );
+        assert!(
+            background.try_claim(&namespace_id),
+            "the released slot claims fresh for the next crossing"
+        );
+        background.release(&namespace_id);
+    }
+
+    #[test]
+    fn shutdown_wins_over_a_deferred_rerun() {
+        let background = BackgroundWork::new(FsBackgroundWork::Enabled, None, 8);
+        let namespace_id = namespace_id();
+
+        assert!(background.try_claim(&namespace_id));
+        assert!(!background.try_claim(&namespace_id), "defers while active");
+        background.shut_down();
+        assert!(
+            !background.finish_or_rerun(&namespace_id),
+            "a deferred request must not rerun after shutdown closed admission"
+        );
     }
 
     #[tokio::test]

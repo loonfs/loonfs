@@ -604,17 +604,31 @@ impl FsCore {
             namespace_id: namespace_id.clone(),
         };
         self.inner.background.spawn(async move {
-            if let Err(error) = claim
-                .fs
-                .run_auto_maintenance(&claim.namespace_id, options)
-                .await
-            {
-                tracing::info!(
-                    phase = "auto_maintenance_tick",
-                    result = "error",
-                    error = %error,
-                    "post-publish maintenance tick failed"
-                );
+            loop {
+                if let Err(error) = claim
+                    .fs
+                    .run_auto_maintenance(&claim.namespace_id, options)
+                    .await
+                {
+                    tracing::info!(
+                        phase = "auto_maintenance_tick",
+                        result = "error",
+                        error = %error,
+                        "post-publish maintenance tick failed"
+                    );
+                }
+                // A publish that crossed the threshold while this tick ran
+                // deferred its request rather than dropping it; consume it
+                // and run again, so the last write before an idle period
+                // cannot leave the tail unbounded.
+                if !claim
+                    .fs
+                    .inner
+                    .background
+                    .finish_or_rerun(&claim.namespace_id)
+                {
+                    break;
+                }
             }
         });
     }
