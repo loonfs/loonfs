@@ -383,13 +383,6 @@ pub fn load_server_config(path: impl AsRef<Path>) -> Result<ServerConfig, Server
     let bytes = fs::read(path.as_ref()).map_err(|err| ServerConfigError::Io(err.to_string()))?;
     let source =
         std::str::from_utf8(&bytes).map_err(|err| ServerConfigError::Decode(err.to_string()))?;
-    let table: toml::Table =
-        toml::from_str(source).map_err(|err| ServerConfigError::Decode(err.to_string()))?;
-    if table.contains_key("gram_index_build") {
-        return Err(ServerConfigError::Decode(
-            "removed `[gram_index_build]` table; move these fields under `[grep]`".to_owned(),
-        ));
-    }
     let mut config: ServerConfig =
         toml::from_str(source).map_err(|err| ServerConfigError::Decode(err.to_string()))?;
     config.apply_env_fallbacks(
@@ -1247,7 +1240,10 @@ root = "/tmp/loonfs-server"
     }
 
     #[test]
-    fn removed_gram_index_build_table_names_grep_replacement() {
+    fn unknown_config_tables_fail_decode() {
+        // Pre-release rule: no compatibility courtesies. An unrecognized
+        // table — including any removed one — fails through the config's
+        // own strict parsing, with no special-cased guidance.
         let path = write_config(
             r#"
 bind = "127.0.0.1:9400"
@@ -1264,11 +1260,10 @@ root = "/tmp/loonfs-server"
 "#,
         );
 
-        let error = load_server_config(&path).expect_err("removed table must fail");
+        let error = load_server_config(&path).expect_err("unknown table must fail");
         match error {
             ServerConfigError::Decode(message) => {
-                assert!(message.contains("[gram_index_build]"), "{message}");
-                assert!(message.contains("[grep]"), "{message}");
+                assert!(message.contains("gram_index_build"), "{message}");
             }
             other => panic!("expected decode error, got {other:?}"),
         }
