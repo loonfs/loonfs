@@ -949,11 +949,13 @@ otherwise `content_not_prepared` names the first uncovered digest. A retry of
 an already-landed semantic commit replays its durable receipt even when tokens
 are then absent, expired, or malformed.
 
-One submission accepts at most 4096 operations, 4096 `content_tokens` entries,
-and 4096 distinct new external refs. A violation answers `invalid_request`
-before publisher admission; the server never splits the commit. These bounds
-protect serialized publisher occupancy, not commit correctness. A successful
-response is returned only after the request is committed (section 5.1).
+One new request accepts at most 4096 operations, 4096 prepared
+`content_tokens` proofs, and 4096 distinct new external refs. A violation
+answers `invalid_request`; the server never splits the commit. Current limits
+apply to new requests, while a committed request always replays from its
+receipt. These bounds protect serialized publisher occupancy, not commit
+correctness. A successful response is returned only after the request is
+committed (section 5.1).
 
 Representative response:
 

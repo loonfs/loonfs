@@ -1,5 +1,6 @@
 use bytes::Bytes;
 use loonfs::content_tokens::mint_content_token;
+use loonfs::publish::MAX_COMMIT_CONTENT_TOKENS;
 use loonfs_api::{
     v0::{
         BeginUploadRequest, CommitDelta, CommitOp, CommitRequest as ApiCommitRequest,
@@ -1205,7 +1206,7 @@ async fn commit_with_invalid_relevant_token_reports_token_failure() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn landed_commit_replays_byte_for_byte_with_absent_expired_or_garbage_tokens() {
+async fn landed_commit_replays_byte_for_byte_with_over_limit_absent_expired_or_garbage_tokens() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
@@ -1222,6 +1223,7 @@ async fn landed_commit_replays_byte_for_byte_with_absent_expired_or_garbage_toke
             .expect("create namespace");
         let completed = stage_uploaded_content(&harness.client, &namespace, b"commit replay");
         let content_ref = completed.content_ref.clone();
+        let valid_token = validated_content_token(&completed);
         let mut request = CommitSubmissionRequest {
             commit: ApiCommitRequest {
                 commit_id: CommitId::parse("commit-token-replay").expect("valid commit id"),
@@ -1233,7 +1235,7 @@ async fn landed_commit_replays_byte_for_byte_with_absent_expired_or_garbage_toke
                 }],
                 message: None,
             },
-            content_tokens: vec![validated_content_token(&completed)],
+            content_tokens: vec![valid_token.clone()],
         };
         let send = |request: &CommitSubmissionRequest| {
             response_bytes(
@@ -1242,6 +1244,9 @@ async fn landed_commit_replays_byte_for_byte_with_absent_expired_or_garbage_toke
             )
         };
         let original = send(&request);
+
+        request.content_tokens = vec![valid_token; MAX_COMMIT_CONTENT_TOKENS + 1];
+        assert_eq!(send(&request), original);
 
         request.content_tokens.clear();
         assert_eq!(send(&request), original);
@@ -1309,7 +1314,7 @@ async fn bare_commit_body_without_content_tokens_still_parses_and_commits_mkdir(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn commit_operation_and_content_token_limits_reject_before_admission() {
+async fn commit_operation_and_prepared_proof_limits_reject_new_requests() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
@@ -1343,27 +1348,24 @@ async fn commit_operation_and_content_token_limits_reject_before_admission() {
             "4097 operations",
         );
 
-        let irrelevant_ref = ContentRef::whole_file_v0(b"irrelevant");
-        let oversized_tokens = CommitSubmissionRequest {
+        let completed = stage_uploaded_content(&harness.client, &namespace, b"proof limit");
+        let prepared_proof = validated_content_token(&completed);
+        let oversized_proofs = CommitSubmissionRequest {
             commit: ApiCommitRequest {
-                commit_id: CommitId::parse("commit-too-many-tokens").expect("valid commit id"),
+                commit_id: CommitId::parse("commit-too-many-proofs").expect("valid commit id"),
                 preconditions: Vec::new(),
-                ops: vec![CommitOp::CreateDirectory {
+                ops: vec![CommitOp::CreateFile {
                     parent_inode_id: InodeId(1),
-                    display_name: "never-admitted".to_owned(),
+                    display_name: "never-committed.txt".to_owned(),
+                    content_ref: completed.content_ref,
                 }],
                 message: None,
             },
-            content_tokens: (0..4097)
-                .map(|_| ValidatedContentToken {
-                    content_ref: irrelevant_ref.clone(),
-                    token: "irrelevant".to_owned(),
-                })
-                .collect(),
+            content_tokens: vec![prepared_proof; MAX_COMMIT_CONTENT_TOKENS + 1],
         };
         assert_invalid_commit_limit_response(
-            send_commit_submission(&harness.server_url, &namespace, &oversized_tokens),
-            "4097 content token entries",
+            send_commit_submission(&harness.server_url, &namespace, &oversized_proofs),
+            "4097 prepared content proofs",
         );
 
         let changes = harness

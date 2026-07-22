@@ -129,7 +129,6 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
     index: usize,
     dedup: &mut BatchDedup,
 ) -> Result<CandidateAdmission> {
-    candidate.validate_request_limits()?;
     let acquired_writer = view
         .acquired_writer
         .as_ref()
@@ -160,7 +159,7 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
             {
                 return Ok(admission);
             }
-            reject_failed_content_preparation(candidate)?;
+            validate_new_primary(candidate)?;
             Ok(CandidateAdmission::Prepared(CandidateCoreRequest {
                 request,
                 identity_source: CommitIdentitySource::CoreCommitRequest,
@@ -184,7 +183,7 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
             {
                 return Ok(admission);
             }
-            reject_failed_content_preparation(candidate)?;
+            validate_new_primary(candidate)?;
             let planned = session
                 .plan_path_mutation(namespace_id, intent, view.metadata_view())
                 .await?;
@@ -195,6 +194,12 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
             }))
         }
     }
+}
+
+fn validate_new_primary(candidate: &NamespaceMutationCandidate) -> Result<()> {
+    // For new primaries, request limits precede rejected content preparation.
+    candidate.validate_request_limits()?;
+    reject_failed_content_preparation(candidate)
 }
 
 fn reject_failed_content_preparation(candidate: &NamespaceMutationCandidate) -> Result<()> {

@@ -17,8 +17,9 @@ use loonfs_objectstore::{PROVIDER_ATTEMPT_TIMEOUT, PROVIDER_OP_DEADLINE};
 pub const MAX_COMMIT_OPERATIONS: usize = 4096;
 
 /// Maximum content-token or prepared-proof entries carried by one explicit
-/// commit, bounding its preparation work and retained publisher admission
-/// state.
+/// commit, bounding preparation work for a new primary. An oversized
+/// candidate may occupy a publisher queue slot until candidate preparation
+/// rejects it.
 pub const MAX_COMMIT_CONTENT_TOKENS: usize = 4096;
 
 /// Maximum distinct new external content refs in one explicit commit, bounding

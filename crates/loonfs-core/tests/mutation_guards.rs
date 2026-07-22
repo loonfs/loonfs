@@ -3435,6 +3435,152 @@ async fn batch_commit_aliases_duplicate_commit_id_with_same_fingerprint() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oversized_prepared_proof_candidate_replays_receipt_but_new_request_is_rejected() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    let stored = store_bytes_as_content(&store, &namespace_id, b"proof replay")
+        .await
+        .expect("store content");
+    let catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &namespace_id)
+        .await
+        .expect("load namespace catalog");
+    let prepared = prepare_existing_content_ref(&store, &catalog, stored.content_ref.clone())
+        .await
+        .expect("prepare content");
+    let request = ApiCommitRequest {
+        commit_id: CommitId::parse("over-proof-replay").expect("valid commit id"),
+        preconditions: Vec::new(),
+        ops: vec![ApiCommitOp::CreateFile {
+            parent_inode_id: InodeId(1),
+            display_name: "proof-replay.txt".to_owned(),
+            content_ref: stored.content_ref,
+        }],
+        message: None,
+    };
+
+    let original = publish_namespace_mutations_batch(
+        &store,
+        &namespace_id,
+        vec![NamespaceMutationCandidate::commit_prepared(
+            request.clone(),
+            vec![prepared.clone()],
+        )],
+        &context,
+    )
+    .remove(0)
+    .expect("land original commit");
+    let oversized_proofs = vec![prepared; loonfs_core::limits::MAX_COMMIT_CONTENT_TOKENS + 1];
+
+    let replay = publish_namespace_mutations_batch(
+        &store,
+        &namespace_id,
+        vec![NamespaceMutationCandidate::commit_prepared(
+            request.clone(),
+            oversized_proofs.clone(),
+        )],
+        &context,
+    )
+    .remove(0)
+    .expect("durable receipt must win over current proof limit");
+    assert_eq!(replay, original);
+
+    let mut new_request = request;
+    new_request.commit_id = CommitId::parse("over-proof-new").expect("valid commit id");
+    let error = publish_namespace_mutations_batch(
+        &store,
+        &namespace_id,
+        vec![NamespaceMutationCandidate::commit_prepared(
+            new_request,
+            oversized_proofs,
+        )],
+        &context,
+    )
+    .remove(0)
+    .expect_err("new over-proof request must be rejected after receipt miss");
+    assert_eq!(error.code(), ErrorCode::InvalidRequest);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn same_batch_over_limit_proof_duplicate_joins_its_primary() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    let stored = store_bytes_as_content(&store, &namespace_id, b"batch proof")
+        .await
+        .expect("store content");
+    let catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &namespace_id)
+        .await
+        .expect("load namespace catalog");
+    let prepared = prepare_existing_content_ref(&store, &catalog, stored.content_ref.clone())
+        .await
+        .expect("prepare content");
+    let request = ApiCommitRequest {
+        commit_id: CommitId::parse("over-proof-duplicate").expect("valid commit id"),
+        preconditions: Vec::new(),
+        ops: vec![ApiCommitOp::CreateFile {
+            parent_inode_id: InodeId(1),
+            display_name: "batch-proof.txt".to_owned(),
+            content_ref: stored.content_ref,
+        }],
+        message: None,
+    };
+
+    let responses = publish_namespace_mutations_batch(
+        &store,
+        &namespace_id,
+        vec![
+            NamespaceMutationCandidate::commit_prepared(request.clone(), vec![prepared.clone()]),
+            NamespaceMutationCandidate::commit_prepared(
+                request,
+                vec![prepared; loonfs_core::limits::MAX_COMMIT_CONTENT_TOKENS + 1],
+            ),
+        ],
+        &context,
+    );
+
+    let primary = responses[0].as_ref().expect("primary commit");
+    let duplicate = responses[1]
+        .as_ref()
+        .expect("over-limit duplicate must join primary");
+    assert_eq!(duplicate, primary);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn new_candidate_with_4097_operations_is_rejected_after_identity_computation() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    let candidate = NamespaceMutationCandidate::commit(ApiCommitRequest {
+        commit_id: CommitId::parse("over-operation-new").expect("valid commit id"),
+        preconditions: Vec::new(),
+        ops: (0..=loonfs_core::limits::MAX_COMMIT_OPERATIONS)
+            .map(|index| ApiCommitOp::CreateDirectory {
+                parent_inode_id: InodeId(1),
+                display_name: format!("over-operation-{index}"),
+            })
+            .collect(),
+        message: None,
+    });
+
+    // A later release may lower the operation limit below a durable request;
+    // identity must remain available so receipt resolution can win first.
+    candidate
+        .semantic_identity(&namespace_id)
+        .expect("current request limits must not affect identity");
+    let error = publish_namespace_mutations_batch(&store, &namespace_id, vec![candidate], &context)
+        .remove(0)
+        .expect_err("new over-operation request must be rejected");
+    assert_eq!(error.code(), ErrorCode::InvalidRequest);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn visible_commit_id_retry_aliases_across_writer_takeover() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
