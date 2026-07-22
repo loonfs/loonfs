@@ -4,7 +4,7 @@
 use crate::background::BackgroundWork;
 use crate::cache::{RuntimeCacheStatsInner, RuntimeControlCache};
 use crate::config::{validate_config, FsConfig};
-use crate::publisher::PublisherRegistry;
+use crate::publisher::{PublishObserver, PublisherRegistry};
 use crate::time::current_time_ms;
 use crate::writer_session::WriterSessionRegistry;
 use crate::{
@@ -49,6 +49,9 @@ pub(crate) struct FsInner {
     pub(crate) grep_service: GrepService,
     pub(crate) cache_stats: RuntimeCacheStatsInner,
     pub(crate) background: BackgroundWork,
+    /// Optional synchronous notification after a mutation batch durably
+    /// advances a namespace. Callers promise that it does not block.
+    pub(crate) publish_observer: Option<PublishObserver>,
     /// The core's publication service: every mutation — direct handle
     /// calls and server submissions alike — publishes through it. It holds
     /// this core weakly, so the ownership does not cycle.
@@ -84,6 +87,7 @@ impl FsCore {
         config: FsConfig,
         background: BackgroundWork,
         shared_metadata_table_cache: Option<Arc<MetadataTableCache>>,
+        publish_observer: Option<PublishObserver>,
     ) -> Result<Self> {
         validate_config(&config)?;
         let metadata_table_cache = shared_metadata_table_cache.unwrap_or_else(|| {
@@ -115,6 +119,7 @@ impl FsCore {
                 grep_service: GrepService::new(),
                 cache_stats: RuntimeCacheStatsInner::default(),
                 background,
+                publish_observer,
                 publisher: PublisherRegistry::from_core(
                     weak.clone(),
                     min_publish_interval,

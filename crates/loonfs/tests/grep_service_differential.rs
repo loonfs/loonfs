@@ -5,8 +5,8 @@
 
 use loonfs::{
     CommitId, CoreError, CreateDirectoryOptions, CreateNamespaceOptions, DeleteOptions,
-    DestinationBehavior, FsWriter, GramIndexBuildPolicy, GrepRequest, GrepResponse, MoveOptions,
-    NamespaceId, PutFileOptions, SharedObjectStore,
+    DestinationBehavior, FsWriter, GrepRequest, GrepResponse, MoveOptions, NamespaceId,
+    PutFileOptions, SharedObjectStore,
 };
 use loonfs_api::AbsolutePath;
 use loonfs_core::cache::{
@@ -18,6 +18,7 @@ use loonfs_core::control::load_namespace_read_anchor;
 use loonfs_core::publish::{NamespaceMutationCandidate, PathMutationIntent};
 use loonfs_core::{NamespaceEngine, RuntimeReadContext};
 use loonfs_grep::root::load_grep_root;
+use loonfs_grep::GramIndexBuildPolicy;
 use loonfs_grep::{GrepBuildOutcome, GrepFoldOutcome, GrepIndexSnapshot, GrepService, GrepWorker};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use std::collections::BTreeSet;

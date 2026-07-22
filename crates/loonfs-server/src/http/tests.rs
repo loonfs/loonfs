@@ -74,10 +74,12 @@ use loonfs::{
     CreateNamespaceOptions, DeleteOptions, FsWriter, PutFileOptions, TraceMode, TraceStoreKind,
 };
 use loonfs_api::ErrorCode;
-use loonfs_api::{ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior, NamespaceId};
+use loonfs_api::{
+    ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior, GrepRequest, NamespaceId,
+};
 use loonfs_client::{Client, ClientConfig, ClientError, MutationOptions, NamespacePath};
 use loonfs_grep::keyspace::root_key as grep_root_key;
-use loonfs_grep::GrepWorker;
+use loonfs_grep::{GrepDriverParked, GrepWorker};
 use loonfs_objectstore::keys::wal_head;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{
@@ -326,12 +328,16 @@ async fn embedded_shutdown_drains_an_active_grep_step() {
     .expect("enable grep");
 
     blocking_store.arm();
-    let mut config = test_config(temp_dir.path(), "grep-shutdown-server");
-    config.grep.step_interval_ms = 1;
-    let (_router, lifecycle, _state) =
+    let config = test_config(temp_dir.path(), "grep-shutdown-server");
+    let (_router, lifecycle, state) =
         super::app_with_store_and_transfer_issuer(config, store, None)
             .await
             .expect("build app");
+    state
+        .grep_drivers
+        .as_ref()
+        .expect("embedded drivers")
+        .start(&namespace_id);
     blocking_store.entered.notified().await;
 
     let shutdown = tokio::runtime::Handle::current().spawn(lifecycle.shutdown());
@@ -345,6 +351,76 @@ async fn embedded_shutdown_drains_an_active_grep_step() {
         .await
         .expect("join shutdown")
         .expect("drain grep step");
+}
+
+#[tokio::test]
+async fn embedded_publish_observer_nudges_only_the_enabled_namespace_driver() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
+    let config = test_config(temp_dir.path(), "grep-observer-server");
+    let (_router, lifecycle, state) =
+        super::app_with_store_and_transfer_issuer(config, store, None)
+            .await
+            .expect("build app");
+    let namespace_id = namespace_id("grep-observer");
+    state
+        .writer
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
+    state
+        .grep_worker
+        .as_ref()
+        .expect("grep worker")
+        .enable(&namespace_id)
+        .await
+        .expect("enable grep");
+    state
+        .grep_drivers
+        .as_ref()
+        .expect("embedded drivers")
+        .start(&namespace_id);
+    assert_eq!(
+        lifecycle.wait_for_grep_quiescence(&namespace_id).await,
+        Some(GrepDriverParked::CaughtUp {
+            built_through_seq: ChangeSeq(0)
+        })
+    );
+
+    state
+        .writer
+        .put_file_bytes(
+            &namespace_id,
+            "/note.txt",
+            b"observer-driven needle\n",
+            PutFileOptions::default(),
+        )
+        .await
+        .expect("publish file");
+    assert_eq!(
+        lifecycle.wait_for_grep_quiescence(&namespace_id).await,
+        Some(GrepDriverParked::CaughtUp {
+            built_through_seq: ChangeSeq(1)
+        })
+    );
+    let response = state
+        .reader
+        .grep(
+            &namespace_id,
+            &GrepRequest {
+                pattern: "observer-driven needle".to_owned(),
+                case_insensitive: false,
+                path_prefix: None,
+                cursor: None,
+                limit: None,
+                allow_stale: false,
+                allow_scan: false,
+            },
+        )
+        .await
+        .expect("grep caught-up index");
+    assert_eq!(response.matches.len(), 1);
+    lifecycle.shutdown().await.expect("drain lifecycle");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

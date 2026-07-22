@@ -6,6 +6,7 @@
 //! `loonfs` directly.
 
 mod config;
+mod grep_drivers;
 mod http;
 mod trace;
 

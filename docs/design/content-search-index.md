@@ -1,15 +1,14 @@
 # Content Search Index
 
 LoonFS can answer grep-style regular-expression queries over file
-content from a derived index that the regular maintenance cycle
-builds and folds alongside metadata. This document describes what
+content from a derived index that event-driven per-namespace maintenance
+builds and folds independently of metadata. This document describes what
 the index stores, how it is built and reclaimed, how a query runs,
 and why the pieces are shaped that way. The index is derived work
 in the sense of `docs/specs/format.md` section 6.6: rebuildable
 from authoritative state, recorded in the namespace features map
 (section 5), and invisible to any reader that does not understand
-it. This is the design for unshipped work — no feature key, object
-family, or endpoint below is registered in the specs yet.
+it.
 
 ## The approach
 
@@ -121,10 +120,8 @@ never has to understand grep state to read the filesystem.
 
 Publication writes the immutable manifest first and installs the pointer by
 one etag CAS. A CAS loser's manifest and segments are unreachable derived
-garbage for grep GC. Embedded enablement registers directly with the worker
-loop. Standalone rediscovery lists the whole `namespaces/` prefix at startup
-and on a rare interval; this is proportional to total store keys until a
-namespace catalog exists.
+garbage for grep GC. Maintenance is created by namespace events, never by
+store discovery, and no grep path enumerates namespaces.
 
 Disabling writes a manifest with lifecycle `disabled` and no segment
 references, then CAS-publishes its pointer. The old objects become candidates for grep-owned collection;
@@ -143,6 +140,28 @@ steps walk that checkpoint's immutable manifest, read eligible revision
 content, write delta segments, and publish the cursor and segment set in
 one root CAS. The completing step changes the lifecycle to `steady` and
 releases the checkpoint.
+
+One per-namespace driver owns those steps. Starting a driver immediately
+runs backfill and incremental catch-up continuously, yielding between bounded
+steps. Once the root is steady and its watermark reaches the namespace head,
+the driver parks without a timer. A nudge received while active coalesces into
+one more catch-up run; a nudge received while parked wakes it. Step failures
+back off exponentially inside only that namespace's driver, capped at one
+second, so a poisoned root cannot delay a sibling namespace.
+
+In server `embedded` mode, enable and re-enable start the namespace driver,
+disable stops it, and successful runtime publications send a non-blocking
+nudge only to an already-running driver. A grep query also starts or nudges a
+driver when the root it inspects is backfilling or its watermark trails the
+head. That first-touch path resumes durable work after a restart without a
+scan. `serve_only` serves the same queries and administration operations but
+starts no drivers.
+
+Detached maintenance is explicitly assigned with repeatable
+`loonfs-grep --namespace <id>` flags. `--once` catches up only those namespaces
+and exits. The long-running form polls each assigned namespace's own head at
+`poll_interval_ms` (default 1000, zero rejected), the manifest-poll analog for
+this derived index. It never lists a namespace prefix.
 
 Steady-state build steps replay the validated change feed after
 `built_through_seq`, collect the file revisions that appeared, read each
@@ -231,6 +250,13 @@ materialized and queries are refused with the feature named; when the walk
 completes, lifecycle becomes `steady`, the checkpoint is released, and the
 watermark takes over. If the checkpoint expires or vanishes, the worker
 starts again from a fresh checkpoint.
+
+Grep garbage collection is also explicit and per namespace. The standalone
+binary runs it only when passed `--gc`; the server exposes
+`POST /v0/admin/namespaces/{ns}/index/grams/gc`, a sibling of core's explicit
+per-namespace GC endpoint. Pointing that operation at an absent or tombstoned
+namespace reaps its aged `extensions/grep/` state. Driver activity never runs
+GC.
 
 Postings for revisions that later become unobservable are not
 dropped in the first version. They are harmless — verification

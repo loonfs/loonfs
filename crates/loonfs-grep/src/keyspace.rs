@@ -3,7 +3,7 @@
 use crate::root::GrepManifestId;
 use loonfs_api::{IndexSegmentId, NamespaceId};
 
-const ALL_NAMESPACES_PREFIX: &str = "namespaces/";
+const NAMESPACE_KEYSPACE_PREFIX: &str = "namespaces/";
 const GREP_EXTENSION_SUFFIX: &str = "/extensions/grep/";
 
 /// The grep-owned object kind named by a parsed key.
@@ -21,17 +21,9 @@ pub struct ParsedGrepKey {
     pub kind: GrepKeyKind,
 }
 
-/// Prefix containing all namespace-scoped objects.
-///
-/// Grep discovery must scan this whole prefix until a namespace catalog
-/// exists; callers filter the stream through [`parse_key`].
-pub const fn all_namespaces_prefix() -> &'static str {
-    ALL_NAMESPACES_PREFIX
-}
-
 /// Prefix containing every grep object for one namespace.
 pub fn namespace_prefix(namespace_id: &NamespaceId) -> String {
-    format!("{ALL_NAMESPACES_PREFIX}{namespace_id}{GREP_EXTENSION_SUFFIX}")
+    format!("{NAMESPACE_KEYSPACE_PREFIX}{namespace_id}{GREP_EXTENSION_SUFFIX}")
 }
 
 /// Key of one namespace's atomic grep root pointer.
@@ -67,7 +59,7 @@ pub fn segment_key(namespace_id: &NamespaceId, segment_id: &IndexSegmentId) -> S
 /// Prefixes, malformed ids, unknown object families, temporary suffixes,
 /// and keys with trailing path components are rejected.
 pub fn parse_key(key: &str) -> Option<ParsedGrepKey> {
-    let suffix = key.strip_prefix(ALL_NAMESPACES_PREFIX)?;
+    let suffix = key.strip_prefix(NAMESPACE_KEYSPACE_PREFIX)?;
     let (namespace, suffix) = suffix.split_once('/')?;
     let namespace_id = NamespaceId::parse(namespace).ok()?;
     let object = suffix.strip_prefix("extensions/grep/")?;
@@ -115,7 +107,6 @@ mod tests {
         )
         .expect("valid manifest id");
 
-        assert_eq!(all_namespaces_prefix(), "namespaces/");
         assert_eq!(
             namespace_prefix(&namespace_id),
             "namespaces/docs/extensions/grep/"

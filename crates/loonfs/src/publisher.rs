@@ -64,6 +64,15 @@ use tracing::Instrument;
 type CommitResult = Result<ApiCommitResponse, CoreError>;
 type DeleteResult = Result<DeleteNamespaceResponse, CoreError>;
 
+/// A synchronous notification after one mutation batch durably advances a
+/// namespace.
+///
+/// The callback runs on the publication task after durability and before
+/// results are delivered. It must not block; enqueue any follow-up work onto
+/// a non-blocking channel. The sequence is the highest committed sequence in
+/// that publication batch.
+pub type PublishObserver = Arc<dyn Fn(&NamespaceId, loonfs_api::ChangeSeq) + Send + Sync + 'static>;
+
 const MAX_BATCH_CANDIDATES: usize = 1024;
 const HEAD_CAS_RETRY_LIMIT: usize = 8;
 
@@ -1430,7 +1439,6 @@ mod tests {
                 min_publish_interval_ms: 0,
                 max_read_content_bytes: None,
                 runtime_cache: RuntimeCacheConfig::default(),
-                gram_index_build: crate::GramIndexBuildPolicy::default(),
                 trace_mode: TraceMode::Remote,
                 trace_store_kind: TraceStoreKind::LocalFs,
             },
@@ -1439,6 +1447,7 @@ mod tests {
                 None,
                 crate::config::DEFAULT_MAX_CONCURRENT_MAINTENANCE,
             ),
+            None,
             None,
         )
         .expect("open runtime")

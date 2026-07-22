@@ -422,8 +422,9 @@ A representative v0 binding is shown below.
 | Run a maintenance tick | `POST /v0/admin/namespaces/{ns}/maintenance/tick` (optional body overrides `max_wal_tail_segments` and opts into `gc`; an override above the write-rejection threshold is rejected as `invalid_request`; flush races surface as outcomes, not errors) |
 | Collect garbage | `POST /v0/admin/namespaces/{ns}/gc` (optional body overrides `grace_window_ms`/`reap_window_ms`; a grace window below the derived safety floor is rejected as `invalid_request`; nothing sweeps without an explicit call) |
 | Content search | `POST /v0/namespaces/{ns}/query/grep` (feature `query.grep`; requires a materialized steady-state grep root) |
-| Enable the gram index | `POST /v0/admin/namespaces/{ns}/index/grams/enable` (CAS-publishes the independent grep root into checkpointed backfill; explicit `GrepWorker` steps perform backfill and upkeep; idempotent) |
+| Enable the gram index | `POST /v0/admin/namespaces/{ns}/index/grams/enable` (CAS-publishes the independent grep root into checkpointed backfill; embedded mode starts that namespace's event-driven driver; idempotent) |
 | Disable the gram index | `POST /v0/admin/namespaces/{ns}/index/grams/disable` (CAS-publishes the grep root as disabled; grep-owned garbage collection later reclaims unreferenced segments; idempotent) |
+| Collect gram-index garbage | `POST /v0/admin/namespaces/{ns}/index/grams/gc` (one explicit pass over only that namespace's grep extension; also reaps aged state for an absent or tombstoned namespace) |
 
 Routes under `/v0/admin/` belong to the `admin/v0` profile and routes under
 `/v0/namespaces/{ns}/query/` to `query/v0`; everything else shown belongs to

@@ -6,7 +6,7 @@ use crate::config::FsConfig;
 use crate::fs::FsCore;
 use crate::metrics::ObjectStoreMetricsRecorder;
 use crate::{
-    GramIndexBuildPolicy, Result, RuntimeCacheConfig, RuntimeError, SharedObjectStore, StoreConfig,
+    PublishObserver, Result, RuntimeCacheConfig, RuntimeError, SharedObjectStore, StoreConfig,
     TraceMode, TraceStoreKind,
 };
 use loonfs_core::cache::MetadataTableCache;
@@ -28,13 +28,13 @@ pub(super) struct HandleBuilderCore {
     pub(super) min_publish_interval_ms: u64,
     pub(super) max_read_content_bytes: Option<u64>,
     pub(super) runtime_cache: RuntimeCacheConfig,
-    pub(super) gram_index_build: GramIndexBuildPolicy,
     /// An existing decoded-block cache to share instead of sizing a fresh
     /// one from `runtime_cache`; see [`FsCore::open_with_background`].
     pub(super) shared_metadata_table_cache: Option<Arc<MetadataTableCache>>,
     pub(super) trace_mode: TraceMode,
     pub(super) trace_store_kind: Option<TraceStoreKind>,
     pub(super) metrics_recorder: Option<Arc<dyn ObjectStoreMetricsRecorder>>,
+    pub(super) publish_observer: Option<PublishObserver>,
 }
 
 impl HandleBuilderCore {
@@ -52,11 +52,11 @@ impl HandleBuilderCore {
             min_publish_interval_ms: crate::config::DEFAULT_MIN_PUBLISH_INTERVAL_MS,
             max_read_content_bytes: None,
             runtime_cache: RuntimeCacheConfig::default(),
-            gram_index_build: GramIndexBuildPolicy::default(),
             shared_metadata_table_cache: None,
             trace_mode: TraceMode::Embedded,
             trace_store_kind: None,
             metrics_recorder: None,
+            publish_observer: None,
         }
     }
 
@@ -91,12 +91,12 @@ impl HandleBuilderCore {
                 min_publish_interval_ms: self.min_publish_interval_ms,
                 max_read_content_bytes: self.max_read_content_bytes,
                 runtime_cache: self.runtime_cache,
-                gram_index_build: self.gram_index_build,
                 trace_mode: self.trace_mode,
                 trace_store_kind,
             },
             background,
             self.shared_metadata_table_cache,
+            self.publish_observer,
         )
     }
 }

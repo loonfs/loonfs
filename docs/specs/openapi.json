@@ -316,7 +316,7 @@
           "admin"
         ],
         "summary": "Disable the gram index",
-        "description": "Removes the namespace's index.grams feature entry and its segment references; garbage collection reclaims the segments. Idempotent.",
+        "description": "Removes the namespace's index.grams feature entry and its segment references, and stops its embedded driver. Explicit grep garbage collection later reclaims the segments. Idempotent.",
         "operationId": "disable_grams_index",
         "parameters": [
           {
@@ -371,7 +371,7 @@
             }
           },
           "503": {
-            "description": "Lost a manifest publication race; retry",
+            "description": "Lost a grep root-pointer publication race; retry",
             "content": {
               "application/json": {
                 "schema": {
@@ -389,7 +389,7 @@
           "admin"
         ],
         "summary": "Enable the gram index",
-        "description": "Publishes the namespace's index.grams feature entry. Backfill over existing revisions starts on the next grep worker sweep and the index stays current from then on. Idempotent.",
+        "description": "Publishes the namespace's index.grams feature entry. Embedded mode immediately starts that namespace's event-driven backfill driver; serve-only deployments rely on their explicitly assigned external driver. Idempotent.",
         "operationId": "enable_grams_index",
         "parameters": [
           {
@@ -444,7 +444,60 @@
             }
           },
           "503": {
-            "description": "Lost a manifest publication race; retry",
+            "description": "Lost a grep root-pointer publication race; retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v0/admin/namespaces/{namespace}/index/grams/gc": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Collect gram-index garbage",
+        "description": "Runs one explicit garbage-collection pass over only this namespace's grep-owned extension keyspace. A tombstoned or absent namespace has aged extension state reaped; no grep garbage collection runs implicitly.",
+        "operationId": "gc_grams_index",
+        "parameters": [
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "Namespace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Namespace grep garbage collection completed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GrepGcResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "Grep serving is disabled for this deployment",
             "content": {
               "application/json": {
                 "schema": {
@@ -4301,6 +4354,50 @@
             "type": "integer",
             "format": "int64",
             "description": "Candidates retained at delete time (grace window, missing\ntimestamps, or reachable from the fresh root set).",
+            "minimum": 0
+          }
+        }
+      },
+      "GrepGcResponse": {
+        "type": "object",
+        "description": "Result of one explicit gram-index garbage-collection pass (admin plane).",
+        "required": [
+          "namespace_id",
+          "deleted_segments",
+          "deleted_other_objects",
+          "namespace_reaped",
+          "retained_candidates",
+          "namespace_degraded"
+        ],
+        "properties": {
+          "deleted_other_objects": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Other unreferenced grep objects deleted after the grace window.",
+            "minimum": 0
+          },
+          "deleted_segments": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unreferenced grep segments deleted after the grace window.",
+            "minimum": 0
+          },
+          "namespace_degraded": {
+            "type": "boolean",
+            "description": "Whether unreadable namespace or grep state forced conservative retention."
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace whose grep-owned keyspace was inspected."
+          },
+          "namespace_reaped": {
+            "type": "boolean",
+            "description": "Whether an absent or tombstoned namespace had extension state reaped."
+          },
+          "retained_candidates": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Young or concurrently revived candidates retained by the pass.",
             "minimum": 0
           }
         }

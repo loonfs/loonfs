@@ -8,8 +8,7 @@ use bytes::Bytes;
 use futures::stream::BoxStream;
 use loonfs::{
     CreateNamespaceOptions, DeleteNamespaceOptions, ErrorCode, FsAdmin, FsWriter, GcConfig,
-    GramIndexBuildPolicy, GrepRequest, GrepResponse, NamespaceId, PutFileOptions,
-    SharedObjectStore,
+    GrepRequest, GrepResponse, NamespaceId, PutFileOptions, SharedObjectStore,
 };
 use loonfs_api::wire::control::CheckpointRecordLifecycle;
 use loonfs_api::{ChangeSeq, IndexSegmentId};
@@ -28,8 +27,8 @@ use loonfs_grep::root::{
     GrepRootPointer,
 };
 use loonfs_grep::{
-    GrepBuildOutcome, GrepFoldOutcome, GrepIndexSnapshot, GrepService, GrepWorker,
-    GREP_GC_GRACE_WINDOW_MS,
+    GramIndexBuildPolicy, GrepBuildOutcome, GrepFoldOutcome, GrepIndexSnapshot, GrepService,
+    GrepWorker, GREP_GC_GRACE_WINDOW_MS,
 };
 use loonfs_objectstore::keys::{
     checkpoint_prefix, metadata_manifest_object, metadata_manifest_prefix, metadata_table_prefix,
@@ -232,7 +231,7 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
         loonfs_grep::GrepDisableOutcome::Disabled
     );
     worker
-        .garbage_collect(u64::MAX)
+        .garbage_collect_namespace(&namespace_id, u64::MAX)
         .await
         .expect("collect disabled segments");
     assert!(
@@ -925,12 +924,26 @@ async fn grep_gc_retains_live_roots_reaps_deleted_namespaces_and_never_crosses_k
         .delete_namespace(&deleted_namespace, DeleteNamespaceOptions::default())
         .await
         .expect("delete namespace");
-    let report = worker
-        .garbage_collect(GREP_GC_GRACE_WINDOW_MS + 1)
+    let live_report = worker
+        .garbage_collect_namespace(&live_namespace, GREP_GC_GRACE_WINDOW_MS + 1)
         .await
-        .expect("grep gc");
-    assert!(report.deleted_segments >= 1);
-    assert!(report.degraded_namespaces >= 1);
+        .expect("collect live namespace");
+    let deleted_report = worker
+        .garbage_collect_namespace(&deleted_namespace, GREP_GC_GRACE_WINDOW_MS + 1)
+        .await
+        .expect("collect deleted namespace");
+    let corrupt_report = worker
+        .garbage_collect_namespace(&corrupt_namespace, GREP_GC_GRACE_WINDOW_MS + 1)
+        .await
+        .expect("collect corrupt namespace");
+    let absent_report = worker
+        .garbage_collect_namespace(&absent_namespace, GREP_GC_GRACE_WINDOW_MS + 1)
+        .await
+        .expect("collect absent namespace");
+    assert!(live_report.deleted_segments >= 1);
+    assert!(deleted_report.namespace_reaped);
+    assert!(absent_report.namespace_reaped);
+    assert!(corrupt_report.namespace_degraded);
     assert!(store
         .head(&live_segment_key)
         .await

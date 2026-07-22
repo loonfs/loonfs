@@ -1,30 +1,48 @@
-//! The `loonfs-grep` standalone worker binary.
+//! The explicitly assigned `loonfs-grep` per-namespace maintenance binary.
 
 use clap::Parser;
-use loonfs_grep::{GrepWorker, GrepWorkerConfig, GrepWorkerLoop};
+use loonfs_api::NamespaceId;
+use loonfs_core::control::load_namespace_head_control;
+use loonfs_grep::{
+    GrepDriver, GrepDriverParked, GrepDriverState, GrepDriverTask, GrepWorker, GrepWorkerConfig,
+};
 use loonfs_objectstore::{SharedObjectStore, StoreConfig};
 use serde::Deserialize;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
+use tokio::sync::Notify;
 use tracing_subscriber::EnvFilter;
 
+const DEFAULT_POLL_INTERVAL_MS: u64 = 1_000;
+
 #[derive(Debug, Parser)]
-#[command(about = "Drive LoonFS grep indexing and garbage collection")]
+#[command(about = "Drive grep maintenance for explicitly assigned LoonFS namespaces")]
 struct Args {
-    /// TOML file containing `[store]` and optional `[grep]` tables.
+    /// TOML file containing `[store]`, optional `[grep]`, and `poll_interval_ms`.
     #[arg(long)]
     config: PathBuf,
-    /// Rediscover grep roots, run one build/fold/GC sweep, and exit.
+    /// Namespace to maintain. Repeat the flag to assign more namespaces.
+    #[arg(long, required = true)]
+    namespace: Vec<NamespaceId>,
+    /// Run every assigned namespace to caught-up and exit.
     #[arg(long)]
     once: bool,
+    /// Run explicit grep garbage collection for every assigned namespace.
+    #[arg(long)]
+    gc: bool,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StandaloneConfig {
     store: StoreConfig,
+    #[serde(default = "default_poll_interval_ms")]
+    poll_interval_ms: u64,
     #[serde(default)]
     grep: GrepWorkerConfig,
 }
@@ -45,16 +63,47 @@ enum StandaloneError {
     },
     #[error("invalid grep config: {0}")]
     GrepConfig(#[from] loonfs_grep::GrepWorkerConfigError),
+    #[error("invalid `poll_interval_ms`: must be greater than zero")]
+    PollInterval,
     #[error("invalid store config: {0}")]
     StoreConfig(#[from] loonfs_objectstore::StoreConfigError),
     #[error("failed to open configured store: {0}")]
     OpenStore(#[from] loonfs_objectstore::ObjectStoreError),
-    #[error(transparent)]
-    RunOnce(#[from] loonfs_grep::GrepWorkerRunOnceError),
+    #[error("grep maintenance failed: {0}")]
+    Maintenance(#[from] loonfs_core::Error),
+    #[error("grep driver for namespace `{namespace_id}` stopped before parking")]
+    DriverStopped { namespace_id: NamespaceId },
+    #[error("grep driver task failed: {0}")]
+    DriverTask(#[from] tokio::task::JoinError),
     #[error("failed to initialize tracing: {0}")]
     Tracing(String),
-    #[error("standalone signal task failed: {0}")]
-    SignalTask(String),
+}
+
+#[derive(Debug)]
+struct PollShutdown {
+    requested: AtomicBool,
+    notify: Notify,
+}
+
+impl PollShutdown {
+    fn new() -> Self {
+        Self {
+            requested: AtomicBool::new(false),
+            notify: Notify::new(),
+        }
+    }
+
+    fn request(&self) {
+        self.requested.store(true, Ordering::Release);
+        self.notify.notify_waiters();
+    }
+
+    async fn wait(&self) {
+        if self.requested.load(Ordering::Acquire) {
+            return;
+        }
+        self.notify.notified().await;
+    }
 }
 
 #[tokio::main]
@@ -79,28 +128,136 @@ async fn run() -> Result<(), StandaloneError> {
         loonfs_api::generated_id("wrs"),
         format!("loonfs-grep/{}", env!("CARGO_PKG_VERSION")),
     );
-    let mut worker_loop = GrepWorkerLoop::new(worker, store, config.grep);
+    let namespace_ids: BTreeSet<_> = args.namespace.into_iter().collect();
+
+    if args.gc {
+        collect_assigned(&worker, &namespace_ids).await?;
+    }
+
+    let runtime = tokio::runtime::Handle::current();
+    let mut drivers = Vec::with_capacity(namespace_ids.len());
+    for namespace_id in &namespace_ids {
+        let task = GrepDriver::new(
+            worker.clone(),
+            namespace_id.clone(),
+            config.grep.build_policy(),
+        )
+        .spawn_on(&runtime);
+        drivers.push((namespace_id.clone(), task));
+    }
 
     if args.once {
-        let report = worker_loop.run_once().await?;
-        tracing::info!(
-            namespaces_seen = report.namespaces_seen,
-            namespaces_completed = report.namespaces_completed,
-            "grep worker one-shot sweep completed"
-        );
+        wait_for_assigned(&drivers).await?;
+        shutdown_drivers(drivers).await?;
         return Ok(());
     }
 
-    let shutdown = worker_loop.shutdown_handle();
-    let signal_task = tokio::runtime::Handle::current().spawn(async move {
-        shutdown_signal().await;
-        shutdown.request_shutdown();
-    });
-    worker_loop.run().await;
-    signal_task
-        .await
-        .map_err(|error| StandaloneError::SignalTask(error.to_string()))?;
+    let shutdown = Arc::new(PollShutdown::new());
+    let mut poll_tasks = Vec::with_capacity(drivers.len());
+    for (namespace_id, driver) in &drivers {
+        poll_tasks.push(runtime.spawn(poll_namespace(
+            store.clone(),
+            namespace_id.clone(),
+            driver.handle(),
+            Duration::from_millis(config.poll_interval_ms),
+            shutdown.clone(),
+        )));
+    }
+
+    shutdown_signal().await;
+    shutdown.request();
+    for task in poll_tasks {
+        task.await?;
+    }
+    shutdown_drivers(drivers).await
+}
+
+async fn wait_for_assigned(
+    drivers: &[(NamespaceId, GrepDriverTask)],
+) -> Result<(), StandaloneError> {
+    for (namespace_id, driver) in drivers {
+        let parked = driver.handle().wait_for_quiescence().await.ok_or_else(|| {
+            StandaloneError::DriverStopped {
+                namespace_id: namespace_id.clone(),
+            }
+        })?;
+        tracing::info!(
+            namespace_id = %namespace_id,
+            state = ?parked,
+            "grep namespace caught up"
+        );
+    }
     Ok(())
+}
+
+async fn collect_assigned(
+    worker: &GrepWorker<SharedObjectStore>,
+    namespace_ids: &BTreeSet<NamespaceId>,
+) -> Result<(), StandaloneError> {
+    let now_ms = current_time_ms()?;
+    for namespace_id in namespace_ids {
+        let report = worker
+            .garbage_collect_namespace(namespace_id, now_ms)
+            .await?;
+        tracing::info!(
+            namespace_id = %namespace_id,
+            deleted_segments = report.deleted_segments,
+            deleted_other_objects = report.deleted_other_objects,
+            namespace_reaped = report.namespace_reaped,
+            "grep namespace garbage collection completed"
+        );
+    }
+    Ok(())
+}
+
+async fn shutdown_drivers(
+    drivers: Vec<(NamespaceId, GrepDriverTask)>,
+) -> Result<(), StandaloneError> {
+    for (_, driver) in &drivers {
+        driver.handle().request_stop();
+    }
+    for (_, driver) in drivers {
+        driver.shutdown().await?;
+    }
+    Ok(())
+}
+
+async fn poll_namespace(
+    store: SharedObjectStore,
+    namespace_id: NamespaceId,
+    driver: loonfs_grep::GrepDriverHandle,
+    poll_interval: Duration,
+    shutdown: Arc<PollShutdown>,
+) {
+    let mut interval = tokio::time::interval(poll_interval);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {
+                match load_namespace_head_control(&*store, &namespace_id).await {
+                    Ok(head) => {
+                        let behind = matches!(
+                            driver.state(),
+                            GrepDriverState::Parked(GrepDriverParked::CaughtUp {
+                                built_through_seq,
+                            }) if built_through_seq < head.state.seq
+                        );
+                        if behind {
+                            driver.nudge();
+                        }
+                    }
+                    Err(error) => tracing::warn!(
+                        namespace_id = %namespace_id,
+                        phase = "grep_namespace_poll",
+                        result = "error",
+                        error = %error,
+                        "grep namespace head poll failed"
+                    ),
+                }
+            }
+            () = shutdown.wait() => return,
+        }
+    }
 }
 
 fn load_config(path: &Path) -> Result<StandaloneConfig, StandaloneError> {
@@ -114,8 +271,15 @@ fn load_config(path: &Path) -> Result<StandaloneConfig, StandaloneError> {
             source,
         })?;
     config.grep.validate()?;
+    if config.poll_interval_ms == 0 {
+        return Err(StandaloneError::PollInterval);
+    }
     config.store.validate()?;
     Ok(config)
+}
+
+const fn default_poll_interval_ms() -> u64 {
+    DEFAULT_POLL_INTERVAL_MS
 }
 
 fn init_tracing() -> Result<(), StandaloneError> {
@@ -147,4 +311,15 @@ async fn shutdown_signal() {
         () = ctrl_c => {}
         _ = terminate => {}
     }
+}
+
+#[allow(clippy::disallowed_methods)]
+fn current_time_ms() -> Result<u64, loonfs_core::Error> {
+    // Standalone explicit GC enters wall time at the command boundary; durable replay stays deterministic.
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .map_err(|error| {
+            loonfs_core::Error::Internal(format!("system clock before unix epoch: {error}"))
+        })
 }

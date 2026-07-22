@@ -6,12 +6,14 @@ use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::Json;
 use loonfs_api::v0::{
-    DisableGramsIndexResponse, EnableGramsIndexResponse, GrepRequest, GrepResponse,
+    DisableGramsIndexResponse, EnableGramsIndexResponse, GrepGcResponse, GrepRequest, GrepResponse,
 };
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
 use loonfs_api::FEATURE_QUERY_GREP;
+use loonfs_grep::root::{load_grep_root, GrepLifecycle};
 use loonfs_grep::{GrepDisableOutcome, GrepEnableOutcome};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg_attr(
     feature = "openapi",
@@ -42,6 +44,7 @@ pub(super) async fn grep(
 ) -> Result<Json<GrepResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let namespace_id = namespace.into_id()?;
+    start_driver_for_query_if_needed(&state, &namespace_id).await;
     let response = state
         .reader
         .grep(&namespace_id, &request)
@@ -69,7 +72,7 @@ pub(super) async fn grep_not_supported(
         path = "/v0/admin/namespaces/{namespace}/index/grams/enable",
         tag = "admin",
         summary = "Enable the gram index",
-        description = "Publishes the namespace's index.grams feature entry. Backfill over existing revisions starts on the next grep worker sweep and the index stays current from then on. Idempotent.",
+        description = "Publishes the namespace's index.grams feature entry. Embedded mode immediately starts that namespace's event-driven backfill driver; serve-only deployments rely on their explicitly assigned external driver. Idempotent.",
         params(("namespace" = String, Path, description = "Namespace id")),
         responses(
             (status = 200, description = "Feature entry published or already present", body = EnableGramsIndexResponse),
@@ -119,6 +122,9 @@ pub(super) async fn enable_grams_index(
             ));
         }
     };
+    if let Some(drivers) = &state.grep_drivers {
+        drivers.start(&namespace_id);
+    }
     Ok(Json(response))
 }
 
@@ -129,7 +135,7 @@ pub(super) async fn enable_grams_index(
         path = "/v0/admin/namespaces/{namespace}/index/grams/disable",
         tag = "admin",
         summary = "Disable the gram index",
-        description = "Removes the namespace's index.grams feature entry and its segment references; garbage collection reclaims the segments. Idempotent.",
+        description = "Removes the namespace's index.grams feature entry and its segment references, and stops its embedded driver. Explicit grep garbage collection later reclaims the segments. Idempotent.",
         params(("namespace" = String, Path, description = "Namespace id")),
         responses(
             (status = 200, description = "Feature entry removed or already absent", body = DisableGramsIndexResponse),
@@ -147,6 +153,12 @@ pub(super) async fn disable_grams_index(
 ) -> Result<Json<DisableGramsIndexResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let namespace_id = namespace.into_id()?;
+    if let Some(drivers) = &state.grep_drivers {
+        drivers
+            .stop(&namespace_id)
+            .await
+            .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+    }
     let outcome = state
         .grep_worker
         .as_ref()
@@ -178,4 +190,92 @@ pub(super) async fn disable_grams_index(
         }
     };
     Ok(Json(response))
+}
+
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        post,
+        path = "/v0/admin/namespaces/{namespace}/index/grams/gc",
+        tag = "admin",
+        summary = "Collect gram-index garbage",
+        description = "Runs one explicit garbage-collection pass over only this namespace's grep-owned extension keyspace. A tombstoned or absent namespace has aged extension state reaped; no grep garbage collection runs implicitly.",
+        params(("namespace" = String, Path, description = "Namespace id")),
+        responses(
+            (status = 200, description = "Namespace grep garbage collection completed", body = GrepGcResponse),
+            (status = 401, description = "Unauthorized", body = ApiError),
+            (status = 501, description = "Grep serving is disabled for this deployment", body = ApiError)
+        )
+    )
+)]
+pub(super) async fn gc_grams_index(
+    State(state): State<AppState>,
+    namespace: NamespaceIdPath,
+    headers: HeaderMap,
+) -> Result<Json<GrepGcResponse>, ApiResponseError> {
+    authorize(&state.config, &headers)?;
+    let namespace_id = namespace.into_id()?;
+    let report = state
+        .grep_worker
+        .as_ref()
+        .expect("grep routes should carry a grep worker")
+        .garbage_collect_namespace(
+            &namespace_id,
+            current_time_ms().map_err(|error| {
+                ApiResponseError::runtime_for_namespace(
+                    &namespace_id,
+                    loonfs::RuntimeError::Core(error),
+                )
+            })?,
+        )
+        .await
+        .map_err(|error| {
+            ApiResponseError::runtime_for_namespace(
+                &namespace_id,
+                loonfs::RuntimeError::Core(error),
+            )
+        })?;
+    Ok(Json(GrepGcResponse {
+        namespace_id,
+        deleted_segments: report.deleted_segments,
+        deleted_other_objects: report.deleted_other_objects,
+        namespace_reaped: report.namespace_reaped,
+        retained_candidates: report.retained_candidates,
+        namespace_degraded: report.namespace_degraded,
+    }))
+}
+
+async fn start_driver_for_query_if_needed(
+    state: &AppState,
+    namespace_id: &loonfs_api::NamespaceId,
+) {
+    let Some(drivers) = &state.grep_drivers else {
+        return;
+    };
+    let Ok(Some(root)) = load_grep_root(&*state.store, namespace_id).await else {
+        return;
+    };
+    let needs_catch_up = match root.state().lifecycle() {
+        GrepLifecycle::Backfilling { .. } => true,
+        GrepLifecycle::Steady => state
+            .admin
+            .namespace_status(namespace_id)
+            .await
+            .is_ok_and(|status| root.state().index().built_through_seq < status.head_seq),
+        GrepLifecycle::Disabled => false,
+    };
+    if needs_catch_up {
+        drivers.start(namespace_id);
+    }
+}
+
+#[allow(clippy::disallowed_methods)]
+fn current_time_ms() -> Result<u64, loonfs::CoreError> {
+    // Explicit server grep GC enters wall time at the admin boundary; durable replay stays deterministic.
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .map_err(|error| {
+            loonfs::CoreError::Internal(format!("system clock before unix epoch: {error}"))
+        })
 }

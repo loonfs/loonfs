@@ -3,7 +3,9 @@
 use crate::cache::{GrepBlockCache, MAX_CACHED_GREP_BLOCKS};
 use crate::codec::{extract_grams, Gram, GramPosting, IndexRow, INDEX_GRAMS_MAX_FILE_BYTES};
 use crate::index_read::{load_data_block, load_index_block};
-use crate::keyspace::{all_namespaces_prefix, manifest_key, root_key, segment_key};
+use crate::keyspace::{
+    manifest_key, namespace_prefix, parse_key, root_key, segment_key, GrepKeyKind,
+};
 use crate::root::{
     advance_grep_root, load_grep_root, seed_grep_root, GrepFoldState, GrepIndexState,
     GrepLifecycle, GrepRootError, GrepRootState, GrepSegmentRef, LoadedGrepRoot,
@@ -35,7 +37,7 @@ use loonfs_objectstore::{
     ObjectStore, ObjectStoreError, PutMode, PROVIDER_MULTIPART_THRESHOLD_BYTES,
 };
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// User-checkpoint lifetime used by one backfill attempt. An expired attempt
@@ -181,31 +183,20 @@ pub enum GrepFoldOutcome {
     Superseded,
 }
 
-/// Counts from one all-namespaces grep garbage-collection pass.
+/// Counts from one namespace's grep garbage-collection pass.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct GrepGcReport {
     pub deleted_segments: u64,
     pub deleted_other_objects: u64,
-    pub reaped_namespaces: u64,
+    pub namespace_reaped: bool,
     pub retained_candidates: u64,
-    pub degraded_namespaces: u64,
+    pub namespace_degraded: bool,
 }
 
 /// Namespace-independent writer for the grep-owned durable keyspace.
 ///
-/// Calls are explicit and bounded. A later standalone process or server mode
-/// can drive the same methods without changing the durable protocol.
-#[derive(Debug, Default)]
-struct GrepNamespaceRegistry {
-    state: Mutex<GrepNamespaceRegistryState>,
-}
-
-#[derive(Debug, Default)]
-struct GrepNamespaceRegistryState {
-    namespace_generations: BTreeMap<NamespaceId, u64>,
-    generation: u64,
-}
-
+/// Calls are explicit and bounded. Per-namespace drivers decide when to call
+/// them without changing the durable protocol.
 #[derive(Debug, Clone)]
 pub struct GrepWorker<S> {
     store: S,
@@ -213,7 +204,6 @@ pub struct GrepWorker<S> {
     writer_session_id: String,
     writer_version: String,
     block_cache: Arc<GrepBlockCache>,
-    namespace_registry: Arc<GrepNamespaceRegistry>,
 }
 
 impl<S: ObjectStore + Clone> GrepWorker<S> {
@@ -230,63 +220,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             writer_session_id: writer_session_id.into(),
             writer_version: writer_version.into(),
             block_cache: Arc::new(GrepBlockCache::new(MAX_CACHED_GREP_BLOCKS)),
-            namespace_registry: Arc::new(GrepNamespaceRegistry::default()),
         }
-    }
-
-    pub(crate) fn registered_namespace_ids(&self) -> Vec<NamespaceId> {
-        self.namespace_registry
-            .state
-            .lock()
-            .expect("grep namespace registry lock poisoned")
-            .namespace_generations
-            .keys()
-            .cloned()
-            .collect()
-    }
-
-    pub(crate) fn namespace_registration_generation(&self) -> u64 {
-        self.namespace_registry
-            .state
-            .lock()
-            .expect("grep namespace registry lock poisoned")
-            .generation
-    }
-
-    pub(crate) fn reconcile_namespaces(
-        &self,
-        discovered: BTreeSet<NamespaceId>,
-        scan_started_at_generation: u64,
-    ) {
-        let mut registry = self
-            .namespace_registry
-            .state
-            .lock()
-            .expect("grep namespace registry lock poisoned");
-        registry
-            .namespace_generations
-            .retain(|namespace_id, generation| {
-                discovered.contains(namespace_id) || *generation > scan_started_at_generation
-            });
-        for namespace_id in discovered {
-            registry
-                .namespace_generations
-                .entry(namespace_id)
-                .or_default();
-        }
-    }
-
-    fn register_namespace(&self, namespace_id: &NamespaceId) {
-        let mut registry = self
-            .namespace_registry
-            .state
-            .lock()
-            .expect("grep namespace registry lock poisoned");
-        registry.generation = registry.generation.saturating_add(1);
-        let generation = registry.generation;
-        registry
-            .namespace_generations
-            .insert(namespace_id.clone(), generation);
     }
 
     /// Enables grep by pinning a checkpoint and CAS-publishing a fresh
@@ -297,7 +231,6 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             .map_err(core_root_error)?
         {
             if !matches!(current.state().lifecycle(), GrepLifecycle::Disabled) {
-                self.register_namespace(namespace_id);
                 return Ok(GrepEnableOutcome::AlreadyEnabled {
                     built_through_seq: current.state().index().built_through_seq,
                 });
@@ -316,7 +249,6 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                     current.state(),
                 )
                 .await?;
-                self.register_namespace(namespace_id);
                 return Ok(GrepEnableOutcome::AlreadyEnabled {
                     built_through_seq: current.state().index().built_through_seq,
                 });
@@ -496,9 +428,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     }
 
     async fn seed_root(&self, state: &GrepRootState) -> crate::root::Result<LoadedGrepRoot> {
-        let loaded = seed_grep_root(&self.store, state, &self.writer_version).await?;
-        self.register_namespace(state.namespace_id());
-        Ok(loaded)
+        seed_grep_root(&self.store, state, &self.writer_version).await
     }
 
     async fn advance_root(
@@ -506,9 +436,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         current: &LoadedGrepRoot,
         next: &GrepRootState,
     ) -> crate::root::Result<LoadedGrepRoot> {
-        let loaded = advance_grep_root(&self.store, current, next, &self.writer_version).await?;
-        self.register_namespace(next.namespace_id());
-        Ok(loaded)
+        advance_grep_root(&self.store, current, next, &self.writer_version).await
     }
 
     async fn create_backfill_checkpoint(
@@ -1120,26 +1048,23 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         }
     }
 
-    /// Sweeps the grep keyspace for every namespace. Live namespaces retain
-    /// their verified root and every segment it names; deleted or absent
-    /// namespaces have their entire grep prefix reaped after the grace window.
-    pub async fn garbage_collect(&self, now_ms: u64) -> Result<GrepGcReport> {
+    /// Collects one namespace's grep keyspace. A live namespace retains its
+    /// verified root and every segment it names; a deleted or absent namespace
+    /// has its entire grep prefix reaped after the grace window.
+    pub async fn garbage_collect_namespace(
+        &self,
+        namespace_id: &NamespaceId,
+        now_ms: u64,
+    ) -> Result<GrepGcReport> {
+        let prefix = namespace_prefix(namespace_id);
         let keys = self
             .store
-            .list_prefix(all_namespaces_prefix())
+            .list_prefix(&prefix)
             .await
-            .map_err(|error| core_store_error(all_namespaces_prefix(), &error))?;
-        let mut by_namespace: BTreeMap<NamespaceId, Vec<String>> = BTreeMap::new();
-        for key in keys {
-            if let Some(namespace_id) = namespace_id_from_grep_key(&key) {
-                by_namespace.entry(namespace_id).or_default().push(key);
-            }
-        }
+            .map_err(|error| core_store_error(&prefix, &error))?;
         let mut report = GrepGcReport::default();
-        for (namespace_id, keys) in by_namespace {
-            self.collect_namespace_garbage(&namespace_id, &keys, now_ms, &mut report)
-                .await?;
-        }
+        self.collect_namespace_garbage(namespace_id, &keys, now_ms, &mut report)
+            .await?;
         Ok(report)
     }
 
@@ -1166,14 +1091,14 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                     }
                 }
                 if deleted_any {
-                    report.reaped_namespaces += 1;
+                    report.namespace_reaped = true;
                 }
             }
             NamespaceLiveness::Live => {
                 let root = match load_grep_root(&self.store, namespace_id).await {
                     Ok(root) => root,
                     Err(_) => {
-                        report.degraded_namespaces += 1;
+                        report.namespace_degraded = true;
                         report.retained_candidates += keys.len() as u64;
                         return Ok(());
                     }
@@ -1186,7 +1111,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                     let fresh = match load_grep_root(&self.store, namespace_id).await {
                         Ok(root) => root,
                         Err(_) => {
-                            report.degraded_namespaces += 1;
+                            report.namespace_degraded = true;
                             report.retained_candidates += 1;
                             continue;
                         }
@@ -1204,7 +1129,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 }
             }
             NamespaceLiveness::Unknown => {
-                report.degraded_namespaces += 1;
+                report.namespace_degraded = true;
                 report.retained_candidates += keys.len() as u64;
             }
         }
@@ -1451,14 +1376,6 @@ async fn ensure_live_namespace<S: ObjectStore + ?Sized>(
     Ok(())
 }
 
-fn namespace_id_from_grep_key(key: &str) -> Option<NamespaceId> {
-    let suffix = key.strip_prefix(all_namespaces_prefix())?;
-    let (namespace, object) = suffix.split_once('/')?;
-    object
-        .starts_with("extensions/grep/")
-        .then(|| NamespaceId::parse(namespace).ok())?
-}
-
 fn live_grep_keys(root: &LoadedGrepRoot) -> BTreeSet<String> {
     let namespace_id = root.state().namespace_id();
     let mut live = BTreeSet::from([
@@ -1511,7 +1428,7 @@ async fn delete_if_aged<S: ObjectStore + ?Sized>(
 }
 
 fn count_deleted_key(key: &str, report: &mut GrepGcReport) {
-    if key.contains("/segments/") {
+    if parse_key(key).is_some_and(|parsed| matches!(parsed.kind, GrepKeyKind::Segment { .. })) {
         report.deleted_segments += 1;
     } else {
         report.deleted_other_objects += 1;
