@@ -357,6 +357,10 @@ The retry rule has three cases:
   `commit_id_reuse_conflict`.
 - Retrying with a new `commit_id` is a new logical mutation.
 
+For a path-oriented delete, `expected_inode_id` is part of the mutation's
+semantic identity, so changing, adding, or removing the guard while reusing a
+`commit_id` fails with `commit_id_reuse_conflict`.
+
 Identical resubmission is the reconciliation mechanism. There is no separate
 commit-status lookup: after `commit_outcome_unknown`, a transport failure, or
 a process restart, resubmit the same request with the same `commit_id` and
