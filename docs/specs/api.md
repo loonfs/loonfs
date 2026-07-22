@@ -366,6 +366,11 @@ commit-status lookup: after `commit_outcome_unknown`, a transport failure, or
 a process restart, resubmit the same request with the same `commit_id` and
 read the definitive answer from the response.
 
+The blocking Rust client automatically retries reads, commit-id mutations,
+replay-safe upload stages, and idempotent maintenance calls, but makes one
+attempt for namespace create, fork, and delete, upload-session begin, and
+presigned direct PUT.
+
 Committed mutations record a durable receipt binding the `commit_id` to its
 `committed_seq`; replay reads that receipt. Receipts are currently retained
 for the life of the namespace. When receipt retention becomes bounded, this
