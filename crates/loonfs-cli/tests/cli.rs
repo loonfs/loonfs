@@ -1113,12 +1113,12 @@ fn index_enable_leaves_core_maintenance_decoupled() {
 
     let enabled = harness.run(&["--json", "admin", "index-enable"]);
     assert_success(&enabled);
-    assert!(json_data(&enabled)["backfill_tick"].is_null());
+    assert!(json_data(&enabled).get("backfill_tick").is_none());
 
     let retried = harness.run(&["--json", "admin", "index-enable"]);
     assert_success(&retried);
     assert_eq!(json_data(&retried)["already_enabled"], true);
-    assert!(json_data(&retried)["backfill_tick"].is_null());
+    assert!(json_data(&retried).get("backfill_tick").is_none());
 }
 
 #[test]

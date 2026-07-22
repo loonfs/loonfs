@@ -463,9 +463,7 @@ fn classify_key(key: &str) -> KeyClass {
         DurableObjectFamily::WalHead => KeyClass::NamespaceHead,
         DurableObjectFamily::WalSegment => KeyClass::WalSegment,
         DurableObjectFamily::MetadataManifest => KeyClass::NamespaceManifest,
-        DurableObjectFamily::MetadataTable | DurableObjectFamily::IndexSegment => {
-            KeyClass::MetadataSst
-        }
+        DurableObjectFamily::MetadataTable => KeyClass::MetadataSst,
         DurableObjectFamily::Pin
         | DurableObjectFamily::CheckpointRecord
         | DurableObjectFamily::WalFloor => KeyClass::GcControl,
@@ -473,6 +471,7 @@ fn classify_key(key: &str) -> KeyClass {
         DurableObjectFamily::NamespaceConfig
         | DurableObjectFamily::WalIndex
         | DurableObjectFamily::WalIndexRun
+        | DurableObjectFamily::IndexSegment
         | DurableObjectFamily::UploadSession
         | DurableObjectFamily::ContentStoreDescriptor => KeyClass::Metadata,
     }

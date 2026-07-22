@@ -436,12 +436,10 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
             next_inode_id: projection.head.next_inode_id,
             retention_floor_seq: projection.floor_seq,
             fork: None,
-            // A checkpoint appends one delta run; it never changes what is
-            // materialized on the namespace, so feature declarations and
-            // derived-index segments carry forward verbatim.
+            // A checkpoint appends one delta run and preserves generic
+            // manifest feature declarations.
             features: previous_manifest.payload.features.clone(),
             metadata_files,
-            index_files: previous_manifest.payload.index_files.clone(),
         },
     )
     .map_err(|err| {

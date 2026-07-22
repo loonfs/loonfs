@@ -49,9 +49,6 @@ impl GcConfig {
 pub struct GcReport {
     pub deleted_wal_segments: u64,
     pub deleted_metadata_tables: u64,
-    /// Unreferenced derived-index segments deleted.
-    #[serde(default)]
-    pub deleted_index_segments: u64,
     pub deleted_manifests: u64,
     pub deleted_checkpoint_records: u64,
     /// Fork-owned checkpoint records flipped to released because their

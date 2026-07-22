@@ -1,14 +1,13 @@
 #![allow(clippy::panic)]
-// Lifecycle assertions use panic for precise differential diagnostics.
+// Lifecycle assertions use panic for precise full-pipeline diagnostics.
 
-//! Full-pipeline differential lock between core's reference grep and GrepService.
+//! Frozen full-pipeline `GrepService` query semantics and budgets.
 
 use loonfs::{
-    CommitId, CreateDirectoryOptions, CreateNamespaceOptions, DeleteOptions, DestinationBehavior,
-    ErrorCode, FsWriter, GramIndexBuildPolicy, GrepRequest, GrepResponse, MoveOptions, NamespaceId,
-    PutFileOptions, SharedObjectStore,
+    CommitId, CoreError, CreateDirectoryOptions, CreateNamespaceOptions, DeleteOptions,
+    DestinationBehavior, FsWriter, GramIndexBuildPolicy, GrepRequest, GrepResponse, MoveOptions,
+    NamespaceId, PutFileOptions, SharedObjectStore,
 };
-use loonfs_api::wire::manifest::decode_namespace_manifest_json;
 use loonfs_api::AbsolutePath;
 use loonfs_core::cache::{
     MetadataTableCache, MetadataTableCacheConfig, WalTailProjectionCache,
@@ -18,10 +17,9 @@ use loonfs_core::cache::{
 use loonfs_core::control::load_namespace_read_anchor;
 use loonfs_core::publish::{NamespaceMutationCandidate, PathMutationIntent};
 use loonfs_core::{NamespaceEngine, RuntimeReadContext};
-use loonfs_grep::{GrepIndexSnapshot, GrepService};
-use loonfs_objectstore::keys::metadata_manifest_object;
+use loonfs_grep::root::load_grep_root;
+use loonfs_grep::{GrepBuildOutcome, GrepFoldOutcome, GrepIndexSnapshot, GrepService, GrepWorker};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_objectstore::ObjectStore;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -57,20 +55,20 @@ async fn read_context(store: &SharedObjectStore, namespace_id: &NamespaceId) -> 
     }
 }
 
-struct DifferentialHarness {
+struct ServiceHarness {
     store: SharedObjectStore,
     namespace_id: NamespaceId,
     engine: NamespaceEngine<SharedObjectStore>,
     service: GrepService,
 }
 
-impl DifferentialHarness {
+impl ServiceHarness {
     fn new(store: SharedObjectStore, namespace_id: NamespaceId) -> Self {
         let engine = NamespaceEngine::builder(store.clone())
             .namespace_id(namespace_id.clone())
-            .writer_id("grep-differential-reference")
+            .writer_id("grep-service-query")
             .build()
-            .expect("build reference engine");
+            .expect("build query engine");
         Self {
             store,
             namespace_id,
@@ -79,63 +77,38 @@ impl DifferentialHarness {
         }
     }
 
-    async fn results(
-        &self,
-        grep_request: &GrepRequest,
-    ) -> (
-        loonfs_core::Result<GrepResponse>,
-        loonfs_core::Result<GrepResponse>,
-    ) {
+    async fn result(&self, grep_request: &GrepRequest) -> loonfs_core::Result<GrepResponse> {
         let context = read_context(&self.store, &self.namespace_id).await;
-        // This old core entry point intentionally survives only as the
-        // differential oracle until the final deletion PR.
-        let core = self
+        let view = self
             .engine
-            .grep_with_runtime_context(grep_request, &context)
-            .await;
-        let service = async {
-            let view = self
-                .engine
-                .load_grep_view_with_runtime_context(&context)
-                .await?;
-            let snapshot = GrepIndexSnapshot::from_core_parts(view.grep_index_snapshot_parts());
-            self.service
-                .query(grep_request, &snapshot, &view, &self.store)
-                .await
-        }
-        .await;
-        (core, service)
+            .load_grep_view_with_runtime_context(&context)
+            .await?;
+        let root = load_grep_root(&*self.store, &self.namespace_id)
+            .await
+            .map_err(|error| CoreError::NamespaceCorrupt(error.to_string()))?;
+        let snapshot = GrepIndexSnapshot::from_grep_root(root.as_ref().map(|root| root.state()));
+        self.service
+            .query(grep_request, &snapshot, &view, &self.store)
+            .await
     }
 
     async fn success(&self, case: &str, grep_request: &GrepRequest) -> GrepResponse {
-        let (core, service) = self.results(grep_request).await;
-        match (core, service) {
-            (Ok(core), Ok(service)) => {
-                assert_eq!(service, core, "full response diverged for {case}");
-                service
-            }
-            (core, service) => {
-                panic!("expected success for {case}, got core={core:?}, service={service:?}")
-            }
-        }
+        self.result(grep_request)
+            .await
+            .unwrap_or_else(|error| panic!("expected success for {case}, got {error:?}"))
     }
 
-    async fn error(&self, case: &str, grep_request: &GrepRequest, code: ErrorCode) {
-        let (core, service) = self.results(grep_request).await;
-        match (core, service) {
-            (Err(core), Err(service)) => {
-                assert_eq!(core.code(), code, "unexpected core code for {case}");
-                assert_eq!(service.code(), code, "unexpected service code for {case}");
-                assert_eq!(
-                    service.to_string(),
-                    core.to_string(),
-                    "error text for {case}"
-                );
-            }
-            (core, service) => {
-                panic!("expected error for {case}, got core={core:?}, service={service:?}")
-            }
-        }
+    async fn error(&self, case: &str, grep_request: &GrepRequest, expected: &CoreError) {
+        let error = match self.result(grep_request).await {
+            Err(error) => error,
+            Ok(response) => panic!("expected error for {case}, got {response:?}"),
+        };
+        assert_eq!(error.code(), expected.code(), "error code for {case}");
+        assert_eq!(
+            error.to_string(),
+            expected.to_string(),
+            "error text for {case}"
+        );
     }
 }
 
@@ -173,51 +146,76 @@ async fn publish_same_content_files(
     }
 }
 
-async fn drive_old_index_step(
-    engine: &NamespaceEngine<SharedObjectStore>,
+fn worker(store: &SharedObjectStore) -> GrepWorker<SharedObjectStore> {
+    GrepWorker::new(
+        store.clone(),
+        "grep-service-worker",
+        "grep-service-worker-session",
+        "grep-service-worker/0.1",
+    )
+}
+
+async fn drive_worker_step(
+    worker: &GrepWorker<SharedObjectStore>,
+    namespace_id: &NamespaceId,
     policy: GramIndexBuildPolicy,
 ) {
-    engine
-        .build_grams_index_step(policy, None)
+    worker
+        .build_step(namespace_id, policy)
         .await
-        .expect("old core build step");
-    engine
-        .fold_grams_index_step(policy, None)
+        .expect("grep build step");
+    worker
+        .fold_step(namespace_id, policy)
         .await
-        .expect("old core fold step");
+        .expect("grep fold step");
+}
+
+async fn drive_worker_to_current(
+    worker: &GrepWorker<SharedObjectStore>,
+    namespace_id: &NamespaceId,
+    policy: GramIndexBuildPolicy,
+) {
+    for _ in 0..512 {
+        let build = worker
+            .build_step(namespace_id, policy)
+            .await
+            .expect("grep build step");
+        let fold = worker
+            .fold_step(namespace_id, policy)
+            .await
+            .expect("grep fold step");
+        if matches!(build.outcome, GrepBuildOutcome::UpToDate { .. })
+            && matches!(fold.outcome, GrepFoldOutcome::NotNeeded { .. })
+        {
+            return;
+        }
+    }
+    panic!("grep worker backlog must drain");
 }
 
 async fn gram_segment_levels(
     store: &SharedObjectStore,
     namespace_id: &NamespaceId,
 ) -> BTreeSet<u32> {
-    let (_, root) = load_namespace_read_anchor(&**store, namespace_id)
+    load_grep_root(&**store, namespace_id)
         .await
-        .expect("load root");
-    let key = metadata_manifest_object(namespace_id.as_str(), &root.state.manifest_object_id);
-    let bytes = store
-        .get(&key, None)
-        .await
-        .expect("read manifest")
-        .expect("manifest exists");
-    decode_namespace_manifest_json(&bytes)
-        .expect("decode manifest")
-        .payload
-        .index_files
-        .into_iter()
-        .filter(|segment| segment.family == "grams")
+        .expect("load grep root")
+        .expect("grep root exists")
+        .state()
+        .segments()
+        .iter()
         .map(|segment| segment.level)
         .collect()
 }
 
 #[tokio::test]
-async fn grep_service_matches_core_across_query_semantics_and_budgets() {
+async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
     let temp_dir = tempdir().expect("tempdir");
     let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("grep-service-differential").expect("namespace id");
     let writer = FsWriter::builder_with_store(store.clone())
-        .writer_id("grep-differential-writer")
+        .writer_id("grep-service-writer")
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -227,18 +225,14 @@ async fn grep_service_matches_core_across_query_semantics_and_budgets() {
         max_mid_runs: 2,
         ..GramIndexBuildPolicy::default()
     };
-    let old_engine = NamespaceEngine::builder(store.clone())
-        .namespace_id(namespace_id.clone())
-        .writer_id("grep-differential-old-index")
-        .build()
-        .expect("build old index engine");
+    let worker = worker(&store);
 
     writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
         .await
         .expect("create namespace");
-    old_engine.enable_grams_index().await.expect("enable index");
-    drive_old_index_step(&old_engine, policy).await;
+    worker.enable(&namespace_id).await.expect("enable grep");
+    drive_worker_to_current(&worker, &namespace_id, policy).await;
 
     let folded_corpus: [(&str, &[u8]); 10] = [
         ("/docs/indexed.txt", b"indexed-needle\n"),
@@ -257,7 +251,7 @@ async fn grep_service_matches_core_across_query_semantics_and_budgets() {
             .put_file_bytes(&namespace_id, path, content, PutFileOptions::default())
             .await
             .expect("write folded corpus file");
-        drive_old_index_step(&old_engine, policy).await;
+        drive_worker_step(&worker, &namespace_id, policy).await;
     }
 
     // The ten rounds above finish a base fold. Two more one-file rounds
@@ -272,7 +266,7 @@ async fn grep_service_matches_core_across_query_semantics_and_budgets() {
             )
             .await
             .expect("write mid-run filler");
-        drive_old_index_step(&old_engine, policy).await;
+        drive_worker_step(&worker, &namespace_id, policy).await;
     }
 
     // One final indexed delta supplies enough false-positive candidates to
@@ -286,11 +280,11 @@ async fn grep_service_matches_core_across_query_semantics_and_budgets() {
         b"budget-needle without the final letter\n",
     )
     .await;
-    drive_old_index_step(&old_engine, policy).await;
+    drive_worker_step(&worker, &namespace_id, policy).await;
     assert_eq!(
         gram_segment_levels(&store, &namespace_id).await,
         BTreeSet::from([0, 1, 2]),
-        "the differential snapshot must exercise delta, mid, and base segments"
+        "the service snapshot must exercise delta, mid, and base segments"
     );
 
     writer
@@ -320,22 +314,41 @@ async fn grep_service_matches_core_across_query_semantics_and_budgets() {
         .await
         .expect("move indexed file");
 
-    let harness = DifferentialHarness::new(store.clone(), namespace_id.clone());
+    let harness = ServiceHarness::new(store.clone(), namespace_id.clone());
 
     let indexed = harness
         .success("indexed hits", &request("indexed-needle"))
         .await;
+    assert_eq!(indexed.namespace_id, namespace_id);
+    assert!(indexed.built_through_seq < indexed.head_seq);
+    assert!(indexed.tail_scanned);
     assert_eq!(indexed.matches.len(), 1);
+    assert_eq!(indexed.matches[0].absolute_path, "/docs/indexed.txt");
+    assert_eq!(indexed.matches[0].line_number, 1);
+    assert_eq!(indexed.matches[0].byte_offset, 0);
+    assert_eq!(indexed.matches[0].line, "indexed-needle");
+    assert!(!indexed.matches[0].line_truncated);
+    assert!(indexed.next_cursor.is_none());
 
     let tail = harness
         .success("unindexed-tail hits", &request("tail-only-token"))
         .await;
     assert_eq!(tail.matches.len(), 1);
     assert!(tail.tail_scanned);
+    assert!(tail.built_through_seq < tail.head_seq);
+    assert_eq!(tail.matches[0].absolute_path, "/tail/tail-hit.txt");
 
     let mut scan_off = request("ab");
     harness
-        .error("allow_scan off", &scan_off, ErrorCode::QueryUnindexable)
+        .error(
+            "allow_scan off",
+            &scan_off,
+            &CoreError::QueryUnindexable(
+                "the pattern has no run of at least 3 literal bytes for the trigram index; set \
+                 allow_scan to search without it"
+                    .to_owned(),
+            ),
+        )
         .await;
     scan_off.allow_scan = true;
     let scanned = harness
@@ -348,6 +361,7 @@ async fn grep_service_matches_core_across_query_semantics_and_budgets() {
     case_folded.case_insensitive = true;
     let case_folded = harness.success("case folding", &case_folded).await;
     assert_eq!(case_folded.matches.len(), 1);
+    assert_eq!(case_folded.matches[0].absolute_path, "/docs/case.txt");
 
     let visible = harness
         .success("deleted and moved visibility", &request("visibility-token"))
@@ -364,20 +378,34 @@ async fn grep_service_matches_core_across_query_semantics_and_budgets() {
         .success("empty result", &request("definitely-absent-token"))
         .await;
     assert!(empty.matches.is_empty());
+    assert!(empty.next_cursor.is_none());
 
     let mut paged_request = request("budget-needle");
     paged_request.limit = Some(17);
     let mut pages = 0usize;
     let mut matches = 0usize;
+    let mut matched_paths = BTreeSet::new();
+    let mut cursors = BTreeSet::new();
     loop {
         let page = harness
             .success("multi-page cursor walk", &paged_request)
             .await;
         pages += 1;
         matches += page.matches.len();
+        assert_eq!(page.namespace_id, namespace_id);
+        assert!(page.tail_scanned);
+        assert!(page.matches.len() <= 17);
+        for found in &page.matches {
+            assert!(found.absolute_path.starts_with("/budget/candidate-"));
+            assert_eq!(found.line_number, 1);
+            assert_eq!(found.byte_offset, 0);
+            assert_eq!(found.line, "budget-needle without the final letter");
+            assert!(matched_paths.insert(found.absolute_path.clone()));
+        }
         let Some(cursor) = page.next_cursor else {
             break;
         };
+        assert!(cursors.insert(cursor.clone()));
         paged_request.cursor = Some(cursor);
     }
     assert!(pages > 1);
@@ -398,8 +426,8 @@ async fn grep_service_matches_core_across_query_semantics_and_budgets() {
         .await;
     assert!(budget_end.next_cursor.is_none());
 
-    // Raise the unindexed revision tail to 513 files without advancing the
-    // index, one over the exact tail budget.
+    // Add 512 more unindexed revisions without advancing the index, taking
+    // the existing tail past the exact scan budget.
     publish_same_content_files(
         &writer,
         &namespace_id,
@@ -413,7 +441,9 @@ async fn grep_service_matches_core_across_query_semantics_and_budgets() {
         .error(
             "allow_stale off over tail budget",
             &stale_request,
-            ErrorCode::IndexLagging,
+            &CoreError::IndexLagging {
+                behind_commits: 530,
+            },
         )
         .await;
     let mut stale_request = stale_request;

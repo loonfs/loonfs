@@ -84,7 +84,6 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
     let mut live = LiveSet {
         manifests: BTreeSet::new(),
         tables: BTreeSet::new(),
-        index_segments: BTreeSet::new(),
         wal_segments: BTreeSet::new(),
         checkpoint_keys: BTreeSet::new(),
         missing_basis_records: Vec::new(),
@@ -221,9 +220,6 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
             Ok(Some(manifest)) => {
                 for file in &manifest.payload.metadata_files {
                     live.tables.insert(file.object_key.clone());
-                }
-                for file in &manifest.payload.index_files {
-                    live.index_segments.insert(file.object_key.clone());
                 }
             }
             // Absent is not ambiguous. The root's manifest missing is real

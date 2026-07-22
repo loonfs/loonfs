@@ -9,10 +9,9 @@ use std::io::{self, Write};
 
 fn gc_summary(report: &GcResponse) -> String {
     let mut summary = format!(
-        "gc deleted {} wal segments, {} tables, {} index segments, {} manifests, {} checkpoint records ({} retained)",
+        "gc deleted {} wal segments, {} tables, {} manifests, {} checkpoint records ({} retained)",
         report.deleted_wal_segments,
         report.deleted_metadata_tables,
-        report.deleted_index_segments,
         report.deleted_manifests,
         report.deleted_checkpoint_records,
         report.retained_candidates
@@ -277,10 +276,7 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             })
             .collect::<Vec<_>>()
             .join("\n"),
-        CommandData::GramsIndexEnabled {
-            enabled: response,
-            backfill_tick: _,
-        } => {
+        CommandData::GramsIndexEnabled(response) => {
             if response.already_enabled {
                 format!(
                     "gram index already enabled on {} (built through seq {}); grep worker \

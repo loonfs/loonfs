@@ -361,9 +361,6 @@ async fn write_reorganized_manifest<S: ObjectStore + ?Sized>(
                 fork: previous.payload.fork.clone(),
                 features: previous.payload.features.clone(),
                 metadata_files: metadata_files.clone(),
-                // Reorganization folds metadata family groups; derived-index
-                // segments carry forward verbatim until index folds exist.
-                index_files: previous.payload.index_files.clone(),
             },
         )
         .map_err(|err| {

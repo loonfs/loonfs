@@ -64,8 +64,9 @@ pub use loonfs_api::{
 pub use loonfs_core::cache::MetadataTableCacheConfig;
 pub use loonfs_core::{
     BootstrapNamespaceError, DeleteNamespaceOptions, Error as CoreError, ErrorCode, ErrorKind,
-    GcConfig, GcReport, GramIndexBuildPolicy, WriterFence,
+    GcConfig, GcReport, WriterFence,
 };
+pub use loonfs_grep::GramIndexBuildPolicy;
 
 /// Integration seam: the vocabulary for handing classified mutation work to
 /// the runtime's batch publication surface. The server's filesystem

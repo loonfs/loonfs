@@ -1,18 +1,17 @@
 //! Explicit grep building, checkpointed backfill, folding, and garbage collection.
 
 use crate::cache::{GrepBlockCache, MAX_CACHED_GREP_BLOCKS};
+use crate::codec::{extract_grams, Gram, GramPosting, IndexRow, INDEX_GRAMS_MAX_FILE_BYTES};
 use crate::index_read::{load_data_block, load_index_block};
 use crate::keyspace::{all_namespaces_prefix, root_key, segment_key};
 use crate::root::{
     advance_grep_root, load_grep_root, seed_grep_root, GrepFoldState, GrepIndexState,
     GrepLifecycle, GrepRootError, GrepRootState, GrepSegmentRef, LoadedGrepRoot,
 };
+use crate::service::is_indexable_text_content;
 use bytes::Bytes;
 use futures::future::try_join_all;
 use loonfs_api::wire::control::NamespaceState;
-use loonfs_api::wire::index_grams::{
-    extract_grams, Gram, GramPosting, IndexRow, INDEX_GRAMS_MAX_FILE_BYTES,
-};
 use loonfs_api::wire::manifest::hex_encode_bytes;
 use loonfs_api::wire::sst_blocks::{index_blocks_for_key_range, SegmentBlocksBuilder};
 use loonfs_api::wire::wal::WalDelta;
@@ -29,8 +28,8 @@ use loonfs_core::grep::{
 };
 use loonfs_core::limits::METADATA_PUBLICATION_BUDGET_MS;
 use loonfs_core::{
-    Error as CoreError, GramIndexBuildPolicy, MetadataProjectionLoadError, MonotonicTimer,
-    NamespaceEngine, Result, StdMonotonicTimer, StoreFailureClass,
+    Error as CoreError, MetadataProjectionLoadError, MonotonicTimer, NamespaceEngine, Result,
+    StdMonotonicTimer, StoreFailureClass,
 };
 use loonfs_objectstore::{
     ObjectStore, ObjectStoreError, PutMode, PROVIDER_MULTIPART_THRESHOLD_BYTES,
@@ -48,12 +47,72 @@ pub const GREP_GC_GRACE_WINDOW_MS: u64 = 60 * 60 * 1000;
 
 const GREP_BACKFILL_CHECKPOINT_NAME: &str = "loonfs-grep-backfill";
 const GRAM_POSTING_BATCH_TARGET: usize = 256;
-const ELIGIBILITY_SAMPLE_BYTES: usize = 8 * 1024;
 const INLINE_INDEX_FILTER_MAX_BYTES: u32 = 1024;
 const MAX_GREP_WORKER_IO: usize = 8;
 const INDEX_GRAMS_DELTA_LEVEL: u32 = 0;
 const INDEX_GRAMS_MID_LEVEL: u32 = 1;
 const INDEX_GRAMS_BASE_LEVEL: u32 = 2;
+
+/// Writer-side budgets for one grep build or fold step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GramIndexBuildPolicy {
+    /// Revisions examined per step.
+    pub max_files_per_step: usize,
+    /// Content bytes read per step.
+    pub max_content_bytes_per_step: u64,
+    /// Rows per written grep segment.
+    pub max_rows_per_segment: usize,
+    /// Delta-level runs that trigger a fold into a fresh mid run.
+    pub max_l0_runs: usize,
+    /// Mid-level runs that trigger a fold into a fresh base run.
+    pub max_mid_runs: usize,
+    /// Rows one fold step merges before publishing and yielding.
+    pub max_fold_rows_per_step: usize,
+}
+
+impl GramIndexBuildPolicy {
+    /// Names the first zero budget so configuration boundaries can reject it.
+    pub fn zero_budget_field(&self) -> Option<&'static str> {
+        [
+            ("max_files_per_step", self.max_files_per_step == 0),
+            (
+                "max_content_bytes_per_step",
+                self.max_content_bytes_per_step == 0,
+            ),
+            ("max_rows_per_segment", self.max_rows_per_segment == 0),
+            ("max_l0_runs", self.max_l0_runs == 0),
+            ("max_mid_runs", self.max_mid_runs == 0),
+            ("max_fold_rows_per_step", self.max_fold_rows_per_step == 0),
+        ]
+        .into_iter()
+        .find_map(|(field, is_zero)| is_zero.then_some(field))
+    }
+
+    /// Normalizes directly supplied policies to at least one unit per budget.
+    pub fn normalized(self) -> Self {
+        Self {
+            max_files_per_step: self.max_files_per_step.max(1),
+            max_content_bytes_per_step: self.max_content_bytes_per_step.max(1),
+            max_rows_per_segment: self.max_rows_per_segment.max(1),
+            max_l0_runs: self.max_l0_runs.max(1),
+            max_mid_runs: self.max_mid_runs.max(1),
+            max_fold_rows_per_step: self.max_fold_rows_per_step.max(1),
+        }
+    }
+}
+
+impl Default for GramIndexBuildPolicy {
+    fn default() -> Self {
+        Self {
+            max_files_per_step: 256,
+            max_content_bytes_per_step: 64 * 1024 * 1024,
+            max_rows_per_segment: 65_536,
+            max_l0_runs: 8,
+            max_mid_runs: 8,
+            max_fold_rows_per_step: 131_072,
+        }
+    }
+}
 
 /// Result of enabling grep for one namespace.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -710,20 +769,6 @@ async fn load_and_fold_revision_contents<S: ObjectStore + ?Sized>(
         }
     }
     Ok(())
-}
-
-fn is_indexable_text_content(content: &[u8]) -> bool {
-    if content.len() as u64 > INDEX_GRAMS_MAX_FILE_BYTES {
-        return false;
-    }
-    let sample = &content[..content.len().min(ELIGIBILITY_SAMPLE_BYTES)];
-    if sample.contains(&0) {
-        return false;
-    }
-    match std::str::from_utf8(sample) {
-        Ok(_) => true,
-        Err(error) => error.error_len().is_none() && error.valid_up_to() > 0,
-    }
 }
 
 fn gram_postings_rows(postings: BTreeMap<Gram, Vec<GramPosting>>) -> Result<Vec<IndexRow>> {

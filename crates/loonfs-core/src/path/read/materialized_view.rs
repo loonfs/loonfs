@@ -1,6 +1,5 @@
 //! [`LoadedMetadataView`]: a verified, seq-pinned view of one namespace
-//! that answers every read — stat, list, revisions, content; the grep read
-//! lives with its machinery in [`super::grep`].
+//! that answers core reads and exposes a narrow projection to `loonfs-grep`.
 
 use super::listing::{invalid_cursor, validate_cursor_head, validate_directory_cursor};
 use crate::checkpoint::{
@@ -20,10 +19,7 @@ use crate::path::helpers::{map_path_error_to_core, parse_absolute_path_for_core}
 use crate::storage::content::read_durable_content_bytes;
 use crate::wal::{load_validated_wal_chain, project_validated_wal_tail, WalChainLoadRequest};
 use loonfs_api::wire::control::{HeadState, NamespaceState};
-use loonfs_api::wire::index_grams::{
-    IndexGramsCodecError, IndexGramsFeature, INDEX_FAMILY_GRAMS, INDEX_GRAMS_FEATURE_KEY,
-};
-use loonfs_api::wire::manifest::{IndexFileRef, MetadataRow, MetadataTableFamily};
+use loonfs_api::wire::manifest::{MetadataRow, MetadataTableFamily};
 use loonfs_api::wire::wal::WalCommitPayload;
 use loonfs_api::ManifestObjectId;
 use loonfs_api::{
@@ -177,46 +173,6 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     /// This is part of the read surface consumed by `loonfs-grep`.
     pub fn grep_session(&self) -> MetadataViewSession<'_, '_, S> {
         self.metadata_view().session()
-    }
-
-    /// Returns the materialized gram-index watermark and segment descriptors.
-    ///
-    /// This is part of the read surface consumed by `loonfs-grep`. The tuple
-    /// deliberately contains API vocabulary rather than a grep-owned type so
-    /// `loonfs-core` remains independent of `loonfs-grep`.
-    pub fn grep_index_snapshot_parts(&self) -> Result<(ChangeSeq, Vec<IndexFileRef>), CoreError> {
-        let manifest = self.tables.manifest();
-        let Some(value) = manifest.payload.features.get(INDEX_GRAMS_FEATURE_KEY) else {
-            return Err(CoreError::FeatureNotMaterialized {
-                feature: INDEX_GRAMS_FEATURE_KEY.to_owned(),
-            });
-        };
-        let feature = IndexGramsFeature::from_value(value).map_err(|error| match error {
-            IndexGramsCodecError::UnsupportedFeatureVersion { .. } => {
-                CoreError::FeatureNotMaterialized {
-                    feature: INDEX_GRAMS_FEATURE_KEY.to_owned(),
-                }
-            }
-            error => CoreError::NamespaceCorrupt(format!(
-                "namespace `{}` carries an unreadable index.grams feature value: {error}",
-                self.namespace_id.as_str()
-            )),
-        })?;
-        if !feature.is_materialized() {
-            return Err(CoreError::FeatureNotMaterialized {
-                feature: INDEX_GRAMS_FEATURE_KEY.to_owned(),
-            });
-        }
-        Ok((
-            feature.built_through_seq,
-            manifest
-                .payload
-                .index_files
-                .iter()
-                .filter(|segment| segment.family == INDEX_FAMILY_GRAMS)
-                .cloned()
-                .collect(),
-        ))
     }
 
     /// Loads one ordered page of revision-family row keys and inode ids.

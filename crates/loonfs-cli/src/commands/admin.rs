@@ -195,13 +195,7 @@ async fn run_admin_index_enable(
         kind,
         profile: Some(context.profile_name),
         mode: Some(context.mode),
-        data: CommandData::GramsIndexEnabled {
-            enabled: response,
-            // Kept in the v1 CLI JSON shape for compatibility. Core
-            // maintenance no longer drives grep, so there is no tick to
-            // report here.
-            backfill_tick: None,
-        },
+        data: CommandData::GramsIndexEnabled(response),
     })
 }
 

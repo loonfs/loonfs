@@ -1169,8 +1169,6 @@ dependencies = [
  "loonfs-api",
  "loonfs-model",
  "loonfs-objectstore",
- "regex",
- "regex-syntax",
  "serde",
  "serde_json",
  "sha2",

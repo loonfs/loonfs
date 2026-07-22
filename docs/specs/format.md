@@ -59,10 +59,9 @@ The required durable object families and standard key patterns are:
 | **Namespace config** | Immutable | Stable namespace identity and immutable configuration, including the content-store binding; written last at creation as the completion marker. | `namespaces/{namespace_id}/namespace.json` |
 | **WAL head** | Mutable | Hot head of the semantic commit stream: current visible boundary, writer epoch, writer liveness metadata, replay hints, and visible WAL tip. | `namespaces/{namespace_id}/wal/head.json` |
 | **WAL segments** | Immutable | Record one or more logical commits with a contiguous sequence range. | `namespaces/{namespace_id}/wal/segments/{start_seq:020}-{suffix}.wal.zst` |
-| **Namespace manifests** | Immutable | Record one namespace file-set version, including metadata table references, derived-index segment references, head summary, fork references, and the namespace features map. | `namespaces/{namespace_id}/metadata/manifests/{manifest_object_id}.manifest.json` |
+| **Namespace manifests** | Immutable | Record one namespace file-set version, including metadata table references, head summary, fork references, and the namespace features map. | `namespaces/{namespace_id}/metadata/manifests/{manifest_object_id}.manifest.json` |
 | **Checkpoint records** | Mutable lifecycle | Durable stable-view pins to a metadata manifest, each carrying a required owner (user or fork target); written active, verified after the write, flipped released on verification failure or owner release. | `namespaces/{namespace_id}/checkpoints/{checkpoint_id}.json` |
 | **Metadata tables** | Immutable | Store metadata rows referenced by manifests. Files may be owned by the namespace itself or by a fork source namespace. | `namespaces/{owner_namespace_id}/metadata/tables/{table_id}.sst.zst` |
-| **Index segments** | Immutable | Store derived-index rows referenced by manifests ("Derived work"): the metadata-table block grammar with a feature-owned row payload. Files may be owned by the namespace itself or by a fork source namespace. | `namespaces/{owner_namespace_id}/metadata/indexes/{segment_id}.idx.zst` |
 | **Upload sessions** | Mutable | Track one staged-content upload from begin to completion. | `namespaces/{namespace_id}/uploads/{upload_id}.json` |
 | **Content-store descriptor** | Immutable | Record content-store identity. | `content-stores/{content_store_id}/descriptor.json` |
 | **Metadata root** | Mutable | Cold pointer to the best known materialized metadata root; monotonic CAS. | `namespaces/{namespace_id}/metadata/root.json` |
@@ -98,8 +97,9 @@ recovery authority. `wal/head.json` and `wal/floor.json` live outside the
 `wal/segments/` listing prefix, so a reclamation listing of segments yields
 only segment keys.
 
-WAL, metadata table, and index segment deletion is reachability-driven from
-the live manifest, checkpoint records, and the retention floor.
+WAL and metadata-table deletion is reachability-driven from the live
+manifest, checkpoint records, and the retention floor. Grep objects live in
+the independent `grep/v0` keyspace and are never core-GC candidates.
 
 ### 1.3 Durable naming conventions
 
@@ -551,8 +551,8 @@ Namespace deletion does not imply content-store deletion. In v0, content-store
 deletion and destructive content garbage collection are unsupported
 operator-only work. Metadata is reclaimed by garbage collection: on a
 terminally deleted namespace a GC pass reaps the WAL chain, metadata tables,
-index segments, manifests, and non-protecting checkpoint records under the
-usual windows, leaving the head, descriptor, root, and floor objects as the
+manifests, and non-protecting checkpoint records under the usual windows,
+leaving the head, descriptor, root, and floor objects as the
 id-retiring tombstone (section 6, rule 4). Objects protected by fork-owned
 checkpoint records survive, so clones of a deleted source stay readable.
 
@@ -1199,9 +1199,9 @@ namespace-to-content-store relationship.
 
 ### 4.1 Durable envelope layout
 
-Every durable LoonFS object except metadata segments (section 4.2.1) is an
-envelope document with the same leading fields, followed by the payload as
-an opaque sub-document:
+Every durable LoonFS object except block segments (sections 4.2.1 and 4.2.2)
+is an envelope document with the same leading fields, followed by the
+payload as an opaque sub-document:
 
 | Field | Meaning |
 | --- | --- |
@@ -1228,7 +1228,8 @@ Two rules make these envelopes evolvable:
 | --- | --- | --- | --- |
 | WAL segment | `namespace_wal_segment` | CBOR envelope, zstd-compressed; CBOR payload | 1 |
 | Metadata segment | none (section 4.2.1) | block sections, per-block zstd + CRC32C | 1 (via manifest) |
-| Gram index segment | none (section 4.2.2) | block sections, per-block zstd + CRC32C | 1 (via the `index.grams` feature value) |
+| Grep root | `grep_root` | JSON, uncompressed | `v0` |
+| Grep segment | none (section 4.2.2) | block sections, per-block zstd + CRC32C | `v0` (via the grep root) |
 | Namespace manifest | `namespace_manifest` | JSON, uncompressed | 1 |
 | Control objects (head, descriptors, upload session) | per-kind snake_case names | JSON, uncompressed | 1 (tracked per kind) |
 
@@ -1267,15 +1268,20 @@ out-of-order index entries, and checksum failures as malformed. The segment
 format is versioned by the manifest that references it (`namespace_manifest`
 `format_version`), since a segment is unreachable except through a manifest.
 
-#### 4.2.2 Gram index segments
+#### 4.2.2 Grep roots and gram-index segments
 
-A gram index segment stores the `index.grams` derived index (section 5). It
-uses the section 4.2.1 block grammar unchanged — prefix-compressed data
-blocks, one bloom filter block, one index block, handles and checksums in
-the referencing descriptor — with a feature-owned row payload instead of
-metadata rows. The tokenizer, the row shapes, and the posting encoding
-below are frozen for feature version 1; changing any of them is a new
-feature version and a rebuild, which is always legal for derived work
+`loonfs-grep` owns all grep durability under
+`grep/v0/namespaces/{namespace_id}/`: one atomic `root.json` and immutable
+segments under `segments/{segment_id}.sst`. Namespace manifests carry no
+grep root, watermark, lifecycle, or segment references. A fork consequently
+starts without grep state until grep is enabled for the target.
+
+A gram-index segment uses the section 4.2.1 block grammar unchanged —
+prefix-compressed data blocks, one bloom filter block, one index block,
+handles and checksums in the grep-root descriptor — with a grep-owned row
+payload instead of metadata rows. The tokenizer, row shapes, and posting
+encoding below are frozen by grep format `v0`; changing them requires a new
+grep format and a rebuild, which is always legal for derived work
 (section 6.6).
 
 - The **tokenizer** is every overlapping three-byte window (gram) of an
@@ -1295,16 +1301,10 @@ feature version and a rebuild, which is always legal for derived work
 - Several rows may carry the same gram (within a segment and across
   segments); readers union their batches.
 
-Manifests reference index segments through the `index_files` list, one
-descriptor per segment mirroring the metadata descriptor fields plus an
-open-vocabulary `family` string (`grams` for this section). The list is an
-additive payload field with the section 5 contract: readers use the entries
-whose family they understand, preserve the rest verbatim when rewriting a
-manifest, and never let an unknown family affect how core state is read.
-Garbage collection protects every listed object key regardless of family.
-Maintenance that rewrites a manifest without folding the index — checkpoint
-flushes, metadata reorganization, forks — must carry `index_files` and the
-paired feature entry forward verbatim.
+The grep root carries the query-visible watermark, lifecycle, fold state,
+and segment descriptors. Grep's worker alone publishes and collects that
+state. Core maintenance does not list `grep/v0`, and grep maintenance does
+not list or sweep core-owned collections.
 
 ### 4.3 Evolution rules
 
@@ -1333,14 +1333,13 @@ paired feature entry forward verbatim.
 
 ## 5. Namespace features map
 
-A namespace manifest may carry a `features` map recording per-namespace
-capabilities that are materialized *on this data* — for example, which derived
-indexes exist for the manifest's file-set version.
+A namespace manifest may carry a `features` map recording generic
+per-namespace capabilities materialized on its file-set version.
 
 ```json
 {
   "features": {
-    "index.grams": { "version": 1, "built_through_seq": 41290 }
+    "example.feature": { "version": 1 }
   }
 }
 ```
@@ -1355,25 +1354,12 @@ Rules:
 - Readers must ignore feature keys they do not understand. The map is
   additive metadata: it never changes how the core filesystem model is read.
 - An absent map and an empty map are equivalent.
-- Successful use of a data-dependent capability requires both halves: the
-  deployment must advertise the serving capability (`api.md` capability
-  document) **and** the namespace's `features` map must show the capability
-  materialized for the data being served.
+- Successful use of a feature requires the deployment to advertise its
+  serving capability (`api.md`) and the feature's own specification to
+  define any durable materialization contract.
 
-One feature key is registered:
-
-- **`index.grams`** — the gram index for content search (section 4.2.2).
-  The value carries `version` (this spec defines version 1),
-  `built_through_seq` (commits at or below this sequence are reflected in
-  the manifest's `index_files` segments; later revisions are the query
-  path's exhaustive-scan tail), and, while initial materialization is still
-  walking existing revisions, a `backfill_cursor` resume key. While
-  `backfill_cursor` is present the index is not yet materialized and
-  data-dependent queries must be refused. Readers hard-reject an
-  unsupported `version` with a typed error and tolerate unknown fields
-  inside the value. The retention floor advances independently of
-  `built_through_seq`; grep restarts from a checkpointed manifest when
-  retention removes WAL after its watermark instead of holding the floor.
+No feature key is currently registered. In particular, grep state lives in
+the section 4.2.2 keyspace rather than this map.
 
 The map exists so that derived indexes and similar per-namespace
 capabilities can arrive without a format version bump.
@@ -1470,13 +1456,14 @@ the admin endpoint or an explicit maintenance-tick opt-in.
 
 v1 GC is listing mark-and-sweep. Its inputs are `wal/head.json`,
 `wal/floor.json`, `metadata/root.json`, and the `metadata/manifests/`,
-`metadata/tables/`, `metadata/indexes/`, `checkpoints/`, and `wal/segments/`
-collections. A live manifest roots every object key its `metadata_files`
-and `index_files` lists name, whatever their family. The pass also sweeps
+`metadata/tables/`, `checkpoints/`, and `wal/segments/` collections. A live
+manifest roots every object key its `metadata_files` list names. The pass also sweeps
 `uploads/`: sessions root nothing and nothing durable references them, so a
 session whose provider age exceeds the reap window is deleted whatever its
 state — the abort-incomplete-upload convention. A `complete` after the
 window answers session-not-found.
+Core GC never lists or deletes any object below `grep/v0`; grep collection is
+owned by `loonfs-grep`.
 Because floor, root, and checkpoint publication no longer serialize through
 one head CAS, two cross-object races must be closed explicitly —
 create-vs-collect (a record written while GC concludes its basis is

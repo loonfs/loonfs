@@ -205,8 +205,7 @@ pub(crate) async fn load_verified_manifest_tables_with_cache<'a, S: ObjectStore 
         } => (manifest, scan_runs),
         DecodedMetadataTableBlock::Index { .. }
         | DecodedMetadataTableBlock::Filter { .. }
-        | DecodedMetadataTableBlock::Data { .. }
-        | DecodedMetadataTableBlock::IndexData { .. } => {
+        | DecodedMetadataTableBlock::Data { .. } => {
             return Err(segment_codec_error(
                 &manifest_key,
                 "cache returned a non-manifest entry for a manifest key",
@@ -938,7 +937,6 @@ async fn load_segment_index<S: ObjectStore + ?Sized>(
         DecodedMetadataTableBlock::Index { entries, .. } => Ok(entries),
         DecodedMetadataTableBlock::Filter { .. }
         | DecodedMetadataTableBlock::Data { .. }
-        | DecodedMetadataTableBlock::IndexData { .. }
         | DecodedMetadataTableBlock::Manifest { .. } => Err(segment_codec_error(
             &descriptor.object_key,
             "cache returned a non-index block for an index key",
@@ -1000,7 +998,6 @@ pub(super) async fn load_segment_filter<S: ObjectStore + ?Sized>(
         DecodedMetadataTableBlock::Filter { filter, .. } => Ok(filter),
         DecodedMetadataTableBlock::Index { .. }
         | DecodedMetadataTableBlock::Data { .. }
-        | DecodedMetadataTableBlock::IndexData { .. }
         | DecodedMetadataTableBlock::Manifest { .. } => Err(segment_codec_error(
             &descriptor.object_key,
             "cache returned a non-filter block",
@@ -1045,7 +1042,6 @@ async fn load_segment_data_block<S: ObjectStore + ?Sized>(
         DecodedMetadataTableBlock::Data { block, .. } => Ok(block),
         DecodedMetadataTableBlock::Index { .. }
         | DecodedMetadataTableBlock::Filter { .. }
-        | DecodedMetadataTableBlock::IndexData { .. }
         | DecodedMetadataTableBlock::Manifest { .. } => Err(segment_codec_error(
             &descriptor.object_key,
             "cache returned a non-data block for a data key",

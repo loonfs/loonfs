@@ -3,7 +3,6 @@
 
 use super::runs::MetadataRunManifest;
 use crate::metadata::MetadataState;
-use loonfs_api::wire::index_grams::IndexRow;
 use loonfs_api::wire::manifest::NamespaceManifestEnvelope;
 use loonfs_api::wire::sst_blocks::{DecodedDataBlock, SegmentFilter, SegmentIndexEntry};
 use loonfs_api::{ChangeSeq, ManifestId, NamespaceId};
@@ -55,21 +54,6 @@ pub(super) enum MetadataTableBlockKind {
     Manifest,
 }
 
-/// What a [`MetadataTableCache::get_or_fetch_with_admission`] miss does
-/// with the fetched block. Lookups behave identically in both modes —
-/// a cached block answers the access either way.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CacheAdmission {
-    /// A miss inserts the fetched block, displacing colder entries; the
-    /// query path's mode, where a fetched block is likely to be asked
-    /// for again.
-    Admit,
-    /// A miss serves the fetched block to the caller without inserting
-    /// it, so a bulk stream — a maintenance fold walking a whole
-    /// snapshot once — cannot evict the query-hot working set.
-    LookupOnly,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) struct MetadataTableCacheKey {
     /// The cached object's identity: a segment's payload checksum for block
@@ -84,9 +68,8 @@ pub(super) struct MetadataTableCacheKey {
 /// section (index, filter, or data) or a validated namespace manifest.
 /// Everything shares the cache and its byte budget; the key's `block_kind`
 /// and `block_offset` make collisions between kinds impossible. Data
-/// blocks come in two payloads — metadata rows and gram-index rows — that
-/// can never collide either, because a key's identity is its segment's
-/// payload checksum and one segment object belongs to exactly one family.
+/// Data blocks hold metadata rows; a key's identity is the segment payload
+/// checksum, so entries for distinct immutable objects cannot collide.
 #[derive(Debug, Clone)]
 pub(super) enum DecodedMetadataTableBlock {
     Index {
@@ -99,12 +82,6 @@ pub(super) enum DecodedMetadataTableBlock {
     },
     Data {
         block: Arc<DecodedDataBlock>,
-        decoded_byte_len: usize,
-    },
-    /// A gram-index segment's data block: the same block grammar as
-    /// metadata data blocks with the index family's row payload.
-    IndexData {
-        block: Arc<DecodedDataBlock<IndexRow>>,
         decoded_byte_len: usize,
     },
     Manifest {
@@ -127,9 +104,6 @@ impl DecodedMetadataTableBlock {
                 decoded_byte_len, ..
             }
             | Self::Data {
-                decoded_byte_len, ..
-            }
-            | Self::IndexData {
                 decoded_byte_len, ..
             }
             | Self::Manifest {
@@ -190,37 +164,11 @@ impl MetadataTableCache {
         }
     }
 
-    /// [`Self::get_or_fetch_with_admission`] in the query path's
-    /// admitting mode.
+    /// Resolves one block access through a single-flight cell.
     pub(super) async fn get_or_fetch<E, F, Fut>(
         &self,
         cache_key: &MetadataTableCacheKey,
         fetch: F,
-    ) -> Result<DecodedMetadataTableBlock, E>
-    where
-        F: FnOnce() -> Fut,
-        Fut: std::future::Future<Output = Result<DecodedMetadataTableBlock, E>>,
-    {
-        self.get_or_fetch_with_admission(cache_key, fetch, CacheAdmission::Admit)
-            .await
-    }
-
-    /// Resolves one block access through the single-flight cell: the
-    /// winner consults the cache, fetches on a miss, and populates when
-    /// `admission` says to; concurrent waiters — admitting or not —
-    /// share the winner's block instead of issuing duplicate lookups,
-    /// fetches, or inserts, so hit and miss counts measure deduplicated
-    /// accesses and the winner's mode decides that one fetch's
-    /// admission. In [`CacheAdmission::LookupOnly`] mode a miss fetches,
-    /// decodes, and verifies exactly as an admitting miss does, and the
-    /// caller's clone of the block is the only reference that outlives
-    /// the call. A failed or cancelled fetch leaves the cell empty, so
-    /// the next caller retries.
-    pub(super) async fn get_or_fetch_with_admission<E, F, Fut>(
-        &self,
-        cache_key: &MetadataTableCacheKey,
-        fetch: F,
-        admission: CacheAdmission,
     ) -> Result<DecodedMetadataTableBlock, E>
     where
         F: FnOnce() -> Fut,
@@ -243,9 +191,7 @@ impl MetadataTableCache {
                     return Ok(block);
                 }
                 let block = fetch().await?;
-                if admission == CacheAdmission::Admit {
-                    self.insert(cache_key.clone(), block.clone());
-                }
+                self.insert(cache_key.clone(), block.clone());
                 Ok(block)
             })
             .await
@@ -686,7 +632,6 @@ mod tests {
             DecodedMetadataTableBlock::Data { block: rows, .. } => Arc::clone(rows),
             DecodedMetadataTableBlock::Index { .. }
             | DecodedMetadataTableBlock::Filter { .. }
-            | DecodedMetadataTableBlock::IndexData { .. }
             | DecodedMetadataTableBlock::Manifest { .. } => {
                 unreachable!("fixture builds a data block")
             }
@@ -699,7 +644,6 @@ mod tests {
             } => Arc::ptr_eq(hit_rows, &rows),
             DecodedMetadataTableBlock::Index { .. }
             | DecodedMetadataTableBlock::Filter { .. }
-            | DecodedMetadataTableBlock::IndexData { .. }
             | DecodedMetadataTableBlock::Manifest { .. } => false,
         };
         assert!(
@@ -722,39 +666,6 @@ mod tests {
             recovered.is_ok(),
             "a failed fetch should leave nothing behind for the next caller"
         );
-    }
-
-    #[tokio::test]
-    async fn lookup_only_serves_hits_but_never_inserts() {
-        let cache = MetadataTableCache::new(MetadataTableCacheConfig::default());
-        let fetched: Result<_, String> = cache
-            .get_or_fetch_with_admission(
-                &key("cold"),
-                || async { Ok(block(1)) },
-                super::CacheAdmission::LookupOnly,
-            )
-            .await;
-        assert!(fetched.is_ok());
-        assert_eq!(
-            cache.stats().inserts,
-            0,
-            "a lookup-only miss must not admit the fetched block"
-        );
-        assert!(
-            cache.get(&key("cold")).is_none(),
-            "the lookup-only block must not be resident afterward"
-        );
-
-        // A block someone else admitted answers a lookup-only access.
-        cache.insert(key("warm"), block(1));
-        let warm: Result<_, String> = cache
-            .get_or_fetch_with_admission(
-                &key("warm"),
-                || async { Err("a resident block must not re-fetch".to_owned()) },
-                super::CacheAdmission::LookupOnly,
-            )
-            .await;
-        assert!(warm.is_ok(), "the cached block should answer the access");
     }
 
     #[tokio::test]

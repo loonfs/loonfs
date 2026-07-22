@@ -1,6 +1,6 @@
 //! Grep-private cache for decoded immutable index-segment blocks.
 
-use loonfs_api::wire::index_grams::IndexRow;
+use crate::codec::IndexRow;
 use loonfs_api::wire::sst_blocks::{DecodedDataBlock, SegmentFilter, SegmentIndexEntry};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
