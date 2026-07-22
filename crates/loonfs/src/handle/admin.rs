@@ -75,9 +75,9 @@ impl FsAdmin {
             .await
     }
 
-    /// Publishes the `index.grams` feature entry for a namespace: gram
-    /// index backfill starts on the next maintenance tick, and ticks keep
-    /// the index current from then on. Idempotent.
+    /// Enables the independent grep root for a namespace. Backfill and
+    /// incremental upkeep are driven by `loonfs-grep`'s explicit worker.
+    /// Idempotent.
     pub async fn enable_grams_index(
         &self,
         namespace_id: &NamespaceId,
@@ -85,8 +85,8 @@ impl FsAdmin {
         self.core.enable_grams_index(namespace_id).await
     }
 
-    /// Removes the `index.grams` feature entry and its segment references;
-    /// garbage collection reclaims the segments. Idempotent.
+    /// Disables the independent grep root. Grep-owned garbage collection
+    /// later reclaims its unreferenced segments. Idempotent.
     pub async fn disable_grams_index(
         &self,
         namespace_id: &NamespaceId,
@@ -201,11 +201,9 @@ impl FsAdminBuilder {
         self
     }
 
-    /// Sets the gram index build budgets this handle's explicit
-    /// maintenance ticks run instead of [`GramIndexBuildPolicy::default`].
-    /// Bulk backfills raise the per-step budgets so a tick indexes more
-    /// files per manifest publish. Values are normalized to at least one
-    /// unit per budget.
+    /// Retains the gram-index policy setting for configuration compatibility.
+    /// Core maintenance no longer consumes it; explicit `GrepWorker` callers
+    /// pass their policy to each build and fold step.
     pub fn gram_index_build(mut self, policy: GramIndexBuildPolicy) -> Self {
         self.core.gram_index_build = policy;
         self

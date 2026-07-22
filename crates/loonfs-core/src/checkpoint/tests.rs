@@ -6355,7 +6355,7 @@ async fn grams_index_steady_state_follows_the_wal_and_survives_flush() {
 }
 
 #[tokio::test]
-async fn retention_floor_clamps_to_the_grams_watermark() {
+async fn retention_floor_advances_past_a_stale_old_grams_watermark() {
     let temp_dir = tempdir().expect("temp dir");
     let store = LocalFsStore::new(temp_dir.path()).expect("local store");
     let namespace_id = NamespaceId::parse("grams-retention").expect("namespace id");
@@ -6389,20 +6389,13 @@ async fn retention_floor_clamps_to_the_grams_watermark() {
         .checkpoint_seq;
     assert!(head_seq > watermark);
 
-    let clamped = advance_retention_floor(&store, &namespace_id, &context)
+    let advanced = advance_retention_floor(&store, &namespace_id, &context)
         .await
         .expect("advance retention");
     assert_eq!(
-        clamped.retention_floor_seq, watermark,
-        "the floor must not pass the index watermark"
+        advanced.retention_floor_seq, head_seq,
+        "the retired manifest feature watermark must not hold retention back"
     );
-
-    // Catch the index up; the floor may then advance to the head.
-    drain_grams_index(&store, &namespace_id, &context, policy).await;
-    let advanced = advance_retention_floor(&store, &namespace_id, &context)
-        .await
-        .expect("advance retention after catch-up");
-    assert_eq!(advanced.retention_floor_seq, head_seq);
 }
 
 #[tokio::test]

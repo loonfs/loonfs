@@ -98,7 +98,7 @@ one gram sort together, and batches from different runs for the
 same gram are unioned by readers, so merges never need to combine
 payloads to stay correct.
 
-## Segments and the manifest
+## Segments and the grep root
 
 Index segments reuse the metadata segment layout described in
 `metadata-block-storage.md` — prefix-compressed keys,
@@ -110,69 +110,48 @@ for this gram", which is exactly the pruning a query wants. The
 block builder is generalized over the row payload to make this
 possible; metadata families keep byte-identical output.
 
-Segments live under a new durable object family
-(`metadata/indexes/...`, a new row in the format section 1.2 table)
-and are referenced from a new list in the manifest payload, one
-descriptor per segment with the same key-range, index-block, and
-filter-block fields that metadata descriptors carry. The list is
-an additive payload field: readers that predate it ignore it,
-per the evolution rules in format section 4.3. The index
-deliberately does not ride the existing `metadata_files` list —
-its family field is a closed set, and an unknown family there
-would make an index-unaware reader reject the whole namespace,
-which the features-map contract forbids (an unknown feature must
-never change how core state is read).
+Segments live under the grep-owned
+`grep/v0/namespaces/{namespace}/segments/` family. One atomic
+`grep/v0/namespaces/{namespace}/root.json` names the query-visible
+segments and records `built_through_seq`, lifecycle, run-ordinal
+allocation, and any in-progress fold snapshot, outputs, and cursor.
+The root is independent of the namespace manifest, so an older core
+reader never has to understand grep state to read the filesystem.
 
-The namespace features map records that the index is materialized
-and how far it has caught up:
-
-```json
-"index.grams": { "version": 1, "built_through_seq": 41290 }
-```
-
-Removing the key and the segment list disables the feature; the
-segments become unreachable, and garbage collection reclaims them
-under the normal grace-window and delete-time re-verification
-rules, once its mark phase learns to read the new list from every
-live manifest and its sweep learns the new object prefix. A fork
-copies the manifest, so a fork usually inherits a working index
-for free, protected by the same fork-owned checkpoint records
-that protect its metadata segments. The one exception is a source
-index that trails the fork point: the target does not inherit the
-source WAL, so the gap between the watermark and the fork
-sequence could never be replayed. The fork keeps the segments but
-restarts the backfill cursor, so the target rebuilds the gap from
-its copied metadata tables; duplicate postings from the re-walk
-are harmless.
+Disabling CAS-publishes a root with lifecycle `disabled` and no segment
+references. The objects become candidates for grep-owned collection;
+the disable call never deletes them synchronously. Grep GC retains every
+object named by a verified live root and deletes unreferenced grep objects
+only after its grace window. A fork does not copy a grep root, so it begins
+unmaterialized and can be enabled independently.
 
 ## Building
 
-Index maintenance is one more tick alongside checkpoint,
-reorganization, and garbage collection, and it follows the same
-discipline: read the live manifest, do a bounded amount of work,
-publish one manifest, let the manifest be the resume point.
+`GrepWorker` is driven through explicit bounded steps, independently of
+core metadata maintenance. Enablement first creates an expiring user
+checkpoint at the namespace head, then CAS-publishes a backfilling root
+that records the checkpoint id, target sequence, and empty cursor. Build
+steps walk that checkpoint's immutable manifest, read eligible revision
+content, write delta segments, and publish the cursor and segment set in
+one root CAS. The completing step changes the lifecycle to `steady` and
+releases the checkpoint.
 
-A build tick replays the WAL from `built_through_seq` (the change
-feed of format section 3.7 is the designed extension point for
-index building), collects the file revisions that appeared, reads
-each eligible revision's content, extracts grams, and writes one
-new delta-level index segment, publishing a manifest that adds
-the segment and advances the watermark. Work per tick is budgeted
-(by files and bytes, defaults 256 files or 64 MiB) and the
-backlog drains across ticks exactly like reorganization.
+Steady-state build steps replay the validated change feed after
+`built_through_seq`, collect the file revisions that appeared, read each
+eligible revision's content, extract grams, and write new delta-level
+segments. Work per step is budgeted by files and bytes (defaults 256 files
+or 64 MiB), and every watermark advance shares one root CAS with the
+segment set that implements it.
 
 Two rules keep the cycle honest:
 
-- **Index building never rides the checkpoint.** Checkpoints
-  relieve write backpressure and must stay proportional to the
-  WAL tail; reading file content is much heavier. The tick order
-  is checkpoint, then index build, then fold. Freshness between
-  ticks is the query path's job, not the write path's.
-- **Retention may not outrun the index.** While the feature key
-  is present, the retention floor may not advance past
-  `built_through_seq`, so the WAL the next build tick needs is
-  always still there. Floor advancement is already an explicit
-  operator action, so this is one refusal, not a scheduler.
+- **Index building never rides core maintenance.** Metadata ticks flush and
+  reorganize core state only. Grep build and fold steps are scheduled by the
+  grep worker, and freshness between worker steps is the query path's job.
+- **Retention may outrun the index.** The independent worker does not hold
+  the core WAL floor behind `built_through_seq`. If the change feed reports
+  that retention removed required history, the worker starts a fresh
+  checkpointed backfill instead of guessing across the gap.
 
 When delta runs accumulate past the same threshold shape the
 metadata families use, a fold consumes them. A gram base can grow
@@ -197,7 +176,7 @@ Fold triggers count logical runs, never physical segments. Every
 publish that creates gram segments — a WAL or backfill build
 unit, a delta fold's outputs, a base fold's outputs — stamps one
 run ordinal on the whole batch, allocated from a counter in the
-feature value and incremented in the same manifest publication,
+grep root and incremented in the same root publication,
 so allocation is atomic with the root swap. The per-segment row
 cap can therefore split a run into any number of segments without
 changing fold cadence, and backfill units — which all carry the
@@ -208,52 +187,42 @@ And they are partitioned rather than whole-family: a fold
 snapshots the segment set it will consume, then walks the gram
 keyspace in bounded row-count steps, each step merging one key
 range from the snapshot into fresh segments at the fold's output
-tier and publishing a manifest that records the outputs and the
-resume cursor inside the feature value.
+tier and CAS-publishing a root that records the outputs and resume
+cursor.
 Until the walk completes, snapshot inputs and outputs are
 both referenced and both served — postings are add-only, so
 readers that union them see duplicates, never gaps — and segments
 that arrive during the fold stay out of the snapshot and survive
 it. The completing step swaps the snapshot out for the outputs; a
 fold interrupted anywhere resumes from the cursor the last
-published manifest carries. The step's row budget is soft: rows
+published root carries. The step's row budget is soft: rows
 with equal keys are consumed as one atomic group, because the
 resume cursor is the last merged key plus a terminator and
 splitting the group would strand its tail behind the cursor.
 
 The tiering and run identity are durable writer-side bookkeeping,
-invisible to reads. Because the feature is not yet registered in
-`docs/specs`, this document is the normative home for these
-values for now:
+invisible to reads:
 
-- Descriptor `level` in the manifest's index list: `0` for the
+- Descriptor `level` in the grep root's segment list: `0` for the
   delta segments build units write, `1` for a delta fold's mid
-  runs, `2` for the base. Level `1` is deliberately the level
-  pre-tiering whole-set folds stamped on their outputs, so a
-  legacy base counts as one mid run and self-heals into the
-  level-2 base at its first mid-threshold fold.
+  runs, and `2` for the base.
 - Descriptor `run_ordinal`: the batch-wide run identity described
-  above. Absent means zero, so pre-ordinal segments decode as one
-  legacy run per level and are swept up as real runs accumulate.
-- Feature `next_run_ordinal`: the allocation counter. Absent
-  means zero.
-- Fold-state `output_level` inside the feature value: the tier
-  the in-flight fold's outputs are stamped with (`1` or `2`).
-  Absent means `2`, because pre-tiering states always described a
-  whole-set fold and must complete as the base rewrite their
-  writer intended.
+  above.
+- Root index-state `next_run_ordinal`: the allocation counter.
+- Fold-state `output_level`: the tier the in-flight fold's outputs
+  are stamped with (`1` or `2`).
 - Fold-state `run_ordinal`: the ordinal stamped on every output
   segment of the fold, fixed when the fold starts so a resumed
-  fold keeps its identity. Absent means zero.
+  fold keeps its identity.
 
 Enabling the index on a namespace that already has data starts a
-backfill: a cursor inside the feature value walks the revisions
-family in key order across ticks, indexing as it goes. While the
-cursor is present the index is not yet materialized and queries
-are refused with the feature named; when the walk completes, the
-cursor disappears and the watermark takes over. Backfill reads
-the manifest, not old WAL, so enablement works regardless of what
-retention has already discarded.
+backfill: the worker creates an expiring user checkpoint and a root cursor
+walks the checkpoint manifest's revisions family in key order across steps,
+indexing as it goes. While lifecycle is `backfilling` the index is not yet
+materialized and queries are refused with the feature named; when the walk
+completes, lifecycle becomes `steady`, the checkpoint is released, and the
+watermark takes over. If the checkpoint expires or vanishes, the worker
+starts again from a fresh checkpoint.
 
 Postings for revisions that later become unobservable are not
 dropped in the first version. They are harmless — verification
@@ -349,7 +318,7 @@ default-on decision:
   published systems sit near the low end of that range.
 - **Build cost.** Each eligible revision is read once, linearly
   tokenized, and sorted; the object reads dominate. Budgets make
-  this a per-tick constant, and tiered folds amortize the
+  this a per-step constant, and tiered folds amortize the
   whole-index rewrite by a constant factor — about 64x rarer
   than the delta threshold with the defaults (see "Building").
 - **Query cost.** Posting reads touch a handful of blocks per
@@ -364,15 +333,15 @@ Following the segment-format convention, two different contracts:
 - **Format constants.** The tokenizer (ASCII-case-folded byte
   trigrams), the eligibility rule (the 8 MiB cap and the text
   sniff), the posting row key shape, and the batch encoding are
-  pinned by `"index.grams": {"version": 1}`. Changing any of
-  them is a feature-version bump and a rebuild — cheap by
+  pinned by the grep root/index and segment codec versions. Changing any
+  of them is a format-version bump and a rebuild — cheap by
   construction, since the index is derived work.
-- **Writer-side defaults.** The per-tick build budgets (256
+- **Writer-side defaults.** The per-step build budgets (256
   files or 64 MiB), the fold run thresholds (eight delta runs,
   eight mid runs), the fold step's row budget, the posting
   batch target (about 256), page limits, the verified-candidate
   budget, and the query tail budget are writer- or server-side
-  tunables; readers take what the manifest and descriptors
+  tunables; readers take what the grep root and descriptors
   describe.
 
 ## Deferred, with intent

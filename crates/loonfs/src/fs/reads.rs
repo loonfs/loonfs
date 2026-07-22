@@ -1,11 +1,11 @@
 //! Read operations: stat, list, content, grep, and revision reads.
 
 use super::core::{default_page_limit, file_revisions_page_response, FsCore};
+use crate::Result;
 use crate::{
     AuthoritativeFileBytes, AuthoritativePathEntry, CoreError, InodeId, ListFileRevisionsResponse,
     ListPathEntriesResponse, NamespaceId, RevisionNo,
 };
-use crate::{Result, RuntimeError};
 use loonfs_api::{
     encode_directory_cursor, AbsolutePath, DirectoryPageCursor, FileRevisionsPageCursor,
     GrepRequest, GrepResponse, PageRequest,
@@ -158,29 +158,16 @@ impl FsCore {
         request: &GrepRequest,
     ) -> Result<GrepResponse> {
         let (engine, read_context) = self.pinned_read(namespace_id).await?;
-        // The manifest features map gates this read, and the metadata root
-        // can move without the head moving (index enablement, folds), so a
-        // head-revalidated anchor is not enough: confirm the root still
-        // names the pinned manifest and reload the anchor when it moved.
-        let root =
-            loonfs_core::control::load_namespace_metadata_root_control(self.store(), namespace_id)
-                .await
-                .map_err(|error| {
-                    RuntimeError::Core(CoreError::MetadataProjection(
-                        loonfs_core::MetadataProjectionLoadError::LoadHead(error),
-                    ))
-                })?;
-        let (engine, read_context) =
-            if root.state.manifest_object_id != read_context.manifest_object_id {
-                self.invalidate_namespace_read_cache(namespace_id);
-                self.pinned_read(namespace_id).await?
-            } else {
-                (engine, read_context)
-            };
         let view = engine
             .load_grep_view_with_runtime_context(&read_context)
             .await?;
-        let snapshot = GrepIndexSnapshot::from_core_parts(view.grep_index_snapshot_parts());
+        let root = loonfs_grep::root::load_grep_root(self.store(), namespace_id).await;
+        let snapshot = match root {
+            Ok(root) => GrepIndexSnapshot::from_grep_root(root.as_ref().map(|root| root.state())),
+            Err(error) => GrepIndexSnapshot::from_core_parts(Err(CoreError::NamespaceCorrupt(
+                format!("grep state for `{namespace_id}` is unreadable: {error}"),
+            ))),
+        };
         let response = self
             .inner
             .grep_service

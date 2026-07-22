@@ -5,8 +5,8 @@
 
 use loonfs::{
     CommitId, CreateDirectoryOptions, CreateNamespaceOptions, DeleteOptions, DestinationBehavior,
-    ErrorCode, FsAdmin, FsReader, FsWriter, GramIndexBuildPolicy, GrepRequest, GrepResponse,
-    MaintenanceTickOptions, MoveOptions, NamespaceId, PutFileOptions, SharedObjectStore,
+    ErrorCode, FsWriter, GramIndexBuildPolicy, GrepRequest, GrepResponse, MoveOptions, NamespaceId,
+    PutFileOptions, SharedObjectStore,
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
 use loonfs_api::AbsolutePath;
@@ -173,6 +173,20 @@ async fn publish_same_content_files(
     }
 }
 
+async fn drive_old_index_step(
+    engine: &NamespaceEngine<SharedObjectStore>,
+    policy: GramIndexBuildPolicy,
+) {
+    engine
+        .build_grams_index_step(policy, None)
+        .await
+        .expect("old core build step");
+    engine
+        .fold_grams_index_step(policy, None)
+        .await
+        .expect("old core fold step");
+}
+
 async fn gram_segment_levels(
     store: &SharedObjectStore,
     namespace_id: &NamespaceId,
@@ -208,33 +222,23 @@ async fn grep_service_matches_core_across_query_semantics_and_budgets() {
         .build()
         .await
         .expect("build writer");
-    let reader = FsReader::builder_with_store(store.clone())
+    let policy = GramIndexBuildPolicy {
+        max_l0_runs: 2,
+        max_mid_runs: 2,
+        ..GramIndexBuildPolicy::default()
+    };
+    let old_engine = NamespaceEngine::builder(store.clone())
+        .namespace_id(namespace_id.clone())
+        .writer_id("grep-differential-old-index")
         .build()
-        .await
-        .expect("build reader");
-    let admin = FsAdmin::builder_with_store(store.clone())
-        .actor_id("grep-differential-admin")
-        .gram_index_build(GramIndexBuildPolicy {
-            max_l0_runs: 2,
-            max_mid_runs: 2,
-            ..GramIndexBuildPolicy::default()
-        })
-        .build()
-        .await
-        .expect("build admin");
+        .expect("build old index engine");
 
     writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
         .await
         .expect("create namespace");
-    admin
-        .enable_grams_index(&namespace_id)
-        .await
-        .expect("enable index");
-    admin
-        .maintenance_tick_namespace(&namespace_id, MaintenanceTickOptions::default())
-        .await
-        .expect("materialize empty backfill");
+    old_engine.enable_grams_index().await.expect("enable index");
+    drive_old_index_step(&old_engine, policy).await;
 
     let folded_corpus: [(&str, &[u8]); 10] = [
         ("/docs/indexed.txt", b"indexed-needle\n"),
@@ -253,10 +257,7 @@ async fn grep_service_matches_core_across_query_semantics_and_budgets() {
             .put_file_bytes(&namespace_id, path, content, PutFileOptions::default())
             .await
             .expect("write folded corpus file");
-        admin
-            .maintenance_tick_namespace(&namespace_id, MaintenanceTickOptions::default())
-            .await
-            .expect("build and fold corpus round");
+        drive_old_index_step(&old_engine, policy).await;
     }
 
     // The ten rounds above finish a base fold. Two more one-file rounds
@@ -271,10 +272,7 @@ async fn grep_service_matches_core_across_query_semantics_and_budgets() {
             )
             .await
             .expect("write mid-run filler");
-        admin
-            .maintenance_tick_namespace(&namespace_id, MaintenanceTickOptions::default())
-            .await
-            .expect("build mid-run filler");
+        drive_old_index_step(&old_engine, policy).await;
     }
 
     // One final indexed delta supplies enough false-positive candidates to
@@ -288,10 +286,7 @@ async fn grep_service_matches_core_across_query_semantics_and_budgets() {
         b"budget-needle without the final letter\n",
     )
     .await;
-    admin
-        .maintenance_tick_namespace(&namespace_id, MaintenanceTickOptions::default())
-        .await
-        .expect("index budget corpus");
+    drive_old_index_step(&old_engine, policy).await;
     assert_eq!(
         gram_segment_levels(&store, &namespace_id).await,
         BTreeSet::from([0, 1, 2]),
@@ -331,15 +326,6 @@ async fn grep_service_matches_core_across_query_semantics_and_budgets() {
         .success("indexed hits", &request("indexed-needle"))
         .await;
     assert_eq!(indexed.matches.len(), 1);
-
-    let runtime = reader
-        .grep(&namespace_id, &request("indexed-needle"))
-        .await
-        .expect("runtime delegated grep");
-    assert_eq!(
-        runtime, indexed,
-        "runtime must delegate to the service result"
-    );
 
     let tail = harness
         .success("unindexed-tail hits", &request("tail-only-token"))

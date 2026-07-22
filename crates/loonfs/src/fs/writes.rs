@@ -593,46 +593,28 @@ impl FsCore {
     /// and dropped tasks.
     fn maybe_auto_tick_after_publish(&self, namespace_id: &NamespaceId, wal_tail_segments: u64) {
         let options = MaintenanceTickOptions::default();
-        let run_full_tick = wal_tail_segments >= options.max_wal_tail_segments;
-        // Below the WAL threshold, index catch-up alone is still scheduled
-        // when the gram index is (or may be) enabled: index lag is measured
-        // in files, not segments, and one publish can put more files in the
-        // tail than a grep will scan. `None` means this process has not
-        // observed the namespace yet; the drain it schedules learns the
-        // answer, so the discovery cost is one cheap step per namespace per
-        // process. Flush cadence is unchanged — only the full tick moves
-        // WAL segments into tables.
-        let index_may_lag = self.grams_hint(namespace_id) != Some(false);
-        if !run_full_tick && !index_may_lag {
+        if wal_tail_segments < options.max_wal_tail_segments {
             return;
         }
-        if !self.inner.background.try_claim(namespace_id, run_full_tick) {
+        if !self.inner.background.try_claim(namespace_id) {
             return;
         }
-        let mut claim = BackgroundTickClaim {
+        let claim = BackgroundTickClaim {
             fs: self.clone(),
             namespace_id: namespace_id.clone(),
-            releases_on_drop: true,
         };
         self.inner.background.spawn(async move {
-            let mut run_full_tick = run_full_tick;
-            loop {
-                if let Err(error) = claim
-                    .fs
-                    .run_auto_maintenance(&claim.namespace_id, options, run_full_tick)
-                    .await
-                {
-                    tracing::info!(
-                        phase = "auto_maintenance_tick",
-                        result = "error",
-                        error = %error,
-                        "post-publish maintenance tick failed"
-                    );
-                }
-                if !claim.finish_tick() {
-                    break;
-                }
-                run_full_tick = true;
+            if let Err(error) = claim
+                .fs
+                .run_auto_maintenance(&claim.namespace_id, options)
+                .await
+            {
+                tracing::info!(
+                    phase = "auto_maintenance_tick",
+                    result = "error",
+                    error = %error,
+                    "post-publish maintenance tick failed"
+                );
             }
         });
     }
@@ -641,13 +623,9 @@ impl FsCore {
         &self,
         namespace_id: &NamespaceId,
         options: MaintenanceTickOptions,
-        run_full_tick: bool,
     ) -> Result<()> {
-        if run_full_tick {
-            self.maintenance_tick_namespace(namespace_id, options)
-                .await?;
-            self.drain_reorganization_backlog(namespace_id).await?;
-        }
-        self.drain_grams_index_backlog(namespace_id).await
+        self.maintenance_tick_namespace(namespace_id, options)
+            .await?;
+        self.drain_reorganization_backlog(namespace_id).await
     }
 }

@@ -4,7 +4,9 @@ use crate::cache::{GrepBlockCache, MAX_CACHED_GREP_BLOCKS};
 use crate::index_read::{
     index_segment_corrupt, load_data_block, load_filter_block, load_index_block,
 };
+use crate::keyspace::segment_key;
 use crate::query::{plan_pattern, GramPlanOutcome, GramQueryPlan};
+use crate::root::{GrepLifecycle, GrepRootState};
 use futures::future::{join_all, try_join_all};
 use loonfs_api::wire::index_grams::{
     lookup, Gram, IndexRow, INDEX_FAMILY_GRAMS, INDEX_GRAMS_MAX_FILE_BYTES,
@@ -100,8 +102,51 @@ impl GrepIndexSnapshot {
         }
     }
 
+    /// Builds a query snapshot from one verified grep-owned root.
+    ///
+    /// A missing, disabled, or still-backfilling root has the same
+    /// `index.grams` not-materialized surface as the former manifest feature.
+    pub fn from_grep_root(root: Option<&GrepRootState>) -> Self {
+        let Some(root) = root else {
+            return Self::from_core_parts(Err(feature_not_materialized()));
+        };
+        if !matches!(root.lifecycle(), GrepLifecycle::Steady) {
+            return Self::from_core_parts(Err(feature_not_materialized()));
+        }
+        let segments = root
+            .segments()
+            .iter()
+            .map(|segment| IndexFileRef {
+                owner_namespace_id: root.namespace_id().clone(),
+                segment_id: segment.segment_id.clone(),
+                object_key: segment_key(root.namespace_id(), &segment.segment_id),
+                family: INDEX_FAMILY_GRAMS.to_owned(),
+                run_seq: segment.run_seq,
+                run_ordinal: segment.run_ordinal,
+                level: segment.level,
+                segment_index: segment.segment_index,
+                // Query execution does not consult this writer-side count;
+                // v0 grep roots intentionally omit it.
+                row_count: 0,
+                min_key: segment.min_row_key.clone(),
+                max_key: segment.max_row_key.clone(),
+                index_block: segment.index_block,
+                filter_block: segment.filter_block,
+                filter_inline: segment.filter_inline.clone(),
+                payload_checksum: segment.payload_checksum.clone(),
+            })
+            .collect();
+        Self::new(root.index().built_through_seq, segments)
+    }
+
     fn materialized(&self) -> Result<&MaterializedGrepIndexSnapshot> {
         self.state.as_ref().map_err(Clone::clone)
+    }
+}
+
+fn feature_not_materialized() -> CoreError {
+    CoreError::FeatureNotMaterialized {
+        feature: loonfs_api::wire::index_grams::INDEX_GRAMS_FEATURE_KEY.to_owned(),
     }
 }
 

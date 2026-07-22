@@ -1,5 +1,5 @@
-//! Explicit maintenance: ticks, index builds, GC, checkpoints, WAL
-//! flushes, and retention.
+//! Explicit core maintenance: ticks, GC, checkpoints, WAL flushes, and
+//! retention. Grep building and collection live in `loonfs-grep`.
 
 use super::core::FsCore;
 use crate::{
@@ -56,7 +56,6 @@ impl FsCore {
         let observed_head_seq = status_before.head_seq;
         if status_before.wal_tail_segments < options.max_wal_tail_segments {
             self.run_tick_reorganization(namespace_id).await?;
-            self.run_tick_grams_index(namespace_id).await?;
             let gc = self.run_tick_gc(namespace_id, options.gc.as_ref()).await?;
             return Ok(MaintenanceTickResult {
                 namespace_id: namespace_id.clone(),
@@ -70,7 +69,6 @@ impl FsCore {
             Ok(flush) => flush,
             Err(RuntimeError::Core(error)) if error.code() == ErrorCode::StaleHead => {
                 self.run_tick_reorganization(namespace_id).await?;
-                self.run_tick_grams_index(namespace_id).await?;
                 let gc = self.run_tick_gc(namespace_id, options.gc.as_ref()).await?;
                 return Ok(MaintenanceTickResult {
                     namespace_id: namespace_id.clone(),
@@ -82,7 +80,6 @@ impl FsCore {
             Err(error) => return Err(error),
         };
         self.run_tick_reorganization(namespace_id).await?;
-        self.run_tick_grams_index(namespace_id).await?;
 
         let outcome = match flush.outcome {
             FlushWalOutcome::Published => MaintenanceTickOutcome::WalFlushed {
@@ -174,210 +171,74 @@ impl FsCore {
         Ok(Some(self.gc_namespace(namespace_id, config).await?))
     }
 
-    /// Publishes the `index.grams` feature entry, scheduling gram index
-    /// backfill; maintenance ticks build it from then on.
+    /// Enables the independent grep root and starts checkpointed backfill.
     pub(crate) async fn enable_grams_index(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<EnableGramsIndexResponse> {
         let outcome = self
-            .namespace_engine(namespace_id)
-            .enable_grams_index()
+            .grep_worker()
+            .enable(namespace_id)
             .await
             .map_err(RuntimeError::Core)?;
-        self.record_grams_hint(namespace_id, true);
-        self.invalidate_namespace_cache(namespace_id);
         match outcome {
-            loonfs_core::GramIndexEnableOutcome::Enabled { built_through_seq } => {
+            loonfs_grep::GrepEnableOutcome::Enabled { target_seq } => {
                 Ok(EnableGramsIndexResponse {
                     namespace_id: namespace_id.clone(),
-                    built_through_seq,
+                    built_through_seq: target_seq,
                     already_enabled: false,
                 })
             }
-            loonfs_core::GramIndexEnableOutcome::AlreadyEnabled { built_through_seq } => {
+            loonfs_grep::GrepEnableOutcome::AlreadyEnabled { built_through_seq } => {
                 Ok(EnableGramsIndexResponse {
                     namespace_id: namespace_id.clone(),
                     built_through_seq,
                     already_enabled: true,
                 })
             }
-            loonfs_core::GramIndexEnableOutcome::Superseded => {
+            loonfs_grep::GrepEnableOutcome::Superseded => {
                 Err(RuntimeError::Core(CoreError::CheckpointUnavailable(
-                    "enabling the gram index lost a manifest publication race; retry".to_owned(),
+                    "enabling grep lost a root publication race; retry".to_owned(),
                 )))
             }
         }
     }
 
-    /// Removes the `index.grams` feature entry and its segment references;
-    /// the segments become garbage-collection candidates.
+    /// Disables the independent grep root; its segments become grep-GC
+    /// candidates.
     pub(crate) async fn disable_grams_index(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<DisableGramsIndexResponse> {
         let outcome = self
-            .namespace_engine(namespace_id)
-            .disable_grams_index()
+            .grep_worker()
+            .disable(namespace_id)
             .await
             .map_err(RuntimeError::Core)?;
-        self.record_grams_hint(namespace_id, false);
-        self.invalidate_namespace_cache(namespace_id);
         match outcome {
-            loonfs_core::GramIndexDisableOutcome::Disabled => Ok(DisableGramsIndexResponse {
+            loonfs_grep::GrepDisableOutcome::Disabled => Ok(DisableGramsIndexResponse {
                 namespace_id: namespace_id.clone(),
                 was_enabled: true,
             }),
-            loonfs_core::GramIndexDisableOutcome::NotEnabled => Ok(DisableGramsIndexResponse {
+            loonfs_grep::GrepDisableOutcome::NotEnabled => Ok(DisableGramsIndexResponse {
                 namespace_id: namespace_id.clone(),
                 was_enabled: false,
             }),
-            loonfs_core::GramIndexDisableOutcome::Superseded => {
+            loonfs_grep::GrepDisableOutcome::Superseded => {
                 Err(RuntimeError::Core(CoreError::CheckpointUnavailable(
-                    "disabling the gram index lost a manifest publication race; retry".to_owned(),
+                    "disabling grep lost a root publication race; retry".to_owned(),
                 )))
             }
         }
     }
 
-    fn record_grams_hint(&self, namespace_id: &NamespaceId, enabled: bool) {
-        self.inner
-            .grams_enabled_hints
-            .lock()
-            .expect("grams hint lock poisoned")
-            .insert(namespace_id.clone(), enabled);
-    }
-
-    pub(super) fn grams_hint(&self, namespace_id: &NamespaceId) -> Option<bool> {
-        self.inner
-            .grams_enabled_hints
-            .lock()
-            .expect("grams hint lock poisoned")
-            .get(namespace_id)
-            .copied()
-    }
-
-    /// One bounded gram index build step, then one bounded fold step,
-    /// under the configured [`crate::GramIndexBuildPolicy`]. A namespace
-    /// without the feature entry reports and costs nothing.
-    async fn run_tick_grams_index(&self, namespace_id: &NamespaceId) -> Result<bool> {
-        self.run_tick_grams_index_with_policy(namespace_id, self.inner.config.gram_index_build)
-            .await
-    }
-
-    /// [`Self::run_tick_grams_index`] with explicit budgets. Production
-    /// paths run the handle's configured policy; tests inject small
-    /// budgets to shape states — like a multi-step fold — that neither
-    /// the defaults nor any sane configuration produce at test scale.
-    async fn run_tick_grams_index_with_policy(
-        &self,
-        namespace_id: &NamespaceId,
-        policy: loonfs_core::GramIndexBuildPolicy,
-    ) -> Result<bool> {
-        let engine = self.namespace_engine(namespace_id);
-        // The same shared decoded-block cache reads use: index segments
-        // are immutable and keyed by payload checksum, so blocks queries
-        // already decoded serve the maintenance merge from memory.
-        let table_cache = Some(self.inner.metadata_table_cache.as_ref());
-        let build = engine
-            .build_grams_index_step(policy, table_cache)
-            .await
-            .map_err(RuntimeError::Core)?;
-        let mut published = false;
-        match &build.outcome {
-            loonfs_core::GramIndexBuildOutcome::Published {
-                built_through_seq,
-                indexed_revisions,
-                materialized,
-                ..
-            } => {
-                published = true;
-                self.invalidate_namespace_cache(namespace_id);
-                tracing::info!(
-                    built_through_seq = built_through_seq.0,
-                    indexed_revisions,
-                    materialized,
-                    "gram index build step published"
-                );
-            }
-            loonfs_core::GramIndexBuildOutcome::UnsupportedFeatureVersion { found } => {
-                tracing::warn!(
-                    found,
-                    "gram index feature version is not supported; skipping"
-                );
-            }
-            loonfs_core::GramIndexBuildOutcome::Superseded => {
-                published = true;
-                tracing::info!("gram index build step superseded; will retry");
-            }
-            loonfs_core::GramIndexBuildOutcome::NotEnabled
-            | loonfs_core::GramIndexBuildOutcome::UpToDate { .. } => {}
-        }
-        // `UnsupportedFeatureVersion` also records false: this writer cannot
-        // advance that index, so scheduling it a tick per publish is waste.
-        self.record_grams_hint(
-            namespace_id,
-            !matches!(
-                build.outcome,
-                loonfs_core::GramIndexBuildOutcome::NotEnabled
-                    | loonfs_core::GramIndexBuildOutcome::UnsupportedFeatureVersion { .. }
-            ),
-        );
-        let fold = engine
-            .fold_grams_index_step(policy, table_cache)
-            .await
-            .map_err(RuntimeError::Core)?;
-        if let loonfs_core::GramIndexFoldOutcome::StepPublished {
-            merged_rows,
-            segments_written,
-            completed,
-        } = &fold.outcome
-        {
-            // Any published fold step is continuing work, completed or
-            // not: an unfinished fold keeps a cursor to step, and a
-            // completing one may have just made the next tier eligible —
-            // a delta fold's final step can create the threshold-th mid
-            // run. The next drain iteration discovers either, and
-            // `NotNeeded` is what ends the drain, exactly as metadata
-            // reorganization drains after every published unit.
-            published = true;
-            self.invalidate_namespace_cache(namespace_id);
-            tracing::info!(
-                merged_rows,
-                segments_written,
-                completed,
-                "gram index fold step published"
-            );
-        }
-        Ok(published)
-    }
-
-    /// Builds gram index steps until the watermark reaches the head,
-    /// each step under the configured [`crate::GramIndexBuildPolicy`].
-    /// Only writer-scheduled background ticks drain like this, mirroring
-    /// [`Self::drain_reorganization_backlog`].
-    pub(super) async fn drain_grams_index_backlog(&self, namespace_id: &NamespaceId) -> Result<()> {
-        self.drain_grams_index_backlog_with_policy(namespace_id, self.inner.config.gram_index_build)
-            .await
-    }
-
-    /// [`Self::drain_grams_index_backlog`] with explicit budgets, for the
-    /// same reason as [`Self::run_tick_grams_index_with_policy`].
-    pub(super) async fn drain_grams_index_backlog_with_policy(
-        &self,
-        namespace_id: &NamespaceId,
-        policy: loonfs_core::GramIndexBuildPolicy,
-    ) -> Result<()> {
-        const MAX_STEPS_PER_DRAIN: usize = 16;
-        for _ in 0..MAX_STEPS_PER_DRAIN {
-            if !self
-                .run_tick_grams_index_with_policy(namespace_id, policy)
-                .await?
-            {
-                break;
-            }
-        }
-        Ok(())
+    fn grep_worker(&self) -> loonfs_grep::GrepWorker<crate::SharedObjectStore> {
+        loonfs_grep::GrepWorker::new(
+            self.inner.store.clone(),
+            self.inner.config.writer_id.clone(),
+            self.inner.writer_session_id.clone(),
+            self.inner.config.writer_version.clone(),
+        )
     }
 
     /// Runs the v1 mark-and-sweep garbage collector for one namespace.

@@ -17,7 +17,7 @@ pub enum GrepLifecycle {
     Backfilling {
         /// Resume key for the next backfill step; empty means the start.
         backfill_cursor: String,
-        /// Reserved pin for a later checkpoint-backed backfill protocol.
+        /// User-checkpoint pin backing this immutable manifest walk.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         checkpoint_id: Option<CheckpointId>,
     },

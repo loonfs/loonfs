@@ -60,8 +60,8 @@ pub(crate) enum CommandData {
     GramsIndexEnabled {
         #[serde(flatten)]
         enabled: EnableGramsIndexResponse,
-        /// The maintenance tick this command ran to start the backfill;
-        /// absent when the index was already enabled.
+        /// Legacy v1 output slot. Always absent now that grep backfill is
+        /// independent of core maintenance ticks.
         backfill_tick: Option<MaintenanceTickResponse>,
     },
     GramsIndexDisabled(DisableGramsIndexResponse),

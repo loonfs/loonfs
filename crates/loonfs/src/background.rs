@@ -51,10 +51,6 @@ pub(crate) struct BackgroundWork {
 struct BackgroundState {
     closed: bool,
     inflight: BTreeSet<NamespaceId>,
-    /// Full maintenance requested while an index-only tick already owns the
-    /// namespace's singleflight slot. The owner consumes this before it
-    /// releases the slot, so crossing the WAL threshold is never lost.
-    pending_full_ticks: BTreeSet<NamespaceId>,
     tasks: Vec<JoinHandle<()>>,
 }
 
@@ -73,7 +69,6 @@ impl BackgroundWork {
             state: Mutex::new(BackgroundState {
                 closed: false,
                 inflight: BTreeSet::new(),
-                pending_full_ticks: BTreeSet::new(),
                 tasks: Vec::new(),
             }),
         }
@@ -83,12 +78,10 @@ impl BackgroundWork {
         self.state.lock().expect("background state lock poisoned")
     }
 
-    /// Claims the namespace's singleflight slot. A full tick rejected by an
-    /// existing tick is deferred to that owner; cheaper index-only work can
-    /// be subsumed by the owner's own index drain.
+    /// Claims the namespace's singleflight slot.
     ///
     /// Returns true only when the caller must spawn a new task.
-    pub(crate) fn try_claim(&self, namespace_id: &NamespaceId, full_tick: bool) -> bool {
+    pub(crate) fn try_claim(&self, namespace_id: &NamespaceId) -> bool {
         if self.policy != FsBackgroundWork::Enabled {
             return false;
         }
@@ -97,9 +90,6 @@ impl BackgroundWork {
             return false;
         }
         if state.inflight.contains(namespace_id) {
-            if full_tick {
-                state.pending_full_ticks.insert(namespace_id.clone());
-            }
             return false;
         }
         if state.inflight.len() >= self.max_concurrent {
@@ -114,25 +104,10 @@ impl BackgroundWork {
         state.inflight.insert(namespace_id.clone())
     }
 
-    /// Completes one tick while holding the namespace claim. Returns true
-    /// when a full tick arrived behind it and must run before release.
-    /// Testing and releasing happen under one lock so a threshold crossing
-    /// cannot land between those decisions and be stranded without an owner.
-    pub(crate) fn finish_tick(&self, namespace_id: &NamespaceId) -> bool {
-        let mut state = self.lock_state();
-        if state.pending_full_ticks.remove(namespace_id) {
-            true
-        } else {
-            state.inflight.remove(namespace_id);
-            false
-        }
-    }
-
     /// Releases a namespace's singleflight slot.
     pub(crate) fn release(&self, namespace_id: &NamespaceId) {
         let mut state = self.lock_state();
         state.inflight.remove(namespace_id);
-        state.pending_full_ticks.remove(namespace_id);
     }
 
     /// Rejects any further background scheduling.
@@ -223,7 +198,7 @@ mod tests {
         let namespace_id = namespace_id();
 
         // The racy interleaving a shutdown must win: the claim lands first...
-        assert!(background.try_claim(&namespace_id, false));
+        assert!(background.try_claim(&namespace_id));
         // ...then a close (shut_down + drain) completes while the registry
         // is still empty...
         background.shut_down();
@@ -286,53 +261,28 @@ mod tests {
     async fn claims_are_singleflight_and_refused_after_shut_down() {
         let background = BackgroundWork::new(FsBackgroundWork::Enabled, None, 8);
         let namespace_id = namespace_id();
-        assert!(background.try_claim(&namespace_id, false));
+        assert!(background.try_claim(&namespace_id));
         assert!(
-            !background.try_claim(&namespace_id, false),
+            !background.try_claim(&namespace_id),
             "one in-flight tick per namespace"
         );
         background.release(&namespace_id);
         assert!(
-            background.try_claim(&namespace_id, false),
+            background.try_claim(&namespace_id),
             "a released slot is claimable again"
         );
         background.release(&namespace_id);
         background.shut_down();
         assert!(
-            !background.try_claim(&namespace_id, false),
+            !background.try_claim(&namespace_id),
             "no new claims after shutdown"
         );
     }
 
     #[tokio::test]
-    async fn a_full_tick_is_deferred_behind_an_index_only_tick() {
-        let background = BackgroundWork::new(FsBackgroundWork::Enabled, None, 8);
-        let namespace_id = namespace_id();
-
-        assert!(background.try_claim(&namespace_id, false));
-        assert!(
-            !background.try_claim(&namespace_id, true),
-            "the existing owner keeps the singleflight slot"
-        );
-        assert!(
-            background.finish_tick(&namespace_id),
-            "the owner is promoted to the deferred full tick"
-        );
-        assert!(
-            !background.try_claim(&namespace_id, false),
-            "the promoted owner keeps the slot"
-        );
-        assert!(
-            !background.finish_tick(&namespace_id),
-            "the slot is released after the deferred tick"
-        );
-        assert!(background.try_claim(&namespace_id, false));
-    }
-
-    #[tokio::test]
     async fn manual_only_policy_never_claims() {
         let background = BackgroundWork::new(FsBackgroundWork::ManualOnly, None, 8);
-        assert!(!background.try_claim(&namespace_id(), false));
+        assert!(!background.try_claim(&namespace_id()));
     }
 
     #[tokio::test]
@@ -342,16 +292,16 @@ mod tests {
         let second = NamespaceId::parse("second").expect("valid namespace id");
         let third = NamespaceId::parse("third").expect("valid namespace id");
 
-        assert!(background.try_claim(&first, false));
-        assert!(background.try_claim(&second, false));
+        assert!(background.try_claim(&first));
+        assert!(background.try_claim(&second));
         assert!(
-            !background.try_claim(&third, false),
+            !background.try_claim(&third),
             "a third namespace must wait for a slot"
         );
 
         background.release(&first);
         assert!(
-            background.try_claim(&third, false),
+            background.try_claim(&third),
             "a released slot admits the waiting namespace"
         );
     }
@@ -360,7 +310,7 @@ mod tests {
     async fn a_zero_cap_is_normalized_to_one_slot() {
         let background = BackgroundWork::new(FsBackgroundWork::Enabled, None, 0);
         assert!(
-            background.try_claim(&namespace_id(), false),
+            background.try_claim(&namespace_id()),
             "the policy, not the cap, is the off switch"
         );
     }

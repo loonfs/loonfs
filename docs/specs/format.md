@@ -1371,9 +1371,9 @@ One feature key is registered:
   `backfill_cursor` is present the index is not yet materialized and
   data-dependent queries must be refused. Readers hard-reject an
   unsupported `version` with a typed error and tolerate unknown fields
-  inside the value. While the key is present, the retention floor must not
-  advance past `built_through_seq` — the WAL from the watermark forward is
-  the index build's change feed.
+  inside the value. The retention floor advances independently of
+  `built_through_seq`; grep restarts from a checkpointed manifest when
+  retention removes WAL after its watermark instead of holding the floor.
 
 The map exists so that derived indexes and similar per-namespace
 capabilities can arrive without a format version bump.

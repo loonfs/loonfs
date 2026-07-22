@@ -137,6 +137,10 @@ pub mod grep_limits {
 
 /// Concrete read-view types consumed by `loonfs-grep`.
 pub mod grep {
+    pub use crate::checkpoint::{
+        load_grep_change_feed, load_grep_checkpoint_revision_page, GrepChangeFeed,
+        GrepCheckpointRevisionPage,
+    };
     pub use crate::metadata::MetadataViewSession;
     pub use crate::path::read::LoadedMetadataView;
 }
