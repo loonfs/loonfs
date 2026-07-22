@@ -44,11 +44,12 @@ pub(crate) enum NamespaceInitializationState {
     Absent,
     /// Head and descriptor are both absent but pre-head control objects
     /// (metadata root or WAL floor) exist: a create or fork crashed before
-    /// its head write, or one is in flight right now. Age decides which.
+    /// its head write, or one is in flight right now. Explicit repair uses
+    /// age to decide whether reaping is safe.
     PreHeadDebris,
     /// The head exists but the descriptor does not: a create or fork
-    /// crashed after its linearization point. Completable by a retry whose
-    /// derivable descriptor matches the tree.
+    /// crashed after its linearization point. Explicit repair can complete a
+    /// descriptor whose value is derivable from the tree.
     Partial,
     Complete,
 }

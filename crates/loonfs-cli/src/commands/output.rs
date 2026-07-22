@@ -9,7 +9,7 @@ use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativePathEntry, CreateCheckpointResponse,
     DeleteNamespaceResponse, DisableGramsIndexResponse, EnableGramsIndexResponse, FileRevision,
     FlushWalResponse, GcResponse, GrepMatch, MaintenanceTickResponse, NamespaceSummary,
-    ReleaseCheckpointResponse,
+    ReleaseCheckpointResponse, RepairNamespaceResponse,
 };
 use serde::Serialize;
 
@@ -57,6 +57,7 @@ pub(crate) enum CommandData {
     RetentionAdvanced(AdvanceRetentionResponse),
     MaintenanceTicked(MaintenanceTickResponse),
     GarbageCollected(GcResponse),
+    NamespaceRepaired(RepairNamespaceResponse),
     GramsIndexEnabled(EnableGramsIndexResponse),
     GramsIndexDisabled(DisableGramsIndexResponse),
     Changes(ChangesResponse),

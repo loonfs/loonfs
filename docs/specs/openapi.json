@@ -242,7 +242,7 @@
           "admin"
         ],
         "summary": "Collect garbage",
-        "description": "Runs one mark-and-sweep garbage-collection pass under the format's safety rules (grace window, delete-time re-verification, retention wins). Nothing sweeps without this explicit call or a maintenance-tick opt-in.",
+        "description": "Runs one mark-and-sweep garbage-collection pass under the format's safety rules (grace window, delete-time re-verification, retention wins). Incomplete namespaces are ignored without listing or deletion. Nothing sweeps without this explicit call or a maintenance-tick opt-in.",
         "operationId": "gc_namespace",
         "parameters": [
           {
@@ -582,6 +582,69 @@
           },
           "410": {
             "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v0/admin/namespaces/{namespace}/repair": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Repair namespace",
+        "description": "Explicitly completes a recoverable partial namespace, or reaps non-completable installation debris after the fixed safety window. Younger debris is left untouched and reported as in flight.",
+        "operationId": "repair_namespace",
+        "parameters": [
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "Namespace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Namespace repair inspected or changed the namespace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RepairNamespaceResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid namespace id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -4274,7 +4337,7 @@
               "null"
             ],
             "format": "int64",
-            "description": "Abandoned bootstrap trees older than this may be reaped. Must be at\nleast the grace window.",
+            "description": "Old upload sessions and abandoned fork records older than this may be\nreaped or released. Must be at least the grace window.",
             "minimum": 0
           }
         }
@@ -4289,9 +4352,9 @@
           "deleted_manifests",
           "deleted_checkpoint_records",
           "released_fork_checkpoints",
-          "reaped_abandoned_objects",
           "retained_candidates",
-          "degraded_retention"
+          "degraded_retention",
+          "incomplete_namespace_ignored"
         ],
         "properties": {
           "degraded_retention": {
@@ -4328,15 +4391,13 @@
             "description": "Unreferenced WAL segments deleted.",
             "minimum": 0
           },
+          "incomplete_namespace_ignored": {
+            "type": "boolean",
+            "description": "True when the namespace lacks a complete head-and-descriptor pair, so\nthe pass deliberately performed no listing or deletion."
+          },
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
             "description": "Namespace the pass ran against."
-          },
-          "reaped_abandoned_objects": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Objects removed while reaping an abandoned bootstrap tree.",
-            "minimum": 0
           },
           "released_fork_checkpoints": {
             "type": "integer",
@@ -4910,6 +4971,34 @@
           "was_active": {
             "type": "boolean",
             "description": "True when this call flipped an active record to released; false when\nthe record was already released or no longer exists. Release is\nidempotent — the end state is the same either way."
+          }
+        }
+      },
+      "RepairNamespaceOutcome": {
+        "type": "string",
+        "description": "How an explicit namespace repair resolved the namespace's durable state.",
+        "enum": [
+          "already_complete",
+          "completed",
+          "reaped",
+          "in_flight"
+        ]
+      },
+      "RepairNamespaceResponse": {
+        "type": "object",
+        "description": "Result of explicitly repairing one namespace.",
+        "required": [
+          "namespace_id",
+          "outcome"
+        ],
+        "properties": {
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace the repair inspected."
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/RepairNamespaceOutcome",
+            "description": "What the repair did, or why it left the namespace untouched."
           }
         }
       },

@@ -1179,6 +1179,7 @@ fn every_advertised_capability_maps_to_a_cli_command_path() {
                 &["admin", "retention-advance"],
                 &["admin", "tick"],
                 &["admin", "gc"],
+                &["admin", "repair"],
                 &["admin", "index-enable"],
                 &["admin", "index-disable"],
             ],
@@ -1399,6 +1400,14 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
         assert_eq!(gc_data["deleted_wal_segments"], 0);
         assert_eq!(gc_data["deleted_manifests"], 0);
         assert_eq!(gc_data["degraded_retention"], false);
+        assert_eq!(gc_data["incomplete_namespace_ignored"], false);
+
+        let repair = harness.run(&["--json", "admin", "repair", "--profile", profile]);
+        assert_success(&repair);
+        let repair_data = json_data(&repair);
+        assert_eq!(repair_data["kind"], "namespace_repaired");
+        assert_eq!(repair_data["namespace_id"], "demo");
+        assert_eq!(repair_data["outcome"], "already_complete");
 
         // Admin failures surface the registry code in both modes.
         let missing = harness.run(&[
@@ -1421,6 +1430,7 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
             sorted_object_keys(&retention_data),
             sorted_object_keys(&tick_data),
             sorted_object_keys(&gc_data),
+            sorted_object_keys(&repair_data),
         ));
     }
 

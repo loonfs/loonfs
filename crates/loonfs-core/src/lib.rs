@@ -119,7 +119,7 @@ pub use error::{
     StoreFailureClass, WriterFence,
 };
 pub use gc::{gc_namespace, GcConfig, GcReport};
-pub use namespace::BootstrapNamespaceError;
+pub use namespace::{repair_namespace, BootstrapNamespaceError};
 pub use options::{BootstrapOptions, DeleteNamespaceOptions, WriteOptions};
 pub use timing::{MonotonicTimer, StdMonotonicTimer};
 

@@ -25,7 +25,7 @@ use loonfs_api::{
     AbsolutePath, AuthoritativePathEntry, ChangeSeq, CommitId, ContentRef, ContentRefKind,
     ContentStoreId, DeleteDirectoryBehavior, DestinationBehavior, DirectoryPageCursor,
     EffectiveLimit, InodeId, InodeKind, ManifestId, NameKey, NamespaceId, Page, PageRequest,
-    RevisionNo, UploadId, WriterEpoch,
+    RepairNamespaceOutcome, RevisionNo, UploadId, WriterEpoch,
 };
 use loonfs_core::cache::{
     MetadataTableCache, MetadataTableCacheConfig, WalTailProjectionCache,
@@ -43,8 +43,8 @@ use loonfs_core::control::{load_namespace_head_control, load_namespace_read_anch
 use loonfs_core::metadata::MetadataState;
 use loonfs_core::publish::{NamespaceCommitEngine, NamespaceMutationCandidate, PathMutationIntent};
 use loonfs_core::{
-    BeginDirectPutUploadTargetResponse, BootstrapOptions, Error as CoreError, ErrorCode,
-    MutationContext, NamespaceEngine, RuntimeReadContext,
+    repair_namespace, BeginDirectPutUploadTargetResponse, BootstrapOptions, Error as CoreError,
+    ErrorCode, MutationContext, NamespaceEngine, RuntimeReadContext,
 };
 use loonfs_objectstore::keys::{
     content_blob, content_store_descriptor, metadata_manifest_object, namespace_config,
@@ -1421,7 +1421,7 @@ async fn namespace_creation_writes_descriptors_and_rejects_partial_recreation() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn bootstrap_head_reservation_failure_does_not_allocate_content_store() {
+async fn bootstrap_head_lost_ack_stays_partial_until_explicit_repair() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id();
     let context = mutation_context();
@@ -1451,11 +1451,14 @@ async fn bootstrap_head_reservation_failure_does_not_allocate_content_store() {
             .is_empty(),
         "content-store descriptor must not be allocated before namespace head reservation"
     );
-    // The injected failure wrote the head before reporting the lost ack —
-    // the crash window creation is now resumable from: a retry completes
-    // the genesis tree instead of wedging on namespace_partial.
-    bootstrap_namespace(&store, &namespace_id, &context, false)
-        .expect("retry completes the ack-lost create");
+    // The injected failure wrote the head before reporting the lost ack.
+    // Normal create retries are classification-only and leave it untouched.
+    let retry = bootstrap_namespace(&store, &namespace_id, &context, false)
+        .expect_err("retry preserves the ack-lost partial tree");
+    assert_eq!(retry.code(), ErrorCode::NamespacePartial);
+    let report = block_on(repair_namespace(&store, &namespace_id, &context))
+        .expect("explicit repair completes the ack-lost create");
+    assert_eq!(report.outcome, RepairNamespaceOutcome::Completed);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4306,6 +4309,12 @@ async fn fork_target_head_reservation_failure_keeps_descriptor_unpublished() {
         "descriptor must remain unpublished"
     );
     assert_namespace_partial(&store, &clone_namespace_id, &context);
+    let retry = fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
+        .expect_err("normal fork retry preserves the raced partial target");
+    assert_eq!(retry.code(), ErrorCode::NamespacePartial);
+    let report = block_on(repair_namespace(&store, &clone_namespace_id, &context))
+        .expect("explicit repair completes the raced fork target");
+    assert_eq!(report.outcome, RepairNamespaceOutcome::Completed);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

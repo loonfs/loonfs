@@ -89,7 +89,8 @@ pub use v0::{
     ForkNamespaceRequest, GcRequest, GcResponse, GrepGcResponse, GrepMatch, GrepRequest,
     GrepResponse, ListFileRevisionsResponse, ListPathEntriesResponse, MaintenanceTickOutcome,
     MaintenanceTickRequest, MaintenanceTickResponse, NamespaceStatusResponse, NamespaceSummary,
-    ReleaseCheckpointResponse, RestoreFileRevisionRequest,
+    ReleaseCheckpointResponse, RepairNamespaceOutcome, RepairNamespaceResponse,
+    RestoreFileRevisionRequest,
 };
 
 #[cfg(test)]

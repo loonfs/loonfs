@@ -1,28 +1,34 @@
-//! Reaping: age-gated deletion of unreachable objects and abandoned
-//! bootstrap debris.
+//! Reaping: age-gated deletion of unreachable objects and the explicit
+//! namespace-repair reap for abandoned installation debris.
 
-use super::config::{GcConfig, GcReport};
+use super::config::GcReport;
 use crate::context::MutationContext;
 use crate::error::{CoreError, MetadataProjectionLoadError};
+use crate::limits::GC_MIN_GRACE_WINDOW_MS;
 use crate::namespace::control::ControlObjectLoadError;
 use loonfs_api::{ManifestObjectId, NamespaceId};
-use loonfs_objectstore::keys::namespace_config;
+use loonfs_objectstore::keys::{namespace_config, wal_head};
 use loonfs_objectstore::ObjectStore;
 
-/// Rule 9: a namespace tree with no `namespace.json` whose newest object is
-/// older than the reap window may be reaped, re-checking the completion
-/// marker's absence immediately before deleting.
-pub(super) async fn reap_abandoned_bootstrap<S: ObjectStore + ?Sized>(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AbandonedBootstrapReap {
+    Reaped,
+    InFlight,
+    AlreadyComplete,
+}
+
+/// Reaps a non-completable namespace tree for explicit admin repair once its
+/// newest object is older than [`GC_MIN_GRACE_WINDOW_MS`], re-checking the
+/// complete head-and-descriptor pair immediately before deletion.
+pub(crate) async fn reap_abandoned_bootstrap<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    config: &GcConfig,
     context: &MutationContext,
-) -> Result<GcReport, CoreError> {
+) -> Result<AbandonedBootstrapReap, CoreError> {
     let namespace_prefix = format!("namespaces/{}/", namespace_id.as_str());
     let keys = list_prefix(store, &namespace_prefix).await?;
-    let mut report = GcReport::default();
     if keys.is_empty() {
-        return Ok(report);
+        return Ok(AbandonedBootstrapReap::Reaped);
     }
 
     // The newest object bounds the tree's age; a missing timestamp reads as
@@ -36,34 +42,38 @@ pub(super) async fn reap_abandoned_bootstrap<S: ObjectStore + ?Sized>(
             continue;
         };
         let Some(last_modified_ms) = metadata.last_modified_ms else {
-            report.retained_candidates += u64::try_from(keys.len()).unwrap_or(u64::MAX);
-            return Ok(report);
+            return Ok(AbandonedBootstrapReap::InFlight);
         };
-        if context.now_ms.saturating_sub(last_modified_ms) < config.reap_window_ms {
-            report.retained_candidates += u64::try_from(keys.len()).unwrap_or(u64::MAX);
-            return Ok(report);
+        if context.now_ms.saturating_sub(last_modified_ms) < GC_MIN_GRACE_WINDOW_MS {
+            return Ok(AbandonedBootstrapReap::InFlight);
         }
     }
 
-    // Re-check the absence of the completion marker immediately before
-    // deleting (rule 9).
-    let complete_now = store
-        .head(&namespace_config(namespace_id.as_str()))
+    // Re-check the complete pair immediately before deleting. A descriptor
+    // without a head is itself non-completable debris; a real completed
+    // namespace always has both because the descriptor is written last.
+    let descriptor_key = namespace_config(namespace_id.as_str());
+    let head_key = wal_head(namespace_id.as_str());
+    let descriptor_exists = store
+        .head(&descriptor_key)
         .await
-        .map_err(|error| CoreError::store(namespace_config(namespace_id.as_str()), &error))?
+        .map_err(|error| CoreError::store(&descriptor_key, &error))?
         .is_some();
-    if complete_now {
-        report.retained_candidates = u64::try_from(keys.len()).unwrap_or(u64::MAX);
-        return Ok(report);
+    let head_exists = store
+        .head(&head_key)
+        .await
+        .map_err(|error| CoreError::store(&head_key, &error))?
+        .is_some();
+    if descriptor_exists && head_exists {
+        return Ok(AbandonedBootstrapReap::AlreadyComplete);
     }
     for key in keys {
         store
             .delete(&key)
             .await
             .map_err(|error| CoreError::store(&key, &error))?;
-        report.reaped_abandoned_objects += 1;
     }
-    Ok(report)
+    Ok(AbandonedBootstrapReap::Reaped)
 }
 
 pub(super) async fn delete_if_aged<S: ObjectStore + ?Sized>(

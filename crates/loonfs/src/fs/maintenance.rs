@@ -264,6 +264,19 @@ impl FsCore {
         Ok(report)
     }
 
+    /// Explicitly completes or reaps one incomplete namespace installation.
+    pub(crate) async fn repair_namespace(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<crate::RepairNamespaceResponse> {
+        let response =
+            loonfs_core::repair_namespace(self.store(), namespace_id, &self.mutation_context()?)
+                .await
+                .map_err(RuntimeError::Core)?;
+        self.invalidate_namespace_read_cache(namespace_id);
+        Ok(response)
+    }
+
     /// Waits until every scheduled background maintenance tick has finished.
     ///
     /// Call this to quiesce before shutdown, or in tests that assert on
