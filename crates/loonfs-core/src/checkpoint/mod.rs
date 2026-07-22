@@ -62,9 +62,9 @@ pub(crate) use self::runs::MetadataLsmPolicy;
 pub(crate) use self::cache::CacheAdmission;
 pub(crate) use self::create::{build_initial_namespace_manifest, create_checkpoint};
 pub(crate) use self::flush::flush_wal;
+pub use self::index_build::is_indexable_text_content;
 pub(crate) use self::index_build::{
     build_grams_index_step, disable_grams_index, enable_grams_index, fold_grams_index_step,
-    is_indexable_text_content,
 };
 pub(crate) use self::index_read::{
     index_segment_corrupt, load_index_segment_data_block, load_index_segment_filter_block,

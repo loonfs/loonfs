@@ -206,7 +206,10 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         .await
     }
 
-    /// Runs one content-search page against the pinned runtime read context.
+    /// Runs one content-search page through core's reference executor.
+    ///
+    /// Retained for differential testing until the final core-deletion PR;
+    /// the production runtime delegates content search to `loonfs-grep`.
     pub async fn grep_with_runtime_context(
         &self,
         request: &GrepRequest,
@@ -216,6 +219,19 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             .load_read_view(runtime_read_load_context(options))
             .await?;
         view.grep(&self.store, request).await
+    }
+
+    /// Loads the coherent read view passed to `loonfs-grep`.
+    ///
+    /// This is part of the read surface consumed by `loonfs-grep`. The old
+    /// [`Self::grep_with_runtime_context`] remains callable only as the
+    /// differential-test reference until the final core-deletion change.
+    pub async fn load_grep_view_with_runtime_context<'a>(
+        &'a self,
+        options: &'a RuntimeReadContext,
+    ) -> CoreResult<LoadedMetadataView<'a, S>> {
+        self.load_read_view(runtime_read_load_context(options))
+            .await
     }
 
     /// Lists one revision page for a path against the pinned runtime read context.

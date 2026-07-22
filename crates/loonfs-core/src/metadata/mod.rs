@@ -43,7 +43,8 @@ pub use self::rows::{
 
 pub(crate) use self::durable_cache::DurableVisibilityCache;
 pub(crate) use self::view::{InMemoryMetadataView, MetadataView};
-pub(crate) use self::view_session::{MetadataViewSession, VisibleChildEntry};
+pub use self::view_session::MetadataViewSession;
+pub(crate) use self::view_session::VisibleChildEntry;
 pub(crate) use self::visibility::{unbind_matches_binding, BindingIdentity};
 
 #[cfg(test)]

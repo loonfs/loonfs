@@ -111,9 +111,9 @@ pub mod publish {
 }
 
 pub use checkpoint::{
-    GramIndexBuildOutcome, GramIndexBuildPolicy, GramIndexBuildReport, GramIndexDisableOutcome,
-    GramIndexEnableOutcome, GramIndexFoldOutcome, GramIndexFoldReport, MetadataReorganizeOutcome,
-    MetadataReorganizeReport,
+    is_indexable_text_content, GramIndexBuildOutcome, GramIndexBuildPolicy, GramIndexBuildReport,
+    GramIndexDisableOutcome, GramIndexEnableOutcome, GramIndexFoldOutcome, GramIndexFoldReport,
+    MetadataReorganizeOutcome, MetadataReorganizeReport,
 };
 pub use context::MutationContext;
 pub use engine::RuntimeReadContext;
@@ -133,4 +133,10 @@ pub mod grep_limits {
     pub use crate::path::read::{
         DEFAULT_GREP_PAGE_LIMIT, MAX_GREP_PAGE_LIMIT, MAX_GREP_SCAN_FILES, MAX_GREP_TAIL_FILES,
     };
+}
+
+/// Concrete read-view types consumed by `loonfs-grep`.
+pub mod grep {
+    pub use crate::metadata::MetadataViewSession;
+    pub use crate::path::read::LoadedMetadataView;
 }

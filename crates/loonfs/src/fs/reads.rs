@@ -10,6 +10,7 @@ use loonfs_api::{
     encode_directory_cursor, AbsolutePath, DirectoryPageCursor, FileRevisionsPageCursor,
     GrepRequest, GrepResponse, PageRequest,
 };
+use loonfs_grep::GrepIndexSnapshot;
 
 impl FsCore {
     /// Resolves an absolute path to its authoritative entry at the current
@@ -176,8 +177,14 @@ impl FsCore {
             } else {
                 (engine, read_context)
             };
-        let response = engine
-            .grep_with_runtime_context(request, &read_context)
+        let view = engine
+            .load_grep_view_with_runtime_context(&read_context)
+            .await?;
+        let snapshot = GrepIndexSnapshot::from_core_parts(view.grep_index_snapshot_parts());
+        let response = self
+            .inner
+            .grep_service
+            .query(request, &snapshot, &view, &self.inner.store)
             .await?;
         self.inner.cache_stats.record_latest_metadata_view_read();
         Ok(response)
