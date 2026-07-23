@@ -11,6 +11,7 @@ mod cache;
 pub mod codec;
 mod config;
 mod driver;
+mod error;
 mod index_read;
 pub mod keyspace;
 mod query;
@@ -20,6 +21,8 @@ mod worker;
 
 pub use config::{GrepWorkerConfig, GrepWorkerConfigError};
 pub use driver::{GrepDriver, GrepDriverHandle, GrepDriverParked, GrepDriverState, GrepDriverTask};
+pub use error::GrepError as Error;
+pub use error::{GrepError, Result};
 pub use service::{
     GrepIndexSnapshot, GrepService, DEFAULT_GREP_PAGE_LIMIT, MAX_GREP_PAGE_LIMIT,
     MAX_GREP_SCAN_FILES, MAX_GREP_TAIL_FILES,

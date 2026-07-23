@@ -12,7 +12,7 @@ use loonfs::{
     gc_config_from_request, gc_response_from_report, BootstrapNamespaceError, ChangesResponse,
     CopyOptions, CoreError, CreateCheckpointOptions, CreateDirectoryOptions,
     CreateNamespaceOptions, DeleteNamespaceOptions, DeleteNamespaceResponse, DeleteOptions,
-    ErrorCode, FsAdmin, FsBackgroundWork, FsReader, FsWriter, ListChangesOptions,
+    ErrorCode, FsAdmin, FsBackgroundWork, FsReader, FsWriter, GrepError, ListChangesOptions,
     MaintenanceTickOptions, MaintenanceTickResult, MoveOptions, PutFileOptions,
     RestoreRevisionOptions, RuntimeError, SharedObjectStore, TraceStoreKind, UndeleteOptions,
 };
@@ -518,6 +518,7 @@ fn map_runtime_error(error: RuntimeError) -> BackendError {
     match error {
         RuntimeError::Core(error) => map_core_error(error),
         RuntimeError::Bootstrap(error) => map_bootstrap_error(error),
+        RuntimeError::Grep(error) => map_grep_error(error),
         RuntimeError::Config(message) => BackendError::invalid_config(message),
         RuntimeError::RuntimeTask(message) => BackendError::runtime_error(message),
         other => BackendError::runtime_error(other.to_string()),
@@ -531,6 +532,7 @@ fn map_namespace_scoped_runtime_error(
     match error {
         RuntimeError::Core(error) => map_namespace_scoped_core_error(namespace_id, error),
         RuntimeError::Bootstrap(error) => map_bootstrap_error(error),
+        RuntimeError::Grep(error) => map_namespace_scoped_grep_error(namespace_id, error),
         RuntimeError::Config(message) => BackendError::invalid_config(message),
         RuntimeError::RuntimeTask(message) => BackendError::runtime_error(message),
         other => BackendError::runtime_error(other.to_string()),
@@ -545,6 +547,13 @@ fn map_core_error(error: CoreError) -> BackendError {
     BackendError::new(error.code().as_str(), error.to_string())
 }
 
+fn map_grep_error(error: GrepError) -> BackendError {
+    match error {
+        GrepError::Core(error) => map_core_error(error),
+        error => BackendError::new(error.code().as_str(), error.to_string()),
+    }
+}
+
 fn map_namespace_scoped_core_error(namespace_id: &NamespaceId, error: CoreError) -> BackendError {
     if matches!(error.code(), ErrorCode::NamespaceNotFound) {
         return BackendError::new(
@@ -554,6 +563,13 @@ fn map_namespace_scoped_core_error(namespace_id: &NamespaceId, error: CoreError)
     }
 
     map_core_error(error)
+}
+
+fn map_namespace_scoped_grep_error(namespace_id: &NamespaceId, error: GrepError) -> BackendError {
+    match error {
+        GrepError::Core(error) => map_namespace_scoped_core_error(namespace_id, error),
+        error => BackendError::new(error.code().as_str(), error.to_string()),
+    }
 }
 
 fn map_bootstrap_error(error: BootstrapNamespaceError) -> BackendError {
@@ -701,12 +717,13 @@ impl RemoteTarget {
 #[allow(clippy::panic)]
 mod tests {
     use super::{
-        map_bootstrap_error, map_core_error, resolve_cli_page_limit, Backend, EmbeddedTarget,
+        map_bootstrap_error, map_core_error, map_grep_error, resolve_cli_page_limit, Backend,
+        EmbeddedTarget,
     };
     use crate::config::StoreConfig;
     use loonfs::{
         BootstrapNamespaceError, CoreError, CreateNamespaceOptions, ErrorCode, FsBackgroundWork,
-        FsWriter, PutFileOptions, RuntimeError, SharedObjectStore,
+        FsWriter, GrepError, PutFileOptions, RuntimeError, SharedObjectStore,
     };
     use loonfs_api::{
         ChangeSeq, CreateCheckpointRequest, DestinationBehavior, InodeId, NamespaceId, RevisionNo,
@@ -735,6 +752,27 @@ mod tests {
         ));
         assert_eq!(error.code, ErrorCode::ContentNotPrepared.as_str());
         assert!(error.message.contains("abc123"));
+    }
+
+    #[test]
+    fn map_grep_error_preserves_embedded_remote_code_parity() {
+        for (error, expected) in [
+            (GrepError::NotEnabled, ErrorCode::NotSupported),
+            (
+                GrepError::CorruptIndex {
+                    message: "bad pointer".to_owned(),
+                },
+                ErrorCode::IndexCorrupt,
+            ),
+            (
+                GrepError::PublicationConflict {
+                    object_key: "namespaces/demo/extensions/grep/root.json".to_owned(),
+                },
+                ErrorCode::StaleHead,
+            ),
+        ] {
+            assert_eq!(map_grep_error(error).code, expected.as_str());
+        }
     }
 
     #[test]

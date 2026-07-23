@@ -1,8 +1,7 @@
 //! Event-driven maintenance for one grep-enabled namespace.
 
-use crate::{GramIndexBuildPolicy, GrepBuildOutcome, GrepFoldOutcome, GrepWorker};
+use crate::{GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepFoldOutcome, GrepWorker};
 use loonfs_api::{ChangeSeq, ErrorCode, NamespaceId};
-use loonfs_core::Error as CoreError;
 use loonfs_objectstore::ObjectStore;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -266,7 +265,7 @@ impl<S: ObjectStore + Clone + Send + Sync + 'static> GrepDriver<S> {
         &self,
         consecutive_failures: u32,
         phase: &'static str,
-        error: &CoreError,
+        error: &GrepError,
     ) -> bool {
         let shift = consecutive_failures.saturating_sub(1).min(16);
         let delay_ms = ERROR_BACKOFF_BASE_MS

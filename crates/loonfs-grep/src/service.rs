@@ -7,9 +7,10 @@ use crate::codec::{lookup, Gram, IndexRow, INDEX_GRAMS_MAX_FILE_BYTES};
 use crate::index_read::{
     index_segment_corrupt, load_data_block, load_filter_block, load_index_block,
 };
-use crate::keyspace::segment_key;
+use crate::keyspace::{manifest_key, segment_key};
 use crate::query::{plan_pattern, GramPlanOutcome, GramQueryPlan};
 use crate::root::{load_grep_manifest, load_grep_root_pointer, GrepLifecycle, GrepRootState};
+use crate::{GrepError, Result};
 use futures::future::{join_all, try_join_all};
 use loonfs_api::wire::manifest::hex_decode_bytes;
 use loonfs_api::wire::sst_blocks::{decode_filter_block, index_blocks_for_key_range};
@@ -21,7 +22,7 @@ use loonfs_api::{
 use loonfs_core::content::read_durable_content_bytes;
 use loonfs_core::grep::{LoadedMetadataView, MetadataViewSession};
 use loonfs_core::metadata::RevisionRecord;
-use loonfs_core::{Error as CoreError, MetadataViewError, Result};
+use loonfs_core::{Error as CoreError, MetadataViewError};
 use loonfs_objectstore::ObjectStore;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -94,15 +95,15 @@ struct GrepQuerySegment {
 
 impl GrepIndexSnapshot {
     /// Captures unreadable grep extension state while preserving error precedence.
-    pub fn from_error(error: CoreError) -> Self {
+    pub fn from_error(error: GrepError) -> Self {
         Self { state: Err(error) }
     }
 
     /// Freshly loads the grep pointer, then loads or reuses its immutable manifest.
     ///
-    /// Missing or corrupt pointers/manifests and disabled or backfilling
-    /// lifecycles all collapse to the same `index.grams` not-materialized
-    /// surface. Grep-private corruption never changes core read behavior.
+    /// Missing or disabled roots and incomplete backfills remain
+    /// not-materialized. Unreadable derived state retains its actionable
+    /// grep-specific failure without changing core read behavior.
     pub async fn from_grep_root<S: ObjectStore + ?Sized>(
         store: &S,
         namespace_id: &NamespaceId,
@@ -110,7 +111,8 @@ impl GrepIndexSnapshot {
     ) -> Self {
         let pointer = match load_grep_root_pointer(store, namespace_id).await {
             Ok(Some(pointer)) => pointer,
-            Ok(None) | Err(_) => return Self::from_error(feature_not_materialized()),
+            Ok(None) => return Self::from_error(GrepError::NotEnabled),
+            Err(error) => return Self::from_error(error.into()),
         };
         let manifest_id = pointer.pointer().manifest_id();
         let cache_key = GrepBlockCacheKey {
@@ -124,11 +126,27 @@ impl GrepIndexSnapshot {
                 DecodedGrepBlock::Filter(_)
                 | DecodedGrepBlock::Index(_)
                 | DecodedGrepBlock::Data(_),
-            ) => return Self::from_error(feature_not_materialized()),
+            ) => {
+                return Self::from_error(GrepError::CorruptIndex {
+                    message: format!(
+                        "grep manifest `{}` resolved to a non-manifest cache entry",
+                        manifest_key(namespace_id, manifest_id)
+                    ),
+                });
+            }
             None => {
                 let manifest = match load_grep_manifest(store, namespace_id, manifest_id).await {
                     Ok(Some(manifest)) => manifest,
-                    Ok(None) | Err(_) => return Self::from_error(feature_not_materialized()),
+                    Ok(None) => {
+                        return Self::from_error(GrepError::CorruptIndex {
+                            message: format!(
+                                "grep root `{}` names missing manifest `{}`",
+                                pointer.object_key(),
+                                manifest_key(namespace_id, manifest_id)
+                            ),
+                        });
+                    }
+                    Err(error) => return Self::from_error(error.into()),
                 };
                 let state = std::sync::Arc::new(manifest.state().clone());
                 service
@@ -138,17 +156,27 @@ impl GrepIndexSnapshot {
             }
         };
         if state.namespace_id() != namespace_id {
-            return Self::from_error(feature_not_materialized());
+            return Self::from_error(GrepError::CorruptIndex {
+                message: format!(
+                    "grep manifest `{}` names namespace `{}` instead of requested namespace `{namespace_id}`",
+                    manifest_key(namespace_id, manifest_id),
+                    state.namespace_id()
+                ),
+            });
         }
         Self::from_state(Some(&state))
     }
 
     fn from_state(root: Option<&GrepRootState>) -> Self {
         let Some(root) = root else {
-            return Self::from_error(feature_not_materialized());
+            return Self::from_error(GrepError::NotEnabled);
         };
-        if !matches!(root.lifecycle(), GrepLifecycle::Steady) {
-            return Self::from_error(feature_not_materialized());
+        match root.lifecycle() {
+            GrepLifecycle::Disabled => return Self::from_error(GrepError::NotEnabled),
+            GrepLifecycle::Backfilling { .. } => {
+                return Self::from_error(GrepError::Backfilling);
+            }
+            GrepLifecycle::Steady => {}
         }
         let segments = root
             .segments()
@@ -173,12 +201,6 @@ impl GrepIndexSnapshot {
 
     fn materialized(&self) -> Result<&MaterializedGrepIndexSnapshot> {
         self.state.as_ref().map_err(Clone::clone)
-    }
-}
-
-fn feature_not_materialized() -> CoreError {
-    CoreError::FeatureNotMaterialized {
-        feature: "index.grams".to_owned(),
     }
 }
 
@@ -369,12 +391,13 @@ async fn segment_postings_for_gram<S: ObjectStore + ?Sized>(
     let mut postings = BTreeSet::new();
     let admitted = match &descriptor.filter_inline {
         Some(inline) => {
-            let filter_bytes = hex_decode_bytes(inline).map_err(|error| {
-                CoreError::NamespaceCorrupt(format!(
-                    "index segment `{}` carries undecodable inline filter hex: {error}",
-                    descriptor.object_key
-                ))
-            })?;
+            let filter_bytes =
+                hex_decode_bytes(inline).map_err(|error| GrepError::CorruptIndex {
+                    message: format!(
+                        "index segment `{}` carries undecodable inline filter hex: {error}",
+                        descriptor.object_key
+                    ),
+                })?;
             let filter =
                 decode_filter_block(&filter_bytes, &descriptor.filter_block).map_err(|error| {
                     index_segment_corrupt(&descriptor.object_key, "filter block", &error)
@@ -553,7 +576,7 @@ async fn derive_visible_path<S: ObjectStore + ?Sized>(
         }
         Ok(_) => Ok(None),
         Err(error) if error.code() == loonfs_api::ErrorCode::PathNotFound => Ok(None),
-        Err(error) => Err(error),
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -623,14 +646,15 @@ impl GrepService {
         let limit = match request.limit {
             None => DEFAULT_GREP_PAGE_LIMIT,
             Some(0) => {
-                return Err(CoreError::InvalidQuery(
-                    "limit must be greater than zero".to_owned(),
-                ));
+                return Err(
+                    CoreError::InvalidQuery("limit must be greater than zero".to_owned()).into(),
+                );
             }
             Some(limit) if limit as usize > MAX_GREP_PAGE_LIMIT => {
                 return Err(CoreError::InvalidQuery(format!(
                     "limit {limit} exceeds the maximum of {MAX_GREP_PAGE_LIMIT}"
-                )));
+                ))
+                .into());
             }
             Some(limit) => limit as usize,
         };
@@ -644,13 +668,14 @@ impl GrepService {
                         "the cursor was issued by a different request; replaying it \
                          under new criteria would silently skip results"
                             .to_owned(),
-                    ));
+                    )
+                    .into());
                 }
                 if cursor.head_seq > view.head().seq {
-                    return Err(MetadataViewError::SnapshotUnavailable {
+                    return Err(CoreError::from(MetadataViewError::SnapshotUnavailable {
                         requested_seq: cursor.head_seq,
                         head_seq: view.head().seq,
-                    }
+                    })
                     .into());
                 }
                 Some((cursor.last_inode_id, cursor.last_byte_offset))
@@ -696,7 +721,7 @@ impl GrepService {
                             next_cursor: None,
                         });
                     }
-                    Err(error) => return Err(error),
+                    Err(error) => return Err(error.into()),
                 }
             }
             None => None,
@@ -716,7 +741,8 @@ impl GrepService {
                         "the pattern has no run of at least 3 literal bytes for the \
                          trigram index; set allow_scan to search without it"
                             .to_owned(),
-                    ));
+                    )
+                    .into());
                 }
                 candidates.unfiltered = scan_candidate_inodes(view).await?;
             }
@@ -734,7 +760,8 @@ impl GrepService {
                         .seq
                         .0
                         .saturating_sub(snapshot.built_through_seq.0),
-                });
+                }
+                .into());
             }
         } else {
             candidates.unfiltered.extend(tail);
@@ -887,7 +914,7 @@ impl GrepService {
                     resume_cursor = Some((inode_id, u64::MAX));
                     continue;
                 };
-                let content = content?;
+                let content = content.map_err(CoreError::from)?;
                 if !is_indexable_text_content(&content.bytes) {
                     resume_cursor = Some((inode_id, u64::MAX));
                     continue;
@@ -986,7 +1013,8 @@ async fn scan_candidate_inodes<S: ObjectStore + ?Sized>(
                 "the namespace exceeds the {MAX_GREP_SCAN_FILES}-file scan budget; \
                  give the pattern a run of at least 3 literal bytes so the \
                  trigram index can narrow candidates"
-            )));
+            ))
+            .into());
         }
         if exhausted {
             break;

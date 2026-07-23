@@ -113,7 +113,7 @@ async fn new_query(
     store: &SharedObjectStore,
     namespace_id: &NamespaceId,
     grep_request: &GrepRequest,
-) -> loonfs_core::Result<GrepResponse> {
+) -> loonfs_grep::Result<GrepResponse> {
     let engine = NamespaceEngine::builder(store.clone())
         .namespace_id(namespace_id.clone())
         .writer_id("new-query")
@@ -458,17 +458,17 @@ async fn grep_root_lifecycle_pins_not_materialized_error_surface() {
         .expect("create namespace");
     let worker = worker(&store);
 
-    assert_not_materialized_error(
+    assert_not_enabled_error(
         "never enabled",
         new_reader.grep(&namespace_id, &request("needle")).await,
     );
     worker.enable(&namespace_id).await.expect("enable");
-    assert_not_materialized_error(
+    assert_backfilling_error(
         "backfilling",
         new_reader.grep(&namespace_id, &request("needle")).await,
     );
     worker.disable(&namespace_id).await.expect("disable");
-    assert_not_materialized_error(
+    assert_not_enabled_error(
         "disabled",
         new_reader.grep(&namespace_id, &request("needle")).await,
     );
@@ -477,7 +477,7 @@ async fn grep_root_lifecycle_pins_not_materialized_error_surface() {
         GrepManifestId::parse("1111111111111111111111111111111111111111111111111111111111111111")
             .expect("valid manifest id");
     write_pointer(&*store, &namespace_id, missing_manifest_id).await;
-    assert_not_materialized_error(
+    assert_corrupt_index_error(
         "missing manifest",
         new_reader.grep(&namespace_id, &request("needle")).await,
     );
@@ -493,7 +493,7 @@ async fn grep_root_lifecycle_pins_not_materialized_error_surface() {
         .await
         .expect("write corrupt manifest");
     write_pointer(&*store, &namespace_id, corrupt_manifest_id).await;
-    assert_not_materialized_error(
+    assert_corrupt_index_error(
         "corrupt manifest",
         new_reader.grep(&namespace_id, &request("needle")).await,
     );
@@ -505,7 +505,7 @@ async fn grep_root_lifecycle_pins_not_materialized_error_surface() {
         )
         .await
         .expect("write corrupt pointer");
-    assert_not_materialized_error(
+    assert_corrupt_index_error(
         "corrupt pointer",
         new_reader.grep(&namespace_id, &request("needle")).await,
     );
@@ -531,9 +531,9 @@ async fn write_pointer(
         .expect("write pointer");
 }
 
-fn assert_not_materialized_error(case: &str, result: loonfs::Result<GrepResponse>) {
+fn assert_not_enabled_error(case: &str, result: loonfs::Result<GrepResponse>) {
     match result {
-        Err(loonfs::Error::Core(error)) => {
+        Err(loonfs::Error::Grep(error @ loonfs::GrepError::NotEnabled)) => {
             assert_eq!(error.code(), ErrorCode::NotSupported, "code for {case}");
             assert_eq!(
                 error.to_string(),
@@ -542,6 +542,35 @@ fn assert_not_materialized_error(case: &str, result: loonfs::Result<GrepResponse
             );
         }
         outcome => panic!("expected not-materialized error for {case}, got {outcome:?}"),
+    }
+}
+
+fn assert_backfilling_error(case: &str, result: loonfs::Result<GrepResponse>) {
+    match result {
+        Err(loonfs::Error::Grep(error @ loonfs::GrepError::Backfilling)) => {
+            assert_eq!(error.code(), ErrorCode::NotSupported, "code for {case}");
+            assert_eq!(
+                error.to_string(),
+                "feature `index.grams` is not materialized on this namespace",
+                "error text for {case}"
+            );
+        }
+        outcome => panic!("expected backfilling error for {case}, got {outcome:?}"),
+    }
+}
+
+fn assert_corrupt_index_error(case: &str, result: loonfs::Result<GrepResponse>) {
+    match result {
+        Err(loonfs::Error::Grep(error @ loonfs::GrepError::CorruptIndex { .. })) => {
+            assert_eq!(error.code(), ErrorCode::IndexCorrupt, "code for {case}");
+            assert!(
+                error
+                    .to_string()
+                    .contains("disable and re-enable grep to rebuild it"),
+                "error text for {case}: {error}"
+            );
+        }
+        outcome => panic!("expected corrupt-index error for {case}, got {outcome:?}"),
     }
 }
 
@@ -724,7 +753,7 @@ async fn fork_of_grep_enabled_namespace_starts_unmaterialized_without_manifest_s
         "fork target must have no grep root until explicitly enabled"
     );
     let target_reader = writer.reader();
-    assert_not_materialized_error(
+    assert_not_enabled_error(
         "fork target",
         target_reader.grep(&target, &request("needle")).await,
     );

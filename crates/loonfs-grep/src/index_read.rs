@@ -2,11 +2,12 @@
 
 use crate::cache::{DecodedGrepBlock, GrepBlockCache, GrepBlockCacheKey, GrepBlockKind};
 use crate::codec::IndexRow;
+use crate::{GrepError, Result};
 use loonfs_api::wire::sst_blocks::{
     decode_data_block_rows, decode_filter_block, decode_index_block, BlockHandle, DecodedDataBlock,
     SegmentFilter, SegmentIndexEntry,
 };
-use loonfs_core::{Error as CoreError, Result, StoreFailureClass};
+use loonfs_core::StoreFailureClass;
 use loonfs_objectstore::{ByteRange, ObjectStore};
 use std::sync::Arc;
 
@@ -14,10 +15,10 @@ pub(crate) fn index_segment_corrupt(
     object_key: &str,
     what: &str,
     error: &dyn std::fmt::Display,
-) -> CoreError {
-    CoreError::NamespaceCorrupt(format!(
-        "index segment `{object_key}` carries an unreadable {what}: {error}"
-    ))
+) -> GrepError {
+    GrepError::CorruptIndex {
+        message: format!("index segment `{object_key}` carries an unreadable {what}: {error}"),
+    }
 }
 
 fn cache_key(
@@ -40,10 +41,10 @@ async fn load_index_section_bytes<S: ObjectStore + ?Sized>(
     let end_exclusive = handle
         .offset
         .checked_add(u64::from(handle.stored_len))
-        .ok_or_else(|| {
-            CoreError::NamespaceCorrupt(format!(
+        .ok_or_else(|| GrepError::CorruptIndex {
+            message: format!(
                 "index segment `{object_key}` descriptor names bytes past the address space"
-            ))
+            ),
         })?;
     let bytes = store
         .get(
@@ -54,15 +55,13 @@ async fn load_index_section_bytes<S: ObjectStore + ?Sized>(
             }),
         )
         .await
-        .map_err(|error| CoreError::Store {
+        .map_err(|error| GrepError::StoreUnavailable {
             object_key: object_key.to_owned(),
             message: error.message(),
             class: StoreFailureClass::of(&error),
         })?
-        .ok_or_else(|| {
-            CoreError::NamespaceCorrupt(format!(
-                "manifest references missing index segment `{object_key}`"
-            ))
+        .ok_or_else(|| GrepError::CorruptIndex {
+            message: format!("manifest references missing index segment `{object_key}`"),
         })?;
     Ok(bytes.to_vec())
 }

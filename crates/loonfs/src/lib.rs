@@ -66,6 +66,7 @@ pub use loonfs_core::{
     BootstrapNamespaceError, DeleteNamespaceOptions, Error as CoreError, ErrorCode, ErrorKind,
     GcConfig, GcReport, WriterFence,
 };
+pub use loonfs_grep::GrepError;
 pub use publisher::PublishObserver;
 
 /// Integration seam: the vocabulary for handing classified mutation work to
@@ -132,6 +133,9 @@ pub enum RuntimeError {
     /// Bootstrapping a namespace failed.
     #[error(transparent)]
     Bootstrap(#[from] BootstrapNamespaceError),
+    /// A grep query or grep-owned maintenance operation failed.
+    #[error(transparent)]
+    Grep(#[from] GrepError),
     /// The runtime configuration is invalid.
     #[error("invalid runtime config: {0}")]
     Config(String),

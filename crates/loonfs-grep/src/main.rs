@@ -71,6 +71,8 @@ enum StandaloneError {
     OpenStore(#[from] loonfs_objectstore::ObjectStoreError),
     #[error("grep maintenance failed: {0}")]
     Maintenance(#[from] loonfs_core::Error),
+    #[error("grep operation failed: {0}")]
+    Grep(#[from] loonfs_grep::GrepError),
     #[error("grep driver for namespace `{namespace_id}` stopped before parking")]
     DriverStopped { namespace_id: NamespaceId },
     #[error("grep driver task failed: {0}")]

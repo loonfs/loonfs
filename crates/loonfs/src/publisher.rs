@@ -1016,6 +1016,7 @@ fn runtime_error_to_core(error: RuntimeError) -> CoreError {
     match error {
         RuntimeError::Core(error) => error,
         RuntimeError::Bootstrap(error) => CoreError::Internal(error.to_string()),
+        RuntimeError::Grep(error) => CoreError::Internal(error.to_string()),
         RuntimeError::Config(message) => CoreError::Internal(message),
         RuntimeError::RuntimeTask(message) => CoreError::Internal(message),
     }

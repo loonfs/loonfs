@@ -14,6 +14,7 @@ use super::state::{GrepManifestId, GrepRootPointer, GrepRootState};
 use crate::keyspace::{manifest_key, root_key};
 use bytes::Bytes;
 use loonfs_api::NamespaceId;
+use loonfs_core::StoreFailureClass;
 use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
 
 /// A verified grep root pointer and metadata from the same store read.
@@ -371,5 +372,6 @@ fn store_error(object_key: &str, error: &ObjectStoreError) -> GrepRootError {
     GrepRootError::Store {
         object_key: object_key.to_owned(),
         message: error.message(),
+        class: StoreFailureClass::of(error),
     }
 }

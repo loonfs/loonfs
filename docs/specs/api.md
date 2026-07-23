@@ -250,6 +250,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `checkpoint_unavailable` | 503 | Required checkpoint state is unavailable: not yet published, changed during the operation, condemned pending GC deletion, or referenced material is missing. Retry after maintenance. |
 | `maintenance_required` | 503 | Namespace metadata requires maintenance before the request can be served; run maintenance and retry. |
 | `index_lagging` | 503 | The gram index trails the head past the exhaustive-scan budget; let the grep worker catch up (or set `allow_stale`) and retry. |
+| `index_corrupt` | 500 | The grep index's derived state failed validation. Disable and re-enable grep on the namespace to rebuild it; core filesystem state remains available. |
 | `namespace_corrupt` | 500 | Durable namespace state failed validation. |
 | `server_error` | 500 | Unclassified internal failure. |
 

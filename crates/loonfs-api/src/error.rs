@@ -153,6 +153,7 @@ error_codes! {
     RebootstrapRequired => "rebootstrap_required",
     QueryUnindexable => "query_unindexable",
     IndexLagging => "index_lagging",
+    IndexCorrupt => "index_corrupt",
     NamespaceCorrupt => "namespace_corrupt",
     ServerError => "server_error",
 }
@@ -192,7 +193,7 @@ impl ErrorCode {
             | ErrorCode::IndexLagging
             | ErrorCode::MaintenanceRequired => ErrorKind::Unavailable,
             ErrorCode::CommitOutcomeUnknown => ErrorKind::OutcomeUnknown,
-            ErrorCode::NamespaceCorrupt => ErrorKind::DataCorruption,
+            ErrorCode::IndexCorrupt | ErrorCode::NamespaceCorrupt => ErrorKind::DataCorruption,
             ErrorCode::ServerError => ErrorKind::Internal,
             // The spec deliberately surfaces precondition failures
             // (`stale_revision`, `stale_head`, `commit_id_reuse_conflict`) as
