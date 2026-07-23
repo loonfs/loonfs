@@ -489,7 +489,7 @@ impl FsCore {
 
     #[tracing::instrument(
         level = "info",
-        name = "loon.phase",
+        name = "loonfs.phase",
         skip_all,
         fields(phase = "update_cache")
     )]

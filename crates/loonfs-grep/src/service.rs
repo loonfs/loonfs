@@ -645,7 +645,7 @@ impl GrepService {
     /// `head_seq`.
     #[tracing::instrument(
         level = "info",
-        name = "loon.phase",
+        name = "loonfs.phase",
         err,
         skip_all,
         fields(phase = "grep")

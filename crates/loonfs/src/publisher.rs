@@ -688,7 +688,7 @@ impl NamespacePublisher {
         }
 
         let publish_span = tracing::info_span!(
-            "loon.phase",
+            "loonfs.phase",
             phase = "batch_publish",
             mode = self.trace_mode(),
             store_kind = self.trace_store_kind(),

@@ -119,7 +119,10 @@ pub(crate) async fn publish_namespace_mutations_batch_against_publish_view<
                 index,
                 &mut dedup,
             )
-            .instrument(tracing::info_span!("loon.phase", phase = "prepare_commit"))
+            .instrument(tracing::info_span!(
+                "loonfs.phase",
+                phase = "prepare_commit"
+            ))
             .await
             .unwrap_or_else(|error| CandidateAdmission::Settled(Err(error)));
             let candidate_request = match admission {
@@ -148,7 +151,7 @@ pub(crate) async fn publish_namespace_mutations_batch_against_publish_view<
                 continue;
             }
             let plan = {
-                let span = tracing::info_span!("loon.phase", phase = "build_commit_plan");
+                let span = tracing::info_span!("loonfs.phase", phase = "build_commit_plan");
                 match build_commit_plan_for_publish(&request, context.now_ms, &validation)
                     .instrument(span)
                     .await
@@ -161,8 +164,8 @@ pub(crate) async fn publish_namespace_mutations_batch_against_publish_view<
                 }
             };
             let prepared = {
-                let _span =
-                    tracing::info_span!("loon.phase", phase = "PreparedCommit::prepare").entered();
+                let _span = tracing::info_span!("loonfs.phase", phase = "PreparedCommit::prepare")
+                    .entered();
                 match PreparedCommit::prepare(
                     request,
                     plan.clone(),
@@ -179,12 +182,12 @@ pub(crate) async fn publish_namespace_mutations_batch_against_publish_view<
             };
             let materialized = {
                 let _span =
-                    tracing::info_span!("loon.phase", phase = "materialize_commit").entered();
+                    tracing::info_span!("loonfs.phase", phase = "materialize_commit").entered();
                 materialize_commit(prepared, context.now_ms)
             };
             let preview = {
                 let _span = tracing::info_span!(
-                    "loon.phase",
+                    "loonfs.phase",
                     phase = "wal_payload_from_materialized_commit"
                 )
                 .entered();
@@ -197,8 +200,9 @@ pub(crate) async fn publish_namespace_mutations_batch_against_publish_view<
                 }
             };
             {
-                let _span = tracing::info_span!("loon.phase", phase = "apply_committed_wal_record")
-                    .entered();
+                let _span =
+                    tracing::info_span!("loonfs.phase", phase = "apply_committed_wal_record")
+                        .entered();
                 session.apply_accepted_commit(&preview, &plan);
             }
             accepted.push((index, materialized));

@@ -27,7 +27,7 @@ pub(super) enum ManifestPublicationOutcome {
 
 #[tracing::instrument(
     level = "info",
-    name = "loon.phase",
+    name = "loonfs.phase",
     err,
     skip_all,
     fields(phase = "write_namespace_manifest", key_class = "manifest_table")
@@ -91,7 +91,7 @@ pub(crate) async fn write_namespace_manifest<S: ObjectStore + ?Sized>(
 
 #[tracing::instrument(
     level = "info",
-    name = "loon.phase",
+    name = "loonfs.phase",
     err,
     skip_all,
     fields(phase = "publish_metadata_root", key_class = "metadata_root")
