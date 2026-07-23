@@ -29,6 +29,11 @@ pub enum WalBuildError {
         request: NamespaceId,
         plan: NamespaceId,
     },
+    #[error("WAL segment namespace mismatch: record `{record}`, segment `{segment}`")]
+    SegmentNamespaceMismatch {
+        record: NamespaceId,
+        segment: NamespaceId,
+    },
     #[error("WAL build base head seq mismatch: request `{request}`, plan `{plan}`")]
     BaseHeadSeqMismatch { request: ChangeSeq, plan: ChangeSeq },
     #[error("non-contiguous WAL seq: expected `{expected}`, actual `{actual}`")]
@@ -38,6 +43,8 @@ pub enum WalBuildError {
     },
     #[error("WAL codec error: {0}")]
     Codec(String),
+    #[error("sequence counter overflow")]
+    SeqOverflow,
 }
 
 #[derive(Debug, Clone)]
@@ -162,8 +169,11 @@ pub enum WalChainLoadError {
         chain_base_seq: ChangeSeq,
         head_seq: ChangeSeq,
     },
-    #[error("missing visible WAL tip for seq `{seq}` under `{prefix}`")]
-    MissingVisibleTip { prefix: String, seq: ChangeSeq },
+    #[error("missing visible WAL tip for namespace `{namespace_id}` at seq `{seq}`")]
+    MissingVisibleTip {
+        namespace_id: NamespaceId,
+        seq: ChangeSeq,
+    },
     #[error("visible WAL tip ends at `{actual}`, expected head seq `{expected}`")]
     TipEndSeqMismatch {
         expected: ChangeSeq,
@@ -227,6 +237,13 @@ pub enum WalReplayError {
     EmptySegment,
     #[error("WAL segment summary does not match its records")]
     SegmentSummaryMismatch,
+    #[error(
+        "WAL segment `{object_key}` is missing its previous visible segment link before seq `{required_seq}`"
+    )]
+    BrokenChainLink {
+        object_key: String,
+        required_seq: ChangeSeq,
+    },
     #[error("sequence counter overflow")]
     SeqOverflow,
 }

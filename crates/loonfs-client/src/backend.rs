@@ -16,16 +16,22 @@
 //! running each wire call on the runtime's blocking pool instead of stalling
 //! an async worker.
 
-use crate::{Client, ClientError, MutationOptions, NamespacePath};
+use crate::{
+    Client, ClientError, CreateDirectoryOptions, DeleteOptions, MutationOptions, NamespacePath,
+    PutFileOptions,
+};
 use async_trait::async_trait;
 use loonfs_api::{
-    v0::ChangesResponse, AdvanceRetentionResponse, AuthoritativePathEntry, ChangeSeq, CommitId,
+    v0::{
+        ChangesResponse, DisableGramsIndexResponse, EnableGramsIndexResponse,
+        RepairNamespaceResponse,
+    },
+    AdvanceRetentionResponse, AuthoritativePathEntry, ChangeSeq, CheckpointId, CommitId,
     CommitResponse, CreateCheckpointRequest, CreateCheckpointResponse, DeleteNamespaceResponse,
-    DestinationBehavior, DisableGramsIndexResponse, EnableGramsIndexResponse, ErrorCode,
-    ErrorDetails, FlushWalResponse, GcRequest, GcResponse, GrepRequest, GrepResponse, InodeId,
-    ListFileRevisionsResponse, MaintenanceTickRequest, MaintenanceTickResponse, NamespaceId,
-    NamespaceStatusResponse, NamespaceSummary, ReleaseCheckpointResponse, RepairNamespaceResponse,
-    RevisionNo,
+    DestinationBehavior, ErrorCode, ErrorDetails, FlushWalResponse, GcRequest, GcResponse,
+    GrepRequest, GrepResponse, InodeId, ListFileRevisionsResponse, MaintenanceTickRequest,
+    MaintenanceTickResponse, NamespaceId, NamespaceStatusResponse, NamespaceSummary,
+    ReleaseCheckpointResponse, RevisionNo,
 };
 use thiserror::Error;
 
@@ -149,7 +155,7 @@ pub trait Backend {
     async fn delete_namespace(
         &self,
         namespace_id: &NamespaceId,
-        expected_head_seq: Option<u64>,
+        expected_head_seq: Option<ChangeSeq>,
     ) -> Result<DeleteNamespaceResponse, BackendError>;
     /// Creates a new namespace as a fork of the source's durable view.
     async fn fork_namespace(
@@ -163,7 +169,7 @@ pub trait Backend {
         namespace_id: &NamespaceId,
     ) -> Result<NamespaceStatusResponse, BackendError>;
     /// Lists the entries of a directory.
-    async fn list_path_all(
+    async fn list_path_entries_all(
         &self,
         spec: &NamespacePath,
     ) -> Result<Vec<AuthoritativePathEntry>, BackendError>;
@@ -208,25 +214,21 @@ pub trait Backend {
         &self,
         spec: &NamespacePath,
         bytes: &[u8],
-        behavior: DestinationBehavior,
-        commit_id: Option<CommitId>,
+        options: &PutFileOptions,
     ) -> Result<CommitResponse, BackendError>;
     /// Creates a directory; `parents` also creates missing ancestors.
     async fn create_directory(
         &self,
         spec: &NamespacePath,
-        parents: bool,
-        commit_id: Option<CommitId>,
+        options: &CreateDirectoryOptions,
     ) -> Result<CommitResponse, BackendError>;
-    /// Deletes a file or empty directory.
     /// Deletes a file or empty directory. With `expected_inode_id`, the
     /// delete applies only while the path still resolves to that inode, so
     /// callers reporting a recovery handle never report a raced rebinding.
     async fn delete_path(
         &self,
         spec: &NamespacePath,
-        expected_inode_id: Option<InodeId>,
-        commit_id: Option<CommitId>,
+        options: &DeleteOptions,
     ) -> Result<CommitResponse, BackendError>;
     /// Moves a path within a namespace; `behavior` selects create-only or
     /// replace semantics for the destination.
@@ -277,7 +279,7 @@ pub trait Backend {
     async fn release_checkpoint(
         &self,
         namespace_id: &NamespaceId,
-        checkpoint_id: &str,
+        checkpoint_id: &CheckpointId,
     ) -> Result<ReleaseCheckpointResponse, BackendError>;
     /// Flushes the WAL tail and advances the metadata root, creating no
     /// checkpoint record.
@@ -285,7 +287,7 @@ pub trait Backend {
         -> Result<FlushWalResponse, BackendError>;
     /// Advances the namespace retention floor. Irreversible: WAL history
     /// before the floor stops being replayable.
-    async fn advance_retention(
+    async fn advance_retention_floor(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<AdvanceRetentionResponse, BackendError>;
@@ -309,7 +311,7 @@ pub trait Backend {
         namespace_id: &NamespaceId,
     ) -> Result<RepairNamespaceResponse, BackendError>;
     /// Reads the ordered change feed after the `after_seq` cursor.
-    async fn list_changes_page(
+    async fn list_changes_after(
         &self,
         namespace_id: &NamespaceId,
         after_seq: ChangeSeq,
@@ -336,7 +338,7 @@ impl RemoteBackend {
     async fn wire<T, F>(&self, call: F) -> Result<T, BackendError>
     where
         T: Send + 'static,
-        F: FnOnce(Client) -> Result<T, ClientError> + Send + 'static,
+        F: FnOnce(Client) -> crate::Result<T> + Send + 'static,
     {
         let client = self.client.clone();
         tokio::task::spawn_blocking(move || call(client))
@@ -360,13 +362,11 @@ impl Backend for RemoteBackend {
     async fn delete_namespace(
         &self,
         namespace_id: &NamespaceId,
-        expected_head_seq: Option<u64>,
+        expected_head_seq: Option<ChangeSeq>,
     ) -> Result<DeleteNamespaceResponse, BackendError> {
         let namespace_id = namespace_id.clone();
-        self.wire(move |client| {
-            client.delete_namespace(&namespace_id, expected_head_seq.map(ChangeSeq))
-        })
-        .await
+        self.wire(move |client| client.delete_namespace(&namespace_id, expected_head_seq))
+            .await
     }
 
     async fn fork_namespace(
@@ -389,13 +389,13 @@ impl Backend for RemoteBackend {
             .await
     }
 
-    async fn list_path_all(
+    async fn list_path_entries_all(
         &self,
         spec: &NamespacePath,
     ) -> Result<Vec<AuthoritativePathEntry>, BackendError> {
         let spec = spec.clone();
         Ok(self
-            .wire(move |client| client.list_path_all(&spec))
+            .wire(move |client| client.list_path_entries_all(&spec))
             .await?
             .entries)
     }
@@ -468,41 +468,35 @@ impl Backend for RemoteBackend {
         &self,
         spec: &NamespacePath,
         bytes: &[u8],
-        behavior: DestinationBehavior,
-        commit_id: Option<CommitId>,
+        options: &PutFileOptions,
     ) -> Result<CommitResponse, BackendError> {
         let spec = spec.clone();
         let bytes = bytes.to_vec();
-        let options = MutationOptions { commit_id };
-        self.wire(move |client| client.put_file_bytes(&spec, &bytes, behavior, &options))
+        let options = options.clone();
+        self.wire(move |client| client.put_file_bytes(&spec, &bytes, &options))
             .await
     }
 
     async fn create_directory(
         &self,
         spec: &NamespacePath,
-        parents: bool,
-        commit_id: Option<CommitId>,
+        options: &CreateDirectoryOptions,
     ) -> Result<CommitResponse, BackendError> {
         let spec = spec.clone();
-        let options = MutationOptions { commit_id };
-        self.wire(move |client| client.create_directory(&spec, parents, &options))
+        let options = options.clone();
+        self.wire(move |client| client.create_directory(&spec, &options))
             .await
     }
 
     async fn delete_path(
         &self,
         spec: &NamespacePath,
-        expected_inode_id: Option<InodeId>,
-        commit_id: Option<CommitId>,
+        options: &DeleteOptions,
     ) -> Result<CommitResponse, BackendError> {
         let spec = spec.clone();
-        let options = MutationOptions { commit_id };
-        self.wire(move |client| match expected_inode_id {
-            Some(expected) => client.delete_path_expecting(&spec, expected, &options),
-            None => client.delete_path(&spec, &options),
-        })
-        .await
+        let options = options.clone();
+        self.wire(move |client| client.delete_path(&spec, &options))
+            .await
     }
 
     async fn move_path(
@@ -571,10 +565,10 @@ impl Backend for RemoteBackend {
     async fn release_checkpoint(
         &self,
         namespace_id: &NamespaceId,
-        checkpoint_id: &str,
+        checkpoint_id: &CheckpointId,
     ) -> Result<ReleaseCheckpointResponse, BackendError> {
         let namespace_id = namespace_id.clone();
-        let checkpoint_id = checkpoint_id.to_owned();
+        let checkpoint_id = checkpoint_id.clone();
         self.wire(move |client| client.release_checkpoint(&namespace_id, &checkpoint_id))
             .await
     }
@@ -588,12 +582,12 @@ impl Backend for RemoteBackend {
             .await
     }
 
-    async fn advance_retention(
+    async fn advance_retention_floor(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<AdvanceRetentionResponse, BackendError> {
         let namespace_id = namespace_id.clone();
-        self.wire(move |client| client.advance_retention(&namespace_id))
+        self.wire(move |client| client.advance_retention_floor(&namespace_id))
             .await
     }
 
@@ -626,14 +620,14 @@ impl Backend for RemoteBackend {
             .await
     }
 
-    async fn list_changes_page(
+    async fn list_changes_after(
         &self,
         namespace_id: &NamespaceId,
         after_seq: ChangeSeq,
         limit: Option<u32>,
     ) -> Result<ChangesResponse, BackendError> {
         let namespace_id = namespace_id.clone();
-        self.wire(move |client| client.list_changes_page(&namespace_id, after_seq, limit))
+        self.wire(move |client| client.list_changes_after(&namespace_id, after_seq, limit))
             .await
     }
 }

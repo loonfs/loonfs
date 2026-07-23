@@ -1,15 +1,13 @@
 //! Provider contract profiles: what each provider is expected to support.
 
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Expectation {
     ExpectedYes,
     ExpectedNo,
     VerifyByConformance,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ActiveContractProfile {
     pub create_if_absent: Expectation,
     pub compare_and_swap_small_object: Expectation,
@@ -27,7 +25,7 @@ pub struct ActiveContractProfile {
     pub multipart_upload: Expectation,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ProviderProfile {
     pub name: &'static str,
     pub active_contract: ActiveContractProfile,

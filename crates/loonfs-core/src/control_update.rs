@@ -41,10 +41,10 @@ pub(crate) enum ControlUpdateError {
     LoadHead(ControlObjectLoadError),
     #[error("missing etag for `{object_key}`")]
     MissingEtag { object_key: String },
-    #[error("control object codec error: {0}")]
-    Codec(String),
-    #[error("control object store error: {0}")]
-    Store(String),
+    #[error("control object codec error for `{object_key}`: {message}")]
+    Codec { object_key: String, message: String },
+    #[error("control object store error for `{object_key}`: {message}")]
+    Store { object_key: String, message: String },
     #[error("control object update retries exhausted after {attempts} attempts")]
     RetryExhausted { attempts: usize },
 }
@@ -76,7 +76,8 @@ where
         match update(&loaded)? {
             HeadUpdate::Noop(outcome) => return Ok(outcome),
             HeadUpdate::Replace { next, outcome } => {
-                let encoded = encode_head(writer_version, *next).map_err(E::from)?;
+                let encoded =
+                    encode_head(writer_version, *next, &loaded.object_key).map_err(E::from)?;
                 match store
                     .compare_and_swap(&loaded.object_key, expected_etag, Bytes::from(encoded))
                     .await
@@ -89,7 +90,10 @@ where
                         continue;
                     }
                     Err(error) => {
-                        return Err(E::from(ControlUpdateError::Store(error.to_string())))
+                        return Err(E::from(ControlUpdateError::Store {
+                            object_key: loaded.object_key,
+                            message: error.to_string(),
+                        }))
                     }
                 }
             }
@@ -108,11 +112,11 @@ pub(crate) async fn update_upload_session<S, T, F, Fut>(
     writer_version: &str,
     max_attempts: usize,
     mut update: F,
-) -> Result<T, CoreError>
+) -> crate::error::Result<T>
 where
     S: ObjectStore + ?Sized,
     F: FnMut(UploadSessionState) -> Fut,
-    Fut: Future<Output = Result<UploadSessionUpdate<T>, CoreError>>,
+    Fut: Future<Output = crate::error::Result<UploadSessionUpdate<T>>>,
 {
     for _attempt in 0..max_attempts {
         match try_update_upload_session(
@@ -144,11 +148,11 @@ pub(crate) async fn try_update_upload_session<S, T, F, Fut>(
     upload_id: &UploadId,
     writer_version: &str,
     update: F,
-) -> Result<UploadSessionCas<T>, CoreError>
+) -> crate::error::Result<UploadSessionCas<T>>
 where
     S: ObjectStore + ?Sized,
     F: FnOnce(UploadSessionState, ObjectMetadata) -> Fut,
-    Fut: Future<Output = Result<UploadSessionUpdate<T>, CoreError>>,
+    Fut: Future<Output = crate::error::Result<UploadSessionUpdate<T>>>,
 {
     let loaded = read_upload_session_object(store, namespace_id, upload_id).await?;
     let expected_etag = required_etag_core(&loaded.metadata, &loaded.object_key)?.to_owned();
@@ -180,10 +184,20 @@ where
     }
 }
 
-fn encode_head(writer_version: &str, next: HeadState) -> Result<Vec<u8>, ControlUpdateError> {
+fn encode_head(
+    writer_version: &str,
+    next: HeadState,
+    object_key: &str,
+) -> Result<Vec<u8>, ControlUpdateError> {
     let envelope = HeadStateEnvelope::from_state(ControlObjectKind::WalHead, writer_version, next)
-        .map_err(|err| ControlUpdateError::Codec(err.to_string()))?;
-    encode_control_object(&envelope).map_err(|err| ControlUpdateError::Codec(err.to_string()))
+        .map_err(|err| ControlUpdateError::Codec {
+            object_key: object_key.to_owned(),
+            message: err.to_string(),
+        })?;
+    encode_control_object(&envelope).map_err(|err| ControlUpdateError::Codec {
+        object_key: object_key.to_owned(),
+        message: err.to_string(),
+    })
 }
 
 fn required_etag<'a>(
@@ -201,7 +215,7 @@ fn required_etag<'a>(
 fn required_etag_core<'a>(
     metadata: &'a ObjectMetadata,
     object_key: &str,
-) -> Result<&'a str, CoreError> {
+) -> crate::error::Result<&'a str> {
     metadata.etag.as_deref().ok_or_else(|| CoreError::Store {
         object_key: object_key.to_owned(),
         message: "missing control object etag".to_owned(),
@@ -220,7 +234,7 @@ async fn read_upload_session_object<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
-) -> Result<LoadedUploadSessionObject, CoreError> {
+) -> crate::error::Result<LoadedUploadSessionObject> {
     let object_key = upload_session(namespace_id.as_str(), upload_id.as_str());
     let body = store
         .get_with_metadata(&object_key)

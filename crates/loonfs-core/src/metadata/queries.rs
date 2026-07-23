@@ -9,7 +9,7 @@
 
 use super::visibility::{self, resolve_in_memory_read, unbind_matches_binding};
 use super::{DirentryBindRecord, InodeRecord, MetadataState, SubtreeTombstoneRecord};
-use loonfs_api::{AbsolutePath, ChangeSeq, InodeId, InodeKind, NamePolicy};
+use loonfs_api::{AbsolutePath, ChangeSeq, InodeId, InodeKind, NameKey, NamePolicy};
 use serde::{Deserialize, Serialize};
 use std::future::Future;
 use thiserror::Error;
@@ -47,7 +47,7 @@ impl MetadataState {
         self.inode_at_seq_scan(inode_id, base_seq)
     }
 
-    pub fn inode_at_head(&self, inode_id: InodeId) -> Option<InodeRecord> {
+    pub(crate) fn inode_at_head(&self, inode_id: InodeId) -> Option<InodeRecord> {
         self.indexes.inode(inode_id)
     }
 
@@ -60,10 +60,10 @@ impl MetadataState {
 
     /// Latest bind for `(parent, name)` at or before `base_seq`, regardless
     /// of whether it has since been unbound.
-    pub fn bound_child_at_seq(
+    pub(crate) fn bound_child_at_seq(
         &self,
         parent_inode_id: InodeId,
-        name_key: &str,
+        name_key: &NameKey,
         base_seq: ChangeSeq,
     ) -> Option<DirentryBindRecord> {
         if base_seq >= self.indexed_seq() {
@@ -75,14 +75,14 @@ impl MetadataState {
     fn bound_child_at_seq_scan(
         &self,
         parent_inode_id: InodeId,
-        name_key: &str,
+        name_key: &NameKey,
         base_seq: ChangeSeq,
     ) -> Option<DirentryBindRecord> {
         self.direntry_binds
             .iter()
             .filter(|direntry| {
                 direntry.parent_inode_id == parent_inode_id
-                    && direntry.name_key.as_str() == name_key
+                    && direntry.name_key == *name_key
                     && direntry.bind_seq <= base_seq
             })
             .max_by_key(|direntry| (direntry.bind_seq, direntry.bind_delta_index))
@@ -103,7 +103,7 @@ impl MetadataState {
         ))
     }
 
-    pub fn current_parent_binding_for_child_at_head(
+    pub(crate) fn current_parent_binding_for_child_at_head(
         &self,
         child_inode_id: InodeId,
     ) -> Option<DirentryBindRecord> {
@@ -121,7 +121,7 @@ impl MetadataState {
         self.active_subtree_tombstone_scan(root_inode_id, base_seq)
     }
 
-    pub fn active_subtree_tombstone_at_head(
+    pub(crate) fn active_subtree_tombstone_at_head(
         &self,
         root_inode_id: InodeId,
     ) -> Option<SubtreeTombstoneRecord> {
@@ -156,7 +156,7 @@ impl MetadataState {
         ))
     }
 
-    pub fn covering_subtree_tombstone_at_head(
+    pub(crate) fn covering_subtree_tombstone_at_head(
         &self,
         inode_id: InodeId,
     ) -> Option<SubtreeTombstoneRecord> {
@@ -176,7 +176,7 @@ impl MetadataState {
         ))
     }
 
-    pub fn visible_inode_at_head(&self, inode_id: InodeId) -> Option<InodeRecord> {
+    pub(crate) fn visible_inode_at_head(&self, inode_id: InodeId) -> Option<InodeRecord> {
         read_now(visibility::visible_inode(
             &mut self.reads_at_head(),
             inode_id,
@@ -186,7 +186,7 @@ impl MetadataState {
     pub fn visible_child(
         &self,
         parent_inode_id: InodeId,
-        name_key: &str,
+        name_key: &NameKey,
         base_seq: ChangeSeq,
     ) -> Option<DirentryBindRecord> {
         if base_seq >= self.indexed_seq() {
@@ -199,10 +199,10 @@ impl MetadataState {
         ))
     }
 
-    pub fn visible_child_at_head(
+    pub(crate) fn visible_child_at_head(
         &self,
         parent_inode_id: InodeId,
-        name_key: &str,
+        name_key: &NameKey,
     ) -> Option<DirentryBindRecord> {
         read_now(visibility::visible_child(
             &mut self.reads_at_head(),
@@ -238,7 +238,7 @@ impl MetadataState {
             .cloned()
     }
 
-    pub fn is_direntry_unbound_at_seq(
+    pub(crate) fn is_direntry_unbound_at_seq(
         &self,
         direntry: &DirentryBindRecord,
         base_seq: ChangeSeq,
@@ -279,7 +279,7 @@ impl MetadataState {
         ))
     }
 
-    pub fn would_create_directory_cycle_at_head(
+    pub(crate) fn would_create_directory_cycle_at_head(
         &self,
         inode_id: InodeId,
         new_parent_inode_id: InodeId,
@@ -296,5 +296,5 @@ impl MetadataState {
 /// arm: of the [`super::visibility`] rules only `resolve_visible_path`
 /// constructs a [`VisiblePathError`], and it is not routed through here.
 fn read_now<T>(future: impl Future<Output = Result<T, VisiblePathError>>) -> T {
-    resolve_in_memory_read(future).expect("seq-scoped metadata state reads are infallible")
+    resolve_in_memory_read(future).expect("seq-scoped metadata state reads should be infallible")
 }

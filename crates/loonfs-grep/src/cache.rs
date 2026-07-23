@@ -6,7 +6,7 @@ use loonfs_api::wire::sst_blocks::{DecodedDataBlock, SegmentFilter, SegmentIndex
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
-/// Maximum decoded manifests and segment sections retained by one grep service.
+/// Maximum decoded manifests and segment sections retained by one grep service or worker.
 pub(crate) const MAX_CACHED_GREP_BLOCKS: usize = 4_096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -63,7 +63,10 @@ impl GrepBlockCache {
         if self.max_blocks == 0 {
             return None;
         }
-        let mut inner = self.inner.lock().expect("grep block cache lock poisoned");
+        let mut inner = self
+            .inner
+            .lock()
+            .expect("grep block cache lock should not be poisoned");
         let block = inner.entries.get(key)?.block.clone();
         inner.touch(key);
         inner.compact_if_needed(self.max_blocks);
@@ -74,7 +77,10 @@ impl GrepBlockCache {
         if self.max_blocks == 0 {
             return;
         }
-        let mut inner = self.inner.lock().expect("grep block cache lock poisoned");
+        let mut inner = self
+            .inner
+            .lock()
+            .expect("grep block cache lock should not be poisoned");
         let stamp = inner.next_stamp();
         inner.entries.insert(
             key.clone(),
@@ -120,7 +126,7 @@ impl GrepBlockCacheInner {
     }
 
     fn compact_if_needed(&mut self, max_blocks: usize) {
-        let queue_limit = max_blocks.saturating_mul(4).max(1);
+        let queue_limit = max_blocks.saturating_mul(4);
         if self.order.len() <= queue_limit {
             return;
         }

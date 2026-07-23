@@ -1,7 +1,7 @@
 //! The HTTP transport: request sending, the bounded transient retry, and
 //! response-to-error mapping.
 
-use crate::{Client, ClientError};
+use crate::{Client, ClientError, Result};
 use loonfs_api::{ApiError, ErrorCode};
 
 /// Cap on attempts for transient-error retry: one initial try plus three
@@ -56,7 +56,7 @@ impl Client {
         &self,
         request: ureq::Request,
         body: Option<&Req>,
-    ) -> Result<Resp, ClientError>
+    ) -> Result<Resp>
     where
         Req: serde::Serialize,
         Resp: serde::de::DeserializeOwned,
@@ -68,7 +68,7 @@ impl Client {
         &self,
         request: ureq::Request,
         body: Option<&Req>,
-    ) -> Result<Resp, ClientError>
+    ) -> Result<Resp>
     where
         Req: serde::Serialize,
         Resp: serde::de::DeserializeOwned,
@@ -81,7 +81,7 @@ impl Client {
         request: ureq::Request,
         body: Option<&Req>,
         retry: bool,
-    ) -> Result<Resp, ClientError>
+    ) -> Result<Resp>
     where
         Req: serde::Serialize,
         Resp: serde::de::DeserializeOwned,
@@ -109,7 +109,7 @@ impl Client {
             .map_err(|err| ClientError::Json(err.to_string()))
     }
 
-    pub(crate) fn request_bytes(&self, url: &str) -> Result<Vec<u8>, ClientError> {
+    pub(crate) fn request_bytes(&self, url: &str) -> Result<Vec<u8>> {
         let request = self.authenticated(self.agent.get(url));
         let response = self.call_with_transient_retry(&request, None)?;
         let mut reader = response.into_reader();
@@ -125,7 +125,7 @@ impl Client {
         &self,
         request: &ureq::Request,
         body: Option<&[u8]>,
-    ) -> Result<ureq::Response, ClientError> {
+    ) -> Result<ureq::Response> {
         send_request(request, body).map_err(|error| self.map_error(*error))
     }
 
@@ -146,7 +146,7 @@ impl Client {
         &self,
         request: &ureq::Request,
         body: Option<&[u8]>,
-    ) -> Result<ureq::Response, ClientError> {
+    ) -> Result<ureq::Response> {
         let mut attempts = 0;
         loop {
             let outcome = send_request(request, body);
@@ -205,7 +205,7 @@ impl Client {
 fn send_request(
     request: &ureq::Request,
     body: Option<&[u8]>,
-) -> Result<ureq::Response, Box<ureq::Error>> {
+) -> std::result::Result<ureq::Response, Box<ureq::Error>> {
     #[cfg(test)]
     if let Some(outcome) = test_transport::next() {
         return outcome;

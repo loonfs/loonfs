@@ -8,12 +8,15 @@ use loonfs_api::{
         ValidatedContentToken,
     },
     AdvanceRetentionResponse, ApiError, ChangeSeq, CheckpointId, CommitId, CommitResponse,
-    ContentRef, CreateCheckpointResponse, DestinationBehavior, ErrorCode, FilesystemOperation,
-    FilesystemOperationRequest, InodeId, InodeKind, ListPathEntriesResponse, ManifestId,
-    NamespaceId, RevisionNo, DEFAULT_MAX_PAGE_LIMIT, DEFAULT_PAGE_LIMIT, LIMIT_PAGINATION_DEFAULT,
-    LIMIT_PAGINATION_MAX,
+    ContentRef, CreateCheckpointResponse, DeleteDirectoryBehavior, DestinationBehavior, ErrorCode,
+    FilesystemOperation, FilesystemOperationRequest, InodeId, InodeKind, ListPathEntriesResponse,
+    ManifestId, NamespaceId, RevisionNo, DEFAULT_MAX_PAGE_LIMIT, DEFAULT_PAGE_LIMIT,
+    LIMIT_PAGINATION_DEFAULT, LIMIT_PAGINATION_MAX,
 };
-use loonfs_client::{Client, ClientConfig, ClientError, MutationOptions, NamespacePath};
+use loonfs_client::{
+    Client, ClientConfig, ClientError, CreateDirectoryOptions, DeleteOptions, MutationOptions,
+    NamespacePath, PutFileOptions,
+};
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::{ConfiguredObjectStore, ObjectStore};
 use loonfs_server::{app, RuntimeCacheConfigOverrides, ServerConfig, StoreConfig};
@@ -44,6 +47,13 @@ fn block_on<T>(future: impl Future<Output = T>) -> T {
         .block_on(future)
 }
 
+fn replace_file_options() -> PutFileOptions {
+    PutFileOptions {
+        behavior: DestinationBehavior::Replace,
+        ..PutFileOptions::default()
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn delete_namespace_is_terminal_and_retires_the_id() {
     let temp_dir = tempdir().expect("tempdir");
@@ -63,7 +73,7 @@ async fn delete_namespace_is_terminal_and_retires_the_id() {
         let target = NamespacePath::parse("doomed", "/note.txt").expect("parse path");
         harness
             .client
-            .write_file_bytes(&target, b"last words", &MutationOptions::default())
+            .put_file_bytes(&target, b"last words", &replace_file_options())
             .expect("write file");
 
         // A stale precondition refuses the delete and deletes nothing.
@@ -193,44 +203,44 @@ async fn http_paginates_directory_listing_and_rejects_cursor_path_mismatch() {
         let other = NamespacePath::parse("demo", "/other").expect("other path");
         harness
             .client
-            .create_directory(&docs, false, &MutationOptions::default())
+            .create_directory(&docs, &CreateDirectoryOptions::default())
             .expect("create docs dir");
         harness
             .client
-            .create_directory(&other, false, &MutationOptions::default())
+            .create_directory(&other, &CreateDirectoryOptions::default())
             .expect("create other dir");
         for name in ["a.txt", "b.txt", "c.txt"] {
             let path = NamespacePath::parse("demo", &format!("/docs/{name}")).expect("file path");
             harness
                 .client
-                .write_file_bytes(&path, name.as_bytes(), &MutationOptions::default())
+                .put_file_bytes(&path, name.as_bytes(), &replace_file_options())
                 .expect("write file");
         }
 
         let first_page = harness
             .client
-            .list_path_page(&docs, Some(2), None)
+            .list_path_entries_page(&docs, Some(2), None)
             .expect("first directory page");
         assert_eq!(entry_names(&first_page), vec!["a.txt", "b.txt"]);
         let cursor = first_page.next_cursor.clone().expect("directory cursor");
 
         let second_page = harness
             .client
-            .list_path_page(&docs, Some(2), Some(&cursor))
+            .list_path_entries_page(&docs, Some(2), Some(&cursor))
             .expect("second directory page");
         assert_eq!(entry_names(&second_page), vec!["c.txt"]);
         assert_eq!(second_page.next_cursor, None);
 
         let full_listing = harness
             .client
-            .list_path_all(&docs)
+            .list_path_entries_all(&docs)
             .expect("full directory list");
         assert_eq!(entry_names(&full_listing), vec!["a.txt", "b.txt", "c.txt"]);
         assert_eq!(full_listing.next_cursor, None);
 
         let mismatch = harness
             .client
-            .list_path_page(&other, Some(2), Some(&cursor))
+            .list_path_entries_page(&other, Some(2), Some(&cursor))
             .expect_err("directory cursor must match listed path");
         match mismatch {
             ClientError::Api { status, code, .. } => {
@@ -289,17 +299,20 @@ async fn http_client_listing_preserves_canonical_name_key_order() {
         let docs = NamespacePath::parse("demo", "/docs").expect("docs path");
         harness
             .client
-            .create_directory(&docs, false, &MutationOptions::default())
+            .create_directory(&docs, &CreateDirectoryOptions::default())
             .expect("create docs dir");
         for name in ["B.txt", "a.txt", "c.txt"] {
             let path = NamespacePath::parse("demo", &format!("/docs/{name}")).expect("file path");
             harness
                 .client
-                .write_file_bytes(&path, name.as_bytes(), &MutationOptions::default())
+                .put_file_bytes(&path, name.as_bytes(), &replace_file_options())
                 .expect("write file");
         }
 
-        let listing = harness.client.list_path_all(&docs).expect("directory list");
+        let listing = harness
+            .client
+            .list_path_entries_all(&docs)
+            .expect("directory list");
         assert_eq!(entry_names(&listing), vec!["a.txt", "B.txt", "c.txt"]);
     })
     .await
@@ -326,7 +339,7 @@ async fn http_round_trip_supports_namespace_create_and_file_read_write() {
         let directory = NamespacePath::parse("demo", "/notes").expect("parse directory path");
         harness
             .client
-            .create_directory(&directory, false, &MutationOptions::default())
+            .create_directory(&directory, &CreateDirectoryOptions::default())
             .expect("create directory");
         let directory_entry = harness
             .client
@@ -338,12 +351,13 @@ async fn http_round_trip_supports_namespace_create_and_file_read_write() {
             NamespacePath::parse("demo", "/notes/hello.txt").expect("parse namespace path");
         let written = harness
             .client
-            .write_file_bytes(
+            .put_file_bytes(
                 &target,
                 b"hello over http\n",
-                &MutationOptions::with_commit_id(
-                    CommitId::parse("smoke-write-1").expect("valid commit id"),
-                ),
+                &PutFileOptions {
+                    behavior: DestinationBehavior::Replace,
+                    commit_id: Some(CommitId::parse("smoke-write-1").expect("valid commit id")),
+                },
             )
             .expect("write bytes");
         // Path operations echo the commit id they committed under.
@@ -469,16 +483,23 @@ async fn http_upload_content_rejects_invalid_upload_id() {
             .expect("create namespace");
 
         let invalid_upload_id = ["upl", "123"].join("-");
-        match harness
-            .client
-            .upload_content(&namespace_id("demo"), &invalid_upload_id, b"hello")
-        {
-            Err(ClientError::Api { status, code, .. }) => {
-                assert_eq!(status, 400);
-                assert_eq!(code, "invalid_request");
-            }
-            other => unreachable!("expected upload id rejection, got {other:?}"),
-        }
+        let result = raw_agent()
+            .put(&format!(
+                "{}/v0/namespaces/demo/uploads/{invalid_upload_id}/content",
+                harness.server_url
+            ))
+            .set("authorization", "Bearer test-token")
+            .set("content-type", "application/octet-stream")
+            .send_bytes(b"hello");
+        let ureq::Error::Status(status, response) =
+            result.expect_err("invalid upload id should fail")
+        else {
+            unreachable!("invalid upload id should return an HTTP status");
+        };
+        assert_eq!(status, 400);
+        let error: ApiError =
+            serde_json::from_reader(response.into_reader()).expect("API error envelope");
+        assert_eq!(error.code, "invalid_request");
     })
     .await
     .expect("join blocking task");
@@ -504,32 +525,20 @@ async fn http_put_no_replace_and_copy_preserve_cli_semantics() {
         let source = NamespacePath::parse("demo", "/docs/hello.txt").expect("source");
         harness
             .client
-            .put_file_bytes(
-                &source,
-                b"hello over http\n",
-                DestinationBehavior::NoReplace,
-                &MutationOptions::default(),
-            )
+            .put_file_bytes(&source, b"hello over http\n", &PutFileOptions::default())
             .expect("initial create");
 
-        match harness.client.put_file_bytes(
-            &source,
-            b"conflict\n",
-            DestinationBehavior::NoReplace,
-            &MutationOptions::default(),
-        ) {
+        match harness
+            .client
+            .put_file_bytes(&source, b"conflict\n", &PutFileOptions::default())
+        {
             Err(ClientError::Api { code, .. }) => assert_eq!(code, "path_conflict"),
             other => unreachable!("expected path_conflict, got {other:?}"),
         }
 
         harness
             .client
-            .put_file_bytes(
-                &source,
-                b"forced overwrite\n",
-                DestinationBehavior::Replace,
-                &MutationOptions::default(),
-            )
+            .put_file_bytes(&source, b"forced overwrite\n", &replace_file_options())
             .expect("forced overwrite");
 
         let destination = NamespacePath::parse("demo", "/docs/copy.txt").expect("destination");
@@ -578,7 +587,7 @@ async fn http_namespace_fork_shares_content_and_diverges() {
         let clone_path = NamespacePath::parse("clone", "/docs/shared.txt").expect("clone path");
         harness
             .client
-            .write_file_bytes(&source_path, b"base\n", &MutationOptions::default())
+            .put_file_bytes(&source_path, b"base\n", &replace_file_options())
             .expect("write source");
 
         let forked = harness
@@ -600,10 +609,10 @@ async fn http_namespace_fork_shares_content_and_diverges() {
 
         harness
             .client
-            .write_file_bytes(
+            .put_file_bytes(
                 &source_path,
                 b"source-after-fork\n",
-                &MutationOptions::default(),
+                &replace_file_options(),
             )
             .expect("replace source");
         assert_eq!(
@@ -616,11 +625,7 @@ async fn http_namespace_fork_shares_content_and_diverges() {
 
         let clone_write = harness
             .client
-            .write_file_bytes(
-                &clone_path,
-                b"clone-after-fork\n",
-                &MutationOptions::default(),
-            )
+            .put_file_bytes(&clone_path, b"clone-after-fork\n", &replace_file_options())
             .expect("replace clone");
         assert_eq!(clone_write.committed_seq, ChangeSeq(2));
         assert_eq!(
@@ -640,14 +645,14 @@ async fn http_namespace_fork_shares_content_and_diverges() {
 
         match harness
             .client
-            .list_changes_page(&namespace_id("clone"), ChangeSeq(0), None)
+            .list_changes_after(&namespace_id("clone"), ChangeSeq(0), None)
         {
             Err(ClientError::Api { code, .. }) => assert_eq!(code, "rebootstrap_required"),
             other => unreachable!("expected rebootstrap_required, got {other:?}"),
         }
         let clone_changes = harness
             .client
-            .list_changes_page(&namespace_id("clone"), ChangeSeq(1), None)
+            .list_changes_after(&namespace_id("clone"), ChangeSeq(1), None)
             .expect("clone changes");
         assert_eq!(clone_changes.changes.len(), 1);
         assert_eq!(clone_changes.changes[0].seq, ChangeSeq(2));
@@ -683,18 +688,17 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
             .expect("begin upload");
         let first_content = harness
             .client
-            .upload_content(&namespace, begin.upload_id.as_str(), file_bytes)
+            .upload_content(&namespace, &begin.upload_id, file_bytes)
             .expect("upload content");
         let repeated_content = harness
             .client
-            .upload_content(&namespace, begin.upload_id.as_str(), file_bytes)
+            .upload_content(&namespace, &begin.upload_id, file_bytes)
             .expect("repeat upload content");
         assert_eq!(first_content, repeated_content);
-        match harness.client.upload_content(
-            &namespace,
-            begin.upload_id.as_str(),
-            b"different bytes",
-        ) {
+        match harness
+            .client
+            .upload_content(&namespace, &begin.upload_id, b"different bytes")
+        {
             Err(ClientError::Api { code, .. }) => assert_eq!(code, "upload_content_conflict"),
             other => unreachable!("expected upload_content_conflict, got {other:?}"),
         }
@@ -705,7 +709,7 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
             .expect("begin mismatch upload");
         let staged = harness
             .client
-            .upload_content(&namespace, mismatch_upload.upload_id.as_str(), file_bytes)
+            .upload_content(&namespace, &mismatch_upload.upload_id, file_bytes)
             .expect("stage mismatch upload content");
         assert_ne!(
             staged.content_ref,
@@ -713,7 +717,7 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
         );
         match harness.client.complete_upload(
             &namespace,
-            mismatch_upload.upload_id.as_str(),
+            &mismatch_upload.upload_id,
             &CompleteUploadRequest {
                 content_ref: ContentRef::whole_file_v0(b"other bytes"),
             },
@@ -731,7 +735,8 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
                 preconditions: Vec::new(),
                 ops: vec![CommitOp::CreateFile {
                     parent_inode_id: InodeId(1),
-                    display_name: "uploaded.txt".to_owned(),
+                    display_name: loonfs_api::DisplayName::parse("uploaded.txt")
+                        .expect("valid display name"),
                     content_ref: content_ref.clone(),
                 }],
                 message: Some("upload over http".to_owned()),
@@ -768,7 +773,7 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
 
         let changes = harness
             .client
-            .list_changes_page(&namespace, ChangeSeq(0), None)
+            .list_changes_after(&namespace, ChangeSeq(0), None)
             .expect("list changes");
         assert_eq!(changes.namespace_id, namespace);
         assert_eq!(changes.after_seq, ChangeSeq(0));
@@ -788,12 +793,12 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
                 name_key,
                 display_name,
                 ..
-            } if name_key.as_str() == "uploaded.txt" && display_name == "uploaded.txt"
+            } if name_key.as_str() == "uploaded.txt" && display_name.as_str() == "uploaded.txt"
         ));
 
         let empty = harness
             .client
-            .list_changes_page(&namespace, commit.committed_seq, None)
+            .list_changes_after(&namespace, commit.committed_seq, None)
             .expect("list changes after head");
         assert_eq!(empty.changes, Vec::new());
     })
@@ -1067,22 +1072,26 @@ async fn commit_with_valid_tokens_for_all_distinct_refs_succeeds() {
                 ops: vec![
                     CommitOp::CreateFile {
                         parent_inode_id: InodeId(1),
-                        display_name: "first.txt".to_owned(),
+                        display_name: loonfs_api::DisplayName::parse("first.txt")
+                            .expect("valid display name"),
                         content_ref: first.content_ref.clone(),
                     },
                     CommitOp::CreateFile {
                         parent_inode_id: InodeId(1),
-                        display_name: "first-copy.txt".to_owned(),
+                        display_name: loonfs_api::DisplayName::parse("first-copy.txt")
+                            .expect("valid display name"),
                         content_ref: first.content_ref.clone(),
                     },
                     CommitOp::CreateFile {
                         parent_inode_id: InodeId(1),
-                        display_name: "second.txt".to_owned(),
+                        display_name: loonfs_api::DisplayName::parse("second.txt")
+                            .expect("valid display name"),
                         content_ref: second.content_ref.clone(),
                     },
                     CommitOp::CreateFile {
                         parent_inode_id: InodeId(1),
-                        display_name: "third.txt".to_owned(),
+                        display_name: loonfs_api::DisplayName::parse("third.txt")
+                            .expect("valid display name"),
                         content_ref: third.content_ref.clone(),
                     },
                 ],
@@ -1144,12 +1153,14 @@ async fn commit_with_one_missing_proof_reports_first_uncovered_digest() {
                 ops: vec![
                     CommitOp::CreateFile {
                         parent_inode_id: InodeId(1),
-                        display_name: "covered.txt".to_owned(),
+                        display_name: loonfs_api::DisplayName::parse("covered.txt")
+                            .expect("valid display name"),
                         content_ref: covered.content_ref.clone(),
                     },
                     CommitOp::CreateFile {
                         parent_inode_id: InodeId(1),
-                        display_name: "uncovered.txt".to_owned(),
+                        display_name: loonfs_api::DisplayName::parse("uncovered.txt")
+                            .expect("valid display name"),
                         content_ref: uncovered.content_ref.clone(),
                     },
                 ],
@@ -1196,7 +1207,8 @@ async fn commit_with_invalid_relevant_token_reports_token_failure() {
                 preconditions: Vec::new(),
                 ops: vec![CommitOp::CreateFile {
                     parent_inode_id: InodeId(1),
-                    display_name: "invalid.txt".to_owned(),
+                    display_name: loonfs_api::DisplayName::parse("invalid.txt")
+                        .expect("valid display name"),
                     content_ref: completed.content_ref.clone(),
                 }],
                 message: None,
@@ -1244,7 +1256,8 @@ async fn landed_commit_replays_byte_for_byte_with_over_limit_absent_expired_or_g
                 preconditions: Vec::new(),
                 ops: vec![CommitOp::CreateFile {
                     parent_inode_id: InodeId(1),
-                    display_name: "replay.txt".to_owned(),
+                    display_name: loonfs_api::DisplayName::parse("replay.txt")
+                        .expect("valid display name"),
                     content_ref: content_ref.clone(),
                 }],
                 message: None,
@@ -1350,7 +1363,8 @@ async fn commit_operation_and_prepared_proof_limits_reject_new_requests() {
                 ops: (0..4097)
                     .map(|index| CommitOp::CreateDirectory {
                         parent_inode_id: InodeId(1),
-                        display_name: format!("dir-{index}"),
+                        display_name: loonfs_api::DisplayName::parse(format!("dir-{index}"))
+                            .expect("valid display name"),
                     })
                     .collect(),
                 message: None,
@@ -1370,7 +1384,8 @@ async fn commit_operation_and_prepared_proof_limits_reject_new_requests() {
                 preconditions: Vec::new(),
                 ops: vec![CommitOp::CreateFile {
                     parent_inode_id: InodeId(1),
-                    display_name: "never-committed.txt".to_owned(),
+                    display_name: loonfs_api::DisplayName::parse("never-committed.txt")
+                        .expect("valid display name"),
                     content_ref: completed.content_ref,
                 }],
                 message: None,
@@ -1384,7 +1399,7 @@ async fn commit_operation_and_prepared_proof_limits_reject_new_requests() {
 
         let changes = harness
             .client
-            .list_changes_page(&namespace, ChangeSeq(0), None)
+            .list_changes_after(&namespace, ChangeSeq(0), None)
             .expect("list changes");
         assert!(changes.changes.is_empty());
     })
@@ -1424,7 +1439,8 @@ async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
                         preconditions: Vec::new(),
                         ops: vec![CommitOp::CreateFile {
                             parent_inode_id: InodeId(1),
-                            display_name: "restore.txt".to_owned(),
+                            display_name: loonfs_api::DisplayName::parse("restore.txt")
+                                .expect("valid display name"),
                             content_ref: first_content_ref.clone(),
                         }],
                         message: None,
@@ -1497,7 +1513,7 @@ async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
 
         let changes = harness
             .client
-            .list_changes_page(&namespace, ChangeSeq(0), None)
+            .list_changes_after(&namespace, ChangeSeq(0), None)
             .expect("list changes");
         assert_eq!(changes.changes.len(), 3);
         assert_eq!(
@@ -1519,7 +1535,7 @@ async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
 
         let first_page = harness
             .client
-            .list_changes_page(&namespace, ChangeSeq(0), Some(2))
+            .list_changes_after(&namespace, ChangeSeq(0), Some(2))
             .expect("list first changes page");
         assert_eq!(first_page.after_seq, ChangeSeq(0));
         assert_eq!(first_page.through_seq, ChangeSeq(2));
@@ -1528,7 +1544,7 @@ async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
 
         let second_page = harness
             .client
-            .list_changes_page(
+            .list_changes_after(
                 &namespace,
                 first_page.next_after_seq.expect("next page"),
                 Some(2),
@@ -1571,21 +1587,11 @@ async fn http_revision_routes_list_read_and_restore_by_path_and_inode() {
         let target = NamespacePath::parse("demo", "/docs/rev.txt").expect("target");
         harness
             .client
-            .put_file_bytes(
-                &target,
-                b"one",
-                DestinationBehavior::NoReplace,
-                &MutationOptions::default(),
-            )
+            .put_file_bytes(&target, b"one", &PutFileOptions::default())
             .expect("create file");
         harness
             .client
-            .put_file_bytes(
-                &target,
-                b"two",
-                DestinationBehavior::Replace,
-                &MutationOptions::default(),
-            )
+            .put_file_bytes(&target, b"two", &replace_file_options())
             .expect("replace file");
 
         let entry = harness.client.stat_path(&target).expect("stat file");
@@ -1695,7 +1701,8 @@ async fn http_commit_restore_revision_missing_source_returns_revision_not_found(
                         preconditions: Vec::new(),
                         ops: vec![CommitOp::CreateFile {
                             parent_inode_id: InodeId(1),
-                            display_name: "restore.txt".to_owned(),
+                            display_name: loonfs_api::DisplayName::parse("restore.txt")
+                                .expect("valid display name"),
                             content_ref: first.content_ref.clone(),
                         }],
                         message: None,
@@ -1764,7 +1771,8 @@ async fn http_commit_rejects_same_commit_id_with_different_payload() {
                 preconditions: Vec::new(),
                 ops: vec![CommitOp::CreateFile {
                     parent_inode_id: InodeId(1),
-                    display_name: "first.txt".to_owned(),
+                    display_name: loonfs_api::DisplayName::parse("first.txt")
+                        .expect("valid display name"),
                     content_ref: first.content_ref.clone(),
                 }],
                 message: Some("first commit".to_owned()),
@@ -1783,7 +1791,8 @@ async fn http_commit_rejects_same_commit_id_with_different_payload() {
                 preconditions: first_request.commit.preconditions.clone(),
                 ops: vec![CommitOp::CreateFile {
                     parent_inode_id: InodeId(1),
-                    display_name: "second.txt".to_owned(),
+                    display_name: loonfs_api::DisplayName::parse("second.txt")
+                        .expect("valid display name"),
                     content_ref: second.content_ref.clone(),
                 }],
                 message: Some("second commit".to_owned()),
@@ -1852,7 +1861,8 @@ async fn http_commit_name_collision_reports_readable_error_message() {
                         preconditions: Vec::new(),
                         ops: vec![CommitOp::CreateFile {
                             parent_inode_id: InodeId(1),
-                            display_name: "taken.txt".to_owned(),
+                            display_name: loonfs_api::DisplayName::parse("taken.txt")
+                                .expect("valid display name"),
                             content_ref: content_ref.clone(),
                         }],
                         message: None,
@@ -1870,7 +1880,8 @@ async fn http_commit_name_collision_reports_readable_error_message() {
                     preconditions: Vec::new(),
                     ops: vec![CommitOp::CreateFile {
                         parent_inode_id: InodeId(1),
-                        display_name: "taken.txt".to_owned(),
+                        display_name: loonfs_api::DisplayName::parse("taken.txt")
+                            .expect("valid display name"),
                         content_ref,
                     }],
                     message: None,
@@ -1929,8 +1940,10 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
             .put_file_bytes(
                 &target,
                 b"stable bytes\n",
-                DestinationBehavior::NoReplace,
-                &MutationOptions::with_commit_id(commit_id.clone()),
+                &PutFileOptions {
+                    behavior: DestinationBehavior::NoReplace,
+                    commit_id: Some(commit_id.clone()),
+                },
             )
             .expect("first put");
         assert!(first.committed_seq.0 >= 1);
@@ -1940,8 +1953,10 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
             .put_file_bytes(
                 &target,
                 b"stable bytes\n",
-                DestinationBehavior::NoReplace,
-                &MutationOptions::with_commit_id(commit_id.clone()),
+                &PutFileOptions {
+                    behavior: DestinationBehavior::NoReplace,
+                    commit_id: Some(commit_id.clone()),
+                },
             )
             .expect("repeat put");
         assert_eq!(repeated, first);
@@ -1954,8 +1969,10 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
         match harness.client.put_file_bytes(
             &target,
             b"different bytes\n",
-            DestinationBehavior::NoReplace,
-            &MutationOptions::with_commit_id(commit_id),
+            &PutFileOptions {
+                behavior: DestinationBehavior::NoReplace,
+                commit_id: Some(commit_id),
+            },
         ) {
             Err(ClientError::Api { code, .. }) => {
                 assert_eq!(code, "commit_id_reuse_conflict")
@@ -1987,7 +2004,7 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
         let source = NamespacePath::parse("demo", "/docs/source.txt").expect("source");
         harness
             .client
-            .write_file_bytes(&source, b"source bytes\n", &MutationOptions::default())
+            .put_file_bytes(&source, b"source bytes\n", &replace_file_options())
             .expect("seed source");
 
         let copied = NamespacePath::parse("demo", "/docs/copied.txt").expect("copied");
@@ -1997,9 +2014,9 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
                 &source,
                 &copied,
                 DestinationBehavior::NoReplace,
-                &MutationOptions::with_commit_id(
-                    CommitId::parse("req-v1-copy").expect("valid commit id"),
-                ),
+                &MutationOptions {
+                    commit_id: Some(CommitId::parse("req-v1-copy").expect("valid commit id")),
+                },
             )
             .expect("copy first");
         let copy_repeated = harness
@@ -2008,9 +2025,9 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
                 &source,
                 &copied,
                 DestinationBehavior::NoReplace,
-                &MutationOptions::with_commit_id(
-                    CommitId::parse("req-v1-copy").expect("valid commit id"),
-                ),
+                &MutationOptions {
+                    commit_id: Some(CommitId::parse("req-v1-copy").expect("valid commit id")),
+                },
             )
             .expect("copy repeat");
         assert_eq!(copy_repeated, copy_first);
@@ -2026,9 +2043,9 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
                 &copied,
                 &moved,
                 DestinationBehavior::NoReplace,
-                &MutationOptions::with_commit_id(
-                    CommitId::parse("req-v1-move").expect("valid commit id"),
-                ),
+                &MutationOptions {
+                    commit_id: Some(CommitId::parse("req-v1-move").expect("valid commit id")),
+                },
             )
             .expect("move first");
         let move_repeated = harness
@@ -2037,9 +2054,9 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
                 &copied,
                 &moved,
                 DestinationBehavior::NoReplace,
-                &MutationOptions::with_commit_id(
-                    CommitId::parse("req-v1-move").expect("valid commit id"),
-                ),
+                &MutationOptions {
+                    commit_id: Some(CommitId::parse("req-v1-move").expect("valid commit id")),
+                },
             )
             .expect("move repeat");
         assert_eq!(move_repeated, move_first);
@@ -2054,18 +2071,20 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
             .client
             .delete_path(
                 &moved,
-                &MutationOptions::with_commit_id(
-                    CommitId::parse("req-v1-delete").expect("valid commit id"),
-                ),
+                &DeleteOptions {
+                    commit_id: Some(CommitId::parse("req-v1-delete").expect("valid commit id")),
+                    ..DeleteOptions::default()
+                },
             )
             .expect("delete first");
         let delete_repeated = harness
             .client
             .delete_path(
                 &moved,
-                &MutationOptions::with_commit_id(
-                    CommitId::parse("req-v1-delete").expect("valid commit id"),
-                ),
+                &DeleteOptions {
+                    commit_id: Some(CommitId::parse("req-v1-delete").expect("valid commit id")),
+                    ..DeleteOptions::default()
+                },
             )
             .expect("delete repeat");
         assert_eq!(delete_repeated, delete_first);
@@ -2098,13 +2117,13 @@ async fn http_delete_path_behavior_controls_recursive_delete() {
         let child = NamespacePath::parse("demo", "/docs/child.txt").expect("child path");
         harness
             .client
-            .write_file_bytes(&child, b"child", &MutationOptions::default())
+            .put_file_bytes(&child, b"child", &replace_file_options())
             .expect("write child");
 
         let dir = NamespacePath::parse("demo", "/docs").expect("dir path");
         let non_recursive = harness
             .client
-            .delete_path(&dir, &MutationOptions::default())
+            .delete_path(&dir, &DeleteOptions::default())
             .expect_err("non-recursive delete rejects non-empty dir");
         match non_recursive {
             ClientError::Api { status, code, .. } => {
@@ -2116,7 +2135,13 @@ async fn http_delete_path_behavior_controls_recursive_delete() {
 
         harness
             .client
-            .delete_path_recursive(&dir, &MutationOptions::default())
+            .delete_path(
+                &dir,
+                &DeleteOptions {
+                    behavior: DeleteDirectoryBehavior::Recursive,
+                    ..DeleteOptions::default()
+                },
+            )
             .expect("recursive delete succeeds");
         match harness.client.stat_path(&child) {
             Err(ClientError::Api { code, .. }) => assert_eq!(code, "path_not_found"),
@@ -2147,7 +2172,7 @@ async fn http_malformed_bodies_fail_inside_the_error_envelope() {
         let source = NamespacePath::parse("demo", "/docs/source.txt").expect("source");
         harness
             .client
-            .write_file_bytes(&source, b"source", &MutationOptions::default())
+            .put_file_bytes(&source, b"source", &replace_file_options())
             .expect("seed source");
 
         // Unknown behaviors are not wire variants; they fail request
@@ -2225,7 +2250,7 @@ async fn http_admin_checkpoint_and_retention_are_idempotent_and_soft() {
             .create_namespace(&namespace)
             .expect("create namespace");
         client
-            .write_file_bytes(&target, b"hello admin\n", &MutationOptions::default())
+            .put_file_bytes(&target, b"hello admin\n", &replace_file_options())
             .expect("write file");
 
         let first = post_checkpoint(&server_url, namespace.as_str()).expect("first checkpoint");
@@ -2280,13 +2305,13 @@ async fn http_admin_checkpoint_and_retention_are_idempotent_and_soft() {
         let bytes = client.read_file_bytes(&target).expect("read file");
         assert_eq!(bytes, b"hello admin\n");
 
-        match client.list_changes_page(&namespace, ChangeSeq(0), None) {
+        match client.list_changes_after(&namespace, ChangeSeq(0), None) {
             Err(ClientError::Api { code, .. }) => assert_eq!(code, "rebootstrap_required"),
             other => unreachable!("expected rebootstrap_required, got {other:?}"),
         }
 
         let empty = client
-            .list_changes_page(&namespace, ChangeSeq(1), None)
+            .list_changes_after(&namespace, ChangeSeq(1), None)
             .expect("changes after floor");
         assert_eq!(empty.changes, Vec::new());
     })
@@ -2315,7 +2340,7 @@ async fn http_admin_gc_is_explicit_and_retains_young_namespaces() {
             .expect("create namespace");
         let target = NamespacePath::parse("demo", "/docs/hello.txt").expect("target");
         client
-            .write_file_bytes(&target, b"hello gc\n", &MutationOptions::default())
+            .put_file_bytes(&target, b"hello gc\n", &replace_file_options())
             .expect("write file");
         post_checkpoint(&server_url, namespace.as_str()).expect("checkpoint");
 
@@ -2356,7 +2381,7 @@ async fn http_admin_maintenance_tick_reports_outcomes_not_errors() {
             .expect("create namespace");
         let target = NamespacePath::parse("demo", "/docs/hello.txt").expect("target");
         client
-            .write_file_bytes(&target, b"hello tick\n", &MutationOptions::default())
+            .put_file_bytes(&target, b"hello tick\n", &replace_file_options())
             .expect("write file");
 
         // One WAL segment sits far below the default threshold.
@@ -2457,7 +2482,7 @@ async fn http_checkpoint_manifest_consumption_is_strict_when_manifest_is_corrupt
             .create_namespace(&namespace)
             .expect("create namespace");
         client
-            .write_file_bytes(&target, b"hello\n", &MutationOptions::default())
+            .put_file_bytes(&target, b"hello\n", &replace_file_options())
             .expect("write file");
         post_checkpoint(&server_url, namespace.as_str()).expect("checkpoint");
 
@@ -2516,7 +2541,7 @@ async fn two_servers_share_one_store_with_last_writer_wins_fencing() {
         let host_a_target =
             NamespacePath::parse("demo", "/docs/host-a.txt").expect("host a target");
         client_a
-            .write_file_bytes(&host_a_target, b"host a\n", &MutationOptions::default())
+            .put_file_bytes(&host_a_target, b"host a\n", &replace_file_options())
             .expect("host a write");
 
         // Server B's first semantic write acquires the epoch immediately:
@@ -2542,10 +2567,10 @@ async fn two_servers_share_one_store_with_last_writer_wins_fencing() {
         let host_c_target =
             NamespacePath::parse("demo", "/docs/host-c.txt").expect("host c target");
         for attempt in 0..2 {
-            match client_a.write_file_bytes(
+            match client_a.put_file_bytes(
                 &host_c_target,
                 b"host a again\n",
-                &MutationOptions::default(),
+                &replace_file_options(),
             ) {
                 Err(ClientError::Api { code, .. }) => {
                     assert_eq!(code, "writer_fenced", "attempt {attempt}")
@@ -2930,16 +2955,16 @@ fn stage_uploaded_content(
         .begin_upload(namespace_id, &BeginUploadRequest::default())
         .expect("begin upload");
     let staged = client
-        .upload_content(namespace_id, begin.upload_id.as_str(), file_bytes)
+        .upload_content(namespace_id, &begin.upload_id, file_bytes)
         .expect("upload content");
     let complete_request = CompleteUploadRequest {
         content_ref: staged.content_ref,
     };
     let complete = client
-        .complete_upload(namespace_id, begin.upload_id.as_str(), &complete_request)
+        .complete_upload(namespace_id, &begin.upload_id, &complete_request)
         .expect("complete upload");
     let repeated = client
-        .complete_upload(namespace_id, begin.upload_id.as_str(), &complete_request)
+        .complete_upload(namespace_id, &begin.upload_id, &complete_request)
         .expect("repeat complete upload");
     assert_eq!(repeated.namespace_id, complete.namespace_id);
     assert_eq!(repeated.upload_id, complete.upload_id);

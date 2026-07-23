@@ -7,6 +7,7 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
 use loonfs::{CreateNamespaceOptions, DeleteNamespaceOptions};
+use loonfs_api::v0::RepairNamespaceResponse;
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
 use loonfs_api::ChangeSeq;
@@ -14,11 +15,10 @@ use loonfs_api::{
     AdvanceRetentionResponse, CheckpointId, CreateCheckpointRequest, CreateCheckpointResponse,
     CreateNamespaceRequest, ErrorCode, FlushWalResponse, ForkNamespaceRequest, GcRequest,
     GcResponse, MaintenanceTickRequest, MaintenanceTickResponse, ReleaseCheckpointResponse,
-    RepairNamespaceResponse, FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_PUT,
-    LIMIT_COMMIT_MAX_BODY_BYTES, LIMIT_DOWNLOAD_MAX_CONCURRENT, LIMIT_DOWNLOAD_MAX_CONTENT_BYTES,
-    LIMIT_QUERY_GREP_DEFAULT, LIMIT_QUERY_GREP_MAX, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES,
-    LIMIT_QUERY_GREP_TAIL_BUDGET_FILES, LIMIT_UPLOAD_MAX_CONCURRENT,
-    LIMIT_UPLOAD_MAX_CONTENT_BYTES,
+    FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_PUT, LIMIT_COMMIT_MAX_BODY_BYTES,
+    LIMIT_DOWNLOAD_MAX_CONCURRENT, LIMIT_DOWNLOAD_MAX_CONTENT_BYTES, LIMIT_QUERY_GREP_DEFAULT,
+    LIMIT_QUERY_GREP_MAX, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES, LIMIT_QUERY_GREP_TAIL_BUDGET_FILES,
+    LIMIT_UPLOAD_MAX_CONCURRENT, LIMIT_UPLOAD_MAX_CONTENT_BYTES,
 };
 
 #[derive(Debug, serde::Deserialize)]
@@ -110,10 +110,8 @@ pub(super) async fn config(
 )]
 pub(super) async fn create_namespace(
     State(state): State<AppState>,
-    headers: HeaderMap,
     AppJson(request): AppJson<CreateNamespaceRequest>,
 ) -> Result<Json<loonfs_api::NamespaceSummary>, ApiResponseError> {
-    authorize(&state.config, &headers)?;
     let summary = state
         .writer
         .create_namespace(&request.namespace_id, CreateNamespaceOptions::default())
@@ -220,10 +218,8 @@ pub(super) async fn delete_namespace(
 pub(super) async fn fork_namespace(
     State(state): State<AppState>,
     namespace: NamespaceIdPath,
-    headers: HeaderMap,
     AppJson(request): AppJson<ForkNamespaceRequest>,
 ) -> Result<Json<loonfs_api::NamespaceSummary>, ApiResponseError> {
-    authorize(&state.config, &headers)?;
     let source_namespace_id = namespace.into_id()?;
     let summary = state
         .writer
@@ -288,10 +284,8 @@ pub(super) async fn repair_namespace(
 pub(super) async fn create_checkpoint(
     State(state): State<AppState>,
     namespace: NamespaceIdPath,
-    headers: HeaderMap,
     AppJson(request): AppJson<CreateCheckpointRequest>,
 ) -> Result<Json<CreateCheckpointResponse>, ApiResponseError> {
-    authorize(&state.config, &headers)?;
     let namespace_id = namespace.into_id()?;
     let response = state
         .admin
@@ -445,10 +439,8 @@ pub(super) async fn advance_retention(
 pub(super) async fn gc_namespace(
     State(state): State<AppState>,
     namespace: NamespaceIdPath,
-    headers: HeaderMap,
     OptionalAppJson(request): OptionalAppJson<GcRequest>,
 ) -> Result<Json<GcResponse>, ApiResponseError> {
-    authorize(&state.config, &headers)?;
     let namespace_id = namespace.into_id()?;
     let config = loonfs::gc_config_from_request(request.unwrap_or_default());
     let report = state
@@ -481,10 +473,8 @@ pub(super) async fn gc_namespace(
 pub(super) async fn maintenance_tick(
     State(state): State<AppState>,
     namespace: NamespaceIdPath,
-    headers: HeaderMap,
     OptionalAppJson(request): OptionalAppJson<MaintenanceTickRequest>,
 ) -> Result<Json<MaintenanceTickResponse>, ApiResponseError> {
-    authorize(&state.config, &headers)?;
     let namespace_id = namespace.into_id()?;
     let options = loonfs::MaintenanceTickOptions::from_request(request.unwrap_or_default());
     let result = state

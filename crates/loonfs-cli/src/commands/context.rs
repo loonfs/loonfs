@@ -74,7 +74,6 @@ pub(crate) async fn resolve_command_context(
     })?
     .namespace;
 
-    // Keep the loaded config alive long enough for the backend borrow to remain valid within the caller.
     Ok(CommandContext {
         profile_name: resolved.profile_name,
         mode,

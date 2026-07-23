@@ -13,11 +13,11 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 pub(super) struct MetadataIndexes {
     indexed_seq: ChangeSeq,
     inode_by_id: HashMap<InodeId, InodeRecord>,
-    active_child_by_parent_name: BTreeMap<(InodeId, String), DirentryBindRecord>,
+    active_child_by_parent_name: BTreeMap<(InodeId, NameKey), DirentryBindRecord>,
     /// Latest bind ever recorded per (parent, name), kept even after the
     /// binding is unbound. Tombstone-ancestry checks need to see dead
     /// bindings, which the active map deliberately drops.
-    latest_bind_by_parent_name: HashMap<(InodeId, String), DirentryBindRecord>,
+    latest_bind_by_parent_name: HashMap<(InodeId, NameKey), DirentryBindRecord>,
     active_parent_by_child: HashMap<InodeId, DirentryBindRecord>,
     unbound_binding_keys: HashSet<BindingKey>,
     tombstone_by_root: HashMap<InodeId, SubtreeTombstoneRecord>,
@@ -54,13 +54,13 @@ impl MetadataIndexes {
             indexes.record_inode(inode);
         }
 
-        let mut latest_by_parent_name = HashMap::<(InodeId, String), DirentryBindRecord>::new();
+        let mut latest_by_parent_name = HashMap::<(InodeId, NameKey), DirentryBindRecord>::new();
         let mut latest_by_child = HashMap::<InodeId, DirentryBindRecord>::new();
         for bind in binds {
             indexes.indexed_seq = indexes.indexed_seq.max(bind.bind_seq);
             replace_if_newer_bind(
                 &mut latest_by_parent_name,
-                (bind.parent_inode_id, bind.name_key.as_str().to_owned()),
+                (bind.parent_inode_id, bind.name_key.clone()),
                 bind.clone(),
             );
             replace_if_newer_bind(&mut latest_by_child, bind.child_inode_id, bind.clone());
@@ -80,10 +80,9 @@ impl MetadataIndexes {
             if !bind.same_binding(latest_child_bind) {
                 continue;
             }
-            indexes.active_child_by_parent_name.insert(
-                (bind.parent_inode_id, bind.name_key.as_str().to_owned()),
-                bind.clone(),
-            );
+            indexes
+                .active_child_by_parent_name
+                .insert((bind.parent_inode_id, bind.name_key.clone()), bind.clone());
             indexes
                 .active_parent_by_child
                 .insert(bind.child_inode_id, bind.clone());
@@ -116,20 +115,20 @@ impl MetadataIndexes {
     pub(super) fn active_child(
         &self,
         parent_inode_id: InodeId,
-        name_key: &str,
+        name_key: &NameKey,
     ) -> Option<DirentryBindRecord> {
         self.active_child_by_parent_name
-            .get(&(parent_inode_id, name_key.to_owned()))
+            .get(&(parent_inode_id, name_key.clone()))
             .cloned()
     }
 
     pub(super) fn latest_bind(
         &self,
         parent_inode_id: InodeId,
-        name_key: &str,
+        name_key: &NameKey,
     ) -> Option<DirentryBindRecord> {
         self.latest_bind_by_parent_name
-            .get(&(parent_inode_id, name_key.to_owned()))
+            .get(&(parent_inode_id, name_key.clone()))
             .cloned()
     }
 
@@ -168,7 +167,7 @@ impl MetadataIndexes {
 
     pub(super) fn record_bind(&mut self, record: &DirentryBindRecord) {
         self.indexed_seq = self.indexed_seq.max(record.bind_seq);
-        let parent_name_key = (record.parent_inode_id, record.name_key.as_str().to_owned());
+        let parent_name_key = (record.parent_inode_id, record.name_key.clone());
         // The unconditional active-map install below is only correct because
         // binds for one (parent, name) arrive in append order — WAL apply
         // walks deltas in seq order and manifest projection pushes rows in
@@ -214,7 +213,7 @@ impl MetadataIndexes {
         self.unbound_binding_keys
             .insert(BindingKey::from_unbind(record));
 
-        let parent_name_key = (record.parent_inode_id, record.name_key.as_str().to_owned());
+        let parent_name_key = (record.parent_inode_id, record.name_key.clone());
         if self
             .active_child_by_parent_name
             .get(&parent_name_key)
@@ -352,10 +351,10 @@ fn remove_active_parent_if_same(
 }
 
 fn remove_active_child_if_same(
-    active_child_by_parent_name: &mut BTreeMap<(InodeId, String), DirentryBindRecord>,
+    active_child_by_parent_name: &mut BTreeMap<(InodeId, NameKey), DirentryBindRecord>,
     record: &DirentryBindRecord,
 ) {
-    let key = (record.parent_inode_id, record.name_key.as_str().to_owned());
+    let key = (record.parent_inode_id, record.name_key.clone());
     if active_child_by_parent_name
         .get(&key)
         .map(|active| active.same_binding(record))

@@ -65,7 +65,7 @@ pub enum GrepRootCodecError {
     KindMismatch { expected: String, found: String },
     #[error("unsupported grep root format version `{found}`: this build supports `{supported}`")]
     UnsupportedFormatVersion { found: String, supported: String },
-    #[error("grep root payload checksum mismatch: expected {expected}, actual {actual}")]
+    #[error("grep root payload checksum mismatch: expected `{expected}`, actual `{actual}`")]
     ChecksumMismatch { expected: String, actual: String },
     #[error("grep root checksum `{checksum}` is stale for payload `{actual}`")]
     StalePayloadChecksum { checksum: String, actual: String },
@@ -112,4 +112,4 @@ pub enum GrepRootError {
     },
 }
 
-pub type Result<T> = std::result::Result<T, GrepRootError>;
+pub(super) type Result<T> = std::result::Result<T, GrepRootError>;

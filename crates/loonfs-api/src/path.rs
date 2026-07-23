@@ -39,17 +39,17 @@ pub const MAX_DISPLAY_NAME_BYTES: usize = 255;
 pub enum PathError {
     #[error("absolute path must not be empty")]
     EmptyPath,
-    #[error("path `{path}` is not absolute")]
+    #[error("path `{path:?}` is not absolute")]
     RelativePath { path: String },
-    #[error("path `{path}` contains `.` component")]
+    #[error("path `{path:?}` contains `.` component")]
     DotComponent { path: String },
-    #[error("path `{path}` contains `..` component")]
+    #[error("path `{path:?}` contains `..` component")]
     ParentComponent { path: String },
     #[error("display name must not be empty")]
     EmptyDisplayName,
-    #[error("display name `{display_name}` contains `/`")]
+    #[error("display name `{display_name:?}` contains `/`")]
     DisplayNameContainsSeparator { display_name: String },
-    #[error("display name `{display_name}` is reserved")]
+    #[error("display name `{display_name:?}` is reserved")]
     ReservedDisplayName { display_name: String },
     #[error("display name contains control character U+{code_point:04X}")]
     DisplayNameContainsControlCharacter { code_point: u32 },

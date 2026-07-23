@@ -11,8 +11,9 @@ use crate::checkpoint::{load_namespace_manifest_envelope, ManifestLoadFailureCla
 use crate::context::MutationContext;
 use crate::error::{CoreError, MetadataProjectionLoadError};
 use crate::gc::{reap_abandoned_bootstrap, AbandonedBootstrapReap};
-use loonfs_api::{NamespaceId, NamespaceSummary, RepairNamespaceOutcome, RepairNamespaceResponse};
-use loonfs_objectstore::keys::namespace_config;
+use loonfs_api::v0::RepairNamespaceResponse;
+use loonfs_api::{NamespaceId, NamespaceSummary, RepairNamespaceOutcome};
+use loonfs_objectstore::keys::{namespace_config, namespace_prefix};
 use loonfs_objectstore::ObjectStore;
 
 /// Explicitly completes or reaps one incomplete namespace installation.
@@ -31,7 +32,7 @@ pub async fn repair_namespace<S: ObjectStore + ?Sized>(
             // blocks no fixed write. Explicit repair lists so it can still
             // condemn the gate of an installer paused immediately after that
             // manifest write; a truly empty namespace remains not found.
-            let namespace_prefix = format!("namespaces/{}/", namespace_id.as_str());
+            let namespace_prefix = namespace_prefix(namespace_id);
             let keys = store
                 .list_prefix(&namespace_prefix)
                 .await
@@ -105,7 +106,7 @@ async fn try_complete_post_head_install<S: ObjectStore + ?Sized>(
 
     match complete_post_head_fork(store, &fork.source_namespace_id, namespace_id, context).await {
         Ok(NamespaceSummary { .. }) => Ok(true),
-        Err(CoreError::NamespacePartiallyInitialized { .. }) => Ok(false),
+        Err(CoreError::NamespacePartial { .. }) => Ok(false),
         Err(CoreError::MetadataProjection(
             MetadataProjectionLoadError::LoadNamespaceDescriptor(error),
         )) if !matches!(error, ControlObjectLoadError::Store { .. }) => Ok(false),

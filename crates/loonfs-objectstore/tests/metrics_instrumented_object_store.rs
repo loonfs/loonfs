@@ -2,8 +2,9 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{self, BoxStream};
 use loonfs_api::ManifestObjectId;
-use loonfs_objectstore::keys::{metadata_manifest_object, metadata_table, wal_head, wal_segment};
-use loonfs_objectstore::layout::ObjectLayout;
+use loonfs_objectstore::keys::{
+    checkpoint_record, metadata_manifest_object, metadata_table, wal_head, wal_segment,
+};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::metrics::{
     InstrumentedObjectStore, JsonlObjectStoreMetricsRecorder, KeyClass, ObjectStoreMetricsRecorder,
@@ -220,11 +221,10 @@ async fn classifies_gc_namespace_layout_family() {
     let temp_dir = tempdir().expect("tempdir");
     let recorder = Arc::new(VecObjectStoreMetricsRecorder::default());
     let store = instrumented_object_store(temp_dir.path(), recorder.clone());
-    let layout = ObjectLayout::new();
 
     store
         .put_overwrite(
-            &layout.metadata_manifest_object(
+            &metadata_manifest_object(
                 "ns-1",
                 &ManifestObjectId::parse("00000000000000000001-0123456789abcdef")
                     .expect("valid manifest object id"),
@@ -235,14 +235,14 @@ async fn classifies_gc_namespace_layout_family() {
         .expect("put namespace manifest");
     store
         .put_overwrite(
-            &layout.metadata_table("ns-1", "tbl_00000000000000000000000000000001"),
+            &metadata_table("ns-1", "tbl_00000000000000000000000000000001"),
             bytes(b"metadata"),
         )
         .await
         .expect("put metadata sst");
     store
         .put_overwrite(
-            &layout.checkpoint_record("ns-1", "chk_00000000000000000000000000000001"),
+            &checkpoint_record("ns-1", "chk_00000000000000000000000000000001"),
             bytes(b"checkpoint"),
         )
         .await

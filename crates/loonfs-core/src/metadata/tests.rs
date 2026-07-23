@@ -8,6 +8,10 @@ use loonfs_api::{
     RevisionNo,
 };
 
+fn name_key(value: &str) -> NameKey {
+    NameKey::parse(value).expect("valid name key")
+}
+
 #[test]
 fn bind_direntry_replay_uses_persisted_name_key() {
     let applied = MetadataState::default().apply_committed_wal_deltas(
@@ -17,7 +21,7 @@ fn bind_direntry_replay_uses_persisted_name_key() {
             delta_index: 7,
             parent_inode_id: InodeId(1),
             name_key: NameKey::parse("persisted-key").expect("valid name key"),
-            display_name: "Report.TXT".to_owned(),
+            display_name: loonfs_api::DisplayName::parse("Report.TXT").expect("valid display name"),
             child_inode_id: InodeId(2),
         }],
     );
@@ -25,7 +29,7 @@ fn bind_direntry_replay_uses_persisted_name_key() {
     assert_eq!(applied.metadata_state.direntry_binds().len(), 1);
     let bind = &applied.metadata_state.direntry_binds()[0];
     assert_eq!(bind.name_key.as_str(), "persisted-key");
-    assert_eq!(bind.display_name, "Report.TXT");
+    assert_eq!(bind.display_name.as_str(), "Report.TXT");
     assert_eq!(bind.bind_delta_index, 7);
 }
 
@@ -47,7 +51,7 @@ fn child_lookup_uses_persisted_name_key_without_recanonicalizing() {
         vec![DirentryBindRecord {
             parent_inode_id: InodeId(1),
             name_key: NameKey::parse("persisted-key").expect("valid name key"),
-            display_name: "Report.TXT".to_owned(),
+            display_name: loonfs_api::DisplayName::parse("Report.TXT").expect("valid display name"),
             child_inode_id: InodeId(2),
             bind_seq: ChangeSeq(1),
             bind_delta_index: 0,
@@ -59,10 +63,10 @@ fn child_lookup_uses_persisted_name_key_without_recanonicalizing() {
     );
 
     assert!(metadata_state
-        .visible_child(InodeId(1), "persisted-key", ChangeSeq(1))
+        .visible_child(InodeId(1), &name_key("persisted-key"), ChangeSeq(1))
         .is_some());
     assert!(metadata_state
-        .visible_child(InodeId(1), "Report.TXT", ChangeSeq(1))
+        .visible_child(InodeId(1), &name_key("Report.TXT"), ChangeSeq(1))
         .is_none());
 }
 
@@ -90,7 +94,7 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
             DirentryBindRecord {
                 parent_inode_id: InodeId(1),
                 name_key: NameKey::parse("docs").expect("valid name key"),
-                display_name: "docs".to_owned(),
+                display_name: loonfs_api::DisplayName::parse("docs").expect("valid display name"),
                 child_inode_id: InodeId(2),
                 bind_seq: ChangeSeq(1),
                 bind_delta_index: 0,
@@ -98,7 +102,8 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
             DirentryBindRecord {
                 parent_inode_id: InodeId(2),
                 name_key: NameKey::parse("report.txt").expect("valid name key"),
-                display_name: "report.txt".to_owned(),
+                display_name: loonfs_api::DisplayName::parse("report.txt")
+                    .expect("valid display name"),
                 child_inode_id: InodeId(3),
                 bind_seq: ChangeSeq(2),
                 bind_delta_index: 0,
@@ -114,7 +119,7 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
     assert!(metadata_state.inode_at_head(InodeId(2)).is_some());
     assert_eq!(
         metadata_state
-            .visible_child_at_head(InodeId(1), "docs")
+            .visible_child_at_head(InodeId(1), &name_key("docs"))
             .expect("docs visible")
             .child_inode_id,
         InodeId(2)
@@ -142,7 +147,7 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
         )
         .metadata_state;
     assert!(metadata_state
-        .visible_child_at_head(InodeId(1), "docs")
+        .visible_child_at_head(InodeId(1), &name_key("docs"))
         .is_none());
     assert!(metadata_state
         .current_parent_binding_for_child_at_head(InodeId(2))
@@ -156,17 +161,18 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
                 delta_index: 0,
                 parent_inode_id: InodeId(1),
                 name_key: NameKey::parse("renamed").expect("valid name key"),
-                display_name: "renamed".to_owned(),
+                display_name: loonfs_api::DisplayName::parse("renamed")
+                    .expect("valid display name"),
                 child_inode_id: InodeId(2),
             }],
         )
         .metadata_state;
     assert!(metadata_state
-        .visible_child_at_head(InodeId(1), "docs")
+        .visible_child_at_head(InodeId(1), &name_key("docs"))
         .is_none());
     assert_eq!(
         metadata_state
-            .visible_child_at_head(InodeId(1), "renamed")
+            .visible_child_at_head(InodeId(1), &name_key("renamed"))
             .expect("renamed visible")
             .child_inode_id,
         InodeId(2)
@@ -183,7 +189,7 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
         )
         .metadata_state;
     assert!(metadata_state
-        .visible_child_at_head(InodeId(1), "renamed")
+        .visible_child_at_head(InodeId(1), &name_key("renamed"))
         .is_none());
     assert_eq!(
         metadata_state
@@ -212,7 +218,7 @@ fn rebuilt_indexes_answer_current_head_queries_after_deserialize() {
         vec![DirentryBindRecord {
             parent_inode_id: InodeId(1),
             name_key: NameKey::parse("file.txt").expect("valid name key"),
-            display_name: "file.txt".to_owned(),
+            display_name: loonfs_api::DisplayName::parse("file.txt").expect("valid display name"),
             child_inode_id: InodeId(2),
             bind_seq: ChangeSeq(1),
             bind_delta_index: 0,
@@ -234,7 +240,7 @@ fn rebuilt_indexes_answer_current_head_queries_after_deserialize() {
     assert_eq!(decoded.indexed_seq(), ChangeSeq(1));
     assert_eq!(
         decoded
-            .visible_child_at_head(InodeId(1), "file.txt")
+            .visible_child_at_head(InodeId(1), &name_key("file.txt"))
             .expect("indexed child")
             .child_inode_id,
         InodeId(2)
@@ -265,7 +271,7 @@ fn stale_binding_is_not_active_after_newer_bind_claims_same_name() {
             DirentryBindRecord {
                 parent_inode_id: InodeId(1),
                 name_key: NameKey::parse("report").expect("valid name key"),
-                display_name: "report".to_owned(),
+                display_name: loonfs_api::DisplayName::parse("report").expect("valid display name"),
                 child_inode_id: InodeId(2),
                 bind_seq: ChangeSeq(1),
                 bind_delta_index: 0,
@@ -273,7 +279,7 @@ fn stale_binding_is_not_active_after_newer_bind_claims_same_name() {
             DirentryBindRecord {
                 parent_inode_id: InodeId(1),
                 name_key: NameKey::parse("report").expect("valid name key"),
-                display_name: "report".to_owned(),
+                display_name: loonfs_api::DisplayName::parse("report").expect("valid display name"),
                 child_inode_id: InodeId(3),
                 bind_seq: ChangeSeq(2),
                 bind_delta_index: 0,
@@ -287,7 +293,7 @@ fn stale_binding_is_not_active_after_newer_bind_claims_same_name() {
 
     assert_eq!(
         metadata_state
-            .visible_child_at_head(InodeId(1), "report")
+            .visible_child_at_head(InodeId(1), &name_key("report"))
             .expect("latest child")
             .child_inode_id,
         InodeId(3)
@@ -315,7 +321,7 @@ fn resolve_visible_path_uses_explicit_name_policy_and_stored_display_name() {
         vec![DirentryBindRecord {
             parent_inode_id: InodeId(1),
             name_key: NameKey::parse("report.txt").expect("valid name key"),
-            display_name: "Report.TXT".to_owned(),
+            display_name: loonfs_api::DisplayName::parse("Report.TXT").expect("valid display name"),
             child_inode_id: InodeId(2),
             bind_seq: ChangeSeq(1),
             bind_delta_index: 0,
@@ -336,7 +342,7 @@ fn resolve_visible_path_uses_explicit_name_policy_and_stored_display_name() {
 
     assert_eq!(resolved.inode_id, InodeId(2));
     assert_eq!(resolved.absolute_path, "/Report.TXT");
-    assert_eq!(resolved.display_name, "Report.TXT");
+    assert_eq!(resolved.display_name.as_str(), "Report.TXT");
 }
 
 #[test]
@@ -549,7 +555,8 @@ fn churned_binding_state() -> MetadataState {
                 delta_index: 1,
                 parent_inode_id: InodeId(1),
                 name_key: NameKey::parse("contested").expect("valid name key"),
-                display_name: "contested".to_owned(),
+                display_name: loonfs_api::DisplayName::parse("contested")
+                    .expect("valid display name"),
                 child_inode_id: InodeId(2),
             },
             WalDelta::CreateInode {
@@ -561,7 +568,8 @@ fn churned_binding_state() -> MetadataState {
                 delta_index: 3,
                 parent_inode_id: InodeId(1),
                 name_key: NameKey::parse("deleted").expect("valid name key"),
-                display_name: "deleted".to_owned(),
+                display_name: loonfs_api::DisplayName::parse("deleted")
+                    .expect("valid display name"),
                 child_inode_id: InodeId(4),
             },
         ],
@@ -582,7 +590,8 @@ fn churned_binding_state() -> MetadataState {
                 delta_index: 1,
                 parent_inode_id: InodeId(1),
                 name_key: NameKey::parse("renamed-away").expect("valid name key"),
-                display_name: "renamed-away".to_owned(),
+                display_name: loonfs_api::DisplayName::parse("renamed-away")
+                    .expect("valid display name"),
                 child_inode_id: InodeId(2),
             },
             WalDelta::UnbindDirentry {
@@ -608,7 +617,8 @@ fn churned_binding_state() -> MetadataState {
                 delta_index: 1,
                 parent_inode_id: InodeId(1),
                 name_key: NameKey::parse("contested").expect("valid name key"),
-                display_name: "contested".to_owned(),
+                display_name: loonfs_api::DisplayName::parse("contested")
+                    .expect("valid display name"),
                 child_inode_id: InodeId(3),
             },
         ],
@@ -638,7 +648,7 @@ fn bound_child_at_head_sees_latest_bind_including_dead_bindings() {
 
     // The latest bind at the contested name is child 3.
     let head_bind = state
-        .bound_child_at_seq(InodeId(1), "contested", head)
+        .bound_child_at_seq(InodeId(1), &name_key("contested"), head)
         .expect("bind at head");
     assert_eq!(head_bind.child_inode_id, InodeId(3));
     assert_eq!(head_bind.bind_seq, ChangeSeq(3));
@@ -646,11 +656,13 @@ fn bound_child_at_head_sees_latest_bind_including_dead_bindings() {
     // The deleted name still answers with its dead binding: the bind is
     // unbound but tombstone-ancestry walks must see it.
     let dead_bind = state
-        .bound_child_at_seq(InodeId(1), "deleted", head)
+        .bound_child_at_seq(InodeId(1), &name_key("deleted"), head)
         .expect("dead binding visible at head");
     assert_eq!(dead_bind.child_inode_id, InodeId(4));
     assert!(state.is_direntry_unbound_at_seq(&dead_bind, head));
-    assert!(state.visible_child(InodeId(1), "deleted", head).is_none());
+    assert!(state
+        .visible_child(InodeId(1), &name_key("deleted"), head)
+        .is_none());
 }
 
 #[test]
@@ -660,7 +672,7 @@ fn bound_child_below_indexed_seq_still_scans_history() {
     // At seq 2 the contested name's latest bind is still child 2's
     // (unbound) binding; the rebind at seq 3 is not visible yet.
     let historical = state
-        .bound_child_at_seq(InodeId(1), "contested", ChangeSeq(2))
+        .bound_child_at_seq(InodeId(1), &name_key("contested"), ChangeSeq(2))
         .expect("historical bind");
     assert_eq!(historical.child_inode_id, InodeId(2));
     assert_eq!(historical.bind_seq, ChangeSeq(1));
@@ -671,11 +683,11 @@ fn incremental_and_rebuilt_indexes_agree_on_latest_binds() {
     let incremental = churned_binding_state();
     let rebuilt = churned_binding_state_rebuilt();
 
-    for name_key in ["contested", "renamed-away", "deleted", "never-bound"] {
+    for name_key_value in ["contested", "renamed-away", "deleted", "never-bound"] {
         assert_eq!(
-            rebuilt.bound_child_at_seq(InodeId(1), name_key, ChangeSeq(3)),
-            incremental.bound_child_at_seq(InodeId(1), name_key, ChangeSeq(3)),
-            "latest bind for `{name_key}` diverges between construction paths"
+            rebuilt.bound_child_at_seq(InodeId(1), &name_key(name_key_value), ChangeSeq(3)),
+            incremental.bound_child_at_seq(InodeId(1), &name_key(name_key_value), ChangeSeq(3),),
+            "latest bind for `{name_key_value}` diverges between construction paths"
         );
     }
 }
@@ -688,12 +700,14 @@ fn queries_above_indexed_seq_match_at_head_results() {
     let beyond_head = ChangeSeq(state.indexed_seq().0 + 1);
 
     assert_eq!(
-        state.bound_child_at_seq(InodeId(1), "contested", beyond_head),
-        state.indexes.latest_bind(InodeId(1), "contested"),
+        state.bound_child_at_seq(InodeId(1), &name_key("contested"), beyond_head),
+        state
+            .indexes
+            .latest_bind(InodeId(1), &name_key("contested")),
     );
     assert_eq!(
-        state.visible_child(InodeId(1), "contested", beyond_head),
-        state.visible_child_at_head(InodeId(1), "contested"),
+        state.visible_child(InodeId(1), &name_key("contested"), beyond_head),
+        state.visible_child_at_head(InodeId(1), &name_key("contested")),
     );
     assert_eq!(
         state.current_parent_binding_for_child(InodeId(2), beyond_head),
@@ -727,7 +741,7 @@ fn has_visible_children_sees_through_unbinds() {
         vec![DirentryBindRecord {
             parent_inode_id: dir,
             name_key: NameKey::parse("doc.txt").expect("valid name key"),
-            display_name: "doc.txt".to_owned(),
+            display_name: loonfs_api::DisplayName::parse("doc.txt").expect("valid display name"),
             child_inode_id: InodeId(2),
             bind_seq: ChangeSeq(2),
             bind_delta_index: 0,

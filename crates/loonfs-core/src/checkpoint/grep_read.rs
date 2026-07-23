@@ -3,7 +3,8 @@
 use super::error::ManifestLoadError;
 use super::load::load_verified_manifest_tables;
 use super::record::read_checkpoint_record;
-use super::scan::{string_prefix_upper_bound, VerifiedMetadataTables};
+pub use super::scan::string_prefix_upper_bound;
+use super::scan::VerifiedMetadataTables;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::metadata::RevisionRecord;
 use crate::namespace::control::{load_namespace_head_control, read_wal_floor_seq_or_zero};
@@ -14,6 +15,9 @@ use loonfs_api::wire::wal::WalCommitPayload;
 use loonfs_api::{ChangeSeq, CheckpointId, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 use std::num::NonZeroUsize;
+
+/// Durable row-key prefix for revision-family metadata rows.
+pub const REVISION_ROW_PREFIX: &str = "revision-";
 
 /// Validated incremental commits after a grep watermark, or an explicit
 /// signal that retention has removed part of the required history.
@@ -50,9 +54,7 @@ pub async fn load_grep_change_feed<S: ObjectStore + ?Sized>(
 ) -> Result<GrepChangeFeed> {
     let head = load_namespace_head_control(store, namespace_id)
         .await
-        .map_err(|error| {
-            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
-        })?
+        .map_err(CoreError::load_head)?
         .state;
     if head.state == NamespaceState::Deleted {
         return Err(CoreError::NamespaceDeleted {
@@ -61,9 +63,7 @@ pub async fn load_grep_change_feed<S: ObjectStore + ?Sized>(
     }
     let floor_seq = read_wal_floor_seq_or_zero(store, namespace_id)
         .await
-        .map_err(|error| {
-            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
-        })?;
+        .map_err(CoreError::load_head)?;
     if after_seq < floor_seq {
         return Ok(GrepChangeFeed::RebootstrapRequired);
     }
@@ -190,7 +190,7 @@ async fn scan_checkpoint_revisions<S: ObjectStore + ?Sized>(
     limit: usize,
 ) -> Result<Vec<(String, MetadataRow)>> {
     let lower_bound = if cursor.is_empty() {
-        "revision-".to_owned()
+        REVISION_ROW_PREFIX.to_owned()
     } else {
         format!("{cursor}\0")
     };
@@ -198,7 +198,7 @@ async fn scan_checkpoint_revisions<S: ObjectStore + ?Sized>(
         .scan_range_page_with_keys(
             MetadataTableFamily::Revisions,
             &lower_bound,
-            string_prefix_upper_bound("revision-").as_deref(),
+            string_prefix_upper_bound(REVISION_ROW_PREFIX).as_deref(),
             limit,
         )
         .await

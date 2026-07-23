@@ -28,6 +28,8 @@ mod s3_compatible;
 mod secret;
 mod store_config;
 mod store_io_runtime;
+#[cfg(test)]
+mod test_support;
 pub mod timing;
 mod transfer_timeouts;
 
@@ -41,7 +43,8 @@ pub use object_store::{
 pub use provider_object_store::{
     ProviderObjectStore, ProviderObjectStoreConfig, PROVIDER_ATTEMPT_TIMEOUT,
     PROVIDER_CONNECT_TIMEOUT, PROVIDER_MULTIPART_PART_BYTES, PROVIDER_MULTIPART_PART_WINDOW,
-    PROVIDER_MULTIPART_THRESHOLD_BYTES, PROVIDER_OP_DEADLINE, PROVIDER_TRANSFER_ATTEMPT_TIMEOUT,
+    PROVIDER_MULTIPART_THRESHOLD_BYTES, PROVIDER_OPERATION_DEADLINE,
+    PROVIDER_TRANSFER_ATTEMPT_TIMEOUT,
 };
 pub use secret::SecretString;
 pub use store_config::{StoreConfig, StoreConfigError};

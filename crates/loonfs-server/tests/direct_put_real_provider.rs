@@ -122,7 +122,7 @@ async fn direct_put_round_trip(config: ServerConfig) {
             .client
             .complete_upload(
                 &namespace_id,
-                begin.upload_id.as_str(),
+                &begin.upload_id,
                 &CompleteUploadRequest {
                     content_ref: content_ref.clone(),
                 },
@@ -175,7 +175,7 @@ fn assert_wrong_direct_put_bytes_rejected(client: &Client, namespace_id: &Namesp
     expect_client_rejection(
         client.complete_upload(
             namespace_id,
-            begin.upload_id.as_str(),
+            &begin.upload_id,
             &CompleteUploadRequest { content_ref },
         ),
         "complete wrong-bytes direct put",
@@ -202,7 +202,7 @@ fn assert_direct_put_requires_signed_checksum_header(client: &Client, namespace_
     expect_client_rejection(
         client.complete_upload(
             namespace_id,
-            begin.upload_id.as_str(),
+            &begin.upload_id,
             &CompleteUploadRequest { content_ref },
         ),
         "complete missing-checksum direct put",
@@ -229,7 +229,7 @@ fn assert_direct_put_is_no_replace(client: &Client, namespace_id: &NamespaceId) 
     let complete = client
         .complete_upload(
             namespace_id,
-            begin.upload_id.as_str(),
+            &begin.upload_id,
             &CompleteUploadRequest { content_ref },
         )
         .expect("complete first direct put");
@@ -410,6 +410,8 @@ fn optional_env(name: &'static str) -> Option<String> {
 
 #[allow(clippy::disallowed_methods)]
 fn direct_put_prefix(provider: &str, base_prefix: Option<String>) -> String {
+    // Unique live-provider key prefixes need wall-clock entropy; nothing
+    // replays this path.
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()

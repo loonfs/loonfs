@@ -38,6 +38,7 @@
 use crate::wire::manifest::MetadataRow;
 use serde::{Deserialize, Serialize};
 use std::io::Read;
+use std::num::NonZeroUsize;
 use thiserror::Error;
 use xxhash_rust::xxh64::xxh64;
 
@@ -143,14 +144,14 @@ pub struct SegmentBlocksBuilder {
 
 impl Default for SegmentBlocksBuilder {
     fn default() -> Self {
-        Self::new(DEFAULT_TARGET_BLOCK_BYTES)
+        Self::new(const { NonZeroUsize::new(DEFAULT_TARGET_BLOCK_BYTES).unwrap() })
     }
 }
 
 impl SegmentBlocksBuilder {
-    pub fn new(target_block_bytes: usize) -> Self {
+    pub fn new(target_block_bytes: NonZeroUsize) -> Self {
         Self {
-            target_block_bytes: target_block_bytes.max(1),
+            target_block_bytes: target_block_bytes.get(),
             entries: Vec::new(),
             restarts: Vec::new(),
             entry_count: 0,
@@ -367,8 +368,16 @@ pub fn decode_filter_block(
             "filter block shorter than its header".to_owned(),
         ));
     }
-    let n_hashes = u32::from_le_bytes(payload[0..4].try_into().expect("length was checked above"));
-    let bit_len = u64::from_le_bytes(payload[4..12].try_into().expect("length was checked above"));
+    let n_hashes = u32::from_le_bytes(
+        payload[0..4]
+            .try_into()
+            .expect("header length should be checked above"),
+    );
+    let bit_len = u64::from_le_bytes(
+        payload[4..12]
+            .try_into()
+            .expect("header length should be checked above"),
+    );
     let bits = payload[12..].to_vec();
     if bit_len.div_ceil(8) != bits.len() as u64 {
         return Err(SstBlockCodecError::Malformed(

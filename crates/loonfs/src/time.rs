@@ -17,7 +17,7 @@ fn unix_ms(now: SystemTime) -> Result<u64> {
 
 #[allow(clippy::disallowed_methods)]
 pub(crate) fn wall_clock_now() -> SystemTime {
-    // Runtime cache TTLs and request timestamps are explicit wall-clock boundaries.
+    // Request timestamps are stamped at this runtime API boundary so core replay stays deterministic.
     SystemTime::now()
 }
 

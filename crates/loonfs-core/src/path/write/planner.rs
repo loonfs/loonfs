@@ -3,7 +3,7 @@
 
 use super::intent::PathMutationIntent;
 use crate::commit::{fingerprint_digest, PathIntentFingerprint, PATH_INTENT_FINGERPRINT_DOMAIN};
-use crate::error::CoreError;
+use crate::error::{CoreError, Result};
 #[cfg(test)]
 use crate::metadata::MetadataState;
 use crate::metadata::{MetadataView, ResolvedVisiblePath, VisiblePathError};
@@ -16,7 +16,7 @@ use loonfs_api::{
         CommitRequest as ApiCommitRequest,
     },
     AbsolutePath, CommitId, ContentRef, DeleteDirectoryBehavior, DestinationBehavior, DisplayName,
-    InodeId, InodeKind, NameKey, NamespaceId, RevisionNo,
+    InodeId, InodeKind, NameKey, NamespaceId, RevisionNo, ROOT_INODE_ID,
 };
 use loonfs_objectstore::ObjectStore;
 use serde::Serialize;
@@ -79,9 +79,7 @@ enum PathFingerprintInput {
     },
 }
 
-fn path_intent_fingerprint(
-    identity: &PathFingerprintInput,
-) -> Result<PathIntentFingerprint, CoreError> {
+fn fingerprint_path_input(identity: &PathFingerprintInput) -> Result<PathIntentFingerprint> {
     #[derive(Serialize)]
     struct CanonicalPathIntent<'a> {
         domain: &'static str,
@@ -96,10 +94,10 @@ fn path_intent_fingerprint(
     .map_err(|err| CoreError::Internal(format!("failed to fingerprint path intent: {err}")))
 }
 
-pub(crate) fn path_intent_fingerprint_for_path_intent(
+pub(crate) fn path_intent_fingerprint(
     namespace_id: &NamespaceId,
     intent: &PathMutationIntent,
-) -> Result<PathIntentFingerprint, CoreError> {
+) -> Result<PathIntentFingerprint> {
     let identity = match intent {
         PathMutationIntent::CreateDir {
             absolute_path,
@@ -180,7 +178,7 @@ pub(crate) fn path_intent_fingerprint_for_path_intent(
             absolute_path: absolute_path.as_str().to_owned(),
         },
     };
-    path_intent_fingerprint(&identity)
+    fingerprint_path_input(&identity)
 }
 
 fn is_missing_visible_path(error: &CoreError) -> bool {
@@ -195,9 +193,9 @@ pub(crate) async fn plan_path_mutation_against_publish_view<S: ObjectStore + ?Si
     intent: &PathMutationIntent,
     head: &HeadState,
     metadata_state: &MetadataView<'_, '_, S>,
-) -> Result<PlannedPathMutation, CoreError> {
+) -> Result<PlannedPathMutation> {
     let commit_id = intent.commit_id().clone();
-    let path_intent_fingerprint = path_intent_fingerprint_for_path_intent(namespace_id, intent)?;
+    let path_intent_fingerprint = path_intent_fingerprint(namespace_id, intent)?;
     let view = PublishPathPlanningView {
         head,
         metadata_state,
@@ -283,7 +281,7 @@ struct PublishPathPlanningView<'a, 'b, 'store, S: ObjectStore + ?Sized> {
 async fn publish_binding_is_precondition<S: ObjectStore + ?Sized>(
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     resolved: &ResolvedVisiblePath,
-) -> Result<ApiCommitPrecondition, CoreError> {
+) -> Result<ApiCommitPrecondition> {
     let parent_inode_id = resolved
         .parent_inode_id
         .ok_or(CoreError::RootMutationForbidden)?;
@@ -307,11 +305,9 @@ async fn publish_binding_is_precondition<S: ObjectStore + ?Sized>(
 fn publish_child_name_absent_precondition<S: ObjectStore + ?Sized>(
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     parent_inode_id: InodeId,
-    display_name: &str,
+    display_name: &DisplayName,
 ) -> ApiCommitPrecondition {
-    let display_name =
-        DisplayName::parse(display_name).expect("path planner should provide valid display name");
-    let name_key = NameKey::for_display_name(view.metadata_state.name_policy(), &display_name);
+    let name_key = NameKey::for_display_name(view.metadata_state.name_policy(), display_name);
     ApiCommitPrecondition::ChildNameAbsent {
         parent_inode_id,
         name_key,
@@ -328,8 +324,8 @@ fn publish_child_name_absent_precondition<S: ObjectStore + ?Sized>(
 async fn publish_reject_tombstoned_path_ancestor<S: ObjectStore + ?Sized>(
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     absolute_path: &AbsolutePath,
-) -> Result<(), CoreError> {
-    let mut current_inode = InodeId(1);
+) -> Result<()> {
+    let mut current_inode = ROOT_INODE_ID;
     let mut current_path = AbsolutePath::root();
 
     for component in absolute_path.components() {
@@ -337,13 +333,12 @@ async fn publish_reject_tombstoned_path_ancestor<S: ObjectStore + ?Sized>(
         let name_key = NameKey::for_display_name(view.metadata_state.name_policy(), &display_name);
         let Some(bound_child) = view
             .metadata_state
-            .visible_child(current_inode, name_key.as_str())
+            .visible_child(current_inode, &name_key)
             .await?
         else {
             return Ok(());
         };
-        let visible_component = DisplayName::parse(&bound_child.display_name)
-            .map_err(crate::path::helpers::map_path_error_to_core)?;
+        let visible_component = bound_child.display_name.clone();
         let visible_path = current_path.join(&visible_component);
         if let Some(tombstone) = view
             .metadata_state
@@ -367,7 +362,7 @@ async fn plan_publish_create_directory<S: ObjectStore + ?Sized>(
     parents: bool,
     commit_id: &CommitId,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
-) -> Result<ApiCommitRequest, CoreError> {
+) -> Result<ApiCommitRequest> {
     ensure_mutation_path(absolute_path)?;
     publish_reject_tombstoned_path_ancestor(view, absolute_path).await?;
     match view
@@ -429,7 +424,7 @@ async fn plan_publish_undelete<S: ObjectStore + ?Sized>(
     absolute_path: &AbsolutePath,
     commit_id: &CommitId,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
-) -> Result<ApiCommitRequest, CoreError> {
+) -> Result<ApiCommitRequest> {
     ensure_mutation_path(absolute_path)?;
     publish_reject_tombstoned_path_ancestor(view, absolute_path).await?;
     match view
@@ -474,7 +469,7 @@ async fn plan_publish_put_file_content_ref<S: ObjectStore + ?Sized>(
     behavior: DestinationBehavior,
     commit_id: &CommitId,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
-) -> Result<ApiCommitRequest, CoreError> {
+) -> Result<ApiCommitRequest> {
     ensure_mutation_path(absolute_path)?;
     publish_reject_tombstoned_path_ancestor(view, absolute_path).await?;
     let target = view
@@ -561,7 +556,7 @@ async fn plan_publish_delete_path<S: ObjectStore + ?Sized>(
     expected_inode_id: Option<InodeId>,
     commit_id: &CommitId,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
-) -> Result<ApiCommitRequest, CoreError> {
+) -> Result<ApiCommitRequest> {
     ensure_mutation_path(absolute_path)?;
     let resolved = view
         .metadata_state
@@ -576,13 +571,16 @@ async fn plan_publish_delete_path<S: ObjectStore + ?Sized>(
                 crate::commit::CommitValidationError::BindingPreconditionMismatch {
                     // Root cannot be deleted, so a resolved delete target
                     // always has a parent.
-                    parent_inode_id: resolved.parent_inode_id.unwrap_or(InodeId(1)),
-                    name_key: loonfs_api::name_key_for_display_name(
+                    parent_inode_id: resolved.parent_inode_id.unwrap_or(ROOT_INODE_ID),
+                    name_key: NameKey::for_display_name(
                         view.metadata_state.name_policy(),
-                        &resolved.display_name,
+                        &absolute_path
+                            .final_component()
+                            .expect("non-root mutation path should have a final component")
+                            .to_display_name(),
                     ),
                     expected_child_inode_id: expected,
-                    actual_child_inode_id: Some(resolved.inode_id),
+                    actual_child_inode_id: resolved.inode_id,
                 }
                 .into(),
             );
@@ -631,7 +629,7 @@ async fn plan_publish_move_path<S: ObjectStore + ?Sized>(
     behavior: DestinationBehavior,
     commit_id: &CommitId,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
-) -> Result<ApiCommitRequest, CoreError> {
+) -> Result<ApiCommitRequest> {
     ensure_mutation_path(from_path)?;
     ensure_mutation_path(to_path)?;
     publish_reject_tombstoned_path_ancestor(view, from_path).await?;
@@ -705,7 +703,7 @@ async fn plan_publish_copy_file_path<S: ObjectStore + ?Sized>(
     behavior: DestinationBehavior,
     commit_id: &CommitId,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
-) -> Result<ApiCommitRequest, CoreError> {
+) -> Result<ApiCommitRequest> {
     ensure_mutation_path(from_path)?;
     ensure_mutation_path(to_path)?;
     publish_reject_tombstoned_path_ancestor(view, from_path).await?;
@@ -809,7 +807,7 @@ async fn plan_publish_restore_revision<S: ObjectStore + ?Sized>(
     source_revision_no: RevisionNo,
     commit_id: &CommitId,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
-) -> Result<ApiCommitRequest, CoreError> {
+) -> Result<ApiCommitRequest> {
     ensure_mutation_path(absolute_path)?;
     publish_reject_tombstoned_path_ancestor(view, absolute_path).await?;
     let target = view
@@ -854,13 +852,13 @@ async fn publish_ensure_parent_directories<S: ObjectStore + ?Sized>(
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     ops: &mut Vec<ApiCommitOp>,
     next_inode_id: &mut InodeId,
-) -> Result<InodeId, CoreError> {
+) -> Result<InodeId> {
     let components = absolute_path.components();
     if components.len() <= 1 {
-        return Ok(InodeId(1));
+        return Ok(ROOT_INODE_ID);
     }
 
-    let mut current_inode = InodeId(1);
+    let mut current_inode = ROOT_INODE_ID;
     let mut creating_missing_ancestors = false;
     for component in &components[..components.len() - 1] {
         let display_name = component.to_display_name();
@@ -868,7 +866,7 @@ async fn publish_ensure_parent_directories<S: ObjectStore + ?Sized>(
         if !creating_missing_ancestors {
             if let Some(child) = view
                 .metadata_state
-                .visible_child(current_inode, name_key.as_str())
+                .visible_child(current_inode, &name_key)
                 .await?
             {
                 let inode = view
@@ -889,7 +887,7 @@ async fn publish_ensure_parent_directories<S: ObjectStore + ?Sized>(
 
         ops.push(ApiCommitOp::CreateDirectory {
             parent_inode_id: current_inode,
-            display_name: display_name.as_str().to_owned(),
+            display_name,
         });
         let allocated = *next_inode_id;
         *next_inode_id = InodeId(next_inode_id.0.saturating_add(1));
@@ -901,12 +899,12 @@ async fn publish_ensure_parent_directories<S: ObjectStore + ?Sized>(
 async fn publish_resolve_parent_directory<S: ObjectStore + ?Sized>(
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     absolute_path: &AbsolutePath,
-) -> Result<InodeId, CoreError> {
+) -> Result<InodeId> {
     let Some(parent_path) = absolute_path.parent() else {
-        return Ok(InodeId(1));
+        return Ok(ROOT_INODE_ID);
     };
     if parent_path.is_root() {
-        return Ok(InodeId(1));
+        return Ok(ROOT_INODE_ID);
     }
     let resolved = view
         .metadata_state
@@ -960,8 +958,7 @@ mod tests {
             parents: false,
         };
 
-        let fingerprint =
-            path_intent_fingerprint_for_path_intent(&namespace_id, &intent).expect("fingerprint");
+        let fingerprint = path_intent_fingerprint(&namespace_id, &intent).expect("fingerprint");
 
         assert_eq!(
             fingerprint.as_str(),
@@ -984,8 +981,7 @@ mod tests {
             expected_inode_id: Some(InodeId(42)),
         };
 
-        let fingerprint =
-            path_intent_fingerprint_for_path_intent(&namespace_id, &intent).expect("fingerprint");
+        let fingerprint = path_intent_fingerprint(&namespace_id, &intent).expect("fingerprint");
 
         assert_eq!(
             fingerprint.as_str(),
@@ -1015,7 +1011,7 @@ mod tests {
         store: &LocalFsStore,
         namespace_id: &NamespaceId,
         intent: &PathMutationIntent,
-    ) -> Result<PlannedPathMutation, CoreError> {
+    ) -> Result<PlannedPathMutation> {
         let (view, _projection) = load_publish_metadata_view(
             store,
             None,
@@ -1047,7 +1043,7 @@ mod tests {
     #[tokio::test]
     async fn path_intent_fingerprint_normalizes_paths() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let left = path_intent_fingerprint_for_path_intent(
+        let left = path_intent_fingerprint(
             &namespace_id,
             &PathMutationIntent::CreateDir {
                 commit_id: CommitId::parse("mkdir-docs-a").expect("valid commit id"),
@@ -1056,7 +1052,7 @@ mod tests {
             },
         )
         .expect("left fingerprint");
-        let right = path_intent_fingerprint_for_path_intent(
+        let right = path_intent_fingerprint(
             &namespace_id,
             &PathMutationIntent::CreateDir {
                 commit_id: CommitId::parse("mkdir-docs-b").expect("valid commit id"),
@@ -1072,7 +1068,7 @@ mod tests {
     #[tokio::test]
     async fn path_intent_fingerprint_changes_when_logical_inputs_change() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let baseline = path_intent_fingerprint_for_path_intent(
+        let baseline = path_intent_fingerprint(
             &namespace_id,
             &PathMutationIntent::CreateDir {
                 commit_id: CommitId::parse("mkdir-docs").expect("valid commit id"),
@@ -1081,7 +1077,7 @@ mod tests {
             },
         )
         .expect("baseline fingerprint");
-        let changed = path_intent_fingerprint_for_path_intent(
+        let changed = path_intent_fingerprint(
             &namespace_id,
             &PathMutationIntent::CreateDir {
                 commit_id: CommitId::parse("mkdir-drafts").expect("valid commit id"),
@@ -1097,7 +1093,7 @@ mod tests {
     #[tokio::test]
     async fn path_intent_and_core_commit_fingerprints_use_distinct_domains() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let path_fingerprint = path_intent_fingerprint_for_path_intent(
+        let path_fingerprint = path_intent_fingerprint(
             &namespace_id,
             &PathMutationIntent::CreateDir {
                 commit_id: CommitId::parse("mkdir-docs").expect("valid commit id"),
@@ -1113,7 +1109,8 @@ mod tests {
                 preconditions: Vec::new(),
                 ops: vec![CommitOp::CreateDirectory {
                     parent_inode_id: InodeId(1),
-                    display_name: "docs".to_owned(),
+                    display_name: loonfs_api::DisplayName::parse("docs")
+                        .expect("valid display name"),
                 }],
                 message: None,
             },
@@ -1141,7 +1138,7 @@ mod tests {
             planned.commit_request.ops,
             vec![CommitOp::CreateDirectory {
                 parent_inode_id: InodeId(1),
-                display_name: "docs".to_owned(),
+                display_name: loonfs_api::DisplayName::parse("docs").expect("valid display name"),
             }]
         );
         assert!(planned
@@ -1181,11 +1178,11 @@ mod tests {
             CommitOp::CreateDirectory {
                 parent_inode_id: InodeId(1),
                 display_name,
-            } if display_name == "docs"
+            } if display_name.as_str() == "docs"
         ));
         assert!(matches!(
             &planned.commit_request.ops[1],
-            CommitOp::CreateDirectory { display_name, .. } if display_name == "nested"
+            CommitOp::CreateDirectory { display_name, .. } if display_name.as_str() == "nested"
         ));
         assert!(matches!(
             &planned.commit_request.ops[2],
@@ -1193,7 +1190,7 @@ mod tests {
                 display_name,
                 content_ref,
                 ..
-            } if display_name == "a.txt" && content_ref == &staged.content_ref
+            } if display_name.as_str() == "a.txt" && content_ref == &staged.content_ref
         ));
     }
 
@@ -1230,7 +1227,7 @@ mod tests {
             [CommitOp::Rename {
                 new_display_name,
                 ..
-            }] if new_display_name == "b.txt"
+            }] if new_display_name.as_str() == "b.txt"
         ));
         assert!(planned
             .commit_request
@@ -1277,7 +1274,7 @@ mod tests {
 
         assert!(matches!(
             planned.commit_request.ops.as_slice(),
-            [CommitOp::CreateFile { display_name, .. }] if display_name == "copy.txt"
+            [CommitOp::CreateFile { display_name, .. }] if display_name.as_str() == "copy.txt"
         ));
         assert!(planned
             .commit_request

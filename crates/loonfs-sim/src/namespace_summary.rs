@@ -2,7 +2,8 @@
 
 use loonfs_api::NamespaceId;
 use loonfs_grep::keyspace::{parse_key as parse_grep_key, GrepKeyKind};
-use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily, ObjectLayout};
+use loonfs_objectstore::keys::namespace_prefix;
+use loonfs_objectstore::layout::{parse_object_key, DurableObjectFamily};
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 use serde::{Deserialize, Serialize};
 
@@ -23,8 +24,7 @@ pub async fn summarize_namespace_objects<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> Result<SimNamespaceObjectSummary, ObjectStoreError> {
-    let layout = ObjectLayout::new();
-    let prefix = layout.namespace_root_prefix(namespace_id.as_str());
+    let prefix = namespace_prefix(namespace_id);
     let keys = store.list_prefix(&prefix).await?;
     let mut summary = SimNamespaceObjectSummary {
         namespace_id: namespace_id.clone(),
@@ -94,6 +94,7 @@ mod tests {
     use loonfs_api::IndexSegmentId;
     use loonfs_grep::keyspace::{manifest_key, root_key, segment_key};
     use loonfs_grep::root::GrepManifestId;
+    use loonfs_objectstore::keys::{wal_head, wal_segment};
     use loonfs_objectstore::local_fs_store::LocalFsStore;
 
     #[tokio::test]
@@ -101,23 +102,20 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let store = LocalFsStore::new(temp_dir.path()).expect("local store");
         let namespace_id = NamespaceId::parse("sim").expect("valid namespace id");
-        let layout = ObjectLayout::new();
 
         store
             .put_overwrite(
-                layout.wal_head(namespace_id.as_str()).as_str(),
+                &wal_head(namespace_id.as_str()),
                 Bytes::from_static(b"head"),
             )
             .await
             .expect("head");
         store
             .put_overwrite(
-                layout
-                    .wal_segment(
-                        namespace_id.as_str(),
-                        "seg_00000000000000000000000000000001",
-                    )
-                    .as_str(),
+                &wal_segment(
+                    namespace_id.as_str(),
+                    "seg_00000000000000000000000000000001",
+                ),
                 Bytes::from_static(b"wal"),
             )
             .await

@@ -112,6 +112,12 @@ define_invariant_ids! {
     (WalReplayRecordsCommitReceipt, "wal_replay_records_commit_receipt"),
 }
 
+pub(crate) fn push_unique_invariant(invariants: &mut Vec<InvariantId>, id: InvariantId) {
+    if !invariants.contains(&id) {
+        invariants.push(id);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::InvariantId;

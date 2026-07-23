@@ -6,18 +6,11 @@ use crate::ObjectStoreError;
 use loonfs_api::ManifestObjectId;
 
 #[derive(Debug, Clone, Copy, Default)]
-pub struct ObjectLayout;
+pub(crate) struct ObjectLayout;
 
-/// Durable object families under the subsystem-owned namespace grammar:
+/// One family in the [durable object key grammar].
 ///
-/// ```text
-/// {subsystem}/{role}.json                    small control/pointer objects
-/// {subsystem}/{collection}/{id}.json         per-id JSON records
-/// {subsystem}/{collection}/{id}.{kind}.zst   compressed immutable payloads
-/// ```
-///
-/// Paths express ownership, not authority: envelopes still validate ids,
-/// families, and checksums.
+/// [durable object key grammar]: ../../../docs/specs/format.md#12-durable-object-families
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DurableObjectFamily {
     NamespaceConfig,
@@ -52,44 +45,32 @@ impl<'a> ParsedObjectKey<'a> {
 }
 
 impl ObjectLayout {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 
-    pub fn namespace_root_prefix(&self, namespace: &str) -> String {
+    pub(crate) fn namespace_root_prefix(&self, namespace: &str) -> String {
         format!("namespaces/{namespace}/")
     }
 
     /// Stable namespace identity and immutable configuration; written last
     /// during bootstrap as the namespace completion marker.
-    pub fn namespace_config(&self, namespace: &str) -> String {
+    pub(crate) fn namespace_config(&self, namespace: &str) -> String {
         format!("namespaces/{namespace}/namespace.json")
     }
 
     /// Hot head of the semantic commit stream: the only object whose CAS
     /// gates user-write throughput.
-    pub fn wal_head(&self, namespace: &str) -> String {
+    pub(crate) fn wal_head(&self, namespace: &str) -> String {
         format!("namespaces/{namespace}/wal/head.json")
     }
 
     /// Cold lower bound of retained WAL/change history.
-    pub fn wal_floor(&self, namespace: &str) -> String {
+    pub(crate) fn wal_floor(&self, namespace: &str) -> String {
         format!("namespaces/{namespace}/wal/floor.json")
     }
 
-    /// Optional mutable pointer to the newest WAL index run (accelerator,
-    /// never authority). Reserved: parseable and buildable ahead of the
-    /// accelerator subsystem landing.
-    pub fn wal_index(&self, namespace: &str) -> String {
-        format!("namespaces/{namespace}/wal/index.json")
-    }
-
-    /// Optional immutable run of visible-chain segment pointers. Reserved.
-    pub fn wal_index_run(&self, namespace: &str, index_id: &str) -> String {
-        format!("namespaces/{namespace}/wal/indexes/{index_id}.json")
-    }
-
-    pub fn wal_segment(&self, namespace: &str, segment_id: &str) -> String {
+    pub(crate) fn wal_segment(&self, namespace: &str, segment_id: &str) -> String {
         format!("namespaces/{namespace}/wal/segments/{segment_id}.wal.zst")
     }
 
@@ -99,7 +80,7 @@ impl ObjectLayout {
     ///
     /// Segment file names start with the segment's 20-digit `start_seq` as
     /// an operator/GC convenience; no protocol depends on listing order.
-    pub fn wal_segment_prefix(&self, namespace: &str) -> String {
+    pub(crate) fn wal_segment_prefix(&self, namespace: &str) -> String {
         format!("namespaces/{namespace}/wal/segments/")
     }
 
@@ -107,17 +88,17 @@ impl ObjectLayout {
     ///
     /// Returns `None` for keys that are not current-format WAL segments, so
     /// listings can skip foreign objects.
-    pub fn wal_segment_id_from_key<'a>(&self, key: &'a str) -> Option<&'a str> {
+    pub(crate) fn wal_segment_id_from_key<'a>(&self, key: &'a str) -> Option<&'a str> {
         let (_, file_name) = key.rsplit_once('/')?;
         file_name.strip_suffix(".wal.zst")
     }
 
     /// Cold pointer to the best known materialized metadata root.
-    pub fn metadata_root(&self, namespace: &str) -> String {
+    pub(crate) fn metadata_root(&self, namespace: &str) -> String {
         format!("namespaces/{namespace}/metadata/root.json")
     }
 
-    pub fn metadata_manifest_object(
+    pub(crate) fn metadata_manifest_object(
         &self,
         namespace: &str,
         manifest_object_id: &ManifestObjectId,
@@ -128,40 +109,40 @@ impl ObjectLayout {
         )
     }
 
-    pub fn metadata_manifest_prefix(&self, namespace: &str) -> String {
+    pub(crate) fn metadata_manifest_prefix(&self, namespace: &str) -> String {
         format!("namespaces/{namespace}/metadata/manifests/")
     }
 
-    pub fn metadata_table(&self, namespace: &str, table_id: &str) -> String {
+    pub(crate) fn metadata_table(&self, namespace: &str, table_id: &str) -> String {
         format!("namespaces/{namespace}/metadata/tables/{table_id}.sst.zst")
     }
 
-    pub fn metadata_table_prefix(&self, namespace: &str) -> String {
+    pub(crate) fn metadata_table_prefix(&self, namespace: &str) -> String {
         format!("namespaces/{namespace}/metadata/tables/")
     }
 
     /// Durable stable-view pin to a metadata manifest.
-    pub fn checkpoint_record(&self, namespace: &str, checkpoint_id: &str) -> String {
+    pub(crate) fn checkpoint_record(&self, namespace: &str, checkpoint_id: &str) -> String {
         format!("namespaces/{namespace}/checkpoints/{checkpoint_id}.json")
     }
 
-    pub fn checkpoint_prefix(&self, namespace: &str) -> String {
+    pub(crate) fn checkpoint_prefix(&self, namespace: &str) -> String {
         format!("namespaces/{namespace}/checkpoints/")
     }
 
-    pub fn upload_session(&self, namespace: &str, upload_id: &str) -> String {
+    pub(crate) fn upload_session(&self, namespace: &str, upload_id: &str) -> String {
         format!("namespaces/{namespace}/uploads/{upload_id}.json")
     }
 
-    pub fn upload_session_prefix(&self, namespace: &str) -> String {
+    pub(crate) fn upload_session_prefix(&self, namespace: &str) -> String {
         format!("namespaces/{namespace}/uploads/")
     }
 
-    pub fn content_store_descriptor(&self, content_store: &str) -> String {
+    pub(crate) fn content_store_descriptor(&self, content_store: &str) -> String {
         format!("content-stores/{content_store}/descriptor.json")
     }
 
-    pub fn content_blob(&self, content_store: &str, digest: &str) -> Result<String> {
+    pub(crate) fn content_blob(&self, content_store: &str, digest: &str) -> Result<String> {
         let hex = sha256_hex_from_digest(digest)?;
         Ok(format!(
             "content-stores/{content_store}/blobs/sha256/{}/{}/{}",
@@ -278,16 +259,6 @@ mod tests {
             "namespaces/ns-1/wal/floor.json"
         );
         assert_eq!(
-            layout.wal_index("ns-1").as_str(),
-            "namespaces/ns-1/wal/index.json"
-        );
-        assert_eq!(
-            layout
-                .wal_index_run("ns-1", "idx_00000000000000000000000000000001")
-                .as_str(),
-            "namespaces/ns-1/wal/indexes/idx_00000000000000000000000000000001.json"
-        );
-        assert_eq!(
             layout
                 .wal_segment("ns-1", "seg_00000000000000000000000000000001")
                 .as_str(),
@@ -348,11 +319,8 @@ mod tests {
         assert_eq!(prefix, "namespaces/ns-1/wal/segments/");
         assert!(!layout.wal_head("ns-1").as_str().starts_with(&prefix));
         assert!(!layout.wal_floor("ns-1").as_str().starts_with(&prefix));
-        assert!(!layout.wal_index("ns-1").as_str().starts_with(&prefix));
-        assert!(!layout
-            .wal_index_run("ns-1", "idx_1")
-            .as_str()
-            .starts_with(&prefix));
+        assert!(!"namespaces/ns-1/wal/index.json".starts_with(&prefix));
+        assert!(!"namespaces/ns-1/wal/indexes/idx_1.json".starts_with(&prefix));
         assert!(layout
             .wal_segment("ns-1", "seg_1")
             .as_str()
@@ -369,9 +337,12 @@ mod tests {
             ),
             (layout.wal_head("ns-1"), DurableObjectFamily::WalHead),
             (layout.wal_floor("ns-1"), DurableObjectFamily::WalFloor),
-            (layout.wal_index("ns-1"), DurableObjectFamily::WalIndex),
             (
-                layout.wal_index_run("ns-1", "idx_00000000000000000000000000000001"),
+                "namespaces/ns-1/wal/index.json".to_owned(),
+                DurableObjectFamily::WalIndex,
+            ),
+            (
+                "namespaces/ns-1/wal/indexes/idx_00000000000000000000000000000001.json".to_owned(),
                 DurableObjectFamily::WalIndexRun,
             ),
             (

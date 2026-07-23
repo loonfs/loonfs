@@ -249,7 +249,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
         .stat_path(&namespace_id, "/tree/dir-000000/file-000000042.txt")
         .await
         .expect("cold stat");
-    assert_eq!(entry.display_name, "file-000000042.txt");
+    assert_eq!(entry.display_name.as_str(), "file-000000042.txt");
     assert!(entry.revision_no.is_some(), "file stat carries a revision");
 
     let gets = log.take();

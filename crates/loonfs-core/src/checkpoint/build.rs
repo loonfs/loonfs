@@ -10,9 +10,8 @@ use crate::error::{CoreError, Result};
 use crate::metadata::MetadataState;
 use bytes::Bytes;
 use futures::future::try_join_all;
-use loonfs_api::wire::manifest::{
-    hex_encode_bytes, MetadataFileRef, MetadataRow, MetadataTableFamily,
-};
+use loonfs_api::wire::hex::hex_encode_bytes;
+use loonfs_api::wire::manifest::{MetadataFileRef, MetadataRow, MetadataTableFamily};
 use loonfs_api::wire::sst_blocks::SegmentBlocksBuilder;
 use loonfs_api::{sha256_digest, ChangeSeq, MetadataTableId, NamespaceId};
 use loonfs_objectstore::keys::metadata_table;

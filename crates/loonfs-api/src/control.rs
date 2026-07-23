@@ -7,7 +7,7 @@ use crate::v0::UploadMode;
 use crate::WriterEpoch;
 use crate::{
     ChangeSeq, CheckpointId, CommitId, ContentRef, ContentStoreId, InodeId, ManifestId,
-    ManifestObjectId, NamePolicy, NamespaceId, UploadId, WalSegmentId,
+    ManifestObjectId, NamePolicy, NamespaceId, UploadId, WalSegmentId, ROOT_INODE_ID,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -76,7 +76,7 @@ pub struct NamespaceConfigState {
     pub content_store_id: ContentStoreId,
     /// Immutable per namespace, chosen at creation: the single authority for
     /// name-key computation on both the write and read paths. Required — a
-    /// descriptor without a policy is malformed, never guessed.
+    /// config without a policy is malformed, never guessed.
     pub name_policy: NamePolicy,
 }
 
@@ -222,9 +222,9 @@ pub struct AcquiredWriter {
 /// Lifecycle state recorded in the namespace head.
 ///
 /// Initialization progress is not recorded here: it stays derived from
-/// object presence (the descriptor is the completion marker). This field
+/// object presence (the config is the completion marker). This field
 /// records the one transition object presence cannot express, because a
-/// deleted namespace keeps its head and descriptor forever as the id-reuse
+/// deleted namespace keeps its head and config forever as the id-reuse
 /// tombstone.
 ///
 /// Decoding is fail-closed: a reader presented with a state it does not
@@ -277,16 +277,18 @@ pub struct HeadState {
     pub state: NamespaceState,
 }
 
+const GENESIS_COMMIT_ID: &str = "c_00000000000000000000000000000000";
+
 impl HeadState {
     pub fn initial(namespace_id: NamespaceId) -> Self {
         Self {
             namespace_id,
             seq: ChangeSeq(0),
-            head_commit_id: CommitId::parse("c_00000000000000000000000000000000")
-                .expect("genesis commit id is valid"),
+            head_commit_id: CommitId::parse(GENESIS_COMMIT_ID).expect("genesis commit id is valid"),
             writer_epoch: WriterEpoch(0),
             writer: None,
-            next_inode_id: InodeId(2),
+            // Inode 1 is the root directory; inode 2 is the first assignable id.
+            next_inode_id: InodeId(ROOT_INODE_ID.0 + 1),
             visible_wal_tip: None,
             recent_segments: Vec::new(),
             state: NamespaceState::Active,
@@ -446,13 +448,13 @@ mod tests {
     #[test]
     fn namespace_config_without_name_policy_is_rejected() {
         // The name policy is the collision-semantics authority; a
-        // descriptor that omits it is malformed, never defaulted.
+        // config that omits it is malformed, never defaulted.
         let missing = serde_json::json!({
             "namespace_id": "demo",
             "content_store_id": "cs_0123456789abcdef"
         });
         serde_json::from_value::<NamespaceConfigState>(missing)
-            .expect_err("descriptor without name_policy must be rejected");
+            .expect_err("config without name_policy must be rejected");
     }
 
     #[test]

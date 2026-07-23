@@ -1,7 +1,7 @@
 //! Typed loaders for the namespace's control objects: head, metadata root,
 //! WAL floor, and the descriptor pair.
 
-use crate::error::StoreFailureClass;
+use crate::error::{CoreError, StoreFailureClass};
 use loonfs_api::wire::control::{
     decode_control_object, ContentStoreDescriptorEnvelope, ContentStoreDescriptorState,
     ControlObjectKind, HeadState, HeadStateEnvelope, MetadataRootEnvelope, MetadataRootState,
@@ -94,17 +94,12 @@ pub struct LoadedHeadControl {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
 pub enum ControlObjectLoadError {
-    #[error("invalid namespace_id {namespace_id:?}: {message}")]
-    InvalidNamespaceId {
-        namespace_id: String,
-        message: String,
-    },
     #[error("missing control object `{object_key}`")]
     MissingObject { object_key: String },
     #[error("missing control object after head `{object_key}`")]
     MissingObjectAfterHead { object_key: String },
     #[error(
-        "metadata root references seq {root_manifest_head_seq:?} beyond the reloaded head seq {head_seq:?}"
+        "metadata root references seq `{root_manifest_head_seq}` beyond the reloaded head seq `{head_seq}`"
     )]
     RootAheadOfHead {
         root_manifest_head_seq: loonfs_api::ChangeSeq,
@@ -144,11 +139,24 @@ pub enum ControlObjectLoadError {
     },
 }
 
+pub(super) fn map_store_load_error_or_else<E>(
+    error: ControlObjectLoadError,
+    otherwise: impl FnOnce() -> E,
+) -> E
+where
+    E: From<CoreError>,
+{
+    if matches!(&error, ControlObjectLoadError::Store { .. }) {
+        CoreError::load_head(error).into()
+    } else {
+        otherwise()
+    }
+}
+
 pub(crate) async fn read_namespace_descriptor_object<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
 ) -> Result<LoadedNamespaceDescriptorObject, ControlObjectLoadError> {
-    validate_namespace_id_for_control_key(expected_namespace_id)?;
     let object_key = namespace_config(expected_namespace_id.as_str());
     let (metadata, encoded_bytes) = read_control_object_bytes(store, &object_key).await?;
     let envelope: NamespaceConfigEnvelope =
@@ -195,7 +203,6 @@ pub(crate) async fn read_wal_floor_object<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
 ) -> Result<LoadedWalFloorObject, ControlObjectLoadError> {
-    validate_namespace_id_for_control_key(expected_namespace_id)?;
     let object_key = wal_floor(expected_namespace_id.as_str());
     let (metadata, encoded_bytes) = read_control_object_bytes(store, &object_key).await?;
     let envelope: WalFloorEnvelope =
@@ -231,7 +238,6 @@ pub(crate) async fn read_metadata_root_object<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
 ) -> Result<LoadedMetadataRootObject, ControlObjectLoadError> {
-    validate_namespace_id_for_control_key(expected_namespace_id)?;
     let object_key = metadata_root(expected_namespace_id.as_str());
     let (metadata, encoded_bytes) = read_control_object_bytes(store, &object_key).await?;
     let envelope: MetadataRootEnvelope =
@@ -284,7 +290,6 @@ pub(crate) async fn read_head_object<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
 ) -> Result<LoadedHeadObject, ControlObjectLoadError> {
-    validate_namespace_id_for_control_key(expected_namespace_id)?;
     let object_key = wal_head(expected_namespace_id.as_str());
     let (metadata, encoded_bytes) = read_control_object_bytes(store, &object_key).await?;
     let envelope: HeadStateEnvelope =
@@ -430,17 +435,6 @@ async fn read_control_object_bytes<S: ObjectStore + ?Sized>(
             object_key: object_key.to_owned(),
         })?;
     Ok((body.metadata, body.bytes))
-}
-
-fn validate_namespace_id_for_control_key(
-    namespace_id: &NamespaceId,
-) -> Result<(), ControlObjectLoadError> {
-    NamespaceId::parse(namespace_id.as_str())
-        .map(|_| ())
-        .map_err(|err| ControlObjectLoadError::InvalidNamespaceId {
-            namespace_id: namespace_id.as_str().to_owned(),
-            message: err.reason().to_owned(),
-        })
 }
 
 fn validate_expected_namespace(

@@ -40,10 +40,10 @@ pub(super) fn validate_directory_cursor(
             "directory cursor resolved to a non-directory path",
         ));
     }
-    if resolved.inode_id != cursor.dir_inode_id {
+    if resolved.inode_id != cursor.directory_inode_id {
         return Err(invalid_cursor(format!(
             "cursor directory inode `{}` does not match requested path inode `{}`",
-            cursor.dir_inode_id.0, resolved.inode_id.0
+            cursor.directory_inode_id.0, resolved.inode_id.0
         )));
     }
     Ok(())

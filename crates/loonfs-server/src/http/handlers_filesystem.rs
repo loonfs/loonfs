@@ -403,10 +403,8 @@ pub(super) async fn restore_inode_revision(
     State(state): State<AppState>,
     namespace: NamespaceIdPath,
     path: AppPath<InodeRestorePathParams>,
-    headers: HeaderMap,
     AppJson(request): AppJson<RestoreFileRevisionRequest>,
 ) -> Result<Json<ApiCommitResponse>, ApiResponseError> {
-    authorize(&state.config, &headers)?;
     let namespace_id = namespace.into_id()?;
     let InodeRestorePathParams {
         inode_id,
@@ -462,10 +460,8 @@ pub(super) async fn restore_inode_revision(
 pub(super) async fn filesystem_operation(
     State(state): State<AppState>,
     namespace: NamespaceIdPath,
-    headers: HeaderMap,
     AppJson(request): AppJson<FilesystemOperationRequest>,
 ) -> Result<Json<ApiCommitResponse>, ApiResponseError> {
-    authorize(&state.config, &headers)?;
     let namespace_id = namespace.into_id()?;
     let FilesystemOperationRequest {
         commit_id,

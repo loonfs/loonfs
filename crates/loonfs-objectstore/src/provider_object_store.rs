@@ -55,7 +55,7 @@ pub const PROVIDER_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// because everything it times — WAL segments inside the publish budget,
 /// the root compare-and-swap — is a small control object on the
 /// single-request path.
-pub const PROVIDER_OP_DEADLINE: Duration = Duration::from_secs(120);
+pub const PROVIDER_OPERATION_DEADLINE: Duration = Duration::from_secs(120);
 
 /// Payload size at and above which overwrite puts use the provider's native
 /// multipart upload instead of one whole-object PUT, matching the multipart
@@ -116,11 +116,11 @@ pub(crate) fn provider_client_options() -> provider_store::ClientOptions {
 }
 
 /// Retry configuration every provider builder applies: the client's internal
-/// read retries consume [`PROVIDER_OP_DEADLINE`] as one per-operation budget,
+/// read retries consume [`PROVIDER_OPERATION_DEADLINE`] as one per-operation budget,
 /// matching the write loops above.
 pub(crate) fn provider_retry_config() -> provider_store::RetryConfig {
     provider_store::RetryConfig {
-        retry_timeout: PROVIDER_OP_DEADLINE,
+        retry_timeout: PROVIDER_OPERATION_DEADLINE,
         ..Default::default()
     }
 }
@@ -182,13 +182,13 @@ impl ProviderObjectStore {
     }
 
     #[cfg(test)]
-    fn with_transport_retry(mut self, transport_retry: TransportRetryPolicy) -> Self {
+    fn transport_retry(mut self, transport_retry: TransportRetryPolicy) -> Self {
         self.transport_retry = transport_retry;
         self
     }
 
     #[cfg(test)]
-    fn with_multipart_geometry(mut self, threshold_bytes: u64, part_bytes: u64) -> Self {
+    fn multipart_geometry(mut self, threshold_bytes: u64, part_bytes: u64) -> Self {
         self.multipart_geometry = MultipartGeometry {
             threshold_bytes,
             part_bytes,
@@ -197,7 +197,7 @@ impl ProviderObjectStore {
     }
 
     #[cfg(test)]
-    fn with_monotonic_timer(mut self, timer: Arc<dyn MonotonicTimer>) -> Self {
+    fn monotonic_timer(mut self, timer: Arc<dyn MonotonicTimer>) -> Self {
         self.timer = timer;
         self
     }
@@ -717,7 +717,7 @@ impl ObjectStore for ProviderObjectStore {
     async fn delete(&self, key: &str) -> Result<()> {
         let path = self.to_path(key)?;
         let deadline =
-            OperationDeadline::start(self.timer.as_ref(), self.transport_retry.op_deadline);
+            OperationDeadline::start(self.timer.as_ref(), self.transport_retry.operation_deadline);
         let mut retries: u32 = 0;
         loop {
             // Delete is idempotent under this contract: not-found already
@@ -850,6 +850,7 @@ fn map_provider_error(object_key: &str, err: provider_store::Error) -> ObjectSto
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::SteppingTimer;
     use futures::StreamExt;
     use object_store::memory::InMemory;
 
@@ -1372,35 +1373,12 @@ mod tests {
             },
         )
         .expect("provider store")
-        .with_transport_retry(TransportRetryPolicy {
+        .transport_retry(TransportRetryPolicy {
             max_retries: 4,
             initial_backoff: Duration::from_millis(1),
             max_backoff: Duration::from_millis(1),
-            op_deadline: PROVIDER_OP_DEADLINE,
+            operation_deadline: PROVIDER_OPERATION_DEADLINE,
         })
-    }
-
-    /// Deterministic timer that advances a fixed step per reading, so a
-    /// deadline is consumed by observations instead of wall time.
-    #[derive(Debug)]
-    struct SteppingTimer {
-        now_ms: std::sync::atomic::AtomicU64,
-        step_ms: u64,
-    }
-
-    impl SteppingTimer {
-        fn new(step_ms: u64) -> Self {
-            Self {
-                now_ms: std::sync::atomic::AtomicU64::new(0),
-                step_ms,
-            }
-        }
-    }
-
-    impl MonotonicTimer for SteppingTimer {
-        fn monotonic_now_ms(&self) -> u64 {
-            self.now_ms.fetch_add(self.step_ms, Ordering::SeqCst)
-        }
     }
 
     fn script_puts(flaky: &FlakyStore, script: impl IntoIterator<Item = WriteScript>) {
@@ -1612,7 +1590,7 @@ mod tests {
     async fn delete_retries_stop_once_the_operation_deadline_is_spent() {
         let flaky = Arc::new(FlakyStore::default());
         let store = retrying_store(Arc::clone(&flaky))
-            .with_monotonic_timer(Arc::new(SteppingTimer::new(45_000)));
+            .monotonic_timer(Arc::new(SteppingTimer::new(45_000)));
         let key = "namespaces/demo/uploads/upl_10.json";
         store
             .put_overwrite(key, Bytes::from_static(b"payload"))
@@ -1720,7 +1698,7 @@ mod tests {
     /// Retrying store with a test-sized multipart geometry: payloads of
     /// 1024+ bytes go multipart in 512-byte parts.
     fn multipart_test_store(flaky: Arc<FlakyStore>) -> ProviderObjectStore {
-        retrying_store(flaky).with_multipart_geometry(MULTIPART_TEST_THRESHOLD, MULTIPART_TEST_PART)
+        retrying_store(flaky).multipart_geometry(MULTIPART_TEST_THRESHOLD, MULTIPART_TEST_PART)
     }
 
     fn multipart_payload(len: usize) -> Vec<u8> {
@@ -2188,7 +2166,7 @@ mod tests {
     async fn multipart_part_retries_are_count_bounded_not_clock_bounded() {
         let flaky = Arc::new(FlakyStore::default());
         let store = multipart_test_store(Arc::clone(&flaky))
-            .with_monotonic_timer(Arc::new(SteppingTimer::new(45_000)));
+            .monotonic_timer(Arc::new(SteppingTimer::new(45_000)));
         script_part(&flaky, 0, (0..6).map(|_| WriteScript::FailWithoutLanding));
 
         let error = store

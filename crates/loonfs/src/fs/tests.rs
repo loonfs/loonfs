@@ -29,7 +29,8 @@ fn explicit_commit_facade_exports_constructor_types() {
             CommitOp::Rename {
                 inode_id: InodeId(2),
                 new_parent_inode_id: InodeId(1),
-                new_display_name: "report.txt".to_owned(),
+                new_display_name: loonfs_api::DisplayName::parse("report.txt")
+                    .expect("valid display name"),
             },
         ],
         message: None,

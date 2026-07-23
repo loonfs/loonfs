@@ -77,8 +77,8 @@ pub enum ObjectStoreError {
     InvalidRange { object_key: String },
     #[error("precondition failed for `{object_key}`")]
     PreconditionFailed { object_key: String },
-    /// Producible only by fault injection (the simulator's fault store):
-    /// no real provider constructs it. Core treats it alongside
+    /// Producible only by test fault injection; no real provider constructs
+    /// it. Core treats it alongside
     /// [`Self::PreconditionFailed`] so injected conflicts exercise the
     /// same recovery paths.
     #[error("conflict for `{object_key}`")]
@@ -179,11 +179,12 @@ pub trait ObjectStore: Send + Sync + Debug {
     /// Writes `bytes` under an immutable `key` and accepts success only when
     /// the key contains exactly those bytes.
     ///
-    /// Payloads below 8 MiB use create-if-absent; payloads at or above 8 MiB
-    /// use the store's multipart-capable overwrite path. Transport retries
-    /// are safe only because every writer allowed to name this immutable key
-    /// must supply identical bytes. Mutable keys must use [`Self::put`] and
-    /// own their protocol-specific ambiguity resolution.
+    /// Payloads below [`crate::PROVIDER_MULTIPART_THRESHOLD_BYTES`] use
+    /// create-if-absent; payloads at or above that threshold use the store's
+    /// multipart-capable overwrite path. Transport retries are safe only
+    /// because every writer allowed to name this immutable key must supply
+    /// identical bytes. Mutable keys must use [`Self::put`] and own their
+    /// protocol-specific ambiguity resolution.
     async fn put_immutable_verified(
         &self,
         key: &str,
@@ -234,6 +235,37 @@ impl<T: ObjectStore + ?Sized> ObjectStore for Arc<T> {
     fn list_prefix_stream(&self, prefix: &str) -> BoxStream<'static, Result<String>> {
         self.as_ref().list_prefix_stream(prefix)
     }
+
+    async fn list_prefix(&self, prefix: &str) -> Result<Vec<String>> {
+        self.as_ref().list_prefix(prefix).await
+    }
+
+    async fn put_overwrite(&self, key: &str, bytes: Bytes) -> Result<ObjectMetadata> {
+        self.as_ref().put_overwrite(key, bytes).await
+    }
+
+    async fn put_if_absent(&self, key: &str, bytes: Bytes) -> Result<ObjectMetadata> {
+        self.as_ref().put_if_absent(key, bytes).await
+    }
+
+    async fn put_immutable_verified(
+        &self,
+        key: &str,
+        bytes: Bytes,
+    ) -> std::result::Result<(), crate::ImmutableWriteError> {
+        self.as_ref().put_immutable_verified(key, bytes).await
+    }
+
+    async fn compare_and_swap(
+        &self,
+        key: &str,
+        expected_etag: &str,
+        bytes: Bytes,
+    ) -> Result<ObjectMetadata> {
+        self.as_ref()
+            .compare_and_swap(key, expected_etag, bytes)
+            .await
+    }
 }
 
 #[async_trait]
@@ -260,5 +292,95 @@ impl<T: ObjectStore + ?Sized> ObjectStore for &T {
 
     fn list_prefix_stream(&self, prefix: &str) -> BoxStream<'static, Result<String>> {
         (*self).list_prefix_stream(prefix)
+    }
+
+    async fn list_prefix(&self, prefix: &str) -> Result<Vec<String>> {
+        (*self).list_prefix(prefix).await
+    }
+
+    async fn put_overwrite(&self, key: &str, bytes: Bytes) -> Result<ObjectMetadata> {
+        (*self).put_overwrite(key, bytes).await
+    }
+
+    async fn put_if_absent(&self, key: &str, bytes: Bytes) -> Result<ObjectMetadata> {
+        (*self).put_if_absent(key, bytes).await
+    }
+
+    async fn put_immutable_verified(
+        &self,
+        key: &str,
+        bytes: Bytes,
+    ) -> std::result::Result<(), crate::ImmutableWriteError> {
+        (*self).put_immutable_verified(key, bytes).await
+    }
+
+    async fn compare_and_swap(
+        &self,
+        key: &str,
+        expected_etag: &str,
+        bytes: Bytes,
+    ) -> Result<ObjectMetadata> {
+        (*self).compare_and_swap(key, expected_etag, bytes).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::stream;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[derive(Debug)]
+    struct ListOverrideStore {
+        override_reached: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl ObjectStore for ListOverrideStore {
+        async fn head(&self, _key: &str) -> Result<Option<ObjectMetadata>> {
+            Ok(None)
+        }
+
+        async fn get_with_metadata(&self, _key: &str) -> Result<Option<ObjectBody>> {
+            Ok(None)
+        }
+
+        async fn get(&self, _key: &str, _range: Option<ByteRange>) -> Result<Option<Bytes>> {
+            Ok(None)
+        }
+
+        async fn put(&self, key: &str, _bytes: Bytes, _mode: PutMode) -> Result<ObjectMetadata> {
+            Err(ObjectStoreError::Conflict {
+                object_key: key.to_owned(),
+            })
+        }
+
+        async fn delete(&self, _key: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn list_prefix_stream(&self, _prefix: &str) -> BoxStream<'static, Result<String>> {
+            Box::pin(stream::empty())
+        }
+
+        async fn list_prefix(&self, _prefix: &str) -> Result<Vec<String>> {
+            self.override_reached.store(true, Ordering::SeqCst);
+            Ok(vec!["overridden".to_owned()])
+        }
+    }
+
+    #[tokio::test]
+    async fn arc_dyn_store_forwards_overridden_list_prefix() {
+        let override_reached = Arc::new(AtomicBool::new(false));
+        let store: Arc<dyn ObjectStore> = Arc::new(ListOverrideStore {
+            override_reached: Arc::clone(&override_reached),
+        });
+
+        let keys = <Arc<dyn ObjectStore> as ObjectStore>::list_prefix(&store, "prefix/")
+            .await
+            .expect("overridden list should succeed");
+
+        assert_eq!(keys, vec!["overridden"]);
+        assert!(override_reached.load(Ordering::SeqCst));
     }
 }

@@ -197,36 +197,41 @@ impl<S> InstrumentedObjectStore<S> {
     }
 }
 
-// Instrumentation is the explicit timing boundary for object-store latency metrics.
-#[async_trait]
 #[allow(clippy::disallowed_methods)]
+fn sample_clock() -> Instant {
+    // Metrics sampling reads the wall clock at this recorder boundary so
+    // protocol replay stays deterministic.
+    Instant::now()
+}
+
+#[async_trait]
 impl<S> ObjectStore for InstrumentedObjectStore<S>
 where
     S: ObjectStore,
 {
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>> {
-        let start = Instant::now();
+        let start = sample_clock();
         let result = self.inner.head(key).await;
         self.record_head_like(ObjectStoreOperation::Head, key, start.elapsed(), &result);
         result
     }
 
     async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Option<Bytes>> {
-        let start = Instant::now();
+        let start = sample_clock();
         let result = self.inner.get(key, range.clone()).await;
         self.record_get(key, range.as_ref(), start.elapsed(), &result);
         result
     }
 
     async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>> {
-        let start = Instant::now();
+        let start = sample_clock();
         let result = self.inner.get_with_metadata(key).await;
         self.record_get_with_metadata(key, start.elapsed(), &result);
         result
     }
 
     async fn put(&self, key: &str, bytes: Bytes, mode: PutMode) -> Result<ObjectMetadata> {
-        let start = Instant::now();
+        let start = sample_clock();
         let bytes_in = bytes.len() as u64;
         let result = self.inner.put(key, bytes, mode.clone()).await;
         self.record_put(key, bytes_in, &mode, start.elapsed(), &result);
@@ -234,7 +239,7 @@ where
     }
 
     async fn delete(&self, key: &str) -> Result<()> {
-        let start = Instant::now();
+        let start = sample_clock();
         let result = self.inner.delete(key).await;
         self.record_unit(ObjectStoreOperation::Delete, key, start.elapsed(), &result);
         result
@@ -250,15 +255,15 @@ where
             recorder: Arc::clone(&self.recorder),
             store_kind: self.store_kind.clone(),
             key_class: classify_key(prefix),
-            started: Instant::now(),
+            started: sample_clock(),
             items: 0,
             first_error: None,
         })
     }
 
     async fn list_prefix(&self, prefix: &str) -> Result<Vec<String>> {
-        let start = Instant::now();
-        let result: std::result::Result<Vec<_>, _> = self
+        let start = sample_clock();
+        let result: Result<Vec<_>> = self
             .inner
             .list_prefix_stream(prefix)
             .try_collect()

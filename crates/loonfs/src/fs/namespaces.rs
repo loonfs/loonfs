@@ -57,7 +57,7 @@ impl FsCore {
     /// spec, "Tombstones and deletion"). Commits acknowledged before the
     /// swap stay committed; reads, writes, forks, and re-creation of the id
     /// fail with `namespace_deleted` afterward. Deletion does not reclaim
-    /// storage; reclamation is future maintenance work.
+    /// storage; reclamation is explicit garbage collection.
     ///
     /// Sequenced as a barrier through the publication service: mutations
     /// admitted before the delete publish first, and mutations admitted

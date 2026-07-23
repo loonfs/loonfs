@@ -4,7 +4,7 @@
 use super::intent::PathMutationIntent;
 use super::planner::{plan_path_mutation_against_publish_view, PlannedPathMutation};
 use crate::commit::CommitPlan;
-use crate::error::CoreError;
+use crate::error::Result;
 use crate::metadata::{DurableVisibilityCache, MetadataState, MetadataView};
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::wal::WalCommitPayload;
@@ -55,7 +55,7 @@ impl PublishPlanningSession {
         namespace_id: &NamespaceId,
         intent: &PathMutationIntent,
         base_view: MetadataView<'_, '_, S>,
-    ) -> Result<PlannedPathMutation, CoreError> {
+    ) -> Result<PlannedPathMutation> {
         let cached_view = base_view.with_durable_cache(&self.durable_cache);
         let view = cached_view.with_overlay(&self.accepted_rows, self.head.seq);
         plan_path_mutation_against_publish_view(namespace_id, intent, &self.head, &view).await
@@ -75,7 +75,7 @@ mod tests {
     use super::*;
     use crate::commit_engine::{publish_namespace_mutations_batch, NamespaceMutationCandidate};
     use crate::context::MutationContext;
-    use crate::error::ErrorCode;
+    use crate::error::{CoreError, ErrorCode};
     use crate::namespace::bootstrap::bootstrap_namespace;
     use crate::protocol::{load_publish_metadata_view, PublishTailOptions};
     use crate::storage::content::store_bytes_as_content;

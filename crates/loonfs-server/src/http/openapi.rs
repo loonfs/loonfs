@@ -12,14 +12,15 @@ use loonfs_api::{
         BeginUploadRequest, BeginUploadResponse, ChangesResponse,
         CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse,
         CommitSubmissionRequest, CompleteUploadRequest, CompleteUploadResponse, DirectPutUpload,
-        ObjectTransferAccess, UploadContentResponse, UploadMode, ValidatedContentToken,
+        ObjectTransferAccess, RepairNamespaceResponse, UploadContentResponse, UploadMode,
+        ValidatedContentToken,
     },
     AdvanceRetentionResponse, ApiError, ContentRef, CreateCheckpointRequest,
     CreateCheckpointResponse, CreateNamespaceRequest, FilesystemOperation,
     FilesystemOperationRequest, FlushWalOutcome, FlushWalResponse, ForkNamespaceRequest, GcRequest,
     GcResponse, InodeId, ListFileRevisionsResponse, MaintenanceTickOutcome, MaintenanceTickRequest,
     MaintenanceTickResponse, ReleaseCheckpointResponse, RepairNamespaceOutcome,
-    RepairNamespaceResponse, RestoreFileRevisionRequest, RevisionNo,
+    RestoreFileRevisionRequest, RevisionNo,
 };
 
 pub fn openapi_document() -> utoipa::openapi::OpenApi {

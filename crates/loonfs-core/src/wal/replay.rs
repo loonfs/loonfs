@@ -2,7 +2,7 @@
 
 pub(crate) use super::frame::WalReplayError;
 use super::{DecodedWalRecord, ReplayedWalTail, ValidatedWalChain};
-use crate::invariants::InvariantId;
+use crate::invariants::{push_unique_invariant, InvariantId};
 use crate::metadata::MetadataState;
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::wal::{WalCommitDelta, WalDelta, WalSegmentEnvelope};
@@ -58,7 +58,7 @@ where
             record.message,
             &record.deltas,
         );
-        push_invariant(
+        push_unique_invariant(
             &mut checked_invariants,
             InvariantId::WalReplayAppliesMetadataRows,
         );
@@ -190,7 +190,7 @@ pub(super) fn extend_wal_replay_invariants(checked_invariants: &mut Vec<Invarian
         InvariantId::WalReplayRequiresMatchingBaseHeadSeq,
         InvariantId::WalTailSeqIsContiguous,
     ] {
-        push_invariant(checked_invariants, invariant);
+        push_unique_invariant(checked_invariants, invariant);
     }
 }
 
@@ -220,12 +220,6 @@ fn replay_next_inode_id_from_commit_deltas(
 
 fn extend_invariants(checked_invariants: &mut Vec<InvariantId>, new_invariants: &[InvariantId]) {
     for invariant in new_invariants {
-        push_invariant(checked_invariants, *invariant);
-    }
-}
-
-fn push_invariant(checked_invariants: &mut Vec<InvariantId>, invariant: InvariantId) {
-    if !checked_invariants.contains(&invariant) {
-        checked_invariants.push(invariant);
+        push_unique_invariant(checked_invariants, *invariant);
     }
 }

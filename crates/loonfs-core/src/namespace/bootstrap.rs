@@ -7,6 +7,7 @@ use crate::checkpoint::{
 };
 use crate::context::MutationContext;
 use crate::error::{CoreError, MetadataProjectionLoadError};
+use crate::limits::CONTENTION_RETRY_LIMIT;
 #[cfg(test)]
 use crate::limits::GC_MIN_GRACE_WINDOW_MS;
 use crate::metadata::{InodeRecord, MetadataState};
@@ -15,8 +16,10 @@ use crate::namespace::catalog::{
     put_completion_descriptor, put_namespace_install_gate, put_target_namespace_control_object,
     NamespaceInitializationState, NamespaceInstallGate,
 };
-use crate::namespace::control::ControlObjectLoadError;
-use crate::namespace::control::{read_head_object, read_metadata_root_object};
+use crate::namespace::control::{
+    map_store_load_error_or_else, read_head_object, read_metadata_root_object,
+    ControlObjectLoadError,
+};
 use bytes::Bytes;
 use loonfs_api::wire::control::NamespaceState;
 use loonfs_api::wire::control::{
@@ -25,8 +28,8 @@ use loonfs_api::wire::control::{
     NamespaceConfigEnvelope, NamespaceConfigState, WalFloorEnvelope, WalFloorState, WriterBlock,
 };
 use loonfs_api::{
-    ChangeSeq, ContentStoreId, ErrorCode, InodeId, InodeKind, NamePolicy, NamespaceId,
-    NamespaceSummary,
+    ChangeSeq, ContentStoreId, ErrorCode, InodeKind, NamePolicy, NamespaceId, NamespaceSummary,
+    ROOT_INODE_ID,
 };
 #[cfg(test)]
 use loonfs_objectstore::keys::wal_head;
@@ -200,7 +203,7 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     .await?;
 
     if gate == NamespaceInstallGate::ExistingPartial {
-        return Err(CoreError::NamespacePartiallyInitialized {
+        return Err(CoreError::NamespacePartial {
             namespace_id: namespace_id.clone(),
         }
         .into());
@@ -258,12 +261,7 @@ pub(super) async fn complete_post_head_bootstrap<S: ObjectStore + ?Sized>(
     };
     let head = read_head_object(store, namespace_id)
         .await
-        .map_err(|error| match error {
-            ControlObjectLoadError::Store { .. } => BootstrapNamespaceError::Core(
-                CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error)),
-            ),
-            _ => partial(),
-        })?
+        .map_err(|error| map_store_load_error_or_else(error, partial))?
         .envelope
         .state;
     let genesis = head.state == NamespaceState::Active
@@ -274,12 +272,7 @@ pub(super) async fn complete_post_head_bootstrap<S: ObjectStore + ?Sized>(
     }
     let root = read_metadata_root_object(store, namespace_id)
         .await
-        .map_err(|error| match error {
-            ControlObjectLoadError::Store { .. } => BootstrapNamespaceError::Core(
-                CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error)),
-            ),
-            _ => partial(),
-        })?
+        .map_err(|error| map_store_load_error_or_else(error, partial))?
         .envelope
         .state;
     let manifest = load_namespace_manifest_envelope(store, namespace_id, &root.manifest_object_id)
@@ -326,13 +319,11 @@ pub(super) async fn complete_post_head_bootstrap<S: ObjectStore + ?Sized>(
     })
 }
 
-const CONTENT_STORE_ID_RETRY_LIMIT: usize = 8;
-
 async fn create_new_content_store<S: ObjectStore + ?Sized>(
     store: &S,
     context: &MutationContext,
 ) -> Result<ContentStoreId, CoreError> {
-    for _attempt in 0..CONTENT_STORE_ID_RETRY_LIMIT {
+    for _attempt in 0..CONTENTION_RETRY_LIMIT {
         let content_store_id = ContentStoreId::generate();
         let descriptor = ContentStoreDescriptorEnvelope::from_state(
             ControlObjectKind::ContentStoreDescriptor,
@@ -369,7 +360,7 @@ async fn create_new_content_store<S: ObjectStore + ?Sized>(
 pub(crate) fn bootstrap_metadata_state() -> MetadataState {
     MetadataState::from_rows(
         vec![InodeRecord {
-            inode_id: InodeId(1),
+            inode_id: ROOT_INODE_ID,
             inode_kind: InodeKind::Directory,
             created_seq: ChangeSeq(0),
         }],
@@ -626,11 +617,13 @@ mod tests {
                     preconditions: Vec::new(),
                     ops: vec![ApiCommitOp::CreateDirectory {
                         parent_inode_id: loonfs_api::InodeId(1),
-                        display_name: name.to_owned(),
+                        display_name: loonfs_api::DisplayName::parse(name)
+                            .expect("valid display name"),
                     }],
                     message: None,
                 })],
                 &context(2_000),
+                &crate::protocol::PublishTailOptions::default(),
             )
             .await
             .results

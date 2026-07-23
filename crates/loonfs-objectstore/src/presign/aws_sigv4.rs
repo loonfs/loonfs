@@ -74,7 +74,7 @@ pub(crate) fn hmac_sha256(key: &[u8], value: &[u8]) -> Vec<u8> {
 }
 
 pub(crate) fn hex_lower(bytes: &[u8]) -> String {
-    loonfs_api::wire::manifest::hex_encode_bytes(bytes)
+    loonfs_api::wire::hex::hex_encode_bytes(bytes)
 }
 
 fn percent_encode_query(value: &str) -> String {

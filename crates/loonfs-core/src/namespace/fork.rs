@@ -15,7 +15,9 @@ use crate::namespace::catalog::{
     namespace_initialization_state, put_completion_descriptor, put_namespace_install_gate,
     put_target_namespace_control_object, NamespaceInitializationState, NamespaceInstallGate,
 };
-use crate::namespace::control::{read_head_object, read_metadata_root_object};
+use crate::namespace::control::{
+    map_store_load_error_or_else, read_head_object, read_metadata_root_object,
+};
 use loonfs_api::wire::control::{
     encode_control_object, CheckpointOwner, CheckpointRecordState, ControlObjectKind, HeadState,
     HeadStateEnvelope, MetadataRootEnvelope, MetadataRootState, NamespaceConfigEnvelope,
@@ -48,12 +50,12 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
                     namespace_id: new_namespace_id.clone(),
                 });
             }
-            return Err(CoreError::NamespaceAlreadyExists {
+            return Err(CoreError::NamespaceExists {
                 namespace_id: new_namespace_id.clone(),
             });
         }
         NamespaceInitializationState::Partial | NamespaceInitializationState::PreHeadDebris => {
-            return Err(CoreError::NamespacePartiallyInitialized {
+            return Err(CoreError::NamespacePartial {
                 namespace_id: new_namespace_id.clone(),
             });
         }
@@ -141,7 +143,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
             source_namespace_id,
             source_manifest,
             &source_record,
-        )?,
+        ),
     )
     .map_err(|err| CoreError::Internal(format!("failed to build fork control envelope: {err}")))?;
     // Freshen the record before the first target write: the compare-and-swap
@@ -209,7 +211,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     )
     .await?;
     if gate == NamespaceInstallGate::ExistingPartial {
-        return Err(CoreError::NamespacePartiallyInitialized {
+        return Err(CoreError::NamespacePartial {
             namespace_id: new_namespace_id.clone(),
         });
     }
@@ -242,17 +244,12 @@ pub(super) async fn complete_post_head_fork<S: ObjectStore + ?Sized>(
 ) -> Result<NamespaceSummary> {
     // Best-effort, like the create-side completion: any target object that
     // fails to load or validate answers partial, never a server error.
-    let partial = || CoreError::NamespacePartiallyInitialized {
+    let partial = || CoreError::NamespacePartial {
         namespace_id: new_namespace_id.clone(),
     };
     let head = read_head_object(store, new_namespace_id)
         .await
-        .map_err(|error| match error {
-            crate::namespace::control::ControlObjectLoadError::Store { .. } => {
-                CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
-            }
-            _ => partial(),
-        })?
+        .map_err(|error| map_store_load_error_or_else(error, partial))?
         .envelope
         .state;
     if head.state == NamespaceState::Deleted {
@@ -265,12 +262,7 @@ pub(super) async fn complete_post_head_fork<S: ObjectStore + ?Sized>(
     }
     let root = read_metadata_root_object(store, new_namespace_id)
         .await
-        .map_err(|error| match error {
-            crate::namespace::control::ControlObjectLoadError::Store { .. } => {
-                CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
-            }
-            _ => partial(),
-        })?
+        .map_err(|error| map_store_load_error_or_else(error, partial))?
         .envelope
         .state;
     let manifest =
@@ -288,7 +280,7 @@ pub(super) async fn complete_post_head_fork<S: ObjectStore + ?Sized>(
         .as_ref()
         .is_some_and(|fork| fork.source_namespace_id == *source_namespace_id);
     if !names_this_source {
-        return Err(CoreError::NamespacePartiallyInitialized {
+        return Err(CoreError::NamespacePartial {
             namespace_id: new_namespace_id.clone(),
         });
     }
@@ -327,9 +319,9 @@ fn fork_target_manifest_payload(
     source_namespace_id: &NamespaceId,
     source_manifest: &NamespaceManifestEnvelope,
     source_record: &CheckpointRecordState,
-) -> Result<NamespaceManifestPayload> {
+) -> NamespaceManifestPayload {
     let fork_seq = source_record.manifest_head_seq;
-    Ok(NamespaceManifestPayload {
+    NamespaceManifestPayload {
         namespace_id: new_namespace_id.clone(),
         manifest_id: target_manifest_id,
         manifest_object_id: target_manifest_object_id,
@@ -348,7 +340,7 @@ fn fork_target_manifest_payload(
             source_head_seq: source_record.manifest_head_seq,
         }),
         metadata_files: source_manifest.payload.metadata_files.clone(),
-    })
+    }
 }
 
 #[cfg(test)]
@@ -438,8 +430,7 @@ mod tests {
             &NamespaceId::parse("source").expect("source namespace"),
             &source,
             &source_checkpoint,
-        )
-        .expect("fork payload");
+        );
 
         assert_eq!(target.metadata_files, source.payload.metadata_files);
         assert_eq!(target.head_seq, source_checkpoint.manifest_head_seq);

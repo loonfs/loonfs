@@ -74,7 +74,7 @@ pub enum DurableContentValidationError {
     Store { object_key: String, message: String },
 }
 
-pub async fn validate_durable_content_reference<S: ObjectStore + ?Sized>(
+pub(crate) async fn validate_durable_content_reference<S: ObjectStore + ?Sized>(
     store: &S,
     content_store_id: &ContentStoreId,
     content_ref: &ContentRef,

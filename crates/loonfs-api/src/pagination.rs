@@ -1,16 +1,12 @@
 //! Pagination: page-size policy, typed page envelopes, and the opaque
 //! cursors each paginated endpoint round-trips.
 
+use crate::capability::{LIMIT_PAGINATION_DEFAULT, LIMIT_PAGINATION_MAX};
 use crate::{ChangeSeq, InodeId, NameKey, RevisionNo};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
 use thiserror::Error;
-
-/// Advisory capability key for the default page size applied when callers omit `limit`.
-pub const LIMIT_PAGINATION_DEFAULT: &str = "pagination.default_limit";
-/// Advisory capability key for the largest page size accepted by a deployment.
-pub const LIMIT_PAGINATION_MAX: &str = "pagination.max_limit";
 
 /// Default page size for endpoints that can return unbounded result sets.
 pub const DEFAULT_PAGE_LIMIT: u32 = 1_000;
@@ -121,8 +117,8 @@ impl PaginationPolicy {
 
 impl Default for PaginationPolicy {
     fn default() -> Self {
-        let default_limit = hard_coded_nonzero(DEFAULT_PAGE_LIMIT);
-        let max_limit = hard_coded_nonzero(DEFAULT_MAX_PAGE_LIMIT);
+        let default_limit = const { NonZeroU32::new(DEFAULT_PAGE_LIMIT).unwrap() };
+        let max_limit = const { NonZeroU32::new(DEFAULT_MAX_PAGE_LIMIT).unwrap() };
         Self {
             default_limit,
             max_limit,
@@ -184,16 +180,16 @@ pub struct Page<T, C> {
 /// Directory pagination advances in canonical `name_key` order.
 ///
 /// The cursor intentionally contains only the snapshot (`head_seq`), listed
-/// directory identity (`dir_inode_id`), and resume position (`last_name_key`).
+/// directory identity (`directory_inode_id`), and resume position (`last_name_key`).
 /// HTTP clients must pass the URL namespace and `path` on every page.
 /// Runtime/server code resolves that path at `head_seq` and rejects the cursor
-/// unless it names `dir_inode_id`.
+/// unless it names `directory_inode_id`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirectoryPageCursor {
     /// Snapshot sequence captured by the first page.
     pub head_seq: ChangeSeq,
     /// Directory inode resolved at `head_seq`.
-    pub dir_inode_id: InodeId,
+    pub directory_inode_id: InodeId,
     /// Last canonical name key returned to the client.
     pub last_name_key: NameKey,
 }
@@ -242,13 +238,19 @@ pub struct GrepPageCursor {
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum EncodedPageCursor {
     Directory {
-        v: u8,
+        // The wire field is frozen as `v` in page cursor version 1.
+        #[serde(rename = "v")]
+        version: u8,
         head_seq: ChangeSeq,
-        dir_inode_id: InodeId,
+        // The wire field is frozen as `dir_inode_id` in page cursor version 1.
+        #[serde(rename = "dir_inode_id")]
+        directory_inode_id: InodeId,
         last_name_key: NameKey,
     },
     FileRevisions {
-        v: u8,
+        // The wire field is frozen as `v` in page cursor version 1.
+        #[serde(rename = "v")]
+        version: u8,
         head_seq: ChangeSeq,
         inode_id: InodeId,
         last_revision_no: RevisionNo,
@@ -256,7 +258,9 @@ enum EncodedPageCursor {
         last_revision_delta_index: u32,
     },
     Grep {
-        v: u8,
+        // The wire field is frozen as `v` in page cursor version 1.
+        #[serde(rename = "v")]
+        version: u8,
         head_seq: ChangeSeq,
         last_inode_id: InodeId,
         last_byte_offset: u64,
@@ -267,7 +271,9 @@ enum EncodedPageCursor {
 impl EncodedPageCursor {
     fn version(&self) -> u8 {
         match self {
-            Self::Directory { v, .. } | Self::FileRevisions { v, .. } | Self::Grep { v, .. } => *v,
+            Self::Directory { version, .. }
+            | Self::FileRevisions { version, .. }
+            | Self::Grep { version, .. } => *version,
         }
     }
 
@@ -295,9 +301,9 @@ impl EncodedPageCursor {
 /// Encodes a directory-list cursor as an opaque string for clients.
 pub fn encode_directory_cursor(cursor: &DirectoryPageCursor) -> Result<String, PageCursorError> {
     encode_cursor(&EncodedPageCursor::Directory {
-        v: PAGE_CURSOR_VERSION,
+        version: PAGE_CURSOR_VERSION,
         head_seq: cursor.head_seq,
-        dir_inode_id: cursor.dir_inode_id,
+        directory_inode_id: cursor.directory_inode_id,
         last_name_key: cursor.last_name_key.clone(),
     })
 }
@@ -307,12 +313,12 @@ pub fn decode_directory_cursor(value: &str) -> Result<DirectoryPageCursor, PageC
     match decode_cursor(value)? {
         EncodedPageCursor::Directory {
             head_seq,
-            dir_inode_id,
+            directory_inode_id,
             last_name_key,
             ..
         } => Ok(DirectoryPageCursor {
             head_seq,
-            dir_inode_id,
+            directory_inode_id,
             last_name_key,
         }),
         other => Err(PageCursorError::WrongKind {
@@ -327,7 +333,7 @@ pub fn encode_file_revisions_cursor(
     cursor: &FileRevisionsPageCursor,
 ) -> Result<String, PageCursorError> {
     encode_cursor(&EncodedPageCursor::FileRevisions {
-        v: PAGE_CURSOR_VERSION,
+        version: PAGE_CURSOR_VERSION,
         head_seq: cursor.head_seq,
         inode_id: cursor.inode_id,
         last_revision_no: cursor.last_revision_no,
@@ -365,7 +371,7 @@ pub fn decode_file_revisions_cursor(
 /// Encodes a grep cursor as an opaque string for clients.
 pub fn encode_grep_cursor(cursor: &GrepPageCursor) -> Result<String, PageCursorError> {
     encode_cursor(&EncodedPageCursor::Grep {
-        v: PAGE_CURSOR_VERSION,
+        version: PAGE_CURSOR_VERSION,
         head_seq: cursor.head_seq,
         last_inode_id: cursor.last_inode_id,
         last_byte_offset: cursor.last_byte_offset,
@@ -430,18 +436,11 @@ pub enum PageCursorError {
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
-    crate::manifest::hex_encode_bytes(bytes)
+    crate::hex::hex_encode_bytes(bytes)
 }
 
 fn hex_decode(value: &str) -> Result<Vec<u8>, PageCursorError> {
-    crate::manifest::hex_decode_bytes(value).map_err(|_| PageCursorError::InvalidEncoding)
-}
-
-fn hard_coded_nonzero(value: u32) -> NonZeroU32 {
-    match NonZeroU32::new(value) {
-        Some(value) => value,
-        None => unreachable!("hard-coded pagination limits must be non-zero"),
-    }
+    crate::hex::hex_decode_bytes(value).map_err(|_| PageCursorError::InvalidEncoding)
 }
 
 #[cfg(test)]
@@ -500,7 +499,7 @@ mod tests {
     fn directory_cursor_round_trips() {
         let cursor = DirectoryPageCursor {
             head_seq: ChangeSeq(11),
-            dir_inode_id: InodeId(7),
+            directory_inode_id: InodeId(7),
             last_name_key: NameKey::parse("plan.md").expect("name key"),
         };
 
@@ -557,9 +556,9 @@ mod tests {
     #[test]
     fn unsupported_cursor_version_is_rejected() {
         let encoded = encode_cursor(&EncodedPageCursor::Directory {
-            v: PAGE_CURSOR_VERSION + 1,
+            version: PAGE_CURSOR_VERSION + 1,
             head_seq: ChangeSeq(11),
-            dir_inode_id: InodeId(7),
+            directory_inode_id: InodeId(7),
             last_name_key: NameKey::parse("plan.md").expect("name key"),
         })
         .expect("encode cursor");

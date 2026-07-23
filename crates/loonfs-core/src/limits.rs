@@ -9,7 +9,7 @@
 //! plus a margin for provider-timestamp skew. Callers may configure a larger
 //! grace window, never a smaller one.
 
-use loonfs_objectstore::{PROVIDER_ATTEMPT_TIMEOUT, PROVIDER_OP_DEADLINE};
+use loonfs_objectstore::{PROVIDER_ATTEMPT_TIMEOUT, PROVIDER_OPERATION_DEADLINE};
 
 /// Maximum semantic operations in one explicit commit, bounding how long one
 /// request can occupy the serialized publisher during planning and
@@ -26,6 +26,9 @@ pub const MAX_COMMIT_CONTENT_TOKENS: usize = 4096;
 /// its in-memory coverage work while it occupies the serialized publisher.
 pub const MAX_COMMIT_EXTERNAL_CONTENT_REFS: usize = 4096;
 
+/// Maximum attempts for a bounded compare-and-swap or allocation contention loop.
+pub const CONTENTION_RETRY_LIMIT: usize = 8;
+
 /// Provider operation deadline, in milliseconds (`loonfs-objectstore`
 /// consumes it across every retry of one single-request operation).
 /// Multipart transfers of large immutable payloads carry no
@@ -35,11 +38,11 @@ pub const MAX_COMMIT_EXTERNAL_CONTENT_REFS: usize = 4096;
 /// checkpoint records, the root compare-and-swap) is a small control
 /// object on the single-request path, and publications self-enforce their
 /// budgets by wall clock regardless of per-operation deadlines.
-pub const PROVIDER_OP_DEADLINE_MS: u64 = PROVIDER_OP_DEADLINE.as_millis() as u64;
+pub const PROVIDER_OPERATION_DEADLINE_MS: u64 = PROVIDER_OPERATION_DEADLINE.as_millis() as u64;
 
 /// One control-plane provider HTTP attempt's request timeout, in
 /// milliseconds. An operation's total wall time is bounded by
-/// `PROVIDER_OP_DEADLINE_MS + PROVIDER_ATTEMPT_TIMEOUT_MS`, because the
+/// `PROVIDER_OPERATION_DEADLINE_MS + PROVIDER_ATTEMPT_TIMEOUT_MS`, because the
 /// deadline gates starting an attempt rather than preempting one.
 pub const PROVIDER_ATTEMPT_TIMEOUT_MS: u64 = PROVIDER_ATTEMPT_TIMEOUT.as_millis() as u64;
 
@@ -86,7 +89,7 @@ const fn max_u64(left: u64, right: u64) -> u64 {
 pub const GC_MIN_GRACE_WINDOW_MS: u64 = max_u64(
     max_u64(WAL_PUBLISH_BUDGET_MS, CHECKPOINT_VERIFY_BUDGET_MS),
     METADATA_PUBLICATION_BUDGET_MS,
-) + PROVIDER_OP_DEADLINE_MS
+) + PROVIDER_OPERATION_DEADLINE_MS
     + PROVIDER_ATTEMPT_TIMEOUT_MS
     + GC_SAFETY_MARGIN_MS;
 
@@ -109,7 +112,7 @@ mod tests {
                 > max_u64(
                     max_u64(WAL_PUBLISH_BUDGET_MS, CHECKPOINT_VERIFY_BUDGET_MS),
                     METADATA_PUBLICATION_BUDGET_MS,
-                ) + PROVIDER_OP_DEADLINE_MS,
+                ) + PROVIDER_OPERATION_DEADLINE_MS,
             "the floor keeps a margin above budget plus provider deadline"
         );
     }

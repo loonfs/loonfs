@@ -17,24 +17,28 @@ use loonfs_api::{
     v0::{
         BeginUploadRequest, BeginUploadResponse, ChangesResponse,
         CommitResponse as ApiCommitResponse, CommitSubmissionRequest, CompleteUploadRequest,
-        CompleteUploadResponse, ObjectTransferAccess, UploadContentResponse, UploadMode,
-        ValidatedContentToken,
+        CompleteUploadResponse, DisableGramsIndexResponse, EnableGramsIndexResponse,
+        GrepGcResponse, ObjectTransferAccess, RepairNamespaceResponse, UploadContentResponse,
+        UploadMode, ValidatedContentToken,
     },
     AbsolutePath, AdvanceRetentionResponse, AuthoritativePathEntry, CapabilityDocument, ChangeSeq,
-    CommitId, ContentRef, CreateCheckpointRequest, CreateCheckpointResponse,
+    CheckpointId, CommitId, ContentRef, CreateCheckpointRequest, CreateCheckpointResponse,
     CreateNamespaceRequest, DeleteDirectoryBehavior, DeleteNamespaceResponse, DestinationBehavior,
-    DisableGramsIndexResponse, EnableGramsIndexResponse, ErrorCode, FilesystemOperation,
-    FilesystemOperationRequest, FlushWalResponse, ForkNamespaceRequest, GcRequest, GcResponse,
-    GrepGcResponse, GrepRequest, GrepResponse, InodeId, ListFileRevisionsResponse,
-    ListPathEntriesResponse, MaintenanceTickRequest, MaintenanceTickResponse, NamespaceId,
-    NamespaceStatusResponse, NamespaceSummary, ReleaseCheckpointResponse, RepairNamespaceResponse,
-    RestoreFileRevisionRequest, RevisionNo,
+    ErrorCode, FilesystemOperation, FilesystemOperationRequest, FlushWalResponse,
+    ForkNamespaceRequest, GcRequest, GcResponse, GrepRequest, GrepResponse, InodeId,
+    ListFileRevisionsResponse, ListPathEntriesResponse, MaintenanceTickRequest,
+    MaintenanceTickResponse, NamespaceId, NamespaceStatusResponse, NamespaceSummary,
+    ReleaseCheckpointResponse, RestoreFileRevisionRequest, RevisionNo, UploadId,
 };
 use std::sync::{Arc, OnceLock};
 
 pub use config::ClientConfig;
 pub use error::ClientError;
 use transport::IO_INACTIVITY_TIMEOUT;
+pub use ClientError as Error;
+
+/// Result type returned by the blocking client.
+pub type Result<T> = std::result::Result<T, ClientError>;
 
 /// Synchronous HTTP client for LoonFS.
 #[derive(Debug, Clone)]
@@ -66,9 +70,8 @@ pub struct NamespacePath {
     absolute_path: AbsolutePath,
 }
 
-/// Options shared by every client mutation, mirroring the runtime's
-/// per-operation options structs.
-#[derive(Debug, Clone, Default)]
+/// Options for client mutations whose only optional input is a commit id.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MutationOptions {
     /// Idempotency key for the commit; retrying with the same id replays
     /// the committed mutation instead of double-committing. A fresh id is
@@ -77,15 +80,56 @@ pub struct MutationOptions {
 }
 
 impl MutationOptions {
-    /// Retry with a caller-chosen idempotency key.
-    pub fn with_commit_id(commit_id: CommitId) -> Self {
-        Self {
-            commit_id: Some(commit_id),
-        }
-    }
-
     fn resolve_commit_id(&self) -> CommitId {
         self.commit_id.clone().unwrap_or_else(CommitId::generate)
+    }
+}
+
+/// Options for writing a file path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PutFileOptions {
+    /// Create-only or replace-existing behavior.
+    pub behavior: DestinationBehavior,
+    /// Optional idempotency key.
+    pub commit_id: Option<CommitId>,
+}
+
+impl Default for PutFileOptions {
+    fn default() -> Self {
+        Self {
+            behavior: DestinationBehavior::NoReplace,
+            commit_id: None,
+        }
+    }
+}
+
+/// Options for creating a directory.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CreateDirectoryOptions {
+    /// Optional idempotency key.
+    pub commit_id: Option<CommitId>,
+    /// Also create missing ancestor directories.
+    pub parents: bool,
+}
+
+/// Options for deleting a path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeleteOptions {
+    /// Directory delete behavior.
+    pub behavior: DeleteDirectoryBehavior,
+    /// Optional idempotency key.
+    pub commit_id: Option<CommitId>,
+    /// Delete only while the path still resolves to this inode.
+    pub expected_inode_id: Option<InodeId>,
+}
+
+impl Default for DeleteOptions {
+    fn default() -> Self {
+        Self {
+            behavior: DeleteDirectoryBehavior::NonRecursive,
+            commit_id: None,
+            expected_inode_id: None,
+        }
     }
 }
 
@@ -93,7 +137,7 @@ impl Client {
     /// Creates a client, validating the config exactly as
     /// [`ClientConfig::load`] does — direct Rust construction cannot bypass
     /// validation.
-    pub fn new(config: ClientConfig) -> Result<Self, ClientError> {
+    pub fn new(config: ClientConfig) -> Result<Self> {
         config.validate()?;
         let mut agent = ureq::AgentBuilder::new()
             .timeout_read(IO_INACTIVITY_TIMEOUT)
@@ -117,7 +161,7 @@ impl Client {
     /// Feature keys that are not parented by an advertised profile are
     /// dropped rather than trusted, per the spec's client guidance for
     /// malformed documents.
-    pub fn capabilities(&self) -> Result<CapabilityDocument, ClientError> {
+    pub fn capabilities(&self) -> Result<CapabilityDocument> {
         if let Some(document) = self.capabilities.get() {
             return Ok(document.clone());
         }
@@ -135,10 +179,7 @@ impl Client {
             .clone())
     }
 
-    pub fn create_namespace(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<NamespaceSummary, ClientError> {
+    pub fn create_namespace(&self, namespace_id: &NamespaceId) -> Result<NamespaceSummary> {
         let url = format!("{}/v0/namespaces", self.base_url);
         // Namespace creation has no durable request identity to reconcile an ambiguous success.
         self.request_json_once::<_, NamespaceSummary>(
@@ -149,10 +190,7 @@ impl Client {
         )
     }
 
-    pub fn namespace_status(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<NamespaceStatusResponse, ClientError> {
+    pub fn namespace_status(&self, namespace_id: &NamespaceId) -> Result<NamespaceStatusResponse> {
         // Validated namespace ids are URL-safe by construction, like the
         // other parsed id segments interpolated into paths here and below.
         let url = format!("{}/v0/namespaces/{namespace_id}", self.base_url);
@@ -168,7 +206,7 @@ impl Client {
         &self,
         namespace_id: &NamespaceId,
         expected_head_seq: Option<ChangeSeq>,
-    ) -> Result<DeleteNamespaceResponse, ClientError> {
+    ) -> Result<DeleteNamespaceResponse> {
         let mut url = format!("{}/v0/namespaces/{namespace_id}", self.base_url);
         if let Some(expected) = expected_head_seq {
             url.push_str(&format!("?expected_head_seq={}", expected.0));
@@ -181,7 +219,7 @@ impl Client {
         &self,
         source_namespace_id: &NamespaceId,
         new_namespace_id: &NamespaceId,
-    ) -> Result<NamespaceSummary, ClientError> {
+    ) -> Result<NamespaceSummary> {
         let url = format!(
             "{}/v0/namespaces/{source_namespace_id}/forks",
             self.base_url
@@ -201,12 +239,9 @@ impl Client {
     /// `rebootstrap_required` (API spec: restart the listing from a fresh
     /// first page). This helper performs that restart itself, discarding
     /// the partial aggregation, up to three times before surfacing the
-    /// error. Use [`Self::list_path_page`] for page-level control and
+    /// error. Use [`Self::list_path_entries_page`] for page-level control and
     /// cursor errors surfaced as-is.
-    pub fn list_path_all(
-        &self,
-        spec: &NamespacePath,
-    ) -> Result<ListPathEntriesResponse, ClientError> {
+    pub fn list_path_entries_all(&self, spec: &NamespacePath) -> Result<ListPathEntriesResponse> {
         // Bounded so a write-hot namespace cannot pin this loop forever.
         const MAX_LISTING_RESTARTS: u32 = 3;
         let mut restarts = 0;
@@ -215,12 +250,12 @@ impl Client {
             let mut envelope = None;
             let mut cursor = None;
             loop {
-                let page = match self.list_path_page(spec, None, cursor.as_deref()) {
+                let page = match self.list_path_entries_page(spec, None, cursor.as_deref()) {
                     Ok(page) => page,
                     Err(error)
                         if cursor.is_some()
                             && restarts < MAX_LISTING_RESTARTS
-                            && error.error_code() == Some(ErrorCode::RebootstrapRequired) =>
+                            && error.code() == Some(ErrorCode::RebootstrapRequired) =>
                     {
                         restarts += 1;
                         continue 'restart;
@@ -246,23 +281,24 @@ impl Client {
         }
     }
 
-    pub fn list_path_page(
+    pub fn list_path_entries_page(
         &self,
         spec: &NamespacePath,
         limit: Option<u32>,
         cursor: Option<&str>,
-    ) -> Result<ListPathEntriesResponse, ClientError> {
+    ) -> Result<ListPathEntriesResponse> {
         let mut url = format!(
             "{}/v0/namespaces/{}/filesystem/list?path={}",
             self.base_url,
             spec.namespace().as_str(),
             urlencoding::encode(spec.absolute_path().as_str())
         );
-        append_optional_pagination_query(&mut url, true, limit, cursor);
+        let has_query = true;
+        append_optional_pagination_query(&mut url, has_query, limit, cursor);
         self.request_json::<(), ListPathEntriesResponse>(self.agent.get(&url), None)
     }
 
-    pub fn stat_path(&self, spec: &NamespacePath) -> Result<AuthoritativePathEntry, ClientError> {
+    pub fn stat_path(&self, spec: &NamespacePath) -> Result<AuthoritativePathEntry> {
         let url = format!(
             "{}/v0/namespaces/{}/filesystem/stat?path={}",
             self.base_url,
@@ -272,7 +308,7 @@ impl Client {
         self.request_json::<(), AuthoritativePathEntry>(self.agent.get(&url), None)
     }
 
-    pub fn read_file_bytes(&self, spec: &NamespacePath) -> Result<Vec<u8>, ClientError> {
+    pub fn read_file_bytes(&self, spec: &NamespacePath) -> Result<Vec<u8>> {
         let url = format!(
             "{}/v0/namespaces/{}/filesystem/content?path={}",
             self.base_url,
@@ -286,7 +322,7 @@ impl Client {
         &self,
         spec: &NamespacePath,
         revision_no: RevisionNo,
-    ) -> Result<Vec<u8>, ClientError> {
+    ) -> Result<Vec<u8>> {
         let url = format!(
             "{}/v0/namespaces/{}/filesystem/content?path={}&revision_no={}",
             self.base_url,
@@ -302,14 +338,15 @@ impl Client {
         spec: &NamespacePath,
         limit: Option<u32>,
         cursor: Option<&str>,
-    ) -> Result<ListFileRevisionsResponse, ClientError> {
+    ) -> Result<ListFileRevisionsResponse> {
         let mut url = format!(
             "{}/v0/namespaces/{}/filesystem/revisions?path={}",
             self.base_url,
             spec.namespace().as_str(),
             urlencoding::encode(spec.absolute_path().as_str())
         );
-        append_optional_pagination_query(&mut url, true, limit, cursor);
+        let has_query = true;
+        append_optional_pagination_query(&mut url, has_query, limit, cursor);
         self.request_json::<(), ListFileRevisionsResponse>(self.agent.get(&url), None)
     }
 
@@ -319,12 +356,13 @@ impl Client {
         inode_id: InodeId,
         limit: Option<u32>,
         cursor: Option<&str>,
-    ) -> Result<ListFileRevisionsResponse, ClientError> {
+    ) -> Result<ListFileRevisionsResponse> {
         let mut url = format!(
             "{}/v0/namespaces/{namespace_id}/inodes/{}/revisions",
             self.base_url, inode_id.0
         );
-        append_optional_pagination_query(&mut url, false, limit, cursor);
+        let has_query = false;
+        append_optional_pagination_query(&mut url, has_query, limit, cursor);
         self.request_json::<(), ListFileRevisionsResponse>(self.agent.get(&url), None)
     }
 
@@ -333,7 +371,7 @@ impl Client {
         namespace_id: &NamespaceId,
         inode_id: InodeId,
         revision_no: RevisionNo,
-    ) -> Result<Vec<u8>, ClientError> {
+    ) -> Result<Vec<u8>> {
         let url = format!(
             "{}/v0/namespaces/{namespace_id}/inodes/{}/revisions/{}/content",
             self.base_url, inode_id.0, revision_no.0
@@ -341,7 +379,7 @@ impl Client {
         self.request_bytes(&url)
     }
 
-    pub fn health(&self) -> Result<(), ClientError> {
+    pub fn health(&self) -> Result<()> {
         let url = format!("{}/health", self.base_url);
         let request = self.authenticated(self.agent.get(&url));
         self.call_with_transient_retry(&request, None)?;
@@ -352,7 +390,7 @@ impl Client {
         &self,
         namespace_id: &NamespaceId,
         request: &BeginUploadRequest,
-    ) -> Result<BeginUploadResponse, ClientError> {
+    ) -> Result<BeginUploadResponse> {
         let url = format!("{}/v0/namespaces/{namespace_id}/uploads", self.base_url);
         // Beginning an upload mints a new session id, so a resend could create a second session.
         self.request_json_once::<_, BeginUploadResponse>(self.agent.post(&url), Some(request))
@@ -362,7 +400,7 @@ impl Client {
         &self,
         namespace_id: &NamespaceId,
         content_ref: ContentRef,
-    ) -> Result<BeginUploadResponse, ClientError> {
+    ) -> Result<BeginUploadResponse> {
         self.begin_upload(
             namespace_id,
             &BeginUploadRequest {
@@ -376,7 +414,7 @@ impl Client {
         &self,
         access: &ObjectTransferAccess,
         bytes: &[u8],
-    ) -> Result<(), ClientError> {
+    ) -> Result<()> {
         let (method, url, headers) = match access {
             ObjectTransferAccess::PresignedUrl {
                 method,
@@ -401,9 +439,9 @@ impl Client {
     pub fn upload_content(
         &self,
         namespace_id: &NamespaceId,
-        upload_id: &str,
+        upload_id: &UploadId,
         bytes: &[u8],
-    ) -> Result<UploadContentResponse, ClientError> {
+    ) -> Result<UploadContentResponse> {
         let url = format!(
             "{}/v0/namespaces/{namespace_id}/uploads/{upload_id}/content",
             self.base_url
@@ -421,9 +459,9 @@ impl Client {
     pub fn complete_upload(
         &self,
         namespace_id: &NamespaceId,
-        upload_id: &str,
+        upload_id: &UploadId,
         request: &CompleteUploadRequest,
-    ) -> Result<CompleteUploadResponse, ClientError> {
+    ) -> Result<CompleteUploadResponse> {
         let url = format!(
             "{}/v0/namespaces/{namespace_id}/uploads/{upload_id}/complete",
             self.base_url
@@ -436,18 +474,18 @@ impl Client {
         &self,
         namespace_id: &NamespaceId,
         request: &CommitSubmissionRequest,
-    ) -> Result<ApiCommitResponse, ClientError> {
+    ) -> Result<ApiCommitResponse> {
         let url = format!("{}/v0/namespaces/{namespace_id}/commits", self.base_url);
         // The request's commit id resolves an ambiguous resend through a durable receipt.
         self.request_json::<_, ApiCommitResponse>(self.agent.post(&url), Some(request))
     }
 
-    pub fn list_changes_page(
+    pub fn list_changes_after(
         &self,
         namespace_id: &NamespaceId,
         after_seq: ChangeSeq,
         limit: Option<u32>,
-    ) -> Result<ChangesResponse, ClientError> {
+    ) -> Result<ChangesResponse> {
         let mut url = format!(
             "{}/v0/namespaces/{namespace_id}/changes?after_seq={}",
             self.base_url, after_seq.0
@@ -466,7 +504,7 @@ impl Client {
         &self,
         namespace_id: &NamespaceId,
         request: &CreateCheckpointRequest,
-    ) -> Result<CreateCheckpointResponse, ClientError> {
+    ) -> Result<CreateCheckpointResponse> {
         let url = format!(
             "{}/v0/admin/namespaces/{namespace_id}/checkpoints",
             self.base_url
@@ -479,9 +517,8 @@ impl Client {
     pub fn release_checkpoint(
         &self,
         namespace_id: &NamespaceId,
-        checkpoint_id: &str,
-    ) -> Result<ReleaseCheckpointResponse, ClientError> {
-        let checkpoint_id = checkpoint_id_url_segment(checkpoint_id)?;
+        checkpoint_id: &CheckpointId,
+    ) -> Result<ReleaseCheckpointResponse> {
         let url = format!(
             "{}/v0/admin/namespaces/{namespace_id}/checkpoints/{checkpoint_id}/release",
             self.base_url
@@ -492,7 +529,7 @@ impl Client {
     /// Flushes the WAL tail and advances the metadata root to a manifest
     /// covering the current head (admin plane). The latest-state maintenance operation: no checkpoint
     /// record is created. The request carries no body.
-    pub fn flush_wal(&self, namespace_id: &NamespaceId) -> Result<FlushWalResponse, ClientError> {
+    pub fn flush_wal(&self, namespace_id: &NamespaceId) -> Result<FlushWalResponse> {
         let url = format!(
             "{}/v0/admin/namespaces/{namespace_id}/wal/flush",
             self.base_url
@@ -503,10 +540,10 @@ impl Client {
     /// Advances the namespace retention floor to what checkpoint state allows
     /// (admin plane). Irreversible: WAL history before the floor stops being
     /// replayable. The request carries no body.
-    pub fn advance_retention(
+    pub fn advance_retention_floor(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<AdvanceRetentionResponse, ClientError> {
+    ) -> Result<AdvanceRetentionResponse> {
         let url = format!(
             "{}/v0/admin/namespaces/{namespace_id}/retention/advance",
             self.base_url
@@ -521,7 +558,7 @@ impl Client {
         &self,
         namespace_id: &NamespaceId,
         request: &MaintenanceTickRequest,
-    ) -> Result<MaintenanceTickResponse, ClientError> {
+    ) -> Result<MaintenanceTickResponse> {
         let url = format!(
             "{}/v0/admin/namespaces/{namespace_id}/maintenance/tick",
             self.base_url
@@ -536,16 +573,13 @@ impl Client {
         &self,
         namespace_id: &NamespaceId,
         request: &GcRequest,
-    ) -> Result<GcResponse, ClientError> {
+    ) -> Result<GcResponse> {
         let url = format!("{}/v0/admin/namespaces/{namespace_id}/gc", self.base_url);
         self.request_json(self.agent.post(&url), Some(request))
     }
 
     /// Explicitly repairs one incomplete namespace installation.
-    pub fn repair_namespace(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<RepairNamespaceResponse, ClientError> {
+    pub fn repair_namespace(&self, namespace_id: &NamespaceId) -> Result<RepairNamespaceResponse> {
         let url = format!(
             "{}/v0/admin/namespaces/{namespace_id}/repair",
             self.base_url
@@ -559,11 +593,7 @@ impl Client {
     /// Gate on the `query.grep` capability before calling against unknown
     /// deployments; the namespace must also have a materialized steady-state
     /// grep root or the server answers `not_supported`.
-    pub fn grep(
-        &self,
-        namespace_id: &NamespaceId,
-        request: &GrepRequest,
-    ) -> Result<GrepResponse, ClientError> {
+    pub fn grep(&self, namespace_id: &NamespaceId, request: &GrepRequest) -> Result<GrepResponse> {
         let url = format!("{}/v0/namespaces/{namespace_id}/query/grep", self.base_url);
         self.request_json(self.agent.post(&url), Some(request))
     }
@@ -573,7 +603,7 @@ impl Client {
     pub fn enable_grams_index(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<EnableGramsIndexResponse, ClientError> {
+    ) -> Result<EnableGramsIndexResponse> {
         let url = format!(
             "{}/v0/admin/namespaces/{namespace_id}/index/grams/enable",
             self.base_url
@@ -586,7 +616,7 @@ impl Client {
     pub fn disable_grams_index(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<DisableGramsIndexResponse, ClientError> {
+    ) -> Result<DisableGramsIndexResponse> {
         let url = format!(
             "{}/v0/admin/namespaces/{namespace_id}/index/grams/disable",
             self.base_url
@@ -595,10 +625,7 @@ impl Client {
     }
 
     /// Runs one explicit gram-index garbage-collection pass for a namespace.
-    pub fn gc_grams_index(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<GrepGcResponse, ClientError> {
+    pub fn gc_grams_index(&self, namespace_id: &NamespaceId) -> Result<GrepGcResponse> {
         let url = format!(
             "{}/v0/admin/namespaces/{namespace_id}/index/grams/gc",
             self.base_url
@@ -610,7 +637,7 @@ impl Client {
         &self,
         namespace_id: &NamespaceId,
         request: &FilesystemOperationRequest,
-    ) -> Result<ApiCommitResponse, ClientError> {
+    ) -> Result<ApiCommitResponse> {
         let url = format!(
             "{}/v0/namespaces/{namespace_id}/filesystem/operations",
             self.base_url
@@ -623,12 +650,12 @@ impl Client {
         &self,
         namespace_id: &NamespaceId,
         bytes: &[u8],
-    ) -> Result<StagedContent, ClientError> {
+    ) -> Result<StagedContent> {
         let upload = self.begin_upload(namespace_id, &BeginUploadRequest::default())?;
-        let staged = self.upload_content(namespace_id, upload.upload_id.as_str(), bytes)?;
+        let staged = self.upload_content(namespace_id, &upload.upload_id, bytes)?;
         let response = self.complete_upload(
             namespace_id,
-            upload.upload_id.as_str(),
+            &upload.upload_id,
             &CompleteUploadRequest {
                 content_ref: staged.content_ref,
             },
@@ -650,10 +677,9 @@ impl Client {
         &self,
         spec: &NamespacePath,
         bytes: &[u8],
-        behavior: DestinationBehavior,
-        options: &MutationOptions,
-    ) -> Result<ApiCommitResponse, ClientError> {
-        let commit_id = options.resolve_commit_id();
+        options: &PutFileOptions,
+    ) -> Result<ApiCommitResponse> {
+        let commit_id = options.commit_id.clone().unwrap_or_else(CommitId::generate);
         let staged = self.stage_bytes_as_content_ref(spec.namespace(), bytes)?;
         let response = self.apply_filesystem_operation(
             spec.namespace(),
@@ -663,29 +689,19 @@ impl Client {
                 operation: FilesystemOperation::PutFile {
                     path: spec.absolute_path().as_str().to_owned(),
                     content_ref: staged.content_ref,
-                    behavior,
+                    behavior: options.behavior,
                 },
             },
         )?;
         Ok(response)
     }
 
-    pub fn write_file_bytes(
-        &self,
-        spec: &NamespacePath,
-        bytes: &[u8],
-        options: &MutationOptions,
-    ) -> Result<ApiCommitResponse, ClientError> {
-        self.put_file_bytes(spec, bytes, DestinationBehavior::Replace, options)
-    }
-
     pub fn create_directory(
         &self,
         spec: &NamespacePath,
-        parents: bool,
-        options: &MutationOptions,
-    ) -> Result<ApiCommitResponse, ClientError> {
-        let commit_id = options.resolve_commit_id();
+        options: &CreateDirectoryOptions,
+    ) -> Result<ApiCommitResponse> {
+        let commit_id = options.commit_id.clone().unwrap_or_else(CommitId::generate);
         let response = self.apply_filesystem_operation(
             spec.namespace(),
             &FilesystemOperationRequest {
@@ -693,7 +709,7 @@ impl Client {
                 content_tokens: Vec::new(),
                 operation: FilesystemOperation::CreateDirectory {
                     path: spec.absolute_path().as_str().to_owned(),
-                    parents,
+                    parents: options.parents,
                 },
             },
         )?;
@@ -703,44 +719,9 @@ impl Client {
     pub fn delete_path(
         &self,
         spec: &NamespacePath,
-        options: &MutationOptions,
-    ) -> Result<ApiCommitResponse, ClientError> {
-        self.delete_path_with_behavior(spec, DeleteDirectoryBehavior::NonRecursive, None, options)
-    }
-
-    /// Like [`Self::delete_path`], but the delete applies only while the
-    /// path still resolves to `expected_inode_id` — a raced rebinding
-    /// fails instead of deleting the wrong inode.
-    pub fn delete_path_expecting(
-        &self,
-        spec: &NamespacePath,
-        expected_inode_id: InodeId,
-        options: &MutationOptions,
-    ) -> Result<ApiCommitResponse, ClientError> {
-        self.delete_path_with_behavior(
-            spec,
-            DeleteDirectoryBehavior::NonRecursive,
-            Some(expected_inode_id),
-            options,
-        )
-    }
-
-    pub fn delete_path_recursive(
-        &self,
-        spec: &NamespacePath,
-        options: &MutationOptions,
-    ) -> Result<ApiCommitResponse, ClientError> {
-        self.delete_path_with_behavior(spec, DeleteDirectoryBehavior::Recursive, None, options)
-    }
-
-    fn delete_path_with_behavior(
-        &self,
-        spec: &NamespacePath,
-        behavior: DeleteDirectoryBehavior,
-        expected_inode_id: Option<InodeId>,
-        options: &MutationOptions,
-    ) -> Result<ApiCommitResponse, ClientError> {
-        let commit_id = options.resolve_commit_id();
+        options: &DeleteOptions,
+    ) -> Result<ApiCommitResponse> {
+        let commit_id = options.commit_id.clone().unwrap_or_else(CommitId::generate);
         let response = self.apply_filesystem_operation(
             spec.namespace(),
             &FilesystemOperationRequest {
@@ -748,8 +729,8 @@ impl Client {
                 content_tokens: Vec::new(),
                 operation: FilesystemOperation::DeletePath {
                     path: spec.absolute_path().as_str().to_owned(),
-                    behavior,
-                    expected_inode_id,
+                    behavior: options.behavior,
+                    expected_inode_id: options.expected_inode_id,
                 },
             },
         )?;
@@ -762,7 +743,7 @@ impl Client {
         to: &NamespacePath,
         behavior: DestinationBehavior,
         options: &MutationOptions,
-    ) -> Result<ApiCommitResponse, ClientError> {
+    ) -> Result<ApiCommitResponse> {
         if from.namespace() != to.namespace() {
             return Err(ClientError::InvalidNamespacePath(format!(
                 "cannot move across namespaces: {} -> {}",
@@ -792,7 +773,7 @@ impl Client {
         to: &NamespacePath,
         behavior: DestinationBehavior,
         options: &MutationOptions,
-    ) -> Result<ApiCommitResponse, ClientError> {
+    ) -> Result<ApiCommitResponse> {
         if from.namespace() != to.namespace() {
             return Err(ClientError::InvalidNamespacePath(format!(
                 "cannot copy across namespaces: {} -> {}",
@@ -825,7 +806,7 @@ impl Client {
         inode_id: InodeId,
         deleted_at_seq: ChangeSeq,
         options: &MutationOptions,
-    ) -> Result<ApiCommitResponse, ClientError> {
+    ) -> Result<ApiCommitResponse> {
         let commit_id = options.resolve_commit_id();
         let response = self.apply_filesystem_operation(
             spec.namespace(),
@@ -847,7 +828,7 @@ impl Client {
         spec: &NamespacePath,
         source_revision_no: RevisionNo,
         options: &MutationOptions,
-    ) -> Result<ApiCommitResponse, ClientError> {
+    ) -> Result<ApiCommitResponse> {
         let commit_id = options.resolve_commit_id();
         let response = self.apply_filesystem_operation(
             spec.namespace(),
@@ -870,7 +851,7 @@ impl Client {
         source_revision_no: RevisionNo,
         base_revision_no: RevisionNo,
         commit_id: &CommitId,
-    ) -> Result<ApiCommitResponse, ClientError> {
+    ) -> Result<ApiCommitResponse> {
         let url = format!(
             "{}/v0/namespaces/{namespace_id}/inodes/{}/revisions/{}/restore",
             self.base_url, inode_id.0, source_revision_no.0
@@ -887,7 +868,7 @@ impl Client {
 
 impl NamespacePath {
     /// Parses and validates both parts of a namespace-qualified path.
-    pub fn parse(namespace: &str, absolute_path: &str) -> Result<Self, ClientError> {
+    pub fn parse(namespace: &str, absolute_path: &str) -> Result<Self> {
         let namespace = NamespaceId::parse(namespace)
             .map_err(|error| ClientError::InvalidNamespacePath(error.to_string()))?;
         let absolute_path = AbsolutePath::parse(absolute_path)
@@ -917,14 +898,6 @@ impl NamespacePath {
     }
 }
 
-/// Validated checkpoint ids are URL-safe by construction, like the other
-/// parsed id segments interpolated into paths.
-fn checkpoint_id_url_segment(checkpoint_id: &str) -> Result<&str, ClientError> {
-    loonfs_api::CheckpointId::parse(checkpoint_id)
-        .map(|_| checkpoint_id)
-        .map_err(|error| ClientError::InvalidCheckpointId(error.to_string()))
-}
-
 fn append_optional_pagination_query(
     url: &mut String,
     has_query: bool,
@@ -950,6 +923,11 @@ fn append_query_param(url: &mut String, has_query: &mut bool, name: &str, value:
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::transport::{transient_failure, MAX_TRANSIENT_ATTEMPTS};
+    use loonfs_api::ErrorKind;
+    use std::fs;
+    use tempfile::tempdir;
 
     /// `Client::new` runs the same validation as `ClientConfig::load`, so a
     /// directly built config cannot bypass it.
@@ -989,8 +967,6 @@ mod tests {
             toml::from_str("server_url = \"http://localhost:1\"\n").expect("minimal config");
         assert!(config.auth_token.is_none());
     }
-    use super::*;
-
     /// The retry policy in one place: network-level transport failures and
     /// the retryable-unavailability codes resend; everything else — including
     /// a served status whose body was not the error envelope — surfaces
@@ -1064,9 +1040,7 @@ mod tests {
         .expect("valid client config")
     }
 
-    fn assert_transport_failure_after_one_attempt<T>(
-        call: impl FnOnce(&Client) -> Result<T, ClientError>,
-    ) {
+    fn assert_transport_failure_after_one_attempt<T>(call: impl FnOnce(&Client) -> Result<T>) {
         let transport = crate::transport::test_transport::failure_then_success(b"{}".to_vec());
         let client = retry_policy_client();
         let result = call(&client);
@@ -1110,7 +1084,13 @@ mod tests {
         let spec = NamespacePath::parse("demo", "/docs").expect("valid namespace path");
 
         let actual = client
-            .create_directory(&spec, false, &MutationOptions::with_commit_id(commit_id))
+            .create_directory(
+                &spec,
+                &CreateDirectoryOptions {
+                    commit_id: Some(commit_id),
+                    ..CreateDirectoryOptions::default()
+                },
+            )
             .expect("commit-id mutation should retry");
         assert_eq!(actual, response);
         assert_eq!(transport.attempts(), 2);
@@ -1182,7 +1162,7 @@ mod tests {
         let client = retry_policy_client();
 
         let actual = client
-            .upload_content(&namespace_id, upload_id.as_str(), b"content")
+            .upload_content(&namespace_id, &upload_id, b"content")
             .expect("identical content staging should retry");
         assert_eq!(actual, response);
         assert_eq!(transport.attempts(), 2);
@@ -1208,7 +1188,7 @@ mod tests {
         let actual = client
             .complete_upload(
                 &namespace_id,
-                upload_id.as_str(),
+                &upload_id,
                 &CompleteUploadRequest { content_ref },
             )
             .expect("completed-session replay should retry");
@@ -1237,12 +1217,6 @@ mod tests {
         assert!(message.contains("502"), "{message}");
         assert!(message.contains("non-envelope body"), "{message}");
     }
-    use super::{Client, ClientConfig, ClientError, ErrorCode, NamespacePath};
-    use crate::transport::{transient_failure, MAX_TRANSIENT_ATTEMPTS};
-    use loonfs_api::ErrorKind;
-    use std::fs;
-    use tempfile::tempdir;
-
     fn api_error(status: u16, code: &str) -> ClientError {
         ClientError::Api {
             status,
@@ -1257,23 +1231,23 @@ mod tests {
     #[test]
     fn api_errors_with_known_codes_classify_through_the_registry() {
         let error = api_error(409, "stale_revision");
-        assert_eq!(error.error_code(), Some(ErrorCode::StaleRevision));
+        assert_eq!(error.code(), Some(ErrorCode::StaleRevision));
         assert_eq!(error.kind(), Some(ErrorKind::Conflict));
 
         let error = api_error(409, "content_not_prepared");
-        assert_eq!(error.error_code(), Some(ErrorCode::ContentNotPrepared));
+        assert_eq!(error.code(), Some(ErrorCode::ContentNotPrepared));
         assert_eq!(error.kind(), Some(ErrorKind::Conflict));
 
         let error = api_error(410, "namespace_deleted");
-        assert_eq!(error.error_code(), Some(ErrorCode::NamespaceDeleted));
+        assert_eq!(error.code(), Some(ErrorCode::NamespaceDeleted));
         assert_eq!(error.kind(), Some(ErrorKind::Gone));
 
         let error = api_error(503, "commit_outcome_unknown");
-        assert_eq!(error.error_code(), Some(ErrorCode::CommitOutcomeUnknown));
+        assert_eq!(error.code(), Some(ErrorCode::CommitOutcomeUnknown));
         assert_eq!(error.kind(), Some(ErrorKind::OutcomeUnknown));
 
         let error = api_error(500, "index_corrupt");
-        assert_eq!(error.error_code(), Some(ErrorCode::IndexCorrupt));
+        assert_eq!(error.code(), Some(ErrorCode::IndexCorrupt));
         assert_eq!(error.kind(), Some(ErrorKind::DataCorruption));
     }
 
@@ -1286,7 +1260,7 @@ mod tests {
             (503, ErrorKind::Unavailable),
         ] {
             let error = api_error(status, "code_from_a_newer_server");
-            assert_eq!(error.error_code(), None);
+            assert_eq!(error.code(), None);
             assert_eq!(error.kind(), Some(kind), "status {status}");
         }
     }
@@ -1294,7 +1268,7 @@ mod tests {
     #[test]
     fn non_api_errors_have_no_code_or_kind() {
         let error = ClientError::Http("connection refused".to_owned());
-        assert_eq!(error.error_code(), None);
+        assert_eq!(error.code(), None);
         assert_eq!(error.kind(), None);
     }
 

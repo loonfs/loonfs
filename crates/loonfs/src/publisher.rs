@@ -53,6 +53,8 @@ use crate::{CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, RuntimeE
 use loonfs_api::v0::{CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse};
 use loonfs_api::{CommitId, NamespaceId};
 use loonfs_core::commit::{CommitHeadPublishError, SemanticMutationIdentity};
+// Publisher head-CAS races use the core-wide bounded contention retry limit.
+use loonfs_core::limits::CONTENTION_RETRY_LIMIT;
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::{Arc, Mutex, Weak};
@@ -73,8 +75,9 @@ type DeleteResult = Result<DeleteNamespaceResponse, CoreError>;
 /// that publication batch.
 pub type PublishObserver = Arc<dyn Fn(&NamespaceId, loonfs_api::ChangeSeq) + Send + Sync + 'static>;
 
+/// Maximum candidates held by one pending batch before admission reports
+/// `commit_queue_full`.
 const MAX_BATCH_CANDIDATES: usize = 1024;
-const HEAD_CAS_RETRY_LIMIT: usize = 8;
 
 /// Shared front door to the per-namespace publishers of one runtime core.
 ///
@@ -685,7 +688,7 @@ impl NamespacePublisher {
         }
 
         let publish_span = tracing::info_span!(
-            "publisher.batch_publish",
+            "loon.phase",
             phase = "batch_publish",
             mode = self.trace_mode(),
             store_kind = self.trace_store_kind(),
@@ -696,7 +699,7 @@ impl NamespacePublisher {
         let (results, retry_count) = async {
             let mut results = Vec::new();
             let mut retry_count = 0_u64;
-            for attempt in 0..HEAD_CAS_RETRY_LIMIT {
+            for attempt in 0..CONTENTION_RETRY_LIMIT {
                 let batch_candidates = candidates
                     .iter()
                     .map(|candidate| candidate.candidate.clone())
@@ -717,7 +720,7 @@ impl NamespacePublisher {
                 if !results.iter().any(is_retryable_head_publish) {
                     break;
                 }
-                if attempt + 1 == HEAD_CAS_RETRY_LIMIT {
+                if attempt + 1 == CONTENTION_RETRY_LIMIT {
                     break;
                 }
                 retry_count += 1;
@@ -1074,7 +1077,7 @@ mod tests {
     // Publisher tests use panic in async result helpers for precise diagnostics.
 
     use super::*;
-    use crate::background::{BackgroundWork, FsBackgroundWork};
+    use crate::background::BackgroundWork;
     use crate::config::FsConfig;
     use crate::content_tokens::ContentTokenError;
     use crate::publish::{ContentPreparationError, NamespaceMutation};
@@ -1443,12 +1446,7 @@ mod tests {
                 trace_mode: TraceMode::Remote,
                 trace_store_kind: TraceStoreKind::LocalFs,
             },
-            BackgroundWork::new(
-                FsBackgroundWork::ManualOnly,
-                None,
-                std::num::NonZeroUsize::new(crate::config::DEFAULT_MAX_CONCURRENT_MAINTENANCE)
-                    .expect("default maintenance concurrency should be nonzero"),
-            ),
+            BackgroundWork::inert(),
             None,
             None,
         )
@@ -1510,14 +1508,15 @@ mod tests {
 
     fn create_directory_request(
         commit_id: impl Into<String>,
-        display_name: impl Into<String>,
+        display_name: impl AsRef<str>,
     ) -> CommitRequest {
         CommitRequest {
             commit_id: CommitId::parse(commit_id.into()).expect("valid commit id"),
             preconditions: Vec::new(),
             ops: vec![CommitOp::CreateDirectory {
                 parent_inode_id: InodeId(1),
-                display_name: display_name.into(),
+                display_name: loonfs_api::DisplayName::parse(display_name.as_ref())
+                    .expect("valid display name"),
             }],
             message: None,
         }
@@ -1680,6 +1679,7 @@ mod tests {
         assert_eq!(duplicate_error.to_string(), primary_error.to_string());
     }
 
+    /// Admission races a blocked active publication with a pending batch.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn publisher_admits_pending_batch_while_active_publish_blocks() {
         let temp_dir = tempdir().expect("tempdir");
@@ -1733,6 +1733,7 @@ mod tests {
         assert_eq!(wal_keys.len(), 2);
     }
 
+    /// Duplicate and conflicting admissions race an active publication.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn publisher_duplicate_active_request_joins_while_conflict_fails() {
         let temp_dir = tempdir().expect("tempdir");
@@ -1773,6 +1774,7 @@ mod tests {
         assert_eq!(duplicate_response.committed_seq, ChangeSeq(1));
     }
 
+    /// Distinct and duplicate admissions race a full pending batch.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn publisher_pending_batch_full_rejects_distinct_but_allows_duplicate() {
         let temp_dir = tempdir().expect("tempdir");
@@ -1944,6 +1946,7 @@ mod tests {
         );
     }
 
+    /// Receipt replay races a lost head compare-and-swap acknowledgement.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn publisher_resolves_unknown_head_outcome_by_replaying_receipt() {
         let temp_dir = tempdir().expect("tempdir");
@@ -1970,6 +1973,7 @@ mod tests {
         assert_eq!(response.committed_seq, ChangeSeq(1));
     }
 
+    /// Queued publication races recovery from a panicked publish task.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn publisher_survives_publish_task_panic_and_keeps_serving() {
         let temp_dir = tempdir().expect("tempdir");
@@ -2021,6 +2025,7 @@ mod tests {
         );
     }
 
+    /// Delete admission races active, pending, and later mutation work.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn delete_barrier_publishes_admitted_work_and_rejects_later_work() {
         let temp_dir = tempdir().expect("tempdir");
@@ -2107,6 +2112,7 @@ mod tests {
         assert!(matches!(fast_fail, Err(CoreError::NamespaceDeleted { .. })));
     }
 
+    /// Concurrent submissions race to share one pending publication batch.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn publisher_batches_concurrent_distinct_commits_into_one_wal_segment() {
         let temp_dir = tempdir().expect("tempdir");
@@ -2133,7 +2139,7 @@ mod tests {
             preconditions: Vec::new(),
             ops: vec![CommitOp::CreateDirectory {
                 parent_inode_id: InodeId(1),
-                display_name: "alpha".to_owned(),
+                display_name: loonfs_api::DisplayName::parse("alpha").expect("valid display name"),
             }],
             message: None,
         };
@@ -2142,7 +2148,7 @@ mod tests {
             preconditions: Vec::new(),
             ops: vec![CommitOp::CreateDirectory {
                 parent_inode_id: InodeId(1),
-                display_name: "beta".to_owned(),
+                display_name: loonfs_api::DisplayName::parse("beta").expect("valid display name"),
             }],
             message: None,
         };
@@ -2163,6 +2169,7 @@ mod tests {
         assert_eq!(wal_keys.len(), 2);
     }
 
+    /// Explicit and path-intent submissions race to share one publication batch.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn publisher_batches_explicit_commit_and_path_intent_together() {
         let temp_dir = tempdir().expect("tempdir");
@@ -2211,7 +2218,7 @@ mod tests {
             preconditions: Vec::new(),
             ops: vec![CommitOp::CreateDirectory {
                 parent_inode_id: InodeId(1),
-                display_name: "alpha".to_owned(),
+                display_name: loonfs_api::DisplayName::parse("alpha").expect("valid display name"),
             }],
             message: None,
         };
@@ -2257,6 +2264,7 @@ mod tests {
         assert_eq!(record_counts, vec![1, 2]);
     }
 
+    /// Admission closure races an already-blocked publication draining.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn registry_close_admission_refuses_new_work_while_admitted_work_drains() {
         let temp_dir = tempdir().expect("tempdir");
@@ -2317,6 +2325,7 @@ mod tests {
         assert!(registry.shared.lock_state().tasks.is_empty());
     }
 
+    /// Registry drain races panic recovery and respawned queued work.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn registry_drain_surfaces_panics_and_settles_respawned_work() {
         let temp_dir = tempdir().expect("tempdir");
@@ -2398,6 +2407,7 @@ mod tests {
         );
     }
 
+    /// Publisher eviction races the delete barrier's terminal transition.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn successful_delete_evicts_the_namespace_publisher() {
         let temp_dir = tempdir().expect("tempdir");

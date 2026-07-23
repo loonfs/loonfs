@@ -392,7 +392,7 @@ mod tests {
             writer_epoch,
             ops: vec![CommitOp::CreateDirectory {
                 parent_inode_id: InodeId(1),
-                display_name: "docs".to_owned(),
+                display_name: loonfs_api::DisplayName::parse("docs").expect("valid display name"),
             }],
             preconditions: Vec::new(),
             message: Some("create docs".to_owned()),
@@ -437,11 +437,13 @@ mod tests {
             ops: vec![
                 CommitOp::CreateDirectory {
                     parent_inode_id: InodeId(1),
-                    display_name: "Docs".to_owned(),
+                    display_name: loonfs_api::DisplayName::parse("Docs")
+                        .expect("valid display name"),
                 },
                 CommitOp::CreateFile {
                     parent_inode_id: InodeId(1),
-                    display_name: "a.txt".to_owned(),
+                    display_name: loonfs_api::DisplayName::parse("a.txt")
+                        .expect("valid display name"),
                     content_ref: content_ref.clone(),
                 },
                 CommitOp::ReplaceFile {
@@ -460,7 +462,8 @@ mod tests {
                 CommitOp::Rename {
                     inode_id: InodeId(5),
                     new_parent_inode_id: InodeId(2),
-                    new_display_name: "b.txt".to_owned(),
+                    new_display_name: loonfs_api::DisplayName::parse("b.txt")
+                        .expect("valid display name"),
                 },
                 CommitOp::DeleteSubtree {
                     root_inode_id: InodeId(9),
@@ -469,7 +472,8 @@ mod tests {
                     inode_id: InodeId(9),
                     deleted_at_seq: ChangeSeq(11),
                     parent_inode_id: InodeId(1),
-                    display_name: "restored".to_owned(),
+                    display_name: loonfs_api::DisplayName::parse("restored")
+                        .expect("valid display name"),
                 },
             ],
             message: Some("all operations and preconditions".to_owned()),
@@ -568,7 +572,7 @@ mod tests {
         let mut changed = core_request(WriterEpoch(1));
         changed.ops = vec![CommitOp::CreateDirectory {
             parent_inode_id: InodeId(1),
-            display_name: "drafts".to_owned(),
+            display_name: loonfs_api::DisplayName::parse("drafts").expect("valid display name"),
         }];
 
         let changed = core_commit_fingerprint(&changed).expect("changed fingerprint");
@@ -584,7 +588,7 @@ mod tests {
             preconditions: Vec::new(),
             ops: vec![CommitOp::CreateDirectory {
                 parent_inode_id: InodeId(1),
-                display_name: "docs".to_owned(),
+                display_name: loonfs_api::DisplayName::parse("docs").expect("valid display name"),
             }],
             message: Some("create docs".to_owned()),
         };

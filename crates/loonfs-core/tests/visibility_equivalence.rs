@@ -3,7 +3,7 @@
 
 use loonfs_api::v0::{CommitOp, CommitRequest, CommitResponse};
 use loonfs_api::{
-    AbsolutePath, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior,
+    AbsolutePath, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior, DisplayName,
     EffectiveLimit, InodeId, NamespaceId, PageRequest, RevisionNo,
 };
 use loonfs_core::cache::{
@@ -565,7 +565,7 @@ async fn move_across_a_delete_boundary_preserves_visibility_equivalence() {
             CommitOp::Rename {
                 inode_id: reverse_branch,
                 new_parent_inode_id: safe,
-                new_display_name: "reverse-branch".to_owned(),
+                new_display_name: DisplayName::parse("reverse-branch").expect("valid display name"),
             },
         ])
         .await
@@ -577,7 +577,7 @@ async fn move_across_a_delete_boundary_preserves_visibility_equivalence() {
             CommitOp::Rename {
                 inode_id: branch,
                 new_parent_inode_id: safe,
-                new_display_name: "branch".to_owned(),
+                new_display_name: DisplayName::parse("branch").expect("valid display name"),
             },
             CommitOp::DeleteSubtree {
                 root_inode_id: source,

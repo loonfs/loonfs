@@ -8,6 +8,7 @@
 //!   operations, file revisions, maintenance, and the `ApiError` body.
 //! - [`reads`] — authoritative read results (stat/list entries, file bytes).
 //! - [`commits`] — explicit semantic commits and the change feed.
+//! - [`search`] — content search and gram-index administration.
 //! - [`uploads`] — upload sessions and direct-put access.
 //!
 //! The crate root re-exports the common surface for convenience; see the

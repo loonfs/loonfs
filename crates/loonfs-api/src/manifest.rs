@@ -6,7 +6,7 @@ use crate::envelope::EnvelopeCodecError;
 use crate::sst_blocks::BlockHandle;
 use crate::WriterEpoch;
 use crate::{
-    ChangeSeq, CheckpointId, CommitId, ContentRef, InodeId, InodeKind, ManifestId,
+    ChangeSeq, CheckpointId, CommitId, ContentRef, DisplayName, InodeId, InodeKind, ManifestId,
     ManifestObjectId, MetadataTableId, NameKey, NamespaceId, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
@@ -94,7 +94,7 @@ pub enum MetadataRow {
     DirentryBind {
         parent_inode_id: InodeId,
         name_key: NameKey,
-        display_name: String,
+        display_name: DisplayName,
         child_inode_id: InodeId,
         bind_seq: ChangeSeq,
         bind_delta_index: u32,
@@ -309,38 +309,7 @@ impl MetadataRow {
 }
 
 pub fn hex_encode_row_key_component(value: &str) -> String {
-    hex_encode_bytes(value.as_bytes())
-}
-
-pub fn hex_encode_bytes(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        encoded.push(char::from(HEX[(byte >> 4) as usize]));
-        encoded.push(char::from(HEX[(byte & 0x0f) as usize]));
-    }
-    encoded
-}
-
-/// Decodes the lowercase hex this module's encoders produce. Errors carry no
-/// input bytes; callers name the field they were decoding.
-pub fn hex_decode_bytes(encoded: &str) -> Result<Vec<u8>, String> {
-    fn nibble(byte: u8) -> Result<u8, String> {
-        match byte {
-            b'0'..=b'9' => Ok(byte - b'0'),
-            b'a'..=b'f' => Ok(byte - b'a' + 10),
-            _ => Err(format!("invalid hex byte {byte:#04x}")),
-        }
-    }
-    let bytes = encoded.as_bytes();
-    if bytes.len() % 2 != 0 {
-        return Err(format!("odd hex length {}", bytes.len()));
-    }
-    let mut decoded = Vec::with_capacity(bytes.len() / 2);
-    for pair in bytes.chunks_exact(2) {
-        decoded.push((nibble(pair[0])? << 4) | nibble(pair[1])?);
-    }
-    Ok(decoded)
+    crate::hex::hex_encode_bytes(value.as_bytes())
 }
 
 /// Reader-side lookup grammar: the probes, prefixes, and resume keys that
@@ -687,7 +656,7 @@ mod tests {
         let row = super::MetadataRow::DirentryBind {
             parent_inode_id: InodeId(9),
             name_key: NameKey::parse("report.txt").expect("valid name key"),
-            display_name: "Report.txt".to_owned(),
+            display_name: crate::DisplayName::parse("Report.txt").expect("valid display name"),
             child_inode_id: InodeId(42),
             bind_seq: ChangeSeq(17),
             bind_delta_index: 3,
@@ -708,7 +677,7 @@ mod tests {
         let row = super::MetadataRow::DirentryBind {
             parent_inode_id: InodeId(9),
             name_key: NameKey::parse("report-2024").expect("valid name key"),
-            display_name: "report-2024".to_owned(),
+            display_name: crate::DisplayName::parse("report-2024").expect("valid display name"),
             child_inode_id: InodeId(42),
             bind_seq: ChangeSeq(17),
             bind_delta_index: 3,

@@ -1,3 +1,5 @@
+//! Frozen grep root and manifest format fixtures.
+
 #![allow(clippy::panic)]
 
 use loonfs_api::wire::sst_blocks::BlockHandle;

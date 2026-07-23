@@ -1,7 +1,7 @@
 //! Deterministic object-store fault injection with operation tracing.
 
 use crate::fault::{FaultSchedule, ObjectStoreFault, ScheduledFault};
-use crate::object_op::{ObjectOp, ObjectOpKind};
+use crate::object_operation::{ObjectOperation, ObjectOperationKind};
 use crate::trace::{RunId, SharedSimTrace, SimEventResult, SimTrace, SimTraceEvent};
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -32,10 +32,6 @@ impl<S> FaultInjectingObjectStore<S> {
             RunId(format!("sim-{:016x}", schedule.seed.0)),
             schedule.seed,
         ));
-        Self::with_trace(inner, schedule, trace)
-    }
-
-    pub fn with_trace(inner: S, schedule: FaultSchedule, trace: SharedSimTrace) -> Self {
         Self {
             inner,
             schedule,
@@ -46,7 +42,12 @@ impl<S> FaultInjectingObjectStore<S> {
         }
     }
 
-    pub fn trace(&self) -> SharedSimTrace {
+    pub fn trace(mut self, trace: SharedSimTrace) -> Self {
+        self.trace = trace;
+        self
+    }
+
+    pub fn shared_trace(&self) -> SharedSimTrace {
         self.trace.clone()
     }
 
@@ -58,8 +59,8 @@ impl<S> FaultInjectingObjectStore<S> {
         self.inner
     }
 
-    fn next_object_op(&self, kind: ObjectOpKind, key: &str) -> ObjectOp {
-        ObjectOp {
+    fn next_object_op(&self, kind: ObjectOperationKind, key: &str) -> ObjectOperation {
+        ObjectOperation {
             step: self.next_step.fetch_add(1, Ordering::SeqCst),
             kind,
             key: key.to_owned(),
@@ -68,7 +69,7 @@ impl<S> FaultInjectingObjectStore<S> {
 
     fn push_trace(
         &self,
-        op: ObjectOp,
+        op: ObjectOperation,
         operation: impl Into<String>,
         fault: Option<ObjectStoreFault>,
         result: SimEventResult,
@@ -76,7 +77,7 @@ impl<S> FaultInjectingObjectStore<S> {
         push_trace_event(&self.trace, op, operation, fault, result);
     }
 
-    fn scheduled_fault(&self, op: &ObjectOp) -> Option<ScheduledFault> {
+    fn scheduled_fault(&self, op: &ObjectOperation) -> Option<ScheduledFault> {
         self.schedule.fault_for(op).cloned()
     }
 
@@ -87,7 +88,7 @@ impl<S> FaultInjectingObjectStore<S> {
         if let Ok(Some(body)) = self.inner.get_with_metadata(key).await {
             self.stale_values
                 .lock()
-                .expect("stale value lock poisoned")
+                .expect("stale value lock should not be poisoned")
                 .entry(key.to_owned())
                 .or_default()
                 .push(body);
@@ -97,14 +98,14 @@ impl<S> FaultInjectingObjectStore<S> {
     fn remember_successful_write(&self, key: &str) {
         self.recent_writes
             .lock()
-            .expect("recent writes lock poisoned")
+            .expect("recent writes lock should not be poisoned")
             .push(key.to_owned());
     }
 
     fn stale_value(&self, key: &str) -> Option<ObjectBody> {
         self.stale_values
             .lock()
-            .expect("stale value lock poisoned")
+            .expect("stale value lock should not be poisoned")
             .get(key)
             .and_then(|values| values.last().cloned())
     }
@@ -112,7 +113,7 @@ impl<S> FaultInjectingObjectStore<S> {
     async fn put_with(
         &self,
         key: &str,
-        kind: ObjectOpKind,
+        kind: ObjectOperationKind,
         bytes: Bytes,
         mode: PutMode,
     ) -> Result<ObjectMetadata, ObjectStoreError>
@@ -163,7 +164,9 @@ impl<S> FaultInjectingObjectStore<S> {
                     result
                 }
             }
-            Some(ObjectStoreFault::CompareAndSwapStale) if kind == ObjectOpKind::CompareAndSwap => {
+            Some(ObjectStoreFault::CompareAndSwapStale)
+                if kind == ObjectOperationKind::CompareAndSwap =>
+            {
                 self.push_trace(
                     op,
                     "compare_and_swap_stale",
@@ -212,7 +215,7 @@ where
     S: ObjectStore,
 {
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        let op = self.next_object_op(ObjectOpKind::Head, key);
+        let op = self.next_object_op(ObjectOperationKind::Head, key);
         let result = self.inner.head(key).await;
         self.push_trace(op, "head", None, result_class(&result));
         result
@@ -223,7 +226,7 @@ where
         key: &str,
         range: Option<ByteRange>,
     ) -> Result<Option<Bytes>, ObjectStoreError> {
-        let op = self.next_object_op(ObjectOpKind::Get, key);
+        let op = self.next_object_op(ObjectOperationKind::Get, key);
         let scheduled = self.scheduled_fault(&op);
         match scheduled.as_ref().map(|fault| &fault.fault) {
             Some(ObjectStoreFault::GetReturnsStaleValue) => {
@@ -285,7 +288,7 @@ where
     }
 
     async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        let op = self.next_object_op(ObjectOpKind::Get, key);
+        let op = self.next_object_op(ObjectOperationKind::Get, key);
         let scheduled = self.scheduled_fault(&op);
         match scheduled.as_ref().map(|fault| &fault.fault) {
             Some(ObjectStoreFault::GetReturnsStaleValue) => {
@@ -355,7 +358,7 @@ where
     }
 
     async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        let op = self.next_object_op(ObjectOpKind::Delete, key);
+        let op = self.next_object_op(ObjectOperationKind::Delete, key);
         let scheduled = self.scheduled_fault(&op);
         match scheduled.as_ref().map(|fault| &fault.fault) {
             Some(ObjectStoreFault::DeleteReturnsTransientError) => {
@@ -393,7 +396,7 @@ where
     }
 
     async fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
-        let op = self.next_object_op(ObjectOpKind::ListPrefix, prefix);
+        let op = self.next_object_op(ObjectOperationKind::ListPrefix, prefix);
         let scheduled = self.scheduled_fault(&op);
         match scheduled.as_ref().map(|fault| &fault.fault) {
             Some(ObjectStoreFault::ListOmitsRecentObject) => {
@@ -406,7 +409,7 @@ where
                         &self
                             .recent_writes
                             .lock()
-                            .expect("recent writes lock poisoned"),
+                            .expect("recent writes lock should not be poisoned"),
                     ) {
                         keys.remove(index);
                     }
@@ -444,7 +447,7 @@ where
         key: &str,
         bytes: Bytes,
     ) -> Result<ObjectMetadata, ObjectStoreError> {
-        self.put_with(key, ObjectOpKind::Put, bytes, PutMode::Overwrite)
+        self.put_with(key, ObjectOperationKind::Put, bytes, PutMode::Overwrite)
             .await
     }
 
@@ -455,7 +458,7 @@ where
     ) -> Result<ObjectMetadata, ObjectStoreError> {
         self.put_with(
             key,
-            ObjectOpKind::PutIfAbsent,
+            ObjectOperationKind::PutIfAbsent,
             bytes,
             PutMode::CreateIfAbsent,
         )
@@ -470,7 +473,7 @@ where
     ) -> Result<ObjectMetadata, ObjectStoreError> {
         self.put_with(
             key,
-            ObjectOpKind::CompareAndSwap,
+            ObjectOperationKind::CompareAndSwap,
             bytes,
             PutMode::CompareAndSwap {
                 expected_etag: expected_etag.to_owned(),
@@ -483,7 +486,7 @@ where
         &self,
         prefix: &str,
     ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        let op = self.next_object_op(ObjectOpKind::ListPrefix, prefix);
+        let op = self.next_object_op(ObjectOperationKind::ListPrefix, prefix);
         let scheduled = self.scheduled_fault(&op);
         let (operation, fault, omit_key, skipped_reason) =
             match scheduled.as_ref().map(|fault| &fault.fault) {
@@ -495,7 +498,7 @@ where
                         &self
                             .recent_writes
                             .lock()
-                            .expect("recent writes lock poisoned"),
+                            .expect("recent writes lock should not be poisoned"),
                     )
                     .map(str::to_owned),
                     None,
@@ -524,7 +527,7 @@ where
 struct TracedListStream {
     inner: BoxStream<'static, Result<String, ObjectStoreError>>,
     trace: SharedSimTrace,
-    op: Option<ObjectOp>,
+    op: Option<ObjectOperation>,
     operation: &'static str,
     fault: Option<ObjectStoreFault>,
     omit_key: Option<String>,
@@ -580,7 +583,7 @@ impl Drop for TracedListStream {
 
 fn push_trace_event(
     trace: &SharedSimTrace,
-    op: ObjectOp,
+    op: ObjectOperation,
     operation: impl Into<String>,
     fault: Option<ObjectStoreFault>,
     result: SimEventResult,
@@ -597,11 +600,11 @@ fn push_trace_event(
     });
 }
 
-fn put_mode_kind(mode: &PutMode) -> ObjectOpKind {
+fn put_mode_kind(mode: &PutMode) -> ObjectOperationKind {
     match mode {
-        PutMode::Overwrite => ObjectOpKind::Put,
-        PutMode::CreateIfAbsent => ObjectOpKind::PutIfAbsent,
-        PutMode::CompareAndSwap { .. } => ObjectOpKind::CompareAndSwap,
+        PutMode::Overwrite => ObjectOperationKind::Put,
+        PutMode::CreateIfAbsent => ObjectOperationKind::PutIfAbsent,
+        PutMode::CompareAndSwap { .. } => ObjectOperationKind::CompareAndSwap,
     }
 }
 
@@ -704,7 +707,7 @@ mod tests {
             .expect("put");
         store.get("a", None).await.expect("get");
 
-        let trace = store.trace().snapshot();
+        let trace = store.shared_trace().snapshot();
         assert_eq!(trace.events.len(), 2);
         assert_eq!(
             trace.events[0].object_op.as_ref().expect("first op").step,
@@ -723,7 +726,7 @@ mod tests {
             seed: SimSeed(1),
             faults: vec![ScheduledFault {
                 step: 1,
-                op_kind: Some(ObjectOpKind::Put),
+                op_kind: Some(ObjectOperationKind::Put),
                 key_contains: None,
                 fault: ObjectStoreFault::PutSucceedsButResponseLost,
             }],
@@ -747,7 +750,7 @@ mod tests {
             seed: SimSeed(1),
             faults: vec![ScheduledFault {
                 step: 1,
-                op_kind: Some(ObjectOpKind::Put),
+                op_kind: Some(ObjectOperationKind::Put),
                 key_contains: None,
                 fault: ObjectStoreFault::PutReturnsTransientError,
             }],
@@ -768,7 +771,7 @@ mod tests {
             seed: SimSeed(1),
             faults: vec![ScheduledFault {
                 step: 3,
-                op_kind: Some(ObjectOpKind::Get),
+                op_kind: Some(ObjectOperationKind::Get),
                 key_contains: None,
                 fault: ObjectStoreFault::GetReturnsStaleValue,
             }],
@@ -800,7 +803,7 @@ mod tests {
             seed: SimSeed(1),
             faults: vec![ScheduledFault {
                 step: 3,
-                op_kind: Some(ObjectOpKind::ListPrefix),
+                op_kind: Some(ObjectOperationKind::ListPrefix),
                 key_contains: Some("prefix/".to_owned()),
                 fault: ObjectStoreFault::ListOmitsRecentObject,
             }],
@@ -827,7 +830,7 @@ mod tests {
             seed: SimSeed(1),
             faults: vec![ScheduledFault {
                 step: 3,
-                op_kind: Some(ObjectOpKind::ListPrefix),
+                op_kind: Some(ObjectOperationKind::ListPrefix),
                 key_contains: Some("prefix/".to_owned()),
                 fault: ObjectStoreFault::ListOmitsRecentObject,
             }],
@@ -849,7 +852,7 @@ mod tests {
             .expect("stream list");
 
         assert_eq!(keys, vec!["prefix/a".to_owned()]);
-        let trace = store.trace().snapshot();
+        let trace = store.shared_trace().snapshot();
         let event = trace.events.last().expect("stream list trace event");
         assert_eq!(event.operation, "list_prefix_stream_omits_recent_object");
         assert_eq!(
@@ -863,7 +866,7 @@ mod tests {
                 .as_ref()
                 .expect("stream list object op")
                 .kind,
-            ObjectOpKind::ListPrefix
+            ObjectOperationKind::ListPrefix
         );
     }
 }

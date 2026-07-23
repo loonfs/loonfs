@@ -1,7 +1,7 @@
 //! [`CommitValidationError`]: every way a commit request can fail
 //! validation.
 
-use loonfs_api::{ChangeSeq, InodeId, InodeKind, RevisionNo, WriterEpoch};
+use loonfs_api::{ChangeSeq, InodeId, InodeKind, NameKey, RevisionNo, WriterEpoch};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -25,16 +25,16 @@ pub enum CommitValidationError {
     )]
     BindingPreconditionMissing {
         parent_inode_id: InodeId,
-        name_key: String,
+        name_key: NameKey,
     },
     #[error(
-        "binding precondition failed: name `{name_key}` under parent inode `{parent_inode_id}` expected child inode `{expected_child_inode_id}` but found `{actual_child_inode_id:?}`"
+        "binding precondition failed: name `{name_key}` under parent inode `{parent_inode_id}` expected child inode `{expected_child_inode_id}` but found `{actual_child_inode_id}`"
     )]
     BindingPreconditionMismatch {
         parent_inode_id: InodeId,
-        name_key: String,
+        name_key: NameKey,
         expected_child_inode_id: InodeId,
-        actual_child_inode_id: Option<InodeId>,
+        actual_child_inode_id: InodeId,
     },
     #[error("directory-empty precondition inode `{inode_id}` is missing")]
     DirectoryEmptyPreconditionInodeMissing { inode_id: InodeId },
@@ -59,7 +59,7 @@ pub enum CommitValidationError {
     )]
     CreateChildNameCollision {
         parent_inode_id: InodeId,
-        name_key: String,
+        name_key: NameKey,
         child_inode_id: InodeId,
     },
     #[error("invalid display name: {reason}")]
@@ -161,7 +161,7 @@ pub enum CommitValidationError {
     )]
     RenameTargetNameCollision {
         parent_inode_id: InodeId,
-        name_key: String,
+        name_key: NameKey,
         child_inode_id: InodeId,
     },
     #[error(

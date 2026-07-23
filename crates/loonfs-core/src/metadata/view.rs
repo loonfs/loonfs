@@ -16,7 +16,9 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{self, BoxStream};
 use loonfs_api::wire::control::HeadState;
-use loonfs_api::{AbsolutePath, ChangeSeq, CommitId, InodeId, InodeKind, NamePolicy, RevisionNo};
+use loonfs_api::{
+    AbsolutePath, ChangeSeq, CommitId, InodeId, InodeKind, NameKey, NamePolicy, RevisionNo,
+};
 use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
 };
@@ -261,7 +263,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     pub(crate) async fn visible_child(
         &self,
         parent_inode_id: InodeId,
-        name_key: &str,
+        name_key: &NameKey,
     ) -> Result<Option<DirentryBindRecord>, CoreError> {
         visibility::visible_child(&mut self.reads(), parent_inode_id, name_key).await
     }
@@ -458,7 +460,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     pub(crate) async fn bound_child(
         &self,
         parent_inode_id: InodeId,
-        name_key: &str,
+        name_key: &NameKey,
     ) -> Result<Option<DirentryBindRecord>, CoreError> {
         let bindings = self
             .direntry_binds_for_parent_name(parent_inode_id, name_key)
@@ -497,11 +499,11 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     pub(super) async fn direntry_binds_for_parent_name(
         &self,
         parent_inode_id: InodeId,
-        name_key: &str,
+        name_key: &NameKey,
     ) -> Result<SharedRows<DirentryBindRecord>, CoreError> {
         let cache_key = ParentNameCacheKey {
             parent_inode_id,
-            name_key: name_key.to_owned(),
+            name_key: name_key.clone(),
         };
         let durable = if let Some(cached) = self
             .sources
@@ -522,7 +524,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
                     .iter()
                     .filter(move |direntry| {
                         direntry.parent_inode_id == parent_inode_id
-                            && direntry.name_key.as_str() == name_key
+                            && direntry.name_key == *name_key
                     })
                     .cloned()
             }));
@@ -545,7 +547,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
                     .iter()
                     .filter(move |direntry| {
                         direntry.parent_inode_id == parent_inode_id
-                            && direntry.name_key.as_str() == name_key
+                            && direntry.name_key == *name_key
                     })
                     .cloned()
             })
@@ -749,8 +751,8 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     pub(super) async fn direntry_unbinds_for_parent_name_range(
         &self,
         parent_inode_id: InodeId,
-        first_name_key: &str,
-        last_name_key: &str,
+        first_name_key: &NameKey,
+        last_name_key: &NameKey,
     ) -> Result<Vec<DirentryUnbindRecord>, CoreError> {
         let mut unbinds = if let Some(tables) = self.manifest_tables() {
             manifest_index::direntry_unbinds_for_parent_name_range(
@@ -769,8 +771,8 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
                 .iter()
                 .filter(move |unbind| {
                     unbind.parent_inode_id == parent_inode_id
-                        && unbind.name_key.as_str() >= first_name_key
-                        && unbind.name_key.as_str() <= last_name_key
+                        && unbind.name_key >= *first_name_key
+                        && unbind.name_key <= *last_name_key
                 })
                 .cloned()
         }));
@@ -797,7 +799,7 @@ impl<S: ObjectStore + ?Sized> MetadataVisibilityReads for MetadataViewReads<'_, 
     async fn find_latest_bound_child(
         &mut self,
         parent_inode_id: InodeId,
-        name_key: &str,
+        name_key: &NameKey,
     ) -> Result<Option<DirentryBindRecord>, Self::Error> {
         self.view.bound_child(parent_inode_id, name_key).await
     }

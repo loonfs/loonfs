@@ -2,18 +2,17 @@
 //! namespace-repair reap for abandoned installation debris.
 
 use super::config::GcReport;
+use crate::checkpoint::record::encode_checkpoint_record;
 use crate::context::MutationContext;
-use crate::error::{CoreError, MetadataProjectionLoadError};
+use crate::error::{CoreError, Result};
 use crate::limits::GC_MIN_GRACE_WINDOW_MS;
-use crate::namespace::control::ControlObjectLoadError;
 use bytes::Bytes;
 use loonfs_api::wire::control::{
-    decode_control_object, encode_control_object, CheckpointRecordEnvelope,
-    CheckpointRecordLifecycle, CheckpointRecordState, ControlObjectKind, HeadState,
-    HeadStateEnvelope, NamespaceState,
+    decode_control_object, encode_control_object, CheckpointRecordLifecycle, CheckpointRecordState,
+    ControlObjectKind, HeadState, HeadStateEnvelope, NamespaceState,
 };
 use loonfs_api::{ManifestObjectId, NamespaceId};
-use loonfs_objectstore::keys::{namespace_config, wal_head};
+use loonfs_objectstore::keys::{namespace_config, namespace_prefix, wal_head};
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,7 +39,7 @@ pub(super) async fn condemn_checkpoint_if_aged<S: ObjectStore + ?Sized>(
     grace_window_ms: u64,
     namespace_deleted: bool,
     context: &MutationContext,
-) -> Result<CheckpointCondemn, CoreError> {
+) -> Result<CheckpointCondemn> {
     let Some(body) = store
         .get_with_metadata(key)
         .await
@@ -78,22 +77,8 @@ pub(super) async fn condemn_checkpoint_if_aged<S: ObjectStore + ?Sized>(
     };
     let mut condemned = record;
     condemned.state = CheckpointRecordLifecycle::Condemned;
-    let envelope = CheckpointRecordEnvelope::from_state(
-        ControlObjectKind::CheckpointRecord,
-        &context.writer_version,
-        condemned,
-    )
-    .map_err(|error| {
-        CoreError::Internal(format!(
-            "failed to build checkpoint record envelope: {error}"
-        ))
-    })?;
-    let bytes = encode_control_object(&envelope).map_err(|error| {
-        CoreError::Internal(format!(
-            "failed to encode checkpoint record object: {error}"
-        ))
-    })?;
-    match store.compare_and_swap(key, etag, Bytes::from(bytes)).await {
+    let bytes = encode_checkpoint_record(&condemned, &context.writer_version)?;
+    match store.compare_and_swap(key, etag, bytes).await {
         Ok(_) => Ok(CheckpointCondemn::Delete),
         Err(ObjectStoreError::PreconditionFailed { .. } | ObjectStoreError::Conflict { .. }) => {
             tracing::debug!(
@@ -117,8 +102,8 @@ pub(crate) async fn reap_abandoned_bootstrap<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
-) -> Result<AbandonedBootstrapReap, CoreError> {
-    let namespace_prefix = format!("namespaces/{}/", namespace_id.as_str());
+) -> Result<AbandonedBootstrapReap> {
+    let namespace_prefix = namespace_prefix(namespace_id);
     let keys = list_prefix(store, &namespace_prefix).await?;
     if keys.is_empty() {
         return Ok(AbandonedBootstrapReap::Reaped);
@@ -255,7 +240,7 @@ pub(super) async fn delete_if_aged<S: ObjectStore + ?Sized>(
     grace_window_ms: u64,
     context: &MutationContext,
     report: &mut GcReport,
-) -> Result<bool, CoreError> {
+) -> Result<bool> {
     let Some(metadata) = store
         .head(key)
         .await
@@ -283,7 +268,7 @@ pub(super) async fn delete_if_aged<S: ObjectStore + ?Sized>(
 pub(super) async fn list_prefix<S: ObjectStore + ?Sized>(
     store: &S,
     prefix: &str,
-) -> Result<Vec<String>, CoreError> {
+) -> Result<Vec<String>> {
     store
         .list_prefix(prefix)
         .await
@@ -294,8 +279,4 @@ pub(super) fn manifest_object_id_of(key: &str) -> Option<ManifestObjectId> {
     let name = key.rsplit('/').next()?;
     let object_id = name.strip_suffix(".manifest.json")?;
     ManifestObjectId::parse(object_id).ok()
-}
-
-pub(super) fn load_error(error: ControlObjectLoadError) -> CoreError {
-    CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
 }

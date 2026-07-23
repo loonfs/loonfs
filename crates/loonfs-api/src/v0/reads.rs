@@ -24,7 +24,11 @@ pub struct AuthoritativePathEntry {
     pub head_seq: ChangeSeq,
     /// Parent directory inode, or `None` for the root.
     pub parent_inode_id: Option<InodeId>,
-    /// Stored display name for this path component.
+    /// Stored display name for this path component. The root directory has
+    /// no name and serializes as the empty string, which the validating
+    /// [`DisplayName`](crate::DisplayName) newtype cannot represent — this
+    /// field stays a raw `String` until the wire decides how to spell
+    /// "nameless".
     pub display_name: String,
     /// Current file revision number, for files.
     pub revision_no: Option<RevisionNo>,

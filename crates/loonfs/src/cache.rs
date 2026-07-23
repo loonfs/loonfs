@@ -26,7 +26,6 @@ use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
 
 #[derive(Debug, Default)]
-
 pub(crate) struct RuntimeControlCache {
     namespaces: HashMap<NamespaceId, NamespaceControlCacheEntry>,
     namespace_order: VecDeque<NamespaceId>,
@@ -404,10 +403,6 @@ impl FsCore {
     }
 
     pub(crate) fn control_cache_enabled(&self) -> bool {
-        self.inner.config.runtime_cache.max_cached_namespaces > 0
-    }
-
-    pub(crate) fn commit_engine_cache_enabled(&self) -> bool {
         self.inner.config.runtime_cache.max_cached_namespaces > 0
     }
 

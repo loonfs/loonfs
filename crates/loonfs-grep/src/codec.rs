@@ -1,36 +1,14 @@
 //! Gram tokenizer and durable segment codecs for LoonFS grep.
 //!
-//! The gram index accelerates content grep: every eligible file revision
-//! contributes its three-byte substrings (grams, ASCII-case-folded), and
-//! each gram maps to the `(inode_id, revision_no)` pairs whose content
-//! contains it. Queries intersect posting lists to find candidates and
-//! verify every candidate against the real pattern, so the index can only
-//! make a grep slower, never wrong.
-//!
-//! Durable layout, copied byte-for-byte from the original API codec:
-//!
-//! - The **tokenizer** is every overlapping three-byte window of the
-//!   content after folding ASCII letters to lower case. Grams are bytes,
-//!   not characters.
-//! - A **posting batch** is a varint-packed run of postings sorted
-//!   strictly ascending by `(inode_id, revision_no)`: the posting count,
-//!   the first posting's inode id and revision number, then for each
-//!   subsequent posting its inode delta and absolute revision number. All
-//!   integers are LEB128 varints, the same encoding data blocks use.
-//! - An **index row** ([`IndexRow::GramPostings`]) carries one gram, the
-//!   batch's first inode id (repeated from the batch so row keys derive
-//!   without decoding it), and the packed batch. Its row key is
-//!   `gram-{gram hex}-{first inode id:020}`; its filter key is the
-//!   `gram-{gram hex}` prefix, so a segment's bloom filter answers "no
-//!   postings for this gram here". Rows use the shared `loonfs-api`
-//!   segment-block grammar.
+//! The frozen tokenizer, posting-batch, and row-key grammar is specified in
+//! [`docs/specs/format.md` §4.2.2](../../../docs/specs/format.md#422-grep-roots-manifests-and-gram-index-segments).
 
 use loonfs_api::{InodeId, RevisionNo};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use thiserror::Error;
 
-/// Bytes per gram. Fixed by the copied durable format.
+/// Bytes per gram. Fixed by the frozen durable format.
 pub const GRAM_LEN: usize = 3;
 /// Largest content the version-1 eligibility rule admits, in bytes.
 pub const INDEX_GRAMS_MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
@@ -42,13 +20,16 @@ pub struct Gram(pub [u8; GRAM_LEN]);
 impl Gram {
     /// The gram as the six lowercase hex characters row keys embed.
     pub fn as_hex(&self) -> String {
-        loonfs_api::wire::manifest::hex_encode_bytes(&self.0)
+        loonfs_api::wire::hex::hex_encode_bytes(&self.0)
     }
 
     /// Parses the row-key hex form back into a gram.
     pub fn from_hex(hex: &str) -> Result<Self, IndexGramsCodecError> {
-        let bytes = loonfs_api::wire::manifest::hex_decode_bytes(hex)
-            .map_err(|reason| IndexGramsCodecError::InvalidGram { reason })?;
+        let bytes = loonfs_api::wire::hex::hex_decode_bytes(hex).map_err(|reason| {
+            IndexGramsCodecError::InvalidGram {
+                reason: reason.to_string(),
+            }
+        })?;
         let bytes: [u8; GRAM_LEN] =
             bytes
                 .try_into()
@@ -99,6 +80,7 @@ pub struct GramPosting {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum IndexGramsCodecError {
     #[error("a posting batch must contain at least one posting")]
     EmptyPostings,
@@ -151,7 +133,7 @@ pub fn encode_gram_postings(postings: &[GramPosting]) -> Result<Vec<u8>, IndexGr
 /// and that the batch ends exactly where its bytes do.
 pub fn decode_gram_postings(bytes: &[u8]) -> Result<Vec<GramPosting>, IndexGramsCodecError> {
     let mut cursor = 0usize;
-    let count = batch_varint(bytes, &mut cursor)?;
+    let count = read_varint(bytes, &mut cursor)?;
     if count == 0 {
         return Err(IndexGramsCodecError::EmptyPostings);
     }
@@ -167,12 +149,12 @@ pub fn decode_gram_postings(bytes: &[u8]) -> Result<Vec<GramPosting>, IndexGrams
     }
     let mut postings = Vec::with_capacity(count);
     let mut previous = GramPosting {
-        inode_id: InodeId(batch_varint(bytes, &mut cursor)?),
-        revision_no: RevisionNo(batch_varint(bytes, &mut cursor)?),
+        inode_id: InodeId(read_varint(bytes, &mut cursor)?),
+        revision_no: RevisionNo(read_varint(bytes, &mut cursor)?),
     };
     postings.push(previous);
     for _ in 1..count {
-        let inode_delta = batch_varint(bytes, &mut cursor)?;
+        let inode_delta = read_varint(bytes, &mut cursor)?;
         let inode_id = previous
             .inode_id
             .0
@@ -182,7 +164,7 @@ pub fn decode_gram_postings(bytes: &[u8]) -> Result<Vec<GramPosting>, IndexGrams
             })?;
         let posting = GramPosting {
             inode_id: InodeId(inode_id),
-            revision_no: RevisionNo(batch_varint(bytes, &mut cursor)?),
+            revision_no: RevisionNo(read_varint(bytes, &mut cursor)?),
         };
         if posting <= previous {
             return Err(IndexGramsCodecError::PostingsOutOfOrder {
@@ -202,10 +184,6 @@ pub fn decode_gram_postings(bytes: &[u8]) -> Result<Vec<GramPosting>, IndexGrams
         )));
     }
     Ok(postings)
-}
-
-fn batch_varint(bytes: &[u8], cursor: &mut usize) -> Result<u64, IndexGramsCodecError> {
-    read_varint(bytes, cursor)
 }
 
 fn write_varint(bytes: &mut Vec<u8>, mut value: u64) {
@@ -281,7 +259,12 @@ impl IndexRow {
                 gram,
                 first_inode_id,
                 ..
-            } => format!("gram-{}-{:020}", gram.as_hex(), first_inode_id.0),
+            } => format!(
+                "{}{}-{:020}",
+                lookup::GRAM_ROW_PREFIX,
+                gram.as_hex(),
+                first_inode_id.0
+            ),
         }
     }
 
@@ -305,7 +288,7 @@ impl IndexRow {
                 let decoded = decode_gram_postings(postings)?;
                 let actual = decoded
                     .first()
-                    .expect("decode_gram_postings rejects empty batches")
+                    .expect("decoded posting batches should be nonempty")
                     .inode_id;
                 if actual != *first_inode_id {
                     return Err(IndexGramsCodecError::FirstInodeMismatch {
@@ -325,8 +308,11 @@ impl IndexRow {
 pub mod lookup {
     use super::Gram;
 
+    /// Scan floor shared by every gram row key.
+    pub const GRAM_ROW_PREFIX: &str = "gram-";
+
     pub fn gram_probe(gram: Gram) -> String {
-        format!("gram-{}", gram.as_hex())
+        format!("{GRAM_ROW_PREFIX}{}", gram.as_hex())
     }
 
     pub fn gram_prefix(gram: Gram) -> String {

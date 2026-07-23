@@ -66,12 +66,11 @@ pub(crate) async fn load_validated_wal_chain<S: ObjectStore + ?Sized>(
         return Ok(ValidatedWalChain::empty());
     }
 
-    let prefix = format!("namespaces/{}/wal/", request.namespace_id.as_str());
     let mut pointer = request
         .visible_tip
         .clone()
         .ok_or(WalChainLoadError::MissingVisibleTip {
-            prefix,
+            namespace_id: request.namespace_id.clone(),
             seq: request.head_seq,
         })?;
     if pointer.end_seq != request.head_seq {
@@ -118,7 +117,7 @@ pub(crate) async fn load_validated_wal_chain<S: ObjectStore + ?Sized>(
         validate_pointer_matches_envelope(&pointer, &object_key, &envelope)?;
 
         let prev = envelope.payload.prev_visible_segment.clone();
-        reversed.push(ValidatedWalSegment::new(object_key, envelope));
+        reversed.push(ValidatedWalSegment::new(object_key.clone(), envelope));
 
         if reversed
             .last()
@@ -128,7 +127,10 @@ pub(crate) async fn load_validated_wal_chain<S: ObjectStore + ?Sized>(
             break;
         }
 
-        pointer = prev.ok_or(WalReplayError::SegmentSummaryMismatch)?;
+        pointer = prev.ok_or_else(|| WalReplayError::BrokenChainLink {
+            object_key: object_key.clone(),
+            required_seq: stop_after_seq,
+        })?;
     }
 
     reversed.reverse();

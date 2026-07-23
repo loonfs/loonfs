@@ -4,12 +4,14 @@ use crate::args::CommandKind;
 use crate::config::{CliConfig, ProfileConfig};
 use crate::error::CliError;
 use crate::profiles::ProfileSummary;
-use loonfs_api::v0::ChangesResponse;
+use loonfs_api::v0::{
+    ChangesResponse, DisableGramsIndexResponse, EnableGramsIndexResponse, RepairNamespaceResponse,
+};
 use loonfs_api::{
-    AdvanceRetentionResponse, AuthoritativePathEntry, CreateCheckpointResponse,
-    DeleteNamespaceResponse, DisableGramsIndexResponse, EnableGramsIndexResponse, FileRevision,
-    FlushWalResponse, GcResponse, GrepMatch, MaintenanceTickResponse, NamespaceSummary,
-    ReleaseCheckpointResponse, RepairNamespaceResponse,
+    AdvanceRetentionResponse, AuthoritativePathEntry, ChangeSeq, CommitId,
+    CreateCheckpointResponse, DeleteNamespaceResponse, FileRevision, FlushWalResponse, GcResponse,
+    GrepMatch, InodeId, MaintenanceTickResponse, NamespaceId, NamespaceSummary,
+    ReleaseCheckpointResponse,
 };
 use serde::Serialize;
 
@@ -67,12 +69,12 @@ pub(crate) enum CommandData {
     PathEntry(AuthoritativePathEntry),
     GrepMatches {
         pattern: String,
-        namespace_id: String,
+        namespace_id: NamespaceId,
         /// Namespace head the final page was evaluated against.
-        head_seq: u64,
+        head_seq: ChangeSeq,
         /// Index watermark: content committed at or below this sequence is
         /// searchable through the index.
-        built_through_seq: u64,
+        built_through_seq: ChangeSeq,
         matches: Vec<GrepMatch>,
         tail_scanned: bool,
     },
@@ -88,19 +90,19 @@ pub(crate) enum CommandData {
     },
     FileMutation {
         target: String,
-        committed_seq: u64,
-        commit_id: String,
+        committed_seq: ChangeSeq,
+        commit_id: CommitId,
         /// Inode the mutation acted on, when the command resolved one —
         /// `rm` reports it so the deletion stays recoverable via
         /// `loon undelete`.
         #[serde(skip_serializing_if = "Option::is_none")]
-        inode_id: Option<u64>,
+        inode_id: Option<InodeId>,
     },
     PathMove {
         from: String,
         to: String,
-        committed_seq: u64,
-        commit_id: String,
+        committed_seq: ChangeSeq,
+        commit_id: CommitId,
     },
     ConfigPath {
         path: String,

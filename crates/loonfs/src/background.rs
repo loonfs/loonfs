@@ -61,6 +61,15 @@ struct BackgroundState {
 }
 
 impl BackgroundWork {
+    pub(crate) fn inert() -> Self {
+        Self::new(
+            FsBackgroundWork::ManualOnly,
+            None,
+            NonZeroUsize::new(crate::config::DEFAULT_MAX_CONCURRENT_MAINTENANCE)
+                .expect("default maintenance concurrency should be nonzero"),
+        )
+    }
+
     pub(crate) fn new(
         policy: FsBackgroundWork,
         runtime: Option<tokio::runtime::Handle>,

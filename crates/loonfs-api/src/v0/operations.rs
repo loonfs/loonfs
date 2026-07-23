@@ -241,7 +241,6 @@ pub enum FilesystemOperation {
         #[serde(default)]
         behavior: DestinationBehavior,
     },
-    /// Restore an older revision as the current revision for a path.
     /// Recover a deleted file or subtree: revoke the deletion of
     /// `inode_id` recorded at `deleted_at_seq` (both reported by the
     /// delete and by the change feed) and re-bind it at `path`. Answers
@@ -253,6 +252,7 @@ pub enum FilesystemOperation {
         deleted_at_seq: ChangeSeq,
         path: String,
     },
+    /// Restore an older revision as the current revision for a path.
     #[cfg_attr(feature = "openapi", schema(title = "FsOpRestoreRevision"))]
     RestoreRevision {
         path: String,

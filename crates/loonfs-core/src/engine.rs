@@ -4,7 +4,7 @@
 use crate::cache::{MetadataTableCache, WalTailProjectionCache};
 use crate::commit_engine::NamespaceMutationCandidate;
 use crate::context::MutationContext;
-use crate::error::Result as CoreResult;
+use crate::error::Result;
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::namespace::{bootstrap, delete, fork, BootstrapNamespaceError};
 use crate::options::{BootstrapOptions, DeleteNamespaceOptions};
@@ -19,9 +19,10 @@ use loonfs_api::wire::control::{CheckpointOwner, HeadState};
 use loonfs_api::EffectiveLimit;
 use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq,
-    CheckpointId, ContentRef, CreateCheckpointResponse, DirectoryPageCursor, FileRevision,
-    FileRevisionsPageCursor, FlushWalResponse, InodeId, ManifestId, ManifestObjectId, NamespaceId,
-    NamespaceSummary, Page, PageRequest, ReleaseCheckpointResponse, RevisionNo, UploadId,
+    CheckpointId, ContentRef, CreateCheckpointResponse, DeleteNamespaceResponse,
+    DirectoryPageCursor, FileRevision, FileRevisionsPageCursor, FlushWalResponse, InodeId,
+    ManifestId, ManifestObjectId, NamespaceId, NamespaceSummary, Page, PageRequest,
+    ReleaseCheckpointResponse, RevisionNo, UploadId,
 };
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
@@ -49,15 +50,15 @@ pub struct RuntimeReadContext {
     pub catalog: Option<VerifiedNamespaceCatalogEntry>,
 }
 
-fn runtime_read_load_context(options: &RuntimeReadContext) -> ReadLoadContext<'_> {
+fn runtime_read_load_context(context: &RuntimeReadContext) -> ReadLoadContext<'_> {
     ReadLoadContext::pinned_head(
-        &options.head,
-        Some(options.head_etag.as_str()),
-        options.manifest_id,
-        &options.manifest_object_id,
-        Some(&options.table_cache),
-        Some(&options.tail_cache),
-        options.catalog.as_ref(),
+        &context.head,
+        Some(context.head_etag.as_str()),
+        context.manifest_id,
+        &context.manifest_object_id,
+        Some(&context.table_cache),
+        Some(&context.tail_cache),
+        context.catalog.as_ref(),
     )
 }
 
@@ -130,7 +131,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     pub async fn bootstrap_namespace(
         &self,
         options: BootstrapOptions,
-    ) -> Result<NamespaceSummary, BootstrapNamespaceError> {
+    ) -> std::result::Result<NamespaceSummary, BootstrapNamespaceError> {
         bootstrap::bootstrap_namespace(
             &self.store,
             &self.namespace_id,
@@ -143,7 +144,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     /// Creates a new namespace at the current head of this namespace.
     ///
     /// The fork shares immutable file bytes but gets its own metadata history.
-    pub async fn fork_namespace(&self, target: &NamespaceId) -> CoreResult<NamespaceSummary> {
+    pub async fn fork_namespace(&self, target: &NamespaceId) -> Result<NamespaceSummary> {
         fork::fork_namespace(
             &self.store,
             &self.namespace_id,
@@ -159,7 +160,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     pub async fn delete_namespace(
         &self,
         options: DeleteNamespaceOptions,
-    ) -> CoreResult<loonfs_api::DeleteNamespaceResponse> {
+    ) -> Result<DeleteNamespaceResponse> {
         delete::delete_namespace(
             &self.store,
             &self.namespace_id,
@@ -173,9 +174,9 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     pub async fn resolve_path_with_runtime_context(
         &self,
         path: impl AsRef<str>,
-        options: &RuntimeReadContext,
-    ) -> CoreResult<AuthoritativePathEntry> {
-        self.resolve_path_with_context(path.as_ref(), runtime_read_load_context(options))
+        context: &RuntimeReadContext,
+    ) -> Result<AuthoritativePathEntry> {
+        self.resolve_path_with_context(path.as_ref(), runtime_read_load_context(context))
             .await
     }
 
@@ -184,9 +185,9 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         &self,
         path: impl AsRef<str>,
         request: PageRequest<DirectoryPageCursor>,
-        options: &RuntimeReadContext,
-    ) -> CoreResult<Page<AuthoritativePathEntry, DirectoryPageCursor>> {
-        self.list_path_page_with_context(path.as_ref(), request, runtime_read_load_context(options))
+        context: &RuntimeReadContext,
+    ) -> Result<Page<AuthoritativePathEntry, DirectoryPageCursor>> {
+        self.list_path_page_with_context(path.as_ref(), request, runtime_read_load_context(context))
             .await
     }
 
@@ -194,12 +195,12 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     pub async fn read_file_with_runtime_context(
         &self,
         path: impl AsRef<str>,
-        options: &RuntimeReadContext,
+        context: &RuntimeReadContext,
         max_content_bytes: Option<u64>,
-    ) -> CoreResult<AuthoritativeFileBytes> {
+    ) -> Result<AuthoritativeFileBytes> {
         self.read_file_with_context(
             path.as_ref(),
-            runtime_read_load_context(options),
+            runtime_read_load_context(context),
             max_content_bytes,
         )
         .await
@@ -210,9 +211,9 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     /// This is part of the read surface consumed by `loonfs-grep`.
     pub async fn load_grep_view_with_runtime_context<'a>(
         &'a self,
-        options: &'a RuntimeReadContext,
-    ) -> CoreResult<LoadedMetadataView<'a, S>> {
-        self.load_read_view(runtime_read_load_context(options))
+        context: &'a RuntimeReadContext,
+    ) -> Result<LoadedMetadataView<'a, S>> {
+        self.load_read_view(runtime_read_load_context(context))
             .await
     }
 
@@ -221,12 +222,12 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         &self,
         path: impl AsRef<str>,
         request: PageRequest<FileRevisionsPageCursor>,
-        options: &RuntimeReadContext,
-    ) -> CoreResult<Page<FileRevision, FileRevisionsPageCursor>> {
+        context: &RuntimeReadContext,
+    ) -> Result<Page<FileRevision, FileRevisionsPageCursor>> {
         self.list_file_revisions_page_with_context(
             path.as_ref(),
             request,
-            runtime_read_load_context(options),
+            runtime_read_load_context(context),
         )
         .await
     }
@@ -236,12 +237,12 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         &self,
         inode_id: InodeId,
         request: PageRequest<FileRevisionsPageCursor>,
-        options: &RuntimeReadContext,
-    ) -> CoreResult<Page<FileRevision, FileRevisionsPageCursor>> {
+        context: &RuntimeReadContext,
+    ) -> Result<Page<FileRevision, FileRevisionsPageCursor>> {
         self.list_file_revisions_for_inode_page_with_context(
             inode_id,
             request,
-            runtime_read_load_context(options),
+            runtime_read_load_context(context),
         )
         .await
     }
@@ -252,13 +253,13 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         &self,
         path: impl AsRef<str>,
         revision_no: RevisionNo,
-        options: &RuntimeReadContext,
+        context: &RuntimeReadContext,
         max_content_bytes: Option<u64>,
-    ) -> CoreResult<AuthoritativeFileBytes> {
+    ) -> Result<AuthoritativeFileBytes> {
         self.read_file_revision_with_context(
             path.as_ref(),
             revision_no,
-            runtime_read_load_context(options),
+            runtime_read_load_context(context),
             max_content_bytes,
         )
         .await
@@ -269,13 +270,13 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         &self,
         inode_id: InodeId,
         revision_no: RevisionNo,
-        options: &RuntimeReadContext,
+        context: &RuntimeReadContext,
         max_content_bytes: Option<u64>,
-    ) -> CoreResult<Vec<u8>> {
+    ) -> Result<Vec<u8>> {
         self.read_file_revision_for_inode_with_context(
             inode_id,
             revision_no,
-            runtime_read_load_context(options),
+            runtime_read_load_context(context),
             max_content_bytes,
         )
         .await
@@ -284,7 +285,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     async fn load_read_view<'a>(
         &'a self,
         context: ReadLoadContext<'a>,
-    ) -> CoreResult<LoadedMetadataView<'a, S>> {
+    ) -> Result<LoadedMetadataView<'a, S>> {
         load_metadata_view(&self.store, &self.namespace_id, context).await
     }
 
@@ -292,7 +293,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         &self,
         path: &str,
         context: ReadLoadContext<'_>,
-    ) -> CoreResult<AuthoritativePathEntry> {
+    ) -> Result<AuthoritativePathEntry> {
         let view = self.load_read_view(context).await?;
         view.resolve_path(path).await
     }
@@ -302,7 +303,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         path: &str,
         request: PageRequest<DirectoryPageCursor>,
         context: ReadLoadContext<'_>,
-    ) -> CoreResult<Page<AuthoritativePathEntry, DirectoryPageCursor>> {
+    ) -> Result<Page<AuthoritativePathEntry, DirectoryPageCursor>> {
         let view = self.load_read_view(context).await?;
         view.list_path_page(path, request).await
     }
@@ -312,7 +313,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         path: &str,
         context: ReadLoadContext<'_>,
         max_content_bytes: Option<u64>,
-    ) -> CoreResult<AuthoritativeFileBytes> {
+    ) -> Result<AuthoritativeFileBytes> {
         let view = self.load_read_view(context).await?;
         view.read_file_bytes(&self.store, path, max_content_bytes)
             .await
@@ -323,7 +324,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         path: &str,
         request: PageRequest<FileRevisionsPageCursor>,
         context: ReadLoadContext<'_>,
-    ) -> CoreResult<Page<FileRevision, FileRevisionsPageCursor>> {
+    ) -> Result<Page<FileRevision, FileRevisionsPageCursor>> {
         let view = self.load_read_view(context).await?;
         view.list_file_revisions_page(path, request).await
     }
@@ -333,7 +334,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         inode_id: InodeId,
         request: PageRequest<FileRevisionsPageCursor>,
         context: ReadLoadContext<'_>,
-    ) -> CoreResult<Page<FileRevision, FileRevisionsPageCursor>> {
+    ) -> Result<Page<FileRevision, FileRevisionsPageCursor>> {
         let view = self.load_read_view(context).await?;
         view.list_file_revisions_for_inode_page(inode_id, request)
             .await
@@ -345,7 +346,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         revision_no: RevisionNo,
         context: ReadLoadContext<'_>,
         max_content_bytes: Option<u64>,
-    ) -> CoreResult<AuthoritativeFileBytes> {
+    ) -> Result<AuthoritativeFileBytes> {
         let view = self.load_read_view(context).await?;
         view.read_file_revision_bytes(&self.store, path, revision_no, max_content_bytes)
             .await
@@ -357,7 +358,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         revision_no: RevisionNo,
         context: ReadLoadContext<'_>,
         max_content_bytes: Option<u64>,
-    ) -> CoreResult<Vec<u8>> {
+    ) -> Result<Vec<u8>> {
         let view = self.load_read_view(context).await?;
         view.read_file_revision_bytes_for_inode(
             &self.store,
@@ -373,7 +374,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     pub async fn publish_namespace_mutations_batch(
         &self,
         candidates: Vec<NamespaceMutationCandidate>,
-    ) -> Vec<CoreResult<CommitResponse>> {
+    ) -> Vec<Result<CommitResponse>> {
         let context = match self.mutation_context() {
             Ok(context) => context,
             Err(error) => return candidates.iter().map(|_| Err(error.clone())).collect(),
@@ -392,15 +393,12 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         &self,
         after_seq: ChangeSeq,
         limit: EffectiveLimit,
-    ) -> CoreResult<ChangesResponse> {
+    ) -> Result<ChangesResponse> {
         crate::protocol::list_changes_after(&self.store, &self.namespace_id, after_seq, limit).await
     }
 
     /// Starts a durable upload session with explicit transport options.
-    pub async fn begin_upload(
-        &self,
-        request: BeginUploadRequest,
-    ) -> CoreResult<BeginUploadResponse> {
+    pub async fn begin_upload(&self, request: BeginUploadRequest) -> Result<BeginUploadResponse> {
         crate::protocol::begin_upload(
             &self.store,
             &self.namespace_id,
@@ -414,7 +412,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     pub async fn begin_direct_put_upload_target(
         &self,
         content_ref: ContentRef,
-    ) -> CoreResult<BeginDirectPutUploadTargetResponse> {
+    ) -> Result<BeginDirectPutUploadTargetResponse> {
         crate::protocol::begin_direct_put_upload_target(
             &self.store,
             &self.namespace_id,
@@ -429,7 +427,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         &self,
         upload_id: &UploadId,
         bytes: &[u8],
-    ) -> CoreResult<UploadContentResponse> {
+    ) -> Result<UploadContentResponse> {
         crate::protocol::upload_content(
             &self.store,
             &self.namespace_id,
@@ -445,7 +443,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         &self,
         upload_id: &UploadId,
         request: &CompleteUploadRequest,
-    ) -> CoreResult<CompleteUploadResponse> {
+    ) -> Result<CompleteUploadResponse> {
         let (response, _) = self.complete_upload_prepared(upload_id, request).await?;
         Ok(response)
     }
@@ -458,7 +456,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         &self,
         upload_id: &UploadId,
         request: &CompleteUploadRequest,
-    ) -> CoreResult<(CompleteUploadResponse, PreparedContent)> {
+    ) -> Result<(CompleteUploadResponse, PreparedContent)> {
         let catalog = crate::namespace::catalog::load_namespace_catalog_entry(
             &self.store,
             &self.namespace_id,
@@ -475,7 +473,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         catalog: &VerifiedNamespaceCatalogEntry,
         upload_id: &UploadId,
         request: &CompleteUploadRequest,
-    ) -> CoreResult<(CompleteUploadResponse, PreparedContent)> {
+    ) -> Result<(CompleteUploadResponse, PreparedContent)> {
         if catalog.namespace_id() != &self.namespace_id {
             return Err(
                 crate::commit_engine::ContentPreparationError::ContentNotPrepared {
@@ -507,7 +505,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         &self,
         name: String,
         ttl_ms: Option<u64>,
-    ) -> CoreResult<CreateCheckpointResponse> {
+    ) -> Result<CreateCheckpointResponse> {
         let context = self.mutation_context()?;
         let expires_at_ms = ttl_ms.map(|ttl_ms| context.now_ms.saturating_add(ttl_ms));
         crate::checkpoint::create_checkpoint(
@@ -528,7 +526,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     pub async fn release_checkpoint(
         &self,
         checkpoint_id: &CheckpointId,
-    ) -> CoreResult<ReleaseCheckpointResponse> {
+    ) -> Result<ReleaseCheckpointResponse> {
         crate::checkpoint::release_checkpoint(
             &self.store,
             &self.namespace_id,
@@ -545,7 +543,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     /// WAL tail into a published manifest and advances the root, creating no
     /// checkpoint record. Superseded manifests become garbage-collection
     /// candidates once nothing pins them.
-    pub async fn flush_wal(&self) -> CoreResult<FlushWalResponse> {
+    pub async fn flush_wal(&self) -> Result<FlushWalResponse> {
         crate::checkpoint::flush_wal(&self.store, &self.namespace_id, &self.mutation_context()?)
             .await
     }
@@ -556,9 +554,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     /// calling this from maintenance is what keeps read fan-out bounded.
     /// Repeat until the report says `NotNeeded`; every call re-reads durable
     /// state, so interrupted reorganizations resume from the live manifest.
-    pub async fn reorganize_metadata(
-        &self,
-    ) -> CoreResult<crate::checkpoint::MetadataReorganizeReport> {
+    pub async fn reorganize_metadata(&self) -> Result<crate::checkpoint::MetadataReorganizeReport> {
         crate::checkpoint::reorganize_metadata_step(
             &self.store,
             &self.namespace_id,
@@ -569,7 +565,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     }
 
     /// Advances the retention floor when a verified checkpoint makes it safe.
-    pub async fn advance_retention_floor(&self) -> CoreResult<AdvanceRetentionResponse> {
+    pub async fn advance_retention_floor(&self) -> Result<AdvanceRetentionResponse> {
         crate::checkpoint::advance_retention_floor(
             &self.store,
             &self.namespace_id,
@@ -578,7 +574,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         .await
     }
 
-    fn mutation_context(&self) -> CoreResult<MutationContext> {
+    fn mutation_context(&self) -> Result<MutationContext> {
         Ok(MutationContext {
             writer_id: self.writer_id.clone(),
             writer_session_id: self.writer_session_id.clone(),
@@ -628,7 +624,7 @@ impl<S: ObjectStore> NamespaceEngineBuilder<S> {
     }
 
     /// Builds the engine after required fields are present.
-    pub fn build(self) -> Result<NamespaceEngine<S>, NamespaceEngineBuildError> {
+    pub fn build(self) -> std::result::Result<NamespaceEngine<S>, NamespaceEngineBuildError> {
         let namespace_id = self
             .namespace_id
             .ok_or(NamespaceEngineBuildError::MissingNamespace)?;
@@ -676,7 +672,7 @@ fn default_writer_version() -> String {
 }
 
 #[allow(clippy::disallowed_methods)]
-fn current_time_ms() -> CoreResult<u64> {
+fn current_time_ms() -> Result<u64> {
     // Engine wrappers set request timestamps at this API boundary; core replay remains deterministic.
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

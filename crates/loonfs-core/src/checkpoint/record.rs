@@ -10,8 +10,7 @@
 //! standalone objects, never inside manifests.
 
 use super::load::load_namespace_manifest_envelope;
-use crate::error::CoreError;
-use crate::error::MetadataProjectionLoadError;
+use crate::error::{CoreError, Result};
 use crate::namespace::control::read_wal_floor_seq_or_zero;
 use bytes::Bytes;
 use loonfs_api::wire::control::{
@@ -66,7 +65,7 @@ pub(crate) fn deterministic_checkpoint_id(
     for byte in &digest[..16] {
         hex.push_str(&format!("{byte:02x}"));
     }
-    CheckpointId::parse(hex).expect("derived checkpoint id is valid")
+    CheckpointId::parse(hex).expect("derived checkpoint id should be valid")
 }
 
 pub(crate) enum CheckpointRecordWrite {
@@ -76,24 +75,37 @@ pub(crate) enum CheckpointRecordWrite {
     Existing,
 }
 
-pub(crate) async fn write_checkpoint_record<S: ObjectStore + ?Sized>(
-    store: &S,
+pub(crate) fn encode_checkpoint_record(
     record: &CheckpointRecordState,
     writer_version: &str,
-) -> Result<CheckpointRecordWrite, CoreError> {
+) -> crate::error::Result<Bytes> {
     let envelope = CheckpointRecordEnvelope::from_state(
         ControlObjectKind::CheckpointRecord,
         writer_version,
         record.clone(),
     )
-    .map_err(|err| {
-        CoreError::Internal(format!("failed to build checkpoint record envelope: {err}"))
+    .map_err(|error| {
+        CoreError::Internal(format!(
+            "failed to build checkpoint record envelope: {error}"
+        ))
     })?;
-    let encoded = encode_control_object(&envelope).map_err(|err| {
-        CoreError::Internal(format!("failed to encode checkpoint record object: {err}"))
-    })?;
+    encode_control_object(&envelope)
+        .map(Bytes::from)
+        .map_err(|error| {
+            CoreError::Internal(format!(
+                "failed to encode checkpoint record object: {error}"
+            ))
+        })
+}
+
+pub(crate) async fn write_checkpoint_record<S: ObjectStore + ?Sized>(
+    store: &S,
+    record: &CheckpointRecordState,
+    writer_version: &str,
+) -> Result<CheckpointRecordWrite> {
+    let encoded = encode_checkpoint_record(record, writer_version)?;
     let object_key = checkpoint_record(record.namespace_id.as_str(), record.checkpoint_id.as_str());
-    match store.put_if_absent(&object_key, Bytes::from(encoded)).await {
+    match store.put_if_absent(&object_key, encoded).await {
         Ok(_) => Ok(CheckpointRecordWrite::Created),
         Err(ObjectStoreError::PreconditionFailed { .. } | ObjectStoreError::Conflict { .. }) => {
             Ok(CheckpointRecordWrite::Existing)
@@ -111,7 +123,7 @@ pub(crate) async fn read_checkpoint_record<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     checkpoint_id: &CheckpointId,
-) -> Result<Option<LoadedCheckpointRecord>, CoreError> {
+) -> Result<Option<LoadedCheckpointRecord>> {
     let object_key = checkpoint_record(namespace_id.as_str(), checkpoint_id.as_str());
     let Some(body) = store
         .get_with_metadata(&object_key)
@@ -143,7 +155,7 @@ pub(crate) async fn set_checkpoint_record_state<S: ObjectStore + ?Sized>(
     checkpoint_id: &CheckpointId,
     target: CheckpointRecordLifecycle,
     writer_version: &str,
-) -> Result<(), CoreError> {
+) -> Result<()> {
     cas_checkpoint_record(store, namespace_id, checkpoint_id, writer_version, |next| {
         refuse_condemned_checkpoint(next)?;
         if next.state == target {
@@ -167,7 +179,7 @@ pub(crate) async fn renew_checkpoint_record<S: ObjectStore + ?Sized>(
     checkpoint_id: &CheckpointId,
     expires_at_ms: Option<u64>,
     writer_version: &str,
-) -> Result<(), CoreError> {
+) -> Result<()> {
     cas_checkpoint_record(store, namespace_id, checkpoint_id, writer_version, |next| {
         refuse_condemned_checkpoint(next)?;
         if next.state == CheckpointRecordLifecycle::Active && next.expires_at_ms == expires_at_ms {
@@ -180,7 +192,7 @@ pub(crate) async fn renew_checkpoint_record<S: ObjectStore + ?Sized>(
     .await
 }
 
-fn refuse_condemned_checkpoint(record: &CheckpointRecordState) -> Result<(), CoreError> {
+fn refuse_condemned_checkpoint(record: &CheckpointRecordState) -> Result<()> {
     if record.state == CheckpointRecordLifecycle::Condemned {
         return Err(CoreError::CheckpointStateConflict {
             checkpoint_id: record.checkpoint_id.clone(),
@@ -198,8 +210,8 @@ async fn cas_checkpoint_record<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     checkpoint_id: &CheckpointId,
     writer_version: &str,
-    apply: impl Fn(&mut CheckpointRecordState) -> Result<bool, CoreError>,
-) -> Result<(), CoreError> {
+    apply: impl Fn(&mut CheckpointRecordState) -> Result<bool>,
+) -> Result<()> {
     const STATE_CAS_ATTEMPTS: usize = 4;
     let object_key = checkpoint_record(namespace_id.as_str(), checkpoint_id.as_str());
     for _attempt in 0..STATE_CAS_ATTEMPTS {
@@ -212,26 +224,13 @@ async fn cas_checkpoint_record<S: ObjectStore + ?Sized>(
         if !apply(&mut next)? {
             return Ok(());
         }
-        let envelope = CheckpointRecordEnvelope::from_state(
-            ControlObjectKind::CheckpointRecord,
-            writer_version,
-            next,
-        )
-        .map_err(|err| {
-            CoreError::Internal(format!("failed to build checkpoint record envelope: {err}"))
-        })?;
-        let encoded = encode_control_object(&envelope).map_err(|err| {
-            CoreError::Internal(format!("failed to encode checkpoint record object: {err}"))
-        })?;
+        let encoded = encode_checkpoint_record(&next, writer_version)?;
         let Some(etag) = loaded.etag.as_deref() else {
             return Err(CoreError::NamespaceCorrupt(format!(
                 "missing etag for checkpoint record `{object_key}`"
             )));
         };
-        match store
-            .compare_and_swap(&object_key, etag, Bytes::from(encoded))
-            .await
-        {
+        match store.compare_and_swap(&object_key, etag, encoded).await {
             Ok(_) => return Ok(()),
             Err(
                 ObjectStoreError::PreconditionFailed { .. } | ObjectStoreError::Conflict { .. },
@@ -261,7 +260,7 @@ pub(crate) async fn freshen_fork_checkpoint<S: ObjectStore + ?Sized>(
     checkpoint_id: &CheckpointId,
     expected_target: &NamespaceId,
     writer_version: &str,
-) -> Result<CheckpointRecordState, CoreError> {
+) -> Result<CheckpointRecordState> {
     const FRESHEN_CAS_ATTEMPTS: usize = 4;
     let object_key = checkpoint_record(namespace_id.as_str(), checkpoint_id.as_str());
     for _attempt in 0..FRESHEN_CAS_ATTEMPTS {
@@ -285,26 +284,13 @@ pub(crate) async fn freshen_fork_checkpoint<S: ObjectStore + ?Sized>(
         let revived = loaded.state.state == CheckpointRecordLifecycle::Released;
         let mut next = loaded.state;
         next.state = CheckpointRecordLifecycle::Active;
-        let envelope = CheckpointRecordEnvelope::from_state(
-            ControlObjectKind::CheckpointRecord,
-            writer_version,
-            next.clone(),
-        )
-        .map_err(|err| {
-            CoreError::Internal(format!("failed to build checkpoint record envelope: {err}"))
-        })?;
-        let encoded = encode_control_object(&envelope).map_err(|err| {
-            CoreError::Internal(format!("failed to encode checkpoint record object: {err}"))
-        })?;
+        let encoded = encode_checkpoint_record(&next, writer_version)?;
         let Some(etag) = loaded.etag.as_deref() else {
             return Err(CoreError::NamespaceCorrupt(format!(
                 "missing etag for checkpoint record `{object_key}`"
             )));
         };
-        match store
-            .compare_and_swap(&object_key, etag, Bytes::from(encoded))
-            .await
-        {
+        match store.compare_and_swap(&object_key, etag, encoded).await {
             Ok(_) => {
                 // We just revived a released record, so check that the
                 // basis still verifies before trusting it.
@@ -345,12 +331,10 @@ pub(crate) async fn freshen_fork_checkpoint<S: ObjectStore + ?Sized>(
 pub(crate) async fn verify_checkpoint_basis<S: ObjectStore + ?Sized>(
     store: &S,
     record: &CheckpointRecordState,
-) -> Result<bool, CoreError> {
+) -> Result<bool> {
     let floor_seq = read_wal_floor_seq_or_zero(store, &record.namespace_id)
         .await
-        .map_err(|error| {
-            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
-        })?;
+        .map_err(CoreError::load_head)?;
     if floor_seq > record.manifest_head_seq {
         return Ok(false);
     }

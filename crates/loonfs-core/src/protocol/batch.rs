@@ -14,6 +14,7 @@ use crate::commit::{
 use crate::commit_engine::NamespaceMutationCandidate;
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result, StoreFailureClass};
+use crate::limits::WAL_PUBLISH_BUDGET_MS;
 use crate::path::write::PublishPlanningSession;
 use crate::timing::MonotonicTimer;
 use crate::wal::{prepare_wal_segment, PreparedWalSegment};
@@ -24,8 +25,6 @@ use loonfs_api::wire::wal::WalCommitPayload;
 use loonfs_api::NamespaceId;
 use loonfs_objectstore::{ObjectMetadata, ObjectStore};
 use tracing::Instrument;
-
-pub(crate) use crate::limits::WAL_PUBLISH_BUDGET_MS as PUBLISH_BUDGET_MS;
 
 #[derive(Debug, Clone)]
 pub(crate) struct PublishBatchAgainstViewResult {
@@ -239,7 +238,7 @@ pub(crate) async fn publish_namespace_mutations_batch_against_publish_view<
 
     let last_plan = &records
         .last()
-        .expect("non-empty accepted records")
+        .expect("accepted records should be non-empty")
         .prepared
         .plan;
     let head_publish =
@@ -252,10 +251,10 @@ pub(crate) async fn publish_namespace_mutations_batch_against_publish_view<
         }
     };
     let elapsed_ms = timer.monotonic_now_ms().saturating_sub(put_started_ms);
-    if elapsed_ms > PUBLISH_BUDGET_MS {
+    if elapsed_ms > WAL_PUBLISH_BUDGET_MS {
         let error = CoreError::HeadPublish(CommitHeadPublishError::PublishBudgetExceeded {
             elapsed_ms,
-            budget_ms: PUBLISH_BUDGET_MS,
+            budget_ms: WAL_PUBLISH_BUDGET_MS,
         });
         return abort_batch(outcomes, &dedup, &accepted, &error);
     }

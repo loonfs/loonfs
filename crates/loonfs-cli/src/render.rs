@@ -90,6 +90,10 @@ pub(crate) fn render_error(failure: &CommandFailure, json_mode: bool) -> io::Res
     Ok(())
 }
 
+pub(crate) fn write_stderr_warning(message: impl std::fmt::Display) {
+    let _ = writeln!(io::stderr().lock(), "warning: {message}");
+}
+
 pub(crate) fn json_success(output: &CommandOutput) -> io::Result<String> {
     match &output.data {
         CommandData::StreamBytes(_) => Err(io::Error::new(
@@ -348,7 +352,7 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             }
             if let Some(content_ref) = &entry.content_ref {
                 lines.push(format!("content_ref: {}", content_ref.digest));
-                lines.push(format!("content_kind: {:?}", content_ref.kind));
+                lines.push(format!("content_kind: {}", content_ref.kind));
             }
             lines.join("\n")
         }
@@ -439,7 +443,7 @@ mod tests {
     use crate::profiles::ProfileSummary;
     use insta::{assert_json_snapshot, assert_snapshot};
     #[test]
-    fn human_profile_list_snapshot() {
+    fn human_profile_list_renders_default_marker() {
         let output = CommandOutput {
             kind: CommandKind::ProfileList,
             profile: None,
@@ -483,7 +487,7 @@ mod tests {
     }
 
     #[test]
-    fn json_error_snapshot() {
+    fn json_error_carries_profile_and_code() {
         let failure = CommandFailure {
             kind: CommandKind::ConfigShow,
             profile: Some("default".to_owned()),

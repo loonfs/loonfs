@@ -12,7 +12,7 @@ use crate::commit_engine::{
 };
 use crate::error::{CoreError, Result};
 use crate::metadata::CommitReceiptRecord;
-use crate::path::write::{path_intent_fingerprint_for_path_intent, PublishPlanningSession};
+use crate::path::write::{path_intent_fingerprint, PublishPlanningSession};
 use crate::storage::content_admission::ContentAdmission;
 use loonfs_api::v0::{CommitOp, CommitResponse as ApiCommitResponse};
 use loonfs_api::{CommitId, ContentRef, ContentStoreId, NamespaceId};
@@ -141,7 +141,6 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
     };
     match candidate.mutation() {
         NamespaceMutation::Commit(request) => {
-            validate_commit_id(&request.commit_id)?;
             let request = CoreCommitRequest::from_v0(conversion_context, request.clone());
             let semantic_identity = core_commit_fingerprint(&request).map_err(|error| {
                 CoreError::Internal(format!("failed to fingerprint commit request: {error}"))
@@ -166,9 +165,7 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
             }))
         }
         NamespaceMutation::Path(intent) => {
-            validate_commit_id(intent.commit_id())?;
-            let path_intent_fingerprint =
-                path_intent_fingerprint_for_path_intent(namespace_id, intent)?;
+            let path_intent_fingerprint = path_intent_fingerprint(namespace_id, intent)?;
             let semantic_identity =
                 SemanticMutationIdentity::PathIntent(path_intent_fingerprint.clone());
             if let Some(admission) = resolve_commit_id_reuse(
@@ -207,12 +204,6 @@ fn reject_failed_content_preparation(candidate: &NamespaceMutationCandidate) -> 
         ContentPreparation::Ready(_) => Ok(()),
         ContentPreparation::Rejected(error) => Err(error.clone().into()),
     }
-}
-
-fn validate_commit_id(commit_id: &CommitId) -> Result<()> {
-    CommitId::parse(commit_id.as_str())
-        .map(|_| ())
-        .map_err(CoreError::InvalidCommitId)
 }
 
 /// Settles a candidate whose commit id was already used, either by a durable

@@ -82,7 +82,7 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
                         .deltas
                         .iter()
                         .map(commit_delta_from_wal)
-                        .collect::<std::result::Result<Vec<_>, _>>()?,
+                        .collect::<Result<Vec<_>>>()?,
                 });
                 if changes.len() == limit.as_usize() {
                     through_seq = seq;

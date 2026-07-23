@@ -2,17 +2,16 @@
 
 use super::config::GcConfig;
 use super::reap::list_prefix;
-use crate::checkpoint::record::set_checkpoint_record_state;
+use crate::checkpoint::record::{encode_checkpoint_record, set_checkpoint_record_state};
 use crate::context::MutationContext;
-use crate::error::CoreError;
+use crate::error::{CoreError, Result};
 use crate::namespace::control::{read_head_object, ControlObjectLoadError};
-use bytes::Bytes;
 use loonfs_api::wire::control::{
-    decode_control_object, encode_control_object, CheckpointOwner, CheckpointRecordEnvelope,
-    CheckpointRecordLifecycle, CheckpointRecordState, ControlObjectKind, NamespaceState,
+    decode_control_object, CheckpointOwner, CheckpointRecordLifecycle, CheckpointRecordState,
+    ControlObjectKind, NamespaceState,
 };
 use loonfs_api::NamespaceId;
-use loonfs_objectstore::keys::metadata_manifest_object;
+use loonfs_objectstore::keys::{metadata_manifest_object, namespace_prefix};
 use loonfs_objectstore::ObjectStore;
 
 pub(super) enum ForkCheckpointSweep {
@@ -25,11 +24,6 @@ pub(super) enum ForkCheckpointSweep {
     NotAnActiveFork,
 }
 
-/// Decides one active fork-owned sweep candidate immediately before acting
-/// (rule 3): re-reads the record, re-proves the target namespace is gone,
-/// and releases the record by compare-and-swap on the just-observed etag.
-/// The etag check means a concurrent fork freshen either wins the swap
-/// outright or observes the release — the two can never both succeed.
 /// Releases a still-active record whose basis manifest is verifiably gone.
 /// Every check runs against fresh reads at decision time: the record must
 /// still be active and unexpired, older than the grace window (an in-flight
@@ -43,7 +37,7 @@ pub(super) async fn release_missing_basis_checkpoint<S: ObjectStore + ?Sized>(
     key: &str,
     config: &GcConfig,
     context: &MutationContext,
-) -> Result<bool, CoreError> {
+) -> Result<bool> {
     let Some(body) = store
         .get_with_metadata(key)
         .await
@@ -91,12 +85,17 @@ pub(super) async fn release_missing_basis_checkpoint<S: ObjectStore + ?Sized>(
     Ok(true)
 }
 
+/// Decides one active fork-owned sweep candidate immediately before acting
+/// (rule 3): re-reads the record, re-proves the target namespace is gone,
+/// and releases the record by compare-and-swap on the just-observed etag.
+/// The etag check means a concurrent fork freshen either wins the swap
+/// outright or observes the release — the two can never both succeed.
 pub(super) async fn maybe_release_fork_checkpoint<S: ObjectStore + ?Sized>(
     store: &S,
     key: &str,
     config: &GcConfig,
     context: &MutationContext,
-) -> Result<ForkCheckpointSweep, CoreError> {
+) -> Result<ForkCheckpointSweep> {
     let Some(body) = store
         .get_with_metadata(key)
         .await
@@ -145,21 +144,8 @@ pub(super) async fn maybe_release_fork_checkpoint<S: ObjectStore + ?Sized>(
     };
     let mut released = record;
     released.state = CheckpointRecordLifecycle::Released;
-    let envelope = CheckpointRecordEnvelope::from_state(
-        ControlObjectKind::CheckpointRecord,
-        &context.writer_version,
-        released,
-    )
-    .map_err(|err| {
-        CoreError::Internal(format!("failed to build checkpoint record envelope: {err}"))
-    })?;
-    let encoded = encode_control_object(&envelope).map_err(|err| {
-        CoreError::Internal(format!("failed to encode checkpoint record object: {err}"))
-    })?;
-    match store
-        .compare_and_swap(key, etag, Bytes::from(encoded))
-        .await
-    {
+    let encoded = encode_checkpoint_record(&released, &context.writer_version)?;
+    match store.compare_and_swap(key, etag, encoded).await {
         Ok(_) => Ok(ForkCheckpointSweep::Released),
         // A fork freshen (or another pass) won the record; retain and let a
         // later pass re-decide against the fresh state.
@@ -183,11 +169,11 @@ pub(super) async fn fork_target_proven_gone<S: ObjectStore + ?Sized>(
     record_last_modified_ms: u64,
     config: &GcConfig,
     context: &MutationContext,
-) -> Result<bool, CoreError> {
+) -> Result<bool> {
     match read_head_object(store, target_namespace_id).await {
         Ok(loaded) => Ok(loaded.envelope.state.state == NamespaceState::Deleted),
         Err(ControlObjectLoadError::MissingObject { .. }) => {
-            let target_prefix = format!("namespaces/{}/", target_namespace_id.as_str());
+            let target_prefix = namespace_prefix(target_namespace_id);
             let tree = list_prefix(store, &target_prefix).await?;
             if !tree.is_empty() {
                 // Either a bootstrap is in progress or rule 10 has not

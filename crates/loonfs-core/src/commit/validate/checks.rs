@@ -4,11 +4,9 @@
 //! only differ by error vocabulary take error-constructor closures so each
 //! call site keeps its exact wire-visible variant.
 
-use super::super::{
-    push_unique_invariant, CommitRequest, CommitValidationError, ResolvedBinding, ValidatedOp,
-};
+use super::super::{CommitRequest, CommitValidationError, ResolvedBinding, ValidatedOp};
 use super::view::CommitValidationView;
-use crate::invariants::InvariantId;
+use crate::invariants::{push_unique_invariant, InvariantId};
 use crate::metadata::{BindingIdentity, InodeRecord, RevisionRecord, SubtreeTombstoneRecord};
 use loonfs_api::v0::{CommitOp, CommitPrecondition};
 use loonfs_api::{ChangeSeq, DisplayName, InodeId, InodeKind, NameKey, NamePolicy, RevisionNo};
@@ -106,7 +104,16 @@ pub(super) async fn validate_metadata_preconditions<V: CommitValidationView>(
                 content_ref,
             } => {
                 validate_inode_revision_is(&metadata_state, *inode_id, *base_revision_no).await?;
-                let revision_no = next_revision_no(*inode_id, *base_revision_no, true)?;
+                let revision_no = next_revision_no(
+                    *inode_id,
+                    *base_revision_no,
+                    |inode_id, base_revision_no| {
+                        CommitValidationError::ReplaceFileRevisionOverflow {
+                            inode_id,
+                            base_revision_no,
+                        }
+                    },
+                )?;
                 validate_replace_target_not_covered(&metadata_state, *inode_id, checked_invariants)
                     .await?;
                 ValidatedOp::ReplaceFile {
@@ -129,7 +136,14 @@ pub(super) async fn validate_metadata_preconditions<V: CommitValidationView>(
                     *source_revision_no,
                 )
                 .await?;
-                let revision_no = next_revision_no(*inode_id, *base_revision_no, false)?;
+                let revision_no = next_revision_no(
+                    *inode_id,
+                    *base_revision_no,
+                    |inode_id, base_revision_no| CommitValidationError::RestoreRevisionOverflow {
+                        inode_id,
+                        base_revision_no,
+                    },
+                )?;
                 validate_not_covered_by_tombstone(
                     &metadata_state,
                     *inode_id,
@@ -424,21 +438,13 @@ fn reserve_delta_index(next_delta_index: &mut u32) -> Result<u32, CommitValidati
 fn next_revision_no(
     inode_id: InodeId,
     base_revision_no: RevisionNo,
-    is_replace: bool,
+    overflow: impl FnOnce(InodeId, RevisionNo) -> CommitValidationError,
 ) -> Result<RevisionNo, CommitValidationError> {
-    base_revision_no.0.checked_add(1).map(RevisionNo).ok_or({
-        if is_replace {
-            CommitValidationError::ReplaceFileRevisionOverflow {
-                inode_id,
-                base_revision_no,
-            }
-        } else {
-            CommitValidationError::RestoreRevisionOverflow {
-                inode_id,
-                base_revision_no,
-            }
-        }
-    })
+    base_revision_no
+        .0
+        .checked_add(1)
+        .map(RevisionNo)
+        .ok_or_else(|| overflow(inode_id, base_revision_no))
 }
 
 /// Requires the inode to exist and to have `expected_kind`, with the error
@@ -518,17 +524,15 @@ async fn validate_replace_target_not_covered<V: CommitValidationView>(
 /// Requires `display_name` to be valid and unbound under `parent_inode_id`,
 /// which must be an existing directory; returns the derived name key. The
 /// error vocabulary (create vs rename) is supplied by the call site.
-#[allow(clippy::too_many_arguments)]
 async fn validate_name_absent<V: CommitValidationView>(
     metadata_state: &V,
     parent_inode_id: InodeId,
-    display_name: &str,
+    display_name: &DisplayName,
     name_policy: NamePolicy,
     parent_missing: impl FnOnce() -> CommitValidationError,
     parent_not_directory: impl FnOnce(InodeKind) -> CommitValidationError,
-    collision: impl FnOnce(String, InodeId) -> CommitValidationError,
+    collision: impl FnOnce(NameKey, InodeId) -> CommitValidationError,
 ) -> Result<NameKey, V::Error> {
-    let display_name = validate_display_name(display_name)?;
     validate_inode_kind(
         metadata_state,
         parent_inode_id,
@@ -538,12 +542,12 @@ async fn validate_name_absent<V: CommitValidationView>(
     )
     .await?;
 
-    let name_key = NameKey::for_display_name(name_policy, &display_name);
+    let name_key = NameKey::for_display_name(name_policy, display_name);
     if let Some(existing) = metadata_state
-        .visible_child(parent_inode_id, name_key.as_str())
+        .visible_child(parent_inode_id, &name_key)
         .await?
     {
-        return Err(collision(name_key.as_str().to_owned(), existing.child_inode_id).into());
+        return Err(collision(name_key, existing.child_inode_id).into());
     }
 
     Ok(name_key)
@@ -552,7 +556,7 @@ async fn validate_name_absent<V: CommitValidationView>(
 async fn validate_child_name_absent<V: CommitValidationView>(
     metadata_state: &V,
     parent_inode_id: InodeId,
-    display_name: &str,
+    display_name: &DisplayName,
     name_policy: NamePolicy,
 ) -> Result<NameKey, V::Error> {
     validate_name_absent(
@@ -577,7 +581,7 @@ async fn validate_child_name_absent<V: CommitValidationView>(
 async fn validate_rename_target_name_absent<V: CommitValidationView>(
     metadata_state: &V,
     parent_inode_id: InodeId,
-    display_name: &str,
+    display_name: &DisplayName,
     name_policy: NamePolicy,
 ) -> Result<NameKey, V::Error> {
     validate_name_absent(
@@ -607,12 +611,12 @@ async fn validate_child_name_absent_precondition<V: CommitValidationView>(
     validate_name_precondition_parent(metadata_state, parent_inode_id).await?;
 
     if let Some(existing) = metadata_state
-        .visible_child(parent_inode_id, name_key.as_str())
+        .visible_child(parent_inode_id, name_key)
         .await?
     {
         return Err(CommitValidationError::CreateChildNameCollision {
             parent_inode_id,
-            name_key: name_key.as_str().to_owned(),
+            name_key: name_key.clone(),
             child_inode_id: existing.child_inode_id,
         }
         .into());
@@ -621,7 +625,6 @@ async fn validate_child_name_absent_precondition<V: CommitValidationView>(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn validate_binding_is_precondition<V: CommitValidationView>(
     metadata_state: &V,
     parent_inode_id: InodeId,
@@ -633,12 +636,12 @@ async fn validate_binding_is_precondition<V: CommitValidationView>(
     validate_name_precondition_parent(metadata_state, parent_inode_id).await?;
 
     let Some(existing) = metadata_state
-        .visible_child(parent_inode_id, name_key.as_str())
+        .visible_child(parent_inode_id, name_key)
         .await?
     else {
         return Err(CommitValidationError::BindingPreconditionMissing {
             parent_inode_id,
-            name_key: name_key.as_str().to_owned(),
+            name_key: name_key.clone(),
         }
         .into());
     };
@@ -647,7 +650,7 @@ async fn validate_binding_is_precondition<V: CommitValidationView>(
     // remaining binding-identity fields.
     let expected = BindingIdentity {
         parent_inode_id,
-        name_key: name_key.as_str(),
+        name_key,
         child_inode_id,
         bind_seq,
         bind_delta_index,
@@ -655,9 +658,9 @@ async fn validate_binding_is_precondition<V: CommitValidationView>(
     if BindingIdentity::from(&existing) != expected {
         return Err(CommitValidationError::BindingPreconditionMismatch {
             parent_inode_id,
-            name_key: name_key.as_str().to_owned(),
+            name_key: name_key.clone(),
             expected_child_inode_id: child_inode_id,
-            actual_child_inode_id: Some(existing.child_inode_id),
+            actual_child_inode_id: existing.child_inode_id,
         }
         .into());
     }
@@ -856,11 +859,4 @@ async fn validate_rename_does_not_cycle<V: CommitValidationView>(
     }
 
     Ok(())
-}
-
-fn validate_display_name(display_name: &str) -> Result<DisplayName, CommitValidationError> {
-    DisplayName::parse(display_name).map_err(|error| CommitValidationError::InvalidDisplayName {
-        display_name: error.invalid_path_input().to_owned(),
-        reason: error.to_string(),
-    })
 }

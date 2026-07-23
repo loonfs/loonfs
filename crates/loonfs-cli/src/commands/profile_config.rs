@@ -198,6 +198,12 @@ const PROVIDER_FLAGS: &[ProviderFlag] = &[
     },
 ];
 
+pub(super) fn has_update_flags(args: &ProfileUpdateArgs) -> bool {
+    PROVIDER_FLAGS
+        .iter()
+        .any(|row| row.update_set.is_some_and(|is_set| is_set(args)))
+}
+
 /// Rejects every set create flag whose allowed targets do not intersect
 /// `targets`, reporting `profile_label` in the error.
 fn reject_inapplicable_create_flags(
@@ -375,7 +381,7 @@ fn build_embedded_profile(
             key_prefix: spec.key_prefix,
         },
         ConfiguredObjectStoreKind::AwsS3 => StoreConfig::AwsS3 {
-            bucket: require_or_prompt(spec.bucket.as_ref(), "bucket name", runtime)?,
+            bucket: require_or_prompt(spec.bucket.as_ref(), "bucket", runtime)?,
             region: require_or_prompt_region(spec.region.as_ref(), runtime)?,
             endpoint_url: spec.endpoint_url,
             access_key_id: require_or_prompt_secret(
@@ -393,7 +399,7 @@ fn build_embedded_profile(
             force_path_style: spec.force_path_style,
         },
         ConfiguredObjectStoreKind::CloudflareR2 => StoreConfig::CloudflareR2 {
-            bucket: require_or_prompt(spec.bucket.as_ref(), "bucket name", runtime)?,
+            bucket: require_or_prompt(spec.bucket.as_ref(), "bucket", runtime)?,
             account_id: require_or_prompt(spec.account_id.as_ref(), "account-id", runtime)?,
             endpoint_url: require_or_prompt(spec.endpoint_url.as_ref(), "endpoint-url", runtime)?,
             access_key_id: require_or_prompt_secret(
@@ -409,7 +415,7 @@ fn build_embedded_profile(
             key_prefix: spec.key_prefix,
         },
         ConfiguredObjectStoreKind::GcpGcs => StoreConfig::GcpGcs {
-            bucket: require_or_prompt(spec.bucket.as_ref(), "bucket name", runtime)?,
+            bucket: require_or_prompt(spec.bucket.as_ref(), "bucket", runtime)?,
             service_account_key_path: require_or_prompt(
                 spec.service_account_key_path.as_ref(),
                 "service-account-key-path",
@@ -418,13 +424,13 @@ fn build_embedded_profile(
             key_prefix: spec.key_prefix,
         },
         ConfiguredObjectStoreKind::AzureAbs => StoreConfig::AzureAbs {
-            account_name: require_or_prompt(spec.account_name.as_ref(), "account name", runtime)?,
+            account_name: require_or_prompt(spec.account_name.as_ref(), "account-name", runtime)?,
             container_name: require_or_prompt(
                 spec.container_name.as_ref(),
-                "container name",
+                "container-name",
                 runtime,
             )?,
-            access_key: require_or_prompt_secret(spec.access_key.as_ref(), "access key", runtime)?,
+            access_key: require_or_prompt_secret(spec.access_key.as_ref(), "access-key", runtime)?,
             endpoint_url: spec.endpoint_url,
             key_prefix: spec.key_prefix,
         },
@@ -445,7 +451,7 @@ fn build_remote_profile(
     reject_inapplicable_create_flags(&spec, &[FlagTarget::Remote], "remote")?;
 
     Ok(ProfileConfig::Remote {
-        server_url: require_or_prompt(spec.server_url.as_ref(), "server url", runtime)?,
+        server_url: require_or_prompt(spec.server_url.as_ref(), "server-url", runtime)?,
         default_namespace: None,
         auth_token: match spec.auth_token {
             Some(token) if token.trim().is_empty() => None,
@@ -462,7 +468,7 @@ fn require_or_prompt(
     match value {
         Some(v) if !v.trim().is_empty() => Ok(v.clone()),
         _ if runtime.interactive => prompt::prompt_line(field),
-        _ => Err(CliError::non_interactive_input_required(field)),
+        _ => Err(CliError::non_interactive_field_required(field)),
     }
 }
 
@@ -476,7 +482,7 @@ fn require_or_prompt_secret(
     match value {
         Some(v) if !v.trim().is_empty() => Ok(SecretString::from(v.clone())),
         _ if runtime.interactive => prompt::prompt_secret(field).map(SecretString::from),
-        _ => Err(CliError::non_interactive_input_required(field)),
+        _ => Err(CliError::non_interactive_field_required(field)),
     }
 }
 
@@ -487,7 +493,7 @@ fn require_or_prompt_region(
     match value {
         Some(v) if !v.trim().is_empty() => Ok(v.clone()),
         _ if runtime.interactive => prompt::prompt_fuzzy_choice("region", AWS_REGIONS, 0),
-        _ => Err(CliError::non_interactive_input_required("region")),
+        _ => Err(CliError::non_interactive_field_required("region")),
     }
 }
 
@@ -648,19 +654,19 @@ pub(super) fn apply_update_interactive(existing: ProfileConfig) -> Result<Profil
                     key_prefix,
                     force_path_style,
                 } => StoreConfig::AwsS3 {
-                    bucket: prompt::prompt_line_default("bucket name", &bucket)?,
+                    bucket: prompt::prompt_line_default("bucket", &bucket)?,
                     region: {
                         let default_idx =
                             AWS_REGIONS.iter().position(|r| *r == region).unwrap_or(0);
                         prompt::prompt_fuzzy_choice("region", AWS_REGIONS, default_idx)?
                     },
                     access_key_id: prompt::prompt_secret_keep_current(
-                        "access key id",
+                        "access-key-id",
                         access_key_id.expose(),
                     )?
                     .into(),
                     secret_access_key: prompt::prompt_secret_keep_current(
-                        "secret access key",
+                        "secret-access-key",
                         secret_access_key.expose(),
                     )?
                     .into(),
@@ -681,16 +687,16 @@ pub(super) fn apply_update_interactive(existing: ProfileConfig) -> Result<Profil
                     secret_access_key,
                     key_prefix,
                 } => StoreConfig::CloudflareR2 {
-                    bucket: prompt::prompt_line_default("bucket name", &bucket)?,
+                    bucket: prompt::prompt_line_default("bucket", &bucket)?,
                     account_id: prompt::prompt_line_default("account id", &account_id)?,
                     endpoint_url: prompt::prompt_line_default("endpoint url", &endpoint_url)?,
                     access_key_id: prompt::prompt_secret_keep_current(
-                        "access key id",
+                        "access-key-id",
                         access_key_id.expose(),
                     )?
                     .into(),
                     secret_access_key: prompt::prompt_secret_keep_current(
-                        "secret access key",
+                        "secret-access-key",
                         secret_access_key.expose(),
                     )?
                     .into(),
@@ -701,7 +707,7 @@ pub(super) fn apply_update_interactive(existing: ProfileConfig) -> Result<Profil
                     service_account_key_path,
                     key_prefix,
                 } => StoreConfig::GcpGcs {
-                    bucket: prompt::prompt_line_default("bucket name", &bucket)?,
+                    bucket: prompt::prompt_line_default("bucket", &bucket)?,
                     service_account_key_path: prompt::prompt_line_default(
                         "service account key path",
                         &service_account_key_path,
@@ -715,10 +721,10 @@ pub(super) fn apply_update_interactive(existing: ProfileConfig) -> Result<Profil
                     endpoint_url,
                     key_prefix,
                 } => StoreConfig::AzureAbs {
-                    account_name: prompt::prompt_line_default("account name", &account_name)?,
-                    container_name: prompt::prompt_line_default("container name", &container_name)?,
+                    account_name: prompt::prompt_line_default("account-name", &account_name)?,
+                    container_name: prompt::prompt_line_default("container-name", &container_name)?,
                     access_key: prompt::prompt_secret_keep_current(
-                        "access key",
+                        "access-key",
                         access_key.expose(),
                     )?
                     .into(),
@@ -738,7 +744,7 @@ pub(super) fn apply_update_interactive(existing: ProfileConfig) -> Result<Profil
             default_namespace,
             auth_token,
         } => Ok(ProfileConfig::Remote {
-            server_url: prompt::prompt_line_default("server url", &server_url)?,
+            server_url: prompt::prompt_line_default("server-url", &server_url)?,
             default_namespace,
             auth_token: prompt::prompt_secret_optional(
                 "auth token",

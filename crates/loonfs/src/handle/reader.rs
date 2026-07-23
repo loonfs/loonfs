@@ -1,7 +1,7 @@
 //! The read-only runtime handle.
 
 use super::HandleBuilderCore;
-use crate::background::{BackgroundWork, FsBackgroundWork};
+use crate::background::BackgroundWork;
 use crate::config::default_writer_version;
 use crate::fs::FsCore;
 use crate::metrics::ObjectStoreMetricsRecorder;
@@ -12,7 +12,6 @@ use crate::{
     PageRequest, Result, RevisionNo, RuntimeCacheConfig, RuntimeCacheStats, SharedObjectStore,
     StoreConfig, TraceMode, TraceStoreKind,
 };
-use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 /// Read-only handle for latest namespace views.
@@ -241,12 +240,7 @@ impl FsReaderBuilder {
     pub async fn build(self) -> Result<FsReader> {
         // Readers never mutate, so the engine identity below is inert; it
         // exists because shared internals require a non-empty actor.
-        let background = BackgroundWork::new(
-            FsBackgroundWork::ManualOnly,
-            None,
-            NonZeroUsize::new(crate::config::DEFAULT_MAX_CONCURRENT_MAINTENANCE)
-                .expect("default maintenance concurrency should be nonzero"),
-        );
+        let background = BackgroundWork::inert();
         Ok(FsReader {
             core: self.core.open(
                 "loonfs-reader".to_owned(),

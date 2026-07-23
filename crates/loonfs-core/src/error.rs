@@ -16,8 +16,9 @@ use crate::storage::content::DurableContentValidationError;
 use crate::wal::{WalBuildError, WalChainLoadError, WalReplayError};
 use loonfs_api::wire::control::{CheckpointRecordLifecycle, HeadState};
 use loonfs_api::{
-    ChangeSeq, CommitId, CommitIdValidationError, ErrorDetails, GeneratedIdValidationError,
-    InodeId, InodeKind, NamespaceId, NamespaceIdValidationError, UploadId, WriterEpoch,
+    ChangeSeq, CheckpointId, CommitId, CommitIdValidationError, ErrorDetails,
+    GeneratedIdValidationError, InodeId, InodeKind, NamespaceId, NamespaceIdValidationError,
+    RevisionNo, UploadId, WriterEpoch,
 };
 use loonfs_objectstore::{ImmutableWriteError, ObjectStoreError};
 use thiserror::Error;
@@ -77,7 +78,7 @@ pub enum CoreError {
     #[error("revision `{revision_no}` not found for inode `{inode_id}`")]
     RevisionNotFound {
         inode_id: InodeId,
-        revision_no: loonfs_api::RevisionNo,
+        revision_no: RevisionNo,
     },
     /// A buffered content read was refused before any fetch: the resolved
     /// content is larger than the caller's read budget allows in memory.
@@ -110,7 +111,7 @@ pub enum CoreError {
     CheckpointUnavailable(String),
     #[error("checkpoint `{checkpoint_id}` is in absorbing `{state}` state")]
     CheckpointStateConflict {
-        checkpoint_id: loonfs_api::CheckpointId,
+        checkpoint_id: CheckpointId,
         state: CheckpointRecordLifecycle,
     },
     #[error("invalid checkpoint request: {0}")]
@@ -131,8 +132,6 @@ pub enum CoreError {
          exhaustive-scan budget; run maintenance or set allow_stale"
     )]
     IndexLagging { behind_commits: u64 },
-    #[error("feature `{feature}` is not materialized on this namespace")]
-    FeatureNotMaterialized { feature: String },
     #[error("upload session `{upload_id}` was not found")]
     UploadNotFound { upload_id: UploadId },
     #[error("upload session `{upload_id}` is already completed")]
@@ -177,11 +176,11 @@ pub enum CoreError {
     #[error("internal error: {0}")]
     Internal(String),
     #[error("namespace `{namespace_id}` already exists")]
-    NamespaceAlreadyExists { namespace_id: NamespaceId },
+    NamespaceExists { namespace_id: NamespaceId },
     #[error("namespace `{namespace_id}` is deleted")]
     NamespaceDeleted { namespace_id: NamespaceId },
     #[error("namespace `{namespace_id}` is partially initialized; run admin repair explicitly")]
-    NamespacePartiallyInitialized { namespace_id: NamespaceId },
+    NamespacePartial { namespace_id: NamespaceId },
 }
 
 /// Failures specific to manifest-plus-tail metadata views.
@@ -328,6 +327,10 @@ fn classify_store_failure(class: StoreFailureClass) -> ErrorCode {
 }
 
 impl CoreError {
+    pub(crate) fn load_head(error: ControlObjectLoadError) -> Self {
+        Self::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
+    }
+
     /// Builds [`CoreError::Store`] for a failed object-store operation on
     /// `object_key`.
     pub(crate) fn store(object_key: impl Into<String>, error: &ObjectStoreError) -> Self {
@@ -355,47 +358,46 @@ impl CoreError {
                 classify_store_failure(*class)
             }
             CoreError::HeadPublish(error) => classify_head_publish_error(error),
-            CoreError::InvalidPath(_) | CoreError::RootMutationForbidden => {
-                ErrorCode::InvalidRequest
-            }
-            CoreError::InvalidNamespaceId(_) => ErrorCode::InvalidRequest,
-            CoreError::InvalidCommitId(_) => ErrorCode::InvalidRequest,
-            CoreError::InvalidCommitRequest(_) => ErrorCode::InvalidRequest,
-            CoreError::InvalidUploadId(_) => ErrorCode::InvalidRequest,
+            CoreError::InvalidPath(_)
+            | CoreError::RootMutationForbidden
+            | CoreError::InvalidNamespaceId(_)
+            | CoreError::InvalidCommitId(_)
+            | CoreError::InvalidCommitRequest(_)
+            | CoreError::InvalidUploadId(_)
+            | CoreError::InvalidCheckpointRequest(_)
+            | CoreError::InvalidGcConfig(_)
+            | CoreError::InvalidQuery(_)
+            | CoreError::InvalidUploadContent(_)
+            | CoreError::InvalidCursor(_)
+            | CoreError::NonDirectoryPathComponent(_) => ErrorCode::InvalidRequest,
             CoreError::PathNotFound(_) => ErrorCode::PathNotFound,
             CoreError::RevisionNotFound { .. } => ErrorCode::RevisionNotFound,
             CoreError::ContentTooLarge { .. } => ErrorCode::ContentTooLarge,
-            CoreError::NamespaceAlreadyExists { .. } => ErrorCode::NamespaceExists,
+            CoreError::NamespaceExists { .. } => ErrorCode::NamespaceExists,
             CoreError::NamespaceDeleted { .. } => ErrorCode::NamespaceDeleted,
-            CoreError::NamespacePartiallyInitialized { .. } => ErrorCode::NamespacePartial,
+            CoreError::NamespacePartial { .. } => ErrorCode::NamespacePartial,
             CoreError::CommitIdReuseConflict(_) => ErrorCode::CommitIdReuseConflict,
             CoreError::ContentPreparation(_) => ErrorCode::ContentNotPrepared,
             CoreError::CommitQueueFull => ErrorCode::CommitQueueFull,
             CoreError::ShuttingDown => ErrorCode::ShuttingDown,
-            CoreError::CheckpointUnavailable(_) | CoreError::CheckpointStateConflict { .. } => {
-                ErrorCode::CheckpointUnavailable
-            }
-            CoreError::InvalidCheckpointRequest(_) => ErrorCode::InvalidRequest,
             // An over-budget publication aborts pre-CAS and is retryable
             // after maintenance, exactly the checkpoint_unavailable contract.
-            CoreError::MetadataPublicationBudgetExceeded { .. } => ErrorCode::CheckpointUnavailable,
-            CoreError::InvalidGcConfig(_) => ErrorCode::InvalidRequest,
-            CoreError::InvalidQuery(_) => ErrorCode::InvalidRequest,
+            CoreError::CheckpointUnavailable(_)
+            | CoreError::CheckpointStateConflict { .. }
+            | CoreError::MetadataPublicationBudgetExceeded { .. } => {
+                ErrorCode::CheckpointUnavailable
+            }
             CoreError::QueryUnindexable(_) => ErrorCode::QueryUnindexable,
             CoreError::IndexLagging { .. } => ErrorCode::IndexLagging,
-            CoreError::FeatureNotMaterialized { .. } => ErrorCode::NotSupported,
             CoreError::UploadNotFound { .. } => ErrorCode::UploadNotFound,
             CoreError::UploadAlreadyCompleted { .. } => ErrorCode::UploadAlreadyCompleted,
             CoreError::UploadContentConflict { .. } => ErrorCode::UploadContentConflict,
-            CoreError::InvalidUploadContent(_) => ErrorCode::InvalidRequest,
-            CoreError::InvalidCursor(_) => ErrorCode::InvalidRequest,
             CoreError::RebootstrapRequired { .. } => ErrorCode::RebootstrapRequired,
             CoreError::ExpectedFile { .. }
             | CoreError::ExpectedDirectory { .. }
             | CoreError::DestinationExists(_) => ErrorCode::PathConflict,
             CoreError::DirectoryNotEmpty(_) => ErrorCode::DirectoryNotEmpty,
             CoreError::TombstoneConflict { .. } => ErrorCode::TombstoneConflict,
-            CoreError::NonDirectoryPathComponent(_) => ErrorCode::InvalidRequest,
             CoreError::WriterFenced(_) => ErrorCode::WriterFenced,
             CoreError::NamespaceCorrupt(_) => ErrorCode::NamespaceCorrupt,
         }
@@ -528,7 +530,6 @@ fn classify_metadata_projection_load_error(error: &MetadataProjectionLoadError) 
             classify_control_object_load_error(error)
         }
         MetadataProjectionLoadError::LoadContentStoreDescriptor(error) => match error {
-            ControlObjectLoadError::InvalidNamespaceId { .. } => ErrorCode::InvalidRequest,
             ControlObjectLoadError::Store { .. } => ErrorCode::ServerError,
             _ => ErrorCode::NamespaceCorrupt,
         },
@@ -551,7 +552,6 @@ fn classify_metadata_projection_load_error(error: &MetadataProjectionLoadError) 
 
 fn classify_control_object_load_error(error: &ControlObjectLoadError) -> ErrorCode {
     match error {
-        ControlObjectLoadError::InvalidNamespaceId { .. } => ErrorCode::InvalidRequest,
         ControlObjectLoadError::MissingObject { .. }
         | ControlObjectLoadError::MissingObjectAfterHead { .. } => ErrorCode::NamespaceNotFound,
         ControlObjectLoadError::RootAheadOfHead { .. } => ErrorCode::StaleHead,
@@ -712,8 +712,8 @@ fn classify_head_publish_error(error: &CommitHeadPublishError) -> ErrorCode {
         | CommitHeadPublishError::WalSegmentEndSeqMismatch { .. }
         | CommitHeadPublishError::EmptyWalSegment
         | CommitHeadPublishError::SeqOverflow
-        | CommitHeadPublishError::Codec(_)
-        | CommitHeadPublishError::Store(_) => ErrorCode::ServerError,
+        | CommitHeadPublishError::Codec { .. }
+        | CommitHeadPublishError::Store { .. } => ErrorCode::ServerError,
     }
 }
 
@@ -757,7 +757,7 @@ mod tests {
 
     #[test]
     fn core_error_exposes_public_kind_and_detailed_code() {
-        let error = CoreError::NamespaceAlreadyExists {
+        let error = CoreError::NamespaceExists {
             namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
         };
         assert_eq!(error.kind(), ErrorKind::AlreadyExists);

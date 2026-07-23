@@ -105,7 +105,10 @@ async fn run_namespace_delete(
     let response = resolved
         .target
         .backend()
-        .delete_namespace(&namespace_id, args.expected_head_seq)
+        .delete_namespace(
+            &namespace_id,
+            args.expected_head_seq.map(loonfs_api::ChangeSeq),
+        )
         .await
         .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
 

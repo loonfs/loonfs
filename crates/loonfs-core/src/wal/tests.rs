@@ -27,7 +27,7 @@ async fn build_wal_record_payload_matches_segment_record_payload() {
         writer_epoch: WriterEpoch(1),
         ops: vec![CommitOp::CreateDirectory {
             parent_inode_id: InodeId(1),
-            display_name: "docs".to_owned(),
+            display_name: loonfs_api::DisplayName::parse("docs").expect("valid display name"),
         }],
         preconditions: Vec::new(),
         message: Some("create docs".to_owned()),
@@ -40,7 +40,7 @@ async fn build_wal_record_payload_matches_segment_record_payload() {
         validated_ops: vec![ValidatedOp::CreateDir {
             op_index: 0,
             parent_inode_id: InodeId(1),
-            display_name: "docs".to_owned(),
+            display_name: loonfs_api::DisplayName::parse("docs").expect("valid display name"),
             name_key: NameKey::parse("docs").expect("valid name key"),
             child_inode_id: InodeId(2),
             create_inode_delta_index: 0,
@@ -97,6 +97,33 @@ async fn prepared_wal_segments_use_unique_segment_ids_and_object_keys() {
     assert_ne!(first.object_key, second.object_key);
     WalSegmentId::parse(first.segment_id.as_str()).expect("first segment id shape");
     WalSegmentId::parse(second.segment_id.as_str()).expect("second segment id shape");
+}
+
+#[test]
+fn wal_segment_namespace_mismatch_names_record_and_segment_values() {
+    let record_namespace = NamespaceId::parse("record").expect("valid namespace id");
+    let segment_namespace = NamespaceId::parse("segment").expect("valid namespace id");
+    let record = materialized_create_directory(
+        &record_namespace,
+        "c_wal_namespace_mismatch",
+        "docs",
+        ChangeSeq(0),
+        ChangeSeq(1),
+    );
+
+    let error = prepare_wal_segment(
+        segment_namespace,
+        WriterEpoch(1),
+        None,
+        &[record],
+        "test-writer",
+    )
+    .expect_err("namespace mismatch should fail");
+
+    assert_eq!(
+        error.to_string(),
+        "WAL segment namespace mismatch: record `record`, segment `segment`"
+    );
 }
 
 #[tokio::test]
@@ -288,6 +315,45 @@ async fn validated_wal_chain_can_load_cursor_suffix_without_full_base() {
 }
 
 #[tokio::test]
+async fn validated_wal_chain_reports_missing_previous_link_truthfully() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let segment = write_create_directory_segment(
+        &store,
+        &namespace_id,
+        None,
+        "c_wal_broken_link",
+        "docs",
+        ChangeSeq(1),
+        ChangeSeq(2),
+    )
+    .await;
+
+    let error = load_validated_wal_chain(
+        &store,
+        WalChainLoadRequest {
+            namespace_id: &namespace_id,
+            chain_base_seq: ChangeSeq(0),
+            head_seq: ChangeSeq(2),
+            visible_tip: Some(segment.envelope.pointer(segment.object_key.clone())),
+            stop_after_seq: None,
+            recent_segments: &[],
+        },
+    )
+    .await
+    .expect_err("missing previous segment link should fail");
+
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "wal replay validation failed: WAL segment `{}` is missing its previous visible segment link before seq `0`",
+            segment.object_key
+        )
+    );
+}
+
+#[tokio::test]
 async fn validated_wal_chain_rejects_corrupt_visible_segments() {
     assert_wal_chain_corruption_rejected(|object_key, _envelope, pointer| {
         *object_key = wal_segment("other", "seg_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
@@ -373,7 +439,7 @@ fn materialized_create_directory(
         writer_epoch: WriterEpoch(1),
         ops: vec![CommitOp::CreateDirectory {
             parent_inode_id: InodeId(1),
-            display_name: display_name.to_owned(),
+            display_name: loonfs_api::DisplayName::parse(display_name).expect("valid display name"),
         }],
         preconditions: Vec::new(),
         message: None,
@@ -386,7 +452,7 @@ fn materialized_create_directory(
         validated_ops: vec![ValidatedOp::CreateDir {
             op_index: 0,
             parent_inode_id: InodeId(1),
-            display_name: display_name.to_owned(),
+            display_name: loonfs_api::DisplayName::parse(display_name).expect("valid display name"),
             name_key: NameKey::parse(loonfs_api::name_key_for_display_name(
                 loonfs_api::NamePolicy::default(),
                 display_name,

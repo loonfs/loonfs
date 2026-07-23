@@ -2815,7 +2815,7 @@
           },
           "display_name": {
             "type": "string",
-            "description": "Stored display name for this path component."
+            "description": "Stored display name for this path component. The root directory has\nno name and serializes as the empty string, which the validating\n[`DisplayName`](crate::DisplayName) newtype cannot represent — this\nfield stays a raw `String` until the wire decides how to spell\n\"nameless\"."
           },
           "head_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
@@ -3073,7 +3073,7 @@
                 "minimum": 0
               },
               "display_name": {
-                "type": "string"
+                "$ref": "#/components/schemas/DisplayName"
               },
               "kind": {
                 "type": "string",
@@ -3275,7 +3275,7 @@
             ],
             "properties": {
               "display_name": {
-                "type": "string"
+                "$ref": "#/components/schemas/DisplayName"
               },
               "kind": {
                 "type": "string",
@@ -3303,7 +3303,7 @@
                 "$ref": "#/components/schemas/ContentRef"
               },
               "display_name": {
-                "type": "string"
+                "$ref": "#/components/schemas/DisplayName"
               },
               "kind": {
                 "type": "string",
@@ -3413,7 +3413,7 @@
                 ]
               },
               "new_display_name": {
-                "type": "string"
+                "$ref": "#/components/schemas/DisplayName"
               },
               "new_parent_inode_id": {
                 "$ref": "#/components/schemas/InodeId"
@@ -3456,7 +3456,7 @@
                 "$ref": "#/components/schemas/ChangeSeq"
               },
               "display_name": {
-                "type": "string"
+                "$ref": "#/components/schemas/DisplayName"
               },
               "inode_id": {
                 "$ref": "#/components/schemas/InodeId"
@@ -3942,6 +3942,10 @@
           }
         }
       },
+      "DisplayName": {
+        "type": "string",
+        "description": "User-facing spelling of one path component."
+      },
       "EnableGramsIndexResponse": {
         "type": "object",
         "description": "Result of enabling the gram index on a namespace (admin plane).",
@@ -4267,7 +4271,7 @@
           {
             "type": "object",
             "title": "FsOpUndelete",
-            "description": "Restore an older revision as the current revision for a path.\nRecover a deleted file or subtree: revoke the deletion of\n`inode_id` recorded at `deleted_at_seq` (both reported by the\ndelete and by the change feed) and re-bind it at `path`. Answers\n`not_deleted` when that generation is not the live one, so a stale\nrequest never cancels a later delete.",
+            "description": "Recover a deleted file or subtree: revoke the deletion of\n`inode_id` recorded at `deleted_at_seq` (both reported by the\ndelete and by the change feed) and re-bind it at `path`. Answers\n`not_deleted` when that generation is not the live one, so a stale\nrequest never cancels a later delete.",
             "required": [
               "inode_id",
               "deleted_at_seq",
@@ -4295,6 +4299,7 @@
           {
             "type": "object",
             "title": "FsOpRestoreRevision",
+            "description": "Restore an older revision as the current revision for a path.",
             "required": [
               "path",
               "source_revision_no",

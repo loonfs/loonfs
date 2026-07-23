@@ -5,7 +5,8 @@ use crate::invariants::InvariantId;
 use crate::metadata::MetadataState;
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::{
-    ChangeSeq, CommitId, ContentRef, InodeId, NameKey, NamePolicy, NamespaceId, RevisionNo,
+    ChangeSeq, CommitId, ContentRef, DisplayName, InodeId, NameKey, NamePolicy, NamespaceId,
+    RevisionNo,
 };
 use serde::{Deserialize, Serialize};
 
@@ -24,7 +25,7 @@ pub struct CommitPlan {
 pub struct ResolvedBinding {
     pub parent_inode_id: InodeId,
     pub name_key: NameKey,
-    pub display_name: String,
+    pub display_name: DisplayName,
     pub child_inode_id: InodeId,
     pub bind_seq: ChangeSeq,
     pub bind_delta_index: u32,
@@ -35,7 +36,7 @@ pub(crate) enum ValidatedOp {
     CreateDir {
         op_index: u32,
         parent_inode_id: InodeId,
-        display_name: String,
+        display_name: DisplayName,
         name_key: NameKey,
         child_inode_id: InodeId,
         create_inode_delta_index: u32,
@@ -44,7 +45,7 @@ pub(crate) enum ValidatedOp {
     CreateFile {
         op_index: u32,
         parent_inode_id: InodeId,
-        display_name: String,
+        display_name: DisplayName,
         name_key: NameKey,
         child_inode_id: InodeId,
         content_ref: ContentRef,
@@ -79,7 +80,7 @@ pub(crate) enum ValidatedOp {
         inode_id: InodeId,
         source_binding: ResolvedBinding,
         new_parent_inode_id: InodeId,
-        new_display_name: String,
+        new_display_name: DisplayName,
         new_name_key: NameKey,
         unbind_delta_index: u32,
         bind_delta_index: u32,
@@ -95,7 +96,7 @@ pub(crate) enum ValidatedOp {
         op_index: u32,
         inode_id: InodeId,
         parent_inode_id: InodeId,
-        display_name: String,
+        display_name: DisplayName,
         name_key: NameKey,
         /// The exact deletion generation validation resolved and pinned:
         /// the active tombstone's own event coordinates.

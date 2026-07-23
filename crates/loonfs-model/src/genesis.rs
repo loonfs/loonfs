@@ -4,6 +4,7 @@
 use crate::metadata::{InodeRecord, MetadataState};
 use loonfs_api::{ChangeSeq, InodeId, InodeKind};
 
+/// Builds the metadata state of a fresh namespace.
 pub fn bootstrap_metadata_state() -> MetadataState {
     MetadataState {
         inodes: vec![InodeRecord {
