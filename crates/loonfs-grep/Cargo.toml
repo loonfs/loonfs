@@ -33,6 +33,7 @@ tracing-subscriber.workspace = true
 [dev-dependencies]
 async-trait.workspace = true
 ciborium.workspace = true
+loonfs-test-support = { path = "../loonfs-test-support" }
 tempfile.workspace = true
 
 [lints]

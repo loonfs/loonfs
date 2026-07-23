@@ -268,14 +268,14 @@ async fn read_upload_session_object<S: ObjectStore + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_trait::async_trait;
-    use futures::stream::{self, BoxStream};
     use loonfs_api::wire::control::{ControlObjectKind, HeadStateEnvelope};
     use loonfs_api::NamespaceId;
     use loonfs_objectstore::keys::wal_head;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
-    use loonfs_objectstore::{ByteRange, ObjectBody, PutMode};
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use loonfs_test_support::stores::{
+        FailStore, InjectedError, KeyPredicate, MetadataMapStore, OperationClass,
+    };
+    use std::sync::atomic::{AtomicBool, Ordering};
     use tempfile::tempdir;
 
     const WRITER_VERSION: &str = "writer/0.1.0";
@@ -329,10 +329,13 @@ mod tests {
         let inner = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         write_initial_head(&inner, &namespace_id).await;
-        let store = ConflictOnceStore {
+        let store = FailStore::new(
             inner,
-            remaining_conflicts: AtomicUsize::new(1),
-        };
+            KeyPredicate::any(),
+            OperationClass::CompareAndSwap,
+            InjectedError::PreconditionFailed,
+        );
+        store.fail_next(1);
 
         let outcome = update_head(&store, &namespace_id, WRITER_VERSION, 3, |loaded| {
             let mut next = loaded.envelope.state.clone();
@@ -346,7 +349,7 @@ mod tests {
         .expect("retry update");
 
         assert_eq!(outcome, "updated");
-        assert_eq!(store.remaining_conflicts.load(Ordering::SeqCst), 0);
+        assert_eq!(store.remaining(), 0);
     }
 
     #[tokio::test]
@@ -355,7 +358,7 @@ mod tests {
         let inner = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         write_initial_head(&inner, &namespace_id).await;
-        let store = MissingEtagStore { inner };
+        let store = MetadataMapStore::without_etag(inner, KeyPredicate::any());
 
         let closure_called = AtomicBool::new(false);
         let error = update_head(&store, &namespace_id, WRITER_VERSION, 3, |_loaded| {
@@ -367,119 +370,5 @@ mod tests {
 
         assert!(matches!(error, ControlUpdateError::MissingEtag { .. }));
         assert!(!closure_called.load(Ordering::SeqCst));
-    }
-
-    #[derive(Debug)]
-    struct ConflictOnceStore {
-        inner: LocalFsStore,
-        remaining_conflicts: AtomicUsize,
-    }
-
-    #[async_trait]
-    impl ObjectStore for ConflictOnceStore {
-        async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-            self.inner.head(key).await
-        }
-
-        async fn get_with_metadata(
-            &self,
-            key: &str,
-        ) -> Result<Option<ObjectBody>, ObjectStoreError> {
-            self.inner.get_with_metadata(key).await
-        }
-
-        async fn get(
-            &self,
-            key: &str,
-            range: Option<ByteRange>,
-        ) -> Result<Option<Bytes>, ObjectStoreError> {
-            self.inner.get(key, range).await
-        }
-
-        async fn put(
-            &self,
-            key: &str,
-            bytes: Bytes,
-            mode: PutMode,
-        ) -> Result<ObjectMetadata, ObjectStoreError> {
-            self.inner.put(key, bytes, mode).await
-        }
-
-        async fn compare_and_swap(
-            &self,
-            key: &str,
-            expected_etag: &str,
-            bytes: Bytes,
-        ) -> Result<ObjectMetadata, ObjectStoreError> {
-            if self.remaining_conflicts.load(Ordering::SeqCst) > 0 {
-                self.remaining_conflicts.fetch_sub(1, Ordering::SeqCst);
-                return Err(ObjectStoreError::PreconditionFailed {
-                    object_key: key.to_owned(),
-                });
-            }
-            self.inner.compare_and_swap(key, expected_etag, bytes).await
-        }
-
-        async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-            self.inner.delete(key).await
-        }
-
-        fn list_prefix_stream(
-            &self,
-            prefix: &str,
-        ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-            self.inner.list_prefix_stream(prefix)
-        }
-    }
-
-    #[derive(Debug)]
-    struct MissingEtagStore {
-        inner: LocalFsStore,
-    }
-
-    #[async_trait]
-    impl ObjectStore for MissingEtagStore {
-        async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-            self.inner.head(key).await
-        }
-
-        async fn get_with_metadata(
-            &self,
-            key: &str,
-        ) -> Result<Option<ObjectBody>, ObjectStoreError> {
-            let Some(mut body) = self.inner.get_with_metadata(key).await? else {
-                return Ok(None);
-            };
-            body.metadata.etag = None;
-            Ok(Some(body))
-        }
-
-        async fn get(
-            &self,
-            key: &str,
-            range: Option<ByteRange>,
-        ) -> Result<Option<Bytes>, ObjectStoreError> {
-            self.inner.get(key, range).await
-        }
-
-        async fn put(
-            &self,
-            key: &str,
-            bytes: Bytes,
-            mode: PutMode,
-        ) -> Result<ObjectMetadata, ObjectStoreError> {
-            self.inner.put(key, bytes, mode).await
-        }
-
-        async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-            self.inner.delete(key).await
-        }
-
-        fn list_prefix_stream(
-            &self,
-            _prefix: &str,
-        ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-            Box::pin(stream::empty())
-        }
     }
 }

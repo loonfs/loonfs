@@ -1096,128 +1096,22 @@ mod tests {
     use loonfs_objectstore::{
         ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
     };
+    use loonfs_test_support::stores::{
+        BlockingStore, FailStore, InjectedError, KeyPredicate, OperationClass,
+    };
     use std::path::Path;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Condvar;
     use tempfile::tempdir;
 
-    #[derive(Debug)]
-    struct BlockingHeadCasStore {
-        inner: LocalFsStore,
-        head_key: String,
-        gate: Arc<HeadCasGate>,
-    }
-
-    #[derive(Debug)]
-    struct HeadCasGate {
-        state: Mutex<HeadCasGateState>,
-        cvar: Condvar,
-    }
-
-    #[derive(Debug)]
-    struct HeadCasGateState {
-        blocks_remaining: usize,
-        entered: usize,
-        released: bool,
-    }
-
-    impl BlockingHeadCasStore {
-        fn new(root: impl AsRef<Path>, namespace_id: &NamespaceId) -> Self {
-            Self {
-                inner: LocalFsStore::new(root.as_ref()).expect("store"),
-                head_key: wal_head(namespace_id.as_str()),
-                gate: Arc::new(HeadCasGate {
-                    state: Mutex::new(HeadCasGateState {
-                        blocks_remaining: 0,
-                        entered: 0,
-                        released: false,
-                    }),
-                    cvar: Condvar::new(),
-                }),
-            }
-        }
-
-        fn arm_next_head_cas(&self) {
-            let mut state = self.gate.state.lock().expect("head gate mutex poisoned");
-            state.blocks_remaining = 1;
-            state.released = false;
-        }
-
-        async fn wait_for_blocked_head_cas(&self) {
-            let gate = self.gate.clone();
-            tokio::task::spawn_blocking(move || {
-                let mut state = gate.state.lock().expect("head gate mutex poisoned");
-                while state.entered < 1 {
-                    state = gate.cvar.wait(state).expect("head gate mutex poisoned");
-                }
-            })
-            .await
-            .expect("wait for blocked head CAS");
-        }
-
-        fn release_head_cas(&self) {
-            let mut state = self.gate.state.lock().expect("head gate mutex poisoned");
-            state.released = true;
-            self.gate.cvar.notify_all();
-        }
-    }
-
-    #[async_trait]
-    impl ObjectStore for BlockingHeadCasStore {
-        async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-            self.inner.head(key).await
-        }
-
-        async fn get(
-            &self,
-            key: &str,
-            range: Option<ByteRange>,
-        ) -> Result<Option<Bytes>, ObjectStoreError> {
-            self.inner.get(key, range).await
-        }
-
-        async fn get_with_metadata(
-            &self,
-            key: &str,
-        ) -> Result<Option<ObjectBody>, ObjectStoreError> {
-            self.inner.get_with_metadata(key).await
-        }
-
-        async fn put(
-            &self,
-            key: &str,
-            bytes: Bytes,
-            mode: PutMode,
-        ) -> Result<ObjectMetadata, ObjectStoreError> {
-            if key == self.head_key && matches!(mode, PutMode::CompareAndSwap { .. }) {
-                let gate = self.gate.clone();
-                tokio::task::spawn_blocking(move || {
-                    let mut state = gate.state.lock().expect("head gate mutex poisoned");
-                    if state.blocks_remaining > 0 {
-                        state.blocks_remaining -= 1;
-                        state.entered += 1;
-                        gate.cvar.notify_all();
-                        while !state.released {
-                            state = gate.cvar.wait(state).expect("head gate mutex poisoned");
-                        }
-                    }
-                })
-                .await
-                .expect("head CAS gate wait task panicked");
-            }
-            self.inner.put(key, bytes, mode).await
-        }
-
-        async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-            self.inner.delete(key).await
-        }
-
-        fn list_prefix_stream(
-            &self,
-            prefix: &str,
-        ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-            self.inner.list_prefix_stream(prefix)
-        }
+    fn blocking_head_cas_store(
+        root: impl AsRef<Path>,
+        namespace_id: &NamespaceId,
+    ) -> BlockingStore<LocalFsStore> {
+        BlockingStore::new(
+            LocalFsStore::new(root.as_ref()).expect("store"),
+            KeyPredicate::wal_head(namespace_id.as_str()),
+            OperationClass::CompareAndSwap,
+        )
     }
 
     #[derive(Debug)]
@@ -1263,7 +1157,7 @@ mod tests {
             state.released = false;
         }
 
-        async fn wait_for_blocked_head_cas(&self) {
+        async fn wait_until_blocked(&self) {
             let gate = self.gate.clone();
             tokio::task::spawn_blocking(move || {
                 let mut state = gate.lock_state();
@@ -1357,79 +1251,17 @@ mod tests {
         }
     }
 
-    /// Applies head CAS writes but reports a transport failure for the next
-    /// one: the commit lands durably while the acknowledgement is lost.
-    #[derive(Debug)]
-    struct LostHeadCasAckStore {
-        inner: LocalFsStore,
-        head_key: String,
-        lose_next_head_cas_ack: AtomicBool,
-    }
-
-    impl LostHeadCasAckStore {
-        fn new(root: impl AsRef<Path>, namespace_id: &NamespaceId) -> Self {
-            Self {
-                inner: LocalFsStore::new(root.as_ref()).expect("store"),
-                head_key: wal_head(namespace_id.as_str()),
-                lose_next_head_cas_ack: AtomicBool::new(false),
-            }
-        }
-
-        fn lose_next_head_cas_ack(&self) {
-            self.lose_next_head_cas_ack.store(true, Ordering::SeqCst);
-        }
-    }
-
-    #[async_trait]
-    impl ObjectStore for LostHeadCasAckStore {
-        async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-            self.inner.head(key).await
-        }
-
-        async fn get(
-            &self,
-            key: &str,
-            range: Option<ByteRange>,
-        ) -> Result<Option<Bytes>, ObjectStoreError> {
-            self.inner.get(key, range).await
-        }
-
-        async fn get_with_metadata(
-            &self,
-            key: &str,
-        ) -> Result<Option<ObjectBody>, ObjectStoreError> {
-            self.inner.get_with_metadata(key).await
-        }
-
-        async fn put(
-            &self,
-            key: &str,
-            bytes: Bytes,
-            mode: PutMode,
-        ) -> Result<ObjectMetadata, ObjectStoreError> {
-            let lose_ack = key == self.head_key
-                && matches!(mode, PutMode::CompareAndSwap { .. })
-                && self.lose_next_head_cas_ack.swap(false, Ordering::SeqCst);
-            let metadata = self.inner.put(key, bytes, mode).await?;
-            if lose_ack {
-                return Err(ObjectStoreError::transport(
-                    key,
-                    "injected lost head CAS acknowledgement",
-                ));
-            }
-            Ok(metadata)
-        }
-
-        async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-            self.inner.delete(key).await
-        }
-
-        fn list_prefix_stream(
-            &self,
-            prefix: &str,
-        ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-            self.inner.list_prefix_stream(prefix)
-        }
+    fn lost_head_cas_ack_store(
+        root: impl AsRef<Path>,
+        namespace_id: &NamespaceId,
+    ) -> FailStore<LocalFsStore> {
+        FailStore::new(
+            LocalFsStore::new(root.as_ref()).expect("store"),
+            KeyPredicate::wal_head(namespace_id.as_str()),
+            OperationClass::CompareAndSwap,
+            InjectedError::Transport("injected lost head CAS acknowledgement".to_owned()),
+        )
+        .apply_then_fail()
     }
 
     fn test_fs(store: SharedStore) -> FsCore {
@@ -1684,19 +1516,19 @@ mod tests {
     async fn publisher_admits_pending_batch_while_active_publish_blocks() {
         let temp_dir = tempdir().expect("tempdir");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let store = Arc::new(BlockingHeadCasStore::new(temp_dir.path(), &namespace_id));
+        let store = Arc::new(blocking_head_cas_store(temp_dir.path(), &namespace_id));
         let shared = store.clone() as SharedStore;
         let fs = test_fs(shared.clone());
         create_namespace(&fs, &namespace_id).await;
         let publisher = standalone_publisher(&namespace_id, &fs);
 
-        store.arm_next_head_cas();
+        store.block_next();
         let active = admit_commit(
             &publisher,
             &namespace_id,
             create_directory_request("active", "active"),
         );
-        store.wait_for_blocked_head_cas().await;
+        store.wait_until_blocked().await;
 
         let pending = admit_commit(
             &publisher,
@@ -1720,7 +1552,7 @@ mod tests {
             );
         }
 
-        store.release_head_cas();
+        store.release();
         let active_response = recv_commit(active, "active").await;
         let pending_response = recv_commit(pending, "pending").await;
         assert_eq!(active_response.committed_seq, ChangeSeq(1));
@@ -1738,19 +1570,19 @@ mod tests {
     async fn publisher_duplicate_active_request_joins_while_conflict_fails() {
         let temp_dir = tempdir().expect("tempdir");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let store = Arc::new(BlockingHeadCasStore::new(temp_dir.path(), &namespace_id));
+        let store = Arc::new(blocking_head_cas_store(temp_dir.path(), &namespace_id));
         let shared = store.clone() as SharedStore;
         let fs = test_fs(shared.clone());
         create_namespace(&fs, &namespace_id).await;
         let publisher = standalone_publisher(&namespace_id, &fs);
 
-        store.arm_next_head_cas();
+        store.block_next();
         let active = admit_commit(
             &publisher,
             &namespace_id,
             create_directory_request("active", "active"),
         );
-        store.wait_for_blocked_head_cas().await;
+        store.wait_until_blocked().await;
 
         let duplicate = admit_commit(
             &publisher,
@@ -1767,7 +1599,7 @@ mod tests {
             Err(CoreError::CommitIdReuseConflict(commit_id)) if commit_id == "active"
         ));
 
-        store.release_head_cas();
+        store.release();
         let active_response = recv_commit(active, "active").await;
         let duplicate_response = recv_commit(duplicate, "duplicate").await;
         assert_eq!(active_response.committed_seq, ChangeSeq(1));
@@ -1779,19 +1611,19 @@ mod tests {
     async fn publisher_pending_batch_full_rejects_distinct_but_allows_duplicate() {
         let temp_dir = tempdir().expect("tempdir");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let store = Arc::new(BlockingHeadCasStore::new(temp_dir.path(), &namespace_id));
+        let store = Arc::new(blocking_head_cas_store(temp_dir.path(), &namespace_id));
         let shared = store.clone() as SharedStore;
         let fs = test_fs(shared.clone());
         create_namespace(&fs, &namespace_id).await;
         let publisher = standalone_publisher(&namespace_id, &fs);
 
-        store.arm_next_head_cas();
+        store.block_next();
         let active = admit_commit(
             &publisher,
             &namespace_id,
             create_directory_request("active", "active"),
         );
-        store.wait_for_blocked_head_cas().await;
+        store.wait_until_blocked().await;
 
         let mut pending = Vec::with_capacity(MAX_BATCH_CANDIDATES);
         for index in 0..MAX_BATCH_CANDIDATES {
@@ -1824,7 +1656,7 @@ mod tests {
         );
         assert!(matches!(overflow, Err(CoreError::CommitQueueFull)));
 
-        store.release_head_cas();
+        store.release();
         assert_eq!(
             recv_commit(active, "active").await.committed_seq,
             ChangeSeq(1)
@@ -1848,13 +1680,13 @@ mod tests {
     async fn publisher_takes_a_cold_full_batch_immediately() {
         let temp_dir = tempdir().expect("tempdir");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let store = Arc::new(BlockingHeadCasStore::new(temp_dir.path(), &namespace_id));
+        let store = Arc::new(blocking_head_cas_store(temp_dir.path(), &namespace_id));
         let shared = store.clone() as SharedStore;
         let fs = test_fs(shared.clone());
         create_namespace(&fs, &namespace_id).await;
         let publisher = standalone_publisher(&namespace_id, &fs);
 
-        store.arm_next_head_cas();
+        store.block_next();
         let mut receivers = Vec::with_capacity(MAX_BATCH_CANDIDATES);
         for index in 0..MAX_BATCH_CANDIDATES {
             receivers.push(admit_commit(
@@ -1873,7 +1705,7 @@ mod tests {
             assert!(state.publishing);
             assert!(state.batch.is_none());
         }
-        store.release_head_cas();
+        store.release();
         for (index, receiver) in receivers.into_iter().enumerate() {
             assert_eq!(
                 recv_commit(receiver, "full").await.committed_seq,
@@ -1951,7 +1783,7 @@ mod tests {
     async fn publisher_resolves_unknown_head_outcome_by_replaying_receipt() {
         let temp_dir = tempdir().expect("tempdir");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let store = Arc::new(LostHeadCasAckStore::new(temp_dir.path(), &namespace_id));
+        let store = Arc::new(lost_head_cas_ack_store(temp_dir.path(), &namespace_id));
         let shared = store.clone() as SharedStore;
         let fs = test_fs(shared);
         create_namespace(&fs, &namespace_id).await;
@@ -1960,7 +1792,7 @@ mod tests {
         // The commit lands but the CAS acknowledgement is lost. The publisher
         // retries with the same commit id and replays the durable receipt
         // instead of reporting `commit_outcome_unknown` to the waiter.
-        store.lose_next_head_cas_ack();
+        store.fail_next(1);
         let response = recv_commit(
             admit_commit(
                 &publisher,
@@ -1990,7 +1822,7 @@ mod tests {
             &namespace_id,
             create_directory_request("doomed", "doomed"),
         );
-        store.wait_for_blocked_head_cas().await;
+        store.wait_until_blocked().await;
 
         // Queued behind the in-flight batch: only the abort guard's respawn
         // can ever publish this one.
@@ -2030,20 +1862,20 @@ mod tests {
     async fn delete_barrier_publishes_admitted_work_and_rejects_later_work() {
         let temp_dir = tempdir().expect("tempdir");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let store = Arc::new(BlockingHeadCasStore::new(temp_dir.path(), &namespace_id));
+        let store = Arc::new(blocking_head_cas_store(temp_dir.path(), &namespace_id));
         let shared = store.clone() as SharedStore;
         let fs = test_fs(shared.clone());
         create_namespace(&fs, &namespace_id).await;
         let publisher = standalone_publisher(&namespace_id, &fs);
 
         // A publishes and blocks at its head CAS; B queues behind it.
-        store.arm_next_head_cas();
+        store.block_next();
         let before_a = admit_commit(
             &publisher,
             &namespace_id,
             create_directory_request("before-a", "before-a"),
         );
-        store.wait_for_blocked_head_cas().await;
+        store.wait_until_blocked().await;
         let before_b = admit_commit(
             &publisher,
             &namespace_id,
@@ -2080,7 +1912,7 @@ mod tests {
             create_directory_request("after", "after"),
         );
 
-        store.release_head_cas();
+        store.release();
 
         // Admitted-before work publishes; the delete lands after it.
         assert_eq!(
@@ -2269,14 +2101,14 @@ mod tests {
     async fn registry_close_admission_refuses_new_work_while_admitted_work_drains() {
         let temp_dir = tempdir().expect("tempdir");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let store = Arc::new(BlockingHeadCasStore::new(temp_dir.path(), &namespace_id));
+        let store = Arc::new(blocking_head_cas_store(temp_dir.path(), &namespace_id));
         let shared = store.clone() as SharedStore;
         let writer = test_writer(shared.clone()).await;
         create_namespace(writer.core(), &namespace_id).await;
         let registry = writer.publisher();
 
         // An admitted publication blocks at its head CAS...
-        store.arm_next_head_cas();
+        store.block_next();
         let active = {
             let registry = registry.clone();
             let namespace_id = namespace_id.clone();
@@ -2286,7 +2118,7 @@ mod tests {
                     .await
             })
         };
-        store.wait_for_blocked_head_cas().await;
+        store.wait_until_blocked().await;
 
         // ...then admission closes. New work is refused at the front door.
         registry.close_admission();
@@ -2315,7 +2147,7 @@ mod tests {
         assert!(matches!(direct, Err(CoreError::ShuttingDown)));
 
         // The admitted publication still settles, and drain joins its task.
-        store.release_head_cas();
+        store.release();
         let response = active
             .await
             .expect("submit task")
@@ -2346,7 +2178,7 @@ mod tests {
                     .await
             })
         };
-        store.wait_for_blocked_head_cas().await;
+        store.wait_until_blocked().await;
 
         // Queued behind the blocked batch: only the abort guard's respawn
         // publishes this one, and the drain must join that respawn.
@@ -2479,7 +2311,7 @@ mod tests {
     async fn delete_queued_mid_publish_waits_behind_the_sealed_batch() {
         let temp_dir = tempdir().expect("tempdir");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let store = Arc::new(BlockingHeadCasStore::new(temp_dir.path(), &namespace_id));
+        let store = Arc::new(blocking_head_cas_store(temp_dir.path(), &namespace_id));
         let shared = store.clone() as SharedStore;
         let writer = test_writer(shared.clone()).await;
         create_namespace(writer.core(), &namespace_id).await;
@@ -2490,7 +2322,7 @@ mod tests {
         // before the delete runs, and the blocked CAS outlasts the pacing
         // interval — the interleaving where a racing second task could run
         // the delete first.
-        store.arm_next_head_cas();
+        store.block_next();
         let before = {
             let registry = registry.clone();
             let namespace_id = namespace_id.clone();
@@ -2500,7 +2332,7 @@ mod tests {
                     .await
             })
         };
-        store.wait_for_blocked_head_cas().await;
+        store.wait_until_blocked().await;
         let publisher = registry
             .shared
             .lock_state()
@@ -2584,7 +2416,7 @@ mod tests {
 
         // Released: the parked commit publishes, then the sealed batch, and
         // only then the delete.
-        store.release_head_cas();
+        store.release();
         assert_eq!(
             unfinished_tasks_while_blocked, 1,
             "a delete must not spawn a racing second publish task"

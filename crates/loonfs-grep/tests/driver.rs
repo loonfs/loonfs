@@ -1,13 +1,14 @@
 #![allow(clippy::panic)]
 //! Per-namespace driver isolation, backoff, and explicit-GC boundaries.
 
+#[path = "../src/test_seeding.rs"]
+mod test_seeding;
+
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
-use loonfs_api::{AbsolutePath, CommitId, DestinationBehavior, IndexSegmentId, NamespaceId};
-use loonfs_core::content::{prepare_stored_content, store_bytes_as_content};
-use loonfs_core::publish::{NamespaceMutationCandidate, PathMutationIntent};
-use loonfs_core::{BootstrapOptions, DeleteNamespaceOptions, NamespaceEngine};
+use loonfs_api::{IndexSegmentId, NamespaceId};
+use loonfs_core::{DeleteNamespaceOptions, NamespaceEngine};
 use loonfs_grep::keyspace::{root_key, segment_key};
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepDriver, GrepDriverParked, GrepDriverState, GrepStepLimiter,
@@ -17,6 +18,7 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
 };
+use loonfs_test_support::ids::nonzero_usize;
 use std::future::Future;
 use std::num::NonZeroUsize;
 use std::path::Path;
@@ -215,10 +217,6 @@ async fn shared_step_limiter_caps_many_namespaces_and_every_driver_converges() {
     }
 }
 
-fn nonzero_usize(value: usize) -> NonZeroUsize {
-    NonZeroUsize::new(value).expect("test value should be nonzero")
-}
-
 #[derive(Debug)]
 struct StepConcurrencyStore {
     inner: LocalFsStore,
@@ -334,18 +332,14 @@ async fn bootstrap<S: ObjectStore + Clone>(
     store: S,
     namespace_id: &NamespaceId,
 ) -> NamespaceEngine<S> {
-    let engine = NamespaceEngine::builder(store)
-        .namespace_id(namespace_id.clone())
-        .writer_id(format!("seed-{namespace_id}"))
-        .writer_session_id(format!("seed-{namespace_id}-session"))
-        .writer_version("driver-test/0.1")
-        .build()
-        .expect("engine");
-    engine
-        .bootstrap_namespace(BootstrapOptions::default())
-        .await
-        .expect("bootstrap namespace");
-    engine
+    test_seeding::bootstrap(
+        store,
+        namespace_id,
+        format!("seed-{namespace_id}"),
+        format!("seed-{namespace_id}-session"),
+        "driver-test/0.1",
+    )
+    .await
 }
 
 async fn put_file<S: ObjectStore + Clone>(
@@ -354,26 +348,13 @@ async fn put_file<S: ObjectStore + Clone>(
     namespace_id: &NamespaceId,
     commit_id: &str,
 ) {
-    let stored = store_bytes_as_content(store, namespace_id, b"driver needle\n")
-        .await
-        .expect("store content");
-    let content_ref = stored.content_ref.clone();
-    let catalog = loonfs_core::control::load_namespace_catalog_entry(store, namespace_id)
-        .await
-        .expect("load namespace catalog");
-    let prepared = prepare_stored_content(&catalog, stored).expect("prepare stored content");
-    engine
-        .publish_namespace_mutations_batch(vec![NamespaceMutationCandidate::path_prepared(
-            PathMutationIntent::PutFile {
-                commit_id: CommitId::parse(commit_id).expect("commit id"),
-                absolute_path: AbsolutePath::parse("/note.txt").expect("path"),
-                content_ref,
-                behavior: DestinationBehavior::NoReplace,
-            },
-            vec![prepared],
-        )])
-        .await
-        .pop()
-        .expect("one result")
-        .expect("publish file");
+    test_seeding::put_file(
+        store,
+        engine,
+        namespace_id,
+        b"driver needle\n",
+        "/note.txt",
+        commit_id,
+    )
+    .await;
 }

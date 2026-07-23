@@ -366,3 +366,6 @@ fn current_time_ms() -> Result<u64, loonfs_core::Error> {
 #[cfg(test)]
 #[path = "main_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod test_seeding;

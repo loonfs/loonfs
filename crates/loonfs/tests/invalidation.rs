@@ -2,89 +2,14 @@
 //! instead of dropping them, and no cache lifecycle event — invalidation,
 //! LRU eviction, or running with caches disabled — erases writer fencing.
 
-use async_trait::async_trait;
-use bytes::Bytes;
-use futures::stream::BoxStream;
 use loonfs::{
     CreateNamespaceOptions, FsWriter, NamespaceId, PutFileOptions, RuntimeCacheConfig,
     RuntimeError, SharedObjectStore,
 };
-use loonfs_objectstore::keys::wal_head;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_objectstore::{
-    ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
-};
-use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use loonfs_test_support::stores::{CountingStore, KeyPredicate, OperationClass, RecordingStore};
+use std::sync::Arc;
 use tempfile::tempdir;
-
-#[derive(Debug)]
-struct GetRecordingStore {
-    inner: LocalFsStore,
-    gets: Mutex<Vec<String>>,
-}
-
-impl GetRecordingStore {
-    fn new(root: &Path) -> Self {
-        Self {
-            inner: LocalFsStore::new(root).expect("create local-fs store"),
-            gets: Mutex::new(Vec::new()),
-        }
-    }
-
-    fn take_gets(&self) -> Vec<String> {
-        std::mem::take(&mut *self.gets.lock().expect("get log lock poisoned"))
-    }
-
-    fn record(&self, key: &str) {
-        self.gets
-            .lock()
-            .expect("get log lock poisoned")
-            .push(key.to_owned());
-    }
-}
-
-#[async_trait]
-impl ObjectStore for GetRecordingStore {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.inner.head(key).await
-    }
-
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
-        self.record(key);
-        self.inner.get(key, range).await
-    }
-
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        self.record(key);
-        self.inner.get_with_metadata(key).await
-    }
-
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        self.inner.put(key, bytes, mode).await
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        self.inner.delete(key).await
-    }
-
-    fn list_prefix_stream(
-        &self,
-        prefix: &str,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        self.inner.list_prefix_stream(prefix)
-    }
-}
 
 async fn writer(store: &SharedObjectStore, writer_id: &str) -> FsWriter {
     writer_with_cache(store, writer_id, RuntimeCacheConfig::default()).await
@@ -113,71 +38,6 @@ fn expect_writer_fenced<T: std::fmt::Debug>(result: loonfs::Result<T>, when: &st
         ),
         "{when}: unexpected error: {error:?}"
     );
-}
-
-/// Counts head compare-and-swap writes for one namespace's head key, so a
-/// test can prove a fenced session stops touching durable state.
-#[derive(Debug)]
-struct HeadCasCountingStore {
-    inner: LocalFsStore,
-    head_key: String,
-    head_cas_writes: AtomicUsize,
-}
-
-impl HeadCasCountingStore {
-    fn new(root: &Path, namespace_id: &NamespaceId) -> Self {
-        Self {
-            inner: LocalFsStore::new(root).expect("create local-fs store"),
-            head_key: wal_head(namespace_id.as_str()),
-            head_cas_writes: AtomicUsize::new(0),
-        }
-    }
-
-    fn head_cas_writes(&self) -> usize {
-        self.head_cas_writes.load(Ordering::SeqCst)
-    }
-}
-
-#[async_trait]
-impl ObjectStore for HeadCasCountingStore {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.inner.head(key).await
-    }
-
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        self.inner.get_with_metadata(key).await
-    }
-
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
-        self.inner.get(key, range).await
-    }
-
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        if key == self.head_key && matches!(mode, PutMode::CompareAndSwap { .. }) {
-            self.head_cas_writes.fetch_add(1, Ordering::SeqCst);
-        }
-        self.inner.put(key, bytes, mode).await
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        self.inner.delete(key).await
-    }
-
-    fn list_prefix_stream(
-        &self,
-        prefix: &str,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        self.inner.list_prefix_stream(prefix)
-    }
 }
 
 /// A fenced writer session must stay fenced: before this fix, the runtime
@@ -250,7 +110,10 @@ async fn fenced_writer_stays_fenced_after_namespace_lru_eviction() {
     let temp_dir = tempdir().expect("tempdir");
     let ns_fence = NamespaceId::parse("fence").expect("valid namespace id");
     let ns_other = NamespaceId::parse("other").expect("valid namespace id");
-    let counting = Arc::new(HeadCasCountingStore::new(temp_dir.path(), &ns_fence));
+    let counting = Arc::new(CountingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
+        KeyPredicate::wal_head(ns_fence.as_str()),
+    ));
     let store: SharedObjectStore = counting.clone();
 
     let single_entry_cache = RuntimeCacheConfig {
@@ -291,7 +154,7 @@ async fn fenced_writer_stays_fenced_after_namespace_lru_eviction() {
         .await
         .expect("writer a publishes to the other namespace");
 
-    let head_cas_after_fencing = counting.head_cas_writes();
+    let head_cas_after_fencing = counting.count(OperationClass::CompareAndSwap);
     expect_writer_fenced(
         writer_a
             .put_file_bytes(&ns_fence, "/a3.txt", b"a", PutFileOptions::default())
@@ -299,7 +162,7 @@ async fn fenced_writer_stays_fenced_after_namespace_lru_eviction() {
         "fenced session stays fenced after eviction",
     );
     assert_eq!(
-        counting.head_cas_writes(),
+        counting.count(OperationClass::CompareAndSwap),
         head_cas_after_fencing,
         "a fenced session must not touch the fenced namespace's head"
     );
@@ -318,7 +181,10 @@ async fn fenced_writer_stays_fenced_after_namespace_lru_eviction() {
 async fn fenced_writer_stays_fenced_with_runtime_caches_disabled() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("nocache").expect("valid namespace id");
-    let counting = Arc::new(HeadCasCountingStore::new(temp_dir.path(), &namespace_id));
+    let counting = Arc::new(CountingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
+        KeyPredicate::wal_head(namespace_id.as_str()),
+    ));
     let store: SharedObjectStore = counting.clone();
 
     let writer_a = writer_with_cache(&store, "writer-a", RuntimeCacheConfig::disabled()).await;
@@ -344,7 +210,7 @@ async fn fenced_writer_stays_fenced_with_runtime_caches_disabled() {
         "superseded writer surfaces fencing",
     );
 
-    let head_cas_after_fencing = counting.head_cas_writes();
+    let head_cas_after_fencing = counting.count(OperationClass::CompareAndSwap);
     expect_writer_fenced(
         writer_a
             .put_file_bytes(&namespace_id, "/a3.txt", b"a", PutFileOptions::default())
@@ -352,7 +218,7 @@ async fn fenced_writer_stays_fenced_with_runtime_caches_disabled() {
         "fenced session stays fenced across throwaway engines",
     );
     assert_eq!(
-        counting.head_cas_writes(),
+        counting.count(OperationClass::CompareAndSwap),
         head_cas_after_fencing,
         "a fenced session must not touch the namespace's head"
     );
@@ -369,7 +235,10 @@ async fn fenced_writer_stays_fenced_with_runtime_caches_disabled() {
 #[tokio::test]
 async fn read_after_write_is_served_from_seeded_caches() {
     let temp_dir = tempdir().expect("tempdir");
-    let recording = Arc::new(GetRecordingStore::new(temp_dir.path()));
+    let recording = Arc::new(RecordingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
+        KeyPredicate::any(),
+    ));
     let store: SharedObjectStore = recording.clone();
     let namespace_id = NamespaceId::parse("seeded").expect("valid namespace id");
 
@@ -395,7 +264,7 @@ async fn read_after_write_is_served_from_seeded_caches() {
         .await
         .expect("warmup stat");
 
-    recording.take_gets();
+    recording.take_get_keys();
     writer
         .put_file_bytes(
             &namespace_id,
@@ -407,7 +276,7 @@ async fn read_after_write_is_served_from_seeded_caches() {
         .expect("steady-state put");
     // The publish itself must read the live head and root for freshness;
     // nothing else.
-    let write_gets = recording.take_gets();
+    let write_gets = recording.take_get_keys();
     assert!(
         write_gets
             .iter()
@@ -419,7 +288,7 @@ async fn read_after_write_is_served_from_seeded_caches() {
         .stat_path(&namespace_id, "/docs/fresh.txt")
         .await
         .expect("read after write");
-    let read_gets = recording.take_gets();
+    let read_gets = recording.take_get_keys();
     assert_eq!(
         read_gets,
         Vec::<String>::new(),

@@ -3,9 +3,7 @@
 #![allow(clippy::panic)]
 // Runtime integration tests use panic in helper assertions for precise diagnostics.
 
-use async_trait::async_trait;
 use bytes::Bytes;
-use futures::stream::BoxStream;
 use loonfs::publish::{parse_mutation_path, PathMutationIntent};
 use loonfs::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, BeginUploadRequest,
@@ -15,20 +13,20 @@ use loonfs::{
     CreateNamespaceOptions, DeleteOptions, DestinationBehavior, DirectoryPageCursor, ErrorCode,
     FsAdmin, FsReader, FsWriter, FsWriterBuilder, InodeId, InodeKind, ListChangesOptions,
     MaintenanceTickOptions, MaintenanceTickOutcome, MaintenanceTickResult, ManifestId, MoveOptions,
-    NamespaceId, NamespaceStatusResponse, PageRequest, PaginationPolicy, PutFileOptions,
-    RuntimeCacheConfig, RuntimeError, SharedObjectStore, TraceStoreKind, UploadContentResponse,
-    UploadId,
+    NamespaceId, NamespaceStatusResponse, PageRequest, PutFileOptions, RuntimeCacheConfig,
+    RuntimeError, SharedObjectStore, TraceStoreKind, UploadContentResponse, UploadId,
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
 use loonfs_objectstore::keys::{metadata_manifest_object, namespace_config, wal_head};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::metrics::{ObjectStoreOperation, VecObjectStoreMetricsRecorder};
-use loonfs_objectstore::{
-    ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
+use loonfs_objectstore::ObjectStore;
+use loonfs_test_support::block_on::block_on;
+use loonfs_test_support::ids::{namespace_id, page_limit};
+use loonfs_test_support::stores::{
+    CountingStore, FailStore, InjectedError, KeyPredicate, OperationClass,
 };
-use std::future::Future;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -216,18 +214,6 @@ impl TestRuntime {
     }
 }
 
-fn namespace_id() -> NamespaceId {
-    NamespaceId::parse("demo").expect("valid namespace id")
-}
-
-fn block_on<T>(future: impl Future<Output = T>) -> T {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("test runtime")
-        .block_on(future)
-}
-
 async fn wal_segment_count(store: &SharedObjectStore, namespace_id: &NamespaceId) -> usize {
     use futures::StreamExt;
     store
@@ -239,13 +225,6 @@ async fn wal_segment_count(store: &SharedObjectStore, namespace_id: &NamespaceId
         .collect::<Vec<_>>()
         .await
         .len()
-}
-
-fn page_limit(limit: u32) -> loonfs::EffectiveLimit {
-    PaginationPolicy::from_values(limit, limit)
-        .expect("valid pagination policy")
-        .resolve_limit(Some(limit))
-        .expect("valid page limit")
 }
 
 fn decode_directory_page_cursor(value: &str) -> DirectoryPageCursor {
@@ -632,7 +611,7 @@ fn builder_metrics_recorder_instruments_object_store() {
             .metrics_recorder(recorder.clone())
     });
 
-    fs.create_namespace_blocking(&namespace_id(), CreateNamespaceOptions::default())
+    fs.create_namespace_blocking(&namespace_id("demo"), CreateNamespaceOptions::default())
         .expect("create namespace");
 
     let samples = recorder.samples();
@@ -649,7 +628,7 @@ fn builder_metrics_recorder_instruments_object_store() {
 fn filesystem_operations_match_core_semantics() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "filesystem-test");
-    let namespace_id = namespace_id();
+    let namespace_id = namespace_id("demo");
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
@@ -719,7 +698,7 @@ fn filesystem_operations_match_core_semantics() {
 async fn async_runtime_methods_are_the_engine_boundary() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = open_runtime_async(store(temp_dir.path()), "async-runtime-test").await;
-    let namespace_id = namespace_id();
+    let namespace_id = namespace_id("demo");
 
     FsWriter::create_namespace(&fs.writer, &namespace_id, CreateNamespaceOptions::default())
         .await
@@ -745,12 +724,12 @@ async fn async_runtime_methods_are_the_engine_boundary() {
 #[test]
 fn runtime_cache_reuses_wal_tail_projection_for_repeated_reads() {
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace_id();
-    let raw_store = Arc::new(HeadCasFailureStore::new(
+    let namespace_id = namespace_id("demo");
+    let raw_store = Arc::new(RuntimeStoreProbe::new(
         temp_dir.path(),
         namespace_id.as_str(),
     ));
-    let object_store: SharedObjectStore = raw_store.clone();
+    let object_store = raw_store.store();
     let fs = open_runtime(object_store, "tail-projection-cache-test");
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
@@ -801,12 +780,12 @@ fn runtime_cache_reuses_wal_tail_projection_for_repeated_reads() {
 #[test]
 fn runtime_publish_reuses_wal_tail_projection_for_sequential_writes() {
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace_id();
-    let raw_store = Arc::new(HeadCasFailureStore::new(
+    let namespace_id = namespace_id("demo");
+    let raw_store = Arc::new(RuntimeStoreProbe::new(
         temp_dir.path(),
         namespace_id.as_str(),
     ));
-    let object_store: SharedObjectStore = raw_store.clone();
+    let object_store = raw_store.store();
     let setup = open_runtime(object_store.clone(), "publish-tail");
     let measured = open_runtime(object_store, "publish-tail");
 
@@ -851,12 +830,12 @@ fn runtime_publish_reuses_wal_tail_projection_for_sequential_writes() {
 #[test]
 fn runtime_publish_allows_multi_segment_wal_tail() {
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace_id();
-    let raw_store = Arc::new(HeadCasFailureStore::new(
+    let namespace_id = namespace_id("demo");
+    let raw_store = Arc::new(RuntimeStoreProbe::new(
         temp_dir.path(),
         namespace_id.as_str(),
     ));
-    let object_store: SharedObjectStore = raw_store.clone();
+    let object_store = raw_store.store();
     let setup = open_runtime(object_store.clone(), "publish-tail");
     let measured = open_runtime(object_store, "publish-tail");
 
@@ -882,12 +861,12 @@ fn runtime_publish_allows_multi_segment_wal_tail() {
 #[test]
 fn runtime_cache_observes_head_advanced_by_another_runtime() {
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace_id();
-    let raw_store = Arc::new(HeadCasFailureStore::new(
+    let namespace_id = namespace_id("demo");
+    let raw_store = Arc::new(RuntimeStoreProbe::new(
         temp_dir.path(),
         namespace_id.as_str(),
     ));
-    let object_store: SharedObjectStore = raw_store.clone();
+    let object_store = raw_store.store();
     let reader = open_runtime(object_store.clone(), "tail-cache-reader");
     let writer = open_runtime(object_store, "tail-cache-writer");
 
@@ -922,12 +901,12 @@ fn runtime_cache_observes_head_advanced_by_another_runtime() {
 #[test]
 fn runtime_cache_can_be_disabled() {
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace_id();
-    let raw_store = Arc::new(HeadCasFailureStore::new(
+    let namespace_id = namespace_id("demo");
+    let raw_store = Arc::new(RuntimeStoreProbe::new(
         temp_dir.path(),
         namespace_id.as_str(),
     ));
-    let object_store: SharedObjectStore = raw_store.clone();
+    let object_store = raw_store.store();
     let fs = open_runtime_with(object_store, "tail-cache-disabled-test", |builder| {
         builder.runtime_cache(RuntimeCacheConfig::disabled())
     });
@@ -999,12 +978,12 @@ fn runtime_wal_tail_projection_cache_evicts_by_namespace_count() {
 #[test]
 fn runtime_wal_tail_projection_cache_skips_oversized_projection() {
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace_id();
-    let raw_store = Arc::new(HeadCasFailureStore::new(
+    let namespace_id = namespace_id("demo");
+    let raw_store = Arc::new(RuntimeStoreProbe::new(
         temp_dir.path(),
         namespace_id.as_str(),
     ));
-    let object_store: SharedObjectStore = raw_store.clone();
+    let object_store = raw_store.store();
     let fs = open_runtime_with(object_store, "tail-oversized-test", |builder| {
         builder.runtime_cache(RuntimeCacheConfig {
             max_cached_wal_tail_projection_rows: 0,
@@ -1038,7 +1017,7 @@ fn runtime_wal_tail_projection_cache_skips_oversized_projection() {
 #[test]
 fn runtime_read_allows_multi_segment_wal_tail() {
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace_id();
+    let namespace_id = namespace_id("demo");
     let fs = open_runtime(store(temp_dir.path()), "tail-read-test");
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
@@ -1055,12 +1034,12 @@ fn runtime_read_allows_multi_segment_wal_tail() {
 #[test]
 fn stale_head_write_error_recovers_and_reseeds_caches() {
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace_id();
-    let raw_store = Arc::new(HeadCasFailureStore::new(
+    let namespace_id = namespace_id("demo");
+    let raw_store = Arc::new(RuntimeStoreProbe::new(
         temp_dir.path(),
         namespace_id.as_str(),
     ));
-    let object_store: SharedObjectStore = raw_store.clone();
+    let object_store = raw_store.store();
     let fs = open_runtime(object_store, "tail-cache-stale-test");
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
@@ -1098,7 +1077,7 @@ fn stale_head_write_error_recovers_and_reseeds_caches() {
 fn delete_options_select_recursive_behavior() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "delete-test");
-    let namespace_id = namespace_id();
+    let namespace_id = namespace_id("demo");
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
@@ -1141,7 +1120,7 @@ fn delete_options_select_recursive_behavior() {
 fn undelete_recovers_a_deleted_file_and_generations_stay_scoped() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "undelete-test");
-    let namespace_id = namespace_id();
+    let namespace_id = namespace_id("demo");
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
     fs.put_file_bytes_blocking(
@@ -1268,7 +1247,7 @@ fn undelete_recovers_a_deleted_file_and_generations_stay_scoped() {
 fn undelete_recovers_a_deleted_subtree_and_rejects_covered_children() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "undelete-subtree-test");
-    let namespace_id = namespace_id();
+    let namespace_id = namespace_id("demo");
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
     fs.put_file_bytes_blocking(
@@ -1335,7 +1314,7 @@ fn undelete_recovers_a_deleted_subtree_and_rejects_covered_children() {
 fn undelete_of_an_ancestor_keeps_independently_deleted_children_hidden() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "undelete-nested-test");
-    let namespace_id = namespace_id();
+    let namespace_id = namespace_id("demo");
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
     fs.put_file_bytes_blocking(
@@ -1404,7 +1383,7 @@ fn undelete_of_an_ancestor_keeps_independently_deleted_children_hidden() {
 fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
     let temp_dir = tempdir().expect("tempdir");
     let object_store = store(temp_dir.path());
-    let namespace_id = namespace_id();
+    let namespace_id = namespace_id("demo");
 
     // Order one: delete + undelete in the WAL tail, then checkpoint,
     // then reopen cold from object storage.
@@ -1535,7 +1514,7 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
 fn change_feed_carries_the_exact_revoked_generation() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "undelete-feed-test");
-    let namespace_id = namespace_id();
+    let namespace_id = namespace_id("demo");
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
     fs.put_file_bytes_blocking(
@@ -1603,7 +1582,7 @@ fn change_feed_carries_the_exact_revoked_generation() {
 fn undelete_rejects_deletions_from_the_same_commit() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "undelete-same-commit-test");
-    let namespace_id = namespace_id();
+    let namespace_id = namespace_id("demo");
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
     fs.put_file_bytes_blocking(
@@ -1661,7 +1640,7 @@ fn undelete_rejects_deletions_from_the_same_commit() {
 fn delete_with_expected_inode_refuses_a_raced_rebinding() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "delete-expectation-test");
-    let namespace_id = namespace_id();
+    let namespace_id = namespace_id("demo");
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
     fs.put_file_bytes_blocking(
@@ -1717,7 +1696,7 @@ fn delete_with_expected_inode_refuses_a_raced_rebinding() {
 fn directory_pages_use_canonical_name_key_order() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "directory-page-order-test");
-    let namespace_id = namespace_id();
+    let namespace_id = namespace_id("demo");
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
     for path in [
@@ -1773,7 +1752,7 @@ fn directory_pages_use_canonical_name_key_order() {
 fn file_revision_pages_merge_manifest_and_wal_tail_newest_first() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "file-revision-page-test");
-    let namespace_id = namespace_id();
+    let namespace_id = namespace_id("demo");
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
 
@@ -1855,7 +1834,7 @@ fn file_revision_pages_merge_manifest_and_wal_tail_newest_first() {
 fn directory_cursor_after_later_writes_is_rejected() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "directory-page-snapshot-test");
-    let namespace_id = namespace_id();
+    let namespace_id = namespace_id("demo");
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
     for path in ["/docs/a.txt", "/docs/b.txt", "/docs/c.txt"] {
@@ -1906,7 +1885,7 @@ fn directory_cursor_after_later_writes_is_rejected() {
 fn directory_cursor_older_than_materialized_snapshot_floor_is_rejected() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "directory-page-floor-test");
-    let namespace_id = namespace_id();
+    let namespace_id = namespace_id("demo");
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
     for path in ["/docs/a.txt", "/docs/b.txt", "/docs/c.txt"] {
@@ -1957,7 +1936,7 @@ fn directory_cursor_older_than_materialized_snapshot_floor_is_rejected() {
 fn directory_cursor_rejects_path_inode_mismatch() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "directory-page-mismatch-test");
-    let namespace_id = namespace_id();
+    let namespace_id = namespace_id("demo");
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
     for path in ["/docs/a.txt", "/docs/b.txt"] {
@@ -1998,7 +1977,7 @@ fn directory_cursor_rejects_path_inode_mismatch() {
 fn forked_namespace_shares_content_then_diverges() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "fork-test");
-    let source = namespace_id();
+    let source = namespace_id("demo");
     let clone = NamespaceId::parse("clone").expect("valid namespace id");
 
     fs.create_namespace_blocking(&source, CreateNamespaceOptions::default())
@@ -2050,7 +2029,7 @@ fn forked_namespace_shares_content_then_diverges() {
 fn upload_flow_is_available_from_runtime() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "upload-test");
-    let namespace_id = namespace_id();
+    let namespace_id = namespace_id("demo");
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
@@ -2081,7 +2060,7 @@ fn upload_flow_is_available_from_runtime() {
 fn direct_put_upload_flow_validates_durable_object_on_complete() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "direct-put-upload-test");
-    let namespace_id = namespace_id();
+    let namespace_id = namespace_id("demo");
     let bytes = b"direct uploaded";
     let content_ref = ContentRef::whole_file_v0(bytes);
 
@@ -2125,8 +2104,11 @@ fn direct_put_upload_flow_validates_durable_object_on_complete() {
 #[test]
 fn direct_put_completion_proves_upload_without_reading_content() {
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace_id();
-    let raw_store = Arc::new(ContentBlobGetCountingStore::new(temp_dir.path()));
+    let namespace_id = namespace_id("demo");
+    let raw_store = Arc::new(CountingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
+        KeyPredicate::content_blob(),
+    ));
     let object_store: SharedObjectStore = raw_store.clone();
     let fs = open_runtime(object_store, "direct-put-probe-test");
     let bytes = b"direct uploaded, provider verified";
@@ -2142,7 +2124,7 @@ fn direct_put_completion_proves_upload_without_reading_content() {
     block_on(direct_store.put_if_absent(&begin.target.object_key, Bytes::copy_from_slice(bytes)))
         .expect("write direct object");
 
-    raw_store.reset_content_blob_counters();
+    raw_store.reset();
     let completed = fs
         .complete_upload_blocking(
             &namespace_id,
@@ -2154,7 +2136,7 @@ fn direct_put_completion_proves_upload_without_reading_content() {
         .expect("complete direct put");
     assert_eq!(completed.content_ref, content_ref);
     assert_eq!(
-        raw_store.content_blob_get_count(),
+        raw_store.count(OperationClass::Read),
         0,
         "completion proves the upload from object metadata alone"
     );
@@ -2164,7 +2146,7 @@ fn direct_put_completion_proves_upload_without_reading_content() {
 fn direct_put_completion_rejects_a_mis_declared_size() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "direct-put-size-test");
-    let namespace_id = namespace_id();
+    let namespace_id = namespace_id("demo");
     let bytes = b"direct put bytes with a lying size";
     // The digest names the object; the declared size rides the reference
     // unchecked by the provider, so completion's size check must catch it.
@@ -2196,7 +2178,7 @@ fn direct_put_completion_rejects_a_mis_declared_size() {
 #[test]
 fn stat_and_list_use_initial_manifest_without_checkpoint() {
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace_id();
+    let namespace_id = namespace_id("demo");
     let fs = runtime(temp_dir.path(), "read-fallback-test");
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
@@ -2216,8 +2198,11 @@ fn stat_and_list_use_initial_manifest_without_checkpoint() {
 #[test]
 fn stat_and_list_use_materialized_tables_after_checkpoint_without_content_reads() {
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace_id();
-    let raw_store = Arc::new(ContentBlobGetCountingStore::new(temp_dir.path()));
+    let namespace_id = namespace_id("demo");
+    let raw_store = Arc::new(CountingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
+        KeyPredicate::content_blob(),
+    ));
     let object_store: SharedObjectStore = raw_store.clone();
     let fs = open_runtime(object_store, "read-materialized-test");
 
@@ -2233,7 +2218,7 @@ fn stat_and_list_use_materialized_tables_after_checkpoint_without_content_reads(
     fs.create_checkpoint_blocking(&namespace_id)
         .expect("checkpoint");
 
-    raw_store.reset_content_blob_counters();
+    raw_store.reset();
     fs.stat_path_blocking(&namespace_id, "/docs/file.txt")
         .expect("stat materialized file");
     fs.list_path_blocking(&namespace_id, "/docs")
@@ -2241,14 +2226,14 @@ fn stat_and_list_use_materialized_tables_after_checkpoint_without_content_reads(
 
     let stats = fs.runtime_cache_stats();
     assert_eq!(stats.latest_metadata_view_reads, 2);
-    assert_eq!(raw_store.content_blob_get_count(), 0);
+    assert_eq!(raw_store.count(OperationClass::Read), 0);
 }
 
 /// Concurrent stat and list race through the shared async metadata-view cache.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_materialized_stat_and_list_share_async_store() {
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace_id();
+    let namespace_id = namespace_id("demo");
     let fs = open_runtime_async(store(temp_dir.path()), "concurrent-materialized-read-test").await;
 
     fs.create_namespace(&namespace_id, CreateNamespaceOptions::default())
@@ -2285,7 +2270,7 @@ async fn concurrent_materialized_stat_and_list_share_async_store() {
 #[test]
 fn repeated_materialized_stat_uses_metadata_table_cache() {
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace_id();
+    let namespace_id = namespace_id("demo");
     let fs = runtime(temp_dir.path(), "metadata-table-cache-test");
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
@@ -2315,15 +2300,18 @@ fn repeated_materialized_stat_uses_metadata_table_cache() {
 #[test]
 fn put_file_bytes_gates_publish_on_its_own_content_write_without_probing() {
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace_id();
-    let raw_store = Arc::new(ContentBlobGetCountingStore::new(temp_dir.path()));
+    let namespace_id = namespace_id("demo");
+    let raw_store = Arc::new(CountingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
+        KeyPredicate::content_blob(),
+    ));
     let object_store: SharedObjectStore = raw_store.clone();
     let fs = open_runtime(object_store, "put-file-content-validation-test");
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
 
-    raw_store.reset_content_blob_counters();
+    raw_store.reset();
     fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/direct.txt",
@@ -2335,11 +2323,11 @@ fn put_file_bytes_gates_publish_on_its_own_content_write_without_probing() {
     // The put writes the blob exactly once and never reads it back: the
     // write's own ack is the durability proof the head CAS waits on, so
     // validation issues no probe for content the put itself is writing.
-    assert_eq!(raw_store.content_blob_put_count(), 1);
-    assert_eq!(raw_store.content_blob_get_count(), 0);
+    assert_eq!(raw_store.count(OperationClass::Put), 1);
+    assert_eq!(raw_store.count(OperationClass::Read), 0);
 
     // A replace put rides the same overlapped path: new blob, no probe.
-    raw_store.reset_content_blob_counters();
+    raw_store.reset();
     fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/direct.txt",
@@ -2351,22 +2339,22 @@ fn put_file_bytes_gates_publish_on_its_own_content_write_without_probing() {
     )
     .expect("replace file bytes");
 
-    assert_eq!(raw_store.content_blob_put_count(), 1);
-    assert_eq!(raw_store.content_blob_get_count(), 0);
+    assert_eq!(raw_store.count(OperationClass::Put), 1);
+    assert_eq!(raw_store.count(OperationClass::Read), 0);
 }
 
 #[test]
 fn put_file_bytes_retries_a_transient_content_write_failure() {
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace_id();
-    let raw_store = Arc::new(FailContentBlobPutsStore::new(temp_dir.path()));
+    let namespace_id = namespace_id("demo");
+    let raw_store = Arc::new(fail_content_blob_puts_store(temp_dir.path()));
     let object_store: SharedObjectStore = raw_store.clone();
     let fs = open_runtime(object_store, "content-write-failure-test");
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
 
-    raw_store.fail_next_content_blob_puts(1);
+    raw_store.fail_next(1);
     fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/report.txt",
@@ -2386,7 +2374,7 @@ fn put_file_bytes_retries_a_transient_content_write_failure() {
 #[test]
 fn path_mutations_return_the_commit_id_they_committed_under() {
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace_id();
+    let namespace_id = namespace_id("demo");
     let object_store = store(temp_dir.path());
     block_on(async {
         let fs = open_runtime_async(object_store, "commit-id-echo-test").await;
@@ -2447,7 +2435,7 @@ fn path_mutations_return_the_commit_id_they_committed_under() {
 #[test]
 fn concurrent_puts_coalesce_into_one_wal_segment() {
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace_id();
+    let namespace_id = namespace_id("demo");
     let object_store = store(temp_dir.path());
     block_on(async {
         let fs = open_runtime_async(object_store.clone(), "publication-batch-test").await;
@@ -2570,7 +2558,7 @@ fn concurrent_puts_coalesce_into_one_wal_segment() {
 #[test]
 fn zero_interval_publishes_sequential_submissions_immediately() {
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace_id();
+    let namespace_id = namespace_id("demo");
     let object_store = store(temp_dir.path());
     block_on(async {
         let fs = open_runtime_with_async(object_store.clone(), "zero-interval-test", |builder| {
@@ -2604,8 +2592,8 @@ fn zero_interval_publishes_sequential_submissions_immediately() {
 #[test]
 fn concurrent_puts_both_commit_after_one_transient_content_failure() {
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace_id();
-    let raw_store = Arc::new(FailContentBlobPutsStore::new(temp_dir.path()));
+    let namespace_id = namespace_id("demo");
+    let raw_store = Arc::new(fail_content_blob_puts_store(temp_dir.path()));
     let object_store: SharedObjectStore = raw_store.clone();
     block_on(async {
         let fs = open_runtime_async(object_store, "window-abort-test").await;
@@ -2615,7 +2603,7 @@ fn concurrent_puts_both_commit_after_one_transient_content_failure() {
 
         // One content write fails once before either submission enters the
         // commit window. Its immutable retry is independent of its peer.
-        raw_store.fail_next_content_blob_puts(1);
+        raw_store.fail_next(1);
         let (a, b) = tokio::join!(
             fs.put_file_bytes(
                 &namespace_id,
@@ -2649,12 +2637,12 @@ fn concurrent_puts_both_commit_after_one_transient_content_failure() {
 #[test]
 fn begin_upload_validates_controls_without_replay_reads() {
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace_id();
-    let raw_store = Arc::new(HeadCasFailureStore::new(
+    let namespace_id = namespace_id("demo");
+    let raw_store = Arc::new(RuntimeStoreProbe::new(
         temp_dir.path(),
         namespace_id.as_str(),
     ));
-    let object_store: SharedObjectStore = raw_store.clone();
+    let object_store = raw_store.store();
     let fs = open_runtime(object_store, "begin-upload-cache-test");
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
@@ -2692,12 +2680,12 @@ fn begin_upload_validates_controls_without_replay_reads() {
 #[test]
 fn runtime_control_cache_reuses_head_for_materialization_validation() {
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace_id();
-    let raw_store = Arc::new(HeadCasFailureStore::new(
+    let namespace_id = namespace_id("demo");
+    let raw_store = Arc::new(RuntimeStoreProbe::new(
         temp_dir.path(),
         namespace_id.as_str(),
     ));
-    let object_store: SharedObjectStore = raw_store.clone();
+    let object_store = raw_store.store();
     let fs = open_runtime(object_store, "control-cache-head-test");
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
@@ -2720,13 +2708,13 @@ fn runtime_control_cache_reuses_head_for_materialization_validation() {
 #[test]
 fn control_cache_eviction_reloads_head_for_materialization_validation() {
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace_id();
+    let namespace_id = namespace_id("demo");
     let other_namespace = NamespaceId::parse("other").expect("valid namespace id");
-    let raw_store = Arc::new(HeadCasFailureStore::new(
+    let raw_store = Arc::new(RuntimeStoreProbe::new(
         temp_dir.path(),
         namespace_id.as_str(),
     ));
-    let object_store: SharedObjectStore = raw_store.clone();
+    let object_store = raw_store.store();
     let fs = open_runtime_with(object_store, "control-cache-eviction-test", |builder| {
         builder.runtime_cache(RuntimeCacheConfig {
             max_cached_namespaces: 1,
@@ -2760,12 +2748,12 @@ fn control_cache_eviction_reloads_head_for_materialization_validation() {
 #[test]
 fn runtime_control_cache_reloads_head_after_external_change() {
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace_id();
-    let raw_store = Arc::new(HeadCasFailureStore::new(
+    let namespace_id = namespace_id("demo");
+    let raw_store = Arc::new(RuntimeStoreProbe::new(
         temp_dir.path(),
         namespace_id.as_str(),
     ));
-    let object_store: SharedObjectStore = raw_store.clone();
+    let object_store = raw_store.store();
     let reader = open_runtime(object_store.clone(), "control-cache-reader");
     let writer = open_runtime(object_store, "control-cache-writer");
 
@@ -2807,7 +2795,7 @@ fn begin_upload_rejects_missing_and_partial_namespace() {
     let raw_store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("create local-fs store"));
     let object_store: SharedObjectStore = raw_store.clone();
     let fs = open_runtime(object_store, "begin-upload-missing-partial-test");
-    let namespace_id = namespace_id();
+    let namespace_id = namespace_id("demo");
 
     assert_core_error_kind(
         fs.begin_upload_blocking(&namespace_id),
@@ -2831,7 +2819,7 @@ fn begin_upload_rejects_malformed_descriptors() {
     let raw_store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("create local-fs store"));
     let object_store: SharedObjectStore = raw_store.clone();
     let fs = open_runtime(object_store, "begin-upload-malformed-test");
-    let namespace_id = namespace_id();
+    let namespace_id = namespace_id("demo");
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
@@ -2894,7 +2882,7 @@ fn begin_upload_rejects_malformed_head_and_lease_when_cache_disabled() {
 fn explicit_commit_appears_in_change_feed() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "commit-test");
-    let namespace_id = namespace_id();
+    let namespace_id = namespace_id("demo");
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
@@ -2927,7 +2915,7 @@ fn explicit_commit_appears_in_change_feed() {
 fn namespace_status_reports_wal_tail_segments() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "status-test");
-    let namespace_id = namespace_id();
+    let namespace_id = namespace_id("demo");
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
@@ -2961,7 +2949,7 @@ fn namespace_status_reports_wal_tail_segments() {
 fn root_stat_and_list_work_immediately_after_namespace_create() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "initial-manifest-read-test");
-    let namespace_id = namespace_id();
+    let namespace_id = namespace_id("demo");
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
@@ -2984,7 +2972,7 @@ fn root_stat_and_list_work_immediately_after_namespace_create() {
 fn namespace_status_and_tick_reject_missing_namespace() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "missing-status-test");
-    let namespace_id = namespace_id();
+    let namespace_id = namespace_id("demo");
 
     assert_core_error_kind(
         fs.namespace_status_blocking(&namespace_id),
@@ -3002,7 +2990,7 @@ fn namespace_status_and_tick_reject_partial_namespace() {
     let raw_store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("create local-fs store"));
     let object_store: SharedObjectStore = raw_store.clone();
     let fs = open_runtime(object_store, "partial-status-test");
-    let namespace_id = namespace_id();
+    let namespace_id = namespace_id("demo");
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
@@ -3023,7 +3011,7 @@ fn namespace_status_and_tick_reject_partial_namespace() {
 fn maintenance_tick_below_threshold_is_not_needed() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "tick-not-needed-test");
-    let namespace_id = namespace_id();
+    let namespace_id = namespace_id("demo");
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
@@ -3053,7 +3041,7 @@ fn maintenance_tick_below_threshold_is_not_needed() {
 fn maintenance_tick_at_segment_threshold_flushes_the_wal() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "tick-publish-test");
-    let namespace_id = namespace_id();
+    let namespace_id = namespace_id("demo");
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
@@ -3107,7 +3095,7 @@ fn maintenance_tick_at_segment_threshold_flushes_the_wal() {
 fn maintenance_tick_after_existing_manifest_writes_l0_manifest() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "tick-l0-run-publish-test");
-    let namespace_id = namespace_id();
+    let namespace_id = namespace_id("demo");
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
@@ -3187,7 +3175,7 @@ fn maintenance_tick_after_existing_manifest_writes_l0_manifest() {
 fn maintenance_tick_counts_segments_not_commits() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "tick-segment-count-test");
-    let namespace_id = namespace_id();
+    let namespace_id = namespace_id("demo");
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
@@ -3270,7 +3258,7 @@ fn maintenance_tick_counts_segments_not_commits() {
 fn maintenance_tick_rejects_zero_threshold() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "tick-config-test");
-    let namespace_id = namespace_id();
+    let namespace_id = namespace_id("demo");
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
@@ -3295,7 +3283,7 @@ fn maintenance_tick_rejects_thresholds_above_the_write_rejection_cap() {
     // while every publish is rejected with `maintenance_required`.
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "tick-config-test");
-    let namespace_id = namespace_id();
+    let namespace_id = namespace_id("demo");
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
@@ -3320,12 +3308,12 @@ fn maintenance_tick_rejects_thresholds_above_the_write_rejection_cap() {
 #[test]
 fn maintenance_tick_treats_metadata_root_cas_loss_as_benign_race() {
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace_id();
-    let raw_store = Arc::new(HeadCasFailureStore::new(
+    let namespace_id = namespace_id("demo");
+    let raw_store = Arc::new(RuntimeStoreProbe::new(
         temp_dir.path(),
         namespace_id.as_str(),
     ));
-    let object_store: SharedObjectStore = raw_store.clone();
+    let object_store = raw_store.store();
     let fs = open_runtime(object_store, "tick-race-test");
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
@@ -3366,7 +3354,7 @@ fn maintenance_tick_treats_metadata_root_cas_loss_as_benign_race() {
 fn checkpoint_and_retention_hooks_are_available() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "maintenance-test");
-    let namespace_id = namespace_id();
+    let namespace_id = namespace_id("demo");
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
@@ -3392,7 +3380,7 @@ fn separate_runtime_instances_share_object_store_state() {
     let temp_dir = tempdir().expect("tempdir");
     let writer = runtime(temp_dir.path(), "writer");
     let reader = runtime(temp_dir.path(), "reader");
-    let namespace_id = namespace_id();
+    let namespace_id = namespace_id("demo");
 
     writer
         .create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
@@ -3413,294 +3401,97 @@ fn separate_runtime_instances_share_object_store_state() {
 }
 
 #[derive(Debug)]
-struct HeadCasFailureStore {
-    inner: LocalFsStore,
-    head_key: String,
-    root_key: String,
-    wal_prefix: String,
-    manifest_prefix: String,
-    fail_head_cas: AtomicBool,
-    fail_root_cas: AtomicBool,
-    wal_get_count: AtomicUsize,
-    manifest_get_count: AtomicUsize,
-    head_get_count: AtomicUsize,
+struct RuntimeStoreProbe {
+    store: SharedObjectStore,
+    fail_head_cas: Arc<FailStore<SharedObjectStore>>,
+    fail_root_cas: Arc<FailStore<SharedObjectStore>>,
+    wal_gets: Arc<CountingStore<SharedObjectStore>>,
+    manifest_gets: Arc<CountingStore<SharedObjectStore>>,
+    head_gets: Arc<CountingStore<SharedObjectStore>>,
 }
 
-impl HeadCasFailureStore {
+impl RuntimeStoreProbe {
     fn new(root: &Path, namespace: &str) -> Self {
+        let inner: SharedObjectStore =
+            Arc::new(LocalFsStore::new(root).expect("create local-fs store"));
+        let wal_gets = Arc::new(CountingStore::new(
+            inner,
+            KeyPredicate::prefix(format!("namespaces/{namespace}/wal/segments/")),
+        ));
+        let manifest_gets = Arc::new(CountingStore::new(
+            wal_gets.clone() as SharedObjectStore,
+            KeyPredicate::prefix(format!("namespaces/{namespace}/metadata/manifests/")),
+        ));
+        let head_gets = Arc::new(CountingStore::new(
+            manifest_gets.clone() as SharedObjectStore,
+            KeyPredicate::wal_head(namespace),
+        ));
+        let fail_head_cas = Arc::new(FailStore::new(
+            head_gets.clone() as SharedObjectStore,
+            KeyPredicate::wal_head(namespace),
+            OperationClass::CompareAndSwap,
+            InjectedError::PreconditionFailed,
+        ));
+        let fail_root_cas = Arc::new(FailStore::new(
+            fail_head_cas.clone() as SharedObjectStore,
+            KeyPredicate::metadata_root(namespace),
+            OperationClass::CompareAndSwap,
+            InjectedError::PreconditionFailed,
+        ));
         Self {
-            inner: LocalFsStore::new(root).expect("create local-fs store"),
-            head_key: wal_head(namespace),
-            root_key: loonfs_objectstore::keys::metadata_root(namespace),
-            wal_prefix: format!("namespaces/{namespace}/wal/segments/"),
-            manifest_prefix: format!("namespaces/{namespace}/metadata/manifests/"),
-            fail_head_cas: AtomicBool::new(false),
-            fail_root_cas: AtomicBool::new(false),
-            wal_get_count: AtomicUsize::new(0),
-            manifest_get_count: AtomicUsize::new(0),
-            head_get_count: AtomicUsize::new(0),
+            store: fail_root_cas.clone(),
+            fail_head_cas,
+            fail_root_cas,
+            wal_gets,
+            manifest_gets,
+            head_gets,
         }
     }
 
+    fn store(&self) -> SharedObjectStore {
+        self.store.clone()
+    }
+
     fn fail_head_cas(&self) {
-        self.fail_head_cas.store(true, Ordering::SeqCst);
+        self.fail_head_cas.fail_all();
     }
 
     fn allow_head_cas(&self) {
-        self.fail_head_cas.store(false, Ordering::SeqCst);
+        self.fail_head_cas.clear();
     }
 
     fn fail_root_cas(&self) {
-        self.fail_root_cas.store(true, Ordering::SeqCst);
+        self.fail_root_cas.fail_all();
     }
 
     fn reset_wal_get_count(&self) {
-        self.wal_get_count.store(0, Ordering::SeqCst);
+        self.wal_gets.reset();
     }
 
     fn reset_control_get_counts(&self) {
-        self.manifest_get_count.store(0, Ordering::SeqCst);
-        self.head_get_count.store(0, Ordering::SeqCst);
+        self.manifest_gets.reset();
+        self.head_gets.reset();
         self.reset_wal_get_count();
     }
 
     fn wal_get_count(&self) -> usize {
-        self.wal_get_count.load(Ordering::SeqCst)
+        self.wal_gets.count(OperationClass::Read)
     }
 
     fn manifest_get_count(&self) -> usize {
-        self.manifest_get_count.load(Ordering::SeqCst)
+        self.manifest_gets.count(OperationClass::Read)
     }
 
     fn head_get_count(&self) -> usize {
-        self.head_get_count.load(Ordering::SeqCst)
+        self.head_gets.count(OperationClass::Read)
     }
 }
 
-#[async_trait]
-impl ObjectStore for HeadCasFailureStore {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.inner.head(key).await
-    }
-
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
-        if key.starts_with(&self.wal_prefix) {
-            self.wal_get_count.fetch_add(1, Ordering::SeqCst);
-        }
-        if key.starts_with(&self.manifest_prefix) {
-            self.manifest_get_count.fetch_add(1, Ordering::SeqCst);
-        }
-        if key == self.head_key {
-            self.head_get_count.fetch_add(1, Ordering::SeqCst);
-        }
-        self.inner.get(key, range).await
-    }
-
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        if key.starts_with(&self.wal_prefix) {
-            self.wal_get_count.fetch_add(1, Ordering::SeqCst);
-        }
-        if key.starts_with(&self.manifest_prefix) {
-            self.manifest_get_count.fetch_add(1, Ordering::SeqCst);
-        }
-        if key == self.head_key {
-            self.head_get_count.fetch_add(1, Ordering::SeqCst);
-        }
-        self.inner.get_with_metadata(key).await
-    }
-
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        if key == self.head_key
-            && matches!(&mode, PutMode::CompareAndSwap { .. })
-            && self.fail_head_cas.load(Ordering::SeqCst)
-        {
-            return Err(ObjectStoreError::PreconditionFailed {
-                object_key: key.to_owned(),
-            });
-        }
-        if key == self.root_key
-            && matches!(&mode, PutMode::CompareAndSwap { .. })
-            && self.fail_root_cas.load(Ordering::SeqCst)
-        {
-            return Err(ObjectStoreError::PreconditionFailed {
-                object_key: key.to_owned(),
-            });
-        }
-        self.inner.put(key, bytes, mode).await
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        self.inner.delete(key).await
-    }
-
-    fn list_prefix_stream(
-        &self,
-        prefix: &str,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        self.inner.list_prefix_stream(prefix)
-    }
-}
-
-#[derive(Debug)]
-struct ContentBlobGetCountingStore {
-    inner: LocalFsStore,
-    content_blob_gets: AtomicUsize,
-    content_blob_puts: AtomicUsize,
-}
-
-impl ContentBlobGetCountingStore {
-    fn new(root: &Path) -> Self {
-        Self {
-            inner: LocalFsStore::new(root).expect("create local-fs store"),
-            content_blob_gets: AtomicUsize::new(0),
-            content_blob_puts: AtomicUsize::new(0),
-        }
-    }
-
-    fn reset_content_blob_counters(&self) {
-        self.content_blob_gets.store(0, Ordering::SeqCst);
-        self.content_blob_puts.store(0, Ordering::SeqCst);
-    }
-
-    fn content_blob_get_count(&self) -> usize {
-        self.content_blob_gets.load(Ordering::SeqCst)
-    }
-
-    fn content_blob_put_count(&self) -> usize {
-        self.content_blob_puts.load(Ordering::SeqCst)
-    }
-}
-
-#[async_trait]
-impl ObjectStore for ContentBlobGetCountingStore {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.inner.head(key).await
-    }
-
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
-        if key.starts_with("content-stores/") && key.contains("/blobs/") {
-            self.content_blob_gets.fetch_add(1, Ordering::SeqCst);
-        }
-        self.inner.get(key, range).await
-    }
-
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        if key.starts_with("content-stores/") && key.contains("/blobs/") {
-            self.content_blob_gets.fetch_add(1, Ordering::SeqCst);
-        }
-        self.inner.get_with_metadata(key).await
-    }
-
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        if key.starts_with("content-stores/") && key.contains("/blobs/") {
-            self.content_blob_puts.fetch_add(1, Ordering::SeqCst);
-        }
-        self.inner.put(key, bytes, mode).await
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        self.inner.delete(key).await
-    }
-
-    fn list_prefix_stream(
-        &self,
-        prefix: &str,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        self.inner.list_prefix_stream(prefix)
-    }
-}
-
-#[derive(Debug)]
-struct FailContentBlobPutsStore {
-    inner: LocalFsStore,
-    fail_remaining: AtomicUsize,
-}
-
-impl FailContentBlobPutsStore {
-    fn new(root: &Path) -> Self {
-        Self {
-            inner: LocalFsStore::new(root).expect("create local-fs store"),
-            fail_remaining: AtomicUsize::new(0),
-        }
-    }
-
-    /// Arms the store to fail the next `count` content-blob puts, then
-    /// recover.
-    fn fail_next_content_blob_puts(&self, count: usize) {
-        self.fail_remaining.store(count, Ordering::SeqCst);
-    }
-
-    fn should_fail_content_blob_put(&self) -> bool {
-        self.fail_remaining
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
-                remaining.checked_sub(1)
-            })
-            .is_ok()
-    }
-}
-
-#[async_trait]
-impl ObjectStore for FailContentBlobPutsStore {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.inner.head(key).await
-    }
-
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
-        self.inner.get(key, range).await
-    }
-
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        self.inner.get_with_metadata(key).await
-    }
-
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        if key.starts_with("content-stores/")
-            && key.contains("/blobs/")
-            && self.should_fail_content_blob_put()
-        {
-            return Err(ObjectStoreError::transport(
-                key,
-                "injected content write failure",
-            ));
-        }
-        self.inner.put(key, bytes, mode).await
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        self.inner.delete(key).await
-    }
-
-    fn list_prefix_stream(
-        &self,
-        prefix: &str,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        self.inner.list_prefix_stream(prefix)
-    }
+fn fail_content_blob_puts_store(root: &Path) -> FailStore<LocalFsStore> {
+    FailStore::new(
+        LocalFsStore::new(root).expect("create local-fs store"),
+        KeyPredicate::content_blob(),
+        OperationClass::Put,
+        InjectedError::Transport("injected content write failure".to_owned()),
+    )
 }

@@ -98,77 +98,18 @@ fn error_status_mapping_matches_the_api_spec_table() {
         "api.md documents codes this build does not register: {documented:?}"
     );
 }
+use loonfs_test_support::http::raw_agent;
+use loonfs_test_support::ids::namespace_id;
+use loonfs_test_support::stores::{BlockingStore, KeyPredicate, MetadataMapStore, OperationClass};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tempfile::tempdir;
-use tokio::sync::Notify;
 
 #[derive(Debug)]
 struct StaleHeadOnceStore {
     inner: LocalFsStore,
     head_key: String,
     armed: AtomicBool,
-}
-
-#[derive(Debug)]
-struct AgedMetadataStore(LocalFsStore);
-
-fn age_metadata(mut metadata: ObjectMetadata) -> ObjectMetadata {
-    metadata.last_modified_ms = Some(0);
-    metadata
-}
-
-/// Raw-request agent with socket inactivity timeouts. A starved or wedged
-/// server must produce a readable transport error, not an indefinite hang
-/// or a panic inside the HTTP client's response path — the failure mode a
-/// loaded CI runner once hit through the default timeout-less agent.
-fn raw_agent() -> ureq::Agent {
-    ureq::AgentBuilder::new()
-        .timeout_read(std::time::Duration::from_secs(30))
-        .timeout_write(std::time::Duration::from_secs(30))
-        .build()
-}
-
-#[async_trait]
-impl ObjectStore for AgedMetadataStore {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        Ok(self.0.head(key).await?.map(age_metadata))
-    }
-
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
-        self.0.get(key, range).await
-    }
-
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        Ok(self.0.get_with_metadata(key).await?.map(|mut body| {
-            body.metadata = age_metadata(body.metadata);
-            body
-        }))
-    }
-
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        Ok(age_metadata(self.0.put(key, bytes, mode).await?))
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        self.0.delete(key).await
-    }
-
-    fn list_prefix_stream(
-        &self,
-        prefix: &str,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        self.0.list_prefix_stream(prefix)
-    }
 }
 
 impl StaleHeadOnceStore {
@@ -226,15 +167,6 @@ impl ObjectStore for StaleHeadOnceStore {
     ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
         self.inner.list_prefix_stream(prefix)
     }
-}
-
-#[derive(Debug)]
-struct BlockGrepRootOnceStore {
-    inner: LocalFsStore,
-    root_key: String,
-    armed: AtomicBool,
-    entered: Notify,
-    release: Notify,
 }
 
 #[derive(Debug)]
@@ -308,65 +240,6 @@ impl ObjectStore for FaultGrepRootStore {
                 object_key: key.to_owned(),
             });
         }
-        self.inner.put(key, bytes, mode).await
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        self.inner.delete(key).await
-    }
-
-    fn list_prefix_stream(
-        &self,
-        prefix: &str,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        self.inner.list_prefix_stream(prefix)
-    }
-}
-
-impl BlockGrepRootOnceStore {
-    fn new(root: impl AsRef<Path>, namespace_id: &NamespaceId) -> Self {
-        Self {
-            inner: LocalFsStore::new(root.as_ref()).expect("construct local store"),
-            root_key: grep_root_key(namespace_id),
-            armed: AtomicBool::new(false),
-            entered: Notify::new(),
-            release: Notify::new(),
-        }
-    }
-
-    fn arm(&self) {
-        self.armed.store(true, Ordering::SeqCst);
-    }
-}
-
-#[async_trait]
-impl ObjectStore for BlockGrepRootOnceStore {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.inner.head(key).await
-    }
-
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
-        self.inner.get(key, range).await
-    }
-
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        if key == self.root_key && self.armed.swap(false, Ordering::SeqCst) {
-            self.entered.notify_one();
-            self.release.notified().await;
-        }
-        self.inner.get_with_metadata(key).await
-    }
-
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
         self.inner.put(key, bytes, mode).await
     }
 
@@ -469,7 +342,11 @@ async fn graceful_shutdown_drains_requests_and_settles_the_writer() {
 async fn embedded_shutdown_drains_an_active_grep_step() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("grep-shutdown");
-    let blocking_store = Arc::new(BlockGrepRootOnceStore::new(temp_dir.path(), &namespace_id));
+    let blocking_store = Arc::new(BlockingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("construct local store"),
+        KeyPredicate::exact(grep_root_key(&namespace_id)),
+        OperationClass::GetWithMetadata,
+    ));
     let store = blocking_store.clone() as SharedObjectStore;
     let writer = test_runtime(store.clone(), "grep-shutdown-seed").await;
     writer
@@ -486,7 +363,7 @@ async fn embedded_shutdown_drains_an_active_grep_step() {
     .await
     .expect("enable grep");
 
-    blocking_store.arm();
+    blocking_store.block_next();
     let config = test_config(temp_dir.path(), "grep-shutdown-server");
     let (_router, lifecycle, state) =
         super::app_with_store_and_transfer_issuer(config, store, None)
@@ -497,7 +374,7 @@ async fn embedded_shutdown_drains_an_active_grep_step() {
         .as_ref()
         .expect("embedded drivers")
         .start(&namespace_id);
-    blocking_store.entered.notified().await;
+    blocking_store.wait_until_blocked().await;
 
     let shutdown = tokio::runtime::Handle::current().spawn(lifecycle.shutdown());
     tokio::task::yield_now().await;
@@ -505,7 +382,7 @@ async fn embedded_shutdown_drains_an_active_grep_step() {
         !shutdown.is_finished(),
         "shutdown must wait for the active bounded grep step"
     );
-    blocking_store.release.notify_one();
+    blocking_store.release();
     shutdown
         .await
         .expect("join shutdown")
@@ -975,8 +852,9 @@ async fn http_admin_repair_reports_completed_already_complete_in_flight_and_not_
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_admin_repair_reports_reaped_for_aged_debris() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(AgedMetadataStore(
+    let store = Arc::new(MetadataMapStore::aged(
         LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::any(),
     ));
     let namespace_id = namespace_id("aged");
     let root_key = metadata_root(namespace_id.as_str());
@@ -2152,10 +2030,6 @@ async fn delete_path_recursive(
     )
     .await
     .unwrap_or_else(|error| panic!("delete `{absolute_path}`: {error}"));
-}
-
-fn namespace_id(value: &str) -> NamespaceId {
-    NamespaceId::parse(value).expect("valid namespace id")
 }
 
 fn assert_api_error<T: std::fmt::Debug>(

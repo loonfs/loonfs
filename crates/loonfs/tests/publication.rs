@@ -3,129 +3,21 @@
 //! one, or all of them — abandons only result delivery, never the
 //! publication itself.
 
-use async_trait::async_trait;
-use bytes::Bytes;
 use futures::future::BoxFuture;
-use futures::stream::BoxStream;
 use loonfs::publish::{parse_mutation_path, PathMutationIntent};
 use loonfs::{
     BeginUploadRequest, CommitId, CommitResponse, CoreError, CreateNamespaceOptions,
     DestinationBehavior, FsWriter, NamespaceId, PutFileOptions, SharedObjectStore,
 };
-use loonfs_objectstore::keys::wal_head;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_objectstore::{
-    ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
-};
+use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationClass};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tempfile::tempdir;
-use tokio::sync::Notify;
 use tokio::time::{timeout, Duration};
 
-/// Blocks head compare-and-swap writes while armed, so a test can park a
-/// publication mid-flight, cancel its callers, and then let it finish.
-#[derive(Debug)]
-struct BlockingHeadCasStore {
-    inner: LocalFsStore,
-    head_key: String,
-    armed: AtomicBool,
-    blocked: AtomicBool,
-    blocked_notify: Notify,
-    release: Notify,
-}
-
-impl BlockingHeadCasStore {
-    fn new(root: &Path, namespace_id: &NamespaceId) -> Self {
-        Self {
-            inner: LocalFsStore::new(root).expect("create local-fs store"),
-            head_key: wal_head(namespace_id.as_str()),
-            armed: AtomicBool::new(false),
-            blocked: AtomicBool::new(false),
-            blocked_notify: Notify::new(),
-            release: Notify::new(),
-        }
-    }
-
-    fn arm(&self) {
-        self.armed.store(true, Ordering::SeqCst);
-    }
-
-    async fn wait_for_blocked_head_cas(&self) {
-        timeout(Duration::from_secs(10), async {
-            while !self.blocked.load(Ordering::SeqCst) {
-                let notified = self.blocked_notify.notified();
-                if self.blocked.load(Ordering::SeqCst) {
-                    break;
-                }
-                let _ = timeout(Duration::from_millis(50), notified).await;
-            }
-        })
-        .await
-        .expect("a head CAS must reach the block");
-    }
-
-    fn release(&self) {
-        self.armed.store(false, Ordering::SeqCst);
-        self.release.notify_waiters();
-    }
-}
-
-#[async_trait]
-impl ObjectStore for BlockingHeadCasStore {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.inner.head(key).await
-    }
-
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        self.inner.get_with_metadata(key).await
-    }
-
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
-        self.inner.get(key, range).await
-    }
-
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        let is_head_cas = key == self.head_key && matches!(mode, PutMode::CompareAndSwap { .. });
-        if is_head_cas && self.armed.load(Ordering::SeqCst) {
-            self.blocked.store(true, Ordering::SeqCst);
-            self.blocked_notify.notify_waiters();
-            while self.armed.load(Ordering::SeqCst) {
-                let released = self.release.notified();
-                if !self.armed.load(Ordering::SeqCst) {
-                    break;
-                }
-                let _ = timeout(Duration::from_millis(50), released).await;
-            }
-            self.blocked.store(false, Ordering::SeqCst);
-        }
-        self.inner.put(key, bytes, mode).await
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        self.inner.delete(key).await
-    }
-
-    fn list_prefix_stream(
-        &self,
-        prefix: &str,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        self.inner.list_prefix_stream(prefix)
-    }
-}
-
 struct ParkedPuts {
-    store: Arc<BlockingHeadCasStore>,
+    store: Arc<BlockingStore<LocalFsStore>>,
     writer: Arc<FsWriter>,
     namespace_id: NamespaceId,
     first: tokio::task::JoinHandle<loonfs::Result<CommitResponse>>,
@@ -149,7 +41,11 @@ struct ParkedPuts {
 /// that never existed cannot land.
 async fn park_two_puts(temp_dir: &Path) -> ParkedPuts {
     let namespace_id = NamespaceId::parse("parked").expect("valid namespace id");
-    let store_impl = Arc::new(BlockingHeadCasStore::new(temp_dir, &namespace_id));
+    let store_impl = Arc::new(BlockingStore::new(
+        LocalFsStore::new(temp_dir).expect("create local-fs store"),
+        KeyPredicate::wal_head(namespace_id.as_str()),
+        OperationClass::CompareAndSwap,
+    ));
     let store: SharedObjectStore = store_impl.clone();
     let writer = Arc::new(
         FsWriter::builder_with_store(store.clone())
@@ -200,7 +96,7 @@ async fn park_two_puts(temp_dir: &Path) -> ParkedPuts {
                 .await
         })
     };
-    store_impl.wait_for_blocked_head_cas().await;
+    store_impl.wait_until_blocked().await;
 
     // The publish task is parked inside the blocked CAS with its batch
     // already taken, so this submission deterministically opens the next

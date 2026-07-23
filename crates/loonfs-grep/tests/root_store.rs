@@ -12,6 +12,7 @@ use loonfs_grep::root::{
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ObjectStore, PutMode};
+use loonfs_test_support::ids::namespace_id;
 
 #[tokio::test]
 async fn load_rejects_namespace_identity_mismatch() {
@@ -158,8 +159,4 @@ fn root(namespace_id: NamespaceId, built_through_seq: ChangeSeq) -> GrepRootStat
         Vec::new(),
     )
     .expect("valid root")
-}
-
-fn namespace_id(value: &str) -> NamespaceId {
-    NamespaceId::parse(value).expect("valid namespace id")
 }

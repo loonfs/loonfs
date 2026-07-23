@@ -1,8 +1,6 @@
 //! Content-object request accounting across staging and publication.
 
-use async_trait::async_trait;
 use bytes::Bytes;
-use futures::stream::BoxStream;
 use loonfs::content_tokens::ContentTokenError;
 use loonfs::publish::{
     parse_mutation_path, ContentPreparationError, NamespaceMutation, NamespaceMutationCandidate,
@@ -17,32 +15,19 @@ use loonfs_api::wire::control::{
     encode_control_object, ControlObjectKind, NamespaceConfigEnvelope, NamespaceConfigState,
 };
 use loonfs_api::{ContentStoreId, NamePolicy};
-use loonfs_objectstore::keys::{namespace_config, wal_head};
+use loonfs_objectstore::keys::namespace_config;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_objectstore::{
-    ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
+use loonfs_test_support::stores::{
+    BlockingStore, CountingStore, FailStore, InjectedError, KeyPredicate, OperationClass,
 };
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tempfile::{tempdir, TempDir};
-use tokio::sync::Notify;
-use tokio::time::{timeout, Duration};
 
 #[derive(Debug, Clone, Copy)]
 enum KeyClass {
     Content = 0,
     Other = 1,
-}
-
-impl KeyClass {
-    fn of(key: &str) -> Self {
-        if key.starts_with("content-stores/") {
-            Self::Content
-        } else {
-            Self::Other
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -64,310 +49,64 @@ impl RequestCounts {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone)]
 struct RequestLog {
-    counts: Mutex<RequestCounts>,
+    store: SharedObjectStore,
+    content: Arc<CountingStore<SharedObjectStore>>,
+    other: Arc<CountingStore<SharedObjectStore>>,
 }
 
 impl RequestLog {
-    fn record_head(&self, key: &str) {
-        self.counts
-            .lock()
-            .expect("request log lock poisoned")
-            .by_class[KeyClass::of(key) as usize]
-            .head += 1;
-    }
-
-    fn record_get(&self, key: &str, bytes_read: usize) {
-        let class = KeyClass::of(key);
-        let mut counts = self.counts.lock().expect("request log lock poisoned");
-        counts.by_class[class as usize].get += 1;
-        if matches!(class, KeyClass::Content) {
-            counts.content_get_bytes += bytes_read;
-        }
-    }
-
-    fn record_put(&self, key: &str) {
-        self.counts
-            .lock()
-            .expect("request log lock poisoned")
-            .by_class[KeyClass::of(key) as usize]
-            .put += 1;
-    }
-
-    fn snapshot(&self) -> RequestCounts {
-        *self.counts.lock().expect("request log lock poisoned")
-    }
-
-    fn reset(&self) {
-        *self.counts.lock().expect("request log lock poisoned") = RequestCounts::default();
-    }
-}
-
-#[derive(Debug)]
-struct RecordingStore {
-    inner: LocalFsStore,
-    log: RequestLog,
-}
-
-impl RecordingStore {
     fn new(root: &Path) -> Self {
+        let inner: SharedObjectStore =
+            Arc::new(LocalFsStore::new(root).expect("create local-fs store"));
+        let other = Arc::new(CountingStore::new(
+            inner,
+            KeyPredicate::new(|key| !key.starts_with("content-stores/")),
+        ));
+        let content = Arc::new(CountingStore::new(
+            other.clone() as SharedObjectStore,
+            KeyPredicate::prefix("content-stores/"),
+        ));
         Self {
-            inner: LocalFsStore::new(root).expect("create local-fs store"),
-            log: RequestLog::default(),
+            store: content.clone(),
+            content,
+            other,
         }
+    }
+
+    fn store(&self) -> SharedObjectStore {
+        self.store.clone()
     }
 
     fn snapshot(&self) -> RequestCounts {
-        self.log.snapshot()
+        let content = self.content.snapshot();
+        let other = self.other.snapshot();
+        let mut counts = RequestCounts::default();
+        counts.by_class[KeyClass::Content as usize] = OperationCounts {
+            head: content.heads,
+            get: content.gets + content.gets_with_metadata,
+            put: content.puts,
+        };
+        counts.by_class[KeyClass::Other as usize] = OperationCounts {
+            head: other.heads,
+            get: other.gets + other.gets_with_metadata,
+            put: other.puts,
+        };
+        counts.content_get_bytes =
+            usize::try_from(content.read_bytes).expect("test byte count should fit usize");
+        counts
     }
 
     fn reset(&self) {
-        self.log.reset();
-    }
-}
-
-#[async_trait]
-impl ObjectStore for RecordingStore {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.log.record_head(key);
-        self.inner.head(key).await
-    }
-
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
-        let result = self.inner.get(key, range).await;
-        let bytes_read = result
-            .as_ref()
-            .ok()
-            .and_then(|bytes| bytes.as_ref())
-            .map_or(0, Bytes::len);
-        self.log.record_get(key, bytes_read);
-        result
-    }
-
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        let result = self.inner.get_with_metadata(key).await;
-        let bytes_read = result
-            .as_ref()
-            .ok()
-            .and_then(|body| body.as_ref())
-            .map_or(0, |body| body.bytes.len());
-        self.log.record_get(key, bytes_read);
-        result
-    }
-
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        self.log.record_put(key);
-        self.inner.put(key, bytes, mode).await
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        self.inner.delete(key).await
-    }
-
-    fn list_prefix_stream(
-        &self,
-        prefix: &str,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        self.inner.list_prefix_stream(prefix)
-    }
-}
-
-#[derive(Debug)]
-struct BlockingHeadCasStore {
-    inner: Arc<RecordingStore>,
-    head_key: String,
-    block_next: AtomicBool,
-    blocked: AtomicBool,
-    released: AtomicBool,
-    blocked_notify: Notify,
-    release_notify: Notify,
-}
-
-impl BlockingHeadCasStore {
-    fn new(inner: Arc<RecordingStore>, namespace_id: &NamespaceId) -> Self {
-        Self {
-            inner,
-            head_key: wal_head(namespace_id.as_str()),
-            block_next: AtomicBool::new(false),
-            blocked: AtomicBool::new(false),
-            released: AtomicBool::new(false),
-            blocked_notify: Notify::new(),
-            release_notify: Notify::new(),
-        }
-    }
-
-    fn arm_next_head_cas(&self) {
-        self.released.store(false, Ordering::SeqCst);
-        self.blocked.store(false, Ordering::SeqCst);
-        self.block_next.store(true, Ordering::SeqCst);
-    }
-
-    async fn wait_for_blocked_head_cas(&self) {
-        timeout(Duration::from_secs(10), async {
-            while !self.blocked.load(Ordering::SeqCst) {
-                let notified = self.blocked_notify.notified();
-                if self.blocked.load(Ordering::SeqCst) {
-                    break;
-                }
-                // Bounded wait: `notified` registers on first poll, so a notify
-                // between the flag check and the await would otherwise be lost.
-                let _ = timeout(Duration::from_millis(50), notified).await;
-            }
-        })
-        .await
-        .expect("a head CAS must reach the block");
-    }
-
-    fn release_head_cas(&self) {
-        self.released.store(true, Ordering::SeqCst);
-        self.release_notify.notify_waiters();
-    }
-}
-
-#[async_trait]
-impl ObjectStore for BlockingHeadCasStore {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.inner.head(key).await
-    }
-
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
-        self.inner.get(key, range).await
-    }
-
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        self.inner.get_with_metadata(key).await
-    }
-
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        let should_block = key == self.head_key
-            && matches!(mode, PutMode::CompareAndSwap { .. })
-            && self.block_next.swap(false, Ordering::SeqCst);
-        if should_block {
-            self.blocked.store(true, Ordering::SeqCst);
-            self.blocked_notify.notify_waiters();
-            while !self.released.load(Ordering::SeqCst) {
-                let notified = self.release_notify.notified();
-                if self.released.load(Ordering::SeqCst) {
-                    break;
-                }
-                // Bounded wait, matching publication.rs: a release landing between
-                // the flag check and the await must not strand this writer.
-                let _ = timeout(Duration::from_millis(50), notified).await;
-            }
-            self.blocked.store(false, Ordering::SeqCst);
-        }
-        self.inner.put(key, bytes, mode).await
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        self.inner.delete(key).await
-    }
-
-    fn list_prefix_stream(
-        &self,
-        prefix: &str,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        self.inner.list_prefix_stream(prefix)
-    }
-}
-
-#[derive(Debug)]
-struct HeadCasConflictStore {
-    inner: Arc<RecordingStore>,
-    head_key: String,
-    fail_next: AtomicBool,
-    attempts: AtomicUsize,
-}
-
-impl HeadCasConflictStore {
-    fn new(inner: Arc<RecordingStore>, namespace_id: &NamespaceId) -> Self {
-        Self {
-            inner,
-            head_key: wal_head(namespace_id.as_str()),
-            fail_next: AtomicBool::new(false),
-            attempts: AtomicUsize::new(0),
-        }
-    }
-
-    fn fail_next_head_cas(&self) {
-        self.attempts.store(0, Ordering::SeqCst);
-        self.fail_next.store(true, Ordering::SeqCst);
-    }
-
-    fn head_cas_attempts(&self) -> usize {
-        self.attempts.load(Ordering::SeqCst)
-    }
-}
-
-#[async_trait]
-impl ObjectStore for HeadCasConflictStore {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.inner.head(key).await
-    }
-
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
-        self.inner.get(key, range).await
-    }
-
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        self.inner.get_with_metadata(key).await
-    }
-
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        if key == self.head_key && matches!(mode, PutMode::CompareAndSwap { .. }) {
-            self.attempts.fetch_add(1, Ordering::SeqCst);
-            if self.fail_next.swap(false, Ordering::SeqCst) {
-                return Err(ObjectStoreError::PreconditionFailed {
-                    object_key: key.to_owned(),
-                });
-            }
-        }
-        self.inner.put(key, bytes, mode).await
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        self.inner.delete(key).await
-    }
-
-    fn list_prefix_stream(
-        &self,
-        prefix: &str,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        self.inner.list_prefix_stream(prefix)
+        self.content.reset();
+        self.other.reset();
     }
 }
 
 struct TestHarness {
     _temp_dir: TempDir,
-    recording: Arc<RecordingStore>,
+    recording: RequestLog,
     store: SharedObjectStore,
     namespace_id: NamespaceId,
     writer: FsWriter,
@@ -376,8 +115,8 @@ struct TestHarness {
 impl TestHarness {
     async fn new(namespace: &str) -> Self {
         let temp_dir = tempdir().expect("tempdir");
-        let recording = Arc::new(RecordingStore::new(temp_dir.path()));
-        let store: SharedObjectStore = recording.clone();
+        let recording = RequestLog::new(temp_dir.path());
+        let store = recording.store();
         let namespace_id = NamespaceId::parse(namespace).expect("valid namespace id");
         let writer =
             build_initialized_writer(store.clone(), &namespace_id, "accounting-writer").await;
@@ -571,8 +310,8 @@ async fn put_file_prepared_performs_no_content_io() {
 #[tokio::test]
 async fn prepared_content_for_another_store_is_rejected_without_content_io() {
     let temp_dir = tempdir().expect("tempdir");
-    let recording = Arc::new(RecordingStore::new(temp_dir.path()));
-    let store: SharedObjectStore = recording.clone();
+    let recording = RequestLog::new(temp_dir.path());
+    let store = recording.store();
     let source = NamespaceId::parse("source-store").expect("source namespace id");
     let target = NamespaceId::parse("target-store").expect("target namespace id");
     let writer = build_initialized_writer(store.clone(), &source, "cross-store-writer").await;
@@ -614,8 +353,8 @@ async fn prepared_content_for_another_store_is_rejected_without_content_io() {
 #[tokio::test]
 async fn independent_namespaces_sharing_a_store_share_prepared_content() {
     let temp_dir = tempdir().expect("tempdir");
-    let recording = Arc::new(RecordingStore::new(temp_dir.path()));
-    let store: SharedObjectStore = recording.clone();
+    let recording = RequestLog::new(temp_dir.path());
+    let store = recording.store();
     let source = NamespaceId::parse("shared-source").expect("source namespace id");
     let target = NamespaceId::parse("shared-target").expect("target namespace id");
     let writer = build_initialized_writer(store.clone(), &source, "shared-store-writer").await;
@@ -653,8 +392,8 @@ async fn independent_namespaces_sharing_a_store_share_prepared_content() {
 #[tokio::test]
 async fn fork_and_source_share_prepared_content_in_both_directions() {
     let temp_dir = tempdir().expect("tempdir");
-    let recording = Arc::new(RecordingStore::new(temp_dir.path()));
-    let store: SharedObjectStore = recording.clone();
+    let recording = RequestLog::new(temp_dir.path());
+    let store = recording.store();
     let source = NamespaceId::parse("fork-source").expect("source namespace id");
     let fork = NamespaceId::parse("fork-target").expect("fork namespace id");
     let writer = build_initialized_writer(store, &source, "fork-sharing-writer").await;
@@ -1221,10 +960,11 @@ async fn new_rejected_preparation_fails_before_path_planning_without_content_ope
 async fn in_flight_duplicate_performs_no_additional_content_operations() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("in-flight-duplicate").expect("valid namespace id");
-    let recording = Arc::new(RecordingStore::new(temp_dir.path()));
-    let blocking = Arc::new(BlockingHeadCasStore::new(
-        Arc::clone(&recording),
-        &namespace_id,
+    let recording = RequestLog::new(temp_dir.path());
+    let blocking = Arc::new(BlockingStore::new(
+        recording.store(),
+        KeyPredicate::wal_head(namespace_id.as_str()),
+        OperationClass::CompareAndSwap,
     ));
     let store: SharedObjectStore = blocking.clone();
     let writer = build_initialized_writer(store.clone(), &namespace_id, "duplicate-writer").await;
@@ -1239,7 +979,7 @@ async fn in_flight_duplicate_performs_no_additional_content_operations() {
     let prepared = prepare_content(&store, &namespace_id, &content_ref).await;
     recording.reset();
 
-    blocking.arm_next_head_cas();
+    blocking.block_next();
     let primary = {
         let registry = writer.publisher();
         let namespace_id = namespace_id.clone();
@@ -1251,7 +991,7 @@ async fn in_flight_duplicate_performs_no_additional_content_operations() {
                 .await
         })
     };
-    blocking.wait_for_blocked_head_cas().await;
+    blocking.wait_until_blocked().await;
     let primary_counts = recording.snapshot();
     assert_content_counts(primary_counts, 0, 0, 0, 0);
 
@@ -1265,7 +1005,7 @@ async fn in_flight_duplicate_performs_no_additional_content_operations() {
         futures::poll!(duplicate.as_mut()).is_pending(),
         "the duplicate must join the in-flight primary"
     );
-    blocking.release_head_cas();
+    blocking.release();
 
     let duplicate_receipt = duplicate.await.expect("duplicate receipt");
     let primary_receipt = primary
@@ -1288,10 +1028,12 @@ async fn in_flight_duplicate_performs_no_additional_content_operations() {
 async fn stale_head_retry_preserves_content_admission() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("stale-head-retry").expect("valid namespace id");
-    let recording = Arc::new(RecordingStore::new(temp_dir.path()));
-    let conflicting = Arc::new(HeadCasConflictStore::new(
-        Arc::clone(&recording),
-        &namespace_id,
+    let recording = RequestLog::new(temp_dir.path());
+    let conflicting = Arc::new(FailStore::new(
+        recording.store(),
+        KeyPredicate::wal_head(namespace_id.as_str()),
+        OperationClass::CompareAndSwap,
+        InjectedError::PreconditionFailed,
     ));
     let store: SharedObjectStore = conflicting.clone();
     let writer = build_initialized_writer(store.clone(), &namespace_id, "retry-writer").await;
@@ -1305,7 +1047,7 @@ async fn stale_head_retry_preserves_content_admission() {
     // before the reset so this phase isolates publication retries.
     let prepared = prepare_content(&store, &namespace_id, &content_ref).await;
     recording.reset();
-    conflicting.fail_next_head_cas();
+    conflicting.fail_next(1);
 
     writer
         .publisher()
@@ -1313,7 +1055,7 @@ async fn stale_head_retry_preserves_content_admission() {
         .await
         .expect("publish after stale-head retry");
 
-    assert_eq!(conflicting.head_cas_attempts(), 2);
+    assert_eq!(conflicting.attempts(), 2);
     assert_content_counts(recording.snapshot(), 0, 0, 0, 0);
 }
 
@@ -1323,10 +1065,11 @@ async fn stale_head_retry_preserves_content_admission() {
 async fn mixed_batch_publishes_admitted_put_and_rejects_unprepared_put_without_content_io() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("mixed-preparation").expect("valid namespace id");
-    let recording = Arc::new(RecordingStore::new(temp_dir.path()));
-    let blocking = Arc::new(BlockingHeadCasStore::new(
-        Arc::clone(&recording),
-        &namespace_id,
+    let recording = RequestLog::new(temp_dir.path());
+    let blocking = Arc::new(BlockingStore::new(
+        recording.store(),
+        KeyPredicate::wal_head(namespace_id.as_str()),
+        OperationClass::CompareAndSwap,
     ));
     let store: SharedObjectStore = blocking.clone();
     let writer = build_initialized_writer(store.clone(), &namespace_id, "mixed-writer").await;
@@ -1340,7 +1083,7 @@ async fn mixed_batch_publishes_admitted_put_and_rejects_unprepared_put_without_c
     let prepared = prepare_content(&store, &namespace_id, &content_ref).await;
     recording.reset();
 
-    blocking.arm_next_head_cas();
+    blocking.block_next();
     let blocker = {
         let registry = writer.publisher();
         let namespace_id = namespace_id.clone();
@@ -1357,7 +1100,7 @@ async fn mixed_batch_publishes_admitted_put_and_rejects_unprepared_put_without_c
                 .await
         })
     };
-    blocking.wait_for_blocked_head_cas().await;
+    blocking.wait_until_blocked().await;
 
     let registry = writer.publisher();
     let mut admitted = Box::pin(registry.submit_path_intent_with_prepared_content(
@@ -1378,7 +1121,7 @@ async fn mixed_batch_publishes_admitted_put_and_rejects_unprepared_put_without_c
         "unprepared put must join the pending batch"
     );
 
-    blocking.release_head_cas();
+    blocking.release();
     blocker
         .await
         .expect("blocker task")

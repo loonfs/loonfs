@@ -3,12 +3,13 @@
 #![allow(clippy::panic)]
 
 use loonfs_api::wire::sst_blocks::BlockHandle;
-use loonfs_api::{ChangeSeq, CheckpointId, IndexSegmentId, NamespaceId};
+use loonfs_api::{ChangeSeq, CheckpointId, IndexSegmentId};
 use loonfs_grep::root::{
     decode_grep_manifest, decode_grep_root, encode_grep_manifest, encode_grep_root, GrepFoldState,
     GrepIndexState, GrepLifecycle, GrepManifestEnvelope, GrepManifestId, GrepRootCodecError,
     GrepRootEnvelope, GrepRootPointer, GrepRootState, GrepRootStateError, GrepSegmentRef,
 };
+use loonfs_test_support::ids::namespace_id;
 
 // Frozen v1 format pins. These byte strings are the durable compatibility
 // fixtures: changing field names, ordering, enum tags, or omission rules must
@@ -199,10 +200,6 @@ fn segment_ref(number: u8, run_ordinal: u64, level: u32, segment_index: u32) -> 
         payload_checksum: "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
             .to_owned(),
     }
-}
-
-fn namespace_id(value: &str) -> NamespaceId {
-    NamespaceId::parse(value).expect("valid namespace id")
 }
 
 fn segment_id(number: u8) -> IndexSegmentId {

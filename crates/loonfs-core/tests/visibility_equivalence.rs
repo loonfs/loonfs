@@ -1,18 +1,15 @@
 #![allow(clippy::panic)]
 //! Differential coverage for tombstone visibility versus root reachability.
 
+mod common;
+
+use common::read_context;
 use loonfs_api::v0::{CommitOp, CommitRequest, CommitResponse};
 use loonfs_api::{
     AbsolutePath, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior, DisplayName,
-    EffectiveLimit, InodeId, NamespaceId, PageRequest, RevisionNo,
-};
-use loonfs_core::cache::{
-    MetadataTableCache, MetadataTableCacheConfig, WalTailProjectionCache,
-    WalTailProjectionCacheConfig, DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES,
-    DEFAULT_WAL_TAIL_PROJECTION_ROWS,
+    InodeId, NamespaceId, PageRequest, RevisionNo,
 };
 use loonfs_core::content::{prepare_stored_content, store_bytes_as_content};
-use loonfs_core::control::load_namespace_read_anchor;
 use loonfs_core::metadata::MetadataViewSession;
 use loonfs_core::publish::{NamespaceMutationCandidate, PathMutationIntent};
 use loonfs_core::{
@@ -22,7 +19,6 @@ use loonfs_core::{
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use std::collections::HashSet;
-use std::num::NonZeroU32;
 use std::sync::Arc;
 use tempfile::{tempdir, TempDir};
 
@@ -192,22 +188,7 @@ impl VisibilityHarness {
     }
 
     async fn read_context(&self) -> RuntimeReadContext {
-        let (head, root) = load_namespace_read_anchor(&self.store, self.namespace_id())
-            .await
-            .expect("load read anchor");
-        RuntimeReadContext {
-            head: head.state,
-            head_etag: head.identity.etag,
-            manifest_id: root.state.manifest_id,
-            manifest_object_id: root.state.manifest_object_id,
-            table_cache: Arc::new(MetadataTableCache::new(MetadataTableCacheConfig::default())),
-            tail_cache: Arc::new(WalTailProjectionCache::new(WalTailProjectionCacheConfig {
-                max_entries: 4,
-                max_rows: DEFAULT_WAL_TAIL_PROJECTION_ROWS,
-                max_decoded_bytes: DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES,
-            })),
-            catalog: None,
-        }
+        read_context(&self.store, self.namespace_id()).await
     }
 
     async fn inode_id(&self, path: &str) -> InodeId {
@@ -328,10 +309,6 @@ async fn derive_root_path<S: ObjectStore + ?Sized>(
     }
     components.reverse();
     Ok(Some(format!("/{}", components.join("/"))))
-}
-
-fn page_limit() -> EffectiveLimit {
-    EffectiveLimit::new(NonZeroU32::new(32).expect("non-zero page limit"))
 }
 
 #[tokio::test]
@@ -1013,7 +990,7 @@ async fn inode_revision_reads_remain_identity_addressed_after_visibility_is_lost
         .list_file_revisions_for_inode_page_with_runtime_context(
             inode_id,
             PageRequest {
-                limit: page_limit(),
+                limit: loonfs_test_support::ids::page_limit(32),
                 cursor: None,
             },
             &context,

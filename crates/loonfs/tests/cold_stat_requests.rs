@@ -9,8 +9,6 @@
 //! lookups was the scale term, and dependent per-section GETs were the
 //! wave count.
 
-use async_trait::async_trait;
-use bytes::Bytes;
 use loonfs::{
     CreateNamespaceOptions, FsAdmin, FsReader, FsWriter, MaintenanceTickOptions, NamespaceId,
 };
@@ -18,96 +16,19 @@ use loonfs_api::wire::manifest::decode_namespace_manifest_json;
 use loonfs_api::AbsolutePath;
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_objectstore::{
-    ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
-};
+use loonfs_test_support::stores::{KeyPredicate, RecordedGet, RecordingStore};
 use std::collections::BTreeSet;
-use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tempfile::tempdir;
-
-type RecordedGet = (String, Option<(u64, u64)>);
-
-#[derive(Debug, Default)]
-struct RequestLog {
-    gets: Mutex<Vec<RecordedGet>>,
-}
-
-impl RequestLog {
-    fn record(&self, key: &str, range: Option<&ByteRange>) {
-        self.gets.lock().expect("request log lock poisoned").push((
-            key.to_owned(),
-            range.map(|range| (range.start_inclusive, range.end_exclusive)),
-        ));
-    }
-
-    fn take(&self) -> Vec<RecordedGet> {
-        std::mem::take(&mut *self.gets.lock().expect("request log lock poisoned"))
-    }
-}
-
-#[derive(Debug)]
-struct RecordingStore {
-    inner: LocalFsStore,
-    log: Arc<RequestLog>,
-}
-
-impl RecordingStore {
-    fn new(root: &Path, log: Arc<RequestLog>) -> Self {
-        Self {
-            inner: LocalFsStore::new(root).expect("create local-fs store"),
-            log,
-        }
-    }
-}
-
-#[async_trait]
-impl ObjectStore for RecordingStore {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.inner.head(key).await
-    }
-
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
-        self.log.record(key, range.as_ref());
-        self.inner.get(key, range).await
-    }
-
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        self.log.record(key, None);
-        self.inner.get_with_metadata(key).await
-    }
-
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        self.inner.put(key, bytes, mode).await
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        self.inner.delete(key).await
-    }
-
-    fn list_prefix_stream(
-        &self,
-        prefix: &str,
-    ) -> futures::stream::BoxStream<'static, Result<String, ObjectStoreError>> {
-        self.inner.list_prefix_stream(prefix)
-    }
-}
 
 #[tokio::test]
 async fn cold_stat_pays_no_per_run_filter_fetches() {
     let temp_dir = tempdir().expect("tempdir");
-    let log = Arc::new(RequestLog::default());
-    let store: loonfs::SharedObjectStore =
-        Arc::new(RecordingStore::new(temp_dir.path(), Arc::clone(&log)));
+    let log = Arc::new(RecordingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
+        KeyPredicate::any(),
+    ));
+    let store: loonfs::SharedObjectStore = log.clone();
     let namespace_id = NamespaceId::parse("coldstat").expect("valid namespace id");
 
     let writer = FsWriter::builder_with_store(store.clone())
@@ -244,7 +165,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
         .build()
         .await
         .expect("build reader");
-    let _ = log.take();
+    let _ = log.take_gets();
     let entry = reader
         .stat_path(&namespace_id, "/tree/dir-000000/file-000000042.txt")
         .await
@@ -252,7 +173,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
     assert_eq!(entry.display_name.as_str(), "file-000000042.txt");
     assert!(entry.revision_no.is_some(), "file stat carries a revision");
 
-    let gets = log.take();
+    let gets = log.take_gets();
     let table_gets: Vec<&RecordedGet> = gets
         .iter()
         .filter(|(key, _)| table_keys.contains(key))

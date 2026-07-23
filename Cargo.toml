@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
   "crates/loonfs-api",
+  "crates/loonfs-test-support",
   "crates/loonfs-grep",
   "crates/loonfs-objectstore",
   "crates/loonfs-core",

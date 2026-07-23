@@ -7,9 +7,6 @@
 //! Run with:
 //!   cargo test -p loonfs --test request_accounting -- --ignored --nocapture
 
-use async_trait::async_trait;
-use bytes::Bytes;
-use futures::stream::BoxStream;
 use loonfs::{
     CreateNamespaceOptions, FsAdmin, FsReader, FsWriter, MaintenanceTickOptions, NamespaceId,
     PageRequest, PaginationPolicy, PutFileOptions, SharedObjectStore,
@@ -19,93 +16,14 @@ use loonfs_api::AbsolutePath;
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_objectstore::{
-    ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
-};
+use loonfs_test_support::stores::{KeyPredicate, RecordedGet, RecordingStore};
 use std::collections::BTreeMap;
-use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tempfile::tempdir;
 
 const FILES: usize = 10_000;
 const BATCH: usize = 100;
 const TICK_EVERY_BATCHES: usize = 33;
-
-type RecordedGet = (String, Option<(u64, u64)>);
-
-#[derive(Debug, Default)]
-struct RequestLog {
-    gets: Mutex<Vec<RecordedGet>>,
-}
-
-impl RequestLog {
-    fn record(&self, key: &str, range: Option<&ByteRange>) {
-        self.gets.lock().expect("request log lock poisoned").push((
-            key.to_owned(),
-            range.map(|range| (range.start_inclusive, range.end_exclusive)),
-        ));
-    }
-
-    fn take(&self) -> Vec<RecordedGet> {
-        std::mem::take(&mut *self.gets.lock().expect("request log lock poisoned"))
-    }
-}
-
-#[derive(Debug)]
-struct RecordingStore {
-    inner: LocalFsStore,
-    log: Arc<RequestLog>,
-}
-
-impl RecordingStore {
-    fn new(root: &Path, log: Arc<RequestLog>) -> Self {
-        Self {
-            inner: LocalFsStore::new(root).expect("create local-fs store"),
-            log,
-        }
-    }
-}
-
-#[async_trait]
-impl ObjectStore for RecordingStore {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.inner.head(key).await
-    }
-
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
-        self.log.record(key, range.as_ref());
-        self.inner.get(key, range).await
-    }
-
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        self.log.record(key, None);
-        self.inner.get_with_metadata(key).await
-    }
-
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        self.inner.put(key, bytes, mode).await
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        self.inner.delete(key).await
-    }
-
-    fn list_prefix_stream(
-        &self,
-        prefix: &str,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        self.inner.list_prefix_stream(prefix)
-    }
-}
 
 /// (family, level, index_offset, filter_offset) per table object key.
 type TableMap = BTreeMap<String, (String, u32, u64, u64)>;
@@ -185,8 +103,11 @@ fn report(phase: &str, gets: &[RecordedGet], tables: &TableMap) {
 #[ignore = "diagnostic: prints warm-phase request accounting"]
 async fn warm_phase_request_accounting() {
     let temp_dir = tempdir().expect("tempdir");
-    let log = Arc::new(RequestLog::default());
-    let store: SharedObjectStore = Arc::new(RecordingStore::new(temp_dir.path(), Arc::clone(&log)));
+    let log = Arc::new(RecordingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
+        KeyPredicate::any(),
+    ));
+    let store: SharedObjectStore = log.clone();
     let namespace_id = NamespaceId::parse("acct").expect("valid namespace id");
 
     // Build phase: bench-like shape — one wide hot directory, maintenance
@@ -274,7 +195,7 @@ async fn warm_phase_request_accounting() {
             .map(|(_, level, _, _)| *level)
             .collect::<std::collections::BTreeSet<_>>()
     );
-    let _ = log.take();
+    let _ = log.take_gets();
 
     // Warm phases, each on the same fresh handle like the bench: a full
     // paged list, then stat, read, write.
@@ -304,19 +225,19 @@ async fn warm_phase_request_accounting() {
         }
     }
     assert_eq!(listed, FILES);
-    report("warm full list", &log.take(), &tables);
+    report("warm full list", &log.take_gets(), &tables);
 
     reader
         .stat_path(&namespace_id, "/hot/file-04999.txt")
         .await
         .expect("stat");
-    report("warm stat", &log.take(), &tables);
+    report("warm stat", &log.take_gets(), &tables);
 
     reader
         .read_file_bytes(&namespace_id, "/hot/file-05000.txt")
         .await
         .expect("read");
-    report("warm read", &log.take(), &tables);
+    report("warm read", &log.take_gets(), &tables);
 
     let writer = FsWriter::builder_with_store(store.clone())
         .writer_id("acct-writer-2")
@@ -336,7 +257,7 @@ async fn warm_phase_request_accounting() {
         )
         .await
         .expect("warm write");
-    report("warm write", &log.take(), &tables);
+    report("warm write", &log.take_gets(), &tables);
 
     // A second write on the same handle separates per-handle warmup cost
     // from per-write cost.
@@ -352,5 +273,9 @@ async fn warm_phase_request_accounting() {
         )
         .await
         .expect("second warm write");
-    report("warm write (same handle, second)", &log.take(), &tables);
+    report(
+        "warm write (same handle, second)",
+        &log.take_gets(),
+        &tables,
+    );
 }
