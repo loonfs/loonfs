@@ -41,6 +41,8 @@ impl ControlObjectKind {
     /// breaking change without invalidating every other control object.
     /// Version 1 (all kinds): a JSON envelope document carrying the payload
     /// as a raw JSON fragment whose checksum covers its exact bytes.
+    /// Version 2 (checkpoint records and upload sessions): an explicit
+    /// absorbing condemned lifecycle state for safe physical deletion.
     pub const fn format_version(self) -> u32 {
         match self {
             Self::NamespaceConfig => 1,
@@ -48,8 +50,8 @@ impl ControlObjectKind {
             Self::WalHead => 1,
             Self::WalFloor => 1,
             Self::MetadataRoot => 1,
-            Self::CheckpointRecord => 1,
-            Self::UploadSession => 1,
+            Self::CheckpointRecord => 2,
+            Self::UploadSession => 2,
         }
     }
 
@@ -122,16 +124,29 @@ pub struct ContentStoreDescriptorState {
 
 /// Lifecycle of a durable checkpoint record.
 ///
-/// Only `active`, non-expired checkpoints are long-term GC roots; `released`
-/// records are collectable tombstones — failed verification, an explicit
-/// owner release, or a fork owner proven gone all end here. Any record
-/// younger than the GC grace window is a root regardless of state.
+/// Only `active`, non-expired checkpoints are long-term GC roots. `released`
+/// records may be revived after basis verification; garbage collection first
+/// compare-and-swaps one into absorbing `condemned`, which no owner operation
+/// may leave, before deleting it. Any non-condemned record younger than the GC
+/// grace window remains protected regardless of state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum CheckpointRecordLifecycle {
     #[default]
     Active,
     Released,
+    Condemned,
+}
+
+impl std::fmt::Display for CheckpointRecordLifecycle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let state = match self {
+            Self::Active => "active",
+            Self::Released => "released",
+            Self::Condemned => "condemned",
+        };
+        formatter.write_str(state)
+    }
 }
 
 /// Durable owner of a checkpoint record: the party whose lifecycle decides
@@ -226,6 +241,10 @@ pub enum NamespaceState {
     /// Terminal: the namespace's history has ended. Reads, commits, forks,
     /// and re-creation of the same id are all refused.
     Deleted,
+    /// Temporary absorbing gate installed only by explicit repair before it
+    /// reaps a partial namespace tree. Create/fork attempts see a partial
+    /// namespace while this head exists; repair deletes this head last.
+    Condemned,
 }
 
 impl NamespaceState {
@@ -255,7 +274,7 @@ pub struct HeadState {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recent_segments: Vec<WalSegmentPointer>,
     /// Lifecycle state. Absent means active, on read and on write, so the
-    /// field appears only in deleted heads.
+    /// field appears only in deleted or repair-condemned heads.
     #[serde(default, skip_serializing_if = "NamespaceState::is_active")]
     pub state: NamespaceState,
 }
@@ -282,6 +301,19 @@ pub struct CompletedUpload {
     pub content_ref: ContentRef,
 }
 
+/// Lifecycle of a durable upload session.
+///
+/// `active` sessions may stage or complete content. Garbage collection
+/// compare-and-swaps an abandoned session to absorbing `condemned` before
+/// physical deletion; upload operations treat that state as not found.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UploadSessionLifecycle {
+    #[default]
+    Active,
+    Condemned,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UploadSessionState {
     pub namespace_id: NamespaceId,
@@ -297,6 +329,7 @@ pub struct UploadSessionState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completed: Option<CompletedUpload>,
     pub created_at_ms: u64,
+    pub state: UploadSessionLifecycle,
 }
 
 /// In-memory view of a control object envelope.

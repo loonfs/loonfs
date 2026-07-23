@@ -1,8 +1,6 @@
 //! Explicit per-namespace repair for incomplete namespace installations.
 
-use super::bootstrap::{
-    complete_post_head_bootstrap, recover_pre_head_debris, BootstrapNamespaceError, PreHeadRecovery,
-};
+use super::bootstrap::{complete_post_head_bootstrap, BootstrapNamespaceError};
 use super::catalog::{
     map_namespace_initialization_error_to_core, namespace_initialization_state,
     NamespaceInitializationState,
@@ -28,24 +26,29 @@ pub async fn repair_namespace<S: ObjectStore + ?Sized>(
         .map_err(map_namespace_initialization_error_to_core)?
     {
         NamespaceInitializationState::Complete => RepairNamespaceOutcome::AlreadyComplete,
-        NamespaceInitializationState::Absent => return Err(namespace_not_found(namespace_id)),
-        NamespaceInitializationState::PreHeadDebris => {
-            match recover_pre_head_debris(store, namespace_id, context.now_ms).await? {
-                PreHeadRecovery::Cleaned => RepairNamespaceOutcome::Reaped,
-                PreHeadRecovery::InFlight => RepairNamespaceOutcome::InFlight,
+        NamespaceInitializationState::Absent => {
+            // Normal create may ignore a lone immutable manifest because it
+            // blocks no fixed write. Explicit repair lists so it can still
+            // condemn the gate of an installer paused immediately after that
+            // manifest write; a truly empty namespace remains not found.
+            let namespace_prefix = format!("namespaces/{}/", namespace_id.as_str());
+            let keys = store
+                .list_prefix(&namespace_prefix)
+                .await
+                .map_err(|error| CoreError::store(&namespace_prefix, &error))?;
+            if keys.is_empty() {
+                return Err(namespace_not_found(namespace_id));
             }
+            map_reap(reap_abandoned_bootstrap(store, namespace_id, context).await?)
+        }
+        NamespaceInitializationState::PreHeadDebris => {
+            map_reap(reap_abandoned_bootstrap(store, namespace_id, context).await?)
         }
         NamespaceInitializationState::Partial => {
             if try_complete_post_head_install(store, namespace_id, context).await? {
                 RepairNamespaceOutcome::Completed
             } else {
-                match reap_abandoned_bootstrap(store, namespace_id, context).await? {
-                    AbandonedBootstrapReap::Reaped => RepairNamespaceOutcome::Reaped,
-                    AbandonedBootstrapReap::InFlight => RepairNamespaceOutcome::InFlight,
-                    AbandonedBootstrapReap::AlreadyComplete => {
-                        RepairNamespaceOutcome::AlreadyComplete
-                    }
-                }
+                map_reap(reap_abandoned_bootstrap(store, namespace_id, context).await?)
             }
         }
     };
@@ -54,6 +57,14 @@ pub async fn repair_namespace<S: ObjectStore + ?Sized>(
         namespace_id: namespace_id.clone(),
         outcome,
     })
+}
+
+fn map_reap(reap: AbandonedBootstrapReap) -> RepairNamespaceOutcome {
+    match reap {
+        AbandonedBootstrapReap::Reaped => RepairNamespaceOutcome::Reaped,
+        AbandonedBootstrapReap::InFlight => RepairNamespaceOutcome::InFlight,
+        AbandonedBootstrapReap::AlreadyComplete => RepairNamespaceOutcome::AlreadyComplete,
+    }
 }
 
 async fn try_complete_post_head_install<S: ObjectStore + ?Sized>(

@@ -1077,6 +1077,10 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     ) -> Result<()> {
         match namespace_liveness(&self.store, namespace_id).await {
             NamespaceLiveness::Gone => {
+                // A verified deleted namespace head is already the absorbing
+                // gate for this pointer: `enable` refuses that tombstone, so
+                // no legal writer can re-reference grep state after this
+                // liveness check. Pointer deletion needs no second state.
                 let mut deleted_any = false;
                 for key in keys {
                     if namespace_liveness(&self.store, namespace_id).await
@@ -1107,6 +1111,11 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                     .as_ref()
                     .map(live_grep_keys)
                     .unwrap_or_else(|| BTreeSet::from([root_key(namespace_id)]));
+                // Grep segments and manifests are immutable. An identical
+                // rebuild can only recreate the same derived bytes at the
+                // same key; pointer advance verifies and heals its manifest
+                // after CAS, so aged unreachable objects need no condemned
+                // state before deletion.
                 for key in keys.iter().filter(|key| !live.contains(*key)) {
                     let fresh = match load_grep_root(&self.store, namespace_id).await {
                         Ok(root) => root,
@@ -1353,7 +1362,8 @@ async fn namespace_liveness<S: ObjectStore + ?Sized>(
 ) -> NamespaceLiveness {
     match load_namespace_head_control(store, namespace_id).await {
         Ok(head) if head.state.state == NamespaceState::Deleted => NamespaceLiveness::Gone,
-        Ok(_) => NamespaceLiveness::Live,
+        Ok(head) if head.state.state == NamespaceState::Active => NamespaceLiveness::Live,
+        Ok(_) => NamespaceLiveness::Unknown,
         Err(ControlObjectLoadError::MissingObject { .. }) => NamespaceLiveness::Gone,
         Err(_) => NamespaceLiveness::Unknown,
     }
@@ -1370,6 +1380,11 @@ async fn ensure_live_namespace<S: ObjectStore + ?Sized>(
         })?;
     if head.state.state == NamespaceState::Deleted {
         return Err(CoreError::NamespaceDeleted {
+            namespace_id: namespace_id.clone(),
+        });
+    }
+    if head.state.state != NamespaceState::Active {
+        return Err(CoreError::NamespacePartiallyInitialized {
             namespace_id: namespace_id.clone(),
         });
     }

@@ -60,9 +60,9 @@ The required durable object families and standard key patterns are:
 | **WAL head** | Mutable | Hot head of the semantic commit stream: current visible boundary, writer epoch, writer liveness metadata, replay hints, and visible WAL tip. | `namespaces/{namespace_id}/wal/head.json` |
 | **WAL segments** | Immutable | Record one or more logical commits with a contiguous sequence range. | `namespaces/{namespace_id}/wal/segments/{start_seq:020}-{suffix}.wal.zst` |
 | **Namespace manifests** | Immutable | Record one namespace file-set version, including metadata table references, head summary, fork references, and the namespace features map. | `namespaces/{namespace_id}/metadata/manifests/{manifest_object_id}.manifest.json` |
-| **Checkpoint records** | Mutable lifecycle | Durable stable-view pins to a metadata manifest, each carrying a required owner (user or fork target); written active, verified after the write, flipped released on verification failure or owner release. | `namespaces/{namespace_id}/checkpoints/{checkpoint_id}.json` |
+| **Checkpoint records** | Mutable lifecycle | Durable stable-view pins to a metadata manifest, each carrying a required owner (user or fork target); active records may release or revive, and GC conditionally condemns them before deletion. | `namespaces/{namespace_id}/checkpoints/{checkpoint_id}.json` |
 | **Metadata tables** | Immutable | Store metadata rows referenced by manifests. Files may be owned by the namespace itself or by a fork source namespace. | `namespaces/{owner_namespace_id}/metadata/tables/{table_id}.sst.zst` |
-| **Upload sessions** | Mutable | Track one staged-content upload from begin to completion. | `namespaces/{namespace_id}/uploads/{upload_id}.json` |
+| **Upload sessions** | Mutable lifecycle | Track one staged-content upload from begin to completion; GC conditionally condemns abandoned active sessions before deletion. | `namespaces/{namespace_id}/uploads/{upload_id}.json` |
 | **Content-store descriptor** | Immutable | Record content-store identity. | `content-stores/{content_store_id}/descriptor.json` |
 | **Metadata root** | Mutable | Cold pointer to the best known materialized metadata root; monotonic CAS. | `namespaces/{namespace_id}/metadata/root.json` |
 | **WAL floor** | Mutable | Cold lower bound of retained WAL/change history; monotonic CAS. | `namespaces/{namespace_id}/wal/floor.json` |
@@ -124,14 +124,20 @@ The namespace tree's lifecycle can be read off its grammar:
 - **`namespace.json` is the existence marker**: written last at creation as
   the completion marker, kept forever after deletion as half of the
   tombstone pair that retires the namespace id.
-- **Creation and forking never repair partial namespace state.** The head
-  write remains the linearization point, but a normal create or fork that
-  finds any pre-head debris or a head without a descriptor answers
-  `namespace_partial` without writing or deleting anything, regardless of
-  age. Explicit per-namespace admin repair owns recovery: it completes a
+- **Creation and forking never repair partial namespace state.** After the
+  immutable target manifest is prepared, the head create-if-absent is the
+  first fixed-key conditional install write and the admission gate; root and
+  floor are written only after it lands. A normal create or fork that finds pre-head
+  debris or a head without a descriptor answers `namespace_partial` without
+  writing or deleting anything, regardless of age. Explicit per-namespace
+  admin repair owns recovery: it completes a
   genesis create or fork target whose immutable tree proves the missing
-  descriptor, reaps non-completable debris only after the derived safety
-  floor, and reports younger debris as `in_flight` without touching it.
+  descriptor, or reaps non-completable debris only after the derived safety
+  floor. Before reaping it conditionally installs `state: condemned` in the
+  head using the state it inspected, deletes the subtree, and deletes that
+  gate last. A racing installer therefore either owns the head first (repair
+  reports `in_flight`) or fails its own create-if-absent as
+  `namespace_partial`.
 
 Names are never authority anywhere — recovery follows the head and its
 references.
@@ -526,15 +532,18 @@ exact generation is the active one, so a stale recovery request can never
 cancel a later deletion. Only the root of a deletion can be undeleted —
 descendants are covered by the root's tombstone, not their own.
 
-A namespace's lifecycle has two recorded states, carried in the head's
-`state` field: `active` (the default; an absent field reads as active) and
-the terminal `deleted`. Initialization progress is deliberately *not*
-recorded here — a namespace is complete when its descriptor exists, partial
-when only earlier objects exist — because object presence cannot go stale.
-Deletion is the one transition presence cannot express: a deleted namespace
+A namespace head has three recorded states: `active` (the default; an absent
+field reads as active), terminal `deleted`, and repair-only `condemned`.
+Ordinary initialization progress is still expressed by object presence: a
+namespace is complete when its descriptor exists and partial when only the
+earlier install objects exist. `condemned` is the temporary exception and an
+absorbing deletion gate: explicit repair conditionally writes it before
+physical reaping and removes the head last. A crash between those operations
+leaves the name blocked as `namespace_partial`; the next repair pass resumes
+the reap without waiting for the age window again. Deletion is terminal and
 keeps its head and descriptor forever as the tombstone that retires its
 `namespace_id`. Readers MUST refuse to serve a namespace whose head state
-they do not recognize.
+they do not recognize, and MUST treat `condemned` as partial rather than live.
 
 Deleting a namespace is a fenced control-plane transition, not a logical
 commit: the deleting writer acquires the namespace writer epoch and
@@ -617,7 +626,7 @@ at minimum:
 
 - `seq`
 - `head_commit_id`
-- `state` (lifecycle: absent or `active`, or the terminal `deleted`)
+- `state` (absent or `active`, terminal `deleted`, or repair-only `condemned`)
 - `next_inode_id`
 - `visible_wal_tip` and the bounded `recent_segments` accelerator
 
@@ -645,9 +654,10 @@ an input to latest visibility. A record carries its basis facts (manifest id,
 seq, payload checksum, head commit id), a required tagged `owner` — a `user`
 owner with a name label, or a `fork` owner naming the target namespace the
 pin protects — an optional expiry (user-owned records only; fork pins never
-expire), and a lifecycle `state` of `active` or `released`. Only active,
-non-expired records are long-term GC roots; released records are collectable
-tombstones, whether verification failed or the owner let go. A user-owned
+expire), and a lifecycle `state` of `active`, `released`, or absorbing
+`condemned`. Only active, non-expired records are long-term GC roots;
+released records remain revivable collectable tombstones, while condemned
+records refuse renewal, revival, and release. A user-owned
 record persists until released or expired; a fork-owned record persists while
 its fork target may still read the basis. Creation is write-then-verify:
 write the record active, then verify — under the self-enforced verify
@@ -666,10 +676,14 @@ shortened, or cleared — while `created_at_ms` keeps the original creation
 instant, and the response always reports the durable state. Distinct owners
 of one basis hold distinct records with
 independent lifecycles. Explicit release flips a user-owned record
-`active -> released` by compare-and-swap and is idempotent; the record itself
-is reaped by a later garbage-collection pass, and its basis becomes
-collectable only on the pass after that (records-last, "Garbage
-collection").
+`active -> released` by compare-and-swap and is idempotent. GC loads a
+collectable record and its etag together, changes `released` (or expired
+`active`) to `condemned` with exactly that etag, and only then deletes the key
+unconditionally. A failed condemn CAS means the inspected state changed, so
+the record is retained without retry. A crash after condemnation blocks the
+deterministic name benignly until the next GC pass deletes the condemned
+record; a fresh create can then reuse the name. Its basis becomes collectable
+only after condemnation (records-last, "Garbage collection").
 
 A namespace manifest is the durable object for one namespace file-set version.
 It may reference one or more immutable metadata runs; standalone checkpoint
@@ -1141,10 +1155,12 @@ The fork protocol is:
    the basis) rather than raced.
 6. Write a target namespace manifest that references the source-owned
    immutable metadata files for the source checkpoint.
-7. Write the target `head.json` to reserve the namespace and point at the
-   target manifest.
-8. Write the target `namespace.json` last as the publish/list marker.
-9. Start the new namespace WAL independently at `fork_seq + 1`.
+7. Write the target `head.json` as the first fixed-key conditional install
+   write and admission gate that explicit repair can condemn.
+8. Prepare the target metadata root and retention floor only after owning the
+   gate.
+9. Write the target `namespace.json` last as the publish/list marker.
+10. Start the new namespace WAL independently at `fork_seq + 1`.
 
 The fork does not copy content-store blobs or source metadata SSTs. If
 initialization fails after the target head exists but before the descriptor is
@@ -1163,7 +1179,14 @@ Examples include:
 - resumable uploads that need a stable destination binding.
 
 In those cases, the server may create control-plane objects such as read
-sessions, upload sessions, or put intents.
+sessions, upload sessions, or put intents. Durable upload sessions carry an
+`active` or absorbing `condemned` lifecycle. GC condemns an aged abandoned
+active session with the exact etag inspected with its provider age before
+deleting it. Completion that observes `condemned` reports
+`upload_not_found`: condemned is logically absent and that existing code is
+also the result after physical deletion. A completion CAS that lands first
+makes the GC CAS fail and the pass retains the session; a condemnation that
+lands first makes completion lose and report `upload_not_found`.
 
 Three rules apply:
 
@@ -1230,7 +1253,9 @@ Two rules make these envelopes evolvable:
 | Grep manifest | `grep_manifest` | JSON, uncompressed | `v0` |
 | Grep segment | none (section 4.2.2) | block sections, per-block zstd + CRC32C | `v0` (via the grep manifest) |
 | Namespace manifest | `namespace_manifest` | JSON, uncompressed | 1 |
-| Control objects (head, descriptors, upload session) | per-kind snake_case names | JSON, uncompressed | 1 (tracked per kind) |
+| Control objects (head, descriptors, roots, floors) | per-kind snake_case names | JSON, uncompressed | 1 (tracked per kind) |
+| Checkpoint record | `checkpoint_record` | JSON, uncompressed | 2 |
+| Upload session | `upload_session` | JSON, uncompressed | 2 |
 
 JSON families keep their payload inline as raw JSON so manifests and control
 objects stay directly readable with generic tooling; CBOR families carry the
@@ -1327,9 +1352,13 @@ Publication writes segments first, writes the content-derived manifest with
 create-if-absent semantics, and finally installs `root.json` with one etag
 compare-and-swap (or create-if-absent for the first pointer). A pointer-CAS
 loser's manifest and segments remain unreachable derived garbage; grep GC
-reclaims them after its grace window. Query readers load the pointer afresh,
-then load the immutable manifest it names; decoded manifests may be cached by
-manifest id.
+reclaims them after its grace window. Because an identical rebuild derives
+the same manifest id, an AlreadyExists observation can race that collection:
+after a successful pointer CAS, the publisher HEADs the installed manifest
+and re-puts its still-buffered bytes with create-if-absent if GC removed it.
+The pointer is returned only after that verification/heal completes. Query
+readers load the pointer afresh, then load the immutable manifest it names;
+decoded manifests may be cached by manifest id.
 
 The namespace-scoped layout is maintained only when that namespace is named
 by an enable, publish, query, detached assignment, or explicit GC operation;
@@ -1497,9 +1526,11 @@ v1 GC is listing mark-and-sweep. Its inputs are `wal/head.json`,
 `metadata/tables/`, `checkpoints/`, and `wal/segments/` collections. A live
 manifest roots every object key its `metadata_files` list names. The pass also sweeps
 `uploads/`: sessions root nothing and nothing durable references them, so a
-session whose provider age exceeds the reap window is deleted whatever its
-state — the abort-incomplete-upload convention. A `complete` after the
-window answers session-not-found.
+session whose provider age exceeds the reap window is first compare-and-swapped
+from `active` to absorbing `condemned` under the etag loaded with that age,
+then deleted unconditionally. A lost CAS retains the session for a later
+pass. Completed sessions are already absorbing and may be deleted directly;
+a completion that loses to condemnation answers `upload_not_found`.
 Core GC never recognizes, lists specifically, or deletes any object below a
 namespace's `extensions/` prefix; grep collection is owned by `loonfs-grep`.
 Because floor, root, and checkpoint publication no longer serialize through
@@ -1560,13 +1591,25 @@ publishing CAS) — under these rules:
 8. **Retention wins residual races.** If the floor is ever observed ahead of
    an active checkpoint's basis, the checkpoint's objects remain protected;
    reconciling the floor is an explicit recovery action.
-9. **Incomplete namespaces and abandoned forks.** Core GC ignores a namespace
+9. **Immutable sweep families need no condemnation.** WAL segments, metadata
+   tables and manifests, grep segments and manifests, and content blobs have
+   keys that can only contain identical bytes under their create-if-absent,
+   content-derived, or write-verification protocols. Once one is unreferenced
+   and grace-aged, unconditional deletion is safe: a zombie retry can at most
+   recreate identical, still-unreferenced bytes for a later pass. Content-blob
+   GC remains unsupported in v0, but the same immutability argument governs a
+   future sweep.
+10. **Incomplete namespaces and abandoned forks.** Core GC ignores a namespace
    without a complete head-and-descriptor pair: it performs no listing or
    deletion and reports that the incomplete namespace was ignored. Explicit
    per-namespace repair first attempts guarded create/fork completion, then
    may reap a non-completable tree whose newest object is older than the
-   derived safety floor `T`, re-checking that the head-and-descriptor pair is
-   not complete before deletion; younger debris is reported as `in_flight`.
+   derived safety floor `T`. It conditionally swaps the WAL head — the first
+   fixed-key conditional install admission write and thus the true gate — to
+   `condemned` under the etag it inspected (or creates that condemned gate if
+   pre-head debris has no head). A conflict reports `in_flight`; success
+   permits unconditional subtree deletion with the condemned head last.
+   Younger debris is reported as `in_flight` without condemnation.
    A fork-owned checkpoint record whose target tree is completely gone remains
    GC-owned and is released under the reap window `R` (`R >= T`): the record
    must be older than `R`, since a live fork retry freshens it before writing
@@ -1574,24 +1617,30 @@ publishing CAS) — under these rules:
 
 Deletion proceeds data first, records last, so a crash mid-sweep leaves
 orphaned data for the next pass rather than a record whose data vanished.
-To keep that true, every readable checkpoint record roots its basis for the
-duration of a pass, whatever its lifecycle, expiry, or owner; state, age,
-and owner fate gate only the record object itself, and a freed basis becomes
-collectable on the pass after its record is gone. A fork-owned record whose
+To keep that true, every readable non-condemned checkpoint record roots its
+basis for the duration of a pass, whatever its lifecycle, expiry, or owner;
+state, age, and owner fate gate only its condemnation. `condemned` is the sole
+exception because it cannot legally revive; crash residue in that state is
+deleted by the next pass and need not continue rooting. A fork-owned record whose
 target namespace is verifiably terminally deleted (target head
-`state = deleted`, re-checked at delete time) or provably abandoned (rule 9)
+`state = deleted`, re-checked at delete time) or provably abandoned (rule 10)
 is released by compare-and-swap on the record's freshly observed etag —
 never deleted while active — so a racing fork freshen always wins or always
-observes the release; the released record then reaps by age on a later pass.
+observes the release. An aged collectable record is then condemned by one
+exact-etag CAS and deleted only after that CAS succeeds; precondition failure
+means retention, never fallback deletion. If physical deletion fails after
+the CAS, the absorbing record makes the next pass self-healing.
 The intended end-state remains tracked deletion derived from manifest
 predecessor diffs, with the listing sweep demoted to a low-frequency
 backstop.
 
 ### 6.5 Control-object cleanup
 
-Upload sessions are cleaned by the GC pass after the reap window
-("Garbage collection"). Implementations may additionally clean up other
-expired control-plane objects. This is control-plane maintenance, not
+Upload sessions are condemned and cleaned by the GC pass after the reap
+window ("Garbage collection"). Implementations may additionally clean up
+other expired control-plane objects. Mutable control objects MUST first enter
+an absorbing state by conditional write under the inspected etag; a failed
+conditional write retains them. This is control-plane maintenance, not
 namespace history.
 
 ### 6.6 Derived work

@@ -5,10 +5,12 @@
 
 use crate::error::{CoreError, MetadataProjectionLoadError, StoreFailureClass};
 use crate::namespace::control::{
-    read_content_store_descriptor_object, read_namespace_descriptor_object, ControlObjectLoadError,
+    read_content_store_descriptor_object, read_head_object, read_namespace_descriptor_object,
+    ControlObjectLoadError,
 };
 use bytes::Bytes;
 use loonfs_api::wire::control::NamespaceConfigState;
+use loonfs_api::wire::control::NamespaceState;
 use loonfs_api::{ContentStoreId, NamespaceId, NamespaceIdValidationError};
 use loonfs_objectstore::keys::{metadata_root, namespace_config, wal_floor, wal_head};
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
@@ -47,10 +49,10 @@ impl VerifiedNamespaceCatalogEntry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NamespaceInitializationState {
     Absent,
-    /// Head and descriptor are both absent but pre-head control objects
-    /// (metadata root or WAL floor) exist: a create or fork crashed before
-    /// its head write, or one is in flight right now. Explicit repair uses
-    /// age to decide whether reaping is safe.
+    /// Head and descriptor are both absent but pre-head namespace objects
+    /// exist: a create or fork crashed before its gating head write, or one
+    /// is in flight right now. Explicit repair uses age to decide whether
+    /// reaping is safe.
     PreHeadDebris,
     /// The head exists but the descriptor does not: a create or fork
     /// crashed after its linearization point. Explicit repair can complete a
@@ -85,6 +87,8 @@ pub(crate) enum NamespaceInitializationError {
     },
     #[error("failed to load namespace descriptor: {0}")]
     LoadNamespaceDescriptor(ControlObjectLoadError),
+    #[error("failed to load namespace head: {0}")]
+    LoadNamespaceHead(ControlObjectLoadError),
     #[error("failed to load content store descriptor: {0}")]
     LoadContentStoreDescriptor(ControlObjectLoadError),
 }
@@ -156,11 +160,10 @@ pub(crate) async fn namespace_initialization_state<S: ObjectStore + ?Sized>(
 
     match (descriptor_exists, head_exists) {
         (false, false) => {
-            // Nothing is visible yet, but a crashed create or fork may have
-            // left pre-head control objects that block a fresh attempt's
-            // put-if-absent writes. Probe the two fixed-key ones; a stray
-            // manifest object alone blocks nothing (random id) and ages out
-            // through ordinary GC.
+            // Nothing is visible yet, but a legacy or crashed installation
+            // may have left pre-head root/floor debris that blocks a fresh
+            // attempt's put-if-absent writes. A stray immutable manifest alone
+            // blocks nothing and a successful namespace can reap it later.
             for probe_key in [
                 metadata_root(namespace_id.as_str()),
                 wal_floor(namespace_id.as_str()),
@@ -183,6 +186,12 @@ pub(crate) async fn namespace_initialization_state<S: ObjectStore + ?Sized>(
             Ok(NamespaceInitializationState::Absent)
         }
         (true, true) => {
+            let head = read_head_object(store, namespace_id)
+                .await
+                .map_err(NamespaceInitializationError::LoadNamespaceHead)?;
+            if head.envelope.state.state == NamespaceState::Condemned {
+                return Ok(NamespaceInitializationState::Partial);
+            }
             let descriptor = read_namespace_descriptor_object(store, namespace_id)
                 .await
                 .map_err(NamespaceInitializationError::LoadNamespaceDescriptor)?;
@@ -195,6 +204,60 @@ pub(crate) async fn namespace_initialization_state<S: ObjectStore + ?Sized>(
             Ok(NamespaceInitializationState::Complete)
         }
         _ => Ok(NamespaceInitializationState::Partial),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NamespaceInstallGate {
+    Landed,
+    /// The store reported a conditional-write conflict, but an exact readback
+    /// found this attempt's head in a still-partial namespace. Prepare the
+    /// deterministic prerequisites, then preserve the existing unknown-outcome
+    /// surface so explicit repair can complete the tree.
+    ExistingPartial,
+}
+
+/// Installs the WAL head as the first fixed-key conditional admission gate for
+/// create and fork. An exact partial readback preserves lost-ack recovery
+/// without letting a different or condemned head admit any subsequent
+/// fixed-key install write.
+pub(crate) async fn put_namespace_install_gate<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    bytes: &[u8],
+) -> Result<NamespaceInstallGate, CoreError> {
+    let object_key = wal_head(namespace_id.as_str());
+    match store
+        .put_if_absent(&object_key, Bytes::copy_from_slice(bytes))
+        .await
+    {
+        Ok(_) => Ok(NamespaceInstallGate::Landed),
+        Err(ObjectStoreError::PreconditionFailed { .. } | ObjectStoreError::Conflict { .. }) => {
+            let exact_readback = store
+                .get(&object_key, None)
+                .await
+                .map_err(|read_error| CoreError::store(&object_key, &read_error))?
+                .is_some_and(|existing| existing.as_ref() == bytes);
+            let state = namespace_initialization_state(store, namespace_id)
+                .await
+                .map_err(map_namespace_initialization_error_to_core)?;
+            if exact_readback
+                && matches!(
+                    state,
+                    NamespaceInitializationState::Partial
+                        | NamespaceInitializationState::PreHeadDebris
+                )
+            {
+                Ok(NamespaceInstallGate::ExistingPartial)
+            } else {
+                Err(namespace_install_conflict_error(
+                    namespace_id,
+                    &object_key,
+                    state,
+                ))
+            }
+        }
+        Err(error) => Err(CoreError::store(&object_key, &error)),
     }
 }
 
@@ -214,6 +277,9 @@ pub(crate) fn map_namespace_initialization_error_to_core(
             CoreError::MetadataProjection(MetadataProjectionLoadError::LoadNamespaceDescriptor(
                 error,
             ))
+        }
+        NamespaceInitializationError::LoadNamespaceHead(error) => {
+            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
         }
         NamespaceInitializationError::LoadContentStoreDescriptor(error) => {
             CoreError::MetadataProjection(MetadataProjectionLoadError::LoadContentStoreDescriptor(
@@ -261,27 +327,38 @@ pub(crate) async fn put_target_namespace_control_object<S: ObjectStore + ?Sized>
     {
         Ok(_) => Ok(()),
         Err(ObjectStoreError::PreconditionFailed { .. } | ObjectStoreError::Conflict { .. }) => {
-            match namespace_initialization_state(store, namespace_id)
+            let state = namespace_initialization_state(store, namespace_id)
                 .await
-                .map_err(map_namespace_initialization_error_to_core)?
-            {
-                NamespaceInitializationState::Complete => Err(CoreError::NamespaceAlreadyExists {
-                    namespace_id: namespace_id.clone(),
-                }),
-                NamespaceInitializationState::Partial
-                | NamespaceInitializationState::PreHeadDebris => {
-                    Err(CoreError::NamespacePartiallyInitialized {
-                        namespace_id: namespace_id.clone(),
-                    })
-                }
-                NamespaceInitializationState::Absent => Err(CoreError::Store {
-                    object_key: object_key.to_owned(),
-                    message: "control object write failed, but namespace remains absent".to_owned(),
-                    class: StoreFailureClass::Other,
-                }),
-            }
+                .map_err(map_namespace_initialization_error_to_core)?;
+            Err(namespace_install_conflict_error(
+                namespace_id,
+                object_key,
+                state,
+            ))
         }
         Err(err) => Err(CoreError::store(object_key, &err)),
+    }
+}
+
+fn namespace_install_conflict_error(
+    namespace_id: &NamespaceId,
+    object_key: &str,
+    state: NamespaceInitializationState,
+) -> CoreError {
+    match state {
+        NamespaceInitializationState::Complete => CoreError::NamespaceAlreadyExists {
+            namespace_id: namespace_id.clone(),
+        },
+        NamespaceInitializationState::Partial | NamespaceInitializationState::PreHeadDebris => {
+            CoreError::NamespacePartiallyInitialized {
+                namespace_id: namespace_id.clone(),
+            }
+        }
+        NamespaceInitializationState::Absent => CoreError::Store {
+            object_key: object_key.to_owned(),
+            message: "control object write failed, but namespace remains absent".to_owned(),
+            class: StoreFailureClass::Other,
+        },
     }
 }
 

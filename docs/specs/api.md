@@ -247,7 +247,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `commit_queue_full` | 503 | The namespace write queue is full; back off and retry. |
 | `server_busy` | 503 | The server is at its configured concurrency limit for this kind of work (proxied upload bodies or proxied content reads); back off and retry. |
 | `shutting_down` | 503 | The serving process closed admission for shutdown; work admitted earlier still settles. Retry against a live instance. |
-| `checkpoint_unavailable` | 503 | Required checkpoint state is unavailable: not yet published, changed during the operation, or referenced material is missing. Retry after maintenance. |
+| `checkpoint_unavailable` | 503 | Required checkpoint state is unavailable: not yet published, changed during the operation, condemned pending GC deletion, or referenced material is missing. Retry after maintenance. |
 | `maintenance_required` | 503 | Namespace metadata requires maintenance before the request can be served; run maintenance and retry. |
 | `index_lagging` | 503 | The gram index trails the head past the exhaustive-scan budget; let the grep worker catch up (or set `allow_stale`) and retry. |
 | `namespace_corrupt` | 500 | Durable namespace state failed validation. |
@@ -443,9 +443,13 @@ Routes under `/v0/admin/` belong to the `admin/v0` profile and routes under
 Namespace repair is deterministic and takes no request body. Its response is
 `{"namespace_id":"...","outcome":"..."}`: `already_complete` is a no-op,
 `completed` published a derivable create/fork completion descriptor, `reaped`
-removed aged non-completable install debris, and `in_flight` left younger
-debris untouched. An absent namespace returns `namespace_not_found` instead
-of a report.
+removed aged non-completable install debris, and `in_flight` left younger or
+concurrently changed debris untouched. Reaping first conditionally marks the
+WAL head — the create/fork admission gate — `condemned`, removes the subtree,
+and deletes that gate last. A create racing the reap therefore reports the
+existing `namespace_partial` code until cleanup finishes, then may create the
+name afresh. An absent namespace returns `namespace_not_found` instead of a
+report.
 
 For `direct_put`, the client requests a presigned upload capability:
 
@@ -839,7 +843,11 @@ The semantic rule is:
 Repeating `PUT /content` with the same bytes for the same upload id is
 idempotent. Repeating it with different bytes is a conflict. Completing an
 upload fails if no content was staged or if the expected `content_ref` differs
-from the staged one. Publication never downloads an arbitrary external ref to
+from the staged one. An aged abandoned session is conditionally condemned
+before GC deletes it. If condemnation wins a completion race, completion
+reports `upload_not_found`, the same stable surface as the subsequent physical
+absence; if completion wins, GC's conditional write fails and retains the
+completed session. Publication never downloads an arbitrary external ref to
 rescue a missing proof.
 
 Representative begin-upload response:

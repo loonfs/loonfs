@@ -2,7 +2,9 @@
 //! including direct-put targets that move bytes past the server.
 
 use crate::context::MutationContext;
-use crate::control_update::{update_upload_session, UploadSessionUpdate};
+use crate::control_update::{
+    try_update_upload_session, update_upload_session, UploadSessionCas, UploadSessionUpdate,
+};
 use crate::engine::{BeginDirectPutUploadTargetResponse, DirectPutUploadTarget};
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
@@ -23,13 +25,19 @@ use loonfs_api::v0::{
 };
 use loonfs_api::wire::control::{
     encode_control_object, CompletedUpload, ControlObjectKind, UploadSessionEnvelope,
-    UploadSessionState,
+    UploadSessionLifecycle, UploadSessionState,
 };
 use loonfs_api::{ContentRef, ContentRefKind, ContentStoreId, NamespaceId, UploadId};
 use loonfs_objectstore::keys::{content_blob, namespace_config, upload_session};
 use loonfs_objectstore::ObjectStore;
 
 const UPLOAD_SESSION_RETRY_LIMIT: usize = 8;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UploadSessionSweep {
+    Delete,
+    Retain,
+}
 
 pub(crate) async fn begin_upload<S: ObjectStore + ?Sized>(
     store: &S,
@@ -114,6 +122,7 @@ async fn create_upload_session<S: ObjectStore + ?Sized>(
         staged_content_ref: None,
         completed: None,
         created_at_ms: context.now_ms,
+        state: UploadSessionLifecycle::Active,
     };
     let envelope = UploadSessionEnvelope::from_state(
         ControlObjectKind::UploadSession,
@@ -201,6 +210,9 @@ pub(crate) async fn upload_content<S: ObjectStore + ?Sized>(
             let namespace_id = namespace_id.clone();
             let upload_id = upload_id.to_owned();
             async move {
+                if state.state == UploadSessionLifecycle::Condemned {
+                    return Err(CoreError::UploadNotFound { upload_id });
+                }
                 if state.completed.is_some() {
                     return Err(CoreError::UploadAlreadyCompleted { upload_id });
                 }
@@ -259,6 +271,9 @@ pub(crate) async fn complete_upload<S: ObjectStore + ?Sized>(
             let upload_id = upload_id.to_owned();
             let request = request.clone();
             async move {
+                if state.state == UploadSessionLifecycle::Condemned {
+                    return Err(CoreError::UploadNotFound { upload_id });
+                }
                 if let Some(completed) = &state.completed {
                     if completed.content_ref == request.content_ref {
                         let prepared_content = prepare_completed_upload_content(
@@ -317,6 +332,55 @@ pub(crate) async fn complete_upload<S: ObjectStore + ?Sized>(
         },
     )
     .await
+}
+
+/// Condemns one abandoned session using exactly the state and etag inspected
+/// together. A lost CAS is retained without retry so a racing completion can
+/// never be overwritten on a second read. Completed and already-condemned
+/// sessions are themselves absorbing and may be deleted once age-qualified.
+pub(crate) async fn condemn_upload_session_if_aged<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    upload_id: &UploadId,
+    reap_window_ms: u64,
+    context: &MutationContext,
+) -> Result<UploadSessionSweep> {
+    let update = try_update_upload_session(
+        store,
+        namespace_id,
+        upload_id,
+        &context.writer_version,
+        |mut state, metadata| async move {
+            let Some(last_modified_ms) = metadata.last_modified_ms else {
+                return Ok(UploadSessionUpdate::Noop(UploadSessionSweep::Retain));
+            };
+            if context.now_ms.saturating_sub(last_modified_ms) < reap_window_ms {
+                return Ok(UploadSessionUpdate::Noop(UploadSessionSweep::Retain));
+            }
+            if state.state == UploadSessionLifecycle::Condemned || state.completed.is_some() {
+                return Ok(UploadSessionUpdate::Noop(UploadSessionSweep::Delete));
+            }
+            state.state = UploadSessionLifecycle::Condemned;
+            Ok(UploadSessionUpdate::Replace {
+                next: Box::new(state),
+                outcome: UploadSessionSweep::Delete,
+            })
+        },
+    )
+    .await;
+    match update {
+        Ok(UploadSessionCas::Applied(outcome)) => Ok(outcome),
+        Ok(UploadSessionCas::Conflict) => {
+            tracing::debug!(
+                namespace_id = %namespace_id,
+                upload_id = %upload_id,
+                "upload-session condemn lost its inspected etag; retaining"
+            );
+            Ok(UploadSessionSweep::Retain)
+        }
+        Err(CoreError::UploadNotFound { .. }) => Ok(UploadSessionSweep::Retain),
+        Err(error) => Err(error),
+    }
 }
 
 fn prepare_completed_upload_content(

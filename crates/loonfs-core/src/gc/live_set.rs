@@ -81,6 +81,7 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
         Err(error) => return Err(load_error(error)),
     };
 
+    let namespace_deleted = head.state == NamespaceState::Deleted;
     let mut live = LiveSet {
         manifests: BTreeSet::new(),
         tables: BTreeSet::new(),
@@ -88,6 +89,7 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
         checkpoint_keys: BTreeSet::new(),
         missing_basis_records: Vec::new(),
         degraded: false,
+        namespace_deleted,
     };
     // Terminal namespaces forget (format spec, rule 4): the tombstone pair
     // and the root/floor pointers survive as non-candidates, but nothing
@@ -95,21 +97,19 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
     // reads are impossible (`namespace_deleted` at every surface, and epoch
     // acquire refuses the tombstone), so user pins and the final replay
     // chain protect nothing.
-    let namespace_deleted = head.state == NamespaceState::Deleted;
     if !namespace_deleted {
         live.manifests.insert(root.manifest_object_id.clone());
     }
     let mut active_record_bases: BTreeMap<ManifestObjectId, Vec<String>> = BTreeMap::new();
 
-    // Every readable checkpoint record roots its basis, no matter its
-    // lifecycle, expiry, or owner: a record must never outlive its
-    // manifest. This matters because released records can come back — the
-    // grace window keeps young ones around, and both `create_checkpoint`
-    // (via deterministic ids) and the fork freshen can revive one — and a
-    // revival is only safe while the basis still exists. Lifecycle,
-    // expiry, and the fork target's fate decide only whether the record
-    // itself may be released or deleted; the basis becomes collectable on
-    // the pass after the record is gone.
+    // Every readable non-condemned checkpoint record roots its basis, no
+    // matter its lifecycle, expiry, or owner: a revivable record must never
+    // outlive its manifest. Released records can come back through
+    // deterministic create or fork freshen. Condemned is the sole exception:
+    // it is absorbing, so a crash between condemn and delete leaves no future
+    // revival to protect. The basis becomes collectable after condemnation,
+    // while records-last ordering keeps a newly condemned record's basis
+    // alive through the pass that performed the CAS.
     for key in list_prefix(store, &checkpoint_prefix(namespace_id.as_str())).await? {
         let Some(body) = store
             .get_with_metadata(&key)
@@ -124,6 +124,9 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
         ) {
             Ok(envelope) => {
                 let record = envelope.state;
+                if record.state == CheckpointRecordLifecycle::Condemned {
+                    continue;
+                }
                 let expired = record
                     .expires_at_ms
                     .is_some_and(|expires_at_ms| expires_at_ms <= now_ms);

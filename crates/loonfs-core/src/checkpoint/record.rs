@@ -4,9 +4,10 @@
 //! garbage collection keeps everything the manifest references. Creation is
 //! write-then-verify: the record is written as `active`, then the basis is
 //! checked against the live retention floor, and the record flips to
-//! `released` if the check fails. Records never decide what readers see as
-//! latest, and they are stored as standalone objects, never inside
-//! manifests.
+//! `released` if the check fails. Garbage collection compare-and-swaps a
+//! collectable record into absorbing `condemned` before physical deletion.
+//! Records never decide what readers see as latest, and they are stored as
+//! standalone objects, never inside manifests.
 
 use super::load::load_namespace_manifest_envelope;
 use crate::error::CoreError;
@@ -144,11 +145,12 @@ pub(crate) async fn set_checkpoint_record_state<S: ObjectStore + ?Sized>(
     writer_version: &str,
 ) -> Result<(), CoreError> {
     cas_checkpoint_record(store, namespace_id, checkpoint_id, writer_version, |next| {
+        refuse_condemned_checkpoint(next)?;
         if next.state == target {
-            return false;
+            return Ok(false);
         }
         next.state = target;
-        true
+        Ok(true)
     })
     .await
 }
@@ -167,14 +169,25 @@ pub(crate) async fn renew_checkpoint_record<S: ObjectStore + ?Sized>(
     writer_version: &str,
 ) -> Result<(), CoreError> {
     cas_checkpoint_record(store, namespace_id, checkpoint_id, writer_version, |next| {
+        refuse_condemned_checkpoint(next)?;
         if next.state == CheckpointRecordLifecycle::Active && next.expires_at_ms == expires_at_ms {
-            return false;
+            return Ok(false);
         }
         next.state = CheckpointRecordLifecycle::Active;
         next.expires_at_ms = expires_at_ms;
-        true
+        Ok(true)
     })
     .await
+}
+
+fn refuse_condemned_checkpoint(record: &CheckpointRecordState) -> Result<(), CoreError> {
+    if record.state == CheckpointRecordLifecycle::Condemned {
+        return Err(CoreError::CheckpointStateConflict {
+            checkpoint_id: record.checkpoint_id.clone(),
+            state: record.state,
+        });
+    }
+    Ok(())
 }
 
 /// The compare-and-swap loop behind the record mutators: `apply` edits the
@@ -185,7 +198,7 @@ async fn cas_checkpoint_record<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     checkpoint_id: &CheckpointId,
     writer_version: &str,
-    apply: impl Fn(&mut CheckpointRecordState) -> bool,
+    apply: impl Fn(&mut CheckpointRecordState) -> Result<bool, CoreError>,
 ) -> Result<(), CoreError> {
     const STATE_CAS_ATTEMPTS: usize = 4;
     let object_key = checkpoint_record(namespace_id.as_str(), checkpoint_id.as_str());
@@ -196,7 +209,7 @@ async fn cas_checkpoint_record<S: ObjectStore + ?Sized>(
             )));
         };
         let mut next = loaded.state;
-        if !apply(&mut next) {
+        if !apply(&mut next)? {
             return Ok(());
         }
         let envelope = CheckpointRecordEnvelope::from_state(
@@ -232,12 +245,13 @@ async fn cas_checkpoint_record<S: ObjectStore + ?Sized>(
 }
 
 /// Rewrites a fork-owned record via compare-and-swap, marking it `active`,
-/// before the fork writes anything into its target namespace.
+/// before the fork writes anything into its target namespace. A condemned
+/// record is absorbing and is refused until garbage collection deletes it.
 ///
 /// The rewrite matters for two reasons. First, it gives the record a fresh
 /// provider timestamp, so a fork that is still retrying never looks
 /// abandoned to garbage collection (format spec, "Garbage collection"
-/// rule 9). Second, the compare-and-swap races any concurrent GC release of
+/// rule 10). Second, the compare-and-swap races any concurrent GC release of
 /// the record, and only one side can win the etag. If the fork wins, it
 /// holds a fresh active record. If GC won, the fork sees the released
 /// record, re-verifies the basis, and revives the record before proceeding.
@@ -267,6 +281,7 @@ pub(crate) async fn freshen_fork_checkpoint<S: ObjectStore + ?Sized>(
                 )));
             }
         }
+        refuse_condemned_checkpoint(&loaded.state)?;
         let revived = loaded.state.state == CheckpointRecordLifecycle::Released;
         let mut next = loaded.state;
         next.state = CheckpointRecordLifecycle::Active;
