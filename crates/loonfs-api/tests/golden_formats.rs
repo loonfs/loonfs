@@ -8,11 +8,12 @@
 //!
 //! - If an encoder's output diverges from its fixture, a Rust-side change
 //!   (field rename, reorder, serde attribute, removed field) silently changed
-//!   the durable format. Either revert it, or bump the family's format
-//!   version and regenerate the fixture with `UPDATE_GOLDEN=1 cargo test`.
-//! - If a fixture stops decoding, the current reader can no longer read
-//!   bytes an earlier build of the same format version wrote — a
-//!   compatibility break with deployed data.
+//!   the durable format. While LoonFS is pre-release, either revert it or
+//!   regenerate the family's version-1 fixture with `UPDATE_GOLDEN=1 cargo
+//!   test`; released formats follow the spec's evolution rules.
+//! - If a fixture stops decoding, the current reader can no longer read bytes
+//!   another implementation of the same format version wrote — a
+//!   compatibility break once that format is deployed.
 //! - Additive payload fields must keep decoding (`*_tolerates_additive_*`):
 //!   that is the format's only same-version evolution mechanism, made
 //!   possible by checksumming the stored payload bytes rather than a
@@ -75,7 +76,8 @@ fn assert_matches_golden(name: &str, actual: &[u8]) {
         panic!(
             "golden fixture `{name}` diverged at byte {offset} \
              (expected {} bytes, actual {} bytes). The durable encoding changed: \
-             if intentional, bump the format version and regenerate with UPDATE_GOLDEN=1.",
+             while pre-release, regenerate the version-1 fixture with UPDATE_GOLDEN=1 \
+             if the change is intentional.",
             expected.len(),
             actual.len(),
         );
@@ -324,7 +326,7 @@ fn wal_segment_golden_decodes_to_sample() {
 #[test]
 fn namespace_manifest_matches_golden_bytes() {
     let encoded = encode_namespace_manifest_json(&sample_manifest_envelope()).expect("encode");
-    assert_matches_golden("namespace_manifest.v2.json", &encoded);
+    assert_matches_golden("namespace_manifest.v1.json", &encoded);
     let document: serde_json::Value = serde_json::from_slice(&encoded).expect("manifest json");
     let payload = document["payload"].as_object().expect("manifest payload");
     assert!(!payload.contains_key("index_files"));
@@ -333,7 +335,7 @@ fn namespace_manifest_matches_golden_bytes() {
 
 #[test]
 fn namespace_manifest_golden_decodes_to_sample() {
-    let decoded = decode_namespace_manifest_json(&read_golden("namespace_manifest.v2.json"))
+    let decoded = decode_namespace_manifest_json(&read_golden("namespace_manifest.v1.json"))
         .expect("decode golden manifest");
     assert_eq!(decoded, sample_manifest_envelope());
 }
@@ -435,7 +437,7 @@ fn control_objects_match_golden_bytes() {
         },
     );
     check_control_golden(
-        "control_checkpoint_record.v2.json",
+        "control_checkpoint_record.v1.json",
         ControlObjectKind::CheckpointRecord,
         CheckpointRecordState {
             checkpoint_id: checkpoint_id("chk_00000000000000000000000000000002"),
@@ -457,7 +459,7 @@ fn control_objects_match_golden_bytes() {
     // The fork owner is a durable encoding of its own: the tagged `owner`
     // changes the document.
     check_control_golden(
-        "control_checkpoint_record_fork.v2.json",
+        "control_checkpoint_record_fork.v1.json",
         ControlObjectKind::CheckpointRecord,
         CheckpointRecordState {
             checkpoint_id: checkpoint_id("chk_00000000000000000000000000000004"),
@@ -477,7 +479,7 @@ fn control_objects_match_golden_bytes() {
         },
     );
     check_control_golden(
-        "control_upload_session.v2.json",
+        "control_upload_session.v1.json",
         ControlObjectKind::UploadSession,
         UploadSessionState {
             namespace_id: namespace_id(),
@@ -496,7 +498,7 @@ fn control_objects_match_golden_bytes() {
     // The released lifecycle and the direct-put session shape are durable
     // encodings of their own: `state` and `mode` change the document.
     check_control_golden(
-        "control_checkpoint_record_released.v2.json",
+        "control_checkpoint_record_released.v1.json",
         ControlObjectKind::CheckpointRecord,
         CheckpointRecordState {
             checkpoint_id: checkpoint_id("chk_00000000000000000000000000000003"),
@@ -516,7 +518,7 @@ fn control_objects_match_golden_bytes() {
         },
     );
     check_control_golden(
-        "control_checkpoint_record_condemned.v2.json",
+        "control_checkpoint_record_condemned.v1.json",
         ControlObjectKind::CheckpointRecord,
         CheckpointRecordState {
             checkpoint_id: checkpoint_id("chk_00000000000000000000000000000005"),
@@ -536,7 +538,7 @@ fn control_objects_match_golden_bytes() {
         },
     );
     check_control_golden(
-        "control_upload_session_direct_put.v2.json",
+        "control_upload_session_direct_put.v1.json",
         ControlObjectKind::UploadSession,
         UploadSessionState {
             namespace_id: namespace_id(),
@@ -551,7 +553,7 @@ fn control_objects_match_golden_bytes() {
         },
     );
     check_control_golden(
-        "control_upload_session_condemned.v2.json",
+        "control_upload_session_condemned.v1.json",
         ControlObjectKind::UploadSession,
         UploadSessionState {
             namespace_id: namespace_id(),
@@ -568,7 +570,7 @@ fn control_objects_match_golden_bytes() {
 }
 
 #[test]
-fn condemned_control_families_reject_predecessor_versions_without_fallback() {
+fn checkpoint_and_upload_decoders_reject_wrong_format_version_without_fallback() {
     let cases = [
         (
             ControlObjectKind::CheckpointRecord,
@@ -611,15 +613,15 @@ fn condemned_control_families_reject_predecessor_versions_without_fallback() {
         let encoded = encode_control_object(&envelope).expect("encode control");
         let mut document: serde_json::Value =
             serde_json::from_slice(&encoded).expect("decode document");
-        document["format_version"] = serde_json::Value::from(1);
-        let predecessor = serde_json::to_vec(&document).expect("encode predecessor");
-        let error = decode_control_object::<serde_json::Value>(&predecessor, kind)
-            .expect_err("v1 must not fall back");
+        document["format_version"] = serde_json::Value::from(7);
+        let wrong_version = serde_json::to_vec(&document).expect("encode wrong version");
+        let error = decode_control_object::<serde_json::Value>(&wrong_version, kind)
+            .expect_err("wrong version must not fall back");
         assert!(matches!(
             error,
             EnvelopeCodecError::UnsupportedFormatVersion {
-                found: 1,
-                supported: 2,
+                found: 7,
+                supported: 1,
                 ..
             }
         ));
@@ -712,19 +714,19 @@ fn wal_delta_decode_rejects_invalid_name_key() {
 }
 
 #[test]
-fn wal_decode_rejects_future_format_version_cleanly() {
+fn wal_decode_rejects_wrong_format_version_cleanly() {
     let document = unzstd(&encode_wal_segment_envelope_zstd(&sample_wal_envelope()).expect("wal"));
-    let bumped = with_cbor_document_entry(&document, "format_version", |value| {
-        *value = ciborium::Value::from(2);
+    let wrong_version = with_cbor_document_entry(&document, "format_version", |value| {
+        *value = ciborium::Value::from(7);
     });
 
-    let err = decode_wal_segment_envelope_zstd(&rezstd(&bumped))
-        .expect_err("future version must be rejected");
+    let err = decode_wal_segment_envelope_zstd(&rezstd(&wrong_version))
+        .expect_err("wrong version must be rejected");
     assert!(
         matches!(
             err,
             EnvelopeCodecError::UnsupportedFormatVersion {
-                found: 2,
+                found: 7,
                 supported: 1,
                 ..
             }
@@ -830,43 +832,21 @@ fn control_object_decode_rejects_tampered_payload_as_checksum_mismatch() {
 }
 
 #[test]
-fn namespace_manifest_decode_rejects_future_format_version_cleanly() {
+fn namespace_manifest_decode_rejects_wrong_format_version_cleanly() {
     let encoded = encode_namespace_manifest_json(&sample_manifest_envelope()).expect("manifest");
     let mut document: serde_json::Value =
         serde_json::from_slice(&encoded).expect("decode document");
-    document["format_version"] = serde_json::Value::from(3);
-    let bumped = serde_json::to_vec(&document).expect("encode document");
-
-    let err = decode_namespace_manifest_json(&bumped).expect_err("future version must be rejected");
-    assert!(
-        matches!(
-            err,
-            EnvelopeCodecError::UnsupportedFormatVersion {
-                found: 3,
-                supported: 2,
-                ..
-            }
-        ),
-        "unexpected error: {err}"
-    );
-}
-
-#[test]
-fn namespace_manifest_decode_rejects_previous_format_version_cleanly() {
-    let encoded = encode_namespace_manifest_json(&sample_manifest_envelope()).expect("manifest");
-    let mut document: serde_json::Value =
-        serde_json::from_slice(&encoded).expect("decode document");
-    document["format_version"] = serde_json::Value::from(1);
-    let previous = serde_json::to_vec(&document).expect("encode document");
+    document["format_version"] = serde_json::Value::from(7);
+    let wrong_version = serde_json::to_vec(&document).expect("encode document");
 
     let err =
-        decode_namespace_manifest_json(&previous).expect_err("previous version must be rejected");
+        decode_namespace_manifest_json(&wrong_version).expect_err("wrong version must be rejected");
     assert!(
         matches!(
             err,
             EnvelopeCodecError::UnsupportedFormatVersion {
-                found: 1,
-                supported: 2,
+                found: 7,
+                supported: 1,
                 ..
             }
         ),

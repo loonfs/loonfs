@@ -11,10 +11,9 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
-/// Version 2: an uncompressed JSON envelope document carrying the payload as
-/// a raw JSON fragment, without the retired generic `features` map.
-/// `payload_checksum` covers the fragment's exact bytes.
-pub const NAMESPACE_MANIFEST_FORMAT_VERSION: u32 = 2;
+/// Version 1: an uncompressed JSON envelope document carrying the payload as
+/// a raw JSON fragment. `payload_checksum` covers the fragment's exact bytes.
+pub const NAMESPACE_MANIFEST_FORMAT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

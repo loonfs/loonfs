@@ -11,10 +11,10 @@ use serde_json::value::RawValue;
 pub const GREP_ROOT_KIND: &str = "grep_root";
 /// Durable kind string for a grep manifest envelope.
 pub const GREP_MANIFEST_KIND: &str = "grep_manifest";
-/// Durable v0 root-pointer format string. Unknown strings are rejected.
-pub const GREP_ROOT_FORMAT_VERSION: &str = "v0";
-/// Durable v0 manifest format string. Unknown strings are rejected.
-pub const GREP_MANIFEST_FORMAT_VERSION: &str = "v0";
+/// Durable v1 root-pointer format string. Unknown strings are rejected.
+pub const GREP_ROOT_FORMAT_VERSION: &str = "v1";
+/// Durable v1 manifest format string. Unknown strings are rejected.
+pub const GREP_MANIFEST_FORMAT_VERSION: &str = "v1";
 
 /// Verified in-memory representation of one grep root-pointer envelope.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -39,10 +39,8 @@ impl ControlObjectKind {
     ///
     /// Versions are tracked per kind so one kind's payload schema can make a
     /// breaking change without invalidating every other control object.
-    /// Version 1 (all kinds): a JSON envelope document carrying the payload
-    /// as a raw JSON fragment whose checksum covers its exact bytes.
-    /// Version 2 (checkpoint records and upload sessions): an explicit
-    /// absorbing condemned lifecycle state for safe physical deletion.
+    /// Version 1 is a JSON envelope document carrying the current payload as
+    /// a raw JSON fragment whose checksum covers its exact bytes.
     pub const fn format_version(self) -> u32 {
         match self {
             Self::NamespaceConfig => 1,
@@ -50,8 +48,8 @@ impl ControlObjectKind {
             Self::WalHead => 1,
             Self::WalFloor => 1,
             Self::MetadataRoot => 1,
-            Self::CheckpointRecord => 2,
-            Self::UploadSession => 2,
+            Self::CheckpointRecord => 1,
+            Self::UploadSession => 1,
         }
     }
 

@@ -1249,13 +1249,13 @@ Two rules make these envelopes evolvable:
 | --- | --- | --- | --- |
 | WAL segment | `namespace_wal_segment` | CBOR envelope, zstd-compressed; CBOR payload | 1 |
 | Metadata segment | none (section 4.2.1) | block sections, per-block zstd + CRC32C | 1 (via manifest) |
-| Grep root pointer | `grep_root` | JSON, uncompressed | `v0` |
-| Grep manifest | `grep_manifest` | JSON, uncompressed | `v0` |
-| Grep segment | none (section 4.2.2) | block sections, per-block zstd + CRC32C | `v0` (via the grep manifest) |
+| Grep root pointer | `grep_root` | JSON, uncompressed | `v1` |
+| Grep manifest | `grep_manifest` | JSON, uncompressed | `v1` |
+| Grep segment | none (section 4.2.2) | block sections, per-block zstd + CRC32C | `v1` (via the grep manifest) |
 | Namespace manifest | `namespace_manifest` | JSON, uncompressed | 1 |
 | Control objects (head, descriptors, roots, floors) | per-kind snake_case names | JSON, uncompressed | 1 (tracked per kind) |
-| Checkpoint record | `checkpoint_record` | JSON, uncompressed | 2 |
-| Upload session | `upload_session` | JSON, uncompressed | 2 |
+| Checkpoint record | `checkpoint_record` | JSON, uncompressed | 1 |
+| Upload session | `upload_session` | JSON, uncompressed | 1 |
 
 JSON families keep their payload inline as raw JSON so manifests and control
 objects stay directly readable with generic tooling; CBOR families carry the
@@ -1311,12 +1311,12 @@ starts without grep state until grep is enabled for the target.
 
 `root.json` is a small mutable pointer envelope with these fields, in order:
 
-- envelope: `kind = "grep_root"`, `format_version = "v0"`, informational
+- envelope: `kind = "grep_root"`, `format_version = "v1"`, informational
   `writer_version`, `payload_checksum`, and raw JSON `payload`;
 - payload: `namespace_id` and `manifest_id`.
 
 Each immutable manifest has the same envelope grammar with
-`kind = "grep_manifest"` and `format_version = "v0"`. Its payload is the full
+`kind = "grep_manifest"` and `format_version = "v1"`. Its payload is the full
 grep state: `namespace_id`, `lifecycle`, nested `index` bookkeeping, and the
 `segments` descriptors. Both decoders verify the checksum over the exact
 stored payload fragment before decoding, reject unknown versions and kind
@@ -1327,8 +1327,8 @@ A gram-index segment uses the section 4.2.1 block grammar unchanged —
 prefix-compressed data blocks, one bloom filter block, one index block,
 handles and checksums in the grep-manifest descriptor — with a grep-owned row
 payload instead of metadata rows. The tokenizer, row shapes, and posting
-encoding below are frozen by grep format `v0`; changing them requires a new
-grep format and a rebuild, which is always legal for derived work
+encoding below are frozen by grep format `v1`; their evolution follows the
+rules in section 4.3 and always permits rebuilding this derived work
 (section 6.6).
 
 - The **tokenizer** is every overlapping three-byte window (gram) of an
@@ -1374,13 +1374,14 @@ and grep maintenance does not collect core-owned objects.
 
 ### 4.3 Evolution rules
 
-- **Additive within a version.** A writer may add new payload fields without
-  bumping `format_version`. Readers must ignore unknown payload and envelope
-  fields. This is the only same-version change allowed.
-- **Everything else bumps the version.** Renaming, removing, retyping, or
-  re-tagging any field — or changing the payload encoding — requires bumping
-  the owning family's `format_version`. Readers reject versions they do not
-  support with a typed unsupported-version error; there is no silent fallback.
+- **Additive within a released version.** Readers ignore unknown payload and
+  envelope fields. After the first stable release, adding such fields is the
+  only change permitted within an existing format version.
+- **Other post-release changes require a new version.** After the first stable
+  release, renaming, removing, retyping, or re-tagging any field — or changing
+  the payload encoding — requires a new `format_version` for the owning family.
+  Readers reject versions they do not support with a typed unsupported-version
+  error; there is no silent fallback.
 - **Digest strings are self-describing.** Durable digest values carry their
   algorithm as a prefix (`sha256:<hex>`) so a future algorithm can be
   introduced without re-interpreting old values. Commit fingerprints
@@ -1393,9 +1394,9 @@ and grep maintenance does not collect core-owned objects.
   understand (section 3.1.3).
 - **Every encoding is pinned by golden-byte fixtures**
   (`crates/loonfs-api/tests/golden_formats.rs`). An encoder change that alters
-  durable bytes fails those tests; the failure message demands either
-  reverting the change or bumping the format version and regenerating the
-  fixtures.
+  durable bytes fails those tests. During pre-release development, an
+  intentional change regenerates the version-1 fixture in place; after the
+  first stable release, it follows the evolution rules above.
 
 ## 5. Extension-owned materialization
 
@@ -1410,11 +1411,10 @@ Core readers and maintenance ignore extension-owned keys. An extension must
 remain rebuildable from authoritative core state and must not require an
 unknown extension to be understood before the namespace can be read.
 
-No feature key is currently registered. In particular, grep state lives in
-the section 4.2.2 keyspace rather than this map.
-
-The map exists so that derived indexes and similar per-namespace
-capabilities can arrive without a format version bump.
+Core defines no extension registry. In particular, grep state lives in the
+section 4.2.2 keyspace. This separation lets derived indexes and similar
+per-namespace capabilities arrive without changing the namespace-manifest
+format.
 
 ## 6. Maintenance operations
 
