@@ -115,7 +115,8 @@ Two kinds of numbers appear above, with different contracts:
 - **Filter parameters are format constants.** Every segment carries one
   bloom filter, about 10 bits per key with 7 probes derived from two
   fixed-seed 64-bit hashes. Filters are durable bytes, so the hashing
-  can never change without a format-version bump.
+  evolves in place at version 1 before the first stable release; afterward,
+  changing it requires a new owning format version.
 - **Sizes are writer-side defaults.** Data blocks target 64 KiB before
   compression and base segments target 65,536 rows; readers take
   whatever the descriptor and index describe, so both can be retuned

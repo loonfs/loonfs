@@ -160,10 +160,10 @@ pub(crate) async fn namespace_initialization_state<S: ObjectStore + ?Sized>(
 
     match (descriptor_exists, head_exists) {
         (false, false) => {
-            // Nothing is visible yet, but a legacy or crashed installation
-            // may have left pre-head root/floor debris that blocks a fresh
-            // attempt's put-if-absent writes. A stray immutable manifest alone
-            // blocks nothing and a successful namespace can reap it later.
+            // Nothing is visible yet, but a crashed create or fork may have
+            // left pre-head root/floor debris that blocks a fresh attempt's
+            // put-if-absent writes. A stray immutable manifest alone blocks
+            // nothing and a successful namespace can reap it later.
             for probe_key in [
                 metadata_root(namespace_id.as_str()),
                 wal_floor(namespace_id.as_str()),

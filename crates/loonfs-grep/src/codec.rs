@@ -32,7 +32,7 @@ use thiserror::Error;
 
 /// Bytes per gram. Fixed by the copied durable format.
 pub const GRAM_LEN: usize = 3;
-/// Largest content the v0 eligibility rule admits, in bytes.
+/// Largest content the version-1 eligibility rule admits, in bytes.
 pub const INDEX_GRAMS_MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
 
 /// One tokenizer gram: three content bytes, ASCII-case-folded.
@@ -241,8 +241,8 @@ fn read_varint(bytes: &[u8], cursor: &mut usize) -> Result<u64, IndexGramsCodecE
     }
 }
 
-/// One row of a gram index segment. Kind-tagged so the family can grow
-/// additional row kinds under future format versions.
+/// One row of a gram index segment. Kind-tagged so a later released format
+/// version can define additional row kinds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum IndexRow {

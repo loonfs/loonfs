@@ -50,8 +50,9 @@ version 1, not a tunable: queries decide the exhaustive-scan and
 verification cut with the same rule the builder used, and a
 divergence would turn into silent false negatives once the
 watermark passes a file one side considers eligible and the other
-does not. Loosening the rule is a feature-version bump and a
-rebuild.
+does not. Before the first stable release the rule evolves in place
+at feature version 1; afterward, loosening it requires a new feature
+version and a rebuild.
 
 Ineligible files are simply absent from the index, and the query
 path applies the same rule to unindexed data, so the contract is
@@ -376,8 +377,9 @@ Following the segment-format convention, two different contracts:
 - **Format constants.** The tokenizer (ASCII-case-folded byte
   trigrams), the eligibility rule (the 8 MiB cap and the text
   sniff), the posting row key shape, and the batch encoding are
-  pinned by the grep pointer/manifest and segment codec versions. Changing any
-  of them is a format-version bump and a rebuild — cheap by
+  pinned by the grep pointer/manifest and segment codec versions. Before the
+  first stable release they evolve in place at version 1; afterward, changing
+  any of them requires a new format version and a rebuild — cheap by
   construction, since the index is derived work.
 - **Writer-side defaults.** The per-step build budgets (256
   files or 64 MiB), the fold run thresholds (eight delta runs,

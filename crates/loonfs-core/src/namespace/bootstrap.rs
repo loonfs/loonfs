@@ -537,7 +537,7 @@ mod tests {
         }
     }
 
-    /// Simulates legacy create/fork debris with root and floor but no gating
+    /// Simulates pre-head create/fork debris with root and floor but no gating
     /// head. The root's manifest pointer is a dangling dummy: repair deletes
     /// this debris without reading through it.
     async fn write_pre_head_debris(store: &LocalFsStore, namespace_id: &NamespaceId) {

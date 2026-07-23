@@ -12,8 +12,8 @@ use std::str::FromStr;
 const SHA256_PREFIX: &str = "sha256:";
 const SHA256_HEX_LEN: usize = 64;
 
-/// Version of the grep index state nested inside a v0 manifest.
-pub const GREP_INDEX_FORMAT_VERSION: u32 = 0;
+/// Version of the grep index state nested inside a v1 manifest.
+pub const GREP_INDEX_FORMAT_VERSION: u32 = 1;
 
 /// Content-derived identity of one immutable grep manifest payload.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
