@@ -71,43 +71,63 @@ pub enum CommitOp {
     /// Create a directory under a parent inode.
     #[cfg_attr(feature = "openapi", schema(title = "CommitOpCreateDirectory"))]
     CreateDirectory {
+        /// Visible directory that will own the new binding.
         parent_inode_id: InodeId,
+        /// Requested child spelling, whose derived name key must be absent.
         display_name: DisplayName,
     },
     /// Create a file under a parent inode.
     #[cfg_attr(feature = "openapi", schema(title = "CommitOpCreateFile"))]
     CreateFile {
+        /// Visible directory that will own the new binding.
         parent_inode_id: InodeId,
+        /// Requested child spelling, whose derived name key must be absent.
         display_name: DisplayName,
+        /// Immutable initial bytes, which must have valid preparation proof before publication.
         content_ref: ContentRef,
     },
     /// Append a new revision to an existing file.
     #[cfg_attr(feature = "openapi", schema(title = "CommitOpReplaceFile"))]
     ReplaceFile {
+        /// Visible file inode receiving a new revision.
         inode_id: InodeId,
+        /// Revision the caller observed; the operation conflicts if it is no longer current.
         base_revision_no: RevisionNo,
+        /// Immutable replacement bytes, which must have valid preparation proof before publication.
         content_ref: ContentRef,
     },
     /// Restore a prior revision as a new current revision.
     #[cfg_attr(feature = "openapi", schema(title = "CommitOpRestoreRevision"))]
     RestoreRevision {
+        /// Visible file inode receiving the restored content as a new revision.
         inode_id: InodeId,
+        /// Existing historical revision whose content is copied forward.
         source_revision_no: RevisionNo,
+        /// Current revision the caller observed; concurrent advancement causes a conflict.
         base_revision_no: RevisionNo,
     },
     /// Delete a file inode.
     #[cfg_attr(feature = "openapi", schema(title = "CommitOpDeleteFile"))]
-    DeleteFile { inode_id: InodeId },
+    DeleteFile {
+        /// Visible file whose exact parent binding and subtree visibility are validated.
+        inode_id: InodeId,
+    },
     /// Rename or move an inode.
     #[cfg_attr(feature = "openapi", schema(title = "CommitOpRename"))]
     Rename {
+        /// Visible inode whose current binding will be replaced.
         inode_id: InodeId,
+        /// Visible destination directory, which may equal the current parent.
         new_parent_inode_id: InodeId,
+        /// Destination spelling, whose derived key must not name another child.
         new_display_name: DisplayName,
     },
     /// Delete a directory subtree.
     #[cfg_attr(feature = "openapi", schema(title = "CommitOpDeleteSubtree"))]
-    DeleteSubtree { root_inode_id: InodeId },
+    DeleteSubtree {
+        /// Visible non-root directory whose entire reachable subtree becomes tombstoned.
+        root_inode_id: InodeId,
+    },
     /// Recover a deleted file or subtree: revoke the deletion recorded at
     /// `deleted_at_seq` (the delete's committed sequence, reported by the
     /// delete and by the change feed) and re-bind the inode under a visible
@@ -115,9 +135,13 @@ pub enum CommitOp {
     /// a stale request from cancelling a later deletion of the same inode.
     #[cfg_attr(feature = "openapi", schema(title = "CommitOpUndelete"))]
     Undelete {
+        /// Deleted inode to make reachable again.
         inode_id: InodeId,
+        /// Observed deletion sequence, which prevents cancelling a newer tombstone generation.
         deleted_at_seq: ChangeSeq,
+        /// Visible directory that will own the recovered binding.
         parent_inode_id: InodeId,
+        /// Recovered child spelling, whose derived key must be absent.
         display_name: DisplayName,
     },
 }
@@ -133,7 +157,9 @@ pub enum CommitPrecondition {
         schema(title = "CommitPreconditionInodeRevisionIs")
     )]
     InodeRevisionIs {
+        /// File inode whose visible revision is tested.
         inode_id: InodeId,
+        /// Exact revision required at commit evaluation time.
         revision_no: RevisionNo,
     },
     /// Inode ancestors have not been subtree-deleted.
@@ -141,23 +167,33 @@ pub enum CommitPrecondition {
         feature = "openapi",
         schema(title = "CommitPreconditionAncestorsNotSubtreeDeleted")
     )]
-    AncestorsNotSubtreeDeleted { inode_id: InodeId },
+    AncestorsNotSubtreeDeleted {
+        /// Inode whose ancestor chain must contain no active tombstone.
+        inode_id: InodeId,
+    },
     /// Directory child name is still absent.
     #[cfg_attr(
         feature = "openapi",
         schema(title = "CommitPreconditionChildNameAbsent")
     )]
     ChildNameAbsent {
+        /// Visible directory in which absence is tested.
         parent_inode_id: InodeId,
+        /// Canonical lookup key that must not have an active binding.
         name_key: NameKey,
     },
     /// Directory binding is still exactly the binding the caller saw.
     #[cfg_attr(feature = "openapi", schema(title = "CommitPreconditionBindingIs"))]
     BindingIs {
+        /// Directory expected to own the observed binding.
         parent_inode_id: InodeId,
+        /// Canonical name key of the observed binding.
         name_key: NameKey,
+        /// Child identity expected at that name.
         child_inode_id: InodeId,
+        /// Sequence that created the exact observed binding generation.
         bind_seq: ChangeSeq,
+        /// Delta position that disambiguates the generation within `bind_seq`.
         bind_delta_index: u32,
     },
     /// Directory is still empty.
@@ -165,7 +201,10 @@ pub enum CommitPrecondition {
         feature = "openapi",
         schema(title = "CommitPreconditionDirectoryEmpty")
     )]
-    DirectoryEmpty { inode_id: InodeId },
+    DirectoryEmpty {
+        /// Visible directory that must have no active child bindings.
+        inode_id: InodeId,
+    },
 }
 
 /// Durable metadata fact exposed through the change feed.
@@ -175,57 +214,92 @@ pub enum CommitPrecondition {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CommitDelta {
+    /// Announces a newly allocated inode and its immutable kind.
     #[cfg_attr(feature = "openapi", schema(title = "CommitDeltaCreateInode"))]
     CreateInode {
+        /// Zero-based request-operation position that produced this fact.
         semantic_op_index: u32,
+        /// Stable ordering position of this fact within the commit.
         delta_index: u32,
+        /// Newly allocated namespace-scoped inode identity.
         inode_id: InodeId,
+        /// File-or-directory classification fixed at creation.
         inode_kind: InodeKind,
     },
+    /// Announces a newly visible generation of a directory binding.
     #[cfg_attr(feature = "openapi", schema(title = "CommitDeltaBindDirentry"))]
     BindDirentry {
+        /// Zero-based request-operation position that produced this fact.
         semantic_op_index: u32,
+        /// Stable ordering position and binding identity within the commit.
         delta_index: u32,
+        /// Directory receiving the binding.
         parent_inode_id: InodeId,
+        /// Policy-derived key used for uniqueness and lookup.
         name_key: NameKey,
+        /// User-facing spelling retained for directory responses.
         display_name: DisplayName,
+        /// Inode made reachable by the binding.
         child_inode_id: InodeId,
     },
+    /// Announces retirement of one exact historical directory binding.
     #[cfg_attr(feature = "openapi", schema(title = "CommitDeltaUnbindDirentry"))]
     UnbindDirentry {
+        /// Zero-based request-operation position that produced this fact.
         semantic_op_index: u32,
+        /// Stable ordering position of this unbind within the commit.
         delta_index: u32,
+        /// Directory from which the binding was removed.
         parent_inode_id: InodeId,
+        /// Canonical lookup key of the retired binding.
         name_key: NameKey,
+        /// Child identity on the retired binding.
         child_inode_id: InodeId,
+        /// Sequence that created the exact retired binding generation.
         bind_seq: ChangeSeq,
+        /// Delta position that disambiguates the generation within `bind_seq`.
         bind_delta_index: u32,
     },
+    /// Announces publication of the next immutable content revision of a file.
     #[cfg_attr(feature = "openapi", schema(title = "CommitDeltaAppendFileRevision"))]
     AppendFileRevision {
+        /// Zero-based request-operation position that produced this fact.
         semantic_op_index: u32,
+        /// Stable ordering position of this revision within the commit.
         delta_index: u32,
+        /// File inode whose history advanced.
         inode_id: InodeId,
+        /// New monotonic position in that file's revision history.
         revision_no: RevisionNo,
+        /// Immutable content published by the revision.
         content_ref: ContentRef,
     },
+    /// Announces a tombstone that hides one rooted subtree.
     #[cfg_attr(feature = "openapi", schema(title = "CommitDeltaTombstoneSubtree"))]
     TombstoneSubtree {
+        /// Zero-based request-operation position that produced this fact.
         semantic_op_index: u32,
+        /// Stable ordering position and tombstone identity within the commit.
         delta_index: u32,
+        /// Inode at the root of the newly hidden subtree.
         root_inode_id: InodeId,
     },
+    /// Announces a compensating event that revokes one exact subtree tombstone.
     #[cfg_attr(
         feature = "openapi",
         schema(title = "CommitDeltaRevokeSubtreeTombstone")
     )]
     RevokeSubtreeTombstone {
+        /// Zero-based request-operation position that produced this fact.
         semantic_op_index: u32,
+        /// Stable ordering position of this revoke within the commit.
         delta_index: u32,
+        /// Root inode governed by the targeted tombstone.
         root_inode_id: InodeId,
         /// The exact deletion generation this revoke cancels. Projections
         /// must reduce with the target, never "whatever is newest".
         target_seq: ChangeSeq,
+        /// Delta position that identifies the targeted deletion within `target_seq`.
         target_delta_index: u32,
     },
 }
@@ -241,6 +315,7 @@ pub struct CommittedChange {
     /// Wall-clock stamp of the commit, in Unix milliseconds.
     /// Observational: `seq` is the order.
     pub committed_at_ms: u64,
+    /// Caller annotation, omitted when absent and carrying no filesystem semantics.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
     /// Materialized metadata deltas.
@@ -251,11 +326,16 @@ pub struct CommittedChange {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ChangesResponse {
+    /// Namespace whose ordered commit stream was read.
     pub namespace_id: NamespaceId,
+    /// Exclusive cursor supplied by the caller, or the endpoint's initial position.
     pub after_seq: ChangeSeq,
+    /// Snapshot head through which this page was evaluated.
     pub through_seq: ChangeSeq,
+    /// Cursor to request when another page remains, or `None` at `through_seq`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_after_seq: Option<ChangeSeq>,
+    /// Logical commits after `after_seq`, ordered by ascending namespace sequence.
     pub changes: Vec<CommittedChange>,
 }
 

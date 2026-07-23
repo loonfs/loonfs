@@ -12,19 +12,30 @@ use crate::{
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+/// Selects one independently versioned mutable control-object family.
+///
+/// See [mutable control-object rules](../../../docs/specs/format.md#17-mutable-control-object-rules).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ControlObjectKind {
+    /// Stores immutable namespace-wide configuration.
     NamespaceConfig,
+    /// Identifies one immutable-content keyspace.
     ContentStoreDescriptor,
+    /// Carries the sole live-visibility and writer-fencing authority.
     WalHead,
+    /// Records the earliest sequence for which incremental history is retained.
     WalFloor,
+    /// Points to the best known materialized metadata manifest.
     MetadataRoot,
+    /// Pins a manifest basis for a user or fork lifecycle.
     CheckpointRecord,
+    /// Tracks staged content through upload completion or cleanup.
     UploadSession,
 }
 
 impl ControlObjectKind {
+    /// Lists every registered control-object family in stable registry order.
     pub const ALL: [Self; 7] = [
         Self::NamespaceConfig,
         Self::ContentStoreDescriptor,
@@ -53,6 +64,7 @@ impl ControlObjectKind {
         }
     }
 
+    /// Returns the frozen envelope discriminator for this control-object family.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::NamespaceConfig => "namespace_config",
@@ -65,14 +77,20 @@ impl ControlObjectKind {
         }
     }
 
+    /// Parses a registered envelope discriminator, returning `None` for future families.
     pub fn parse(value: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|kind| kind.as_str() == value)
     }
 }
 
+/// Stores immutable configuration consulted by every read and write in a namespace.
+///
+/// See [namespaces and identity](../../../docs/specs/format.md#21-namespaces-and-identity).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NamespaceConfigState {
+    /// Namespace whose durable tree owns this configuration object.
     pub namespace_id: NamespaceId,
+    /// Immutable content store in which the namespace publishes file bytes.
     pub content_store_id: ContentStoreId,
     /// Immutable per namespace, chosen at creation: the single authority for
     /// name-key computation on both the write and read paths. Required — a
@@ -91,9 +109,13 @@ pub struct NamespaceConfigState {
 /// (format spec, "Garbage collection").
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WalFloorState {
+    /// Namespace whose retained history this floor bounds.
     pub namespace_id: NamespaceId,
+    /// Earliest sequence at which incremental replay remains promised.
     pub floor_seq: ChangeSeq,
+    /// Unix-millisecond wall-clock time when the referenced manifest basis was last verified.
     pub verified_at_ms: u64,
+    /// Unix-millisecond wall-clock time stamped by the successful floor update attempt.
     pub updated_at_ms: u64,
 }
 
@@ -106,17 +128,26 @@ pub struct WalFloorState {
 /// object never defines live visibility.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MetadataRootState {
+    /// Namespace whose materialized file set this root selects.
     pub namespace_id: NamespaceId,
+    /// Monotonic logical position of the selected manifest.
     pub manifest_id: ManifestId,
+    /// Immutable candidate chosen at `manifest_id`.
     pub manifest_object_id: ManifestObjectId,
+    /// Greatest namespace sequence represented by the selected manifest.
     pub manifest_head_seq: ChangeSeq,
     /// Must equal `payload_checksum` in the referenced manifest envelope.
     pub manifest_payload_checksum: String,
+    /// Unix-millisecond wall-clock stamp for observability and GC grace policy, not ordering.
     pub updated_at_ms: u64,
 }
 
+/// Identifies the immutable-content keyspace described by one control object.
+///
+/// See [immutable content rules](../../../docs/specs/format.md#16-immutable-content-rules).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContentStoreDescriptorState {
+    /// Content-store identity that must agree with the descriptor's durable key.
     pub content_store_id: ContentStoreId,
 }
 
@@ -130,9 +161,12 @@ pub struct ContentStoreDescriptorState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum CheckpointRecordLifecycle {
+    /// Protects the checkpoint basis while the owner remains live and the record unexpired.
     #[default]
     Active,
+    /// Relinquishes the pin while allowing basis-verified revival by its owner.
     Released,
+    /// Irreversibly transfers the record to garbage-collection cleanup.
     Condemned,
 }
 
@@ -155,11 +189,17 @@ pub enum CheckpointOwner {
     /// An operator-created pin, released explicitly by checkpoint id or by
     /// its declared expiry. The name is a label, not a key: several records
     /// may carry the same name over different bases.
-    User { name: String },
+    User {
+        /// Operator-facing label that need not be unique.
+        name: String,
+    },
     /// A fork target keeping its source basis alive. Released only once the
     /// target namespace is terminally deleted or its installation tree is
     /// proven absent.
-    Fork { target_namespace_id: NamespaceId },
+    Fork {
+        /// Fork namespace whose continued existence keeps the source basis pinned.
+        target_namespace_id: NamespaceId,
+    },
 }
 
 /// A checkpoint record: pins one metadata manifest (its basis) so garbage
@@ -172,27 +212,43 @@ pub enum CheckpointOwner {
 /// `released`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CheckpointRecordState {
+    /// Deterministic record identity derived from basis and owner identity.
     pub checkpoint_id: CheckpointId,
+    /// Source namespace whose manifest and metadata remain pinned.
     pub namespace_id: NamespaceId,
+    /// Logical manifest position of the pinned basis.
     pub manifest_id: ManifestId,
+    /// Immutable manifest candidate selected at `manifest_id`.
     pub manifest_object_id: ManifestObjectId,
+    /// Greatest source sequence materialized by the pinned manifest.
     pub manifest_head_seq: ChangeSeq,
     /// Must equal `payload_checksum` in the referenced manifest envelope.
     pub manifest_payload_checksum: String,
+    /// Commit identity at the pinned manifest head, verified against its payload.
     pub head_commit_id: CommitId,
+    /// Unix-millisecond creation stamp used by expiry and GC grace policy, never validity ordering.
     pub created_at_ms: u64,
     /// Expiry for user-owned records; fork-owned records never expire.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at_ms: Option<u64>,
+    /// Party whose durable lifecycle determines when this pin can be released.
     pub owner: CheckpointOwner,
+    /// Current pin or cleanup lifecycle, changed only by guarded rewrites.
     pub state: CheckpointRecordLifecycle,
 }
 
+/// Links one accepted WAL segment to its immutable object and verified sequence range.
+///
+/// See [WAL segment rules](../../../docs/specs/format.md#15-wal-segment-rules).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WalSegmentPointer {
+    /// Fully resolved durable key from which readers load the segment.
     pub object_key: String,
+    /// Segment identity expected to agree with both the key and decoded payload.
     pub segment_id: WalSegmentId,
+    /// First logical commit sequence carried by the segment.
     pub start_seq: ChangeSeq,
+    /// Final logical commit sequence carried by the segment.
     pub end_seq: ChangeSeq,
     /// Checksum of the referenced segment's payload bytes, in `sha256:<hex>`
     /// form. Must equal the `payload_checksum` in the referenced envelope.
@@ -207,15 +263,24 @@ pub struct WalSegmentPointer {
 /// comparison may gate a publish.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WriterBlock {
+    /// Stable writer label supplied by the embedding process for diagnostics.
     pub writer_id: String,
+    /// Per-session generated identity that distinguishes restarts of the same writer.
     pub writer_session_id: String,
+    /// Unix-millisecond stamp of the successful epoch-acquisition CAS.
     pub acquired_at_ms: u64,
 }
 
+/// Captures the writer identity and fencing epoch a session must retain while publishing.
+///
+/// See [mutable control-object rules](../../../docs/specs/format.md#17-mutable-control-object-rules).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AcquiredWriter {
+    /// Stable writer label copied into the head's observability block.
     pub writer_id: String,
+    /// Per-session identity used to recognize an already-acquired head.
     pub writer_session_id: String,
+    /// Fencing epoch every commit publication from this session must match.
     pub writer_epoch: WriterEpoch,
 }
 
@@ -253,16 +318,25 @@ impl NamespaceState {
     }
 }
 
+/// Carries the authoritative visibility, allocation, and fencing state of a namespace.
+///
+/// See [head update authority](../../../docs/specs/format.md#14-head-update-authority).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HeadState {
+    /// Namespace whose live history this head governs.
     pub namespace_id: NamespaceId,
+    /// Greatest visible logical commit sequence.
     pub seq: ChangeSeq,
+    /// Commit id assigned to `seq`, or the fixed genesis id at sequence zero.
     pub head_commit_id: CommitId,
+    /// Current fencing generation; a publisher holding any other epoch is rejected.
     pub writer_epoch: WriterEpoch,
     /// Non-authoritative record of the most recent epoch acquisition.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub writer: Option<WriterBlock>,
+    /// First namespace-scoped inode identity available for allocation.
     pub next_inode_id: InodeId,
+    /// Accepted tip of the visible WAL chain, or `None` before the first commit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visible_wal_tip: Option<WalSegmentPointer>,
     /// Bounded newest-first accelerator over the visible chain, always
@@ -280,6 +354,7 @@ pub struct HeadState {
 const GENESIS_COMMIT_ID: &str = "c_00000000000000000000000000000000";
 
 impl HeadState {
+    /// Constructs the active sequence-zero head with the root inode already reserved.
     pub fn initial(namespace_id: NamespaceId) -> Self {
         Self {
             namespace_id,
@@ -296,8 +371,10 @@ impl HeadState {
     }
 }
 
+/// Records the immutable content selected when an upload session completed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompletedUpload {
+    /// Verified content reference returned by every idempotent completion retry.
     pub content_ref: ContentRef,
 }
 
@@ -309,26 +386,38 @@ pub struct CompletedUpload {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UploadSessionLifecycle {
+    /// Allows staging and idempotent completion of content.
     #[default]
     Active,
+    /// Irreversibly transfers an abandoned session to garbage-collection cleanup.
     Condemned,
 }
 
+/// Tracks one durable content-upload workflow independently of commit publication.
+///
+/// See [upload before publish](../../../docs/specs/format.md#242-upload-before-publish).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UploadSessionState {
+    /// Namespace authorized to consume the staged content.
     pub namespace_id: NamespaceId,
+    /// Durable session identity used by staging and completion requests.
     pub upload_id: UploadId,
+    /// Transport path selected when the session was created.
     #[serde(default, skip_serializing_if = "UploadMode::is_service_proxied")]
     pub mode: UploadMode,
     /// For direct_put sessions, the content ref the presigned URL was minted for.
     /// It becomes staged only after completion validates the durable object.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub direct_put_content_ref: Option<ContentRef>,
+    /// Content already verified and staged, or `None` before bytes have passed validation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub staged_content_ref: Option<ContentRef>,
+    /// Frozen completion result, or `None` while the session can still select content.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completed: Option<CompletedUpload>,
+    /// Unix-millisecond creation stamp used for abandoned-session cleanup policy.
     pub created_at_ms: u64,
+    /// Guarded lifecycle that prevents upload operations racing with cleanup.
     pub state: UploadSessionLifecycle,
 }
 
@@ -338,12 +427,16 @@ pub struct UploadSessionState {
 /// [`encode_control_object`] and validated only by [`decode_control_object`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ControlObjectEnvelope<T> {
+    /// Durable-family discriminator that selects `T` and its independent version.
     pub kind: ControlObjectKind,
+    /// Family-local format version obtained from `kind`.
     pub format_version: u32,
+    /// Informational software version of the writer that encoded this object.
     pub writer_version: String,
     /// Digest of the payload JSON exactly as stored in the durable document,
     /// in `sha256:<hex>` form.
     pub payload_checksum: String,
+    /// Decoded control state protected by `payload_checksum`.
     pub state: T,
 }
 
@@ -351,6 +444,9 @@ impl<T> ControlObjectEnvelope<T>
 where
     T: Serialize,
 {
+    /// Builds a family-versioned envelope and computes its checksum from canonical state JSON.
+    ///
+    /// Construction fails when `state` cannot be encoded.
     pub fn from_state(
         kind: ControlObjectKind,
         writer_version: impl Into<String>,
@@ -366,14 +462,24 @@ where
     }
 }
 
+/// Specializes a control envelope for the authoritative namespace head.
 pub type HeadStateEnvelope = ControlObjectEnvelope<HeadState>;
+/// Specializes a control envelope for a durable upload workflow.
 pub type UploadSessionEnvelope = ControlObjectEnvelope<UploadSessionState>;
+/// Specializes a control envelope for immutable namespace configuration.
 pub type NamespaceConfigEnvelope = ControlObjectEnvelope<NamespaceConfigState>;
+/// Specializes a control envelope for the selected materialized manifest.
 pub type MetadataRootEnvelope = ControlObjectEnvelope<MetadataRootState>;
+/// Specializes a control envelope for the retained-history floor.
 pub type WalFloorEnvelope = ControlObjectEnvelope<WalFloorState>;
+/// Specializes a control envelope for a durable manifest pin.
 pub type CheckpointRecordEnvelope = ControlObjectEnvelope<CheckpointRecordState>;
+/// Specializes a control envelope for an immutable-content keyspace descriptor.
 pub type ContentStoreDescriptorEnvelope = ControlObjectEnvelope<ContentStoreDescriptorState>;
 
+/// Computes the checksum stored beside canonical JSON for a control state.
+///
+/// Computation fails when `state` cannot be serialized.
 pub fn control_payload_checksum<T>(state: &T) -> Result<String, EnvelopeCodecError>
 where
     T: Serialize,
@@ -381,6 +487,11 @@ where
     crate::envelope::json_payload_checksum(state)
 }
 
+/// Encodes a control-object envelope as its durable JSON representation.
+///
+/// Encoding fails when the family version is unsupported, the in-memory
+/// checksum is stale, or JSON serialization fails. See
+/// [mutable control-object rules](../../../docs/specs/format.md#17-mutable-control-object-rules).
 pub fn encode_control_object<T>(
     envelope: &ControlObjectEnvelope<T>,
 ) -> Result<Vec<u8>, EnvelopeCodecError>
@@ -397,6 +508,11 @@ where
     )
 }
 
+/// Decodes and verifies a durable JSON control object of `expected_kind`.
+///
+/// Decoding fails for invalid JSON, an unknown or mismatched kind, an
+/// unsupported family version, a checksum mismatch, or an invalid `T`. See
+/// [mutable control-object rules](../../../docs/specs/format.md#17-mutable-control-object-rules).
 pub fn decode_control_object<T>(
     bytes: &[u8],
     expected_kind: ControlObjectKind,

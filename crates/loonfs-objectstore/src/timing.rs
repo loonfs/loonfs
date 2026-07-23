@@ -13,6 +13,7 @@
 use std::sync::OnceLock;
 use std::time::Instant;
 
+/// Supplies monotonic milliseconds for retry deadlines and deterministic test injection.
 pub trait MonotonicTimer: std::fmt::Debug + Send + Sync {
     /// Milliseconds since an arbitrary per-timer origin. Never goes
     /// backward; only differences are meaningful.

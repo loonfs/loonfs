@@ -137,7 +137,12 @@ pub enum PaginationPolicyError {
     ZeroMaxLimit,
     /// The configured default limit exceeded the configured max.
     #[error("pagination default limit `{default_limit}` exceeds max limit `{max_limit}`")]
-    DefaultExceedsMax { default_limit: u32, max_limit: u32 },
+    DefaultExceedsMax {
+        /// Default page size rejected by policy construction.
+        default_limit: u32,
+        /// Maximum page size the rejected default exceeded.
+        max_limit: u32,
+    },
 }
 
 /// Invalid caller-supplied page size.
@@ -148,7 +153,12 @@ pub enum LimitError {
     Zero,
     /// The caller supplied a limit larger than the active policy allows.
     #[error("limit `{requested}` exceeds max limit `{max_limit}`")]
-    ExceedsMax { requested: u32, max_limit: u32 },
+    ExceedsMax {
+        /// Page size supplied by the caller.
+        requested: u32,
+        /// Largest page size allowed by the active policy.
+        max_limit: u32,
+    },
 }
 
 /// Typed request envelope for internal runtime/core page methods.
@@ -427,12 +437,19 @@ pub enum PageCursorError {
     /// The cursor was valid, but for a different paginated endpoint.
     #[error("page cursor kind `{actual}` cannot be used as `{expected}` cursor")]
     WrongKind {
+        /// Cursor kind accepted by the endpoint doing the decoding.
         expected: &'static str,
+        /// Cursor kind recovered from the caller's opaque token.
         actual: &'static str,
     },
     /// The cursor format version is not supported by this build.
     #[error("unsupported page cursor version `{actual}`; expected `{expected}`")]
-    UnsupportedVersion { expected: u8, actual: u8 },
+    UnsupportedVersion {
+        /// Cursor format version this build can decode.
+        expected: u8,
+        /// Version embedded in the caller's opaque token.
+        actual: u8,
+    },
 }
 
 fn hex_encode(bytes: &[u8]) -> String {

@@ -13,21 +13,63 @@ pub(crate) struct ObjectLayout;
 /// [durable object key grammar]: ../../../docs/specs/format.md#12-durable-object-families
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DurableObjectFamily {
+    /// Classifies an immutable namespace-completion descriptor.
+    ///
+    /// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
     NamespaceConfig,
+    /// Classifies the mutable visibility and fencing head.
+    ///
+    /// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
     WalHead,
+    /// Classifies the mutable retained-history floor.
+    ///
+    /// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
     WalFloor,
+    /// Classifies the reserved mutable WAL-index pointer key.
+    ///
+    /// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
     WalIndex,
+    /// Classifies a reserved immutable WAL-index run.
+    ///
+    /// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
     WalIndexRun,
+    /// Classifies an immutable segment in a namespace's WAL chain.
+    ///
+    /// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
     WalSegment,
+    /// Classifies the mutable materialized metadata pointer.
+    ///
+    /// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
     MetadataRoot,
+    /// Classifies an immutable namespace-manifest candidate.
+    ///
+    /// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
     MetadataManifest,
+    /// Classifies an immutable metadata SST segment.
+    ///
+    /// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
     MetadataTable,
+    /// Classifies a mutable checkpoint lifecycle record.
+    ///
+    /// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
     CheckpointRecord,
+    /// Classifies a mutable upload-session lifecycle record.
+    ///
+    /// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
     UploadSession,
+    /// Classifies an immutable content-store descriptor.
+    ///
+    /// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
     ContentStoreDescriptor,
+    /// Classifies immutable whole-file content bytes.
+    ///
+    /// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
     ContentBlob,
 }
 
+/// Reports the durable family and namespace ownership recoverable from a recognized key.
+///
+/// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedObjectKey<'a> {
     family: DurableObjectFamily,
@@ -35,10 +77,12 @@ pub struct ParsedObjectKey<'a> {
 }
 
 impl<'a> ParsedObjectKey<'a> {
+    /// Returns the durable family selected by the key's path shape.
     pub fn family(&self) -> DurableObjectFamily {
         self.family
     }
 
+    /// Returns the namespace path component, or `None` for content-store-owned families.
     pub fn owner_namespace_id(&self) -> Option<&'a str> {
         self.owner_namespace_id
     }
@@ -153,6 +197,10 @@ impl ObjectLayout {
     }
 }
 
+/// Classifies a current or reserved durable object key without validating identifier text.
+///
+/// Returns `None` for private, foreign, or unrecognized paths. See
+/// [durable object families](../../../docs/specs/format.md#12-durable-object-families).
 pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
     let segments: Vec<_> = key.split('/').collect();
     match segments.as_slice() {
@@ -211,6 +259,11 @@ fn parsed(
     })
 }
 
+/// Extracts canonical lowercase hexadecimal content identity from a `sha256:` digest.
+///
+/// The operation fails when the prefix, length, or lowercase hexadecimal
+/// alphabet is invalid. See
+/// [durable object families](../../../docs/specs/format.md#12-durable-object-families).
 pub fn sha256_hex_from_digest(digest: &str) -> Result<&str> {
     let Some(hex) = digest.strip_prefix("sha256:") else {
         return Err(ObjectStoreError::InvalidKey {

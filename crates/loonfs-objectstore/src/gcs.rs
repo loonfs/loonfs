@@ -10,10 +10,14 @@ use futures::stream::BoxStream;
 use object_store::gcp::GoogleCloudStorageBuilder;
 use std::sync::Arc;
 
+/// Supplies explicit credentials and key scoping for the native Google Cloud Storage adapter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GcpGcsStoreConfig {
+    /// Bucket that acts as the LoonFS object-store root.
     pub bucket: String,
+    /// Filesystem path to the service-account JSON loaded by the provider client.
     pub service_account_key_path: String,
+    /// Logical prefix prepended to every key, or `None` to use the bucket root.
     pub key_prefix: Option<String>,
 }
 
@@ -33,6 +37,10 @@ pub struct GcpGcsStore {
 }
 
 impl GcpGcsStore {
+    /// Builds a native GCS adapter whose compare tokens are object generations.
+    ///
+    /// Construction fails for a blank bucket or credential path, an invalid
+    /// key prefix, runtime initialization, or provider-client configuration.
     pub fn new(config: GcpGcsStoreConfig) -> Result<Self> {
         if config.bucket.trim().is_empty() {
             return Err(ObjectStoreError::Configuration(

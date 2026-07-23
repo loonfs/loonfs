@@ -24,46 +24,75 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum StoreConfig {
+    /// Stores objects beneath a directory using filesystem-backed compare-and-swap.
     LocalFs {
+        /// Directory created or opened as the physical store root.
         root: String,
+        /// Logical prefix applied inside `root`, or `None` to expose it directly.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         key_prefix: Option<String>,
     },
+    /// Connects to AWS S3 or an explicitly configured S3-compatible endpoint.
     AwsS3 {
+        /// Bucket that acts as the physical store root.
         bucket: String,
+        /// SigV4 signing region.
         region: String,
+        /// Service endpoint override, or `None` to derive the regional AWS endpoint.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         endpoint_url: Option<String>,
+        /// Access-key id used for provider requests and direct-upload signing.
         access_key_id: SecretString,
+        /// Secret access key used for provider requests and direct-upload signing.
         secret_access_key: SecretString,
+        /// Temporary credential token, or `None` for long-lived credentials.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session_token: Option<SecretString>,
+        /// Logical prefix applied inside the bucket, or `None` to expose its root.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         key_prefix: Option<String>,
+        /// Uses path-style bucket addressing when `true`; defaults to virtual-hosted style.
         #[serde(default)]
         force_path_style: bool,
     },
+    /// Connects to Cloudflare R2 through its S3-compatible endpoint.
     CloudflareR2 {
+        /// R2 bucket that acts as the physical store root.
         bucket: String,
+        /// Cloudflare account identity used to validate provider configuration.
         account_id: String,
+        /// Account-level R2 S3 endpoint used with path-style bucket addressing.
         endpoint_url: String,
+        /// S3-compatible access-key id used for requests and direct-upload signing.
         access_key_id: SecretString,
+        /// S3-compatible secret used for requests and direct-upload signing.
         secret_access_key: SecretString,
+        /// Logical prefix applied inside the bucket, or `None` to expose its root.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         key_prefix: Option<String>,
     },
+    /// Connects to Google Cloud Storage through its native generation-aware API.
     GcpGcs {
+        /// GCS bucket that acts as the physical store root.
         bucket: String,
+        /// Filesystem path to the service-account JSON used for authentication.
         service_account_key_path: String,
+        /// Logical prefix applied inside the bucket, or `None` to expose its root.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         key_prefix: Option<String>,
     },
+    /// Connects to Azure Blob Storage through its native shared-key API.
     AzureAbs {
+        /// Azure storage account used for addressing and signing.
         account_name: String,
+        /// Blob container that acts as the physical store root.
         container_name: String,
+        /// Shared account key used for request authentication.
         access_key: SecretString,
+        /// Azure-compatible endpoint override, or `None` for the public service.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         endpoint_url: Option<String>,
+        /// Logical prefix applied inside the container, or `None` to expose its root.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         key_prefix: Option<String>,
     },
@@ -75,10 +104,20 @@ pub enum StoreConfig {
 /// can report them directly or prefix them with their own config path.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum StoreConfigError {
+    /// Reports a required field whose value is absent or blank.
     #[error("missing `{field}`")]
-    MissingField { field: &'static str },
+    MissingField {
+        /// `store.`-rooted path suitable for direct configuration diagnostics.
+        field: &'static str,
+    },
+    /// Reports a present field whose value violates its provider-specific contract.
     #[error("invalid `{field}`: {reason}")]
-    InvalidField { field: &'static str, reason: String },
+    InvalidField {
+        /// `store.`-rooted path suitable for direct configuration diagnostics.
+        field: &'static str,
+        /// Specific validation failure without repeating the field path.
+        reason: String,
+    },
 }
 
 impl StoreConfigError {

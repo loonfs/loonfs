@@ -37,38 +37,70 @@ pub(crate) struct EnvelopeProbe {
 /// bytes came from.
 #[derive(Debug, Error)]
 pub enum EnvelopeCodecError {
+    /// Reports a payload that cannot be serialized into its family's durable encoding.
     #[error("failed to encode envelope payload: {0}")]
     PayloadEncode(String),
+    /// Reports an envelope document that cannot be serialized around an encoded payload.
     #[error("failed to encode envelope document: {0}")]
     EnvelopeEncode(String),
+    /// Reports bytes that do not decode as the shared durable envelope layout.
     #[error("failed to decode envelope document: {0}")]
     EnvelopeDecode(String),
+    /// Reports a verified envelope whose opaque payload does not decode as its declared family.
     #[error("failed to decode envelope payload: {0}")]
     PayloadDecode(String),
+    /// Reports an envelope that the configured transport codec could not compress.
     #[error("failed to compress envelope: {0}")]
     Compress(String),
+    /// Reports stored bytes that the configured transport codec could not decompress.
     #[error("failed to decompress envelope: {0}")]
     Decompress(String),
+    /// Reports an unrecognized durable-family discriminator found during the envelope probe.
     #[error("unknown envelope kind `{found}`")]
-    UnknownKind { found: String },
+    UnknownKind {
+        /// Untrusted `kind` spelling decoded from the stored object.
+        found: String,
+    },
+    /// Reports a valid discriminator that does not belong to the decoder the caller selected.
     #[error("envelope kind mismatch: expected `{expected}`, found `{found}`")]
-    KindMismatch { expected: String, found: String },
+    KindMismatch {
+        /// Durable family the selected decoder accepts.
+        expected: String,
+        /// Durable family declared by the stored object.
+        found: String,
+    },
+    /// Reports a known durable family whose format version this build cannot read.
     #[error(
         "unsupported `{kind}` envelope format version `{found}`: \
          this build supports `{supported}`"
     )]
     UnsupportedFormatVersion {
+        /// Durable family whose independent version gate rejected the object.
         kind: String,
+        /// Version declared by the stored object.
         found: u32,
+        /// Sole version this build reads and writes for `kind`.
         supported: u32,
     },
+    /// Reports stored payload bytes that do not match the checksum recorded beside them.
     #[error("envelope payload checksum mismatch: expected `{expected}`, actual `{actual}`")]
-    ChecksumMismatch { expected: String, actual: String },
+    ChecksumMismatch {
+        /// Digest recorded in the durable envelope.
+        expected: String,
+        /// Digest recomputed over the exact stored payload bytes.
+        actual: String,
+    },
+    /// Reports an in-memory payload changed without rebuilding its envelope checksum.
     #[error(
         "envelope checksum `{checksum}` does not match its payload `{actual}`: \
          rebuild the envelope from its payload"
     )]
-    StalePayloadChecksum { checksum: String, actual: String },
+    StalePayloadChecksum {
+        /// Digest retained by the stale in-memory envelope.
+        checksum: String,
+        /// Digest recomputed from the payload about to be encoded.
+        actual: String,
+    },
 }
 
 /// Requires the probed kind to be exactly `expected`.

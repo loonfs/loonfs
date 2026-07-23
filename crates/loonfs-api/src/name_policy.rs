@@ -5,13 +5,16 @@ use serde::{Deserialize, Serialize};
 use unicode_casefold::UnicodeCaseFold;
 use unicode_normalization::UnicodeNormalization;
 
+/// Selects the immutable rule a namespace uses to derive canonical directory lookup keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum NamePolicy {
+    /// Normalizes to NFC, applies Unicode default case folding, then normalizes again.
     #[default]
     NfcCasefoldV0,
 }
 
+/// Derives the canonical lookup key for a display name under `policy`.
 pub fn name_key_for_display_name(policy: NamePolicy, display_name: &str) -> String {
     match policy {
         NamePolicy::NfcCasefoldV0 => display_name

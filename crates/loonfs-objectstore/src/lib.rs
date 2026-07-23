@@ -8,6 +8,8 @@
 //! [`layout`], and the conformance suite that keeps provider assumptions
 //! honest.
 
+#![warn(missing_docs)]
+
 pub mod abs;
 mod configured;
 pub mod gcs;

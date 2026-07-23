@@ -2,14 +2,24 @@
 
 use thiserror::Error;
 
+/// Describes why bytes cannot be decoded from the durable lowercase hexadecimal form.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum HexDecodeError {
+    /// Reports an input that ends after the high nibble of its final byte.
     #[error("odd hex length {length}")]
-    OddLength { length: usize },
+    OddLength {
+        /// Number of ASCII bytes in the rejected input.
+        length: usize,
+    },
+    /// Reports an input byte outside `0`–`9` and `a`–`f`.
     #[error("invalid hex byte {byte:#04x}")]
-    InvalidByte { byte: u8 },
+    InvalidByte {
+        /// First byte that violated the lowercase hexadecimal alphabet.
+        byte: u8,
+    },
 }
 
+/// Encodes bytes using the lowercase hexadecimal alphabet expected by durable codecs.
 pub fn hex_encode_bytes(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut encoded = String::with_capacity(bytes.len() * 2);

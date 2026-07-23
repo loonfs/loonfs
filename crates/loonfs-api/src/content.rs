@@ -24,6 +24,7 @@ pub enum ContentRefKind {
 impl ContentRefKind {
     const WHOLE_FILE_V0: &'static str = "whole_file_v0";
 
+    /// Returns the frozen wire spelling, including an unknown spelling preserved by a reader.
     pub fn as_str(&self) -> &str {
         match self {
             Self::WholeFileV0 => Self::WHOLE_FILE_V0,

@@ -21,24 +21,38 @@ const S3_CREATE_ONLY_HEADER: &str = "if-none-match";
 const S3_SHA256_CHECKSUM_HEADER: &str = "x-amz-checksum-sha256";
 const MAX_PRESIGN_EXPIRY: u64 = 7 * 24 * 60 * 60;
 
+/// Supplies explicit SigV4 credentials and endpoint addressing for direct-put URLs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct S3PresignerConfig {
+    /// Bucket incorporated into the signed request target.
     pub bucket: String,
+    /// SigV4 region incorporated into the credential scope.
     pub region: String,
+    /// S3-compatible endpoint override, or `None` for the regional AWS endpoint.
     pub endpoint_url: Option<String>,
+    /// Access-key id exposed in the signed credential parameter.
     pub access_key_id: SecretString,
+    /// Secret access key used to derive the request signature.
     pub secret_access_key: SecretString,
+    /// Temporary credential token signed into the request, or `None` for long-lived credentials.
     pub session_token: Option<SecretString>,
+    /// Logical prefix prepended before the object key is encoded and signed.
     pub key_prefix: Option<String>,
+    /// Selects path-style bucket addressing instead of virtual-hosted style.
     pub force_path_style: bool,
 }
 
+/// Issues checksum-bound, create-only SigV4 PUT capabilities for S3-compatible providers.
 #[derive(Debug, Clone)]
 pub struct S3CompatiblePresigner {
     config: S3PresignerConfig,
 }
 
 impl S3CompatiblePresigner {
+    /// Creates a presigner after validating required bucket, region, and credential values.
+    ///
+    /// Blank required values fail immediately; endpoint, key-prefix, content,
+    /// expiry, and signing-time failures surface when [`ObjectTransferIssuer::presign_put`] runs.
     pub fn new(config: S3PresignerConfig) -> Result<Self> {
         if config.bucket.trim().is_empty() {
             return Err(ObjectStoreError::Configuration(

@@ -15,13 +15,18 @@ use serde::{Deserialize, Serialize};
 /// a raw JSON fragment. `payload_checksum` covers the fragment's exact bytes.
 pub const NAMESPACE_MANIFEST_FORMAT_VERSION: u32 = 1;
 
+/// Identifies the durable payload family carried by a namespace-manifest envelope.
+///
+/// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NamespaceManifestKind {
+    /// Marks the file-set descriptor used to materialize a namespace snapshot.
     NamespaceManifest,
 }
 
 impl NamespaceManifestKind {
+    /// Returns the frozen envelope discriminator written to durable storage.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::NamespaceManifest => "namespace_manifest",
@@ -29,30 +34,54 @@ impl NamespaceManifestKind {
     }
 }
 
+/// Selects a metadata row family and its durable lookup ordering.
+///
+/// See [metadata segments](../../../docs/specs/format.md#421-metadata-segments).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MetadataTableFamily {
+    /// Stores inode identity, kind, and creation position.
     Inodes,
+    /// Orders directory bindings for parent-and-name visibility lookups.
     DirentryBinds,
+    /// Re-indexes directory bindings by child for parent discovery.
     DirentryChildBinds,
+    /// Stores immutable events that retire exact historical bindings.
     DirentryUnbinds,
+    /// Stores file revisions in their canonical durable ordering.
     Revisions,
+    /// Re-indexes file revisions for newest-first per-inode reads.
     RevisionsByInodeDesc,
+    /// Stores set and revoke events used to determine active subtree tombstones.
     Tombstones,
+    /// Preserves commit idempotency evidence independently of retained WAL history.
     CommitReceipts,
 }
 
+/// Describes one immutable metadata SST object referenced by a namespace manifest.
+///
+/// See [metadata segments](../../../docs/specs/format.md#421-metadata-segments).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MetadataFileRef {
+    /// Namespace whose keyspace owns the object, which may be a fork source rather than the reader.
     pub owner_namespace_id: NamespaceId,
+    /// Immutable table identity incorporated into the object's durable key.
     pub table_id: MetadataTableId,
+    /// Fully resolved object-store key trusted only after descriptor validation.
     pub object_key: String,
+    /// Namespace sequence at which this run was produced.
     pub run_seq: ChangeSeq,
+    /// Compaction tier used to order overlapping runs during reads and reorganization.
     pub level: u32,
+    /// Row schema and lookup ordering encoded in this segment.
     pub family: MetadataTableFamily,
+    /// Zero-based shard position among segments emitted for the same family and run.
     pub segment_index: u32,
+    /// Number of row payloads in the segment, used for validation and planning.
     pub row_count: u64,
+    /// Inclusive least durable row key; the segment is corrupt if decoded rows disagree.
     pub min_key: String,
+    /// Inclusive greatest durable row key; range planning skips disjoint segments.
     pub max_key: String,
     /// Where the segment's index block lives and how to verify it. The
     /// descriptor is the only entry point into a segment object — there is
@@ -73,69 +102,115 @@ pub struct MetadataFileRef {
     pub payload_checksum: String,
 }
 
+/// Records the immutable source snapshot inherited by a forked namespace.
+///
+/// See [namespace forks](../../../docs/specs/format.md#39-namespace-forks).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NamespaceManifestFork {
+    /// Namespace that owns the inherited metadata objects.
     pub source_namespace_id: NamespaceId,
+    /// Destination sequence corresponding to the fork's initial snapshot.
     pub fork_seq: ChangeSeq,
+    /// Released source checkpoint that pins the inherited state.
     pub source_checkpoint_id: CheckpointId,
+    /// Logical source manifest position selected by that checkpoint.
     pub source_manifest_id: ManifestId,
+    /// Immutable source-manifest object selected by the checkpoint record.
     pub source_manifest_object_id: ManifestObjectId,
+    /// Source namespace sequence frozen into the fork snapshot.
     pub source_head_seq: ChangeSeq,
 }
 
+/// Stores one materialized metadata event in an SST segment.
+///
+/// See [metadata segments](../../../docs/specs/format.md#421-metadata-segments).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MetadataRow {
+    /// Establishes one inode's immutable identity and kind.
     Inode {
+        /// Namespace-scoped inode identity allocated by the publishing writer.
         inode_id: InodeId,
+        /// Classification fixed when the inode was created.
         inode_kind: InodeKind,
+        /// Commit sequence from which the inode can become visible.
         created_seq: ChangeSeq,
     },
+    /// Records one generation of a directory name binding.
     DirentryBind {
+        /// Directory in which the name was bound.
         parent_inode_id: InodeId,
+        /// Policy-derived key used for uniqueness and lookup.
         name_key: NameKey,
+        /// User-facing component spelling retained for directory responses.
         display_name: DisplayName,
+        /// Inode reached while this binding generation remains active.
         child_inode_id: InodeId,
+        /// Commit sequence that created this binding generation.
         bind_seq: ChangeSeq,
+        /// Position that disambiguates the binding within `bind_seq`.
         bind_delta_index: u32,
     },
+    /// Retires one exact directory-binding generation.
     DirentryUnbind {
+        /// Directory that held the targeted binding.
         parent_inode_id: InodeId,
+        /// Canonical name key of the targeted binding.
         name_key: NameKey,
+        /// Child identity recorded by the targeted binding.
         child_inode_id: InodeId,
+        /// Commit sequence that created the binding being retired.
         bind_seq: ChangeSeq,
+        /// Delta position of the binding being retired.
         bind_delta_index: u32,
+        /// Commit sequence from which this unbind takes effect.
         unbind_seq: ChangeSeq,
+        /// Position that disambiguates the unbind within `unbind_seq`.
         unbind_delta_index: u32,
     },
+    /// Publishes one immutable content revision for a file inode.
     Revision {
+        /// File inode whose history contains the revision.
         inode_id: InodeId,
+        /// Monotonic revision number within that file's history.
         revision_no: RevisionNo,
+        /// Namespace sequence that published the revision.
         committed_seq: ChangeSeq,
         /// The owning commit's observational wall-clock stamp, denormalized
         /// onto the row so revision reads answer times without a receipt
         /// join. Never a validity input; `committed_seq` is the order.
         committed_at_ms: u64,
+        /// Delta position that disambiguates the revision within `committed_seq`.
         revision_delta_index: u32,
+        /// Immutable bytes published by the revision.
         content_ref: ContentRef,
     },
+    /// Changes whether one root inode has an active subtree tombstone.
     Tombstone {
+        /// Inode whose rooted subtree the event governs.
         root_inode_id: InodeId,
+        /// Commit sequence that published this tombstone event.
         tombstone_seq: ChangeSeq,
+        /// Position that disambiguates the event within `tombstone_seq`.
         tombstone_delta_index: u32,
         /// What this event did; readers take the newest row per root and
         /// treat a `revoke` newest row as "no active tombstone".
         action: TombstoneRowAction,
     },
+    /// Preserves the evidence needed to answer a retried logical commit.
     CommitReceipt {
+        /// Caller idempotency key whose later reuse is checked against this row.
         commit_id: CommitId,
+        /// Digest used to distinguish a safe retry from conflicting id reuse.
         semantic_commit_fingerprint: String,
+        /// Namespace sequence assigned to the accepted commit.
         committed_seq: ChangeSeq,
         /// The commit's observational wall-clock stamp. Receipts are the
         /// durable per-commit record once WAL history drops below the
         /// retention floor, so the stamp lives here for every commit,
         /// revision-bearing or not.
         committed_at_ms: u64,
+        /// Caller annotation preserved for idempotent response reconstruction.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message: Option<String>,
     },
@@ -150,12 +225,17 @@ pub enum TombstoneRowAction {
     /// The deletion recorded at `(target_seq, target_delta_index)` is
     /// revoked.
     Revoke {
+        /// Commit sequence of the exact `Set` event being compensated.
         target_seq: ChangeSeq,
+        /// Delta position of the exact `Set` event within `target_seq`.
         target_delta_index: u32,
     },
 }
 
 impl MetadataRow {
+    /// Builds this row's canonical durable key in its primary table family.
+    ///
+    /// See [metadata segments](../../../docs/specs/format.md#421-metadata-segments).
     pub fn row_key(&self) -> String {
         self.row_key_for_family(match self {
             Self::Inode { .. } => MetadataTableFamily::Inodes,
@@ -167,6 +247,9 @@ impl MetadataRow {
         })
     }
 
+    /// Builds this row's durable key using the selected primary or secondary ordering.
+    ///
+    /// See [metadata segments](../../../docs/specs/format.md#421-metadata-segments).
     pub fn row_key_for_family(&self, family: MetadataTableFamily) -> String {
         match self {
             Self::Inode { inode_id, .. } => format!("inode-{:020}", inode_id.0),
@@ -308,6 +391,9 @@ impl MetadataRow {
     }
 }
 
+/// Encodes an arbitrary string so it can occupy one component of a durable row key.
+///
+/// See [metadata segments](../../../docs/specs/format.md#421-metadata-segments).
 pub fn hex_encode_row_key_component(value: &str) -> String {
     crate::hex::hex_encode_bytes(value.as_bytes())
 }
@@ -322,14 +408,23 @@ pub mod lookup_keys {
     use super::hex_encode_row_key_component;
     use crate::{ChangeSeq, InodeId, RevisionNo};
 
+    /// Builds the exact point-lookup key for an inode row.
+    ///
+    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
     pub fn inode_key(inode_id: InodeId) -> String {
         format!("inode-{:020}", inode_id.0)
     }
 
+    /// Builds the range prefix selecting directory bindings under one parent.
+    ///
+    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
     pub fn direntry_parent_prefix(parent_inode_id: InodeId) -> String {
         format!("direntry-{:020}-", parent_inode_id.0)
     }
 
+    /// Builds the bloom-filter probe shared by all generations of one parent/name binding.
+    ///
+    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
     pub fn direntry_bind_probe(parent_inode_id: InodeId, name_key: &str) -> String {
         format!(
             "direntry-{:020}-{}",
@@ -338,18 +433,30 @@ pub mod lookup_keys {
         )
     }
 
+    /// Builds the range prefix selecting every generation of one parent/name binding.
+    ///
+    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
     pub fn direntry_bind_prefix(parent_inode_id: InodeId, name_key: &str) -> String {
         format!("{}-", direntry_bind_probe(parent_inode_id, name_key))
     }
 
+    /// Builds the bloom-filter probe shared by bindings that target one child inode.
+    ///
+    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
     pub fn direntry_child_probe(child_inode_id: InodeId) -> String {
         format!("direntry-child-{:020}", child_inode_id.0)
     }
 
+    /// Builds the reverse-index range prefix selecting bindings to one child inode.
+    ///
+    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
     pub fn direntry_child_prefix(child_inode_id: InodeId) -> String {
         format!("{}-", direntry_child_probe(child_inode_id))
     }
 
+    /// Builds the bloom-filter probe shared by unbinds for one parent/name pair.
+    ///
+    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
     pub fn direntry_unbind_probe(parent_inode_id: InodeId, name_key: &str) -> String {
         format!(
             "direntry-unbind-{:020}-{}",
@@ -359,6 +466,8 @@ pub mod lookup_keys {
     }
 
     /// Rows for one specific binding generation under the unbind probe.
+    ///
+    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
     pub fn direntry_unbind_binding_prefix(
         parent_inode_id: InodeId,
         name_key: &str,
@@ -373,10 +482,16 @@ pub mod lookup_keys {
         )
     }
 
+    /// Builds the range prefix selecting every unbind below one parent directory.
+    ///
+    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
     pub fn direntry_unbind_parent_prefix(parent_inode_id: InodeId) -> String {
         format!("direntry-unbind-{:020}-", parent_inode_id.0)
     }
 
+    /// Builds the range prefix selecting unbinds for one parent/name pair.
+    ///
+    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
     pub fn direntry_unbind_name_prefix(parent_inode_id: InodeId, name_key: &str) -> String {
         format!(
             "{}{}-",
@@ -385,31 +500,51 @@ pub mod lookup_keys {
         )
     }
 
+    /// Builds the bloom-filter probe shared by tombstone events for one root inode.
+    ///
+    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
     pub fn tombstone_probe(root_inode_id: InodeId) -> String {
         format!("tombstone-{:020}", root_inode_id.0)
     }
 
+    /// Builds the range prefix selecting the tombstone history of one root inode.
+    ///
+    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
     pub fn tombstone_prefix(root_inode_id: InodeId) -> String {
         format!("{}-", tombstone_probe(root_inode_id))
     }
 
+    /// Builds the bloom-filter probe shared by receipts for one commit id.
+    ///
+    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
     pub fn commit_receipt_probe(commit_id: &str) -> String {
         format!("commit-receipt-{}", hex_encode_row_key_component(commit_id))
     }
 
+    /// Builds the range prefix selecting durable receipts for one commit id.
+    ///
+    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
     pub fn commit_receipt_prefix(commit_id: &str) -> String {
         format!("{}-", commit_receipt_probe(commit_id))
     }
 
+    /// Builds the bloom-filter probe shared by newest-first revisions of one inode.
+    ///
+    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
     pub fn revision_by_inode_desc_probe(inode_id: InodeId) -> String {
         format!("revision-by-inode-desc-{:020}", inode_id.0)
     }
 
+    /// Builds the range prefix selecting newest-first revisions of one inode.
+    ///
+    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
     pub fn revision_by_inode_desc_prefix(inode_id: InodeId) -> String {
         format!("{}-", revision_by_inode_desc_probe(inode_id))
     }
 
     /// Revision numbers are stored inverted so newest sorts first.
+    ///
+    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
     pub fn revision_by_inode_desc_revision_prefix(
         inode_id: InodeId,
         revision_no: RevisionNo,
@@ -423,6 +558,8 @@ pub mod lookup_keys {
 
     /// The full descending-index row key: revision number, commit seq, and
     /// delta index all inverted so newest sorts first.
+    ///
+    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
     pub fn revision_by_inode_desc_row_key(
         inode_id: InodeId,
         revision_no: RevisionNo,
@@ -439,19 +576,33 @@ pub mod lookup_keys {
     }
 }
 
+/// Carries one complete namespace file-set description inside a manifest envelope.
+///
+/// See [manifest publication](../../../docs/specs/format.md#61-manifest-publication-and-checkpoint-verification).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NamespaceManifestPayload {
+    /// Namespace whose materialized state this manifest describes.
     pub namespace_id: NamespaceId,
+    /// Monotonic logical manifest position selected by the namespace root.
     pub manifest_id: ManifestId,
+    /// Immutable object identity that distinguishes speculative candidates at `manifest_id`.
     pub manifest_object_id: ManifestObjectId,
+    /// Greatest namespace sequence materialized by the referenced file set.
     pub head_seq: ChangeSeq,
+    /// Commit id assigned to `head_seq`, used to validate agreement with the head.
     pub head_commit_id: CommitId,
+    /// Oldest run sequence still represented by `metadata_files`.
     pub base_seq: ChangeSeq,
+    /// Fencing epoch of the writer that produced this candidate.
     pub writer_epoch: WriterEpoch,
+    /// First inode identity available after replaying the manifest snapshot.
     pub next_inode_id: InodeId,
+    /// Earliest sequence for which retained history remains readable.
     pub retention_floor_seq: ChangeSeq,
+    /// Immutable source snapshot metadata, or `None` when the namespace was not forked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fork: Option<NamespaceManifestFork>,
+    /// Complete ordered set of metadata segments required to reconstruct the snapshot.
     pub metadata_files: Vec<MetadataFileRef>,
 }
 
@@ -462,16 +613,23 @@ pub struct NamespaceManifestPayload {
 /// [`decode_namespace_manifest_json`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NamespaceManifestEnvelope {
+    /// Durable-family discriminator checked before payload decoding.
     pub kind: NamespaceManifestKind,
+    /// Family-local format version, which must equal [`NAMESPACE_MANIFEST_FORMAT_VERSION`].
     pub format_version: u32,
+    /// Informational software version of the writer that encoded this object.
     pub writer_version: String,
     /// Digest of the payload JSON exactly as stored in the durable document,
     /// in `sha256:<hex>` form.
     pub payload_checksum: String,
+    /// Decoded file-set description protected by `payload_checksum`.
     pub payload: NamespaceManifestPayload,
 }
 
 impl NamespaceManifestEnvelope {
+    /// Builds a versioned envelope and computes its checksum from canonical payload JSON.
+    ///
+    /// Construction fails when the payload cannot be encoded.
     pub fn from_payload(
         writer_version: impl Into<String>,
         payload: NamespaceManifestPayload,
@@ -492,6 +650,11 @@ fn namespace_manifest_payload_checksum(
     crate::envelope::json_payload_checksum(payload)
 }
 
+/// Encodes a namespace-manifest envelope as its durable JSON representation.
+///
+/// Encoding fails when the version is unsupported, the in-memory checksum is
+/// stale, or JSON serialization fails. See
+/// [manifest publication](../../../docs/specs/format.md#61-manifest-publication-and-checkpoint-verification).
 pub fn encode_namespace_manifest_json(
     envelope: &NamespaceManifestEnvelope,
 ) -> Result<Vec<u8>, EnvelopeCodecError> {
@@ -505,6 +668,11 @@ pub fn encode_namespace_manifest_json(
     )
 }
 
+/// Decodes and verifies a durable namespace-manifest JSON envelope.
+///
+/// Decoding fails for invalid JSON, the wrong kind or version, a checksum
+/// mismatch, or an invalid payload. See
+/// [manifest publication](../../../docs/specs/format.md#61-manifest-publication-and-checkpoint-verification).
 pub fn decode_namespace_manifest_json(
     bytes: &[u8],
 ) -> Result<NamespaceManifestEnvelope, EnvelopeCodecError> {

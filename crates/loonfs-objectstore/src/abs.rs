@@ -11,12 +11,18 @@ use futures::stream::BoxStream;
 use object_store::azure::MicrosoftAzureBuilder;
 use std::sync::Arc;
 
+/// Supplies explicit credentials and key scoping for the native Azure Blob adapter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AzureAbsStoreConfig {
+    /// Storage account used for both request addressing and shared-key signing.
     pub account_name: String,
+    /// Blob container that acts as the LoonFS object-store root.
     pub container_name: String,
+    /// Shared account key; empty or whitespace-only credentials are rejected.
     pub access_key: SecretString,
+    /// Azure-compatible service endpoint override, or `None` for the public Azure endpoint.
     pub endpoint_url: Option<String>,
+    /// Logical prefix prepended to every key, or `None` to use the container root.
     pub key_prefix: Option<String>,
 }
 
@@ -35,6 +41,10 @@ pub struct AzureAbsStore {
 }
 
 impl AzureAbsStore {
+    /// Builds a native Azure Blob adapter with its own bounded HTTP runtime.
+    ///
+    /// Construction fails for blank account, container, key, or endpoint
+    /// values, an invalid key prefix, runtime initialization, or provider-client configuration.
     pub fn new(config: AzureAbsStoreConfig) -> Result<Self> {
         if config.account_name.trim().is_empty() {
             return Err(ObjectStoreError::Configuration(
