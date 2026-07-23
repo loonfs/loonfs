@@ -1,7 +1,7 @@
 //! The administrative and maintenance runtime handle.
 
 use super::HandleBuilderCore;
-use crate::background::{BackgroundWork, FsBackgroundWork};
+use crate::background::BackgroundWork;
 use crate::config::default_writer_version;
 use crate::fs::FsCore;
 use crate::metrics::ObjectStoreMetricsRecorder;
@@ -12,7 +12,6 @@ use crate::{
     ReleaseCheckpointResponse, RepairNamespaceResponse, Result, RuntimeCacheConfig,
     RuntimeCacheStats, RuntimeError, SharedObjectStore, StoreConfig, TraceMode, TraceStoreKind,
 };
-use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 /// Administrative and maintenance handle.
@@ -254,12 +253,7 @@ impl FsAdminBuilder {
         let actor_id = self
             .actor_id
             .ok_or_else(|| RuntimeError::Config("actor_id is required".to_owned()))?;
-        let background = BackgroundWork::new(
-            FsBackgroundWork::ManualOnly,
-            None,
-            NonZeroUsize::new(crate::config::DEFAULT_MAX_CONCURRENT_MAINTENANCE)
-                .expect("default maintenance concurrency should be nonzero"),
-        );
+        let background = BackgroundWork::inert();
         Ok(FsAdmin {
             core: self.core.open(actor_id, self.actor_version, background)?,
         })

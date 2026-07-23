@@ -142,3 +142,16 @@ pub enum RuntimeError {
     #[error("runtime task failed: {0}")]
     RuntimeTask(String),
 }
+
+impl RuntimeError {
+    /// Returns the stable machine-readable reason for this error.
+    pub fn code(&self) -> ErrorCode {
+        match self {
+            Self::Core(error) => error.code(),
+            Self::Bootstrap(error) => error.code(),
+            Self::Grep(error) => error.code(),
+            Self::Config(_) => ErrorCode::InvalidRequest,
+            Self::RuntimeTask(_) => ErrorCode::ServerError,
+        }
+    }
+}

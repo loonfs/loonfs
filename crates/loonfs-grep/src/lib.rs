@@ -6,6 +6,9 @@
 //! filesystem operation. A [`GrepDriver`] owns the bounded [`GrepWorker`]
 //! steps for exactly one namespace, runs continuously until caught up, and
 //! then waits for an event-driven nudge.
+//!
+//! Core read and replay stay in `loonfs-core`, wire vocabulary stays in
+//! `loonfs-api`, and embedded scheduling stays in `loonfs`.
 
 mod cache;
 pub mod codec;

@@ -4,8 +4,10 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use loonfs::{BootstrapNamespaceError, CoreError, ErrorCode, ErrorKind, RuntimeError};
-use loonfs_api::{ApiError, CommitId, ErrorDetails, NamespaceId, NamespaceIdValidationError};
+use loonfs::{CoreError, RuntimeError};
+use loonfs_api::{
+    ApiError, CommitId, ErrorCode, ErrorDetails, ErrorKind, NamespaceId, NamespaceIdValidationError,
+};
 
 pub(super) struct ApiResponseError {
     status: StatusCode,
@@ -72,24 +74,18 @@ impl ApiResponseError {
         )
     }
 
-    fn bootstrap(error: BootstrapNamespaceError) -> Self {
-        let code = error.code();
-        Self::new(status_for_core_error_code(code), code, &error.to_string())
-    }
-
     pub(super) fn runtime(error: RuntimeError) -> Self {
-        match error {
-            RuntimeError::Core(error) => Self::core(error),
-            RuntimeError::Bootstrap(error) => Self::bootstrap(error),
-            RuntimeError::Config(message) => {
-                Self::new(StatusCode::BAD_REQUEST, ErrorCode::InvalidRequest, &message)
-            }
-            error => Self::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ErrorCode::ServerError,
-                &error.to_string(),
-            ),
+        let code = error.code();
+        let rendered = error.to_string();
+        let message = match &error {
+            RuntimeError::Config(message) => message.as_str(),
+            _ => rendered.as_str(),
+        };
+        let mut response = Self::new(status_for_core_error_code(code), code, message);
+        if let RuntimeError::Core(error) = error {
+            response.body.details = error.details().map(Box::new);
         }
+        response
     }
 
     fn core(error: CoreError) -> Self {
@@ -112,18 +108,15 @@ impl ApiResponseError {
     }
 
     pub(super) fn runtime_for_namespace(namespace_id: &NamespaceId, error: RuntimeError) -> Self {
-        match error {
-            RuntimeError::Core(error) => Self::core_for_namespace(namespace_id, error),
-            RuntimeError::Bootstrap(error) => Self::bootstrap(error),
-            RuntimeError::Config(message) => {
-                Self::new(StatusCode::BAD_REQUEST, ErrorCode::InvalidRequest, &message)
-            }
-            error => Self::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ErrorCode::ServerError,
-                &error.to_string(),
-            ),
+        if error.code() == ErrorCode::NamespaceNotFound {
+            return Self::new(
+                StatusCode::NOT_FOUND,
+                ErrorCode::NamespaceNotFound,
+                &format!("namespace `{}` does not exist", namespace_id.as_str()),
+            );
         }
+
+        Self::runtime(error)
     }
 }
 

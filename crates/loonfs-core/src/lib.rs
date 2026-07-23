@@ -130,8 +130,8 @@ pub use timing::{MonotonicTimer, StdMonotonicTimer};
 /// Concrete read-view types consumed by `loonfs-grep`.
 pub mod grep {
     pub use crate::checkpoint::{
-        load_grep_change_feed, load_grep_checkpoint_revision_page, GrepChangeFeed,
-        GrepCheckpointRevisionPage,
+        load_grep_change_feed, load_grep_checkpoint_revision_page, string_prefix_upper_bound,
+        GrepChangeFeed, GrepCheckpointRevisionPage, REVISION_ROW_PREFIX,
     };
     pub use crate::metadata::{LeafRevisionPrefetch, MetadataViewSession};
     pub use crate::path::read::LoadedMetadataView;

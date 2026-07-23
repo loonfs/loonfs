@@ -48,6 +48,19 @@ fn block_on<T>(future: impl Future<Output = T>) -> T {
         .block_on(future)
 }
 
+fn wal_tail_segment_threshold() -> u64 {
+    MaintenanceTickOptions::default().max_wal_tail_segments
+}
+
+fn wal_tail_segment_count_past_threshold() -> u64 {
+    wal_tail_segment_threshold() + 1
+}
+
+fn writes_past_wal_tail_threshold() -> u32 {
+    u32::try_from(wal_tail_segment_count_past_threshold())
+        .expect("WAL tail threshold plus one should fit in u32")
+}
+
 async fn writer(root: &Path, background_work: FsBackgroundWork) -> FsWriter {
     FsWriter::builder(store_config(root))
         .writer_id("handle-test-writer")
@@ -58,7 +71,7 @@ async fn writer(root: &Path, background_work: FsBackgroundWork) -> FsWriter {
 }
 
 async fn fill_wal_tail_past_threshold(writer: &FsWriter, namespace_id: &NamespaceId) {
-    for round in 0..33u32 {
+    for round in 0..writes_past_wal_tail_threshold() {
         writer
             .put_file_bytes(
                 namespace_id,
@@ -201,15 +214,15 @@ fn a_threshold_crossing_during_an_active_tick_still_bounds_the_tail() {
             .await
             .expect("create namespace");
 
-        // The 32nd publish crosses the threshold and spawns the tick; the
-        // armed store holds that tick at its metadata root CAS.
+        // The threshold-crossing publish spawns the tick; the armed store
+        // holds that tick at its metadata root CAS.
         blocking.arm_next_root_cas();
         fill_wal_tail_past_threshold(&writer, &namespace_id).await;
         blocking.wait_for_blocked_root_cas().await;
 
         // A full second threshold's worth of publishes lands while the tick
         // is held; every crossing defers to the running tick.
-        for round in 0..33u32 {
+        for round in 0..writes_past_wal_tail_threshold() {
             writer
                 .put_file_bytes(
                     &namespace_id,
@@ -237,7 +250,7 @@ fn a_threshold_crossing_during_an_active_tick_still_bounds_the_tail() {
             .await
             .expect("status after deferred rerun");
         assert!(
-            status.wal_tail_segments < 32,
+            status.wal_tail_segments < wal_tail_segment_threshold(),
             "deferred crossings must rerun the tick and bound the tail: {status:?}"
         );
         writer
@@ -423,7 +436,7 @@ fn manual_only_writer_never_schedules_maintenance() {
             "manual-only writer must not publish checkpoints: {status:?}"
         );
         assert!(
-            status.wal_tail_segments >= 33,
+            status.wal_tail_segments >= wal_tail_segment_count_past_threshold(),
             "manual-only writer must leave the tail alone: {status:?}"
         );
 
@@ -446,7 +459,7 @@ fn manual_only_writer_never_schedules_maintenance() {
             "explicit tick should publish a manifest: {status:?}"
         );
         assert!(
-            status.wal_tail_segments < 32,
+            status.wal_tail_segments < wal_tail_segment_threshold(),
             "explicit tick should bound the tail: {status:?}"
         );
     });
@@ -482,7 +495,7 @@ fn enabled_writer_schedules_maintenance_on_its_owning_runtime() {
             "auto tick should have published a manifest: {status:?}"
         );
         assert!(
-            status.wal_tail_segments < 32,
+            status.wal_tail_segments < wal_tail_segment_threshold(),
             "auto tick should have bounded the tail: {status:?}"
         );
         writer
@@ -526,7 +539,7 @@ fn enabled_writer_schedules_maintenance_with_caches_disabled() {
             .await
             .expect("status after auto tick");
         assert!(
-            status.wal_tail_segments < 32,
+            status.wal_tail_segments < wal_tail_segment_threshold(),
             "auto tick should have bounded the tail: {status:?}"
         );
         writer
@@ -574,7 +587,7 @@ fn shut_down_writer_rejects_new_background_work_but_keeps_writing() {
             "shut-down writer must not schedule checkpoints: {status:?}"
         );
         assert!(
-            status.wal_tail_segments >= 33,
+            status.wal_tail_segments >= wal_tail_segment_count_past_threshold(),
             "shut-down writer must leave the tail alone: {status:?}"
         );
     });
@@ -693,7 +706,7 @@ fn enabled_writer_drains_reorganization_backlog_without_admin() {
             .await
             .expect("create namespace");
         for round in 0..8u32 {
-            for file in 0..33u32 {
+            for file in 0..writes_past_wal_tail_threshold() {
                 writer
                     .put_file_bytes(
                         &namespace_id,

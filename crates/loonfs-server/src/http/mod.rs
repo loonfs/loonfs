@@ -586,12 +586,12 @@ async fn shutdown_signal() {
     let ctrl_c = async {
         tokio::signal::ctrl_c()
             .await
-            .expect("install ctrl-c handler");
+            .expect("ctrl-c handler should install");
     };
     #[cfg(unix)]
     let terminate = async {
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("install SIGTERM handler")
+            .expect("SIGTERM handler should install")
             .recv()
             .await;
     };

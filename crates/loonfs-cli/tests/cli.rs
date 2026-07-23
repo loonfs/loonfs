@@ -383,6 +383,44 @@ fn profile_update_changes_fields() {
 }
 
 #[test]
+fn profile_update_with_only_service_account_key_path_applies() {
+    let harness = Harness::new();
+    let create = harness.run(&[
+        "--json",
+        "profile",
+        "create",
+        "gcp",
+        "--mode",
+        "embedded",
+        "--store-kind",
+        "gcp-gcs",
+        "--bucket",
+        "documents",
+        "--service-account-key-path",
+        "/old/service-account.json",
+    ]);
+    assert_success(&create);
+
+    let update = harness.run(&[
+        "--json",
+        "--no-input",
+        "profile",
+        "update",
+        "gcp",
+        "--service-account-key-path",
+        "/new/service-account.json",
+    ]);
+    assert_success(&update);
+
+    let show = harness.run(&["--json", "profile", "show", "gcp"]);
+    assert_success(&show);
+    assert_eq!(
+        json_data(&show)["store"]["service_account_key_path"],
+        "/new/service-account.json"
+    );
+}
+
+#[test]
 fn profile_use_switches_default() {
     let harness = Harness::new();
     harness.add_embedded_profile("alpha");

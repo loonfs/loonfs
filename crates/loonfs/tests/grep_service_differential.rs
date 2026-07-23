@@ -154,9 +154,9 @@ async fn publish_same_content_files(
 fn worker(store: &SharedObjectStore) -> GrepWorker<SharedObjectStore> {
     GrepWorker::new(
         store.clone(),
-        "grep-service-worker",
-        "grep-service-worker-session",
-        "grep-service-worker/0.1",
+        "grep-worker-tests",
+        "grep-worker-tests-session",
+        "grep-worker-tests/0.1",
     )
 }
 

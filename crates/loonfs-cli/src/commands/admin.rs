@@ -7,7 +7,9 @@ use crate::args::{
     AdminCheckpointArgs, AdminCheckpointReleaseArgs, AdminCommand, AdminGcArgs, AdminNamespaceArgs,
     AdminTickArgs, ChangesArgs, CommandKind,
 };
-use loonfs_api::{ChangeSeq, CreateCheckpointRequest, GcRequest, MaintenanceTickRequest};
+use loonfs_api::{
+    ChangeSeq, CheckpointId, CreateCheckpointRequest, ErrorCode, GcRequest, MaintenanceTickRequest,
+};
 
 // --- maintenance/admin plane ---
 
@@ -125,10 +127,16 @@ async fn run_admin_checkpoint_release(
     args: AdminCheckpointReleaseArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, &args.target).await?;
+    let checkpoint_id = CheckpointId::parse(&args.checkpoint_id).map_err(|error| {
+        context.fail(
+            kind,
+            crate::error::CliError::new(ErrorCode::InvalidRequest.as_str(), error.to_string()),
+        )
+    })?;
     let response = context
         .target
         .backend()
-        .release_checkpoint(&context.namespace, &args.checkpoint_id)
+        .release_checkpoint(&context.namespace, &checkpoint_id)
         .await
         .map_err(|error| context.fail(kind, error))?;
 
@@ -168,7 +176,7 @@ async fn run_admin_retention_advance(
     let response = context
         .target
         .backend()
-        .advance_retention(&context.namespace)
+        .advance_retention_floor(&context.namespace)
         .await
         .map_err(|error| context.fail(kind, error))?;
 
@@ -189,7 +197,7 @@ pub(crate) async fn run_admin_changes(
     let response = context
         .target
         .backend()
-        .list_changes_page(&context.namespace, after_seq, args.limit)
+        .list_changes_after(&context.namespace, after_seq, args.limit)
         .await
         .map_err(|error| context.fail(kind, error))?;
 

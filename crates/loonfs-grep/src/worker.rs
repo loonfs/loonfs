@@ -1,7 +1,9 @@
 //! Explicit grep building, checkpointed backfill, folding, and garbage collection.
 
 use crate::cache::{GrepBlockCache, MAX_CACHED_GREP_BLOCKS};
-use crate::codec::{extract_grams, Gram, GramPosting, IndexRow, INDEX_GRAMS_MAX_FILE_BYTES};
+use crate::codec::{
+    extract_grams, lookup::GRAM_ROW_PREFIX, Gram, GramPosting, IndexRow, INDEX_GRAMS_MAX_FILE_BYTES,
+};
 use crate::index_read::{load_data_block, load_index_block};
 use crate::keyspace::{
     manifest_key, namespace_prefix, parse_key, root_key, segment_key, GrepKeyKind,
@@ -15,7 +17,9 @@ use crate::{GrepError, Result};
 use futures::future::try_join_all;
 use loonfs_api::wire::control::NamespaceState;
 use loonfs_api::wire::hex::hex_encode_bytes;
-use loonfs_api::wire::sst_blocks::{index_blocks_for_key_range, SegmentBlocksBuilder};
+use loonfs_api::wire::sst_blocks::{
+    index_blocks_for_key_range, DecodedDataBlock, SegmentBlocksBuilder, SegmentIndexEntry,
+};
 use loonfs_api::wire::wal::WalDelta;
 use loonfs_api::{
     sha256_digest, ChangeSeq, CheckpointId, ContentRef, ContentStoreId, IndexSegmentId, InodeId,
@@ -244,16 +248,11 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 target_seq: checkpoint.checkpoint_seq,
             }),
             Err(GrepRootError::Conflict { .. }) => {
-                let winner = load_grep_root(&self.store, namespace_id)
-                    .await
-                    .map_err(GrepError::from)?;
-                if winner.as_ref().is_none_or(|root| {
-                    !root_names_checkpoint(root.state(), &checkpoint.checkpoint_id)
-                }) {
-                    self.engine(namespace_id)?
-                        .release_checkpoint(&checkpoint.checkpoint_id)
-                        .await?;
-                }
+                self.release_superseded_checkpoint_if_unreferenced(
+                    namespace_id,
+                    &checkpoint.checkpoint_id,
+                )
+                .await?;
                 Ok(GrepEnableOutcome::Superseded)
             }
             Err(error) => Err(error.into()),
@@ -398,7 +397,10 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             })?)
     }
 
-    async fn seed_root(&self, state: &GrepRootState) -> crate::root::Result<LoadedGrepRoot> {
+    async fn seed_root(
+        &self,
+        state: &GrepRootState,
+    ) -> std::result::Result<LoadedGrepRoot, GrepRootError> {
         seed_grep_root(&self.store, state, &self.writer_version).await
     }
 
@@ -406,7 +408,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         &self,
         current: &LoadedGrepRoot,
         next: &GrepRootState,
-    ) -> crate::root::Result<LoadedGrepRoot> {
+    ) -> std::result::Result<LoadedGrepRoot, GrepRootError> {
         advance_grep_root(&self.store, current, next, &self.writer_version).await
     }
 
@@ -435,6 +437,25 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 .await?;
         }
         Ok(())
+    }
+
+    async fn release_superseded_checkpoint_if_unreferenced(
+        &self,
+        namespace_id: &NamespaceId,
+        checkpoint_id: &CheckpointId,
+    ) -> Result<()> {
+        let winner = load_grep_root(&self.store, namespace_id)
+            .await
+            .map_err(GrepError::from)?;
+        if let Some(winner) = winner {
+            self.release_checkpoint_if_unreferenced(namespace_id, checkpoint_id, winner.state())
+                .await
+        } else {
+            self.engine(namespace_id)?
+                .release_checkpoint(checkpoint_id)
+                .await?;
+            Ok(())
+        }
     }
 
     async fn restart_backfill(
@@ -470,16 +491,11 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 ))
             }
             Err(GrepRootError::Conflict { .. }) => {
-                let winner = load_grep_root(&self.store, namespace_id)
-                    .await
-                    .map_err(GrepError::from)?;
-                if winner.as_ref().is_none_or(|root| {
-                    !root_names_checkpoint(root.state(), &checkpoint.checkpoint_id)
-                }) {
-                    self.engine(namespace_id)?
-                        .release_checkpoint(&checkpoint.checkpoint_id)
-                        .await?;
-                }
+                self.release_superseded_checkpoint_if_unreferenced(
+                    namespace_id,
+                    &checkpoint.checkpoint_id,
+                )
+                .await?;
                 Ok(build_report(namespace_id, GrepBuildOutcome::Superseded))
             }
             Err(error) => Err(error.into()),
@@ -1281,14 +1297,14 @@ fn fold_snapshot_row(merged: &mut MergedRange, row: IndexRow, object_key: &str) 
 struct SegmentRangeReader {
     object_key: String,
     payload_checksum: String,
-    entries: std::sync::Arc<Vec<loonfs_api::wire::sst_blocks::SegmentIndexEntry>>,
+    entries: Arc<Vec<SegmentIndexEntry>>,
     next_entry: usize,
     current: Option<CurrentDataBlock>,
     start: String,
 }
 
 struct CurrentDataBlock {
-    block: std::sync::Arc<loonfs_api::wire::sst_blocks::DecodedDataBlock<IndexRow>>,
+    block: Arc<DecodedDataBlock<IndexRow>>,
     next_row: usize,
 }
 
@@ -1309,7 +1325,11 @@ impl SegmentRangeReader {
             &segment.index_block,
         )
         .await?;
-        let start = if cursor.is_empty() { "gram-" } else { cursor };
+        let start = if cursor.is_empty() {
+            GRAM_ROW_PREFIX
+        } else {
+            cursor
+        };
         let range = index_blocks_for_key_range(&entries, start, None);
         Ok(Self {
             object_key,
@@ -1332,10 +1352,7 @@ impl SegmentRangeReader {
     }
 
     fn pop(&mut self) -> (String, IndexRow) {
-        let current = self
-            .current
-            .as_mut()
-            .expect("pop is called only after peek_key returned a key");
+        let current = self.current.as_mut().expect("peek_key should precede pop");
         let key = current.block.row_keys[current.next_row].clone();
         let row = current.block.rows[current.next_row].clone();
         current.next_row += 1;
@@ -1509,7 +1526,7 @@ fn grep_immutable_write_error(error: ImmutableWriteError) -> GrepError {
             core_store_error(&object_key, &source)
         }
         error => GrepError::CorruptIndex {
-            message: format!("{object_key}: {error}"),
+            message: format!("index segment `{object_key}`: {error}"),
         },
     }
 }

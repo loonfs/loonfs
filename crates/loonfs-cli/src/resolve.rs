@@ -41,7 +41,7 @@ pub(crate) async fn resolve_target_profile_from_config(
     no_retry: bool,
 ) -> Result<ResolvedProfile, CliError> {
     let (profile_name, profile) = resolve_profile(config, explicit_profile)?;
-    let target = ResolvedTarget::resolve(profile_name, profile, no_retry).await?;
+    let target = ResolvedTarget::resolve(profile, no_retry).await?;
     Ok(ResolvedProfile {
         profile_name: profile_name.to_owned(),
         target,

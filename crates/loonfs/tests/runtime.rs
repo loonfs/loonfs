@@ -1,3 +1,5 @@
+//! End-to-end runtime behavior through the public handle surface.
+
 #![allow(clippy::panic)]
 // Runtime integration tests use panic in helper assertions for precise diagnostics.
 
@@ -261,7 +263,7 @@ fn display_names(entries: &[AuthoritativePathEntry]) -> Vec<&str> {
         .collect()
 }
 
-trait FsTestExt {
+trait RuntimeTestExt {
     fn create_namespace_blocking(
         &self,
         namespace_id: &NamespaceId,
@@ -370,7 +372,7 @@ trait FsTestExt {
     ) -> loonfs::Result<AdvanceRetentionResponse>;
 }
 
-impl FsTestExt for TestRuntime {
+impl RuntimeTestExt for TestRuntime {
     fn create_namespace_blocking(
         &self,
         namespace_id: &NamespaceId,
@@ -713,7 +715,7 @@ fn filesystem_operations_match_core_semantics() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn async_runtime_methods_are_the_engine_boundary() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = open_runtime_async(store(temp_dir.path()), "async-runtime-test").await;
@@ -2242,6 +2244,7 @@ fn stat_and_list_use_materialized_tables_after_checkpoint_without_content_reads(
     assert_eq!(raw_store.content_blob_get_count(), 0);
 }
 
+/// Concurrent stat and list race through the shared async metadata-view cache.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_materialized_stat_and_list_share_async_store() {
     let temp_dir = tempdir().expect("tempdir");

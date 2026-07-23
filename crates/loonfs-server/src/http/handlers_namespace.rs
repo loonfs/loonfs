@@ -110,10 +110,8 @@ pub(super) async fn config(
 )]
 pub(super) async fn create_namespace(
     State(state): State<AppState>,
-    headers: HeaderMap,
     AppJson(request): AppJson<CreateNamespaceRequest>,
 ) -> Result<Json<loonfs_api::NamespaceSummary>, ApiResponseError> {
-    authorize(&state.config, &headers)?;
     let summary = state
         .writer
         .create_namespace(&request.namespace_id, CreateNamespaceOptions::default())
@@ -220,10 +218,8 @@ pub(super) async fn delete_namespace(
 pub(super) async fn fork_namespace(
     State(state): State<AppState>,
     namespace: NamespaceIdPath,
-    headers: HeaderMap,
     AppJson(request): AppJson<ForkNamespaceRequest>,
 ) -> Result<Json<loonfs_api::NamespaceSummary>, ApiResponseError> {
-    authorize(&state.config, &headers)?;
     let source_namespace_id = namespace.into_id()?;
     let summary = state
         .writer
@@ -288,10 +284,8 @@ pub(super) async fn repair_namespace(
 pub(super) async fn create_checkpoint(
     State(state): State<AppState>,
     namespace: NamespaceIdPath,
-    headers: HeaderMap,
     AppJson(request): AppJson<CreateCheckpointRequest>,
 ) -> Result<Json<CreateCheckpointResponse>, ApiResponseError> {
-    authorize(&state.config, &headers)?;
     let namespace_id = namespace.into_id()?;
     let response = state
         .admin
@@ -445,10 +439,8 @@ pub(super) async fn advance_retention(
 pub(super) async fn gc_namespace(
     State(state): State<AppState>,
     namespace: NamespaceIdPath,
-    headers: HeaderMap,
     OptionalAppJson(request): OptionalAppJson<GcRequest>,
 ) -> Result<Json<GcResponse>, ApiResponseError> {
-    authorize(&state.config, &headers)?;
     let namespace_id = namespace.into_id()?;
     let config = loonfs::gc_config_from_request(request.unwrap_or_default());
     let report = state
@@ -481,10 +473,8 @@ pub(super) async fn gc_namespace(
 pub(super) async fn maintenance_tick(
     State(state): State<AppState>,
     namespace: NamespaceIdPath,
-    headers: HeaderMap,
     OptionalAppJson(request): OptionalAppJson<MaintenanceTickRequest>,
 ) -> Result<Json<MaintenanceTickResponse>, ApiResponseError> {
-    authorize(&state.config, &headers)?;
     let namespace_id = namespace.into_id()?;
     let options = loonfs::MaintenanceTickOptions::from_request(request.unwrap_or_default());
     let result = state

@@ -204,6 +204,9 @@ impl FsWriter {
 
     /// Verifies a namespace-authorized wire token and binds its proof to the
     /// namespace's verified content store.
+    ///
+    /// The outer result reports runtime failure. The inner result carries
+    /// token verification failure as data rather than a runtime error.
     pub async fn prepare_content_token(
         &self,
         namespace_id: &NamespaceId,
@@ -340,7 +343,7 @@ impl FsWriter {
         self.core.begin_upload(namespace_id, request).await
     }
 
-    /// Starts a direct_put upload session and returns the internal target
+    /// Starts a direct-put upload session and returns the internal target
     /// for server-side signing.
     pub async fn begin_direct_put_upload_target(
         &self,
@@ -433,9 +436,6 @@ impl FsWriter {
             .await
     }
 
-    /// Publishes already-classified namespace mutation candidates as one
-    /// batch.
-    ///
     /// Publishes already-classified candidates as one batch; results match
     /// candidates in order. (The server routes through its own publisher
     /// registry, not this method.)

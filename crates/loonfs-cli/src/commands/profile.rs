@@ -2,6 +2,10 @@
 
 use super::context::fail;
 use super::output::{CommandData, CommandFailure, CommandOutput};
+use super::profile_config::{
+    apply_update_flags, apply_update_interactive, build_profile_from_create_spec,
+    create_profile_spec_from_create, has_update_flags,
+};
 use crate::args::{
     CommandKind, ProfileCommand, ProfileCreateArgs, ProfileUpdateArgs, RuntimeBehavior,
 };
@@ -97,22 +101,7 @@ fn run_profile_update(
             .ok_or_else(|| CliError::profile_not_found(&name))?
             .clone();
 
-        let has_flags = args.root.is_some()
-            || args.bucket.is_some()
-            || args.region.is_some()
-            || args.access_key_id.is_some()
-            || args.secret_access_key.is_some()
-            || args.endpoint_url.is_some()
-            || args.session_token.is_some()
-            || args.account_id.is_some()
-            || args.account_name.is_some()
-            || args.container_name.is_some()
-            || args.access_key.is_some()
-            || args.key_prefix.is_some()
-            || args.server_url.is_some()
-            || args.auth_token.is_some();
-
-        let updated = if has_flags {
+        let updated = if has_update_flags(&args) {
             apply_update_flags(existing, &args)?
         } else if runtime.interactive {
             apply_update_interactive(existing)?
@@ -190,8 +179,3 @@ fn run_profile_use(
         },
     })
 }
-
-use super::profile_config::{
-    apply_update_flags, apply_update_interactive, build_profile_from_create_spec,
-    create_profile_spec_from_create,
-};

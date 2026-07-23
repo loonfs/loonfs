@@ -1,7 +1,7 @@
 //! Client configuration: the TOML-loaded [`ClientConfig`] and its
 //! validation.
 
-use crate::ClientError;
+use crate::{ClientError, Result};
 use http::Uri;
 use serde::Deserialize;
 use std::fs;
@@ -39,7 +39,7 @@ pub struct ClientConfig {
 
 impl ClientConfig {
     /// Loads and validates a client config from TOML.
-    pub fn load(path: impl AsRef<Path>) -> Result<Self, ClientError> {
+    pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let bytes =
             fs::read(path.as_ref()).map_err(|err| ClientError::ConfigIo(err.to_string()))?;
         let config: Self = toml::from_str(
@@ -54,7 +54,7 @@ impl ClientConfig {
     /// Validates field invariants. [`Self::load`] and
     /// [`Client::new`](crate::Client::new) both run this, so a file-loaded
     /// config and a directly built one cannot diverge in what they accept.
-    pub fn validate(&self) -> Result<(), ClientError> {
+    pub fn validate(&self) -> Result<()> {
         validate_absolute_http_url("server_url", &self.server_url)?;
         if let Some(token) = &self.auth_token {
             if token.trim().is_empty() {
@@ -74,7 +74,7 @@ impl ClientConfig {
     }
 }
 
-fn validate_absolute_http_url(field: &'static str, value: &str) -> Result<(), ClientError> {
+fn validate_absolute_http_url(field: &'static str, value: &str) -> Result<()> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return Err(ClientError::MissingConfigField { field });

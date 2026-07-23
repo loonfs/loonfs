@@ -90,43 +90,61 @@ pub(crate) enum Command {
 #[derive(Debug, Args)]
 pub(crate) struct InitArgs {
     pub name: Option<String>,
+    /// Profile mode to configure.
     #[arg(long, value_name = "embedded|remote")]
     pub mode: Option<String>,
+    /// Embedded object-store provider.
     #[arg(long)]
     pub store_kind: Option<String>,
+    /// Local filesystem store root.
     #[arg(long)]
     pub root: Option<String>,
+    /// Optional object-key prefix within the provider.
+    #[arg(long)]
+    pub key_prefix: Option<String>,
+    /// S3, R2, or GCS bucket name.
     #[arg(long)]
     pub bucket: Option<String>,
+    /// AWS region.
     #[arg(long)]
     pub region: Option<String>,
     // Provider secrets fall back to the standard environment variables so
     // quickstarts never need them on the command line (argv is visible to
     // `ps` and lands in shell history).
+    /// AWS or R2 access key id.
     #[arg(long, env = "AWS_ACCESS_KEY_ID")]
     pub access_key_id: Option<String>,
+    /// AWS or R2 secret access key.
     #[arg(long, env = "AWS_SECRET_ACCESS_KEY")]
     pub secret_access_key: Option<String>,
+    /// Custom provider endpoint URL.
     #[arg(long)]
     pub endpoint_url: Option<String>,
+    /// Optional AWS session token.
     #[arg(long, env = "AWS_SESSION_TOKEN")]
     pub session_token: Option<String>,
-    #[arg(long)]
-    pub account_id: Option<String>,
-    #[arg(long)]
-    pub account_name: Option<String>,
-    #[arg(long)]
-    pub container_name: Option<String>,
-    #[arg(long)]
-    pub access_key: Option<String>,
-    #[arg(long)]
-    pub service_account_key_path: Option<String>,
-    #[arg(long)]
-    pub key_prefix: Option<String>,
+    /// Use path-style S3 addressing.
     #[arg(long)]
     pub force_path_style: bool,
+    /// Cloudflare R2 account id.
+    #[arg(long)]
+    pub account_id: Option<String>,
+    /// Azure storage account name.
+    #[arg(long)]
+    pub account_name: Option<String>,
+    /// Azure blob container name.
+    #[arg(long)]
+    pub container_name: Option<String>,
+    /// Azure storage access key.
+    #[arg(long)]
+    pub access_key: Option<String>,
+    /// Path to a GCP service-account key.
+    #[arg(long)]
+    pub service_account_key_path: Option<String>,
+    /// Remote LoonFS server URL.
     #[arg(long)]
     pub server_url: Option<String>,
+    /// Remote LoonFS bearer token.
     #[arg(long, env = "LOONFS_AUTH_TOKEN")]
     pub auth_token: Option<String>,
 }
@@ -150,41 +168,59 @@ pub(crate) enum ProfileCommand {
 #[derive(Debug, Args)]
 pub(crate) struct ProfileCreateArgs {
     pub name: String,
+    /// Profile mode to configure.
     #[arg(long, value_name = "embedded|remote")]
     pub mode: Option<String>,
+    /// Embedded object-store provider.
     #[arg(long)]
     pub store_kind: Option<String>,
+    /// Local filesystem store root.
     #[arg(long)]
     pub root: Option<String>,
+    /// Optional object-key prefix within the provider.
     #[arg(long)]
     pub key_prefix: Option<String>,
+    /// S3, R2, or GCS bucket name.
     #[arg(long)]
     pub bucket: Option<String>,
+    /// AWS region.
     #[arg(long)]
     pub region: Option<String>,
     // Same environment fallbacks as `InitArgs`, and for the same reason.
+    /// AWS or R2 access key id.
     #[arg(long, env = "AWS_ACCESS_KEY_ID")]
     pub access_key_id: Option<String>,
+    /// AWS or R2 secret access key.
     #[arg(long, env = "AWS_SECRET_ACCESS_KEY")]
     pub secret_access_key: Option<String>,
+    /// Custom provider endpoint URL.
     #[arg(long)]
     pub endpoint_url: Option<String>,
+    /// Optional AWS session token.
     #[arg(long, env = "AWS_SESSION_TOKEN")]
     pub session_token: Option<String>,
+    /// Use path-style S3 addressing.
     #[arg(long)]
     pub force_path_style: bool,
+    /// Cloudflare R2 account id.
     #[arg(long)]
     pub account_id: Option<String>,
+    /// Azure storage account name.
     #[arg(long)]
     pub account_name: Option<String>,
+    /// Azure blob container name.
     #[arg(long)]
     pub container_name: Option<String>,
+    /// Azure storage access key.
     #[arg(long)]
     pub access_key: Option<String>,
+    /// Path to a GCP service-account key.
     #[arg(long)]
     pub service_account_key_path: Option<String>,
+    /// Remote LoonFS server URL.
     #[arg(long)]
     pub server_url: Option<String>,
+    /// Remote LoonFS bearer token.
     #[arg(long, env = "LOONFS_AUTH_TOKEN")]
     pub auth_token: Option<String>,
 }
@@ -192,34 +228,49 @@ pub(crate) struct ProfileCreateArgs {
 #[derive(Debug, Args)]
 pub(crate) struct ProfileUpdateArgs {
     pub name: String,
+    /// Local filesystem store root.
     #[arg(long)]
     pub root: Option<String>,
+    /// Optional object-key prefix within the provider.
     #[arg(long)]
     pub key_prefix: Option<String>,
+    /// S3, R2, or GCS bucket name.
     #[arg(long)]
     pub bucket: Option<String>,
+    /// AWS region.
     #[arg(long)]
     pub region: Option<String>,
+    /// AWS or R2 access key id.
     #[arg(long)]
     pub access_key_id: Option<String>,
+    /// AWS or R2 secret access key.
     #[arg(long)]
     pub secret_access_key: Option<String>,
+    /// Custom provider endpoint URL.
     #[arg(long)]
     pub endpoint_url: Option<String>,
+    /// Optional AWS session token.
     #[arg(long)]
     pub session_token: Option<String>,
+    /// Cloudflare R2 account id.
     #[arg(long)]
     pub account_id: Option<String>,
+    /// Azure storage account name.
     #[arg(long)]
     pub account_name: Option<String>,
+    /// Azure blob container name.
     #[arg(long)]
     pub container_name: Option<String>,
+    /// Azure storage access key.
     #[arg(long)]
     pub access_key: Option<String>,
+    /// Path to a GCP service-account key.
     #[arg(long)]
     pub service_account_key_path: Option<String>,
+    /// Remote LoonFS server URL.
     #[arg(long)]
     pub server_url: Option<String>,
+    /// Remote LoonFS bearer token.
     #[arg(long)]
     pub auth_token: Option<String>,
 }
@@ -229,8 +280,8 @@ pub(crate) struct ProfileSelectorArgs {
     /// Profile to run against (defaults to the configured default profile).
     #[arg(long)]
     pub profile: Option<String>,
-    /// Disable the bounded automatic retry of transient server errors
-    /// (`server_busy`, `commit_queue_full`) in remote mode.
+    /// Disable bounded retry of `server_busy`, `commit_queue_full`,
+    /// `shutting_down`, and transport errors.
     #[arg(long)]
     pub no_retry: bool,
 }
@@ -338,8 +389,10 @@ pub(crate) struct FilesystemRevisionsArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
     pub path: String,
+    /// Maximum revisions to return in this page.
     #[arg(long)]
     pub limit: Option<u32>,
+    /// Resume cursor from a previous revisions page.
     #[arg(long)]
     pub cursor: Option<String>,
 }
@@ -349,6 +402,7 @@ pub(crate) struct FilesystemCatArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
     pub path: String,
+    /// Print this revision instead of the current content.
     #[arg(long)]
     pub revision: Option<u64>,
 }
@@ -362,6 +416,7 @@ pub(crate) struct FilesystemGrepArgs {
     /// Restrict matches to files under this absolute path prefix.
     #[arg(long)]
     pub path_prefix: Option<String>,
+    /// Match ASCII letters without regard to case.
     #[arg(short = 'i', long)]
     pub ignore_case: bool,
     /// Matches fetched per page, not a cap on total results; the command
@@ -399,6 +454,7 @@ pub(crate) struct FilesystemPutArgs {
     pub target: TargetSelectorArgs,
     pub local_path: String,
     pub remote_path: Option<String>,
+    /// Replace the remote destination if it already exists.
     #[arg(long)]
     pub force: bool,
     /// Idempotency key for the commit; resubmit with the same id to retry
@@ -412,7 +468,8 @@ pub(crate) struct FilesystemTransferArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
     pub source_path: String,
-    pub dest_path: String,
+    pub destination_path: String,
+    /// Replace the destination if it already exists.
     #[arg(long)]
     pub force: bool,
     /// Idempotency key for the commit; resubmit with the same id to retry

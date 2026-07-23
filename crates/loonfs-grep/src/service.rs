@@ -13,18 +13,22 @@ use crate::root::{load_grep_manifest, load_grep_root_pointer, GrepLifecycle, Gre
 use crate::{GrepError, Result};
 use futures::future::{join_all, try_join_all};
 use loonfs_api::wire::hex::hex_decode_bytes;
-use loonfs_api::wire::sst_blocks::{decode_filter_block, index_blocks_for_key_range};
+use loonfs_api::wire::sst_blocks::{decode_filter_block, index_blocks_for_key_range, BlockHandle};
 use loonfs_api::wire::wal::WalDelta;
 use loonfs_api::{
-    decode_grep_cursor, encode_grep_cursor, AbsolutePath, ChangeSeq, GrepMatch, GrepPageCursor,
-    GrepRequest, GrepResponse, InodeId, NamespaceId, RevisionNo,
+    decode_grep_cursor, encode_grep_cursor, AbsolutePath, ChangeSeq, ErrorCode, GrepMatch,
+    GrepPageCursor, GrepRequest, GrepResponse, InodeId, NamespaceId, RevisionNo,
 };
 use loonfs_core::content::read_durable_content_bytes;
-use loonfs_core::grep::{LeafRevisionPrefetch, LoadedMetadataView, MetadataViewSession};
+use loonfs_core::grep::{
+    string_prefix_upper_bound, LeafRevisionPrefetch, LoadedMetadataView, MetadataViewSession,
+    REVISION_ROW_PREFIX,
+};
 use loonfs_core::metadata::RevisionRecord;
 use loonfs_core::{Error as CoreError, MetadataViewError};
 use loonfs_objectstore::ObjectStore;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 /// Matches returned per page when the request names no limit.
 pub const DEFAULT_GREP_PAGE_LIMIT: usize = 100;
@@ -88,8 +92,8 @@ struct GrepQuerySegment {
     object_key: String,
     min_key: String,
     max_key: String,
-    index_block: loonfs_api::wire::sst_blocks::BlockHandle,
-    filter_block: loonfs_api::wire::sst_blocks::BlockHandle,
+    index_block: BlockHandle,
+    filter_block: BlockHandle,
     filter_inline: Option<String>,
     payload_checksum: String,
 }
@@ -149,7 +153,7 @@ impl GrepIndexSnapshot {
                     }
                     Err(error) => return Self::from_error(error.into()),
                 };
-                let state = std::sync::Arc::new(manifest.state().clone());
+                let state = Arc::new(manifest.state().clone());
                 service
                     .block_cache
                     .insert(cache_key, DecodedGrepBlock::Manifest(state.clone()));
@@ -165,13 +169,10 @@ impl GrepIndexSnapshot {
                 ),
             });
         }
-        Self::from_state(Some(&state))
+        Self::from_state(&state)
     }
 
-    fn from_state(root: Option<&GrepRootState>) -> Self {
-        let Some(root) = root else {
-            return Self::from_error(GrepError::NotEnabled);
-        };
+    fn from_state(root: &GrepRootState) -> Self {
         match root.lifecycle() {
             GrepLifecycle::Disabled => return Self::from_error(GrepError::NotEnabled),
             GrepLifecycle::Backfilling { .. } => {
@@ -364,18 +365,6 @@ impl GramLookup {
             upper,
         }
     }
-}
-
-fn string_prefix_upper_bound(prefix: &str) -> Option<String> {
-    let mut bytes = prefix.as_bytes().to_vec();
-    for index in (0..bytes.len()).rev() {
-        if bytes[index] != u8::MAX {
-            bytes[index] += 1;
-            bytes.truncate(index + 1);
-            return String::from_utf8(bytes).ok();
-        }
-    }
-    None
 }
 
 /// One gram's postings from one segment: bloom filter first (the inline
@@ -600,7 +589,7 @@ async fn derive_visible_path<S: ObjectStore + ?Sized>(
             Ok(Some(VisiblePathChain { path, ancestors }))
         }
         Ok(_) => Ok(None),
-        Err(error) if error.code() == loonfs_api::ErrorCode::PathNotFound => Ok(None),
+        Err(error) if error.code() == ErrorCode::PathNotFound => Ok(None),
         Err(error) => Err(error.into()),
     }
 }
@@ -739,7 +728,7 @@ impl GrepService {
                     .await
                 {
                     Ok(resolved) => Some(resolved.inode_id),
-                    Err(error) if error.code() == loonfs_api::ErrorCode::PathNotFound => {
+                    Err(error) if error.code() == ErrorCode::PathNotFound => {
                         return Ok(GrepResponse {
                             namespace_id: view.namespace_id().clone(),
                             head_seq: view.head().seq,
@@ -890,7 +879,7 @@ impl GrepService {
                 // indexable text, so tail and scan candidates skip their
                 // doomed reads on the declared size alone — the same
                 // pre-fetch check the index builder applies
-                // (`checkpoint/index_build.rs`); index-supplied candidates
+                // (the `worker.rs` collection paths); index-supplied candidates
                 // are under the cap by construction. The candidate still
                 // rides the batch in inode order, so the budget and the
                 // resume cursor advance exactly as if its bytes had been
@@ -1026,8 +1015,8 @@ async fn scan_candidate_inodes<S: ObjectStore + ?Sized>(
     view: &LoadedMetadataView<'_, S>,
 ) -> Result<BTreeSet<InodeId>> {
     let mut inodes = BTreeSet::new();
-    let mut lower = "revision-".to_owned();
-    let upper = string_prefix_upper_bound("revision-");
+    let mut lower = REVISION_ROW_PREFIX.to_owned();
+    let upper = string_prefix_upper_bound(REVISION_ROW_PREFIX);
     loop {
         let page = view
             .grep_revision_inode_page(

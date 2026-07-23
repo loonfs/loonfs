@@ -21,7 +21,7 @@ pub struct MaintenanceTickOptions {
     pub max_wal_tail_segments: u64,
     /// Run the mark-and-sweep garbage collector after the tick's
     /// flush work. Nothing sweeps unless this is set.
-    pub gc: Option<crate::GcConfig>,
+    pub gc: Option<GcConfig>,
 }
 
 impl Default for MaintenanceTickOptions {
@@ -107,7 +107,7 @@ pub struct MaintenanceTickResult {
     /// What the tick did.
     pub outcome: MaintenanceTickOutcome,
     /// Garbage-collection report when the tick opted into sweeping.
-    pub gc: Option<crate::GcReport>,
+    pub gc: Option<GcReport>,
 }
 
 impl MaintenanceTickResult {
@@ -222,7 +222,7 @@ impl Default for DeleteOptions {
 }
 
 /// Options for moving a path.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct MoveOptions {
     /// Create-only or replace-existing behavior for the destination.
     pub behavior: DestinationBehavior,

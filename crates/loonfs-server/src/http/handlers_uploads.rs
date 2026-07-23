@@ -2,12 +2,10 @@
 //! backing them.
 
 use super::error::ApiResponseError;
-use super::{
-    authorize, AppJson, AppPath, AppState, NamespaceIdPath, OptionalAppJson, UploadBodyBytes,
-};
+use super::{AppJson, AppPath, AppState, NamespaceIdPath, OptionalAppJson, UploadBodyBytes};
 use crate::config::ServerConfig;
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::Json;
 use loonfs::content_tokens::{mint_content_token, ContentTokenError};
 use loonfs::publish::PreparedContent;
@@ -62,10 +60,8 @@ pub(super) struct UploadPathParams {
 pub(super) async fn begin_upload(
     State(state): State<AppState>,
     namespace: NamespaceIdPath,
-    headers: HeaderMap,
     OptionalAppJson(request): OptionalAppJson<BeginUploadRequest>,
 ) -> Result<Json<BeginUploadResponse>, ApiResponseError> {
-    authorize(&state.config, &headers)?;
     let namespace_id = namespace.into_id()?;
     let request = request.unwrap_or_default();
     if request.mode.unwrap_or_default() == UploadMode::DirectPut {
@@ -147,7 +143,8 @@ fn direct_put_issuer_error(error: ObjectStoreError) -> ApiResponseError {
 
 #[allow(clippy::disallowed_methods)]
 fn direct_put_presign_time() -> SystemTime {
-    // Issuing a short-lived transfer capability is an explicit wall-clock boundary.
+    // Issuing a short-lived transfer capability enters wall time at this HTTP
+    // boundary so core replay stays deterministic.
     SystemTime::now()
 }
 
@@ -204,6 +201,8 @@ fn content_token_error(error: ContentTokenError) -> ApiResponseError {
 
 #[allow(clippy::disallowed_methods)]
 pub(super) fn current_unix_ms() -> Result<u64, ApiResponseError> {
+    // Request timestamps enter wall time at this HTTP API boundary so core
+    // replay stays deterministic.
     let duration = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| {
@@ -251,10 +250,8 @@ pub(super) async fn upload_content(
     State(state): State<AppState>,
     namespace: NamespaceIdPath,
     path: AppPath<UploadPathParams>,
-    headers: HeaderMap,
     body: UploadBodyBytes,
 ) -> Result<Json<UploadContentResponse>, ApiResponseError> {
-    authorize(&state.config, &headers)?;
     let namespace_id = namespace.into_id()?;
     let UploadPathParams { upload_id } = path.into_params()?;
     let upload_id = parse_upload_id(&upload_id)?;
@@ -293,10 +290,8 @@ pub(super) async fn complete_upload(
     State(state): State<AppState>,
     namespace: NamespaceIdPath,
     path: AppPath<UploadPathParams>,
-    headers: HeaderMap,
     AppJson(request): AppJson<CompleteUploadRequest>,
 ) -> Result<Json<CompleteUploadResponse>, ApiResponseError> {
-    authorize(&state.config, &headers)?;
     let namespace_id = namespace.into_id()?;
     let UploadPathParams { upload_id } = path.into_params()?;
     let upload_id = parse_upload_id(&upload_id)?;

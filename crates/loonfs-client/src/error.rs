@@ -49,7 +49,7 @@ impl ClientError {
     /// Returns the typed code for [`ClientError::Api`] errors, or `None` for
     /// non-API errors and for codes this build does not know (clients must
     /// tolerate unknown codes).
-    pub fn error_code(&self) -> Option<ErrorCode> {
+    pub fn code(&self) -> Option<ErrorCode> {
         match self {
             ClientError::Api { code, .. } => ErrorCode::parse(code),
             _ => None,

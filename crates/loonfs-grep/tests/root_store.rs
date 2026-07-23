@@ -1,3 +1,5 @@
+//! Grep root object-store loading and publication behavior.
+
 #![allow(clippy::panic)]
 
 use bytes::Bytes;

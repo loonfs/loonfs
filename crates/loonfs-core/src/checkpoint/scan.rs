@@ -404,7 +404,8 @@ pub(super) fn descriptor_may_intersect_range(
     true
 }
 
-pub(crate) fn string_prefix_upper_bound(prefix: &str) -> Option<String> {
+/// Returns the exclusive upper bound for all strings beginning with `prefix`.
+pub fn string_prefix_upper_bound(prefix: &str) -> Option<String> {
     let mut bytes = prefix.as_bytes().to_vec();
     for index in (0..bytes.len()).rev() {
         if bytes[index] != u8::MAX {

@@ -23,7 +23,7 @@ impl FsCore {
             .await?)
     }
 
-    /// Starts a direct_put upload session and returns the internal target for server-side signing.
+    /// Starts a direct-put upload session and returns the internal target for server-side signing.
     pub(crate) async fn begin_direct_put_upload_target(
         &self,
         namespace_id: &NamespaceId,

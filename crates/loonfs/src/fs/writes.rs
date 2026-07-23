@@ -208,6 +208,8 @@ impl FsCore {
         .map_err(CoreError::from)?)
     }
 
+    /// Verifies an authorized content token against the namespace's durable
+    /// content-store binding.
     pub(crate) async fn prepare_content_token(
         &self,
         namespace_id: &NamespaceId,
@@ -223,6 +225,8 @@ impl FsCore {
         ))
     }
 
+    /// Loads the namespace catalog used to bind prepared content to its
+    /// verified content store.
     pub(crate) async fn load_namespace_catalog_for_content_preparation(
         &self,
         namespace_id: &NamespaceId,
@@ -506,7 +510,7 @@ impl FsCore {
             Ok(context) => context,
             Err(error) => return candidates.iter().map(|_| Err(error.clone())).collect(),
         };
-        if self.commit_engine_cache_enabled() {
+        if self.control_cache_enabled() {
             // Warm the immutable catalog through the control cache so a
             // recreated engine starts seeded; a load failure here surfaces
             // as the publish view's own, properly shaped error instead.
@@ -532,7 +536,7 @@ impl FsCore {
             };
             {
                 let _span = tracing::info_span!(
-                    "publisher.batch_update_cache",
+                    "loon.phase",
                     phase = "batch_update_cache",
                     mode = self.inner.config.trace_mode.as_str(),
                     store_kind = self.inner.config.trace_store_kind.as_str(),
@@ -586,7 +590,7 @@ impl FsCore {
             .collect();
         {
             let _span = tracing::info_span!(
-                "publisher.batch_update_cache",
+                "loon.phase",
                 phase = "batch_update_cache",
                 mode = self.inner.config.trace_mode.as_str(),
                 store_kind = self.inner.config.trace_store_kind.as_str(),

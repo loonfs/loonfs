@@ -8,7 +8,7 @@ use bytes::Bytes;
 use futures::stream::BoxStream;
 use loonfs::{
     ChangeSeq, CommitId, CommitOp, CommitRequest, CreateNamespaceOptions, ErrorCode, FsAdmin,
-    FsReader, FsWriter, GrepRequest, InodeId, NamespaceId, PutFileOptions,
+    FsReader, FsWriter, GrepRequest, InodeId, NamespaceId, PutFileOptions, SharedObjectStore,
 };
 use loonfs_api::decode_grep_cursor;
 use loonfs_grep::codec::INDEX_GRAMS_MAX_FILE_BYTES;
@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
 
-fn grep_request(pattern: &str) -> GrepRequest {
+fn request(pattern: &str) -> GrepRequest {
     GrepRequest {
         pattern: pattern.to_owned(),
         case_insensitive: false,
@@ -42,7 +42,7 @@ fn nonzero_usize(value: usize) -> NonZeroUsize {
 
 /// Content blob object keys currently in the store, for pinpointing the
 /// object behind one file's bytes by diffing around its write.
-async fn content_blob_keys(store: &loonfs::SharedObjectStore) -> BTreeSet<String> {
+async fn content_blob_keys(store: &SharedObjectStore) -> BTreeSet<String> {
     store
         .list_prefix("content-stores/")
         .await
@@ -52,17 +52,17 @@ async fn content_blob_keys(store: &loonfs::SharedObjectStore) -> BTreeSet<String
         .collect()
 }
 
-fn grep_worker(store: &loonfs::SharedObjectStore) -> GrepWorker<loonfs::SharedObjectStore> {
+fn worker(store: &SharedObjectStore) -> GrepWorker<SharedObjectStore> {
     GrepWorker::new(
         store.clone(),
-        "grams-test-worker",
-        "grams-test-session",
-        "grams-test/0.1",
+        "grep-worker-tests",
+        "grep-worker-tests-session",
+        "grep-worker-tests/0.1",
     )
 }
 
 async fn drive_worker_step(
-    worker: &GrepWorker<loonfs::SharedObjectStore>,
+    worker: &GrepWorker<SharedObjectStore>,
     namespace_id: &NamespaceId,
     policy: GramIndexBuildPolicy,
 ) {
@@ -78,7 +78,7 @@ async fn drive_worker_step(
 
 /// The watermark from the namespace's verified grep root.
 async fn grams_built_through_seq(
-    store: &loonfs::SharedObjectStore,
+    store: &SharedObjectStore,
     namespace_id: &NamespaceId,
 ) -> ChangeSeq {
     loonfs_grep::root::load_grep_root(&**store, namespace_id)
@@ -93,7 +93,7 @@ async fn grams_built_through_seq(
 #[tokio::test]
 async fn grep_worker_builds_the_gram_index_once_enabled() {
     let temp_dir = tempdir().expect("tempdir");
-    let store: loonfs::SharedObjectStore =
+    let store: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
     let namespace_id = NamespaceId::parse("grams-runtime").expect("namespace id");
 
@@ -112,7 +112,7 @@ async fn grep_worker_builds_the_gram_index_once_enabled() {
         .build()
         .await
         .expect("build reader");
-    let grep_worker = grep_worker(&store);
+    let grep_worker = worker(&store);
 
     writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
@@ -139,7 +139,7 @@ async fn grep_worker_builds_the_gram_index_once_enabled() {
 
     // Request validation precedes feature materialization; snapshot
     // construction must preserve that error ordering.
-    let mut invalid_limit = grep_request("needle");
+    let mut invalid_limit = request("needle");
     invalid_limit.limit = Some(0);
     let error = reader
         .grep(&namespace_id, &invalid_limit)
@@ -152,7 +152,7 @@ async fn grep_worker_builds_the_gram_index_once_enabled() {
 
     // Before enablement, grep names the missing data half.
     let error = reader
-        .grep(&namespace_id, &grep_request("needle"))
+        .grep(&namespace_id, &request("needle"))
         .await
         .expect_err("grep without the feature must be refused");
     let loonfs::Error::Grep(grep) = &error else {
@@ -178,7 +178,7 @@ async fn grep_worker_builds_the_gram_index_once_enabled() {
     }
 
     let response = reader
-        .grep(&namespace_id, &grep_request("needle"))
+        .grep(&namespace_id, &request("needle"))
         .await
         .expect("grep after ticks");
     assert_eq!(response.matches.len(), 1);
@@ -196,13 +196,13 @@ async fn grep_worker_builds_the_gram_index_once_enabled() {
         .await
         .expect("write charlie");
     let response = reader
-        .grep(&namespace_id, &grep_request("needle"))
+        .grep(&namespace_id, &request("needle"))
         .await
         .expect("grep with tail");
     assert_eq!(response.matches.len(), 2);
     drive_worker_step(&grep_worker, &namespace_id, GramIndexBuildPolicy::default()).await;
     let response = reader
-        .grep(&namespace_id, &grep_request("needle"))
+        .grep(&namespace_id, &request("needle"))
         .await
         .expect("grep after catch-up tick");
     assert_eq!(response.matches.len(), 2);
@@ -214,7 +214,7 @@ async fn grep_worker_builds_the_gram_index_once_enabled() {
         .expect("disable");
     assert!(disabled.was_enabled);
     let error = reader
-        .grep(&namespace_id, &grep_request("needle"))
+        .grep(&namespace_id, &request("needle"))
         .await
         .expect_err("grep after disable must be refused");
     let loonfs::Error::Grep(grep) = &error else {
@@ -250,7 +250,7 @@ async fn a_publish_below_the_wal_threshold_does_not_schedule_grep_work() {
         .build()
         .await
         .expect("build reader");
-    let grep_worker = grep_worker(&store);
+    let grep_worker = worker(&store);
 
     writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
@@ -284,7 +284,7 @@ async fn a_publish_below_the_wal_threshold_does_not_schedule_grep_work() {
         loonfs_grep::root::GrepLifecycle::Backfilling { .. }
     ));
     let error = reader
-        .grep(&namespace_id, &grep_request("needle"))
+        .grep(&namespace_id, &request("needle"))
         .await
         .expect_err("background metadata work must not materialize grep");
     let loonfs::Error::Grep(grep) = error else {
@@ -298,7 +298,7 @@ async fn a_publish_below_the_wal_threshold_does_not_schedule_grep_work() {
 
     // A stale grep serves from the index alone, proving only the explicit
     // worker advanced the watermark past the publish.
-    let mut stale = grep_request("needle");
+    let mut stale = request("needle");
     stale.allow_stale = true;
     let response = reader
         .grep(&namespace_id, &stale)
@@ -335,7 +335,7 @@ async fn a_worker_policy_bounds_each_build_step() {
         .build()
         .await
         .expect("build admin");
-    let grep_worker = grep_worker(&store);
+    let grep_worker = worker(&store);
     let policy = GramIndexBuildPolicy {
         max_files_per_step: nonzero_usize(3),
         ..GramIndexBuildPolicy::default()
@@ -413,7 +413,7 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
         .build()
         .await
         .expect("build reader");
-    let first_worker = grep_worker(&store);
+    let first_worker = worker(&store);
 
     writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
@@ -610,7 +610,7 @@ async fn collect_grep_paths(
     namespace_id: &NamespaceId,
     pattern: &str,
 ) -> BTreeSet<String> {
-    let mut request = grep_request(pattern);
+    let mut request = request(pattern);
     request.limit = Some(1_000);
     let mut paths = BTreeSet::new();
     loop {
@@ -662,7 +662,7 @@ async fn grep_answers_identically_across_tiered_folds() {
         .build()
         .await
         .expect("build reader");
-    let grep_worker = grep_worker(&store);
+    let grep_worker = worker(&store);
 
     writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
@@ -689,7 +689,7 @@ async fn grep_answers_identically_across_tiered_folds() {
         expected_paths.push(path);
 
         let response = reader
-            .grep(&namespace_id, &grep_request("needle"))
+            .grep(&namespace_id, &request("needle"))
             .await
             .expect("grep");
         let mut matched: Vec<String> = response
@@ -888,7 +888,7 @@ async fn repeated_grep_serves_posting_blocks_from_the_grep_cache() {
     let raw_store = Arc::new(IndexSegmentGetCountingStore::new(temp_dir.path()));
     let store: loonfs::SharedObjectStore = raw_store.clone();
     let namespace_id = NamespaceId::parse("grams-cache").expect("namespace id");
-    let grep_worker = grep_worker(&store);
+    let grep_worker = worker(&store);
 
     let writer = FsWriter::builder_with_store(store.clone())
         .writer_id("grams-cache-writer")
@@ -939,7 +939,7 @@ async fn repeated_grep_serves_posting_blocks_from_the_grep_cache() {
 
     let before_first = raw_store.index_segment_get_count();
     let first = reader
-        .grep(&namespace_id, &grep_request("needle"))
+        .grep(&namespace_id, &request("needle"))
         .await
         .expect("first grep");
     assert_eq!(first.matches.len(), 1);
@@ -950,7 +950,7 @@ async fn repeated_grep_serves_posting_blocks_from_the_grep_cache() {
     );
 
     let second = reader
-        .grep(&namespace_id, &grep_request("needle"))
+        .grep(&namespace_id, &request("needle"))
         .await
         .expect("second grep");
     assert_eq!(second.matches, first.matches);
@@ -990,7 +990,7 @@ async fn a_failed_candidate_read_surfaces_in_traversal_order() {
         .build()
         .await
         .expect("build reader");
-    let grep_worker = grep_worker(&store);
+    let grep_worker = worker(&store);
 
     writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
@@ -1034,7 +1034,7 @@ async fn a_failed_candidate_read_surfaces_in_traversal_order() {
         drive_worker_step(&grep_worker, &namespace_id, GramIndexBuildPolicy::default()).await;
     }
     let healthy = reader
-        .grep(&namespace_id, &grep_request("needle"))
+        .grep(&namespace_id, &request("needle"))
         .await
         .expect("grep before the fault");
     assert_eq!(healthy.matches.len(), 3);
@@ -1048,7 +1048,7 @@ async fn a_failed_candidate_read_surfaces_in_traversal_order() {
     // An unlimited page walks past alpha into bravo, so the failed read
     // fails that page, exactly as the serial scan did.
     let error = reader
-        .grep(&namespace_id, &grep_request("needle"))
+        .grep(&namespace_id, &request("needle"))
         .await
         .expect_err("a reached candidate's failed read must fail its page");
     let loonfs::Error::Grep(loonfs::GrepError::Core(core)) = &error else {
@@ -1059,7 +1059,7 @@ async fn a_failed_candidate_read_surfaces_in_traversal_order() {
     // With a one-match limit, alpha's second match fills the page before
     // the walk reaches bravo: the speculative failed read is discarded and
     // the full page comes back with a cursor.
-    let mut first_page = grep_request("needle");
+    let mut first_page = request("needle");
     first_page.limit = Some(1);
     let response = reader
         .grep(&namespace_id, &first_page)
@@ -1074,7 +1074,7 @@ async fn a_failed_candidate_read_surfaces_in_traversal_order() {
 
     // The next page's walk reaches bravo and surfaces the read error at
     // the position the serial scan would have.
-    let mut second_page = grep_request("needle");
+    let mut second_page = request("needle");
     second_page.limit = Some(1);
     second_page.cursor = Some(cursor);
     let error = reader
@@ -1189,7 +1189,7 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
         .build()
         .await
         .expect("build reader");
-    let grep_worker = grep_worker(&store);
+    let grep_worker = worker(&store);
 
     writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
@@ -1248,7 +1248,7 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
 
     let gets_before_greps = raw_store.content_blob_get_keys().len();
 
-    let mut first_page = grep_request("needle");
+    let mut first_page = request("needle");
     first_page.limit = Some(1);
     let page_one = reader
         .grep(&namespace_id, &first_page)
@@ -1270,7 +1270,7 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
     );
     assert_eq!(cursor.last_byte_offset, u64::MAX);
 
-    let mut second_page = grep_request("needle");
+    let mut second_page = request("needle");
     second_page.limit = Some(1);
     second_page.cursor = Some(cursor_token);
     let page_two = reader
@@ -1330,7 +1330,7 @@ async fn a_fold_does_not_reuse_grep_private_index_blocks() {
         .build()
         .await
         .expect("build admin");
-    let grep_worker = grep_worker(&store);
+    let grep_worker = worker(&store);
 
     writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
@@ -1379,7 +1379,7 @@ async fn a_fold_does_not_reuse_grep_private_index_blocks() {
     // The warm-up: one grep that matches every file decodes the pending
     // delta segments' index and posting blocks into the shared cache.
     let warm = reader
-        .grep(&namespace_id, &grep_request("needle"))
+        .grep(&namespace_id, &request("needle"))
         .await
         .expect("warming grep");
     assert_eq!(warm.matches.len(), 15);
@@ -1521,7 +1521,7 @@ async fn a_cold_fold_fans_out_its_segment_opens_within_the_io_cap() {
     let raw_store = Arc::new(InFlightIndexGetProbeStore::new(temp_dir.path()));
     let store: loonfs::SharedObjectStore = raw_store.clone();
     let namespace_id = NamespaceId::parse("grams-fold-fan-out").expect("namespace id");
-    let grep_worker = grep_worker(&store);
+    let grep_worker = worker(&store);
 
     let writer = FsWriter::builder_with_store(store.clone())
         .writer_id("grams-fan-out-writer")

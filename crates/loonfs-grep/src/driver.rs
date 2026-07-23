@@ -35,7 +35,7 @@ impl GrepStepLimiter {
             .clone()
             .acquire_owned()
             .await
-            .expect("grep step semaphore is never closed")
+            .expect("grep step semaphore should remain open")
     }
 }
 
@@ -325,7 +325,8 @@ impl<S: ObjectStore + Clone + Send + Sync + 'static> GrepDriver<S> {
 
     #[allow(clippy::disallowed_methods)]
     async fn wait_for_error_backoff(&self, delay: Duration) -> bool {
-        // Namespace-local one-shot error backoff prevents a poisoned root from hot-looping; it is not recurring idle work.
+        // Namespace-local error backoff enters a one-shot timer at this driver
+        // scheduling boundary so durable replay stays deterministic.
         tokio::select! {
             () = tokio::time::sleep(delay) => !self.stopping(),
             () = self.handle.control.stop_notify.notified() => false,

@@ -1,6 +1,45 @@
 #![allow(clippy::panic)]
 // HTTP smoke helpers panic in unexpected match arms for precise diagnostics.
 
+use super::error::status_for_core_error_code;
+use super::{
+    app_with_store, app_with_store_and_state, build_handles_with_metrics_jsonl_path,
+    SharedObjectStore,
+};
+use crate::config::RuntimeCacheConfigOverrides;
+use crate::{ServerConfig, StoreConfig};
+use async_trait::async_trait;
+use axum::body::Bytes;
+use futures::stream::BoxStream;
+use loonfs::{
+    CreateNamespaceOptions, DeleteOptions, FsWriter, PutFileOptions, TraceMode, TraceStoreKind,
+};
+use loonfs_api::ErrorCode;
+use loonfs_api::{
+    ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior, GrepRequest, NamespaceId,
+    RepairNamespaceOutcome,
+};
+use loonfs_client::{
+    Client, ClientConfig, ClientError, DeleteOptions as ClientDeleteOptions, MutationOptions,
+    NamespacePath, PutFileOptions as ClientPutFileOptions,
+};
+use loonfs_grep::keyspace::{manifest_key as grep_manifest_key, root_key as grep_root_key};
+use loonfs_grep::root::{encode_grep_root, GrepManifestId, GrepRootEnvelope, GrepRootPointer};
+use loonfs_grep::{GrepDriverParked, GrepWorker};
+use loonfs_objectstore::keys::{metadata_root, namespace_config, wal_head};
+use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_objectstore::{
+    ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
+};
+use std::path::Path;
+
+fn replace_file_options() -> ClientPutFileOptions {
+    ClientPutFileOptions {
+        behavior: DestinationBehavior::Replace,
+        ..ClientPutFileOptions::default()
+    }
+}
+
 /// The compile-time forcing function for new error codes moved here when
 /// `ErrorCode` became `#[non_exhaustive]`: every registered code must
 /// appear in the api.md error table, and the status this server serves
@@ -59,35 +98,6 @@ fn error_status_mapping_matches_the_api_spec_table() {
         "api.md documents codes this build does not register: {documented:?}"
     );
 }
-
-use super::error::status_for_core_error_code;
-use super::{
-    app_with_store, app_with_store_and_state, build_handles_with_metrics_jsonl_path,
-    SharedObjectStore,
-};
-use crate::config::RuntimeCacheConfigOverrides;
-use crate::{ServerConfig, StoreConfig};
-use async_trait::async_trait;
-use axum::body::Bytes;
-use futures::stream::BoxStream;
-use loonfs::{
-    CreateNamespaceOptions, DeleteOptions, FsWriter, PutFileOptions, TraceMode, TraceStoreKind,
-};
-use loonfs_api::ErrorCode;
-use loonfs_api::{
-    ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior, GrepRequest, NamespaceId,
-    RepairNamespaceOutcome,
-};
-use loonfs_client::{Client, ClientConfig, ClientError, MutationOptions, NamespacePath};
-use loonfs_grep::keyspace::{manifest_key as grep_manifest_key, root_key as grep_root_key};
-use loonfs_grep::root::{encode_grep_root, GrepManifestId, GrepRootEnvelope, GrepRootPointer};
-use loonfs_grep::{GrepDriverParked, GrepWorker};
-use loonfs_objectstore::keys::{metadata_root, namespace_config, wal_head};
-use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_objectstore::{
-    ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
-};
-use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -830,7 +840,7 @@ async fn http_created_state_is_readable_through_runtime() {
         let target = NamespacePath::parse("demo", "/notes/from-http.txt").expect("target");
         harness
             .client
-            .write_file_bytes(&target, b"hello from http", &MutationOptions::default())
+            .put_file_bytes(&target, b"hello from http", &replace_file_options())
             .expect("write file through http");
     })
     .await
@@ -860,7 +870,7 @@ async fn http_missing_namespace_mutations_return_namespace_not_found() {
         assert_api_error(
             harness
                 .client
-                .write_file_bytes(&target, b"hello", &MutationOptions::default()),
+                .put_file_bytes(&target, b"hello", &replace_file_options()),
             404,
             "namespace_not_found",
             Some("namespace `missing` does not exist"),
@@ -868,7 +878,7 @@ async fn http_missing_namespace_mutations_return_namespace_not_found() {
         assert_api_error(
             harness
                 .client
-                .delete_path(&target, &MutationOptions::default()),
+                .delete_path(&target, &ClientDeleteOptions::default()),
             404,
             "namespace_not_found",
             Some("namespace `missing` does not exist"),
@@ -901,7 +911,7 @@ async fn http_missing_namespace_reads_return_namespace_not_found() {
     tokio::task::spawn_blocking(move || {
         let target = NamespacePath::parse("missing", "/").expect("target");
         assert_api_error(
-            harness.client.list_path_all(&target),
+            harness.client.list_path_entries_all(&target),
             404,
             "namespace_not_found",
             Some("namespace `missing` does not exist"),
@@ -1002,7 +1012,7 @@ async fn http_delete_missing_path_returns_path_not_found() {
         assert_api_error(
             harness
                 .client
-                .delete_path(&target, &MutationOptions::default()),
+                .delete_path(&target, &ClientDeleteOptions::default()),
             404,
             "path_not_found",
             None,
@@ -1048,11 +1058,9 @@ async fn http_put_over_directory_and_move_into_existing_target_return_path_confl
     tokio::task::spawn_blocking(move || {
         let dir_target = NamespacePath::parse("demo", "/docs").expect("dir target");
         assert_api_error(
-            harness.client.write_file_bytes(
-                &dir_target,
-                b"not a file",
-                &MutationOptions::default(),
-            ),
+            harness
+                .client
+                .put_file_bytes(&dir_target, b"not a file", &replace_file_options()),
             409,
             "path_conflict",
             None,
@@ -1108,7 +1116,7 @@ async fn http_put_and_move_under_deleted_ancestor_create_fresh_subtrees() {
         let put_target = NamespacePath::parse("demo", "/docs/new.txt").expect("put target");
         harness
             .client
-            .write_file_bytes(&put_target, b"new", &MutationOptions::default())
+            .put_file_bytes(&put_target, b"new", &replace_file_options())
             .expect("put recreates the subtree");
         let old_child = NamespacePath::parse("demo", "/docs/old.txt").expect("old child");
         assert_api_error(
@@ -1147,7 +1155,7 @@ async fn http_path_mutation_retries_transient_stale_head_cas() {
         let target = NamespacePath::parse("demo", "/notes/race.txt").expect("target");
         let result = harness
             .client
-            .write_file_bytes(&target, b"race", &MutationOptions::default())
+            .put_file_bytes(&target, b"race", &replace_file_options())
             .expect("path write retries stale head");
         assert_eq!(result.committed_seq, ChangeSeq(1));
     })
@@ -1171,7 +1179,7 @@ async fn http_first_write_takes_over_a_namespace_owned_by_another_writer() {
         let target = NamespacePath::parse("demo", "/notes/taken-over.txt").expect("target");
         let result = harness
             .client
-            .write_file_bytes(&target, b"taken over", &MutationOptions::default())
+            .put_file_bytes(&target, b"taken over", &replace_file_options())
             .expect("first write takes over the namespace");
         assert_eq!(result.committed_seq, ChangeSeq(1));
     })
@@ -1339,14 +1347,14 @@ async fn http_upload_body_over_the_limit_answers_content_too_large() {
         .expect("valid client config");
         let target = NamespacePath::parse("demo", "/big.bin").expect("target");
         assert_api_error(
-            client.write_file_bytes(&target, &[0u8; 4096], &MutationOptions::default()),
+            client.put_file_bytes(&target, &[0u8; 4096], &replace_file_options()),
             413,
             "content_too_large",
             None,
         );
         // A body inside the limit still goes through on the same route.
         client
-            .write_file_bytes(&target, &[0u8; 512], &MutationOptions::default())
+            .put_file_bytes(&target, &[0u8; 512], &replace_file_options())
             .expect("small upload fits under the limit");
     })
     .await
@@ -1647,7 +1655,7 @@ async fn http_uploads_answer_server_busy_at_the_concurrency_cap() {
         let client = Client::new(config_for_busy).expect("valid client config");
         let target = NamespacePath::parse("demo", "/one.bin").expect("target");
         assert_api_error(
-            client.write_file_bytes(&target, &[0u8; 64], &MutationOptions::default()),
+            client.put_file_bytes(&target, &[0u8; 64], &replace_file_options()),
             503,
             "server_busy",
             Some("the server is at its concurrency limit for proxied uploads; retry shortly"),
@@ -1661,7 +1669,7 @@ async fn http_uploads_answer_server_busy_at_the_concurrency_cap() {
         let client = Client::new(client_config).expect("valid client config");
         let target = NamespacePath::parse("demo", "/one.bin").expect("target");
         client
-            .write_file_bytes(&target, &[0u8; 64], &MutationOptions::default())
+            .put_file_bytes(&target, &[0u8; 64], &replace_file_options())
             .expect("a freed slot admits the upload");
     })
     .await
@@ -1712,7 +1720,7 @@ async fn client_transient_retry_rides_out_a_briefly_full_upload_slot() {
         .expect("valid client config");
         let target = NamespacePath::parse("demo", "/retried.bin").expect("target");
         client
-            .write_file_bytes(&target, &[0u8; 64], &MutationOptions::default())
+            .put_file_bytes(&target, &[0u8; 64], &replace_file_options())
             .expect("transient retry rides out the briefly full slot");
     })
     .await

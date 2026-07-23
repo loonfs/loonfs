@@ -48,7 +48,11 @@ impl GrepDrivers {
     }
 
     pub(crate) fn start(&self, namespace_id: &NamespaceId) -> GrepDriverHandle {
-        let mut tasks = self.inner.tasks.lock().expect("grep drivers lock poisoned");
+        let mut tasks = self
+            .inner
+            .tasks
+            .lock()
+            .expect("grep drivers lock should not be poisoned");
         if let Some(task) = tasks.get(namespace_id) {
             if !task.is_finished() {
                 let handle = task.handle();
@@ -60,7 +64,7 @@ impl GrepDrivers {
             self.inner
                 .finished
                 .lock()
-                .expect("finished grep drivers lock poisoned")
+                .expect("finished grep drivers lock should not be poisoned")
                 .push(finished);
         }
         let task = GrepDriver::new(
@@ -82,7 +86,7 @@ impl GrepDrivers {
             .inner
             .tasks
             .lock()
-            .expect("grep drivers lock poisoned")
+            .expect("grep drivers lock should not be poisoned")
             .get(namespace_id)
             .filter(|task| !task.is_finished())
         {
@@ -95,7 +99,7 @@ impl GrepDrivers {
             .inner
             .tasks
             .lock()
-            .expect("grep drivers lock poisoned")
+            .expect("grep drivers lock should not be poisoned")
             .remove(namespace_id);
         if let Some(task) = task {
             task.shutdown().await.map_err(driver_join_error)?;
@@ -107,7 +111,7 @@ impl GrepDrivers {
         self.inner
             .tasks
             .lock()
-            .expect("grep drivers lock poisoned")
+            .expect("grep drivers lock should not be poisoned")
             .get(namespace_id)
             .is_some_and(|task| !task.is_finished())
     }
@@ -120,15 +124,20 @@ impl GrepDrivers {
             .inner
             .tasks
             .lock()
-            .expect("grep drivers lock poisoned")
+            .expect("grep drivers lock should not be poisoned")
             .get(namespace_id)
             .map(GrepDriverTask::handle)?;
         handle.wait_for_quiescence().await
     }
 
     pub(crate) async fn shutdown(&self) -> Result<(), RuntimeError> {
-        let tasks =
-            std::mem::take(&mut *self.inner.tasks.lock().expect("grep drivers lock poisoned"));
+        let tasks = std::mem::take(
+            &mut *self
+                .inner
+                .tasks
+                .lock()
+                .expect("grep drivers lock should not be poisoned"),
+        );
         for (_, task) in tasks {
             task.shutdown().await.map_err(driver_join_error)?;
         }
@@ -137,7 +146,7 @@ impl GrepDrivers {
                 .inner
                 .finished
                 .lock()
-                .expect("finished grep drivers lock poisoned"),
+                .expect("finished grep drivers lock should not be poisoned"),
         );
         for task in finished {
             task.shutdown().await.map_err(driver_join_error)?;

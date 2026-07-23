@@ -1,4 +1,4 @@
-//! Bounded step configuration for per-namespace grep drivers.
+//! Grep worker step budgets and the driver-fleet concurrency cap.
 
 use crate::GramIndexBuildPolicy;
 use serde::Deserialize;

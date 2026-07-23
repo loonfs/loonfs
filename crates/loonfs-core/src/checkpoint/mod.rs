@@ -52,8 +52,8 @@ pub use self::cache::{
 };
 pub use self::error::{ManifestLoadError, ManifestLoadFailureClass};
 pub use self::grep_read::{
-    load_grep_change_feed, load_grep_checkpoint_revision_page, GrepChangeFeed,
-    GrepCheckpointRevisionPage,
+    load_grep_change_feed, load_grep_checkpoint_revision_page, string_prefix_upper_bound,
+    GrepChangeFeed, GrepCheckpointRevisionPage, REVISION_ROW_PREFIX,
 };
 pub use self::reorganize::{MetadataReorganizeOutcome, MetadataReorganizeReport};
 pub(crate) use self::runs::MetadataLsmPolicy;
@@ -70,4 +70,4 @@ pub(crate) use self::record::{freshen_fork_checkpoint, read_checkpoint_record};
 pub(crate) use self::release::release_checkpoint;
 pub(crate) use self::reorganize::reorganize_metadata_step;
 pub(crate) use self::retention::advance_retention_floor;
-pub(crate) use self::scan::{string_prefix_upper_bound, Readahead, VerifiedMetadataTables};
+pub(crate) use self::scan::{Readahead, VerifiedMetadataTables};

@@ -237,7 +237,7 @@ async fn poll_namespace(
     poll_interval: Duration,
     shutdown: Arc<PollShutdown>,
 ) {
-    let mut interval = tokio::time::interval(poll_interval);
+    let mut interval = namespace_poll_interval(poll_interval);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
@@ -292,6 +292,13 @@ async fn poll_namespace(
     }
 }
 
+#[allow(clippy::disallowed_methods)]
+fn namespace_poll_interval(period: Duration) -> tokio::time::Interval {
+    // Standalone namespace polling enters a recurring timer at this process
+    // scheduling boundary so durable replay stays deterministic.
+    tokio::time::interval(period)
+}
+
 fn load_config(path: &Path) -> Result<StandaloneConfig, StandaloneError> {
     let source = std::fs::read_to_string(path).map_err(|source| StandaloneError::ReadConfig {
         path: path.to_path_buf(),
@@ -328,12 +335,12 @@ async fn shutdown_signal() {
     let ctrl_c = async {
         tokio::signal::ctrl_c()
             .await
-            .expect("install ctrl-c handler");
+            .expect("ctrl-c handler should install");
     };
     #[cfg(unix)]
     let terminate = async {
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("install SIGTERM handler")
+            .expect("SIGTERM handler should install")
             .recv()
             .await;
     };

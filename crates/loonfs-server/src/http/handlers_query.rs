@@ -1,5 +1,6 @@
 //! The `query/v0` plane: derived-index reads.
 
+use super::handlers_uploads::current_unix_ms;
 use super::{authorize, AppJson, AppState, NamespaceIdPath};
 use crate::http::error::{status_for_core_error_code, ApiResponseError};
 use axum::extract::State;
@@ -13,7 +14,6 @@ use loonfs_api::ApiError;
 use loonfs_api::FEATURE_QUERY_GREP;
 use loonfs_grep::root::{load_grep_root, GrepLifecycle};
 use loonfs_grep::{GrepDisableOutcome, GrepEnableOutcome, GrepError};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 const GREP_INDEX_FEATURE: &str = "index.grams";
 
@@ -43,10 +43,8 @@ const GREP_INDEX_FEATURE: &str = "index.grams";
 pub(super) async fn grep(
     State(state): State<AppState>,
     namespace: NamespaceIdPath,
-    headers: HeaderMap,
     AppJson(request): AppJson<GrepRequest>,
 ) -> Result<Json<GrepResponse>, ApiResponseError> {
-    authorize(&state.config, &headers)?;
     let namespace_id = namespace.into_id()?;
     start_driver_for_query_if_needed(&state, &namespace_id).await;
     let response = state
@@ -219,15 +217,7 @@ pub(super) async fn gc_grams_index(
         .grep_worker
         .as_ref()
         .expect("grep routes should carry a grep worker")
-        .garbage_collect_namespace(
-            &namespace_id,
-            current_time_ms().map_err(|error| {
-                ApiResponseError::runtime_for_namespace(
-                    &namespace_id,
-                    loonfs::RuntimeError::Core(error),
-                )
-            })?,
-        )
+        .garbage_collect_namespace(&namespace_id, current_unix_ms()?)
         .await
         .map_err(|error| map_grep_error(&namespace_id, error))?;
     Ok(Json(GrepGcResponse {
@@ -251,24 +241,15 @@ fn map_runtime_grep_error(
 }
 
 fn map_grep_error(namespace_id: &loonfs_api::NamespaceId, error: GrepError) -> ApiResponseError {
+    let code = error.code();
     match error {
         error @ (GrepError::NotEnabled | GrepError::Backfilling) => {
             ApiResponseError::not_supported(GREP_INDEX_FEATURE, &error.to_string())
         }
-        error @ (GrepError::StoreUnavailable { .. }
-        | GrepError::CorruptIndex { .. }
-        | GrepError::PublicationConflict { .. }) => {
-            let code = error.code();
-            ApiResponseError::new(status_for_core_error_code(code), code, &error.to_string())
-        }
         GrepError::Core(error) => {
             ApiResponseError::runtime_for_namespace(namespace_id, loonfs::RuntimeError::Core(error))
         }
-        error => ApiResponseError::new(
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            loonfs_api::ErrorCode::ServerError,
-            &error.to_string(),
-        ),
+        error => ApiResponseError::new(status_for_core_error_code(code), code, &error.to_string()),
     }
 }
 
@@ -299,15 +280,4 @@ async fn start_driver_for_query_if_needed(
     if needs_catch_up {
         drivers.start(namespace_id);
     }
-}
-
-#[allow(clippy::disallowed_methods)]
-fn current_time_ms() -> Result<u64, loonfs::CoreError> {
-    // Explicit server grep GC enters wall time at the admin boundary; durable replay stays deterministic.
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_millis() as u64)
-        .map_err(|error| {
-            loonfs::CoreError::Internal(format!("system clock before unix epoch: {error}"))
-        })
 }

@@ -7,25 +7,29 @@
 
 use crate::config::{ProfileConfig, StoreConfig};
 use crate::error::CliError;
+use crate::render::write_stderr_warning;
 use async_trait::async_trait;
 use loonfs::{
-    gc_config_from_request, gc_response_from_report, BootstrapNamespaceError, ChangesResponse,
-    CopyOptions, CoreError, CreateCheckpointOptions, CreateDirectoryOptions,
-    CreateNamespaceOptions, DeleteNamespaceOptions, DeleteNamespaceResponse, DeleteOptions,
-    ErrorCode, FsAdmin, FsBackgroundWork, FsReader, FsWriter, GrepError, ListChangesOptions,
-    MaintenanceTickOptions, MaintenanceTickResult, MoveOptions, PutFileOptions,
-    RestoreRevisionOptions, RuntimeError, SharedObjectStore, TraceStoreKind, UndeleteOptions,
+    gc_config_from_request, gc_response_from_report, ChangesResponse, CopyOptions,
+    CreateCheckpointOptions, CreateDirectoryOptions, CreateNamespaceOptions,
+    DeleteNamespaceOptions, DeleteNamespaceResponse, DeleteOptions, FsAdmin, FsBackgroundWork,
+    FsReader, FsWriter, ListChangesOptions, MaintenanceTickOptions, MaintenanceTickResult,
+    MoveOptions, PutFileOptions, RestoreRevisionOptions, RuntimeError, SharedObjectStore,
+    TraceStoreKind, UndeleteOptions,
 };
 use loonfs_api::{
     v0::{DisableGramsIndexResponse, EnableGramsIndexResponse, RepairNamespaceResponse},
     AdvanceRetentionResponse, AuthoritativePathEntry, ChangeSeq, CheckpointId, CommitId,
-    CommitResponse, CreateCheckpointRequest, CreateCheckpointResponse, DeleteDirectoryBehavior,
-    DestinationBehavior, EffectiveLimit, FlushWalResponse, GcRequest, GcResponse, GrepRequest,
-    GrepResponse, InodeId, ListFileRevisionsResponse, MaintenanceTickRequest,
-    MaintenanceTickResponse, NamespaceId, NamespaceStatusResponse, NamespaceSummary,
-    PaginationPolicy, ReleaseCheckpointResponse, RevisionNo,
+    CommitResponse, CreateCheckpointRequest, CreateCheckpointResponse, DestinationBehavior,
+    EffectiveLimit, ErrorCode, FlushWalResponse, GcRequest, GcResponse, GrepRequest, GrepResponse,
+    InodeId, ListFileRevisionsResponse, MaintenanceTickRequest, MaintenanceTickResponse,
+    NamespaceId, NamespaceStatusResponse, NamespaceSummary, PaginationPolicy,
+    ReleaseCheckpointResponse, RevisionNo,
 };
-use loonfs_client::{Client, ClientConfig, NamespacePath};
+use loonfs_client::{
+    Client, ClientConfig, CreateDirectoryOptions as ClientCreateDirectoryOptions,
+    DeleteOptions as ClientDeleteOptions, NamespacePath, PutFileOptions as ClientPutFileOptions,
+};
 use std::sync::Arc;
 
 pub(crate) use loonfs_client::backend::{Backend, BackendError, RemoteBackend};
@@ -65,11 +69,9 @@ impl EmbeddedBackend {
         match (result, self.writer.wait_for_background_work().await) {
             (result, Ok(())) => result,
             (Ok(value), Err(error)) => {
-                use std::io::Write;
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "warning: background maintenance did not settle cleanly: {error}"
-                );
+                write_stderr_warning(format_args!(
+                    "background maintenance did not settle cleanly: {error}"
+                ));
                 Ok(value)
             }
             (Err(error), Err(_)) => Err(error),
@@ -129,11 +131,9 @@ impl Backend for EmbeddedBackend {
     async fn delete_namespace(
         &self,
         namespace_id: &NamespaceId,
-        expected_head_seq: Option<u64>,
+        expected_head_seq: Option<ChangeSeq>,
     ) -> Result<DeleteNamespaceResponse, BackendError> {
-        let options = DeleteNamespaceOptions {
-            expected_head_seq: expected_head_seq.map(ChangeSeq),
-        };
+        let options = DeleteNamespaceOptions { expected_head_seq };
         let result = self
             .writer
             .delete_namespace(namespace_id, options)
@@ -165,7 +165,7 @@ impl Backend for EmbeddedBackend {
             .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
     }
 
-    async fn list_path_all(
+    async fn list_path_entries_all(
         &self,
         spec: &NamespacePath,
     ) -> Result<Vec<AuthoritativePathEntry>, BackendError> {
@@ -265,8 +265,7 @@ impl Backend for EmbeddedBackend {
         &self,
         spec: &NamespacePath,
         bytes: &[u8],
-        behavior: DestinationBehavior,
-        commit_id: Option<CommitId>,
+        options: &ClientPutFileOptions,
     ) -> Result<CommitResponse, BackendError> {
         self.publish_with_maintenance_recovery(spec.namespace(), || {
             self.writer.put_file_bytes(
@@ -274,8 +273,8 @@ impl Backend for EmbeddedBackend {
                 spec.absolute_path().as_str(),
                 bytes,
                 PutFileOptions {
-                    behavior,
-                    commit_id: commit_id.clone(),
+                    behavior: options.behavior,
+                    commit_id: options.commit_id.clone(),
                 },
             )
         })
@@ -285,17 +284,16 @@ impl Backend for EmbeddedBackend {
     async fn delete_path(
         &self,
         spec: &NamespacePath,
-        expected_inode_id: Option<InodeId>,
-        commit_id: Option<CommitId>,
+        options: &ClientDeleteOptions,
     ) -> Result<CommitResponse, BackendError> {
         self.publish_with_maintenance_recovery(spec.namespace(), || {
             self.writer.delete_path(
                 spec.namespace(),
                 spec.absolute_path().as_str(),
                 DeleteOptions {
-                    behavior: DeleteDirectoryBehavior::NonRecursive,
-                    commit_id: commit_id.clone(),
-                    expected_inode_id,
+                    behavior: options.behavior,
+                    commit_id: options.commit_id.clone(),
+                    expected_inode_id: options.expected_inode_id,
                 },
             )
         })
@@ -305,16 +303,15 @@ impl Backend for EmbeddedBackend {
     async fn create_directory(
         &self,
         spec: &NamespacePath,
-        parents: bool,
-        commit_id: Option<CommitId>,
+        options: &ClientCreateDirectoryOptions,
     ) -> Result<CommitResponse, BackendError> {
         self.publish_with_maintenance_recovery(spec.namespace(), || {
             self.writer.create_directory(
                 spec.namespace(),
                 spec.absolute_path().as_str(),
                 CreateDirectoryOptions {
-                    commit_id: commit_id.clone(),
-                    parents,
+                    commit_id: options.commit_id.clone(),
+                    parents: options.parents,
                 },
             )
         })
@@ -421,13 +418,10 @@ impl Backend for EmbeddedBackend {
     async fn release_checkpoint(
         &self,
         namespace_id: &NamespaceId,
-        checkpoint_id: &str,
+        checkpoint_id: &CheckpointId,
     ) -> Result<ReleaseCheckpointResponse, BackendError> {
-        let checkpoint_id = CheckpointId::parse(checkpoint_id).map_err(|error| {
-            BackendError::new(ErrorCode::InvalidRequest.as_str(), error.to_string())
-        })?;
         self.admin
-            .release_checkpoint(namespace_id, &checkpoint_id)
+            .release_checkpoint(namespace_id, checkpoint_id)
             .await
             .map_err(map_runtime_error)
     }
@@ -442,7 +436,7 @@ impl Backend for EmbeddedBackend {
             .map_err(map_runtime_error)
     }
 
-    async fn advance_retention(
+    async fn advance_retention_floor(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<AdvanceRetentionResponse, BackendError> {
@@ -488,7 +482,7 @@ impl Backend for EmbeddedBackend {
             .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
     }
 
-    async fn list_changes_page(
+    async fn list_changes_after(
         &self,
         namespace_id: &NamespaceId,
         after_seq: ChangeSeq,
@@ -516,12 +510,9 @@ fn resolve_cli_page_limit(limit: Option<u32>) -> Result<EffectiveLimit, BackendE
 
 fn map_runtime_error(error: RuntimeError) -> BackendError {
     match error {
-        RuntimeError::Core(error) => map_core_error(error),
-        RuntimeError::Bootstrap(error) => map_bootstrap_error(error),
-        RuntimeError::Grep(error) => map_grep_error(error),
         RuntimeError::Config(message) => BackendError::invalid_config(message),
         RuntimeError::RuntimeTask(message) => BackendError::runtime_error(message),
-        other => BackendError::runtime_error(other.to_string()),
+        error => BackendError::new(error.code().as_str(), error.to_string()),
     }
 }
 
@@ -529,51 +520,14 @@ fn map_namespace_scoped_runtime_error(
     namespace_id: &NamespaceId,
     error: RuntimeError,
 ) -> BackendError {
-    match error {
-        RuntimeError::Core(error) => map_namespace_scoped_core_error(namespace_id, error),
-        RuntimeError::Bootstrap(error) => map_bootstrap_error(error),
-        RuntimeError::Grep(error) => map_namespace_scoped_grep_error(namespace_id, error),
-        RuntimeError::Config(message) => BackendError::invalid_config(message),
-        RuntimeError::RuntimeTask(message) => BackendError::runtime_error(message),
-        other => BackendError::runtime_error(other.to_string()),
-    }
-}
-
-// Embedded-mode failures surface the same registry code the server would
-// serve for the identical failure, so `loon --json` consumers see one code
-// per mistake regardless of profile mode.
-
-fn map_core_error(error: CoreError) -> BackendError {
-    BackendError::new(error.code().as_str(), error.to_string())
-}
-
-fn map_grep_error(error: GrepError) -> BackendError {
-    match error {
-        GrepError::Core(error) => map_core_error(error),
-        error => BackendError::new(error.code().as_str(), error.to_string()),
-    }
-}
-
-fn map_namespace_scoped_core_error(namespace_id: &NamespaceId, error: CoreError) -> BackendError {
-    if matches!(error.code(), ErrorCode::NamespaceNotFound) {
+    if error.code() == ErrorCode::NamespaceNotFound {
         return BackendError::new(
             ErrorCode::NamespaceNotFound.as_str(),
             format!("namespace `{namespace_id}` does not exist"),
         );
     }
 
-    map_core_error(error)
-}
-
-fn map_namespace_scoped_grep_error(namespace_id: &NamespaceId, error: GrepError) -> BackendError {
-    match error {
-        GrepError::Core(error) => map_namespace_scoped_core_error(namespace_id, error),
-        error => BackendError::new(error.code().as_str(), error.to_string()),
-    }
-}
-
-fn map_bootstrap_error(error: BootstrapNamespaceError) -> BackendError {
-    BackendError::new(error.code().as_str(), error.to_string())
+    map_runtime_error(error)
 }
 
 fn default_writer_id() -> String {
@@ -599,11 +553,7 @@ pub(crate) struct RemoteTarget {
 }
 
 impl ResolvedTarget {
-    pub(crate) async fn resolve(
-        profile_name: &str,
-        profile: &ProfileConfig,
-        no_retry: bool,
-    ) -> Result<Self, CliError> {
+    pub(crate) async fn resolve(profile: &ProfileConfig, no_retry: bool) -> Result<Self, CliError> {
         match profile {
             ProfileConfig::Embedded {
                 store,
@@ -618,7 +568,6 @@ impl ResolvedTarget {
                 auth_token,
                 ..
             } => Ok(Self::Remote(RemoteTarget::new(
-                profile_name,
                 server_url,
                 auth_token.as_ref().map(|token| token.expose()),
                 no_retry,
@@ -694,12 +643,7 @@ impl EmbeddedTarget {
 }
 
 impl RemoteTarget {
-    fn new(
-        _profile_name: &str,
-        server_url: &str,
-        auth_token: Option<&str>,
-        no_retry: bool,
-    ) -> Result<Self, CliError> {
+    fn new(server_url: &str, auth_token: Option<&str>, no_retry: bool) -> Result<Self, CliError> {
         let client = Client::new(ClientConfig {
             server_url: server_url.to_owned(),
             auth_token: auth_token.map(ToOwned::to_owned),
@@ -716,19 +660,17 @@ impl RemoteTarget {
 #[cfg(test)]
 #[allow(clippy::panic)]
 mod tests {
-    use super::{
-        map_bootstrap_error, map_core_error, map_grep_error, resolve_cli_page_limit, Backend,
-        EmbeddedTarget,
-    };
+    use super::{map_runtime_error, resolve_cli_page_limit, Backend, EmbeddedTarget};
     use crate::config::StoreConfig;
     use loonfs::{
-        BootstrapNamespaceError, CoreError, CreateNamespaceOptions, ErrorCode, FsBackgroundWork,
-        FsWriter, GrepError, PutFileOptions, RuntimeError, SharedObjectStore,
+        BootstrapNamespaceError, CoreError, CreateNamespaceOptions, FsBackgroundWork, FsWriter,
+        GrepError, PutFileOptions, RuntimeError, SharedObjectStore,
     };
     use loonfs_api::{
-        ChangeSeq, CreateCheckpointRequest, DestinationBehavior, InodeId, NamespaceId, RevisionNo,
+        ChangeSeq, CreateCheckpointRequest, DestinationBehavior, ErrorCode, InodeId, NamespaceId,
+        RevisionNo,
     };
-    use loonfs_client::NamespacePath;
+    use loonfs_client::{NamespacePath, PutFileOptions as ClientPutFileOptions};
     use std::sync::Arc;
     use tempfile::tempdir;
 
@@ -738,18 +680,18 @@ mod tests {
 
     #[test]
     fn map_core_error_surfaces_registry_codes_verbatim() {
-        let error = map_core_error(CoreError::RevisionNotFound {
+        let error = map_runtime_error(RuntimeError::Core(CoreError::RevisionNotFound {
             inode_id: InodeId(42),
             revision_no: RevisionNo(7),
-        });
+        }));
 
         assert_eq!(error.code, ErrorCode::RevisionNotFound.as_str());
 
-        let error = map_core_error(CoreError::ContentPreparation(
+        let error = map_runtime_error(RuntimeError::Core(CoreError::ContentPreparation(
             loonfs::publish::ContentPreparationError::ContentNotPrepared {
                 content_ref_digest: "abc123".to_owned(),
             },
-        ));
+        )));
         assert_eq!(error.code, ErrorCode::ContentNotPrepared.as_str());
         assert!(error.message.contains("abc123"));
     }
@@ -771,7 +713,10 @@ mod tests {
                 ErrorCode::StaleHead,
             ),
         ] {
-            assert_eq!(map_grep_error(error).code, expected.as_str());
+            assert_eq!(
+                map_runtime_error(RuntimeError::Grep(error)).code,
+                expected.as_str()
+            );
         }
     }
 
@@ -789,7 +734,9 @@ mod tests {
         // Embedded mode must report the same code the server serves for the
         // identical failure, not a CLI-local `invalid_input` rewrite.
         let invalid_id = NamespaceId::parse("bad/name").expect_err("invalid namespace id");
-        let error = map_core_error(CoreError::InvalidNamespaceId(invalid_id));
+        let error = map_runtime_error(RuntimeError::Core(CoreError::InvalidNamespaceId(
+            invalid_id,
+        )));
 
         assert_eq!(error.code, ErrorCode::InvalidRequest.as_str());
     }
@@ -797,8 +744,9 @@ mod tests {
     #[test]
     fn map_bootstrap_error_surfaces_registry_codes_verbatim() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let error =
-            map_bootstrap_error(BootstrapNamespaceError::NamespaceAlreadyExists { namespace_id });
+        let error = map_runtime_error(RuntimeError::Bootstrap(
+            BootstrapNamespaceError::NamespaceAlreadyExists { namespace_id },
+        ));
 
         assert_eq!(error.code, ErrorCode::NamespaceExists.as_str());
         assert!(error.message.contains("already exists"));
@@ -825,8 +773,7 @@ mod tests {
             .put_file_bytes(
                 &NamespacePath::parse("demo", "/file.txt").expect("namespace path"),
                 b"hello",
-                DestinationBehavior::NoReplace,
-                None,
+                &ClientPutFileOptions::default(),
             )
             .await
             .expect("put file");
@@ -834,7 +781,7 @@ mod tests {
 
         let changes = target
             .backend
-            .list_changes_page(&namespace_id("demo"), ChangeSeq(0), None)
+            .list_changes_after(&namespace_id("demo"), ChangeSeq(0), None)
             .await
             .expect("list changes");
         assert_eq!(changes.changes.len(), 1);
@@ -867,7 +814,7 @@ mod tests {
 
         let changes = target
             .backend
-            .list_changes_page(&namespace_id("missing"), ChangeSeq(0), None)
+            .list_changes_after(&namespace_id("missing"), ChangeSeq(0), None)
             .await
             .expect_err("changes on missing namespace");
         assert_eq!(changes.code, ErrorCode::NamespaceNotFound.as_str());
@@ -901,8 +848,7 @@ mod tests {
                     &NamespacePath::parse("demo", &format!("/files/f{index}.txt"))
                         .expect("namespace path"),
                     b"payload",
-                    DestinationBehavior::NoReplace,
-                    None,
+                    &ClientPutFileOptions::default(),
                 )
                 .await
                 .unwrap_or_else(|error| {
@@ -976,8 +922,7 @@ mod tests {
             .put_file_bytes(
                 &NamespacePath::parse("demo", "/recovered.txt").expect("namespace path"),
                 b"payload",
-                DestinationBehavior::NoReplace,
-                None,
+                &ClientPutFileOptions::default(),
             )
             .await
             .unwrap_or_else(|error| {
