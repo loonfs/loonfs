@@ -108,6 +108,17 @@ fn age_metadata(mut metadata: ObjectMetadata) -> ObjectMetadata {
     metadata
 }
 
+/// Raw-request agent with socket inactivity timeouts. A starved or wedged
+/// server must produce a readable transport error, not an indefinite hang
+/// or a panic inside the HTTP client's response path — the failure mode a
+/// loaded CI runner once hit through the default timeout-less agent.
+fn raw_agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout_read(std::time::Duration::from_secs(30))
+        .timeout_write(std::time::Duration::from_secs(30))
+        .build()
+}
+
 #[async_trait]
 impl ObjectStore for AgedMetadataStore {
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
@@ -1257,20 +1268,23 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
 
         // A query value that fails its field type: enveloped invalid_request.
         let changes_url = format!("http://{addr}/v0/namespaces/demo/changes?after_seq=abc");
-        let error = ureq::get(&changes_url)
+        let error = raw_agent()
+            .get(&changes_url)
             .set("authorization", "Bearer test-token")
             .call()
             .expect_err("malformed after_seq should answer 400");
         expect_enveloped(error, 400, "invalid_request");
 
         // The same malformed query without credentials: 401 wins.
-        let error = ureq::get(&changes_url)
+        let error = raw_agent()
+            .get(&changes_url)
             .call()
             .expect_err("unauthorized should answer 401");
         expect_enveloped(error, 401, "unauthorized");
 
         // A missing required query parameter: enveloped invalid_request.
-        let error = ureq::get(&format!("http://{addr}/v0/namespaces/demo/filesystem/stat"))
+        let error = raw_agent()
+            .get(&format!("http://{addr}/v0/namespaces/demo/filesystem/stat"))
             .set("authorization", "Bearer test-token")
             .call()
             .expect_err("missing path parameter should answer 400");
@@ -1279,13 +1293,15 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
         // A malformed JSON body: enveloped invalid_request with credentials,
         // 401 without — the body is not read before authorization.
         let create_url = format!("http://{addr}/v0/namespaces");
-        let error = ureq::post(&create_url)
+        let error = raw_agent()
+            .post(&create_url)
             .set("authorization", "Bearer test-token")
             .set("content-type", "application/json")
             .send_string("{not json")
             .expect_err("malformed body should answer 400");
         expect_enveloped(error, 400, "invalid_request");
-        let error = ureq::post(&create_url)
+        let error = raw_agent()
+            .post(&create_url)
             .set("content-type", "application/json")
             .send_string("{not json")
             .expect_err("unauthorized malformed body should answer 401");
@@ -1416,7 +1432,8 @@ async fn http_unknown_routes_and_methods_answer_in_envelope() {
 
     tokio::task::spawn_blocking(move || {
         // Unknown path: in-envelope 404 instead of axum's empty body.
-        let error = ureq::get(&format!("http://{addr}/v0/nonexistent"))
+        let error = raw_agent()
+            .get(&format!("http://{addr}/v0/nonexistent"))
             .call()
             .expect_err("unknown route should answer 404");
         let ureq::Error::Status(status, response) = error else {
@@ -1429,7 +1446,8 @@ async fn http_unknown_routes_and_methods_answer_in_envelope() {
         assert_eq!(body["code"], "route_not_found");
 
         // Served path, unserved method: in-envelope 405.
-        let error = ureq::delete(&format!("http://{addr}/v0/config"))
+        let error = raw_agent()
+            .delete(&format!("http://{addr}/v0/config"))
             .call()
             .expect_err("wrong method should answer 405");
         let ureq::Error::Status(status, response) = error else {
@@ -1466,7 +1484,8 @@ async fn http_commit_body_over_the_limit_answers_content_too_large() {
         // The limit rejects on size before any parsing, so an oversized
         // JSON-shaped body is enough to exercise it.
         let oversized = format!(r#"{{"filler":"{}"}}"#, "d".repeat(4096));
-        let error = ureq::post(&format!("http://{addr}/v0/namespaces/demo/commits"))
+        let error = raw_agent()
+            .post(&format!("http://{addr}/v0/namespaces/demo/commits"))
             .set("content-type", "application/json")
             .send_string(&oversized)
             .expect_err("unauthorized commit should fail before buffering");
@@ -1475,7 +1494,8 @@ async fn http_commit_body_over_the_limit_answers_content_too_large() {
         };
         assert_eq!(status, 401);
 
-        let error = ureq::post(&format!("http://{addr}/v0/namespaces/demo/commits"))
+        let error = raw_agent()
+            .post(&format!("http://{addr}/v0/namespaces/demo/commits"))
             .set("authorization", "Bearer test-token")
             .set("content-type", "application/json")
             .send_string(&oversized)
@@ -1533,14 +1553,15 @@ async fn http_stale_revisions_cursor_answers_rebootstrap_required() {
 
     let cursor = tokio::task::spawn_blocking({
         move || {
-            let response = ureq::get(&format!(
-                "http://{addr}/v0/namespaces/demo/filesystem/revisions"
-            ))
-            .set("authorization", "Bearer test-token")
-            .query("path", "/notes/file.txt")
-            .query("limit", "1")
-            .call()
-            .expect("first revisions page");
+            let response = raw_agent()
+                .get(&format!(
+                    "http://{addr}/v0/namespaces/demo/filesystem/revisions"
+                ))
+                .set("authorization", "Bearer test-token")
+                .query("path", "/notes/file.txt")
+                .query("limit", "1")
+                .call()
+                .expect("first revisions page");
             let body = response.into_string().expect("read revisions body");
             let body: serde_json::Value = serde_json::from_str(&body).expect("json revisions");
             body["next_cursor"]
@@ -1563,15 +1584,16 @@ async fn http_stale_revisions_cursor_answers_rebootstrap_required() {
     .await;
 
     tokio::task::spawn_blocking(move || {
-        let error = ureq::get(&format!(
-            "http://{addr}/v0/namespaces/demo/filesystem/revisions"
-        ))
-        .set("authorization", "Bearer test-token")
-        .query("path", "/notes/file.txt")
-        .query("limit", "1")
-        .query("cursor", &cursor)
-        .call()
-        .expect_err("stale cursor should answer rebootstrap_required");
+        let error = raw_agent()
+            .get(&format!(
+                "http://{addr}/v0/namespaces/demo/filesystem/revisions"
+            ))
+            .set("authorization", "Bearer test-token")
+            .query("path", "/notes/file.txt")
+            .query("limit", "1")
+            .query("cursor", &cursor)
+            .call()
+            .expect_err("stale cursor should answer rebootstrap_required");
         let ureq::Error::Status(status, response) = error else {
             panic!("expected a status error for a stale cursor");
         };
@@ -1845,7 +1867,8 @@ async fn readiness_answers_ready_then_shutting_down_once_admission_closes() {
     let ready_url = format!("http://{addr}/health/ready");
     let url = ready_url.clone();
     tokio::task::spawn_blocking(move || {
-        let body = ureq::get(&url)
+        let body = raw_agent()
+            .get(&url)
             .call()
             .expect("an admitting server is ready")
             .into_string()
@@ -1857,7 +1880,7 @@ async fn readiness_answers_ready_then_shutting_down_once_admission_closes() {
 
     state.publisher.close_admission();
 
-    tokio::task::spawn_blocking(move || match ureq::get(&ready_url).call() {
+    tokio::task::spawn_blocking(move || match raw_agent().get(&ready_url).call() {
         Err(ureq::Error::Status(503, response)) => {
             let body = response.into_string().expect("readiness body");
             assert!(
