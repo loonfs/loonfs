@@ -13,12 +13,10 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use loonfs::publish::{
     parse_mutation_path, ContentPreparationError, NamespaceMutation, NamespaceMutationCandidate,
-    PathMutationIntent, PreparedContent, MAX_COMMIT_CONTENT_TOKENS,
-    MAX_COMMIT_EXTERNAL_CONTENT_REFS, MAX_COMMIT_OPERATIONS,
+    PathMutationIntent, PreparedContent,
 };
 use loonfs::{
-    content_tokens::ContentTokenError, payload_class, CoreError, ErrorCode, ListChangesOptions,
-    TraceStoreKind,
+    content_tokens::ContentTokenError, payload_class, ErrorCode, ListChangesOptions, TraceStoreKind,
 };
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
@@ -645,10 +643,8 @@ pub(super) async fn commit_operations(
     let namespace_id = namespace.into_id()?;
     let commit_id = request.commit_id.clone();
     let external_content_refs = distinct_external_content_refs(&request);
-    validate_commit_submission_limits(&request, content_tokens.len(), external_content_refs.len())
-        .map_err(|error| {
-            ApiResponseError::core_for_namespace(&namespace_id, error).with_commit_id(&commit_id)
-        })?;
+    // The router's commit-body limit is the transport guard. Semantic limits
+    // stay in candidate preparation so durable replays reach receipt lookup.
     let content_preparation = prepare_commit_content(
         &state.writer,
         &state.config,
@@ -694,30 +690,6 @@ fn distinct_external_content_refs(request: &ApiCommitRequest) -> Vec<ContentRef>
         }
     }
     refs
-}
-
-fn validate_commit_submission_limits(
-    request: &ApiCommitRequest,
-    content_token_count: usize,
-    external_content_ref_count: usize,
-) -> Result<(), CoreError> {
-    if request.ops.len() > MAX_COMMIT_OPERATIONS {
-        return Err(CoreError::InvalidCommitRequest(format!(
-            "commit has {} operations; maximum is {MAX_COMMIT_OPERATIONS}",
-            request.ops.len()
-        )));
-    }
-    if content_token_count > MAX_COMMIT_CONTENT_TOKENS {
-        return Err(CoreError::InvalidCommitRequest(format!(
-            "commit has {content_token_count} content token entries; maximum is {MAX_COMMIT_CONTENT_TOKENS}"
-        )));
-    }
-    if external_content_ref_count > MAX_COMMIT_EXTERNAL_CONTENT_REFS {
-        return Err(CoreError::InvalidCommitRequest(format!(
-            "commit references {external_content_ref_count} distinct external content refs; maximum is {MAX_COMMIT_EXTERNAL_CONTENT_REFS}"
-        )));
-    }
-    Ok(())
 }
 
 async fn prepare_commit_content(
