@@ -284,11 +284,16 @@ async fn start_driver_for_query_if_needed(
     };
     let needs_catch_up = match root.state().lifecycle() {
         GrepLifecycle::Backfilling { .. } => true,
-        GrepLifecycle::Steady => state
-            .admin
-            .namespace_status(namespace_id)
-            .await
-            .is_ok_and(|status| root.state().index().built_through_seq < status.head_seq),
+        GrepLifecycle::Steady => {
+            state
+                .admin
+                .namespace_status(namespace_id)
+                .await
+                .is_ok_and(|status| {
+                    root.state().index().next_delta_index != 0
+                        || root.state().index().built_through_seq < status.head_seq
+                })
+        }
         GrepLifecycle::Disabled => false,
     };
     if needs_catch_up {

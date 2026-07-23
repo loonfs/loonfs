@@ -6,11 +6,38 @@ use loonfs_objectstore::ObjectStore;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, watch, Notify};
+use tokio::sync::{mpsc, watch, Notify, OwnedSemaphorePermit, Semaphore};
 use tokio::task::{JoinError, JoinHandle};
 
 const ERROR_BACKOFF_BASE_MS: u64 = 10;
 const ERROR_BACKOFF_CAP_MS: u64 = 1_000;
+
+/// Shared cap on concurrently executing grep build or fold steps.
+///
+/// Tokio's semaphore admits queued drivers in FIFO order, so a namespace
+/// waiting behind busy siblings cannot be starved by later arrivals.
+#[derive(Debug, Clone)]
+pub struct GrepStepLimiter {
+    permits: Arc<Semaphore>,
+}
+
+impl GrepStepLimiter {
+    /// Creates a shared limiter. Direct callers receive the same safe
+    /// normalization as directly supplied build policies; config rejects zero.
+    pub fn new(max_concurrent_steps: usize) -> Self {
+        Self {
+            permits: Arc::new(Semaphore::new(max_concurrent_steps.max(1))),
+        }
+    }
+
+    async fn acquire(&self) -> OwnedSemaphorePermit {
+        self.permits
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("grep step semaphore is never closed")
+    }
+}
 
 /// Why a per-namespace driver has no immediate work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,6 +159,7 @@ pub struct GrepDriver<S> {
     worker: GrepWorker<S>,
     namespace_id: NamespaceId,
     policy: GramIndexBuildPolicy,
+    step_limiter: GrepStepLimiter,
     handle: GrepDriverHandle,
     work: mpsc::Receiver<()>,
 }
@@ -142,6 +170,7 @@ impl<S: ObjectStore + Clone + Send + Sync + 'static> GrepDriver<S> {
         worker: GrepWorker<S>,
         namespace_id: NamespaceId,
         policy: GramIndexBuildPolicy,
+        step_limiter: GrepStepLimiter,
     ) -> Self {
         let (state, _) = watch::channel(GrepDriverState::Active);
         let (work_send, work) = mpsc::channel(1);
@@ -152,6 +181,7 @@ impl<S: ObjectStore + Clone + Send + Sync + 'static> GrepDriver<S> {
             worker,
             namespace_id,
             policy,
+            step_limiter,
             handle: GrepDriverHandle {
                 control: Arc::new(DriverControl {
                     stopping: AtomicBool::new(false),
@@ -205,11 +235,13 @@ impl<S: ObjectStore + Clone + Send + Sync + 'static> GrepDriver<S> {
             if self.stopping() {
                 return None;
             }
-            let build = match self
+            let step_permit = self.acquire_step_permit().await?;
+            let build_result = self
                 .worker
                 .build_step(&self.namespace_id, self.policy)
-                .await
-            {
+                .await;
+            drop(step_permit);
+            let build = match build_result {
                 Ok(report) => report.outcome,
                 Err(error)
                     if matches!(
@@ -234,7 +266,10 @@ impl<S: ObjectStore + Clone + Send + Sync + 'static> GrepDriver<S> {
                 return Some(GrepDriverParked::NotEnabled);
             }
 
-            let fold = match self.worker.fold_step(&self.namespace_id, self.policy).await {
+            let step_permit = self.acquire_step_permit().await?;
+            let fold_result = self.worker.fold_step(&self.namespace_id, self.policy).await;
+            drop(step_permit);
+            let fold = match fold_result {
                 Ok(report) => report.outcome,
                 Err(error) => {
                     consecutive_failures = consecutive_failures.saturating_add(1);
@@ -299,6 +334,16 @@ impl<S: ObjectStore + Clone + Send + Sync + 'static> GrepDriver<S> {
 
     fn stopping(&self) -> bool {
         self.handle.control.stopping.load(Ordering::Acquire)
+    }
+
+    async fn acquire_step_permit(&self) -> Option<OwnedSemaphorePermit> {
+        if self.stopping() {
+            return None;
+        }
+        tokio::select! {
+            permit = self.step_limiter.acquire() => Some(permit),
+            () = self.handle.control.stop_notify.notified() => None,
+        }
     }
 
     fn set_state(&self, state: GrepDriverState) {

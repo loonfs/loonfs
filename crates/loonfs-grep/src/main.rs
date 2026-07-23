@@ -5,7 +5,8 @@ use loonfs_api::NamespaceId;
 use loonfs_core::control::load_namespace_head_control;
 use loonfs_grep::root::{load_grep_root, GrepLifecycle};
 use loonfs_grep::{
-    GrepDriver, GrepDriverParked, GrepDriverState, GrepDriverTask, GrepWorker, GrepWorkerConfig,
+    GrepDriver, GrepDriverParked, GrepDriverState, GrepDriverTask, GrepStepLimiter, GrepWorker,
+    GrepWorkerConfig,
 };
 use loonfs_objectstore::{SharedObjectStore, StoreConfig};
 use serde::Deserialize;
@@ -138,12 +139,14 @@ async fn run() -> Result<(), StandaloneError> {
     }
 
     let runtime = tokio::runtime::Handle::current();
+    let step_limiter = GrepStepLimiter::new(config.grep.max_concurrent_steps);
     let mut drivers = Vec::with_capacity(namespace_ids.len());
     for namespace_id in &namespace_ids {
         let task = GrepDriver::new(
             worker.clone(),
             namespace_id.clone(),
             config.grep.build_policy(),
+            step_limiter.clone(),
         )
         .spawn_on(&runtime);
         drivers.push((namespace_id.clone(), task));

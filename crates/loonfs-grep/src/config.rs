@@ -4,10 +4,18 @@ use crate::GramIndexBuildPolicy;
 use serde::Deserialize;
 use thiserror::Error;
 
+/// Default cap on concurrently executing grep build or fold steps.
+///
+/// Mirrors `loonfs::DEFAULT_MAX_CONCURRENT_MAINTENANCE`; both background
+/// maintenance families default to two expensive namespace steps at once.
+pub const DEFAULT_MAX_CONCURRENT_STEPS: usize = 2;
+
 /// Bounded-work policy shared by embedded and standalone drivers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GrepWorkerConfig {
+    /// Build or fold steps allowed to execute concurrently across namespaces.
+    pub max_concurrent_steps: usize,
     /// Revisions examined per build step.
     pub max_files_per_step: usize,
     /// Content bytes read per build step.
@@ -37,6 +45,12 @@ impl GrepWorkerConfig {
 
     /// Rejects zero step budgets.
     pub fn validate(self) -> Result<(), GrepWorkerConfigError> {
+        if self.max_concurrent_steps == 0 {
+            return Err(GrepWorkerConfigError::InvalidField {
+                field: "max_concurrent_steps",
+                reason: "must be greater than zero".to_owned(),
+            });
+        }
         if let Some(field) = self.build_policy().zero_budget_field() {
             return Err(GrepWorkerConfigError::InvalidField {
                 field,
@@ -51,6 +65,7 @@ impl Default for GrepWorkerConfig {
     fn default() -> Self {
         let policy = GramIndexBuildPolicy::default();
         Self {
+            max_concurrent_steps: DEFAULT_MAX_CONCURRENT_STEPS,
             max_files_per_step: policy.max_files_per_step,
             max_content_bytes_per_step: policy.max_content_bytes_per_step,
             max_rows_per_segment: policy.max_rows_per_segment,
@@ -90,6 +105,13 @@ mod tests {
     #[test]
     fn zero_policy_fields_are_rejected() {
         for (field, config) in [
+            (
+                "max_concurrent_steps",
+                GrepWorkerConfig {
+                    max_concurrent_steps: 0,
+                    ..GrepWorkerConfig::default()
+                },
+            ),
             (
                 "max_files_per_step",
                 GrepWorkerConfig {

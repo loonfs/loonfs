@@ -113,8 +113,11 @@ Segments live under
 `namespaces/{namespace}/extensions/grep/segments/`. The small mutable
 `extensions/grep/root.json` pointer names an immutable, content-derived
 manifest under `extensions/grep/manifests/`; that manifest records the
-query-visible segments, `built_through_seq`, lifecycle, run-ordinal
-allocation, and any in-progress fold snapshot, outputs, and cursor. The
+query-visible segments, the incremental
+`(built_through_seq, next_delta_index)` cursor, lifecycle, run-ordinal
+allocation, and any in-progress fold snapshot, outputs, and cursor. A zero
+or absent `next_delta_index` is the commit boundary; a nonzero value resumes
+at that offset in the watermark commit's durably ordered delta vector. The
 pointer and manifests are independent of the namespace manifest, so core
 never has to understand grep state to read the filesystem.
 
@@ -143,11 +146,14 @@ releases the checkpoint.
 
 One per-namespace driver owns those steps. Starting a driver immediately
 runs backfill and incremental catch-up continuously, yielding between bounded
-steps. Once the root is steady and its watermark reaches the namespace head,
-the driver parks without a timer. A nudge received while active coalesces into
-one more catch-up run; a nudge received while parked wakes it. Step failures
-back off exponentially inside only that namespace's driver, capped at one
-second, so a poisoned root cannot delay a sibling namespace.
+steps. Drivers share one FIFO semaphore, configured by
+`max_concurrent_steps` (default 2), and acquire it only while a build or fold
+step executes; parked drivers hold no permit. Once the root is steady and its
+watermark reaches the namespace head, the driver parks without a timer. A
+nudge received while active coalesces into one more catch-up run; a nudge
+received while parked wakes it. Step failures back off exponentially inside
+only that namespace's driver, capped at one second, so a poisoned root cannot
+delay a sibling namespace.
 
 In server `embedded` mode, enable and re-enable start the namespace driver,
 disable stops it, and successful runtime publications send a non-blocking

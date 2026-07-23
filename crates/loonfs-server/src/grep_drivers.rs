@@ -3,7 +3,7 @@
 use loonfs::{NamespaceId, RuntimeError, SharedObjectStore};
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepDriver, GrepDriverHandle, GrepDriverParked, GrepDriverTask,
-    GrepWorker,
+    GrepStepLimiter, GrepWorker,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -16,6 +16,7 @@ pub(crate) struct GrepDrivers {
 struct GrepDriversInner {
     worker: GrepWorker<SharedObjectStore>,
     policy: GramIndexBuildPolicy,
+    step_limiter: GrepStepLimiter,
     runtime: tokio::runtime::Handle,
     tasks: Mutex<HashMap<NamespaceId, GrepDriverTask>>,
     finished: Mutex<Vec<GrepDriverTask>>,
@@ -25,6 +26,7 @@ impl GrepDrivers {
     pub(crate) fn new(
         worker: GrepWorker<SharedObjectStore>,
         policy: GramIndexBuildPolicy,
+        max_concurrent_steps: usize,
     ) -> Result<Self, crate::ServerConfigError> {
         let runtime = tokio::runtime::Handle::try_current().map_err(|error| {
             crate::ServerConfigError::InvalidField {
@@ -36,6 +38,7 @@ impl GrepDrivers {
             inner: Arc::new(GrepDriversInner {
                 worker,
                 policy,
+                step_limiter: GrepStepLimiter::new(max_concurrent_steps),
                 runtime,
                 tasks: Mutex::new(HashMap::new()),
                 finished: Mutex::new(Vec::new()),
@@ -63,6 +66,7 @@ impl GrepDrivers {
             self.inner.worker.clone(),
             namespace_id.clone(),
             self.inner.policy,
+            self.inner.step_limiter.clone(),
         )
         .spawn_on(&self.inner.runtime);
         let handle = task.handle();

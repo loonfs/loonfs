@@ -230,6 +230,7 @@ async fn app_with_store_and_transfer_issuer(
                 .expect("driver-running grep mode should serve grep")
                 .clone(),
             config.grep.worker_config().build_policy(),
+            config.grep.max_concurrent_steps,
         )?)
     } else {
         None
