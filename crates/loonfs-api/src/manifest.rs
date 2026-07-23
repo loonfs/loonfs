@@ -10,11 +10,11 @@ use crate::{
     ManifestObjectId, MetadataTableId, NameKey, NamespaceId, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 
-/// Version 1: an uncompressed JSON envelope document carrying the payload as
-/// a raw JSON fragment. `payload_checksum` covers the fragment's exact bytes.
-pub const NAMESPACE_MANIFEST_FORMAT_VERSION: u32 = 1;
+/// Version 2: an uncompressed JSON envelope document carrying the payload as
+/// a raw JSON fragment, without the retired generic `features` map.
+/// `payload_checksum` covers the fragment's exact bytes.
+pub const NAMESPACE_MANIFEST_FORMAT_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -484,11 +484,6 @@ pub struct NamespaceManifestPayload {
     pub retention_floor_seq: ChangeSeq,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fork: Option<NamespaceManifestFork>,
-    /// Per-namespace capabilities materialized on this file-set version,
-    /// such as derived indexes (format spec, "Namespace features map").
-    /// Values are feature-owned JSON objects; readers ignore unknown keys.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub features: BTreeMap<String, serde_json::Value>,
     pub metadata_files: Vec<MetadataFileRef>,
 }
 
@@ -571,7 +566,6 @@ mod tests {
         ChangeSeq, CheckpointId, CommitId, InodeId, ManifestId, ManifestObjectId, MetadataTableId,
         NameKey, NamespaceId, WriterEpoch,
     };
-    use std::collections::BTreeMap;
 
     #[test]
     fn namespace_manifest_kind_string_matches_serde() {
@@ -599,7 +593,6 @@ mod tests {
                 next_inode_id: InodeId(42),
                 retention_floor_seq: ChangeSeq(0),
                 fork: None,
-                features: BTreeMap::new(),
                 metadata_files: vec![metadata_file_ref(
                     "demo",
                     "tbl_00000000000000000000000000000001",
@@ -652,7 +645,6 @@ mod tests {
                     .expect("valid manifest object id"),
                     source_head_seq: ChangeSeq(12),
                 }),
-                features: BTreeMap::new(),
                 metadata_files: vec![
                     metadata_file_ref(
                         "source",

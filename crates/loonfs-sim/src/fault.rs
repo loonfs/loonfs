@@ -1,3 +1,5 @@
+//! Serializable object-store fault schedules.
+
 use crate::object_op::{ObjectOp, ObjectOpKind};
 use crate::rng::SimSeed;
 use serde::{Deserialize, Serialize};

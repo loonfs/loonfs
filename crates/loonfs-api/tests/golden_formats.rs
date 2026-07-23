@@ -41,7 +41,6 @@ use loonfs_api::{
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::path::{Path, PathBuf};
 
@@ -236,10 +235,6 @@ fn sample_manifest_envelope() -> NamespaceManifestEnvelope {
                 source_manifest_object_id: manifest_object_id(1, "0123456789abcdef"),
                 source_head_seq: ChangeSeq(2),
             }),
-            features: BTreeMap::from([(
-                "core.test-capability".to_owned(),
-                serde_json::json!({ "version": 1 }),
-            )]),
             metadata_files: vec![MetadataFileRef {
                 owner_namespace_id: namespace_id(),
                 table_id: table_id(),
@@ -329,19 +324,16 @@ fn wal_segment_golden_decodes_to_sample() {
 #[test]
 fn namespace_manifest_matches_golden_bytes() {
     let encoded = encode_namespace_manifest_json(&sample_manifest_envelope()).expect("encode");
-    assert_matches_golden("namespace_manifest.v1.json", &encoded);
+    assert_matches_golden("namespace_manifest.v2.json", &encoded);
     let document: serde_json::Value = serde_json::from_slice(&encoded).expect("manifest json");
     let payload = document["payload"].as_object().expect("manifest payload");
     assert!(!payload.contains_key("index_files"));
-    assert!(!payload
-        .get("features")
-        .and_then(serde_json::Value::as_object)
-        .is_some_and(|features| features.contains_key("index.grams")));
+    assert!(!payload.contains_key("features"));
 }
 
 #[test]
 fn namespace_manifest_golden_decodes_to_sample() {
-    let decoded = decode_namespace_manifest_json(&read_golden("namespace_manifest.v1.json"))
+    let decoded = decode_namespace_manifest_json(&read_golden("namespace_manifest.v2.json"))
         .expect("decode golden manifest");
     assert_eq!(decoded, sample_manifest_envelope());
 }
@@ -842,7 +834,7 @@ fn namespace_manifest_decode_rejects_future_format_version_cleanly() {
     let encoded = encode_namespace_manifest_json(&sample_manifest_envelope()).expect("manifest");
     let mut document: serde_json::Value =
         serde_json::from_slice(&encoded).expect("decode document");
-    document["format_version"] = serde_json::Value::from(2);
+    document["format_version"] = serde_json::Value::from(3);
     let bumped = serde_json::to_vec(&document).expect("encode document");
 
     let err = decode_namespace_manifest_json(&bumped).expect_err("future version must be rejected");
@@ -850,8 +842,31 @@ fn namespace_manifest_decode_rejects_future_format_version_cleanly() {
         matches!(
             err,
             EnvelopeCodecError::UnsupportedFormatVersion {
-                found: 2,
-                supported: 1,
+                found: 3,
+                supported: 2,
+                ..
+            }
+        ),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn namespace_manifest_decode_rejects_previous_format_version_cleanly() {
+    let encoded = encode_namespace_manifest_json(&sample_manifest_envelope()).expect("manifest");
+    let mut document: serde_json::Value =
+        serde_json::from_slice(&encoded).expect("decode document");
+    document["format_version"] = serde_json::Value::from(1);
+    let previous = serde_json::to_vec(&document).expect("encode document");
+
+    let err =
+        decode_namespace_manifest_json(&previous).expect_err("previous version must be rejected");
+    assert!(
+        matches!(
+            err,
+            EnvelopeCodecError::UnsupportedFormatVersion {
+                found: 1,
+                supported: 2,
                 ..
             }
         ),

@@ -557,8 +557,8 @@ impl Client {
 
     /// Content search over the namespace's gram index (query plane).
     /// Gate on the `query.grep` capability before calling against unknown
-    /// deployments; the namespace must also have `index.grams`
-    /// materialized or the server answers `not_supported`.
+    /// deployments; the namespace must also have a materialized steady-state
+    /// grep root or the server answers `not_supported`.
     pub fn grep(
         &self,
         namespace_id: &NamespaceId,
@@ -568,8 +568,8 @@ impl Client {
         self.request_json(self.agent.post(&url), Some(request))
     }
 
-    /// Publishes the `index.grams` feature entry (admin plane); embedded
-    /// mode starts that namespace's event-driven backfill. Idempotent.
+    /// Enables the namespace's grep root (admin plane); embedded mode starts
+    /// that namespace's event-driven backfill. Idempotent.
     pub fn enable_grams_index(
         &self,
         namespace_id: &NamespaceId,
@@ -581,8 +581,8 @@ impl Client {
         self.request_json::<(), EnableGramsIndexResponse>(self.agent.post(&url), None)
     }
 
-    /// Removes the `index.grams` feature entry (admin plane); garbage
-    /// collection reclaims the segments. Idempotent.
+    /// Disables the namespace's grep root (admin plane); garbage collection
+    /// reclaims the segments. Idempotent.
     pub fn disable_grams_index(
         &self,
         namespace_id: &NamespaceId,

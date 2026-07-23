@@ -1,10 +1,11 @@
+//! Object-store operation vocabulary used by fault schedules and traces.
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ObjectOpKind {
     Head,
-    HeadWithChecksum,
     Get,
     Put,
     PutIfAbsent,

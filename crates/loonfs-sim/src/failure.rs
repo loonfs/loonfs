@@ -1,3 +1,5 @@
+//! Replayable simulation failure reports.
+
 use crate::replay::ReplaySeed;
 use std::path::PathBuf;
 use thiserror::Error;

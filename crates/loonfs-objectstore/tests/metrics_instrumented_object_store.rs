@@ -242,11 +242,11 @@ async fn classifies_gc_namespace_layout_family() {
         .expect("put metadata sst");
     store
         .put_overwrite(
-            &layout.pin("ns-1", "pin_00000000000000000000000000000001"),
-            bytes(b"boundary"),
+            &layout.checkpoint_record("ns-1", "chk_00000000000000000000000000000001"),
+            bytes(b"checkpoint"),
         )
         .await
-        .expect("put gc boundary");
+        .expect("put checkpoint record");
 
     let samples = recorder.samples();
     assert_eq!(samples[0].key_class, KeyClass::NamespaceManifest);

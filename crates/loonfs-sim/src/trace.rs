@@ -1,3 +1,5 @@
+//! Serializable simulation traces and their shared recorder.
+
 use crate::fault::ObjectStoreFault;
 use crate::object_op::ObjectOp;
 use crate::rng::SimSeed;

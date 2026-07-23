@@ -318,8 +318,8 @@ pub(super) async fn complete_post_head_fork<S: ObjectStore + ?Sized>(
 }
 
 /// Builds the fork target's manifest payload from the pinned source
-/// checkpoint. The target adopts the source's generic feature declarations
-/// and metadata file references verbatim.
+/// checkpoint. The target adopts the source's metadata file references
+/// verbatim.
 fn fork_target_manifest_payload(
     new_namespace_id: &NamespaceId,
     target_manifest_id: ManifestId,
@@ -347,7 +347,6 @@ fn fork_target_manifest_payload(
             source_manifest_object_id: source_record.manifest_object_id.clone(),
             source_head_seq: source_record.manifest_head_seq,
         }),
-        features: source_manifest.payload.features.clone(),
         metadata_files: source_manifest.payload.metadata_files.clone(),
     })
 }
@@ -363,7 +362,6 @@ mod tests {
         ChangeSeq, CheckpointId, CommitId, InodeId, ManifestId, ManifestObjectId, NamespaceId,
         WriterEpoch,
     };
-    use std::collections::BTreeMap;
 
     fn manifest_object_id(manifest_id: ManifestId) -> ManifestObjectId {
         ManifestObjectId::parse(format!("{:020}-0123456789abcdef", manifest_id.0))
@@ -413,7 +411,6 @@ mod tests {
                 next_inode_id: InodeId(2),
                 retention_floor_seq: head_seq,
                 fork: None,
-                features: BTreeMap::new(),
                 metadata_files: Vec::new(),
             },
         )
@@ -421,18 +418,12 @@ mod tests {
     }
 
     #[test]
-    fn fork_target_manifest_preserves_source_features_and_tables() {
-        let base = source_namespace_manifest(
+    fn fork_target_manifest_preserves_source_tables() {
+        let source = source_namespace_manifest(
             ManifestId(7),
             ChangeSeq(7),
             "c_00000000000000000000000000000009",
         );
-        let mut payload = base.payload.clone();
-        payload
-            .features
-            .insert("core.test-capability".to_owned(), serde_json::json!(true));
-        let source = NamespaceManifestEnvelope::from_payload("test-writer/0.1.0", payload)
-            .expect("source manifest");
         let source_checkpoint = source_checkpoint_record(
             "chk_00000000000000000000000000000002",
             ManifestId(7),
@@ -450,7 +441,6 @@ mod tests {
         )
         .expect("fork payload");
 
-        assert_eq!(target.features, source.payload.features);
         assert_eq!(target.metadata_files, source.payload.metadata_files);
         assert_eq!(target.head_seq, source_checkpoint.manifest_head_seq);
         let fork = target.fork.expect("fork provenance");

@@ -1,3 +1,5 @@
+//! Seeded deterministic randomness for replayable simulations.
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

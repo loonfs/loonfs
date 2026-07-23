@@ -31,7 +31,7 @@ within a plane is expressed as **named features** (section 2).
 
 Notes:
 
-- An embedded engine is `core/v0` (with the namespace features enabled) plus
+- An embedded engine is `core/v0` (with the namespace-management features enabled) plus
   `admin/v0` (maintenance is manually triggerable). A minimal server that
   wraps the embedded engine over HTTP advertises the same two profiles and is
   fully conformant.
@@ -146,17 +146,17 @@ are unregistered until that plane materializes.
 Namespace listing is intentionally not supported in v0. Callers must address
 namespaces by id until LoonFS has a scalable namespace catalog/index design.
 
-### 2.3 Namespace-level features
+### 2.3 Data-dependent features
 
 The capability document describes a *deployment*. What is materialized on
-*data* — for example, which derived indexes exist for a namespace — lives in
-the namespace manifest's `features` map (`format.md`, "Namespace features
-map"), whose keys are deliberately **not** profile-prefixed because they
-describe data, not endpoints.
+*data* — for example, whether a derived index is ready for a namespace — lives
+in the owning extension's keyspace (`format.md`, "Extension-owned
+materialization"), not in the namespace manifest.
 
 A successful data-dependent operation requires both halves: the deployment
 advertises the serving capability here, and the namespace's metadata shows
-the capability materialized on the data.
+the capability materialized through the extension's own verified readiness
+marker.
 
 ## 3. Standard error contract
 

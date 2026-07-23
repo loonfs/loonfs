@@ -4295,17 +4295,6 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
         ),
         "fork record is owned by its target namespace"
     );
-    assert!(
-        store
-            .list_prefix(&format!(
-                "namespaces/{}/pins/",
-                source_namespace_id.as_str()
-            ))
-            .await
-            .expect("list source pins")
-            .is_empty(),
-        "fork protection lives on the fork-owned record; no pin objects are written"
-    );
     let referenced_metadata_files = target_manifest
         .payload
         .metadata_files

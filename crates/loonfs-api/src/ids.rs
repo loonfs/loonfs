@@ -830,7 +830,7 @@ mod tests {
     }
 
     #[test]
-    fn generated_upload_wal_segment_table_and_pin_ids_reject_hyphenated_ids() {
+    fn generated_upload_wal_segment_table_and_checkpoint_ids_reject_hyphenated_ids() {
         assert!(UploadId::parse("upl_00000000000000000000000000000001").is_ok());
         assert!(MetadataTableId::parse("tbl_00000000000000000000000000000001").is_ok());
         assert!(CheckpointId::parse("chk_00000000000000000000000000000001").is_ok());

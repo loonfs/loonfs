@@ -59,7 +59,7 @@ The required durable object families and standard key patterns are:
 | **Namespace config** | Immutable | Stable namespace identity and immutable configuration, including the content-store binding; written last at creation as the completion marker. | `namespaces/{namespace_id}/namespace.json` |
 | **WAL head** | Mutable | Hot head of the semantic commit stream: current visible boundary, writer epoch, writer liveness metadata, replay hints, and visible WAL tip. | `namespaces/{namespace_id}/wal/head.json` |
 | **WAL segments** | Immutable | Record one or more logical commits with a contiguous sequence range. | `namespaces/{namespace_id}/wal/segments/{start_seq:020}-{suffix}.wal.zst` |
-| **Namespace manifests** | Immutable | Record one namespace file-set version, including metadata table references, head summary, fork references, and the namespace features map. | `namespaces/{namespace_id}/metadata/manifests/{manifest_object_id}.manifest.json` |
+| **Namespace manifests** | Immutable | Record one namespace file-set version, including metadata table references, head summary, and fork references. | `namespaces/{namespace_id}/metadata/manifests/{manifest_object_id}.manifest.json` |
 | **Checkpoint records** | Mutable lifecycle | Durable stable-view pins to a metadata manifest, each carrying a required owner (user or fork target); active records may release or revive, and GC conditionally condemns them before deletion. | `namespaces/{namespace_id}/checkpoints/{checkpoint_id}.json` |
 | **Metadata tables** | Immutable | Store metadata rows referenced by manifests. Files may be owned by the namespace itself or by a fork source namespace. | `namespaces/{owner_namespace_id}/metadata/tables/{table_id}.sst.zst` |
 | **Upload sessions** | Mutable lifecycle | Track one staged-content upload from begin to completion; GC conditionally condemns abandoned active sessions before deletion. | `namespaces/{namespace_id}/uploads/{upload_id}.json` |
@@ -1397,32 +1397,18 @@ and grep maintenance does not collect core-owned objects.
   reverting the change or bumping the format version and regenerating the
   fixtures.
 
-## 5. Namespace features map
+## 5. Extension-owned materialization
 
-A namespace manifest may carry a `features` map recording generic
-per-namespace capabilities materialized on its file-set version.
+Derived subsystems own their durable state below
+`namespaces/{namespace_id}/extensions/{name}/`. A namespace manifest contains
+no extension registry or generic extension metadata. Each extension defines
+its own key grammar, versioning, readiness marker, and collection rules; for
+example, grep materialization is visible only through its verified
+`extensions/grep/root.json` pointer.
 
-```json
-{
-  "features": {
-    "example.feature": { "version": 1 }
-  }
-}
-```
-
-Rules:
-
-- Feature keys describe data, not endpoints. They are **not** prefixed by API
-  profile names (contrast the deployment capability document in `api.md`,
-  whose keys are profile-prefixed).
-- Each value is an open JSON object owned by the feature's own specification;
-  `version` is the conventional first field.
-- Readers must ignore feature keys they do not understand. The map is
-  additive metadata: it never changes how the core filesystem model is read.
-- An absent map and an empty map are equivalent.
-- Successful use of a feature requires the deployment to advertise its
-  serving capability (`api.md`) and the feature's own specification to
-  define any durable materialization contract.
+Core readers and maintenance ignore extension-owned keys. An extension must
+remain rebuildable from authoritative core state and must not require an
+unknown extension to be understood before the namespace can be read.
 
 No feature key is currently registered. In particular, grep state lives in
 the section 4.2.2 keyspace rather than this map.
@@ -1648,7 +1634,7 @@ namespace history.
 Derived structures such as search indexes, caches, or materialized summaries
 are optional. They may improve performance or higher-level features, but they
 are not authoritative. They must be rebuildable from authoritative state, and
-their presence on a namespace is recorded in the namespace features map
+their presence and lifecycle are recorded in their extension-owned keyspace
 (section 5).
 
 ## 7. Access-control boundaries

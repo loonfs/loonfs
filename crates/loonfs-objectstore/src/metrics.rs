@@ -464,14 +464,13 @@ fn classify_key(key: &str) -> KeyClass {
         DurableObjectFamily::WalSegment => KeyClass::WalSegment,
         DurableObjectFamily::MetadataManifest => KeyClass::NamespaceManifest,
         DurableObjectFamily::MetadataTable => KeyClass::MetadataSst,
-        DurableObjectFamily::Pin
-        | DurableObjectFamily::CheckpointRecord
-        | DurableObjectFamily::WalFloor => KeyClass::GcControl,
+        DurableObjectFamily::CheckpointRecord | DurableObjectFamily::WalFloor => {
+            KeyClass::GcControl
+        }
         DurableObjectFamily::MetadataRoot => KeyClass::NamespaceManifest,
         DurableObjectFamily::NamespaceConfig
         | DurableObjectFamily::WalIndex
         | DurableObjectFamily::WalIndexRun
-        | DurableObjectFamily::IndexSegment
         | DurableObjectFamily::UploadSession
         | DurableObjectFamily::ContentStoreDescriptor => KeyClass::Metadata,
     }

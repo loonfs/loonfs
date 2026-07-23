@@ -115,8 +115,7 @@ pub(super) async fn publish_metadata_root<S: ObjectStore + ?Sized>(
     //
     // `expected_predecessor` is the root manifest the caller read when it
     // built this successor. Head ordering alone is not enough to decide the
-    // winner: every manifest carries carried-forward state (features,
-    // derived-index references, the retention floor), so a candidate built
+    // winner: every manifest carries forward the retention floor, so a candidate built
     // from a superseded basis could win on a higher head while silently
     // reverting a sibling's acknowledged publication. A root that no longer
     // names the predecessor therefore supersedes the candidate, whatever

@@ -6,9 +6,8 @@ builds and folds independently of metadata. This document describes what
 the index stores, how it is built and reclaimed, how a query runs,
 and why the pieces are shaped that way. The index is derived work
 in the sense of `docs/specs/format.md` section 6.6: rebuildable
-from authoritative state, recorded in the namespace features map
-(section 5), and invisible to any reader that does not understand
-it.
+from authoritative state, contained in the grep-owned extension keyspace,
+and invisible to any reader that does not understand it.
 
 ## The approach
 
@@ -280,7 +279,7 @@ should land together.
 Search is the first resident of the reserved `query/v0` profile
 (`docs/specs/api.md`), and a query needs both halves of the
 capability contract: the deployment advertises the serving
-feature, and the namespace's features map shows the index
+feature, and the namespace's verified grep root shows the index
 materialized for the data being served. Missing either half is
 the existing `not_supported` response with the feature named.
 
@@ -407,5 +406,5 @@ Following the segment-format convention, two different contracts:
   the kind of change the feature version exists for.
 - **Richer text queries.** A tokenized full-text index would be a
   sibling feature, but every seam here — the query profile, the
-  features map, the derived segment family, the WAL-driven build
+  extension keyspace, the derived segment family, the WAL-driven build
   tick — is the seam it would reuse.
