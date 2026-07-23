@@ -25,6 +25,17 @@ use tempfile::tempdir;
 
 const TEST_CONTENT_TOKEN_SECRET: &str = "test-content-token-secret";
 
+/// Raw-request agent with socket inactivity timeouts. A starved or wedged
+/// server must produce a readable transport error, not an indefinite hang
+/// or a panic inside the HTTP client's response path — the failure mode a
+/// loaded CI runner once hit through the default timeout-less agent.
+fn raw_agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout_read(std::time::Duration::from_secs(30))
+        .timeout_write(std::time::Duration::from_secs(30))
+        .build()
+}
+
 fn block_on<T>(future: impl Future<Output = T>) -> T {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -386,7 +397,8 @@ async fn http_namespace_listing_route_is_not_exposed() {
             .create_namespace(&namespace_id("demo"))
             .expect("create demo");
 
-        let response = ureq::get(&format!("{}/v0/namespaces", harness.server_url))
+        let response = raw_agent()
+            .get(&format!("{}/v0/namespaces", harness.server_url))
             .set("authorization", "Bearer test-token")
             .call();
         match response {
@@ -418,18 +430,20 @@ async fn http_rejects_invalid_namespace_ids_in_body_and_path() {
 
     tokio::task::spawn_blocking(move || {
         assert_invalid_namespace_response(
-            ureq::post(&format!("{}/v0/namespaces", harness.server_url))
+            raw_agent()
+                .post(&format!("{}/v0/namespaces", harness.server_url))
                 .set("authorization", "Bearer test-token")
                 .send_json(json!({ "namespace_id": "bad/name" })),
         );
 
         assert_invalid_namespace_response(
-            ureq::get(&format!(
-                "{}/v0/namespaces/bad%25/filesystem/list?path=/",
-                harness.server_url
-            ))
-            .set("authorization", "Bearer test-token")
-            .call(),
+            raw_agent()
+                .get(&format!(
+                    "{}/v0/namespaces/bad%25/filesystem/list?path=/",
+                    harness.server_url
+                ))
+                .set("authorization", "Bearer test-token")
+                .call(),
         );
     })
     .await
@@ -2148,12 +2162,13 @@ async fn http_malformed_bodies_fail_inside_the_error_envelope() {
                     "behavior": behavior,
                 },
             });
-            match ureq::post(&format!(
-                "{}/v0/namespaces/demo/filesystem/operations",
-                harness.server_url
-            ))
-            .set("authorization", "Bearer test-token")
-            .send_json(request)
+            match raw_agent()
+                .post(&format!(
+                    "{}/v0/namespaces/demo/filesystem/operations",
+                    harness.server_url
+                ))
+                .set("authorization", "Bearer test-token")
+                .send_json(request)
             {
                 Err(ureq::Error::Status(status, response)) => {
                     assert_eq!(status, 400);
@@ -2167,13 +2182,14 @@ async fn http_malformed_bodies_fail_inside_the_error_envelope() {
 
         // Malformed upload bodies must also stay inside the envelope — an
         // Option-typed body must reject garbage, not default it to a session.
-        match ureq::post(&format!(
-            "{}/v0/namespaces/demo/uploads",
-            harness.server_url
-        ))
-        .set("authorization", "Bearer test-token")
-        .set("content-type", "application/json")
-        .send_string("{\"mode\": \"direkt_put\"}")
+        match raw_agent()
+            .post(&format!(
+                "{}/v0/namespaces/demo/uploads",
+                harness.server_url
+            ))
+            .set("authorization", "Bearer test-token")
+            .set("content-type", "application/json")
+            .send_string("{\"mode\": \"direkt_put\"}")
         {
             Err(ureq::Error::Status(status, response)) => {
                 assert_eq!(status, 400);
@@ -2628,7 +2644,9 @@ fn entry_names(response: &ListPathEntriesResponse) -> Vec<&str> {
 }
 
 fn get_json<T: serde::de::DeserializeOwned>(url: &str, auth_token: &str) -> Result<T, ApiError> {
-    let request = ureq::get(url).set("authorization", &format!("Bearer {auth_token}"));
+    let request = raw_agent()
+        .get(url)
+        .set("authorization", &format!("Bearer {auth_token}"));
     match request.call() {
         Ok(response) => serde_json::from_reader(response.into_reader()).map_err(|err| ApiError {
             code: "invalid_json".to_owned(),
@@ -2712,7 +2730,9 @@ fn post_admin_json<T: serde::de::DeserializeOwned>(
     url: &str,
     auth_token: &str,
 ) -> Result<T, ApiError> {
-    let request = ureq::post(url).set("authorization", &format!("Bearer {auth_token}"));
+    let request = raw_agent()
+        .post(url)
+        .set("authorization", &format!("Bearer {auth_token}"));
     decode_admin_response(request.call())
 }
 
@@ -2721,7 +2741,9 @@ fn post_admin_json_body<T: serde::de::DeserializeOwned>(
     auth_token: &str,
     body: serde_json::Value,
 ) -> Result<T, ApiError> {
-    let request = ureq::post(url).set("authorization", &format!("Bearer {auth_token}"));
+    let request = raw_agent()
+        .post(url)
+        .set("authorization", &format!("Bearer {auth_token}"));
     decode_admin_response(request.send_json(body))
 }
 
@@ -2778,12 +2800,13 @@ fn send_filesystem_operation(
     namespace_id: &NamespaceId,
     request: &FilesystemOperationRequest,
 ) -> Result<ureq::Response, Box<ureq::Error>> {
-    ureq::post(&format!(
-        "{server_url}/v0/namespaces/{namespace_id}/filesystem/operations"
-    ))
-    .set("authorization", "Bearer test-token")
-    .send_json(request)
-    .map_err(Box::new)
+    raw_agent()
+        .post(&format!(
+            "{server_url}/v0/namespaces/{namespace_id}/filesystem/operations"
+        ))
+        .set("authorization", "Bearer test-token")
+        .send_json(request)
+        .map_err(Box::new)
 }
 
 fn send_commit_submission(
@@ -2799,12 +2822,13 @@ fn send_commit_json(
     namespace_id: &NamespaceId,
     request: &impl serde::Serialize,
 ) -> Result<ureq::Response, Box<ureq::Error>> {
-    ureq::post(&format!(
-        "{server_url}/v0/namespaces/{namespace_id}/commits"
-    ))
-    .set("authorization", "Bearer test-token")
-    .send_json(request)
-    .map_err(Box::new)
+    raw_agent()
+        .post(&format!(
+            "{server_url}/v0/namespaces/{namespace_id}/commits"
+        ))
+        .set("authorization", "Bearer test-token")
+        .send_json(request)
+        .map_err(Box::new)
 }
 
 fn response_bytes(response: ureq::Response) -> Vec<u8> {
