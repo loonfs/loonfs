@@ -1,0 +1,620 @@
+//! Shared fixtures for the crate's integration tests.
+
+#![allow(dead_code)]
+
+use loonfs::{
+    AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, BeginUploadRequest,
+    BeginUploadResponse, ChangeSeq, ChangesResponse, CommitRequest, CommitResponse,
+    CompleteUploadRequest, CompleteUploadResponse, ContentRef, CopyOptions,
+    CreateCheckpointOptions, CreateCheckpointResponse, CreateDirectoryOptions,
+    CreateNamespaceOptions, DeleteOptions, DirectoryPageCursor, ErrorCode, FsAdmin, FsReader,
+    FsWriter, FsWriterBuilder, InodeId, ListChangesOptions, MaintenanceTickOptions,
+    MaintenanceTickResult, MoveOptions, NamespaceId, NamespaceStatusResponse, PageRequest,
+    PutFileOptions, RuntimeError, SharedObjectStore, UploadContentResponse, UploadId,
+};
+use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_test_support::block_on::block_on;
+use loonfs_test_support::stores::{
+    CountingStore, FailStore, InjectedError, KeyPredicate, OperationClass,
+};
+use std::path::Path;
+use std::sync::Arc;
+
+pub(crate) fn store(root: &Path) -> SharedObjectStore {
+    Arc::new(LocalFsStore::new(root).expect("create local-fs store"))
+}
+
+/// One handle set per test fixture: a writer, its derived reader, and an
+/// admin handle sharing the same store, exercised through the blocking
+/// helpers below.
+pub(crate) struct TestRuntime {
+    pub(crate) writer: FsWriter,
+    pub(crate) reader: FsReader,
+    pub(crate) admin: FsAdmin,
+}
+
+pub(crate) fn runtime(root: &Path, writer_id: &str) -> TestRuntime {
+    open_runtime(store(root), writer_id)
+}
+
+pub(crate) fn open_runtime(store: SharedObjectStore, writer_id: &str) -> TestRuntime {
+    open_runtime_with(store, writer_id, |builder| builder)
+}
+
+pub(crate) fn open_runtime_with(
+    store: SharedObjectStore,
+    writer_id: &str,
+    configure: impl FnOnce(FsWriterBuilder) -> FsWriterBuilder,
+) -> TestRuntime {
+    block_on(open_runtime_with_async(store, writer_id, configure))
+}
+
+/// Async-test variant: opens the fixture inside the test's own runtime.
+pub(crate) async fn open_runtime_async(store: SharedObjectStore, writer_id: &str) -> TestRuntime {
+    open_runtime_with_async(store, writer_id, |builder| builder).await
+}
+
+pub(crate) async fn open_runtime_with_async(
+    store: SharedObjectStore,
+    writer_id: &str,
+    configure: impl FnOnce(FsWriterBuilder) -> FsWriterBuilder,
+) -> TestRuntime {
+    let writer = configure(FsWriter::builder_with_store(store.clone()).writer_id(writer_id))
+        .build()
+        .await
+        .expect("build writer");
+    let reader = writer.reader();
+    let admin = FsAdmin::builder_with_store(store)
+        .actor_id(writer_id)
+        .build()
+        .await
+        .expect("build admin");
+    TestRuntime {
+        writer,
+        reader,
+        admin,
+    }
+}
+
+/// Direct async access for tests that drive several operations inside one
+/// runtime; everything else goes through the blocking trait below.
+impl TestRuntime {
+    pub(crate) async fn create_namespace(
+        &self,
+        namespace_id: &NamespaceId,
+        options: CreateNamespaceOptions,
+    ) -> loonfs::Result<loonfs::NamespaceSummary> {
+        self.writer.create_namespace(namespace_id, options).await
+    }
+
+    pub(crate) async fn put_file_bytes(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        bytes: &[u8],
+        options: PutFileOptions,
+    ) -> loonfs::Result<CommitResponse> {
+        self.writer
+            .put_file_bytes(namespace_id, absolute_path, bytes, options)
+            .await
+    }
+
+    pub(crate) async fn put_file_content_ref(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        content_ref: ContentRef,
+        options: PutFileOptions,
+    ) -> loonfs::Result<CommitResponse> {
+        self.writer
+            .put_file_content_ref(namespace_id, absolute_path, content_ref, options)
+            .await
+    }
+
+    pub(crate) async fn stat_path(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+    ) -> loonfs::Result<AuthoritativePathEntry> {
+        self.reader.stat_path(namespace_id, absolute_path).await
+    }
+
+    pub(crate) async fn list_path(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+    ) -> loonfs::Result<Vec<AuthoritativePathEntry>> {
+        Ok(self
+            .reader
+            .list_path_entries_all(namespace_id, absolute_path)
+            .await?
+            .entries)
+    }
+
+    pub(crate) async fn list_path_entries(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+    ) -> loonfs::Result<loonfs::ListPathEntriesResponse> {
+        self.reader
+            .list_path_entries_all(namespace_id, absolute_path)
+            .await
+    }
+
+    pub(crate) async fn list_path_entries_page(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        request: PageRequest<DirectoryPageCursor>,
+    ) -> loonfs::Result<loonfs::ListPathEntriesResponse> {
+        self.reader
+            .list_path_entries_page(namespace_id, absolute_path, request)
+            .await
+    }
+
+    pub(crate) async fn list_file_revisions_page(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        request: PageRequest<loonfs::FileRevisionsPageCursor>,
+    ) -> loonfs::Result<loonfs::ListFileRevisionsResponse> {
+        self.reader
+            .list_file_revisions_page(namespace_id, absolute_path, request)
+            .await
+    }
+
+    pub(crate) async fn list_file_revisions_for_inode_page(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_id: InodeId,
+        request: PageRequest<loonfs::FileRevisionsPageCursor>,
+    ) -> loonfs::Result<loonfs::ListFileRevisionsResponse> {
+        self.reader
+            .list_file_revisions_for_inode_page(namespace_id, inode_id, request)
+            .await
+    }
+
+    pub(crate) async fn create_checkpoint(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> loonfs::Result<CreateCheckpointResponse> {
+        self.admin
+            .create_checkpoint(
+                namespace_id,
+                CreateCheckpointOptions {
+                    name: "test-pin".to_owned(),
+                    ttl_ms: None,
+                },
+            )
+            .await
+    }
+
+    pub(crate) async fn begin_direct_put_upload_target(
+        &self,
+        namespace_id: &NamespaceId,
+        content_ref: ContentRef,
+    ) -> loonfs::Result<loonfs::uploads::BeginDirectPutUploadTargetResponse> {
+        self.writer
+            .begin_direct_put_upload_target(namespace_id, content_ref)
+            .await
+    }
+
+    pub(crate) fn runtime_cache_stats(&self) -> loonfs::RuntimeCacheStats {
+        self.writer.runtime_cache_stats()
+    }
+}
+
+pub(crate) fn decode_directory_page_cursor(value: &str) -> DirectoryPageCursor {
+    loonfs_api::decode_directory_cursor(value).expect("decode directory cursor")
+}
+
+pub(crate) fn decode_file_revisions_page_cursor(value: &str) -> loonfs::FileRevisionsPageCursor {
+    loonfs_api::decode_file_revisions_cursor(value).expect("decode file revisions cursor")
+}
+
+pub(crate) trait RuntimeTestExt {
+    fn create_namespace_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+        options: CreateNamespaceOptions,
+    ) -> loonfs::Result<loonfs::NamespaceSummary>;
+    fn fork_namespace_blocking(
+        &self,
+        source: &NamespaceId,
+        target: &NamespaceId,
+    ) -> loonfs::Result<loonfs::NamespaceSummary>;
+    fn namespace_status_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> loonfs::Result<NamespaceStatusResponse>;
+    fn maintenance_tick_namespace_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+        options: MaintenanceTickOptions,
+    ) -> loonfs::Result<MaintenanceTickResult>;
+    fn stat_path_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+    ) -> loonfs::Result<AuthoritativePathEntry>;
+    fn list_path_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+    ) -> loonfs::Result<Vec<AuthoritativePathEntry>>;
+    fn read_file_bytes_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+    ) -> loonfs::Result<AuthoritativeFileBytes>;
+    fn put_file_bytes_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        bytes: &[u8],
+        options: PutFileOptions,
+    ) -> loonfs::Result<CommitResponse>;
+    fn create_directory_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        options: CreateDirectoryOptions,
+    ) -> loonfs::Result<CommitResponse>;
+    fn delete_path_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        options: DeleteOptions,
+    ) -> loonfs::Result<CommitResponse>;
+    fn move_path_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+        from_path: &str,
+        to_path: &str,
+        options: MoveOptions,
+    ) -> loonfs::Result<CommitResponse>;
+    fn copy_path_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+        from_path: &str,
+        to_path: &str,
+        options: CopyOptions,
+    ) -> loonfs::Result<CommitResponse>;
+    fn begin_upload_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> loonfs::Result<BeginUploadResponse>;
+    fn upload_content_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+        upload_id: &UploadId,
+        bytes: &[u8],
+    ) -> loonfs::Result<UploadContentResponse>;
+    fn complete_upload_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+        upload_id: &UploadId,
+        request: &CompleteUploadRequest,
+    ) -> loonfs::Result<CompleteUploadResponse>;
+    fn commit_operations_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+        request: CommitRequest,
+    ) -> loonfs::Result<CommitResponse>;
+    fn commit_operations_batch_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+        requests: Vec<CommitRequest>,
+    ) -> Vec<loonfs::Result<CommitResponse>>;
+    fn list_changes_after_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+        after_seq: ChangeSeq,
+    ) -> loonfs::Result<ChangesResponse>;
+    fn create_checkpoint_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> loonfs::Result<CreateCheckpointResponse>;
+    fn advance_retention_floor_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> loonfs::Result<AdvanceRetentionResponse>;
+}
+
+impl RuntimeTestExt for TestRuntime {
+    fn create_namespace_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+        options: CreateNamespaceOptions,
+    ) -> loonfs::Result<loonfs::NamespaceSummary> {
+        block_on(self.writer.create_namespace(namespace_id, options))
+    }
+
+    fn fork_namespace_blocking(
+        &self,
+        source: &NamespaceId,
+        target: &NamespaceId,
+    ) -> loonfs::Result<loonfs::NamespaceSummary> {
+        block_on(self.writer.fork_namespace(source, target))
+    }
+
+    fn namespace_status_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> loonfs::Result<NamespaceStatusResponse> {
+        block_on(self.admin.namespace_status(namespace_id))
+    }
+
+    fn maintenance_tick_namespace_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+        options: MaintenanceTickOptions,
+    ) -> loonfs::Result<MaintenanceTickResult> {
+        block_on(self.admin.maintenance_tick_namespace(namespace_id, options))
+    }
+
+    fn stat_path_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+    ) -> loonfs::Result<AuthoritativePathEntry> {
+        block_on(self.reader.stat_path(namespace_id, absolute_path))
+    }
+
+    fn list_path_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+    ) -> loonfs::Result<Vec<AuthoritativePathEntry>> {
+        block_on(
+            self.reader
+                .list_path_entries_all(namespace_id, absolute_path),
+        )
+        .map(|response| response.entries)
+    }
+
+    fn read_file_bytes_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+    ) -> loonfs::Result<AuthoritativeFileBytes> {
+        block_on(self.reader.read_file_bytes(namespace_id, absolute_path))
+    }
+
+    fn put_file_bytes_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        bytes: &[u8],
+        options: PutFileOptions,
+    ) -> loonfs::Result<CommitResponse> {
+        block_on(
+            self.writer
+                .put_file_bytes(namespace_id, absolute_path, bytes, options),
+        )
+    }
+
+    fn create_directory_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        options: CreateDirectoryOptions,
+    ) -> loonfs::Result<CommitResponse> {
+        block_on(
+            self.writer
+                .create_directory(namespace_id, absolute_path, options),
+        )
+    }
+
+    fn delete_path_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        options: DeleteOptions,
+    ) -> loonfs::Result<CommitResponse> {
+        block_on(
+            self.writer
+                .delete_path(namespace_id, absolute_path, options),
+        )
+    }
+
+    fn move_path_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+        from_path: &str,
+        to_path: &str,
+        options: MoveOptions,
+    ) -> loonfs::Result<CommitResponse> {
+        block_on(
+            self.writer
+                .move_path(namespace_id, from_path, to_path, options),
+        )
+    }
+
+    fn copy_path_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+        from_path: &str,
+        to_path: &str,
+        options: CopyOptions,
+    ) -> loonfs::Result<CommitResponse> {
+        block_on(
+            self.writer
+                .copy_path(namespace_id, from_path, to_path, options),
+        )
+    }
+
+    fn begin_upload_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> loonfs::Result<BeginUploadResponse> {
+        block_on(
+            self.writer
+                .begin_upload(namespace_id, BeginUploadRequest::default()),
+        )
+    }
+
+    fn upload_content_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+        upload_id: &UploadId,
+        bytes: &[u8],
+    ) -> loonfs::Result<UploadContentResponse> {
+        block_on(self.writer.upload_content(namespace_id, upload_id, bytes))
+    }
+
+    fn complete_upload_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+        upload_id: &UploadId,
+        request: &CompleteUploadRequest,
+    ) -> loonfs::Result<CompleteUploadResponse> {
+        block_on(
+            self.writer
+                .complete_upload(namespace_id, upload_id, request),
+        )
+    }
+
+    fn commit_operations_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+        request: CommitRequest,
+    ) -> loonfs::Result<CommitResponse> {
+        block_on(self.writer.commit_operations(namespace_id, request))
+    }
+
+    fn commit_operations_batch_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+        requests: Vec<CommitRequest>,
+    ) -> Vec<loonfs::Result<CommitResponse>> {
+        block_on(self.writer.commit_operations_batch(namespace_id, requests))
+    }
+
+    fn list_changes_after_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+        after_seq: ChangeSeq,
+    ) -> loonfs::Result<ChangesResponse> {
+        block_on(self.reader.list_changes_after(
+            namespace_id,
+            after_seq,
+            ListChangesOptions::default(),
+        ))
+    }
+
+    fn create_checkpoint_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> loonfs::Result<CreateCheckpointResponse> {
+        block_on(self.admin.create_checkpoint(
+            namespace_id,
+            CreateCheckpointOptions {
+                name: "test-pin".to_owned(),
+                ttl_ms: None,
+            },
+        ))
+    }
+
+    fn advance_retention_floor_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> loonfs::Result<AdvanceRetentionResponse> {
+        block_on(self.admin.advance_retention_floor(namespace_id))
+    }
+}
+
+pub(crate) fn assert_core_error_kind<T>(result: loonfs::Result<T>, expected: ErrorCode) {
+    match result {
+        Err(RuntimeError::Core(error)) => assert_eq!(error.code(), expected),
+        Err(error) => panic!("expected core error {expected:?}, got {error:?}"),
+        Ok(_) => panic!("expected core error {expected:?}"),
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct RuntimeStoreProbe {
+    pub(crate) store: SharedObjectStore,
+    pub(crate) fail_head_cas: Arc<FailStore<SharedObjectStore>>,
+    pub(crate) fail_root_cas: Arc<FailStore<SharedObjectStore>>,
+    pub(crate) wal_gets: Arc<CountingStore<SharedObjectStore>>,
+    pub(crate) manifest_gets: Arc<CountingStore<SharedObjectStore>>,
+    pub(crate) head_gets: Arc<CountingStore<SharedObjectStore>>,
+}
+
+impl RuntimeStoreProbe {
+    pub(crate) fn new(root: &Path, namespace: &str) -> Self {
+        let inner: SharedObjectStore =
+            Arc::new(LocalFsStore::new(root).expect("create local-fs store"));
+        let wal_gets = Arc::new(CountingStore::new(
+            inner,
+            KeyPredicate::prefix(format!("namespaces/{namespace}/wal/segments/")),
+        ));
+        let manifest_gets = Arc::new(CountingStore::new(
+            wal_gets.clone() as SharedObjectStore,
+            KeyPredicate::prefix(format!("namespaces/{namespace}/metadata/manifests/")),
+        ));
+        let head_gets = Arc::new(CountingStore::new(
+            manifest_gets.clone() as SharedObjectStore,
+            KeyPredicate::wal_head(namespace),
+        ));
+        let fail_head_cas = Arc::new(FailStore::new(
+            head_gets.clone() as SharedObjectStore,
+            KeyPredicate::wal_head(namespace),
+            OperationClass::CompareAndSwap,
+            InjectedError::PreconditionFailed,
+        ));
+        let fail_root_cas = Arc::new(FailStore::new(
+            fail_head_cas.clone() as SharedObjectStore,
+            KeyPredicate::metadata_root(namespace),
+            OperationClass::CompareAndSwap,
+            InjectedError::PreconditionFailed,
+        ));
+        Self {
+            store: fail_root_cas.clone(),
+            fail_head_cas,
+            fail_root_cas,
+            wal_gets,
+            manifest_gets,
+            head_gets,
+        }
+    }
+
+    pub(crate) fn store(&self) -> SharedObjectStore {
+        self.store.clone()
+    }
+
+    pub(crate) fn fail_head_cas(&self) {
+        self.fail_head_cas.fail_all();
+    }
+
+    pub(crate) fn allow_head_cas(&self) {
+        self.fail_head_cas.clear();
+    }
+
+    pub(crate) fn fail_root_cas(&self) {
+        self.fail_root_cas.fail_all();
+    }
+
+    pub(crate) fn reset_wal_get_count(&self) {
+        self.wal_gets.reset();
+    }
+
+    pub(crate) fn reset_control_get_counts(&self) {
+        self.manifest_gets.reset();
+        self.head_gets.reset();
+        self.reset_wal_get_count();
+    }
+
+    pub(crate) fn wal_get_count(&self) -> usize {
+        self.wal_gets.count(OperationClass::Read)
+    }
+
+    pub(crate) fn manifest_get_count(&self) -> usize {
+        self.manifest_gets.count(OperationClass::Read)
+    }
+
+    pub(crate) fn head_get_count(&self) -> usize {
+        self.head_gets.count(OperationClass::Read)
+    }
+}
