@@ -9,7 +9,12 @@ pub(crate) mod content_write;
 pub(crate) mod ops;
 
 mod intent;
+mod plan_create;
+mod plan_delete;
+mod plan_restore;
+mod plan_transfer;
 pub(crate) mod planner;
+mod planning_helpers;
 mod session;
 
 pub use intent::PathMutationIntent;

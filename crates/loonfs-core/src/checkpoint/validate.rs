@@ -4,11 +4,12 @@
 use super::error::ManifestLoadError;
 use super::row::manifest_row_commit_seq;
 use loonfs_api::wire::manifest::{
-    MetadataRow, NamespaceManifestEnvelope, NamespaceManifestPayload,
+    MetadataRow, MetadataTableFamily, NamespaceManifestEnvelope, NamespaceManifestPayload,
 };
 use loonfs_api::{
     manifest_object_id_manifest_id, ChangeSeq, ManifestId, ManifestObjectId, NamespaceId,
 };
+use std::collections::BTreeSet;
 
 pub(super) fn validate_namespace_manifest(
     namespace_id: &NamespaceId,
@@ -141,4 +142,76 @@ pub(super) fn validate_manifest_row_seq_range<'a>(
         }
     }
     Ok(())
+}
+
+pub(super) fn validate_direntry_child_bind_index(
+    object_key: &str,
+    mut direntry_bind_rows: Vec<MetadataRow>,
+    mut direntry_child_bind_rows: Vec<MetadataRow>,
+) -> Result<(), ManifestLoadError> {
+    direntry_bind_rows
+        .sort_by_key(|row| row.row_key_for_family(MetadataTableFamily::DirentryChildBinds));
+    direntry_child_bind_rows
+        .sort_by_key(|row| row.row_key_for_family(MetadataTableFamily::DirentryChildBinds));
+
+    if direntry_bind_rows != direntry_child_bind_rows {
+        return Err(ManifestLoadError::SegmentDescriptorMismatch {
+            object_key: object_key.to_owned(),
+            message: "direntry-child-binds index does not match canonical direntry-binds"
+                .to_owned(),
+        });
+    }
+
+    Ok(())
+}
+
+pub(super) fn validate_revision_by_inode_desc_index(
+    object_key: &str,
+    mut revision_rows: Vec<MetadataRow>,
+    mut revision_by_inode_desc_rows: Vec<MetadataRow>,
+) -> Result<(), ManifestLoadError> {
+    validate_revision_rows_have_unique_keys(
+        object_key,
+        MetadataTableFamily::Revisions,
+        &revision_rows,
+    )?;
+    validate_revision_rows_have_unique_keys(
+        object_key,
+        MetadataTableFamily::RevisionsByInodeDesc,
+        &revision_by_inode_desc_rows,
+    )?;
+
+    revision_rows.sort_by_key(revision_logical_key);
+    revision_by_inode_desc_rows.sort_by_key(revision_logical_key);
+
+    if revision_rows != revision_by_inode_desc_rows {
+        return Err(ManifestLoadError::RevisionIndexMismatch {
+            object_key: object_key.to_owned(),
+        });
+    }
+
+    Ok(())
+}
+
+fn validate_revision_rows_have_unique_keys(
+    object_key: &str,
+    family: MetadataTableFamily,
+    rows: &[MetadataRow],
+) -> Result<(), ManifestLoadError> {
+    let mut seen = BTreeSet::new();
+    for row in rows {
+        let row_key = revision_logical_key(row);
+        if !seen.insert(row_key.clone()) {
+            return Err(ManifestLoadError::DuplicateRevisionRow {
+                object_key: object_key.to_owned(),
+                family,
+                row_key,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn revision_logical_key(row: &MetadataRow) -> String {
+    row.row_key_for_family(MetadataTableFamily::Revisions)
 }

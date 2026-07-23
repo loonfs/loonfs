@@ -1,21 +1,14 @@
-//! Profile-mode wiring for the [`Backend`] seam.
-//!
-//! The trait and its HTTP implementation live in `loonfs_client::backend`;
-//! this module keeps the embedded implementation (the CLI is the only host
-//! that embeds the `loonfs` runtime today, and `loonfs-client` must stay
-//! wire-only) plus the profile-to-backend resolution.
+//! Embedded implementation of the CLI's shared [`Backend`] seam.
 
-use crate::config::{ProfileConfig, StoreConfig};
-use crate::error::CliError;
+use crate::backend_error::{map_namespace_scoped_runtime_error, map_runtime_error};
 use crate::render::write_stderr_warning;
 use async_trait::async_trait;
 use loonfs::{
     gc_config_from_request, gc_response_from_report, ChangesResponse, CopyOptions,
     CreateCheckpointOptions, CreateDirectoryOptions, CreateNamespaceOptions,
-    DeleteNamespaceOptions, DeleteNamespaceResponse, DeleteOptions, FsAdmin, FsBackgroundWork,
-    FsReader, FsWriter, ListChangesOptions, MaintenanceTickOptions, MaintenanceTickResult,
-    MoveOptions, PutFileOptions, RestoreRevisionOptions, RuntimeError, SharedObjectStore,
-    TraceStoreKind, UndeleteOptions,
+    DeleteNamespaceOptions, DeleteNamespaceResponse, DeleteOptions, FsAdmin, FsReader, FsWriter,
+    ListChangesOptions, MaintenanceTickOptions, MaintenanceTickResult, MoveOptions, PutFileOptions,
+    RestoreRevisionOptions, RuntimeError, UndeleteOptions,
 };
 use loonfs_api::{
     v0::{DisableGramsIndexResponse, EnableGramsIndexResponse, RepairNamespaceResponse},
@@ -27,14 +20,14 @@ use loonfs_api::{
     ReleaseCheckpointResponse, RevisionNo,
 };
 use loonfs_client::{
-    Client, ClientConfig, CreateDirectoryOptions as ClientCreateDirectoryOptions,
-    DeleteOptions as ClientDeleteOptions, NamespacePath, PutFileOptions as ClientPutFileOptions,
+    CreateDirectoryOptions as ClientCreateDirectoryOptions, DeleteOptions as ClientDeleteOptions,
+    NamespacePath, PutFileOptions as ClientPutFileOptions,
 };
-use std::sync::Arc;
 
+#[cfg(test)]
+pub(crate) use crate::resolve::EmbeddedTarget;
+pub(crate) use crate::resolve::ResolvedTarget;
 pub(crate) use loonfs_client::backend::{Backend, BackendError, RemoteBackend};
-
-// --- Embedded backend (embedded/direct mode uses the shared loonfs runtime) ---
 
 /// Purpose-specific handles over one shared store client: reads go through
 /// the reader, mutations through the writer, and maintenance through the
@@ -47,9 +40,9 @@ pub(crate) use loonfs_client::backend::{Backend, BackendError, RemoteBackend};
 /// instead of hard-stopping. `loon admin` commands remain the explicit path
 /// for everything else (GC, retention, forced ticks).
 pub(crate) struct EmbeddedBackend {
-    writer: FsWriter,
-    reader: FsReader,
-    admin: FsAdmin,
+    pub(super) writer: FsWriter,
+    pub(super) reader: FsReader,
+    pub(super) admin: FsAdmin,
 }
 
 /// How many times a gated publish resubmits after settling the maintenance
@@ -506,155 +499,6 @@ fn resolve_cli_page_limit(limit: Option<u32>) -> Result<EffectiveLimit, BackendE
     PaginationPolicy::default()
         .resolve_limit(limit)
         .map_err(|error| BackendError::new(ErrorCode::InvalidRequest.as_str(), error.to_string()))
-}
-
-fn map_runtime_error(error: RuntimeError) -> BackendError {
-    match error {
-        RuntimeError::Config(message) => BackendError::invalid_config(message),
-        RuntimeError::RuntimeTask(message) => BackendError::runtime_error(message),
-        error => BackendError::new(error.code().as_str(), error.to_string()),
-    }
-}
-
-fn map_namespace_scoped_runtime_error(
-    namespace_id: &NamespaceId,
-    error: RuntimeError,
-) -> BackendError {
-    if error.code() == ErrorCode::NamespaceNotFound {
-        return BackendError::new(
-            ErrorCode::NamespaceNotFound.as_str(),
-            format!("namespace `{namespace_id}` does not exist"),
-        );
-    }
-
-    map_runtime_error(error)
-}
-
-fn default_writer_id() -> String {
-    hostname::get()
-        .ok()
-        .and_then(|h| h.into_string().ok())
-        .unwrap_or_else(|| "loonfs-cli".to_owned())
-}
-
-// --- Target resolution ---
-
-pub(crate) enum ResolvedTarget {
-    Embedded(Box<EmbeddedTarget>),
-    Remote(RemoteTarget),
-}
-
-pub(crate) struct EmbeddedTarget {
-    backend: EmbeddedBackend,
-}
-
-pub(crate) struct RemoteTarget {
-    backend: RemoteBackend,
-}
-
-impl ResolvedTarget {
-    pub(crate) async fn resolve(profile: &ProfileConfig, no_retry: bool) -> Result<Self, CliError> {
-        match profile {
-            ProfileConfig::Embedded {
-                store,
-                writer_id,
-                writer_version,
-                ..
-            } => Ok(Self::Embedded(Box::new(
-                EmbeddedTarget::new(store, writer_id.as_deref(), writer_version.as_deref()).await?,
-            ))),
-            ProfileConfig::Remote {
-                server_url,
-                auth_token,
-                ..
-            } => Ok(Self::Remote(RemoteTarget::new(
-                server_url,
-                auth_token.as_ref().map(|token| token.expose()),
-                no_retry,
-            )?)),
-        }
-    }
-
-    pub(crate) fn mode_str(&self) -> &'static str {
-        match self {
-            ResolvedTarget::Embedded(_) => "embedded",
-            ResolvedTarget::Remote(_) => "remote",
-        }
-    }
-
-    pub(crate) fn backend(&self) -> &dyn Backend {
-        match self {
-            ResolvedTarget::Embedded(target) => &target.backend,
-            ResolvedTarget::Remote(target) => &target.backend,
-        }
-    }
-}
-
-impl EmbeddedTarget {
-    async fn new(
-        store_config: &StoreConfig,
-        writer_id: Option<&str>,
-        writer_version: Option<&str>,
-    ) -> Result<Self, CliError> {
-        let writer_id = writer_id
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(default_writer_id);
-        let writer_version = writer_version
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(|| format!("loon/{}", env!("CARGO_PKG_VERSION")));
-        let trace_store_kind = TraceStoreKind::from(store_config.kind());
-        // One command drives all three handles from one runtime, so they
-        // deliberately share one provider client.
-        let store: SharedObjectStore = Arc::new(
-            store_config
-                .configured_object_store()
-                .map_err(|err| CliError::invalid_config(format!("invalid store config: {err}")))?,
-        );
-        let writer = FsWriter::builder_with_store(store.clone())
-            .writer_id(writer_id.clone())
-            .writer_version(writer_version.clone())
-            // The server's policy: publishes past the WAL threshold schedule
-            // their own tick. The backend settles scheduled work after each
-            // mutation, so a one-shot command exits with maintenance done
-            // rather than stalling at the WAL backpressure cap.
-            .background_work(FsBackgroundWork::Enabled)
-            // A CLI invocation is one solo mutation: holding the commit
-            // window open would only add its full delay to every command.
-            .min_publish_interval_ms(0)
-            .trace_store_kind(trace_store_kind)
-            .build()
-            .await
-            .map_err(map_runtime_error)?;
-        let reader = writer.reader();
-        let admin = FsAdmin::builder_with_store(store)
-            .actor_id(writer_id)
-            .actor_version(writer_version)
-            .trace_store_kind(trace_store_kind)
-            .build()
-            .await
-            .map_err(map_runtime_error)?;
-        let backend = EmbeddedBackend {
-            writer,
-            reader,
-            admin,
-        };
-        Ok(Self { backend })
-    }
-}
-
-impl RemoteTarget {
-    fn new(server_url: &str, auth_token: Option<&str>, no_retry: bool) -> Result<Self, CliError> {
-        let client = Client::new(ClientConfig {
-            server_url: server_url.to_owned(),
-            auth_token: auth_token.map(ToOwned::to_owned),
-            request_timeout_ms: None,
-            disable_transient_retry: no_retry,
-        })
-        .map_err(|error| CliError::invalid_config(error.to_string()))?;
-        Ok(Self {
-            backend: RemoteBackend::new(client),
-        })
-    }
 }
 
 #[cfg(test)]
