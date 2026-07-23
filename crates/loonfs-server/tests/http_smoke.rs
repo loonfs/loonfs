@@ -1,4 +1,7 @@
+mod common;
+
 use bytes::Bytes;
+use common::start_server;
 use loonfs::content_tokens::mint_content_token;
 use loonfs::publish::MAX_COMMIT_CONTENT_TOKENS;
 use loonfs_api::{
@@ -14,38 +17,20 @@ use loonfs_api::{
     LIMIT_PAGINATION_DEFAULT, LIMIT_PAGINATION_MAX,
 };
 use loonfs_client::{
-    Client, ClientConfig, ClientError, CreateDirectoryOptions, DeleteOptions, MutationOptions,
-    NamespacePath, PutFileOptions,
+    Client, ClientError, CreateDirectoryOptions, DeleteOptions, MutationOptions, NamespacePath,
+    PutFileOptions,
 };
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::{ConfiguredObjectStore, ObjectStore};
-use loonfs_server::{app, RuntimeCacheConfigOverrides, ServerConfig, StoreConfig};
+use loonfs_server::{ServerConfig, StoreConfig};
+use loonfs_test_support::block_on::block_on;
+use loonfs_test_support::http::raw_agent;
+use loonfs_test_support::ids::namespace_id;
 use serde_json::json;
-use std::future::Future;
 use std::io::Read as _;
-use std::path::PathBuf;
 use tempfile::tempdir;
 
 const TEST_CONTENT_TOKEN_SECRET: &str = "test-content-token-secret";
-
-/// Raw-request agent with socket inactivity timeouts. A starved or wedged
-/// server must produce a readable transport error, not an indefinite hang
-/// or a panic inside the HTTP client's response path — the failure mode a
-/// loaded CI runner once hit through the default timeout-less agent.
-fn raw_agent() -> ureq::Agent {
-    ureq::AgentBuilder::new()
-        .timeout_read(std::time::Duration::from_secs(30))
-        .timeout_write(std::time::Duration::from_secs(30))
-        .build()
-}
-
-fn block_on<T>(future: impl Future<Output = T>) -> T {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("test runtime")
-        .block_on(future)
-}
 
 fn replace_file_options() -> PutFileOptions {
     PutFileOptions {
@@ -2472,7 +2457,10 @@ async fn http_checkpoint_manifest_consumption_is_strict_when_manifest_is_corrupt
     let client = harness.client.clone();
     let cold_client = cold.client.clone();
     let server_url = harness.server_url.clone();
-    let store_root = harness.store_root.clone();
+    let store_root = harness
+        .store_root
+        .clone()
+        .expect("local test server has a store root");
     let store_key_prefix = harness.store_key_prefix.clone();
 
     tokio::task::spawn_blocking(move || {
@@ -2596,68 +2584,16 @@ async fn two_servers_share_one_store_with_last_writer_wins_fencing() {
     server_b.server.abort();
 }
 
-struct TestServer {
-    client: Client,
-    server_url: String,
-    store_root: PathBuf,
-    store_key_prefix: Option<String>,
-    server: tokio::task::JoinHandle<()>,
-}
-
-async fn start_server(config: ServerConfig) -> TestServer {
-    let (store_root, store_key_prefix) = match &config.store {
-        StoreConfig::LocalFs { root, key_prefix } => (PathBuf::from(root), key_prefix.clone()),
-        other => unreachable!("test harness requires local fs store, got {other:?}"),
-    };
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind listener");
-    let addr = listener.local_addr().expect("listener addr");
-    // The lifecycle handle is dropped: these tests abort the server task
-    // instead of shutting it down gracefully.
-    let (router, _lifecycle) = app(config).await.expect("build app");
-    let server = tokio::spawn(async move {
-        axum::serve(listener, router).await.expect("serve app");
-    });
-
-    TestServer {
-        client: Client::new(ClientConfig {
-            server_url: format!("http://{}", addr),
-            auth_token: Some("test-token".to_owned()),
-            request_timeout_ms: None,
-            disable_transient_retry: false,
-        })
-        .expect("valid client config"),
-        server_url: format!("http://{}", addr),
-        store_root,
-        store_key_prefix,
-        server,
-    }
-}
-
 fn test_config(store_root: std::path::PathBuf, writer_id: &str, key_prefix: &str) -> ServerConfig {
-    ServerConfig {
-        bind: "127.0.0.1:0".to_owned(),
-        auth_token: Some("test-token".into()),
-        content_token_secret: TEST_CONTENT_TOKEN_SECRET.into(),
-        writer_id: writer_id.to_owned(),
-        writer_version: format!("{writer_id}/0.1.0"),
-        runtime_cache: RuntimeCacheConfigOverrides::default(),
-        grep: loonfs_server::GrepConfig::default(),
-        background_maintenance: true,
-        min_publish_interval_ms: 0,
-        max_upload_bytes: 256 * 1024 * 1024,
-        max_download_bytes: 256 * 1024 * 1024,
-        max_commit_body_bytes: 8 * 1024 * 1024,
-        max_concurrent_uploads: 8,
-        max_concurrent_downloads: 16,
-        max_concurrent_maintenance: loonfs::DEFAULT_MAX_CONCURRENT_MAINTENANCE,
-        allow_unauthenticated_remote: false,
-        store: StoreConfig::LocalFs {
+    common::test_config(
+        StoreConfig::LocalFs {
             root: store_root.display().to_string(),
             key_prefix: Some(key_prefix.to_owned()),
         },
-    }
+        "test-token",
+        TEST_CONTENT_TOKEN_SECRET,
+        writer_id,
+    )
 }
 
 fn entry_names(response: &ListPathEntriesResponse) -> Vec<&str> {
@@ -2814,10 +2750,6 @@ fn assert_invalid_namespace_response(result: Result<ureq::Response, ureq::Error>
         }
         other => unreachable!("expected invalid_namespace_id response, got {other:?}"),
     }
-}
-
-fn namespace_id(value: &str) -> NamespaceId {
-    NamespaceId::parse(value).expect("valid namespace id")
 }
 
 fn send_filesystem_operation(

@@ -2,18 +2,14 @@
 //! Standalone poller wakeup coverage with in-process driver observation.
 
 use super::{poll_namespace, PollShutdown};
-use loonfs_api::{
-    AbsolutePath, ChangeSeq, CommitId, DestinationBehavior, GrepRequest, NamespaceId,
-};
+use loonfs_api::{ChangeSeq, GrepRequest, NamespaceId};
 use loonfs_core::cache::{
     MetadataTableCache, MetadataTableCacheConfig, WalTailProjectionCache,
     WalTailProjectionCacheConfig, DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES,
     DEFAULT_WAL_TAIL_PROJECTION_ROWS,
 };
-use loonfs_core::content::{prepare_stored_content, store_bytes_as_content};
 use loonfs_core::control::{load_namespace_head_control, load_namespace_read_anchor};
-use loonfs_core::publish::{NamespaceMutationCandidate, PathMutationIntent};
-use loonfs_core::{BootstrapOptions, NamespaceEngine, RuntimeReadContext};
+use loonfs_core::{NamespaceEngine, RuntimeReadContext};
 use loonfs_grep::root::{load_grep_root, GrepLifecycle};
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepDriver, GrepDriverParked, GrepDriverState, GrepDriverTask,
@@ -21,6 +17,7 @@ use loonfs_grep::{
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::SharedObjectStore;
+use loonfs_test_support::ids::namespace_id;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
@@ -149,10 +146,6 @@ async fn standalone_enable_without_head_change_wakes_empty_backfill() {
     stop_poll_and_driver(poll, shutdown, driver).await;
 }
 
-fn namespace_id(value: &str) -> NamespaceId {
-    NamespaceId::parse(value).expect("namespace id")
-}
-
 fn worker(store: &SharedObjectStore, actor: &str) -> GrepWorker<SharedObjectStore> {
     GrepWorker::new(
         store.clone(),
@@ -166,18 +159,14 @@ async fn bootstrap(
     store: SharedObjectStore,
     namespace_id: &NamespaceId,
 ) -> NamespaceEngine<SharedObjectStore> {
-    let engine = NamespaceEngine::builder(store)
-        .namespace_id(namespace_id.clone())
-        .writer_id(format!("{}-seed", namespace_id.as_str()))
-        .writer_session_id(format!("{}-seed-session", namespace_id.as_str()))
-        .writer_version("standalone-poll-test/0.1")
-        .build()
-        .expect("engine");
-    engine
-        .bootstrap_namespace(BootstrapOptions::default())
-        .await
-        .expect("bootstrap namespace");
-    engine
+    super::test_seeding::bootstrap(
+        store,
+        namespace_id,
+        format!("{}-seed", namespace_id.as_str()),
+        format!("{}-seed-session", namespace_id.as_str()),
+        "standalone-poll-test/0.1",
+    )
+    .await
 }
 
 async fn put_file(
@@ -186,28 +175,15 @@ async fn put_file(
     namespace_id: &NamespaceId,
     commit_id: &str,
 ) {
-    let stored = store_bytes_as_content(&**store, namespace_id, b"standalone wakeup needle\n")
-        .await
-        .expect("store content");
-    let content_ref = stored.content_ref.clone();
-    let catalog = loonfs_core::control::load_namespace_catalog_entry(&**store, namespace_id)
-        .await
-        .expect("load namespace catalog");
-    let prepared = prepare_stored_content(&catalog, stored).expect("prepare stored content");
-    let result = engine
-        .publish_namespace_mutations_batch(vec![NamespaceMutationCandidate::path_prepared(
-            PathMutationIntent::PutFile {
-                commit_id: CommitId::parse(commit_id).expect("commit id"),
-                absolute_path: AbsolutePath::parse("/note.txt").expect("path"),
-                content_ref,
-                behavior: DestinationBehavior::NoReplace,
-            },
-            vec![prepared],
-        )])
-        .await
-        .pop()
-        .expect("one result");
-    result.expect("publish file");
+    super::test_seeding::put_file(
+        store,
+        engine,
+        namespace_id,
+        b"standalone wakeup needle\n",
+        "/note.txt",
+        commit_id,
+    )
+    .await;
 }
 
 fn spawn_driver(

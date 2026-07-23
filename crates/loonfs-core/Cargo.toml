@@ -28,6 +28,7 @@ default = []
 
 [dev-dependencies]
 loonfs-model = { path = "../loonfs-model" }
+loonfs-test-support = { path = "../loonfs-test-support" }
 tempfile.workspace = true
 tokio.workspace = true
 

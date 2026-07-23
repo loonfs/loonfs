@@ -1,9 +1,10 @@
 #![allow(clippy::panic)]
 //! Standalone worker one-shot and configuration smoke coverage.
 
-use loonfs_api::{AbsolutePath, CommitId, DestinationBehavior, NamespaceId};
-use loonfs_core::content::{prepare_stored_content, store_bytes_as_content};
-use loonfs_core::publish::{NamespaceMutationCandidate, PathMutationIntent};
+#[path = "../src/test_seeding.rs"]
+mod test_seeding;
+
+use loonfs_api::NamespaceId;
 use loonfs_core::{BootstrapOptions, NamespaceEngine};
 use loonfs_grep::keyspace::{root_key, segments_prefix};
 use loonfs_grep::root::{load_grep_root, GrepLifecycle};
@@ -239,18 +240,14 @@ async fn bootstrap(
     store: &Arc<LocalFsStore>,
     namespace_id: &NamespaceId,
 ) -> NamespaceEngine<Arc<LocalFsStore>> {
-    let engine = NamespaceEngine::builder(store.clone())
-        .namespace_id(namespace_id.clone())
-        .writer_id(format!("standalone-seed-{namespace_id}"))
-        .writer_session_id(format!("standalone-seed-{namespace_id}-session"))
-        .writer_version("standalone-test/0.1")
-        .build()
-        .expect("engine");
-    engine
-        .bootstrap_namespace(BootstrapOptions::default())
-        .await
-        .expect("bootstrap namespace");
-    engine
+    test_seeding::bootstrap(
+        store.clone(),
+        namespace_id,
+        format!("standalone-seed-{namespace_id}"),
+        format!("standalone-seed-{namespace_id}-session"),
+        "standalone-test/0.1",
+    )
+    .await
 }
 
 async fn put_file(
@@ -268,28 +265,15 @@ async fn put_file_at(
     path: &str,
     commit_id: &str,
 ) {
-    let stored = store_bytes_as_content(&**store, namespace_id, b"standalone needle\n")
-        .await
-        .expect("store content");
-    let content_ref = stored.content_ref.clone();
-    let catalog = loonfs_core::control::load_namespace_catalog_entry(&**store, namespace_id)
-        .await
-        .expect("load namespace catalog");
-    let prepared = prepare_stored_content(&catalog, stored).expect("prepare stored content");
-    let result = engine
-        .publish_namespace_mutations_batch(vec![NamespaceMutationCandidate::path_prepared(
-            PathMutationIntent::PutFile {
-                commit_id: CommitId::parse(commit_id).expect("commit id"),
-                absolute_path: AbsolutePath::parse(path).expect("path"),
-                content_ref,
-                behavior: DestinationBehavior::NoReplace,
-            },
-            vec![prepared],
-        )])
-        .await
-        .pop()
-        .expect("one result");
-    result.expect("publish file");
+    test_seeding::put_file(
+        store,
+        engine,
+        namespace_id,
+        b"standalone needle\n",
+        path,
+        commit_id,
+    )
+    .await;
 }
 
 fn write_config(path: &Path, store_root: &Path, root_fields: &str, grep_fields: &str) {

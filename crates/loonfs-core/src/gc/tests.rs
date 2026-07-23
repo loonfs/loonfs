@@ -5,7 +5,7 @@ use super::reap::{condemn_checkpoint_if_aged, list_prefix, CheckpointCondemn};
 use super::run::{gc_namespace, gc_namespace_with_reverify_chunk};
 use crate::checkpoint::advance_retention_floor;
 use crate::checkpoint::record::set_checkpoint_record_state;
-use crate::checkpoint::tests::create_checkpoint;
+use crate::checkpoint::tests::{create_checkpoint, mutation_context, write_test_file};
 use crate::context::MutationContext;
 use crate::error::CoreError;
 use crate::limits::GC_MIN_GRACE_WINDOW_MS;
@@ -21,22 +21,20 @@ use loonfs_objectstore::keys::{
 use loonfs_objectstore::ObjectStore;
 use std::num::NonZeroUsize;
 
-use crate::commit_engine::{NamespaceCommitEngine, NamespaceMutationCandidate};
 use crate::namespace::bootstrap::bootstrap_namespace;
 use crate::namespace::delete::delete_namespace;
 use crate::namespace::fork::fork_namespace;
 use crate::options::DeleteNamespaceOptions;
 use crate::path::read::{load_metadata_view, ReadLoadContext};
-use crate::publish::PathMutationIntent;
-use crate::storage::content::{prepare_stored_content, store_bytes_as_content};
 use bytes::Bytes;
 use futures::stream::BoxStream;
-use loonfs_api::{AbsolutePath, CommitId, DestinationBehavior};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ByteRange, ObjectBody, ObjectMetadata, ObjectStoreError, PutMode};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use loonfs_test_support::stores::{
+    BlockingStore, KeyPredicate, MetadataMapStore, OperationContext, OperationKind,
+};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tempfile::tempdir;
-use tokio::sync::Semaphore;
 
 const GRACE_MS: u64 = 60 * 60 * 1000;
 const REAP_MS: u64 = 7 * 24 * 60 * 60 * 1000;
@@ -49,12 +47,7 @@ fn config() -> GcConfig {
 }
 
 fn context(now_ms: u64) -> MutationContext {
-    MutationContext {
-        writer_id: "gc-test".to_owned(),
-        writer_session_id: "wrs_gc_test".to_owned(),
-        writer_version: "gc-test/0.1.0".to_owned(),
-        now_ms,
-    }
+    mutation_context("gc-test", "wrs_gc_test", "gc-test/0.1.0", now_ms)
 }
 
 /// Derives "now" from durable object ages so the tests never touch a
@@ -80,43 +73,6 @@ async fn now_after_newest_object(
     newest + offset_ms
 }
 
-async fn write_file<S: ObjectStore>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    path: &str,
-    commit_id: &str,
-    context: &MutationContext,
-) {
-    let stored = store_bytes_as_content(store, namespace_id, b"body\n")
-        .await
-        .expect("store content");
-    let content_ref = stored.content_ref.clone();
-    let catalog = crate::namespace::catalog::load_namespace_catalog_entry(store, namespace_id)
-        .await
-        .expect("load namespace catalog");
-    let prepared = prepare_stored_content(&catalog, stored).expect("prepare stored content");
-    NamespaceCommitEngine::new(namespace_id.clone())
-        .publish_batch(
-            store,
-            vec![NamespaceMutationCandidate::path_prepared(
-                PathMutationIntent::PutFile {
-                    commit_id: CommitId::parse(commit_id).expect("commit id"),
-                    absolute_path: AbsolutePath::parse(path).expect("path"),
-                    content_ref: content_ref.clone(),
-                    behavior: DestinationBehavior::NoReplace,
-                },
-                vec![prepared],
-            )],
-            context,
-            &crate::protocol::PublishTailOptions::default(),
-        )
-        .await
-        .results
-        .pop()
-        .expect("one result")
-        .expect("write file");
-}
-
 async fn stat_root<S: ObjectStore>(store: &S, namespace_id: &NamespaceId) {
     load_metadata_view(store, namespace_id, ReadLoadContext::latest())
         .await
@@ -124,58 +80,6 @@ async fn stat_root<S: ObjectStore>(store: &S, namespace_id: &NamespaceId) {
         .resolve_path("/")
         .await
         .expect("resolve root");
-}
-
-/// `LocalFsStore` with provider timestamps stripped: rule 1 reads an
-/// object without a timestamp as young, so nothing ever ages out.
-#[derive(Debug)]
-struct TimestamplessStore(LocalFsStore);
-
-fn strip_timestamp(mut metadata: ObjectMetadata) -> ObjectMetadata {
-    metadata.last_modified_ms = None;
-    metadata
-}
-
-#[async_trait::async_trait]
-impl ObjectStore for TimestamplessStore {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        Ok(self.0.head(key).await?.map(strip_timestamp))
-    }
-
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        Ok(self.0.get_with_metadata(key).await?.map(|mut body| {
-            body.metadata = strip_timestamp(body.metadata);
-            body
-        }))
-    }
-
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
-        self.0.get(key, range).await
-    }
-
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        Ok(strip_timestamp(self.0.put(key, bytes, mode).await?))
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        self.0.delete(key).await
-    }
-
-    fn list_prefix_stream(
-        &self,
-        prefix: &str,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        self.0.list_prefix_stream(prefix)
-    }
 }
 
 #[derive(Debug)]
@@ -193,40 +97,9 @@ enum BlockingControlCasTarget {
     UploadCondemned,
 }
 
-#[derive(Debug)]
-struct BlockingControlCasStore {
-    inner: LocalFsStore,
-    target: BlockingControlCasTarget,
-    blocked_once: AtomicBool,
-    entered: Semaphore,
-    release: Semaphore,
-}
-
-impl BlockingControlCasStore {
-    fn new(inner: LocalFsStore, target: BlockingControlCasTarget) -> Self {
-        Self {
-            inner,
-            target,
-            blocked_once: AtomicBool::new(false),
-            entered: Semaphore::new(0),
-            release: Semaphore::new(0),
-        }
-    }
-
-    async fn wait_until_blocked(&self) {
-        self.entered
-            .acquire()
-            .await
-            .expect("blocking store remains open")
-            .forget();
-    }
-
-    fn unblock(&self) {
-        self.release.add_permits(1);
-    }
-
-    fn matches_target(&self, bytes: &[u8]) -> bool {
-        match self.target {
+impl BlockingControlCasTarget {
+    fn matches(self, bytes: &[u8]) -> bool {
+        match self {
             BlockingControlCasTarget::CheckpointActive
             | BlockingControlCasTarget::CheckpointCondemned => {
                 let Ok(envelope) = decode_control_object::<CheckpointRecordState>(
@@ -235,7 +108,7 @@ impl BlockingControlCasStore {
                 ) else {
                     return false;
                 };
-                let target = match self.target {
+                let target = match self {
                     BlockingControlCasTarget::CheckpointActive => CheckpointRecordLifecycle::Active,
                     BlockingControlCasTarget::CheckpointCondemned => {
                         CheckpointRecordLifecycle::Condemned
@@ -252,7 +125,7 @@ impl BlockingControlCasStore {
                 ) else {
                     return false;
                 };
-                match self.target {
+                match self {
                     BlockingControlCasTarget::UploadCompleted => envelope.state.completed.is_some(),
                     BlockingControlCasTarget::UploadCondemned => {
                         envelope.state.state == UploadSessionLifecycle::Condemned
@@ -264,54 +137,23 @@ impl BlockingControlCasStore {
     }
 }
 
-#[async_trait::async_trait]
-impl ObjectStore for BlockingControlCasStore {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.inner.head(key).await
-    }
-
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        self.inner.get_with_metadata(key).await
-    }
-
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
-        self.inner.get(key, range).await
-    }
-
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        let should_block = matches!(&mode, PutMode::CompareAndSwap { .. })
-            && self.matches_target(&bytes)
-            && !self.blocked_once.swap(true, Ordering::SeqCst);
-        if should_block {
-            self.entered.add_permits(1);
-            self.release
-                .acquire()
-                .await
-                .expect("blocking store remains open")
-                .forget();
-        }
-        self.inner.put(key, bytes, mode).await
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        self.inner.delete(key).await
-    }
-
-    fn list_prefix_stream(
-        &self,
-        prefix: &str,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        self.inner.list_prefix_stream(prefix)
-    }
+fn blocking_control_cas_store(
+    inner: LocalFsStore,
+    target: BlockingControlCasTarget,
+) -> BlockingStore<LocalFsStore> {
+    let store = BlockingStore::matching(inner, move |operation: &OperationContext<'_>| {
+        let bytes = match operation.kind() {
+            OperationKind::CompareAndSwap { bytes, .. }
+            | OperationKind::Put {
+                bytes,
+                mode: PutMode::CompareAndSwap { .. },
+            } => bytes,
+            _ => return false,
+        };
+        target.matches(bytes)
+    });
+    store.block_next();
+    store
 }
 
 #[async_trait::async_trait]
@@ -400,7 +242,7 @@ async fn gc_reaps_below_floor_segments_after_the_grace_window() {
     bootstrap_namespace(&store, &namespace_id, &setup, false)
         .await
         .expect("bootstrap");
-    write_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
+    write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
     create_checkpoint(&store, &namespace_id, &setup)
         .await
         .expect("checkpoint");
@@ -506,14 +348,14 @@ async fn active_record_with_a_missing_basis_is_released_not_degrading() {
     bootstrap_namespace(&store, &namespace_id, &setup, false)
         .await
         .expect("bootstrap");
-    write_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
+    write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
     let pinned = create_checkpoint(&store, &namespace_id, &setup)
         .await
         .expect("first checkpoint");
 
     // Advance the root past the pinned basis so deleting the basis
     // object leaves the namespace itself healthy.
-    write_file(&store, &namespace_id, "/docs/two.txt", "gc-two", &setup).await;
+    write_test_file(&store, &namespace_id, "/docs/two.txt", "gc-two", &setup).await;
     let moved_on = crate::checkpoint::create_checkpoint(
         &store,
         &namespace_id,
@@ -588,8 +430,8 @@ async fn deleted_namespace_reclaims_down_to_its_tombstone() {
     bootstrap_namespace(&store, &namespace_id, &setup, false)
         .await
         .expect("bootstrap");
-    write_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
-    write_file(&store, &namespace_id, "/docs/two.txt", "gc-two", &setup).await;
+    write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
+    write_test_file(&store, &namespace_id, "/docs/two.txt", "gc-two", &setup).await;
     create_checkpoint(&store, &namespace_id, &setup)
         .await
         .expect("user pin");
@@ -655,7 +497,7 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
     bootstrap_namespace(&store, &source, &setup, false)
         .await
         .expect("bootstrap");
-    write_file(&store, &source, "/docs/shared.txt", "gc-shared", &setup).await;
+    write_test_file(&store, &source, "/docs/shared.txt", "gc-shared", &setup).await;
     fork_namespace(&store, &source, &clone, &setup)
         .await
         .expect("fork");
@@ -722,7 +564,7 @@ async fn upload_sessions_reap_after_the_window_and_survive_inside_it() {
     bootstrap_namespace(&store, &namespace_id, &setup, false)
         .await
         .expect("bootstrap");
-    write_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
+    write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
     let session_key = write_upload_session(&store, &namespace_id).await;
 
     // Past the grace window but inside the reap window: sessions are
@@ -771,7 +613,7 @@ async fn upload_completion_wins_before_condemn_and_the_session_is_retained() {
     let (upload_id, content_ref, content_store_id) =
         stage_upload(&store, &namespace_id, &setup).await;
     let aged = context(now_after_newest_object(&store, &namespace_id, REAP_MS + 1).await);
-    let store = BlockingControlCasStore::new(store, BlockingControlCasTarget::UploadCondemned);
+    let store = blocking_control_cas_store(store, BlockingControlCasTarget::UploadCondemned);
     let gc_config = config();
     let gc = gc_namespace(&store, &namespace_id, &gc_config, &aged);
     let complete = async {
@@ -787,7 +629,7 @@ async fn upload_completion_wins_before_condemn_and_the_session_is_retained() {
             &setup,
         )
         .await;
-        store.unblock();
+        store.release();
         result
     };
     let (report, completion) = tokio::join!(gc, complete);
@@ -813,7 +655,7 @@ async fn upload_condemn_wins_before_completion_and_completion_reports_not_found(
     let (upload_id, content_ref, content_store_id) =
         stage_upload(&store, &namespace_id, &setup).await;
     let aged = context(now_after_newest_object(&store, &namespace_id, REAP_MS + 1).await);
-    let store = BlockingControlCasStore::new(store, BlockingControlCasTarget::UploadCompleted);
+    let store = blocking_control_cas_store(store, BlockingControlCasTarget::UploadCompleted);
     let request = loonfs_api::v0::CompleteUploadRequest {
         content_ref: content_ref.clone(),
     };
@@ -828,7 +670,7 @@ async fn upload_condemn_wins_before_completion_and_completion_reports_not_found(
     let condemn = async {
         store.wait_until_blocked().await;
         let report = gc_namespace(&store, &namespace_id, &config(), &aged).await;
-        store.unblock();
+        store.release();
         report
     };
     let (completion, report) = tokio::join!(completion, condemn);
@@ -850,7 +692,7 @@ async fn gc_retains_everything_inside_the_grace_window() {
     bootstrap_namespace(&store, &namespace_id, &setup, false)
         .await
         .expect("bootstrap");
-    write_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
+    write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
     create_checkpoint(&store, &namespace_id, &setup)
         .await
         .expect("checkpoint");
@@ -879,7 +721,7 @@ async fn gc_never_deletes_the_live_replay_chain() {
     bootstrap_namespace(&store, &namespace_id, &setup, false)
         .await
         .expect("bootstrap");
-    write_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
+    write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
     create_checkpoint(&store, &namespace_id, &setup)
         .await
         .expect("checkpoint");
@@ -887,7 +729,7 @@ async fn gc_never_deletes_the_live_replay_chain() {
         .await
         .expect("advance floor");
     // A commit past the floor: its segment is the live replay gap.
-    write_file(&store, &namespace_id, "/docs/two.txt", "gc-two", &setup).await;
+    write_test_file(&store, &namespace_id, "/docs/two.txt", "gc-two", &setup).await;
 
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
     let report = gc_namespace(&store, &namespace_id, &config(), &aged)
@@ -916,11 +758,11 @@ async fn gc_reaps_dead_checkpoints_before_their_basis_across_passes() {
     bootstrap_namespace(&store, &namespace_id, &setup, false)
         .await
         .expect("bootstrap");
-    write_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
+    write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
     let first = create_checkpoint(&store, &namespace_id, &setup)
         .await
         .expect("first checkpoint");
-    write_file(&store, &namespace_id, "/docs/two.txt", "gc-two", &setup).await;
+    write_test_file(&store, &namespace_id, "/docs/two.txt", "gc-two", &setup).await;
     create_checkpoint(&store, &namespace_id, &setup)
         .await
         .expect("second checkpoint");
@@ -1004,7 +846,7 @@ async fn gc_reclaims_manifests_superseded_by_wal_flushes() {
         .await
         .expect("bootstrap");
     for round in 0..3 {
-        write_file(
+        write_test_file(
             &store,
             &namespace_id,
             &format!("/docs/file-{round}.txt"),
@@ -1092,11 +934,11 @@ async fn gc_reaps_released_checkpoints_before_their_basis_across_passes() {
     bootstrap_namespace(&store, &namespace_id, &setup, false)
         .await
         .expect("bootstrap");
-    write_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
+    write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
     let pinned = create_checkpoint(&store, &namespace_id, &setup)
         .await
         .expect("pin checkpoint");
-    write_file(&store, &namespace_id, "/docs/two.txt", "gc-two", &setup).await;
+    write_test_file(&store, &namespace_id, "/docs/two.txt", "gc-two", &setup).await;
     create_checkpoint(&store, &namespace_id, &setup)
         .await
         .expect("advance past the pinned basis");
@@ -1140,7 +982,7 @@ async fn checkpoint_revival_wins_before_condemn_and_keeps_its_basis_pinned() {
     bootstrap_namespace(&store, &namespace_id, &setup, false)
         .await
         .expect("bootstrap");
-    write_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
+    write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
     let checkpoint = create_checkpoint(&store, &namespace_id, &setup)
         .await
         .expect("checkpoint");
@@ -1154,13 +996,13 @@ async fn checkpoint_revival_wins_before_condemn_and_keeps_its_basis_pinned() {
         .await
         .expect("release checkpoint");
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
-    let store = BlockingControlCasStore::new(store, BlockingControlCasTarget::CheckpointCondemned);
+    let store = blocking_control_cas_store(store, BlockingControlCasTarget::CheckpointCondemned);
     let gc_config = config();
     let gc = gc_namespace(&store, &namespace_id, &gc_config, &aged);
     let revive = async {
         store.wait_until_blocked().await;
         let revived = create_checkpoint(&store, &namespace_id, &setup).await;
-        store.unblock();
+        store.release();
         revived
     };
     let (report, revived) = tokio::join!(gc, revive);
@@ -1172,11 +1014,11 @@ async fn checkpoint_revival_wins_before_condemn_and_keeps_its_basis_pinned() {
 
     // Move the root to another manifest, then run a complete later pass: the
     // revived record is now the only reason its old basis survives.
-    write_file(&store, &namespace_id, "/docs/two.txt", "gc-two", &setup).await;
+    write_test_file(&store, &namespace_id, "/docs/two.txt", "gc-two", &setup).await;
     create_checkpoint(&store, &namespace_id, &setup)
         .await
         .expect("advance metadata root");
-    let aged = context(now_after_newest_object(&store.inner, &namespace_id, GRACE_MS + 1).await);
+    let aged = context(now_after_newest_object(store.inner(), &namespace_id, GRACE_MS + 1).await);
     gc_namespace(&store, &namespace_id, &config(), &aged)
         .await
         .expect("full pass after revival");
@@ -1209,13 +1051,13 @@ async fn checkpoint_condemn_wins_before_revival_then_gc_frees_the_name() {
         namespace_id.as_str(),
         checkpoint.checkpoint_id.as_str(),
     );
-    let store = BlockingControlCasStore::new(store, BlockingControlCasTarget::CheckpointActive);
+    let store = blocking_control_cas_store(store, BlockingControlCasTarget::CheckpointActive);
     let revival = create_checkpoint(&store, &namespace_id, &setup);
     let condemn = async {
         store.wait_until_blocked().await;
         let outcome =
             condemn_checkpoint_if_aged(&store, &namespace_id, &key, GRACE_MS, false, &aged).await;
-        store.unblock();
+        store.release();
         outcome
     };
     let (revival, condemn) = tokio::join!(revival, condemn);
@@ -1293,7 +1135,7 @@ async fn gc_reaps_expired_checkpoints_before_their_basis_across_passes() {
     bootstrap_namespace(&store, &namespace_id, &setup, false)
         .await
         .expect("bootstrap");
-    write_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
+    write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
     // Expiry compares the caller's `now_ms` against the record's stamp;
     // object ages come from provider timestamps. Pin one record already
     // expired at any provider-derived "now" and one that never expires.
@@ -1319,7 +1161,7 @@ async fn gc_reaps_expired_checkpoints_before_their_basis_across_passes() {
     )
     .await
     .expect("lasting checkpoint");
-    write_file(&store, &namespace_id, "/docs/two.txt", "gc-two", &setup).await;
+    write_test_file(&store, &namespace_id, "/docs/two.txt", "gc-two", &setup).await;
     create_checkpoint(&store, &namespace_id, &setup)
         .await
         .expect("advance past the expiring basis");
@@ -1374,7 +1216,7 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
     bootstrap_namespace(&store, &namespace_id, &setup, false)
         .await
         .expect("bootstrap");
-    write_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
+    write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
     let first = crate::checkpoint::create_checkpoint(
         &store,
         &namespace_id,
@@ -1399,7 +1241,7 @@ async fn gc_keeps_a_basis_pinned_by_another_owner_after_one_release() {
     .expect("second owner");
     assert_ne!(first.checkpoint_id, second.checkpoint_id);
     assert_eq!(first.manifest_id, second.manifest_id);
-    write_file(&store, &namespace_id, "/docs/two.txt", "gc-two", &setup).await;
+    write_test_file(&store, &namespace_id, "/docs/two.txt", "gc-two", &setup).await;
     create_checkpoint(&store, &namespace_id, &setup)
         .await
         .expect("advance past the shared basis");
@@ -1453,7 +1295,7 @@ async fn fork_owned_checkpoints_reject_user_release() {
     bootstrap_namespace(&store, &source, &setup, false)
         .await
         .expect("bootstrap");
-    write_file(&store, &source, "/docs/one.txt", "gc-one", &setup).await;
+    write_test_file(&store, &source, "/docs/one.txt", "gc-one", &setup).await;
     fork_namespace(&store, &source, &clone, &setup)
         .await
         .expect("fork");
@@ -1483,11 +1325,11 @@ async fn gc_retains_active_checkpoint_bases() {
     bootstrap_namespace(&store, &namespace_id, &setup, false)
         .await
         .expect("bootstrap");
-    write_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
+    write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
     let first = create_checkpoint(&store, &namespace_id, &setup)
         .await
         .expect("first checkpoint");
-    write_file(&store, &namespace_id, "/docs/two.txt", "gc-two", &setup).await;
+    write_test_file(&store, &namespace_id, "/docs/two.txt", "gc-two", &setup).await;
     create_checkpoint(&store, &namespace_id, &setup)
         .await
         .expect("second checkpoint");
@@ -1554,14 +1396,14 @@ async fn gc_releases_fork_checkpoints_of_terminally_deleted_targets_across_passe
     bootstrap_namespace(&store, &source, &setup, false)
         .await
         .expect("bootstrap");
-    write_file(&store, &source, "/docs/one.txt", "gc-one", &setup).await;
+    write_test_file(&store, &source, "/docs/one.txt", "gc-one", &setup).await;
     fork_namespace(&store, &source, &clone, &setup)
         .await
         .expect("fork");
     let fork_record = read_fork_record(&store, &source).await;
     // Advance the source root past the fork basis so the basis is
     // reachable only through the fork-owned record.
-    write_file(&store, &source, "/docs/two.txt", "gc-two", &setup).await;
+    write_test_file(&store, &source, "/docs/two.txt", "gc-two", &setup).await;
     create_checkpoint(&store, &source, &setup)
         .await
         .expect("advance root past the fork basis");
@@ -1635,7 +1477,7 @@ async fn gc_retains_young_fork_checkpoints_of_terminally_deleted_targets() {
     bootstrap_namespace(&store, &source, &setup, false)
         .await
         .expect("bootstrap");
-    write_file(&store, &source, "/docs/one.txt", "gc-one", &setup).await;
+    write_test_file(&store, &source, "/docs/one.txt", "gc-one", &setup).await;
     fork_namespace(&store, &source, &clone, &setup)
         .await
         .expect("fork");
@@ -1678,7 +1520,7 @@ async fn gc_releases_abandoned_fork_checkpoints_after_the_reap_window() {
     bootstrap_namespace(&store, &source, &setup, false)
         .await
         .expect("bootstrap");
-    write_file(&store, &source, "/docs/one.txt", "gc-one", &setup).await;
+    write_test_file(&store, &source, "/docs/one.txt", "gc-one", &setup).await;
     fork_namespace(&store, &source, &clone, &setup)
         .await
         .expect("fork");
@@ -1728,7 +1570,7 @@ async fn abandoned_fork_retry_revives_and_freshens_the_source_record() {
     bootstrap_namespace(&store, &source, &setup, false)
         .await
         .expect("bootstrap");
-    write_file(&store, &source, "/docs/one.txt", "gc-one", &setup).await;
+    write_test_file(&store, &source, "/docs/one.txt", "gc-one", &setup).await;
     fork_namespace(&store, &source, &clone, &setup)
         .await
         .expect("fork");
@@ -1787,7 +1629,7 @@ async fn gc_retains_unreadable_checkpoint_records_and_degrades() {
     bootstrap_namespace(&store, &namespace_id, &setup, false)
         .await
         .expect("bootstrap");
-    write_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
+    write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
     create_checkpoint(&store, &namespace_id, &setup)
         .await
         .expect("checkpoint");
@@ -1826,13 +1668,17 @@ async fn gc_retains_unreadable_checkpoint_records_and_degrades() {
 #[tokio::test]
 async fn gc_retains_everything_without_provider_timestamps() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = TimestamplessStore(LocalFsStore::new(temp_dir.path()).expect("store"));
+    // Rule 1 treats missing provider timestamps as young, so nothing ages out.
+    let store = MetadataMapStore::without_last_modified(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        KeyPredicate::any(),
+    );
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
     let setup = context(1_000);
     bootstrap_namespace(&store, &namespace_id, &setup, false)
         .await
         .expect("bootstrap");
-    write_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
+    write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
     create_checkpoint(&store, &namespace_id, &setup)
         .await
         .expect("checkpoint");
@@ -1842,7 +1688,7 @@ async fn gc_retains_everything_without_provider_timestamps() {
 
     // Far past any window by wall clock, but no object carries a
     // provider timestamp.
-    let aged = context(now_after_newest_object(&store.0, &namespace_id, GRACE_MS + 1).await);
+    let aged = context(now_after_newest_object(store.inner(), &namespace_id, GRACE_MS + 1).await);
     let report = gc_namespace(&store, &namespace_id, &config(), &aged)
         .await
         .expect("gc pass");
@@ -1868,11 +1714,11 @@ async fn gc_sweep_reverification_chunks_preserve_outcomes() {
     bootstrap_namespace(&store, &namespace_id, &setup, false)
         .await
         .expect("bootstrap");
-    write_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
+    write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
     let first = create_checkpoint(&store, &namespace_id, &setup)
         .await
         .expect("first checkpoint");
-    write_file(&store, &namespace_id, "/docs/two.txt", "gc-two", &setup).await;
+    write_test_file(&store, &namespace_id, "/docs/two.txt", "gc-two", &setup).await;
     create_checkpoint(&store, &namespace_id, &setup)
         .await
         .expect("second checkpoint");
@@ -1943,7 +1789,7 @@ async fn gc_degrades_to_retention_when_a_pin_checkpoint_is_unreadable() {
     bootstrap_namespace(&store, &source, &setup, false)
         .await
         .expect("bootstrap");
-    write_file(&store, &source, "/docs/one.txt", "gc-one", &setup).await;
+    write_test_file(&store, &source, "/docs/one.txt", "gc-one", &setup).await;
     fork_namespace(&store, &source, &clone, &setup)
         .await
         .expect("fork");

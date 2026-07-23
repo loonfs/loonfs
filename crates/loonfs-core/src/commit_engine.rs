@@ -569,6 +569,7 @@ mod tests {
     use loonfs_objectstore::keys::wal_segment_prefix;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::ObjectStore;
+    use loonfs_test_support::stores::{CountingStore, OperationClass};
     use std::sync::atomic::{AtomicU64, Ordering};
     use tempfile::tempdir;
 
@@ -904,11 +905,9 @@ mod tests {
     #[tokio::test]
     async fn publish_views_reuse_cached_table_blocks_across_publishes() {
         use crate::cache::MetadataTableCacheConfig;
-        use crate::checkpoint::tests::MetadataSstGetCountingStore;
-
         let temp_dir = tempdir().expect("tempdir");
         let store =
-            MetadataSstGetCountingStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+            CountingStore::metadata_tables(LocalFsStore::new(temp_dir.path()).expect("store"));
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let writer = context("writer-a", "session-a");
         bootstrap_namespace(&store, &namespace_id, &writer, false)
@@ -940,7 +939,7 @@ mod tests {
         // Without a cache, every publish view re-fetches the table blocks
         // its validation walks need.
         let mut uncached = NamespaceCommitEngine::new(namespace_id.clone());
-        store.reset_metadata_sst_gets();
+        store.reset();
         uncached
             .publish_batch(
                 &store,
@@ -953,10 +952,10 @@ mod tests {
             .remove(0)
             .expect("uncached publish a");
         assert!(
-            store.metadata_sst_gets() > 0,
+            store.count(OperationClass::Read) > 0,
             "publish validation should read table blocks"
         );
-        store.reset_metadata_sst_gets();
+        store.reset();
         uncached
             .publish_batch(
                 &store,
@@ -969,13 +968,13 @@ mod tests {
             .remove(0)
             .expect("uncached publish b");
         assert!(
-            store.metadata_sst_gets() > 0,
+            store.count(OperationClass::Read) > 0,
             "without a cache the next publish re-fetches the same blocks"
         );
 
         let cache = Arc::new(MetadataTableCache::new(MetadataTableCacheConfig::default()));
         let mut cached = NamespaceCommitEngine::new(namespace_id.clone()).table_cache(cache);
-        store.reset_metadata_sst_gets();
+        store.reset();
         cached
             .publish_batch(
                 &store,
@@ -988,10 +987,10 @@ mod tests {
             .remove(0)
             .expect("cached publish a");
         assert!(
-            store.metadata_sst_gets() > 0,
+            store.count(OperationClass::Read) > 0,
             "the first cached publish fills the cache"
         );
-        store.reset_metadata_sst_gets();
+        store.reset();
         cached
             .publish_batch(
                 &store,
@@ -1004,7 +1003,7 @@ mod tests {
             .remove(0)
             .expect("cached publish b");
         assert_eq!(
-            store.metadata_sst_gets(),
+            store.count(OperationClass::Read),
             0,
             "a warm cache serves every publish-view table read"
         );

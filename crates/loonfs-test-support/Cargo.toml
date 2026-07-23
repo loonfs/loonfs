@@ -1,10 +1,11 @@
 [package]
-name = "loonfs"
+name = "loonfs-test-support"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Embedded LoonFS runtime: a durable, agent-native filesystem on object storage."
+publish = false
+description = "Shared test helpers for LoonFS crates."
 repository.workspace = true
 
 [dependencies]
@@ -12,17 +13,10 @@ async-trait.workspace = true
 bytes.workspace = true
 futures.workspace = true
 loonfs-api = { path = "../loonfs-api" }
-loonfs-core = { path = "../loonfs-core" }
-loonfs-grep = { path = "../loonfs-grep" }
 loonfs-objectstore = { path = "../loonfs-objectstore" }
-thiserror.workspace = true
-tokio.workspace = true
-tracing.workspace = true
-
-[dev-dependencies]
-loonfs-test-support = { path = "../loonfs-test-support" }
-serde_json.workspace = true
 tempfile.workspace = true
+tokio = { version = "1", default-features = false, features = ["macros", "rt", "sync", "time"] }
+ureq.workspace = true
 
 [lints]
 workspace = true

@@ -1092,6 +1092,7 @@ dependencies = [
  "loonfs-core",
  "loonfs-grep",
  "loonfs-objectstore",
+ "loonfs-test-support",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
@@ -1169,6 +1170,7 @@ dependencies = [
  "loonfs-api",
  "loonfs-model",
  "loonfs-objectstore",
+ "loonfs-test-support",
  "serde",
  "serde_json",
  "sha2",
@@ -1190,6 +1192,7 @@ dependencies = [
  "loonfs-api",
  "loonfs-core",
  "loonfs-objectstore",
+ "loonfs-test-support",
  "regex",
  "regex-syntax",
  "serde",
@@ -1251,6 +1254,7 @@ dependencies = [
  "loonfs-core",
  "loonfs-grep",
  "loonfs-objectstore",
+ "loonfs-test-support",
  "serde",
  "serde_json",
  "tempfile",
@@ -1280,6 +1284,20 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+]
+
+[[package]]
+name = "loonfs-test-support"
+version = "0.1.1"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures",
+ "loonfs-api",
+ "loonfs-objectstore",
+ "tempfile",
+ "tokio",
+ "ureq",
 ]
 
 [[package]]

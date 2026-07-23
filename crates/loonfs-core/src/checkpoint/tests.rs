@@ -26,6 +26,7 @@ use super::runs::{
 use crate::error::{CoreError, ErrorCode, MetadataProjectionLoadError};
 use crate::metadata::MetadataState;
 use crate::namespace::bootstrap::bootstrap_namespace;
+use crate::namespace::catalog::load_namespace_catalog_entry;
 use crate::namespace::control::{
     read_head_object, read_metadata_root_object, read_wal_floor_object,
 };
@@ -34,6 +35,10 @@ use crate::path::write::ops::{
     delete_path, move_path, put_file_bytes, restore_file_revision, write_file_bytes,
 };
 use crate::protocol::list_changes_after;
+use crate::publish::{
+    NamespaceCommitEngine, NamespaceMutationCandidate, PathMutationIntent, PublishTailOptions,
+};
+use crate::storage::content::{prepare_stored_content, store_bytes_as_content};
 use crate::MutationContext;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -46,8 +51,8 @@ use loonfs_api::wire::manifest::{
 };
 use loonfs_api::wire::sst_blocks::SegmentBlocksBuilder;
 use loonfs_api::{
-    ChangeSeq, CheckpointId, CommitId, DestinationBehavior, EffectiveLimit, InodeId, ManifestId,
-    ManifestObjectId, NameKey, NamespaceId, RevisionNo,
+    AbsolutePath, ChangeSeq, CheckpointId, CommitId, DestinationBehavior, EffectiveLimit, InodeId,
+    ManifestId, ManifestObjectId, NameKey, NamespaceId, RevisionNo,
 };
 use loonfs_objectstore::keys::{
     metadata_manifest_object, metadata_manifest_prefix, metadata_table, wal_head, wal_segment,
@@ -55,6 +60,9 @@ use loonfs_objectstore::keys::{
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
+};
+use loonfs_test_support::stores::{
+    CountingStore, FailStore, InjectedError, KeyPredicate, OperationClass,
 };
 use std::collections::BTreeSet;
 use std::num::{NonZeroU32, NonZeroUsize};
@@ -79,6 +87,57 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
         context,
     )
     .await
+}
+
+pub(crate) fn mutation_context(
+    writer_id: &str,
+    writer_session_id: &str,
+    writer_version: &str,
+    now_ms: u64,
+) -> MutationContext {
+    MutationContext {
+        writer_id: writer_id.to_owned(),
+        writer_session_id: writer_session_id.to_owned(),
+        writer_version: writer_version.to_owned(),
+        now_ms,
+    }
+}
+
+pub(crate) async fn write_test_file<S: ObjectStore>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    path: &str,
+    commit_id: &str,
+    context: &MutationContext,
+) {
+    let stored = store_bytes_as_content(store, namespace_id, b"body\n")
+        .await
+        .expect("store content");
+    let content_ref = stored.content_ref.clone();
+    let catalog = load_namespace_catalog_entry(store, namespace_id)
+        .await
+        .expect("load namespace catalog");
+    let prepared = prepare_stored_content(&catalog, stored).expect("prepare stored content");
+    NamespaceCommitEngine::new(namespace_id.clone())
+        .publish_batch(
+            store,
+            vec![NamespaceMutationCandidate::path_prepared(
+                PathMutationIntent::PutFile {
+                    commit_id: CommitId::parse(commit_id).expect("commit id"),
+                    absolute_path: AbsolutePath::parse(path).expect("path"),
+                    content_ref,
+                    behavior: DestinationBehavior::NoReplace,
+                },
+                vec![prepared],
+            )],
+            context,
+            &PublishTailOptions::default(),
+        )
+        .await
+        .results
+        .pop()
+        .expect("one result")
+        .expect("write file");
 }
 
 #[derive(Debug)]
@@ -473,21 +532,20 @@ async fn create_checkpoint_surfaces_conflicting_invalid_manifest() {
 #[tokio::test]
 async fn retention_advancement_uses_published_manifest_and_updates_floor_only() {
     let temp_dir = tempdir().expect("tempdir");
-    let store =
-        MetadataSstGetCountingStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let store = CountingStore::metadata_tables(LocalFsStore::new(temp_dir.path()).expect("store"));
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
     bootstrap_namespace(&store, &namespace_id, &context, false)
         .await
         .expect("bootstrap");
 
-    store.reset_metadata_sst_gets();
+    store.reset();
     let unchanged = advance_retention_floor(&store, &namespace_id, &context)
         .await
         .expect("initial manifest already covers floor zero");
     assert_eq!(unchanged.retention_floor_seq, ChangeSeq(0));
     assert_eq!(
-        store.metadata_sst_gets(),
+        store.count(OperationClass::Read),
         0,
         "retention should validate manifest descriptors without loading metadata SST payloads"
     );
@@ -505,13 +563,13 @@ async fn retention_advancement_uses_published_manifest_and_updates_floor_only() 
     create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("create checkpoint");
-    store.reset_metadata_sst_gets();
+    store.reset();
     let advanced = advance_retention_floor(&store, &namespace_id, &context)
         .await
         .expect("advance retention");
     assert_eq!(advanced.retention_floor_seq, ChangeSeq(1));
     assert_eq!(
-        store.metadata_sst_gets(),
+        store.count(OperationClass::Read),
         0,
         "retention should advance from manifest descriptors without materializing rows"
     );
@@ -2323,8 +2381,7 @@ async fn manifest_base_run_tables_have_sorted_segment_coverage() {
 #[tokio::test]
 async fn byte_budgeted_cache_admits_large_table_scans() {
     let temp_dir = tempdir().expect("tempdir");
-    let store =
-        MetadataSstGetCountingStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let store = CountingStore::metadata_tables(LocalFsStore::new(temp_dir.path()).expect("store"));
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
     bootstrap_namespace(&store, &namespace_id, &context, false)
@@ -2375,7 +2432,7 @@ async fn byte_budgeted_cache_admits_large_table_scans() {
     )
     .await
     .expect("load fresh tables");
-    store.reset_metadata_sst_gets();
+    store.reset();
     let repeated = fresh_tables
         .scan_prefix(ApiMetadataTableFamily::Revisions, "revision-")
         .await
@@ -2384,7 +2441,7 @@ async fn byte_budgeted_cache_admits_large_table_scans() {
 
     assert_eq!(repeated, revisions);
     assert_eq!(
-        store.metadata_sst_gets(),
+        store.count(OperationClass::Read),
         0,
         "a warm wide scan should be served entirely from the cache"
     );
@@ -2394,8 +2451,7 @@ async fn byte_budgeted_cache_admits_large_table_scans() {
 #[tokio::test]
 async fn concurrent_scans_share_one_fetch_per_segment() {
     let temp_dir = tempdir().expect("tempdir");
-    let store =
-        MetadataSstGetCountingStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let store = CountingStore::metadata_tables(LocalFsStore::new(temp_dir.path()).expect("store"));
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
     bootstrap_namespace(&store, &namespace_id, &context, false)
@@ -2427,12 +2483,12 @@ async fn concurrent_scans_share_one_fetch_per_segment() {
     )
     .await
     .expect("load solo tables");
-    store.reset_metadata_sst_gets();
+    store.reset();
     let solo = solo_tables
         .scan_prefix(ApiMetadataTableFamily::Revisions, "revision-")
         .await
         .expect("solo scan");
-    let solo_fetches = store.metadata_sst_gets();
+    let solo_fetches = store.count(OperationClass::Read);
     assert!(solo.len() >= 8);
     assert!(solo_fetches >= 8, "solo scan should fetch every segment");
 
@@ -2455,12 +2511,12 @@ async fn concurrent_scans_share_one_fetch_per_segment() {
     )
     .await
     .expect("load second tables");
-    store.reset_metadata_sst_gets();
+    store.reset();
     let (first, second) = tokio::join!(
         first_tables.scan_prefix(ApiMetadataTableFamily::Revisions, "revision-"),
         second_tables.scan_prefix(ApiMetadataTableFamily::Revisions, "revision-"),
     );
-    let paired_fetches = store.metadata_sst_gets();
+    let paired_fetches = store.count(OperationClass::Read);
     assert_eq!(first.expect("first scan"), second.expect("second scan"));
     assert_eq!(
         paired_fetches, solo_fetches,
@@ -2597,8 +2653,7 @@ async fn table_range_page_merges_base_and_l0_in_row_key_order() {
 #[tokio::test]
 async fn byte_budgeted_cache_admits_large_range_scans() {
     let temp_dir = tempdir().expect("tempdir");
-    let store =
-        MetadataSstGetCountingStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let store = CountingStore::metadata_tables(LocalFsStore::new(temp_dir.path()).expect("store"));
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
     bootstrap_namespace(&store, &namespace_id, &context, false)
@@ -2655,7 +2710,7 @@ async fn byte_budgeted_cache_admits_large_range_scans() {
     )
     .await
     .expect("load fresh tables");
-    store.reset_metadata_sst_gets();
+    store.reset();
     let repeated = fresh_tables
         .scan_range_page(
             ApiMetadataTableFamily::DirentryBinds,
@@ -2668,7 +2723,7 @@ async fn byte_budgeted_cache_admits_large_range_scans() {
 
     assert_eq!(repeated, page);
     assert_eq!(
-        store.metadata_sst_gets(),
+        store.count(OperationClass::Read),
         0,
         "a warm range scan should be served entirely from the cache"
     );
@@ -4094,8 +4149,7 @@ async fn create_checkpoint_pins_a_current_basis_without_building_a_new_manifest(
 #[tokio::test]
 async fn a_view_reuses_decoded_blocks_without_a_shared_cache() {
     let temp_dir = tempdir().expect("tempdir");
-    let store =
-        MetadataSstGetCountingStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let store = CountingStore::metadata_tables(LocalFsStore::new(temp_dir.path()).expect("store"));
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
     bootstrap_namespace(&store, &namespace_id, &context, false)
@@ -4129,14 +4183,14 @@ async fn a_view_reuses_decoded_blocks_without_a_shared_cache() {
     let tables = super::load_verified_manifest_tables(&store, &namespace_id, &manifest_object_id)
         .await
         .expect("load tables");
-    store.reset_metadata_sst_gets();
+    store.reset();
     let key = "inode-00000000000000000001";
     assert!(tables
         .get_for_lookup(ApiMetadataTableFamily::Inodes, key, key)
         .await
         .expect("first lookup")
         .is_some());
-    let first_lookup_gets = store.metadata_sst_gets();
+    let first_lookup_gets = store.count(OperationClass::Read);
     assert!(first_lookup_gets > 0, "a cold lookup fetches blocks");
 
     assert!(tables
@@ -4151,7 +4205,7 @@ async fn a_view_reuses_decoded_blocks_without_a_shared_cache() {
         .expect("second-key lookup")
         .is_some());
     assert_eq!(
-        store.metadata_sst_gets(),
+        store.count(OperationClass::Read),
         first_lookup_gets,
         "later lookups through the same view should reuse decoded blocks"
     );
@@ -4160,8 +4214,7 @@ async fn a_view_reuses_decoded_blocks_without_a_shared_cache() {
 #[tokio::test]
 async fn point_lookups_skip_inline_filtered_runs_without_fetches() {
     let temp_dir = tempdir().expect("tempdir");
-    let store =
-        MetadataSstGetCountingStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let store = CountingStore::metadata_tables(LocalFsStore::new(temp_dir.path()).expect("store"));
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
     bootstrap_namespace(&store, &namespace_id, &context, false)
@@ -4227,7 +4280,7 @@ async fn point_lookups_skip_inline_filtered_runs_without_fetches() {
     let probe =
         lookup_keys::direntry_bind_probe(binding.parent_inode_id, binding.name_key.as_str());
 
-    store.reset_metadata_sst_gets();
+    store.reset();
     let rows = tables
         .scan_prefix_for_lookup(
             ApiMetadataTableFamily::DirentryBinds,
@@ -4239,7 +4292,7 @@ async fn point_lookups_skip_inline_filtered_runs_without_fetches() {
         .expect("point lookup");
     assert_eq!(rows.len(), 1, "exactly one bind row for the probed name");
     assert_eq!(
-        store.metadata_sst_gets(),
+        store.count(OperationClass::Read),
         1,
         "inline filters reject the other runs without fetches, and the one \
          admitted small segment loads whole with a single ranged GET"
@@ -4263,7 +4316,7 @@ async fn point_lookups_skip_inline_filtered_runs_without_fetches() {
     let stripped_tables = load_verified_manifest_tables(&store, &namespace_id, &stripped_object_id)
         .await
         .expect("load stripped tables");
-    store.reset_metadata_sst_gets();
+    store.reset();
     let stripped_rows = stripped_tables
         .scan_prefix_for_lookup(
             ApiMetadataTableFamily::DirentryBinds,
@@ -4275,7 +4328,7 @@ async fn point_lookups_skip_inline_filtered_runs_without_fetches() {
         .expect("point lookup without inline filters");
     assert_eq!(stripped_rows, rows);
     assert!(
-        store.metadata_sst_gets() > 1,
+        store.count(OperationClass::Read) > 1,
         "without inline copies the ruled-out runs pay filter fetches"
     );
 }
@@ -4420,8 +4473,7 @@ async fn manifest_load_rejects_descriptors_off_the_frozen_segment_layout() {
 #[tokio::test]
 async fn checkpoint_l0_update_does_not_read_existing_metadata_ssts() {
     let temp_dir = tempdir().expect("tempdir");
-    let store =
-        MetadataSstGetCountingStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let store = CountingStore::metadata_tables(LocalFsStore::new(temp_dir.path()).expect("store"));
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
     bootstrap_namespace(&store, &namespace_id, &context, false)
@@ -4452,14 +4504,14 @@ async fn checkpoint_l0_update_does_not_read_existing_metadata_ssts() {
     )
     .await
     .expect("write second");
-    store.reset_metadata_sst_gets();
+    store.reset();
 
     let checkpoint = create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("create L0 checkpoint");
 
     assert_eq!(
-        store.metadata_sst_gets(),
+        store.count(OperationClass::Read),
         0,
         "L0 checkpoint update should use the WAL tail and copy existing metadata file refs"
     );
@@ -4615,9 +4667,11 @@ async fn current_manifest_cas_retry_exhaustion_reports_head_race() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
-    let store = HeadCasFailureStore::new(
+    let store = FailStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
-        loonfs_objectstore::keys::metadata_root(namespace_id.as_str()),
+        KeyPredicate::metadata_root(namespace_id.as_str()),
+        OperationClass::CompareAndSwap,
+        InjectedError::PreconditionFailed,
     );
     bootstrap_namespace(&store, &namespace_id, &context, false)
         .await
@@ -4654,7 +4708,7 @@ async fn current_manifest_cas_retry_exhaustion_reports_head_race() {
         .await
         .expect("write manifest");
 
-    store.fail_head_cas();
+    store.fail_all();
     let outcome = publish_metadata_root(
         &store,
         &namespace_id,
@@ -5149,12 +5203,7 @@ impl ObjectStore for StaleHeadOnceStore {
 }
 
 fn test_context() -> MutationContext {
-    MutationContext {
-        writer_id: "test-writer".to_owned(),
-        writer_session_id: "wrs_test".to_owned(),
-        writer_version: "test-writer/0.1.0".to_owned(),
-        now_ms: 1_000,
-    }
+    mutation_context("test-writer", "wrs_test", "test-writer/0.1.0", 1_000)
 }
 
 fn manifest_id(seq: ChangeSeq) -> ManifestId {
@@ -5176,80 +5225,6 @@ async fn write_file_and_checkpoint(
         .await
         .expect("create checkpoint")
         .checkpoint_seq
-}
-
-#[derive(Debug)]
-struct HeadCasFailureStore {
-    inner: LocalFsStore,
-    head_key: String,
-    fail_head_cas: Mutex<bool>,
-}
-
-impl HeadCasFailureStore {
-    fn new(inner: LocalFsStore, head_key: String) -> Self {
-        Self {
-            inner,
-            head_key,
-            fail_head_cas: Mutex::new(false),
-        }
-    }
-
-    fn fail_head_cas(&self) {
-        *self
-            .fail_head_cas
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
-    }
-}
-
-#[async_trait]
-impl ObjectStore for HeadCasFailureStore {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.inner.head(key).await
-    }
-
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
-        self.inner.get(key, range).await
-    }
-
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        self.inner.get_with_metadata(key).await
-    }
-
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        if key == self.head_key
-            && matches!(&mode, PutMode::CompareAndSwap { .. })
-            && *self
-                .fail_head_cas
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-        {
-            return Err(ObjectStoreError::PreconditionFailed {
-                object_key: key.to_owned(),
-            });
-        }
-        self.inner.put(key, bytes, mode).await
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        self.inner.delete(key).await
-    }
-
-    fn list_prefix_stream(
-        &self,
-        prefix: &str,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        self.inner.list_prefix_stream(prefix)
-    }
 }
 
 #[derive(Debug)]
@@ -5415,85 +5390,6 @@ impl ObjectStore for RootCasTransportAfterCompetingRootStore {
                 ));
             }
         }
-        self.inner.put(key, bytes, mode).await
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        self.inner.delete(key).await
-    }
-
-    fn list_prefix_stream(
-        &self,
-        prefix: &str,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        self.inner.list_prefix_stream(prefix)
-    }
-}
-
-#[derive(Debug)]
-pub(crate) struct MetadataSstGetCountingStore {
-    inner: LocalFsStore,
-    metadata_sst_gets: Mutex<usize>,
-}
-
-impl MetadataSstGetCountingStore {
-    pub(crate) fn new(inner: LocalFsStore) -> Self {
-        Self {
-            inner,
-            metadata_sst_gets: Mutex::new(0),
-        }
-    }
-
-    pub(crate) fn metadata_sst_gets(&self) -> usize {
-        *self
-            .metadata_sst_gets
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    pub(crate) fn reset_metadata_sst_gets(&self) {
-        *self
-            .metadata_sst_gets
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = 0;
-    }
-
-    fn record_if_metadata_sst(&self, key: &str) {
-        if key.contains("/metadata/tables/") && key.ends_with(".sst.zst") {
-            *self
-                .metadata_sst_gets
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) += 1;
-        }
-    }
-}
-
-#[async_trait]
-impl ObjectStore for MetadataSstGetCountingStore {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.inner.head(key).await
-    }
-
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
-        self.record_if_metadata_sst(key);
-        self.inner.get(key, range).await
-    }
-
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        self.record_if_metadata_sst(key);
-        self.inner.get_with_metadata(key).await
-    }
-
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
         self.inner.put(key, bytes, mode).await
     }
 

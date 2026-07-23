@@ -6,20 +6,12 @@
 
 use loonfs::{CapabilityDocument, FsReader, SharedObjectStore};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_test_support::block_on::block_on;
 use std::collections::BTreeSet;
-use std::future::Future;
 use std::sync::Arc;
 use tempfile::tempdir;
 
 const API_SPEC_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/specs/api.md");
-
-fn block_on<T>(future: impl Future<Output = T>) -> T {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("test runtime")
-        .block_on(future)
-}
 
 fn embedded_capabilities() -> CapabilityDocument {
     let temp_dir = tempdir().expect("tempdir");

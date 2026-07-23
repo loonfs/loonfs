@@ -21,8 +21,8 @@ use loonfs_grep::root::load_grep_root;
 use loonfs_grep::GramIndexBuildPolicy;
 use loonfs_grep::{GrepBuildOutcome, GrepFoldOutcome, GrepIndexSnapshot, GrepService, GrepWorker};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_test_support::ids::nonzero_usize;
 use std::collections::BTreeSet;
-use std::num::NonZeroUsize;
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -36,10 +36,6 @@ fn request(pattern: &str) -> GrepRequest {
         allow_stale: false,
         allow_scan: false,
     }
-}
-
-fn nonzero_usize(value: usize) -> NonZeroUsize {
-    NonZeroUsize::new(value).expect("test value should be nonzero")
 }
 
 async fn read_context(store: &SharedObjectStore, namespace_id: &NamespaceId) -> RuntimeReadContext {

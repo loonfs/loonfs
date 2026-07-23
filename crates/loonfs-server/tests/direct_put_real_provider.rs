@@ -1,12 +1,15 @@
 // Ignored real-provider tests exercise the full server/client/direct-object-store path.
 
+mod common;
+
+use common::{start_server, test_config};
 use loonfs_api::{
     v0::{CompleteUploadRequest, ObjectTransferAccess, ValidatedContentToken},
     ChangeSeq, CommitId, CommitResponse, ContentRef, DestinationBehavior, FilesystemOperation,
     FilesystemOperationRequest, NamespaceId,
 };
-use loonfs_client::{Client, ClientConfig, ClientError, NamespacePath};
-use loonfs_server::{app, GrepConfig, RuntimeCacheConfigOverrides, ServerConfig, StoreConfig};
+use loonfs_client::{Client, ClientError, NamespacePath};
+use loonfs_server::{ServerConfig, StoreConfig};
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -18,24 +21,8 @@ const SIGNED_CHECKSUM_HEADER: &str = "x-amz-checksum-sha256";
 #[ignore = "requires real AWS S3 credentials"]
 async fn aws_s3_direct_put_real_provider_round_trip() {
     let config = AwsS3DirectPutConfig::from_env().expect("load AWS S3 direct-put environment");
-    direct_put_round_trip(ServerConfig {
-        bind: "127.0.0.1:0".to_owned(),
-        auth_token: Some(AUTH_TOKEN.into()),
-        content_token_secret: CONTENT_TOKEN_SECRET.into(),
-        writer_id: "direct-put-aws-s3".to_owned(),
-        writer_version: "direct-put-aws-s3/0.1.0".to_owned(),
-        runtime_cache: RuntimeCacheConfigOverrides::default(),
-        grep: GrepConfig::default(),
-        background_maintenance: true,
-        min_publish_interval_ms: 0,
-        max_upload_bytes: 256 * 1024 * 1024,
-        max_download_bytes: 256 * 1024 * 1024,
-        max_commit_body_bytes: 8 * 1024 * 1024,
-        max_concurrent_uploads: 8,
-        max_concurrent_downloads: 16,
-        max_concurrent_maintenance: loonfs::DEFAULT_MAX_CONCURRENT_MAINTENANCE,
-        allow_unauthenticated_remote: false,
-        store: StoreConfig::AwsS3 {
+    direct_put_round_trip(test_config(
+        StoreConfig::AwsS3 {
             bucket: config.bucket,
             region: config.region,
             endpoint_url: config.endpoint,
@@ -45,7 +32,10 @@ async fn aws_s3_direct_put_real_provider_round_trip() {
             key_prefix: Some(config.prefix),
             force_path_style: false,
         },
-    })
+        AUTH_TOKEN,
+        CONTENT_TOKEN_SECRET,
+        "direct-put-aws-s3",
+    ))
     .await;
 }
 
@@ -54,24 +44,8 @@ async fn aws_s3_direct_put_real_provider_round_trip() {
 async fn cloudflare_r2_direct_put_real_provider_round_trip() {
     let config =
         CloudflareR2DirectPutConfig::from_env().expect("load Cloudflare R2 direct-put environment");
-    direct_put_round_trip(ServerConfig {
-        bind: "127.0.0.1:0".to_owned(),
-        auth_token: Some(AUTH_TOKEN.into()),
-        content_token_secret: CONTENT_TOKEN_SECRET.into(),
-        writer_id: "direct-put-r2".to_owned(),
-        writer_version: "direct-put-r2/0.1.0".to_owned(),
-        runtime_cache: RuntimeCacheConfigOverrides::default(),
-        grep: GrepConfig::default(),
-        background_maintenance: true,
-        min_publish_interval_ms: 0,
-        max_upload_bytes: 256 * 1024 * 1024,
-        max_download_bytes: 256 * 1024 * 1024,
-        max_commit_body_bytes: 8 * 1024 * 1024,
-        max_concurrent_uploads: 8,
-        max_concurrent_downloads: 16,
-        max_concurrent_maintenance: loonfs::DEFAULT_MAX_CONCURRENT_MAINTENANCE,
-        allow_unauthenticated_remote: false,
-        store: StoreConfig::CloudflareR2 {
+    direct_put_round_trip(test_config(
+        StoreConfig::CloudflareR2 {
             bucket: config.bucket,
             account_id: config.account_id,
             endpoint_url: config.endpoint,
@@ -79,7 +53,10 @@ async fn cloudflare_r2_direct_put_real_provider_round_trip() {
             secret_access_key: config.secret_access_key.into(),
             key_prefix: Some(config.prefix),
         },
-    })
+        AUTH_TOKEN,
+        CONTENT_TOKEN_SECRET,
+        "direct-put-r2",
+    ))
     .await;
 }
 
@@ -156,6 +133,8 @@ async fn direct_put_round_trip(config: ServerConfig) {
     })
     .await
     .expect("join blocking task");
+
+    harness.server.abort();
 }
 
 fn assert_wrong_direct_put_bytes_rejected(client: &Client, namespace_id: &NamespaceId) {
@@ -269,44 +248,6 @@ fn expect_client_rejection<T>(result: Result<T, ClientError>, context: &str) {
         Err(error) => {
             unreachable!("{context} failed with unexpected client-side error: {error}")
         }
-    }
-}
-
-struct TestServer {
-    client: Client,
-    server_url: String,
-    server: tokio::task::JoinHandle<()>,
-}
-
-impl Drop for TestServer {
-    fn drop(&mut self) {
-        self.server.abort();
-    }
-}
-
-async fn start_server(config: ServerConfig) -> TestServer {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind listener");
-    let addr = listener.local_addr().expect("listener addr");
-    // The lifecycle handle is dropped: this harness aborts the server task
-    // instead of shutting it down gracefully.
-    let (router, _lifecycle) = app(config).await.expect("build app");
-    let server = tokio::spawn(async move {
-        axum::serve(listener, router).await.expect("serve app");
-    });
-    let server_url = format!("http://{addr}");
-
-    TestServer {
-        client: Client::new(ClientConfig {
-            server_url: server_url.clone(),
-            auth_token: Some(AUTH_TOKEN.to_owned()),
-            request_timeout_ms: None,
-            disable_transient_retry: false,
-        })
-        .expect("valid client config"),
-        server_url,
-        server,
     }
 }
 

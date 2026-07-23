@@ -313,16 +313,12 @@ mod tests {
         probe_durable_content_reference, read_durable_content_bytes,
         validate_durable_content_reference, DurableContentValidationError,
     };
-    use async_trait::async_trait;
     use bytes::Bytes;
-    use futures::stream::BoxStream;
     use loonfs_api::{ContentRef, ContentRefKind, ContentStoreId};
     use loonfs_objectstore::keys::content_blob;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
-    use loonfs_objectstore::{
-        ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
-    };
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use loonfs_objectstore::ObjectStore;
+    use loonfs_test_support::stores::{CountingStore, KeyPredicate, OperationClass};
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -343,16 +339,16 @@ mod tests {
     #[tokio::test]
     async fn validate_whole_file_content_ref_reads_and_hashes_the_bytes() {
         let (_temp_dir, inner, content_store_id) = test_store();
-        let store = GetCountingStore::new(inner);
+        let store = CountingStore::new(inner, KeyPredicate::content_blob());
         let bytes = b"whole file bytes";
         let content_ref = ContentRef::whole_file_v0(bytes);
         put_content_object(&store, &content_store_id, &content_ref, bytes).await;
 
-        store.reset_content_blob_get_count();
+        store.reset();
         validate_durable_content_reference(&store, &content_store_id, &content_ref)
             .await
             .expect("validate content ref");
-        assert_eq!(store.content_blob_get_count(), 1);
+        assert_eq!(store.count(OperationClass::Read), 1);
     }
 
     #[tokio::test]
@@ -417,17 +413,17 @@ mod tests {
     #[tokio::test]
     async fn probe_whole_file_content_ref_proves_durability_without_reading() {
         let (_temp_dir, inner, content_store_id) = test_store();
-        let store = GetCountingStore::new(inner);
+        let store = CountingStore::new(inner, KeyPredicate::content_blob());
         let bytes = b"provider-verified bytes";
         let content_ref = ContentRef::whole_file_v0(bytes);
         put_content_object(&store, &content_store_id, &content_ref, bytes).await;
 
-        store.reset_content_blob_get_count();
+        store.reset();
         probe_durable_content_reference(&store, &content_store_id, &content_ref)
             .await
             .expect("probe content ref");
         assert_eq!(
-            store.content_blob_get_count(),
+            store.count(OperationClass::Read),
             0,
             "the probe proves durability from metadata alone"
         );
@@ -501,76 +497,5 @@ mod tests {
             .put_if_absent(&key, Bytes::copy_from_slice(bytes))
             .await
             .expect("put content");
-    }
-
-    #[derive(Debug)]
-    struct GetCountingStore {
-        inner: LocalFsStore,
-        content_blob_gets: AtomicUsize,
-    }
-
-    impl GetCountingStore {
-        fn new(inner: LocalFsStore) -> Self {
-            Self {
-                inner,
-                content_blob_gets: AtomicUsize::new(0),
-            }
-        }
-
-        fn content_blob_get_count(&self) -> usize {
-            self.content_blob_gets.load(Ordering::Relaxed)
-        }
-
-        fn reset_content_blob_get_count(&self) {
-            self.content_blob_gets.store(0, Ordering::Relaxed);
-        }
-    }
-
-    #[async_trait]
-    impl ObjectStore for GetCountingStore {
-        async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-            self.inner.head(key).await
-        }
-
-        async fn get(
-            &self,
-            key: &str,
-            range: Option<ByteRange>,
-        ) -> Result<Option<Bytes>, ObjectStoreError> {
-            if key.starts_with("content-stores/") && key.contains("/blobs/") {
-                self.content_blob_gets.fetch_add(1, Ordering::Relaxed);
-            }
-            self.inner.get(key, range).await
-        }
-
-        async fn get_with_metadata(
-            &self,
-            key: &str,
-        ) -> Result<Option<ObjectBody>, ObjectStoreError> {
-            if key.starts_with("content-stores/") && key.contains("/blobs/") {
-                self.content_blob_gets.fetch_add(1, Ordering::Relaxed);
-            }
-            self.inner.get_with_metadata(key).await
-        }
-
-        async fn put(
-            &self,
-            key: &str,
-            bytes: Bytes,
-            mode: PutMode,
-        ) -> Result<ObjectMetadata, ObjectStoreError> {
-            self.inner.put(key, bytes, mode).await
-        }
-
-        async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-            self.inner.delete(key).await
-        }
-
-        fn list_prefix_stream(
-            &self,
-            prefix: &str,
-        ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-            self.inner.list_prefix_stream(prefix)
-        }
     }
 }

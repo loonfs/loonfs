@@ -380,144 +380,18 @@ mod tests {
     use crate::namespace::fork::fork_namespace;
     use crate::namespace::repair::repair_namespace;
     use crate::namespace::status::load_namespace_head_summary;
-    use futures::stream::BoxStream;
     use loonfs_api::v0::{CommitOp as ApiCommitOp, CommitRequest as ApiCommitRequest};
     use loonfs_api::wire::control::decode_control_object;
     use loonfs_api::{CommitId, ManifestId, ManifestObjectId, RepairNamespaceOutcome};
     use loonfs_objectstore::local_fs_store::LocalFsStore;
-    use loonfs_objectstore::{ByteRange, ObjectBody, ObjectMetadata, ObjectStoreError, PutMode};
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use loonfs_objectstore::PutMode;
+    use loonfs_test_support::stores::{
+        BlockingStore, KeyPredicate, OperationClass, OperationContext, OperationKind,
+    };
+    use std::sync::Arc;
     use tempfile::tempdir;
-    use tokio::sync::Semaphore;
 
     const WRITER_VERSION: &str = "writer/0.1.0";
-
-    #[derive(Debug)]
-    struct BlockingRepairDeleteStore {
-        inner: LocalFsStore,
-        gate_key: String,
-        install_blocked_once: AtomicBool,
-        install_entered: Semaphore,
-        install_release: Semaphore,
-        install_finished: Semaphore,
-        delete_blocked_once: AtomicBool,
-        delete_entered: Semaphore,
-        delete_release: Semaphore,
-    }
-
-    impl BlockingRepairDeleteStore {
-        fn new(inner: LocalFsStore, gate_key: String) -> Self {
-            Self {
-                inner,
-                gate_key,
-                install_blocked_once: AtomicBool::new(false),
-                install_entered: Semaphore::new(0),
-                install_release: Semaphore::new(0),
-                install_finished: Semaphore::new(0),
-                delete_blocked_once: AtomicBool::new(false),
-                delete_entered: Semaphore::new(0),
-                delete_release: Semaphore::new(0),
-            }
-        }
-
-        async fn wait_until_install_blocked(&self) {
-            self.install_entered
-                .acquire()
-                .await
-                .expect("blocking store remains open")
-                .forget();
-        }
-
-        fn unblock_install(&self) {
-            self.install_release.add_permits(1);
-        }
-
-        async fn wait_until_install_finished(&self) {
-            self.install_finished
-                .acquire()
-                .await
-                .expect("blocking store remains open")
-                .forget();
-        }
-
-        async fn wait_until_delete_blocked(&self) {
-            self.delete_entered
-                .acquire()
-                .await
-                .expect("blocking store remains open")
-                .forget();
-        }
-
-        fn unblock_delete(&self) {
-            self.delete_release.add_permits(1);
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl ObjectStore for BlockingRepairDeleteStore {
-        async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-            self.inner.head(key).await
-        }
-
-        async fn get_with_metadata(
-            &self,
-            key: &str,
-        ) -> Result<Option<ObjectBody>, ObjectStoreError> {
-            self.inner.get_with_metadata(key).await
-        }
-
-        async fn get(
-            &self,
-            key: &str,
-            range: Option<ByteRange>,
-        ) -> Result<Option<Bytes>, ObjectStoreError> {
-            self.inner.get(key, range).await
-        }
-
-        async fn put(
-            &self,
-            key: &str,
-            bytes: Bytes,
-            mode: PutMode,
-        ) -> Result<ObjectMetadata, ObjectStoreError> {
-            let installing_active_head = key == self.gate_key
-                && matches!(&mode, PutMode::CreateIfAbsent)
-                && decode_control_object::<HeadState>(&bytes, ControlObjectKind::WalHead)
-                    .is_ok_and(|envelope| envelope.state.state == NamespaceState::Active)
-                && !self.install_blocked_once.swap(true, Ordering::SeqCst);
-            if installing_active_head {
-                self.install_entered.add_permits(1);
-                self.install_release
-                    .acquire()
-                    .await
-                    .expect("blocking store remains open")
-                    .forget();
-                let result = self.inner.put(key, bytes, mode).await;
-                self.install_finished.add_permits(1);
-                return result;
-            }
-            self.inner.put(key, bytes, mode).await
-        }
-
-        async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-            if key != self.gate_key && !self.delete_blocked_once.swap(true, Ordering::SeqCst) {
-                self.delete_entered.add_permits(1);
-                self.delete_release
-                    .acquire()
-                    .await
-                    .expect("blocking store remains open")
-                    .forget();
-            }
-            self.inner.delete(key).await
-        }
-
-        fn list_prefix_stream(
-            &self,
-            prefix: &str,
-        ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-            self.inner.list_prefix_stream(prefix)
-        }
-    }
 
     fn context(now_ms: u64) -> MutationContext {
         MutationContext {
@@ -782,26 +656,51 @@ mod tests {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-        let store = BlockingRepairDeleteStore::new(store, wal_head(namespace_id.as_str()));
+        let gate_key = wal_head(namespace_id.as_str());
+        let delete_gate = Arc::new(BlockingStore::new(
+            store,
+            KeyPredicate::new({
+                let gate_key = gate_key.clone();
+                move |key| key != gate_key
+            }),
+            OperationClass::Delete,
+        ));
+        delete_gate.block_next();
+        let store = Arc::new(BlockingStore::matching(
+            delete_gate.clone(),
+            move |operation: &OperationContext<'_>| {
+                let OperationKind::Put {
+                    bytes,
+                    mode: PutMode::CreateIfAbsent,
+                } = operation.kind()
+                else {
+                    return false;
+                };
+                operation.key() == gate_key
+                    && decode_control_object::<HeadState>(bytes, ControlObjectKind::WalHead)
+                        .is_ok_and(|envelope| envelope.state.state == NamespaceState::Active)
+            },
+        ));
+        store.block_next();
 
         let create_context = context(1_000);
         let create = bootstrap_namespace(&store, &namespace_id, &create_context, false);
         let repair = async {
-            store.wait_until_install_blocked().await;
+            store.wait_until_blocked().await;
             // The create passed its absent probe and prepared its immutable
             // manifest, but is paused at the first fixed-key conditional
             // install write.
             let repair_context = context(u64::MAX);
             let repair = repair_namespace(&store, &namespace_id, &repair_context);
             let coordinate = async {
-                store.wait_until_delete_blocked().await;
+                delete_gate.wait_until_blocked().await;
                 let head = read_head_object(&store, &namespace_id)
                     .await
                     .expect("condemned gate is durable before subtree deletion");
                 assert_eq!(head.envelope.state.state, NamespaceState::Condemned);
-                store.unblock_install();
-                store.wait_until_install_finished().await;
-                store.unblock_delete();
+                store.release();
+                store.wait_until_completed().await;
+                delete_gate.release();
             };
             let (repair, ()) = tokio::join!(repair, coordinate);
             repair

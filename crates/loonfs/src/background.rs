@@ -207,15 +207,12 @@ mod tests {
     // The drain test injects a task panic to assert it is surfaced.
 
     use super::*;
+    use loonfs_test_support::ids::{namespace_id, nonzero_usize};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
-    fn namespace_id() -> NamespaceId {
-        NamespaceId::parse("demo").expect("valid namespace id")
-    }
-
     fn concurrency_cap(value: usize) -> NonZeroUsize {
-        NonZeroUsize::new(value).expect("test cap should be nonzero")
+        nonzero_usize(value)
     }
 
     /// Sets its flag when dropped, mimicking the claim guard the auto-tick
@@ -232,7 +229,7 @@ mod tests {
     #[test]
     fn a_request_during_an_active_tick_defers_and_reruns_exactly_once() {
         let background = BackgroundWork::new(FsBackgroundWork::Enabled, None, concurrency_cap(8));
-        let namespace_id = namespace_id();
+        let namespace_id = namespace_id("demo");
 
         assert!(background.try_claim(&namespace_id), "first claim spawns");
         assert!(
@@ -257,7 +254,7 @@ mod tests {
     #[test]
     fn shutdown_wins_over_a_deferred_rerun() {
         let background = BackgroundWork::new(FsBackgroundWork::Enabled, None, concurrency_cap(8));
-        let namespace_id = namespace_id();
+        let namespace_id = namespace_id("demo");
 
         assert!(background.try_claim(&namespace_id));
         assert!(!background.try_claim(&namespace_id), "defers while active");
@@ -271,7 +268,7 @@ mod tests {
     #[tokio::test]
     async fn spawn_after_shut_down_refuses_and_drops_the_future() {
         let background = BackgroundWork::new(FsBackgroundWork::Enabled, None, concurrency_cap(8));
-        let namespace_id = namespace_id();
+        let namespace_id = namespace_id("demo");
 
         // The racy interleaving a shutdown must win: the claim lands first...
         assert!(background.try_claim(&namespace_id));
@@ -336,7 +333,7 @@ mod tests {
     #[tokio::test]
     async fn claims_are_singleflight_and_refused_after_shut_down() {
         let background = BackgroundWork::new(FsBackgroundWork::Enabled, None, concurrency_cap(8));
-        let namespace_id = namespace_id();
+        let namespace_id = namespace_id("demo");
         assert!(background.try_claim(&namespace_id));
         assert!(
             !background.try_claim(&namespace_id),
@@ -359,7 +356,7 @@ mod tests {
     async fn manual_only_policy_never_claims() {
         let background =
             BackgroundWork::new(FsBackgroundWork::ManualOnly, None, concurrency_cap(8));
-        assert!(!background.try_claim(&namespace_id()));
+        assert!(!background.try_claim(&namespace_id("demo")));
     }
 
     #[tokio::test]

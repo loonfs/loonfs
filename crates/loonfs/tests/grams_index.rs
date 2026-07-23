@@ -17,8 +17,9 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
 };
+use loonfs_test_support::ids::nonzero_usize;
 use std::collections::BTreeSet;
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::num::NonZeroU64;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -34,10 +35,6 @@ fn request(pattern: &str) -> GrepRequest {
         allow_stale: false,
         allow_scan: false,
     }
-}
-
-fn nonzero_usize(value: usize) -> NonZeroUsize {
-    NonZeroUsize::new(value).expect("test value should be nonzero")
 }
 
 /// Content blob object keys currently in the store, for pinpointing the

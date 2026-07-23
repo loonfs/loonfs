@@ -6,9 +6,6 @@
 //! handle from one runtime fixture, matching the runtime-ownership contract
 //! the handles document.
 
-use async_trait::async_trait;
-use bytes::Bytes;
-use futures::stream::BoxStream;
 use loonfs::{
     CommitId, CreateCheckpointOptions, CreateNamespaceOptions, FsAdmin, FsBackgroundWork, FsReader,
     FsWriter, MaintenanceTickOptions, ManifestId, NamespaceId, PutFileOptions, RuntimeCacheConfig,
@@ -16,36 +13,21 @@ use loonfs::{
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
 use loonfs_core::control::load_namespace_metadata_root_control;
-use loonfs_objectstore::keys::{metadata_manifest_object, metadata_root};
+use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_objectstore::{
-    ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
-};
-use std::future::Future;
+use loonfs_objectstore::ObjectStore;
+use loonfs_test_support::block_on::block_on;
+use loonfs_test_support::ids::namespace_id;
+use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationClass};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tempfile::tempdir;
-use tokio::sync::Notify;
-use tokio::time::{timeout, Duration};
 
 fn store_config(root: &Path) -> StoreConfig {
     StoreConfig::LocalFs {
         root: root.to_string_lossy().into_owned(),
         key_prefix: None,
     }
-}
-
-fn namespace_id() -> NamespaceId {
-    NamespaceId::parse("demo").expect("valid namespace id")
-}
-
-fn block_on<T>(future: impl Future<Output = T>) -> T {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("test runtime")
-        .block_on(future)
 }
 
 fn wal_tail_segment_threshold() -> u64 {
@@ -84,113 +66,6 @@ async fn fill_wal_tail_past_threshold(writer: &FsWriter, namespace_id: &Namespac
     }
 }
 
-/// Holds a maintenance tick mid-run by blocking the namespace's metadata
-/// root compare-and-swap; publishes keep flowing (they CAS the WAL head, a
-/// different key). Bounded-wait pattern as in publication.rs.
-#[derive(Debug)]
-struct BlockingRootCasStore {
-    inner: LocalFsStore,
-    root_key: String,
-    block_next: AtomicBool,
-    blocked: AtomicBool,
-    released: AtomicBool,
-    blocked_notify: Notify,
-    release_notify: Notify,
-}
-
-impl BlockingRootCasStore {
-    fn new(root: &Path, namespace_id: &NamespaceId) -> Self {
-        Self {
-            inner: LocalFsStore::new(root).expect("create local-fs store"),
-            root_key: metadata_root(namespace_id.as_str()),
-            block_next: AtomicBool::new(false),
-            blocked: AtomicBool::new(false),
-            released: AtomicBool::new(false),
-            blocked_notify: Notify::new(),
-            release_notify: Notify::new(),
-        }
-    }
-
-    fn arm_next_root_cas(&self) {
-        self.released.store(false, Ordering::SeqCst);
-        self.blocked.store(false, Ordering::SeqCst);
-        self.block_next.store(true, Ordering::SeqCst);
-    }
-
-    async fn wait_for_blocked_root_cas(&self) {
-        timeout(Duration::from_secs(10), async {
-            while !self.blocked.load(Ordering::SeqCst) {
-                let notified = self.blocked_notify.notified();
-                if self.blocked.load(Ordering::SeqCst) {
-                    break;
-                }
-                let _ = timeout(Duration::from_millis(50), notified).await;
-            }
-        })
-        .await
-        .expect("a metadata root CAS must reach the block");
-    }
-
-    fn release_root_cas(&self) {
-        self.released.store(true, Ordering::SeqCst);
-        self.release_notify.notify_waiters();
-    }
-}
-
-#[async_trait]
-impl ObjectStore for BlockingRootCasStore {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
-        self.inner.head(key).await
-    }
-
-    async fn get(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<Option<Bytes>, ObjectStoreError> {
-        self.inner.get(key, range).await
-    }
-
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
-        self.inner.get_with_metadata(key).await
-    }
-
-    async fn put(
-        &self,
-        key: &str,
-        bytes: Bytes,
-        mode: PutMode,
-    ) -> Result<ObjectMetadata, ObjectStoreError> {
-        let should_block = key == self.root_key
-            && matches!(mode, PutMode::CompareAndSwap { .. })
-            && self.block_next.swap(false, Ordering::SeqCst);
-        if should_block {
-            self.blocked.store(true, Ordering::SeqCst);
-            self.blocked_notify.notify_waiters();
-            while !self.released.load(Ordering::SeqCst) {
-                let notified = self.release_notify.notified();
-                if self.released.load(Ordering::SeqCst) {
-                    break;
-                }
-                let _ = timeout(Duration::from_millis(50), notified).await;
-            }
-            self.blocked.store(false, Ordering::SeqCst);
-        }
-        self.inner.put(key, bytes, mode).await
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
-        self.inner.delete(key).await
-    }
-
-    fn list_prefix_stream(
-        &self,
-        prefix: &str,
-    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
-        self.inner.list_prefix_stream(prefix)
-    }
-}
-
 #[test]
 fn a_threshold_crossing_during_an_active_tick_still_bounds_the_tail() {
     // The interleaving behind the CI failures on the extraction stack: the
@@ -199,9 +74,13 @@ fn a_threshold_crossing_during_an_active_tick_still_bounds_the_tail() {
     // them leaves the tail unbounded when those were the last writes before
     // an idle period.
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace_id();
+    let namespace_id = namespace_id("demo");
     block_on(async {
-        let blocking = Arc::new(BlockingRootCasStore::new(temp_dir.path(), &namespace_id));
+        let blocking = Arc::new(BlockingStore::new(
+            LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
+            KeyPredicate::metadata_root(namespace_id.as_str()),
+            OperationClass::CompareAndSwap,
+        ));
         let store: SharedObjectStore = blocking.clone();
         let writer = FsWriter::builder_with_store(store)
             .writer_id("handle-test-writer")
@@ -216,9 +95,9 @@ fn a_threshold_crossing_during_an_active_tick_still_bounds_the_tail() {
 
         // The threshold-crossing publish spawns the tick; the armed store
         // holds that tick at its metadata root CAS.
-        blocking.arm_next_root_cas();
+        blocking.block_next();
         fill_wal_tail_past_threshold(&writer, &namespace_id).await;
-        blocking.wait_for_blocked_root_cas().await;
+        blocking.wait_until_blocked().await;
 
         // A full second threshold's worth of publishes lands while the tick
         // is held; every crossing defers to the running tick.
@@ -234,7 +113,7 @@ fn a_threshold_crossing_during_an_active_tick_still_bounds_the_tail() {
                 .expect("put file during held tick");
         }
 
-        blocking.release_root_cas();
+        blocking.release();
         writer
             .wait_for_background_work()
             .await
@@ -263,7 +142,7 @@ fn a_threshold_crossing_during_an_active_tick_still_bounds_the_tail() {
 #[test]
 fn writer_reader_and_admin_share_a_namespace_through_store_config() {
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace_id();
+    let namespace_id = namespace_id("demo");
     block_on(async {
         let writer = writer(temp_dir.path(), FsBackgroundWork::ManualOnly).await;
         writer
@@ -408,7 +287,7 @@ fn put_file_bytes_and_prepare_then_put_commit_equivalent_state() {
 #[test]
 fn manual_only_writer_never_schedules_maintenance() {
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace_id();
+    let namespace_id = namespace_id("demo");
     block_on(async {
         let writer = writer(temp_dir.path(), FsBackgroundWork::ManualOnly).await;
         writer
@@ -468,7 +347,7 @@ fn manual_only_writer_never_schedules_maintenance() {
 #[test]
 fn enabled_writer_schedules_maintenance_on_its_owning_runtime() {
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace_id();
+    let namespace_id = namespace_id("demo");
     block_on(async {
         let writer = writer(temp_dir.path(), FsBackgroundWork::Enabled).await;
         writer
@@ -510,7 +389,7 @@ fn enabled_writer_schedules_maintenance_with_caches_disabled() {
     // Cache configuration is performance-only: with the caches off, the
     // Enabled policy still schedules the same post-publish maintenance.
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace_id();
+    let namespace_id = namespace_id("demo");
     block_on(async {
         let writer = FsWriter::builder(store_config(temp_dir.path()))
             .writer_id("handle-test-writer")
@@ -552,7 +431,7 @@ fn enabled_writer_schedules_maintenance_with_caches_disabled() {
 #[test]
 fn shut_down_writer_rejects_new_background_work_but_keeps_writing() {
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace_id();
+    let namespace_id = namespace_id("demo");
     block_on(async {
         let writer = writer(temp_dir.path(), FsBackgroundWork::Enabled).await;
         writer
@@ -648,7 +527,7 @@ fn writer_builder_rejects_zero_maintenance_concurrency() {
 #[test]
 fn admin_checkpoint_and_retention_are_explicit_one_shot_calls() {
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace_id();
+    let namespace_id = namespace_id("demo");
     block_on(async {
         let writer = writer(temp_dir.path(), FsBackgroundWork::ManualOnly).await;
         writer
@@ -698,7 +577,7 @@ fn admin_checkpoint_and_retention_are_explicit_one_shot_calls() {
 #[test]
 fn enabled_writer_drains_reorganization_backlog_without_admin() {
     let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace_id();
+    let namespace_id = namespace_id("demo");
     block_on(async {
         let writer = writer(temp_dir.path(), FsBackgroundWork::Enabled).await;
         writer
