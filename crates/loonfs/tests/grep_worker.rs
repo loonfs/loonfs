@@ -913,6 +913,7 @@ async fn pointer_advance_heals_a_manifest_deleted_after_already_exists() {
         current_state.lifecycle().clone(),
         GrepIndexState::new(
             current_state.index().built_through_seq,
+            current_state.index().next_delta_index,
             current_state.index().fold.clone(),
             current_state.index().next_run_ordinal + 1,
         ),

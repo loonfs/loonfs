@@ -19,8 +19,11 @@ pub mod root;
 mod service;
 mod worker;
 
-pub use config::{GrepWorkerConfig, GrepWorkerConfigError};
-pub use driver::{GrepDriver, GrepDriverHandle, GrepDriverParked, GrepDriverState, GrepDriverTask};
+pub use config::{GrepWorkerConfig, GrepWorkerConfigError, DEFAULT_MAX_CONCURRENT_STEPS};
+pub use driver::{
+    GrepDriver, GrepDriverHandle, GrepDriverParked, GrepDriverState, GrepDriverTask,
+    GrepStepLimiter,
+};
 pub use error::GrepError as Error;
 pub use error::{GrepError, Result};
 pub use service::{

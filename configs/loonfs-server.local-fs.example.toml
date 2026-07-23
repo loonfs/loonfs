@@ -54,7 +54,9 @@ writer_version = "loonfs-server/0.1.0"
 # an external `loonfs-grep` process.
 #[grep]
 #mode = "embedded"
-# Bounded build/fold budgets; every value must be greater than zero.
+# Shared expensive-step cap and bounded build/fold budgets; every value must
+# be greater than zero.
+#max_concurrent_steps = 2
 #max_files_per_step = 256
 #max_content_bytes_per_step = 67108864
 #max_rows_per_segment = 65536

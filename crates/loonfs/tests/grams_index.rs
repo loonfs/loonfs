@@ -7,12 +7,12 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
 use loonfs::{
-    ChangeSeq, CreateNamespaceOptions, ErrorCode, FsAdmin, FsReader, FsWriter, GrepRequest,
-    NamespaceId, PutFileOptions,
+    ChangeSeq, CommitId, CommitOp, CommitRequest, CreateNamespaceOptions, ErrorCode, FsAdmin,
+    FsReader, FsWriter, GrepRequest, InodeId, NamespaceId, PutFileOptions,
 };
 use loonfs_api::decode_grep_cursor;
 use loonfs_grep::codec::INDEX_GRAMS_MAX_FILE_BYTES;
-use loonfs_grep::{GramIndexBuildPolicy, GrepWorker};
+use loonfs_grep::{GramIndexBuildPolicy, GrepBuildOutcome, GrepWorker};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
@@ -380,6 +380,254 @@ async fn a_worker_policy_bounds_each_build_step() {
     writer.shutdown_background().await.expect("writer shutdown");
 }
 
+/// A single legal commit can carry thousands of file revisions. The content
+/// budget must split that one WAL record at a durable delta cursor, queries
+/// must combine the indexed prefix with only its unindexed suffix, and a new
+/// worker must resume without reading the prefix again.
+#[tokio::test]
+async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumable() {
+    const FILES: usize = 1_000;
+    const FILES_PER_STEP: usize = 500;
+
+    let temp_dir = tempdir().expect("tempdir");
+    let raw_store = Arc::new(BuildContentAccountingStore::new(temp_dir.path()));
+    let store: loonfs::SharedObjectStore = raw_store.clone();
+    let namespace_id = NamespaceId::parse("grams-thousand-atomic").expect("namespace id");
+    let writer = FsWriter::builder_with_store(store.clone())
+        .writer_id("grams-thousand-writer")
+        .min_publish_interval_ms(0)
+        .build()
+        .await
+        .expect("build writer");
+    let admin = FsAdmin::builder_with_store(store.clone())
+        .actor_id("grams-thousand-admin")
+        .build()
+        .await
+        .expect("build admin");
+    let reader = FsReader::builder_with_store(store.clone())
+        .build()
+        .await
+        .expect("build reader");
+    let first_worker = grep_worker(&store);
+
+    writer
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
+    admin
+        .enable_grams_index(&namespace_id)
+        .await
+        .expect("enable");
+    first_worker
+        .build_step(&namespace_id, GramIndexBuildPolicy::default())
+        .await
+        .expect("materialize empty backfill");
+
+    let content_bytes = format!("bounded needle file {:04}\n", 0).len();
+    let max_content_bytes_per_step = (content_bytes * FILES_PER_STEP) as u64;
+    let policy = GramIndexBuildPolicy {
+        max_files_per_step: FILES,
+        max_content_bytes_per_step,
+        max_l0_runs: usize::MAX,
+        ..GramIndexBuildPolicy::default()
+    };
+    let mut ops = Vec::with_capacity(FILES);
+    let mut prepared = Vec::with_capacity(FILES);
+    for index in 0..FILES {
+        let bytes = format!("bounded needle file {index:04}\n");
+        assert_eq!(bytes.len(), content_bytes);
+        let content = writer
+            .prepare_file_bytes(&namespace_id, bytes.as_bytes())
+            .await
+            .expect("prepare atomic-commit content");
+        ops.push(CommitOp::CreateFile {
+            parent_inode_id: InodeId(1),
+            display_name: format!("bounded-{index:04}.txt"),
+            content_ref: content.content_ref().clone(),
+        });
+        prepared.push(content);
+    }
+    let commit = writer
+        .commit_operations_prepared(
+            &namespace_id,
+            CommitRequest {
+                commit_id: CommitId::parse("thousand-file-atomic").expect("commit id"),
+                preconditions: Vec::new(),
+                ops,
+                message: None,
+            },
+            prepared,
+        )
+        .await
+        .expect("publish thousand-file commit");
+
+    raw_store.reset_content_reads();
+    let first = first_worker
+        .build_step(&namespace_id, policy)
+        .await
+        .expect("first bounded build");
+    assert!(matches!(
+        first.outcome,
+        GrepBuildOutcome::Published {
+            indexed_revisions,
+            ..
+        } if indexed_revisions == FILES_PER_STEP as u64
+    ));
+    let first_reads = raw_store.take_content_reads();
+    assert_eq!(first_reads.len(), FILES_PER_STEP);
+    assert!(
+        content_read_bytes(&first_reads) <= max_content_bytes_per_step,
+        "first step read {} content bytes past its {max_content_bytes_per_step}-byte budget",
+        content_read_bytes(&first_reads)
+    );
+
+    let partial = loonfs_grep::root::load_grep_root(&*store, &namespace_id)
+        .await
+        .expect("load partial grep root")
+        .expect("partial grep root");
+    assert_eq!(
+        partial.state().index().built_through_seq,
+        commit.committed_seq
+    );
+    assert!(
+        partial.state().index().next_delta_index > 0,
+        "the first step must stop within the atomic commit"
+    );
+    let prefix_segment_ids: BTreeSet<_> = partial
+        .state()
+        .segments()
+        .iter()
+        .map(|segment| segment.segment_id.clone())
+        .collect();
+
+    assert_grep_paths(
+        &reader,
+        &namespace_id,
+        "file 0000",
+        BTreeSet::from(["/bounded-0000.txt".to_owned()]),
+    )
+    .await;
+    assert_grep_paths(
+        &reader,
+        &namespace_id,
+        "file 0999",
+        BTreeSet::from(["/bounded-0999.txt".to_owned()]),
+    )
+    .await;
+    assert_eq!(
+        collect_grep_paths(&reader, &namespace_id, "bounded needle")
+            .await
+            .len(),
+        FILES,
+        "the indexed prefix and unindexed suffix must produce every file exactly once"
+    );
+
+    // Simulate a crash: the fresh worker has no in-memory collection state and
+    // can resume only from the published manifest cursor.
+    let resumed_worker = GrepWorker::new(
+        store.clone(),
+        "grams-resumed-worker",
+        "grams-resumed-session",
+        "grams-test/0.1",
+    );
+    raw_store.reset_content_reads();
+    let second = resumed_worker
+        .build_step(&namespace_id, policy)
+        .await
+        .expect("resumed bounded build");
+    assert!(matches!(
+        second.outcome,
+        GrepBuildOutcome::Published {
+            indexed_revisions,
+            ..
+        } if indexed_revisions == FILES_PER_STEP as u64
+    ));
+    let second_reads = raw_store.take_content_reads();
+    assert_eq!(second_reads.len(), FILES_PER_STEP);
+    assert!(
+        content_read_bytes(&second_reads) <= max_content_bytes_per_step,
+        "resumed step read {} content bytes past its {max_content_bytes_per_step}-byte budget",
+        content_read_bytes(&second_reads)
+    );
+    let first_keys: BTreeSet<_> = first_reads.iter().map(|(key, _)| key).collect();
+    let second_keys: BTreeSet<_> = second_reads.iter().map(|(key, _)| key).collect();
+    assert!(
+        first_keys.is_disjoint(&second_keys),
+        "the fresh worker must not re-read any indexed-prefix content"
+    );
+    assert_eq!(first_keys.len() + second_keys.len(), FILES);
+
+    let complete = loonfs_grep::root::load_grep_root(&*store, &namespace_id)
+        .await
+        .expect("load complete grep root")
+        .expect("complete grep root");
+    assert_eq!(
+        complete.state().index().built_through_seq,
+        commit.committed_seq
+    );
+    assert_eq!(complete.state().index().next_delta_index, 0);
+    let complete_segment_ids: BTreeSet<_> = complete
+        .state()
+        .segments()
+        .iter()
+        .map(|segment| segment.segment_id.clone())
+        .collect();
+    assert!(
+        prefix_segment_ids.is_subset(&complete_segment_ids),
+        "resume must retain the prefix segments instead of replacing them"
+    );
+    assert_eq!(
+        collect_grep_paths(&reader, &namespace_id, "bounded needle")
+            .await
+            .len(),
+        FILES
+    );
+
+    writer.shutdown_background().await.expect("writer shutdown");
+}
+
+async fn assert_grep_paths(
+    reader: &FsReader,
+    namespace_id: &NamespaceId,
+    pattern: &str,
+    expected: BTreeSet<String>,
+) {
+    assert_eq!(
+        collect_grep_paths(reader, namespace_id, pattern).await,
+        expected
+    );
+}
+
+async fn collect_grep_paths(
+    reader: &FsReader,
+    namespace_id: &NamespaceId,
+    pattern: &str,
+) -> BTreeSet<String> {
+    let mut request = grep_request(pattern);
+    request.limit = Some(1_000);
+    let mut paths = BTreeSet::new();
+    loop {
+        let response = reader
+            .grep(namespace_id, &request)
+            .await
+            .expect("grep bounded atomic commit");
+        paths.extend(
+            response
+                .matches
+                .into_iter()
+                .map(|found| found.absolute_path),
+        );
+        let Some(cursor) = response.next_cursor else {
+            return paths;
+        };
+        request.cursor = Some(cursor);
+    }
+}
+
+fn content_read_bytes(reads: &[(String, usize)]) -> u64 {
+    reads.iter().map(|(_, bytes)| *bytes as u64).sum::<u64>()
+}
+
 /// Ten one-file rounds cross the default delta-fold threshold, so the
 /// worker steps tier the index (delta segments fold into a mid run)
 /// while the rounds run. Grep must answer identically before, across, and
@@ -466,6 +714,94 @@ async fn grep_answers_identically_across_tiered_folds() {
     );
 
     writer.shutdown_background().await.expect("writer shutdown");
+}
+
+/// Accounts full content-blob GETs issued by one explicit worker step.
+#[derive(Debug)]
+struct BuildContentAccountingStore {
+    inner: LocalFsStore,
+    content_reads: Mutex<Vec<(String, usize)>>,
+}
+
+impl BuildContentAccountingStore {
+    fn new(root: &Path) -> Self {
+        Self {
+            inner: LocalFsStore::new(root).expect("create local-fs store"),
+            content_reads: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn reset_content_reads(&self) {
+        self.content_reads
+            .lock()
+            .expect("content read accounting lock")
+            .clear();
+    }
+
+    fn take_content_reads(&self) -> Vec<(String, usize)> {
+        std::mem::take(
+            &mut *self
+                .content_reads
+                .lock()
+                .expect("content read accounting lock"),
+        )
+    }
+
+    fn record_content_read(&self, key: &str, bytes: usize) {
+        if key.contains("/blobs/sha256/") {
+            self.content_reads
+                .lock()
+                .expect("content read accounting lock")
+                .push((key.to_owned(), bytes));
+        }
+    }
+}
+
+#[async_trait]
+impl ObjectStore for BuildContentAccountingStore {
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head(key).await
+    }
+
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        let body = self.inner.get_with_metadata(key).await?;
+        if let Some(body) = &body {
+            self.record_content_read(key, body.bytes.len());
+        }
+        Ok(body)
+    }
+
+    async fn get(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<Option<Bytes>, ObjectStoreError> {
+        let bytes = self.inner.get(key, range).await?;
+        if let Some(bytes) = &bytes {
+            self.record_content_read(key, bytes.len());
+        }
+        Ok(bytes)
+    }
+
+    async fn put(
+        &self,
+        key: &str,
+        bytes: Bytes,
+        mode: PutMode,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        self.inner.put(key, bytes, mode).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        self.inner.delete(key).await
+    }
+
+    fn list_prefix_stream(
+        &self,
+        prefix: &str,
+    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+        self.inner.list_prefix_stream(prefix)
+    }
 }
 
 /// Counts store GETs against gram index segment objects, so tests can

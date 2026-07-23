@@ -311,6 +311,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             GrepLifecycle::Disabled,
             GrepIndexState::new(
                 current.state().index().built_through_seq,
+                0,
                 None,
                 current.state().index().next_run_ordinal,
             ),
@@ -392,6 +393,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                     namespace_id,
                     &content_store_id,
                     current.state().index().built_through_seq,
+                    current.state().index().next_delta_index,
                     policy,
                 )
                 .await?
@@ -562,6 +564,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             lifecycle,
             GrepIndexState::new(
                 unit.built_through_seq,
+                unit.next_delta_index,
                 current.state().index().fold.clone(),
                 next_run_ordinal,
             ),
@@ -614,7 +617,7 @@ fn backfilling_root(
             backfill_cursor: String::new(),
             checkpoint_id: Some(checkpoint_id),
         },
-        GrepIndexState::new(target_seq, None, next_run_ordinal),
+        GrepIndexState::new(target_seq, 0, None, next_run_ordinal),
         Vec::new(),
     )
     .map_err(core_state_error)
@@ -636,6 +639,7 @@ struct CollectedIndexUnit {
     skipped_revisions: u64,
     run_seq: ChangeSeq,
     built_through_seq: ChangeSeq,
+    next_delta_index: u32,
     backfill_cursor: Option<String>,
 }
 
@@ -659,6 +663,7 @@ async fn collect_backfill_unit<S: ObjectStore + ?Sized>(
         skipped_revisions: 0,
         run_seq: target_seq,
         built_through_seq: target_seq,
+        next_delta_index: 0,
         backfill_cursor: Some(cursor.to_owned()),
     };
     let mut pending = Vec::new();
@@ -695,9 +700,15 @@ async fn collect_incremental_unit<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     content_store_id: &ContentStoreId,
     built_through_seq: ChangeSeq,
+    next_delta_index: u32,
     policy: GramIndexBuildPolicy,
 ) -> Result<IncrementalCollection> {
-    let feed = load_grep_change_feed(store, namespace_id, built_through_seq).await?;
+    let after_seq = if next_delta_index == 0 {
+        built_through_seq
+    } else {
+        ChangeSeq(built_through_seq.0.saturating_sub(1))
+    };
+    let feed = load_grep_change_feed(store, namespace_id, after_seq).await?;
     let GrepChangeFeed::Records { records, .. } = feed else {
         return Ok(IncrementalCollection::RebootstrapRequired);
     };
@@ -710,18 +721,24 @@ async fn collect_incremental_unit<S: ObjectStore + ?Sized>(
         skipped_revisions: 0,
         run_seq: built_through_seq,
         built_through_seq,
+        next_delta_index,
         backfill_cursor: None,
     };
     let mut pending = Vec::new();
     let mut planned_content_bytes = 0u64;
     let mut examined_files = 0usize;
-    for record in records {
-        if examined_files >= policy.max_files_per_step
-            || planned_content_bytes >= policy.max_content_bytes_per_step
-        {
-            break;
+    'records: for record in records {
+        let start_delta_index = if record.seq == built_through_seq {
+            usize::try_from(next_delta_index).map_err(|_| {
+                CoreError::Internal("grep delta cursor does not fit in memory".to_owned())
+            })?
+        } else {
+            0
+        };
+        if start_delta_index > record.deltas.len() {
+            return Ok(IncrementalCollection::RebootstrapRequired);
         }
-        for delta in &record.deltas {
+        for (delta_index, delta) in record.deltas.iter().enumerate().skip(start_delta_index) {
             if let WalDelta::AppendFileRevision {
                 inode_id,
                 revision_no,
@@ -729,6 +746,19 @@ async fn collect_incremental_unit<S: ObjectStore + ?Sized>(
                 ..
             } = &delta.delta
             {
+                let would_exceed_content_budget = planned_content_bytes > 0
+                    && planned_content_bytes.saturating_add(content_ref.size_bytes)
+                        > policy.max_content_bytes_per_step;
+                if examined_files >= policy.max_files_per_step || would_exceed_content_budget {
+                    if delta_index > 0 {
+                        unit.built_through_seq = record.seq;
+                        unit.run_seq = record.seq;
+                        unit.next_delta_index = u32::try_from(delta_index).map_err(|_| {
+                            CoreError::Internal("grep delta cursor overflow".to_owned())
+                        })?;
+                    }
+                    break 'records;
+                }
                 examined_files += 1;
                 if content_ref.size_bytes > INDEX_GRAMS_MAX_FILE_BYTES {
                     unit.skipped_revisions += 1;
@@ -740,12 +770,30 @@ async fn collect_incremental_unit<S: ObjectStore + ?Sized>(
                         content_ref: content_ref.clone(),
                     });
                 }
+                if examined_files >= policy.max_files_per_step
+                    || planned_content_bytes >= policy.max_content_bytes_per_step
+                {
+                    unit.built_through_seq = record.seq;
+                    unit.run_seq = record.seq;
+                    let next_delta_index = delta_index.checked_add(1).ok_or_else(|| {
+                        CoreError::Internal("grep delta cursor overflow".to_owned())
+                    })?;
+                    if next_delta_index < record.deltas.len() {
+                        unit.next_delta_index = u32::try_from(next_delta_index).map_err(|_| {
+                            CoreError::Internal("grep delta cursor overflow".to_owned())
+                        })?;
+                    } else {
+                        unit.next_delta_index = 0;
+                    }
+                    break 'records;
+                }
             }
         }
         unit.built_through_seq = record.seq;
         unit.run_seq = record.seq;
+        unit.next_delta_index = 0;
     }
-    if unit.built_through_seq == built_through_seq {
+    if unit.built_through_seq == built_through_seq && unit.next_delta_index == next_delta_index {
         return Ok(IncrementalCollection::UpToDate);
     }
     load_and_fold_revision_contents(store, content_store_id, &pending, &mut unit).await?;
@@ -1029,6 +1077,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             current.state().lifecycle().clone(),
             GrepIndexState::new(
                 current.state().index().built_through_seq,
+                current.state().index().next_delta_index,
                 fold,
                 next_run_ordinal,
             ),

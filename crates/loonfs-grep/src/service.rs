@@ -79,6 +79,7 @@ pub struct GrepIndexSnapshot {
 #[derive(Debug, Clone)]
 struct MaterializedGrepIndexSnapshot {
     built_through_seq: ChangeSeq,
+    next_delta_index: u32,
     segments: Vec<GrepQuerySegment>,
 }
 
@@ -194,6 +195,7 @@ impl GrepIndexSnapshot {
         Self {
             state: Ok(MaterializedGrepIndexSnapshot {
                 built_through_seq: root.index().built_through_seq,
+                next_delta_index: root.index().next_delta_index,
                 segments,
             }),
         }
@@ -464,19 +466,39 @@ async fn segment_postings_for_gram<S: ObjectStore + ?Sized>(
     Ok(postings)
 }
 
-/// The file revisions committed after the index watermark, newest revision
-/// per inode, from WAL replay — the exhaustive-scan tail.
+/// The file revisions after the index cursor, newest revision per inode, from
+/// WAL replay — the exhaustive-scan tail. A cursor within its watermark
+/// commit includes only that commit's remaining delta-vector suffix.
 async fn tail_revisions<S: ObjectStore + ?Sized>(
     store: &S,
     view: &LoadedMetadataView<'_, S>,
     built_through_seq: ChangeSeq,
+    next_delta_index: u32,
 ) -> Result<BTreeSet<InodeId>> {
     let mut tail = BTreeMap::new();
-    for record in view
-        .grep_wal_records_after(store, built_through_seq)
-        .await?
-    {
-        for delta in &record.deltas {
+    let after_seq = if next_delta_index == 0 {
+        built_through_seq
+    } else {
+        ChangeSeq(built_through_seq.0.saturating_sub(1))
+    };
+    for record in view.grep_wal_records_after(store, after_seq).await? {
+        let start_delta_index = if record.seq == built_through_seq {
+            usize::try_from(next_delta_index).map_err(|_| {
+                CoreError::Internal("grep delta cursor does not fit in memory".to_owned())
+            })?
+        } else {
+            0
+        };
+        if start_delta_index > record.deltas.len() {
+            return Err(GrepError::CorruptIndex {
+                message: format!(
+                    "grep delta cursor `{next_delta_index}` exceeds commit `{}` length `{}`",
+                    record.seq,
+                    record.deltas.len()
+                ),
+            });
+        }
+        for delta in record.deltas.iter().skip(start_delta_index) {
             if let WalDelta::AppendFileRevision { inode_id, .. } = &delta.delta {
                 tail.insert(*inode_id, ());
             }
@@ -748,7 +770,13 @@ impl GrepService {
             }
         }
 
-        let tail = tail_revisions(store, view, snapshot.built_through_seq).await?;
+        let tail = tail_revisions(
+            store,
+            view,
+            snapshot.built_through_seq,
+            snapshot.next_delta_index,
+        )
+        .await?;
         let mut tail_scanned = true;
         if tail.len() > MAX_GREP_TAIL_FILES {
             if request.allow_stale {
@@ -764,7 +792,7 @@ impl GrepService {
                 .into());
             }
         } else {
-            candidates.unfiltered.extend(tail);
+            candidates.unfiltered.extend(tail.iter().copied());
         }
 
         let mut matches: Vec<GrepMatch> = Vec::new();
@@ -833,7 +861,7 @@ impl GrepService {
                 // unindexed revision while tail-only files stay invisible
                 // — a mix of two snapshots rather than a stale-but-
                 // consistent one.
-                if !tail_scanned && revision.committed_seq > snapshot.built_through_seq {
+                if !tail_scanned && tail.contains(&inode_id) {
                     rejected_frontier = Some(inode_id);
                     continue;
                 }

@@ -124,6 +124,19 @@ async fn standalone_once_after_external_enable_indexes_in_one_sweep_and_is_idemp
     assert!(stderr.contains("poll_interval_ms"), "{stderr}");
     assert!(stderr.contains("greater than zero"), "{stderr}");
 
+    let bad_grep_config_path = temp_dir.path().join("bad-grep-worker.toml");
+    write_config(
+        &bad_grep_config_path,
+        &store_root,
+        "",
+        "max_concurrent_steps = 0\n",
+    );
+    let bad = run_once(&bad_grep_config_path, &[&namespace_id]);
+    assert!(!bad.status.success(), "zero step cap must exit nonzero");
+    let stderr = String::from_utf8_lossy(&bad.stderr);
+    assert!(stderr.contains("max_concurrent_steps"), "{stderr}");
+    assert!(stderr.contains("greater than zero"), "{stderr}");
+
     let missing_namespace = Command::new(env!("CARGO_BIN_EXE_loonfs-grep"))
         .arg("--config")
         .arg(&config_path)
