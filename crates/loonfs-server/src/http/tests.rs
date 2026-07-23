@@ -79,7 +79,8 @@ use loonfs_api::{
     RepairNamespaceOutcome,
 };
 use loonfs_client::{Client, ClientConfig, ClientError, MutationOptions, NamespacePath};
-use loonfs_grep::keyspace::root_key as grep_root_key;
+use loonfs_grep::keyspace::{manifest_key as grep_manifest_key, root_key as grep_root_key};
+use loonfs_grep::root::{encode_grep_root, GrepManifestId, GrepRootEnvelope, GrepRootPointer};
 use loonfs_grep::{GrepDriverParked, GrepWorker};
 use loonfs_objectstore::keys::{metadata_root, namespace_config, wal_head};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -213,6 +214,92 @@ struct BlockGrepRootOnceStore {
     armed: AtomicBool,
     entered: Notify,
     release: Notify,
+}
+
+#[derive(Debug)]
+struct FaultGrepRootStore {
+    inner: LocalFsStore,
+    root_key: String,
+    fail_next_root_read: AtomicBool,
+    conflict_next_root_publication: AtomicBool,
+}
+
+impl FaultGrepRootStore {
+    fn new(root: impl AsRef<Path>, namespace_id: &NamespaceId) -> Self {
+        Self {
+            inner: LocalFsStore::new(root.as_ref()).expect("construct local store"),
+            root_key: grep_root_key(namespace_id),
+            fail_next_root_read: AtomicBool::new(false),
+            conflict_next_root_publication: AtomicBool::new(false),
+        }
+    }
+
+    fn fail_next_root_read(&self) {
+        self.fail_next_root_read.store(true, Ordering::SeqCst);
+    }
+
+    fn conflict_next_root_publication(&self) {
+        self.conflict_next_root_publication
+            .store(true, Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl ObjectStore for FaultGrepRootStore {
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        self.inner.head(key).await
+    }
+
+    async fn get(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<Option<Bytes>, ObjectStoreError> {
+        self.inner.get(key, range).await
+    }
+
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        if key == self.root_key && self.fail_next_root_read.swap(false, Ordering::SeqCst) {
+            return Err(ObjectStoreError::transport(
+                key,
+                "injected grep-root outage",
+            ));
+        }
+        self.inner.get_with_metadata(key).await
+    }
+
+    async fn put(
+        &self,
+        key: &str,
+        bytes: Bytes,
+        mode: PutMode,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        if key == self.root_key
+            && matches!(
+                &mode,
+                PutMode::CreateIfAbsent | PutMode::CompareAndSwap { .. }
+            )
+            && self
+                .conflict_next_root_publication
+                .swap(false, Ordering::SeqCst)
+        {
+            return Err(ObjectStoreError::PreconditionFailed {
+                object_key: key.to_owned(),
+            });
+        }
+        self.inner.put(key, bytes, mode).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        self.inner.delete(key).await
+    }
+
+    fn list_prefix_stream(
+        &self,
+        prefix: &str,
+    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+        self.inner.list_prefix_stream(prefix)
+    }
 }
 
 impl BlockGrepRootOnceStore {
@@ -472,6 +559,213 @@ async fn embedded_publish_observer_nudges_only_the_enabled_namespace_driver() {
         .expect("grep caught-up index");
     assert_eq!(response.matches.len(), 1);
     lifecycle.shutdown().await.expect("drain lifecycle");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn grep_error_disabled_root_is_not_materialized_and_core_reads_survive() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
+    let namespace_id = namespace_id("grep-error-disabled");
+    let writer = seed_grep_error_namespace(&store, &namespace_id).await;
+    let worker = grep_error_worker(&store);
+    worker.enable(&namespace_id).await.expect("enable grep");
+    worker.disable(&namespace_id).await.expect("disable grep");
+    writer.shutdown_background().await.expect("shutdown writer");
+
+    let harness = start_grep_error_server(store, temp_dir.path(), "disabled-server").await;
+    tokio::task::spawn_blocking({
+        let namespace_id = namespace_id.clone();
+        let client = harness.client.clone();
+        move || {
+            let result = client.grep(&namespace_id, &grep_error_request());
+            assert_grep_api_error_and_core_read(
+                &client,
+                &namespace_id,
+                result,
+                501,
+                ErrorCode::NotSupported,
+                "not materialized",
+            );
+        }
+    })
+    .await
+    .expect("join blocking task");
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn grep_error_mid_backfill_is_not_materialized_and_core_reads_survive() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
+    let namespace_id = namespace_id("grep-error-backfill");
+    let writer = seed_grep_error_namespace(&store, &namespace_id).await;
+    grep_error_worker(&store)
+        .enable(&namespace_id)
+        .await
+        .expect("leave grep backfilling");
+    writer.shutdown_background().await.expect("shutdown writer");
+
+    let harness = start_grep_error_server(store, temp_dir.path(), "backfill-server").await;
+    tokio::task::spawn_blocking({
+        let namespace_id = namespace_id.clone();
+        let client = harness.client.clone();
+        move || {
+            let result = client.grep(&namespace_id, &grep_error_request());
+            assert_grep_api_error_and_core_read(
+                &client,
+                &namespace_id,
+                result,
+                501,
+                ErrorCode::NotSupported,
+                "not materialized",
+            );
+        }
+    })
+    .await
+    .expect("join blocking task");
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn grep_error_store_outage_is_provider_failure_and_core_reads_survive() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace_id("grep-error-store");
+    let fault_store = Arc::new(FaultGrepRootStore::new(temp_dir.path(), &namespace_id));
+    let store = fault_store.clone() as SharedObjectStore;
+    let writer = seed_grep_error_namespace(&store, &namespace_id).await;
+    writer.shutdown_background().await.expect("shutdown writer");
+
+    let harness = start_grep_error_server(store, temp_dir.path(), "store-server").await;
+    fault_store.fail_next_root_read();
+    tokio::task::spawn_blocking({
+        let namespace_id = namespace_id.clone();
+        let client = harness.client.clone();
+        move || {
+            let result = client.grep(&namespace_id, &grep_error_request());
+            assert_grep_api_error_and_core_read(
+                &client,
+                &namespace_id,
+                result,
+                500,
+                ErrorCode::ServerError,
+                "injected grep-root outage",
+            );
+        }
+    })
+    .await
+    .expect("join blocking task");
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn grep_error_corrupt_pointer_is_index_corrupt_and_core_reads_survive() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
+    let namespace_id = namespace_id("grep-error-pointer");
+    let writer = seed_grep_error_namespace(&store, &namespace_id).await;
+    store
+        .put_overwrite(
+            &grep_root_key(&namespace_id),
+            Bytes::from_static(b"corrupt grep pointer"),
+        )
+        .await
+        .expect("write corrupt grep pointer");
+    writer.shutdown_background().await.expect("shutdown writer");
+
+    let harness = start_grep_error_server(store, temp_dir.path(), "pointer-server").await;
+    assert_index_corrupt_and_core_read(harness, namespace_id).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn grep_error_missing_manifest_is_index_corrupt_and_core_reads_survive() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
+    let namespace_id = namespace_id("grep-error-missing-manifest");
+    let writer = seed_grep_error_namespace(&store, &namespace_id).await;
+    let manifest_id =
+        GrepManifestId::parse("1111111111111111111111111111111111111111111111111111111111111111")
+            .expect("manifest id");
+    write_grep_pointer(&*store, &namespace_id, namespace_id.clone(), manifest_id).await;
+    writer.shutdown_background().await.expect("shutdown writer");
+
+    let harness = start_grep_error_server(store, temp_dir.path(), "missing-manifest-server").await;
+    assert_index_corrupt_and_core_read(harness, namespace_id).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn grep_error_corrupt_manifest_is_index_corrupt_and_core_reads_survive() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
+    let namespace_id = namespace_id("grep-error-manifest");
+    let writer = seed_grep_error_namespace(&store, &namespace_id).await;
+    let manifest_id =
+        GrepManifestId::parse("2222222222222222222222222222222222222222222222222222222222222222")
+            .expect("manifest id");
+    store
+        .put_overwrite(
+            &grep_manifest_key(&namespace_id, &manifest_id),
+            Bytes::from_static(b"corrupt grep manifest"),
+        )
+        .await
+        .expect("write corrupt grep manifest");
+    write_grep_pointer(&*store, &namespace_id, namespace_id.clone(), manifest_id).await;
+    writer.shutdown_background().await.expect("shutdown writer");
+
+    let harness = start_grep_error_server(store, temp_dir.path(), "manifest-server").await;
+    assert_index_corrupt_and_core_read(harness, namespace_id).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn grep_error_identity_mismatch_is_index_corrupt_and_core_reads_survive() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
+    let namespace_id = namespace_id("grep-error-identity");
+    let writer = seed_grep_error_namespace(&store, &namespace_id).await;
+    let manifest_id =
+        GrepManifestId::parse("3333333333333333333333333333333333333333333333333333333333333333")
+            .expect("manifest id");
+    write_grep_pointer(
+        &*store,
+        &namespace_id,
+        NamespaceId::parse("different-grep-identity").expect("different namespace id"),
+        manifest_id,
+    )
+    .await;
+    writer.shutdown_background().await.expect("shutdown writer");
+
+    let harness = start_grep_error_server(store, temp_dir.path(), "identity-server").await;
+    assert_index_corrupt_and_core_read(harness, namespace_id).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn grep_error_publication_conflict_is_stale_head_and_core_reads_survive() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace_id("grep-error-conflict");
+    let fault_store = Arc::new(FaultGrepRootStore::new(temp_dir.path(), &namespace_id));
+    let store = fault_store.clone() as SharedObjectStore;
+    let writer = seed_grep_error_namespace(&store, &namespace_id).await;
+    writer.shutdown_background().await.expect("shutdown writer");
+
+    let harness = start_grep_error_server(store, temp_dir.path(), "conflict-server").await;
+    fault_store.conflict_next_root_publication();
+    tokio::task::spawn_blocking({
+        let namespace_id = namespace_id.clone();
+        let client = harness.client.clone();
+        move || {
+            let result = client.enable_grams_index(&namespace_id);
+            assert_grep_api_error_and_core_read(
+                &client,
+                &namespace_id,
+                result,
+                409,
+                ErrorCode::StaleHead,
+                "publication conflict",
+            );
+        }
+    })
+    .await
+    .expect("join blocking task");
+    harness.server.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1579,8 +1873,144 @@ async fn readiness_answers_ready_then_shutting_down_once_admission_closes() {
     server.abort();
 }
 
+async fn seed_grep_error_namespace(
+    store: &SharedObjectStore,
+    namespace_id: &NamespaceId,
+) -> FsWriter {
+    let writer = test_runtime(store.clone(), "grep-error-seed").await;
+    writer
+        .create_namespace(namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("create grep-error namespace");
+    writer
+        .put_file_bytes(
+            namespace_id,
+            "/core.txt",
+            b"core remains readable",
+            PutFileOptions::default(),
+        )
+        .await
+        .expect("write core isolation sentinel");
+    writer
+}
+
+fn grep_error_worker(store: &SharedObjectStore) -> GrepWorker<SharedObjectStore> {
+    GrepWorker::new(
+        store.clone(),
+        "grep-error-worker",
+        "grep-error-worker-session",
+        "grep-error-worker/0.1",
+    )
+}
+
+fn grep_error_request() -> GrepRequest {
+    GrepRequest {
+        pattern: "needle".to_owned(),
+        case_insensitive: false,
+        path_prefix: None,
+        cursor: None,
+        limit: None,
+        allow_stale: false,
+        allow_scan: false,
+    }
+}
+
+async fn write_grep_pointer(
+    store: &dyn ObjectStore,
+    stored_namespace_id: &NamespaceId,
+    pointer_namespace_id: NamespaceId,
+    manifest_id: GrepManifestId,
+) {
+    let envelope = GrepRootEnvelope::from_pointer(
+        "grep-error-api-test/0.1",
+        GrepRootPointer::new(pointer_namespace_id, manifest_id),
+    )
+    .expect("build grep pointer");
+    store
+        .put_overwrite(
+            &grep_root_key(stored_namespace_id),
+            Bytes::from(encode_grep_root(&envelope).expect("encode grep pointer")),
+        )
+        .await
+        .expect("write grep pointer");
+}
+
+async fn start_grep_error_server(
+    store: SharedObjectStore,
+    root: &Path,
+    writer_id: &str,
+) -> TestHarness {
+    let mut config = test_config(root, writer_id);
+    config.grep.mode = crate::config::GrepMode::ServeOnly;
+    start_server_with_config(store, config).await
+}
+
+async fn assert_index_corrupt_and_core_read(harness: TestHarness, namespace_id: NamespaceId) {
+    tokio::task::spawn_blocking({
+        let client = harness.client.clone();
+        move || {
+            let result = client.grep(&namespace_id, &grep_error_request());
+            assert_grep_api_error_and_core_read(
+                &client,
+                &namespace_id,
+                result,
+                500,
+                ErrorCode::IndexCorrupt,
+                "disable and re-enable grep to rebuild it",
+            );
+        }
+    })
+    .await
+    .expect("join blocking task");
+    harness.server.abort();
+}
+
+fn assert_grep_api_error_and_core_read<T: std::fmt::Debug>(
+    client: &Client,
+    namespace_id: &NamespaceId,
+    result: Result<T, ClientError>,
+    status: u16,
+    code: ErrorCode,
+    message_fragment: &str,
+) {
+    match result {
+        Err(ClientError::Api {
+            status: actual_status,
+            code: actual_code,
+            feature,
+            message,
+            ..
+        }) => {
+            assert_eq!(actual_status, status);
+            assert_eq!(actual_code, code.as_str());
+            assert!(
+                message.contains(message_fragment),
+                "expected `{message_fragment}` in `{message}`"
+            );
+            if code == ErrorCode::NotSupported {
+                assert_eq!(feature.as_deref(), Some("index.grams"));
+            } else {
+                assert_eq!(feature, None);
+            }
+        }
+        other => panic!(
+            "expected grep api error {status} {}, got {other:?}",
+            code.as_str()
+        ),
+    }
+
+    let target = NamespacePath::parse(namespace_id.as_str(), "/core.txt").expect("core target");
+    let bytes = client
+        .read_file_bytes(&target)
+        .expect("grep failure must not affect core reads");
+    assert_eq!(bytes, b"core remains readable");
+}
+
 async fn start_server(store: SharedObjectStore, root: &Path, writer_id: &str) -> TestHarness {
-    let config = test_config(root, writer_id);
+    start_server_with_config(store, test_config(root, writer_id)).await
+}
+
+async fn start_server_with_config(store: SharedObjectStore, config: ServerConfig) -> TestHarness {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind listener");

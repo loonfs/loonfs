@@ -1,6 +1,7 @@
 //! Typed failures for grep root state, encoding, loading, and publication.
 
 use loonfs_api::{IndexSegmentId, NamespaceId};
+use loonfs_core::StoreFailureClass;
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -79,7 +80,11 @@ pub enum GrepRootCodecError {
 #[non_exhaustive]
 pub enum GrepRootError {
     #[error("object-store operation failed for grep root `{object_key}`: {message}")]
-    Store { object_key: String, message: String },
+    Store {
+        object_key: String,
+        message: String,
+        class: StoreFailureClass,
+    },
     #[error("grep root `{object_key}` is corrupt: {message}")]
     Corrupt { object_key: String, message: String },
     #[error("grep root `{root_key}` names missing manifest `{manifest_key}`")]

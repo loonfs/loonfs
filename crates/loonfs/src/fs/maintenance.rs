@@ -3,9 +3,9 @@
 
 use super::core::FsCore;
 use crate::{
-    AdvanceRetentionResponse, CheckpointId, CoreError, CreateCheckpointOptions,
-    CreateCheckpointResponse, ErrorCode, FlushWalOutcome, FlushWalResponse, MaintenanceTickOptions,
-    MaintenanceTickOutcome, MaintenanceTickResult, NamespaceId, ReleaseCheckpointResponse,
+    AdvanceRetentionResponse, CheckpointId, CreateCheckpointOptions, CreateCheckpointResponse,
+    ErrorCode, FlushWalOutcome, FlushWalResponse, MaintenanceTickOptions, MaintenanceTickOutcome,
+    MaintenanceTickResult, NamespaceId, ReleaseCheckpointResponse,
 };
 use crate::{Result, RuntimeError};
 use loonfs_api::{DisableGramsIndexResponse, EnableGramsIndexResponse};
@@ -180,7 +180,7 @@ impl FsCore {
             .grep_worker()
             .enable(namespace_id)
             .await
-            .map_err(RuntimeError::Core)?;
+            .map_err(RuntimeError::Grep)?;
         match outcome {
             loonfs_grep::GrepEnableOutcome::Enabled { target_seq } => {
                 Ok(EnableGramsIndexResponse {
@@ -196,11 +196,11 @@ impl FsCore {
                     already_enabled: true,
                 })
             }
-            loonfs_grep::GrepEnableOutcome::Superseded => {
-                Err(RuntimeError::Core(CoreError::CheckpointUnavailable(
-                    "enabling grep lost a root publication race; retry".to_owned(),
-                )))
-            }
+            loonfs_grep::GrepEnableOutcome::Superseded => Err(RuntimeError::Grep(
+                loonfs_grep::GrepError::PublicationConflict {
+                    object_key: loonfs_grep::keyspace::root_key(namespace_id),
+                },
+            )),
         }
     }
 
@@ -214,7 +214,7 @@ impl FsCore {
             .grep_worker()
             .disable(namespace_id)
             .await
-            .map_err(RuntimeError::Core)?;
+            .map_err(RuntimeError::Grep)?;
         match outcome {
             loonfs_grep::GrepDisableOutcome::Disabled => Ok(DisableGramsIndexResponse {
                 namespace_id: namespace_id.clone(),
@@ -224,11 +224,11 @@ impl FsCore {
                 namespace_id: namespace_id.clone(),
                 was_enabled: false,
             }),
-            loonfs_grep::GrepDisableOutcome::Superseded => {
-                Err(RuntimeError::Core(CoreError::CheckpointUnavailable(
-                    "disabling grep lost a root publication race; retry".to_owned(),
-                )))
-            }
+            loonfs_grep::GrepDisableOutcome::Superseded => Err(RuntimeError::Grep(
+                loonfs_grep::GrepError::PublicationConflict {
+                    object_key: loonfs_grep::keyspace::root_key(namespace_id),
+                },
+            )),
         }
     }
 

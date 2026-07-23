@@ -1271,6 +1271,10 @@ mod tests {
         let error = api_error(503, "commit_outcome_unknown");
         assert_eq!(error.error_code(), Some(ErrorCode::CommitOutcomeUnknown));
         assert_eq!(error.kind(), Some(ErrorKind::OutcomeUnknown));
+
+        let error = api_error(500, "index_corrupt");
+        assert_eq!(error.error_code(), Some(ErrorCode::IndexCorrupt));
+        assert_eq!(error.kind(), Some(ErrorKind::DataCorruption));
     }
 
     #[test]

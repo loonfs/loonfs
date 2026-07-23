@@ -1,7 +1,7 @@
 //! The `query/v0` plane: derived-index reads.
 
 use super::{authorize, AppJson, AppState, NamespaceIdPath};
-use crate::http::error::ApiResponseError;
+use crate::http::error::{status_for_core_error_code, ApiResponseError};
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::Json;
@@ -12,8 +12,10 @@ use loonfs_api::v0::{
 use loonfs_api::ApiError;
 use loonfs_api::FEATURE_QUERY_GREP;
 use loonfs_grep::root::{load_grep_root, GrepLifecycle};
-use loonfs_grep::{GrepDisableOutcome, GrepEnableOutcome};
+use loonfs_grep::{GrepDisableOutcome, GrepEnableOutcome, GrepError};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+const GREP_INDEX_FEATURE: &str = "index.grams";
 
 #[cfg_attr(
     feature = "openapi",
@@ -29,10 +31,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
             (status = 200, description = "One page of matches", body = GrepResponse),
             (status = 400, description = "Invalid pattern, cursor, or an unindexable pattern without allow_scan", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
+            (status = 403, description = "The backing store rejected its configured credentials", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
             (status = 410, description = "Namespace deleted", body = ApiError),
             (status = 501, description = "Grep serving is disabled or the gram index is not materialized on this namespace", body = ApiError),
-            (status = 503, description = "The index trails the head past the scan budget", body = ApiError)
+            (status = 503, description = "The index trails the head past the scan budget", body = ApiError),
+            (status = 500, description = "The grep index is corrupt or its backing store is unavailable", body = ApiError)
         )
     )
 )]
@@ -49,7 +53,7 @@ pub(super) async fn grep(
         .reader
         .grep(&namespace_id, &request)
         .await
-        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+        .map_err(|error| map_runtime_grep_error(&namespace_id, error))?;
     Ok(Json(response))
 }
 
@@ -77,9 +81,11 @@ pub(super) async fn grep_not_supported(
         responses(
             (status = 200, description = "Grep root enabled or already enabled", body = EnableGramsIndexResponse),
             (status = 401, description = "Unauthorized", body = ApiError),
+            (status = 403, description = "The backing store rejected its configured credentials", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
+            (status = 409, description = "Lost a grep root-pointer publication race; retry", body = ApiError),
             (status = 501, description = "Grep serving is disabled for this deployment", body = ApiError),
-            (status = 503, description = "Lost a grep root-pointer publication race; retry", body = ApiError)
+            (status = 500, description = "The grep index is corrupt or its backing store is unavailable", body = ApiError)
         )
     )
 )]
@@ -96,12 +102,7 @@ pub(super) async fn enable_grams_index(
         .expect("grep routes should carry a grep worker")
         .enable(&namespace_id)
         .await
-        .map_err(|error| {
-            ApiResponseError::runtime_for_namespace(
-                &namespace_id,
-                loonfs::RuntimeError::Core(error),
-            )
-        })?;
+        .map_err(|error| map_grep_error(&namespace_id, error))?;
     let response = match outcome {
         GrepEnableOutcome::Enabled { target_seq } => EnableGramsIndexResponse {
             namespace_id: namespace_id.clone(),
@@ -114,11 +115,11 @@ pub(super) async fn enable_grams_index(
             already_enabled: true,
         },
         GrepEnableOutcome::Superseded => {
-            return Err(ApiResponseError::runtime_for_namespace(
+            return Err(map_grep_error(
                 &namespace_id,
-                loonfs::RuntimeError::Core(loonfs::CoreError::CheckpointUnavailable(
-                    "enabling grep lost a root publication race; retry".to_owned(),
-                )),
+                GrepError::PublicationConflict {
+                    object_key: loonfs_grep::keyspace::root_key(&namespace_id),
+                },
             ));
         }
     };
@@ -140,9 +141,11 @@ pub(super) async fn enable_grams_index(
         responses(
             (status = 200, description = "Grep root disabled or already disabled", body = DisableGramsIndexResponse),
             (status = 401, description = "Unauthorized", body = ApiError),
+            (status = 403, description = "The backing store rejected its configured credentials", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
+            (status = 409, description = "Lost a grep root-pointer publication race; retry", body = ApiError),
             (status = 501, description = "Grep serving is disabled for this deployment", body = ApiError),
-            (status = 503, description = "Lost a grep root-pointer publication race; retry", body = ApiError)
+            (status = 500, description = "The grep index is corrupt or its backing store is unavailable", body = ApiError)
         )
     )
 )]
@@ -165,12 +168,7 @@ pub(super) async fn disable_grams_index(
         .expect("grep routes should carry a grep worker")
         .disable(&namespace_id)
         .await
-        .map_err(|error| {
-            ApiResponseError::runtime_for_namespace(
-                &namespace_id,
-                loonfs::RuntimeError::Core(error),
-            )
-        })?;
+        .map_err(|error| map_grep_error(&namespace_id, error))?;
     let response = match outcome {
         GrepDisableOutcome::Disabled => DisableGramsIndexResponse {
             namespace_id: namespace_id.clone(),
@@ -181,11 +179,11 @@ pub(super) async fn disable_grams_index(
             was_enabled: false,
         },
         GrepDisableOutcome::Superseded => {
-            return Err(ApiResponseError::runtime_for_namespace(
+            return Err(map_grep_error(
                 &namespace_id,
-                loonfs::RuntimeError::Core(loonfs::CoreError::CheckpointUnavailable(
-                    "disabling grep lost a root publication race; retry".to_owned(),
-                )),
+                GrepError::PublicationConflict {
+                    object_key: loonfs_grep::keyspace::root_key(&namespace_id),
+                },
             ));
         }
     };
@@ -204,7 +202,9 @@ pub(super) async fn disable_grams_index(
         responses(
             (status = 200, description = "Namespace grep garbage collection completed", body = GrepGcResponse),
             (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 501, description = "Grep serving is disabled for this deployment", body = ApiError)
+            (status = 403, description = "The backing store rejected its configured credentials", body = ApiError),
+            (status = 501, description = "Grep serving is disabled for this deployment", body = ApiError),
+            (status = 500, description = "The grep index is corrupt or its backing store is unavailable", body = ApiError)
         )
     )
 )]
@@ -229,12 +229,7 @@ pub(super) async fn gc_grams_index(
             })?,
         )
         .await
-        .map_err(|error| {
-            ApiResponseError::runtime_for_namespace(
-                &namespace_id,
-                loonfs::RuntimeError::Core(error),
-            )
-        })?;
+        .map_err(|error| map_grep_error(&namespace_id, error))?;
     Ok(Json(GrepGcResponse {
         namespace_id,
         deleted_segments: report.deleted_segments,
@@ -243,6 +238,38 @@ pub(super) async fn gc_grams_index(
         retained_candidates: report.retained_candidates,
         namespace_degraded: report.namespace_degraded,
     }))
+}
+
+fn map_runtime_grep_error(
+    namespace_id: &loonfs_api::NamespaceId,
+    error: loonfs::RuntimeError,
+) -> ApiResponseError {
+    match error {
+        loonfs::RuntimeError::Grep(error) => map_grep_error(namespace_id, error),
+        error => ApiResponseError::runtime_for_namespace(namespace_id, error),
+    }
+}
+
+fn map_grep_error(namespace_id: &loonfs_api::NamespaceId, error: GrepError) -> ApiResponseError {
+    match error {
+        error @ (GrepError::NotEnabled | GrepError::Backfilling) => {
+            ApiResponseError::not_supported(GREP_INDEX_FEATURE, &error.to_string())
+        }
+        error @ (GrepError::StoreUnavailable { .. }
+        | GrepError::CorruptIndex { .. }
+        | GrepError::PublicationConflict { .. }) => {
+            let code = error.code();
+            ApiResponseError::new(status_for_core_error_code(code), code, &error.to_string())
+        }
+        GrepError::Core(error) => {
+            ApiResponseError::runtime_for_namespace(namespace_id, loonfs::RuntimeError::Core(error))
+        }
+        error => ApiResponseError::new(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            loonfs_api::ErrorCode::ServerError,
+            &error.to_string(),
+        ),
+    }
 }
 
 async fn start_driver_for_query_if_needed(

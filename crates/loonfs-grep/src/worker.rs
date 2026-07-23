@@ -11,6 +11,7 @@ use crate::root::{
     GrepLifecycle, GrepRootError, GrepRootState, GrepSegmentRef, LoadedGrepRoot,
 };
 use crate::service::is_indexable_text_content;
+use crate::{GrepError, Result};
 use bytes::Bytes;
 use futures::future::try_join_all;
 use loonfs_api::wire::control::NamespaceState;
@@ -30,7 +31,7 @@ use loonfs_core::grep::{
 };
 use loonfs_core::limits::METADATA_PUBLICATION_BUDGET_MS;
 use loonfs_core::{
-    Error as CoreError, MetadataProjectionLoadError, MonotonicTimer, NamespaceEngine, Result,
+    Error as CoreError, MetadataProjectionLoadError, MonotonicTimer, NamespaceEngine,
     StdMonotonicTimer, StoreFailureClass,
 };
 use loonfs_objectstore::{
@@ -228,7 +229,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     pub async fn enable(&self, namespace_id: &NamespaceId) -> Result<GrepEnableOutcome> {
         if let Some(current) = load_grep_root(&self.store, namespace_id)
             .await
-            .map_err(core_root_error)?
+            .map_err(GrepError::from)?
         {
             if !matches!(current.state().lifecycle(), GrepLifecycle::Disabled) {
                 return Ok(GrepEnableOutcome::AlreadyEnabled {
@@ -240,7 +241,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         let checkpoint = self.create_backfill_checkpoint(namespace_id).await?;
         let current = load_grep_root(&self.store, namespace_id)
             .await
-            .map_err(core_root_error)?;
+            .map_err(GrepError::from)?;
         if let Some(current) = &current {
             if !matches!(current.state().lifecycle(), GrepLifecycle::Disabled) {
                 self.release_checkpoint_if_unreferenced(
@@ -274,7 +275,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             Err(GrepRootError::Conflict { .. }) => {
                 let winner = load_grep_root(&self.store, namespace_id)
                     .await
-                    .map_err(core_root_error)?;
+                    .map_err(GrepError::from)?;
                 if winner.as_ref().is_none_or(|root| {
                     !root_names_checkpoint(root.state(), &checkpoint.checkpoint_id)
                 }) {
@@ -284,7 +285,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 }
                 Ok(GrepEnableOutcome::Superseded)
             }
-            Err(error) => Err(core_root_error(error)),
+            Err(error) => Err(error.into()),
         }
     }
 
@@ -294,7 +295,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         ensure_live_namespace(&self.store, namespace_id).await?;
         let Some(current) = load_grep_root(&self.store, namespace_id)
             .await
-            .map_err(core_root_error)?
+            .map_err(GrepError::from)?
         else {
             return Ok(GrepDisableOutcome::NotEnabled);
         };
@@ -326,7 +327,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 Ok(GrepDisableOutcome::Disabled)
             }
             Err(GrepRootError::Conflict { .. }) => Ok(GrepDisableOutcome::Superseded),
-            Err(error) => Err(core_root_error(error)),
+            Err(error) => Err(error.into()),
         }
     }
 
@@ -339,7 +340,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         let policy = policy.normalized();
         let Some(current) = load_grep_root(&self.store, namespace_id)
             .await
-            .map_err(core_root_error)?
+            .map_err(GrepError::from)?
         else {
             return Ok(build_report(namespace_id, GrepBuildOutcome::NotEnabled));
         };
@@ -347,7 +348,8 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             return Ok(build_report(namespace_id, GrepBuildOutcome::NotEnabled));
         }
         let content_store_id = load_namespace_catalog_entry(&self.store, namespace_id)
-            .await?
+            .await
+            .map_err(CoreError::from)?
             .content_store_id()
             .clone();
 
@@ -416,7 +418,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     }
 
     fn engine(&self, namespace_id: &NamespaceId) -> Result<NamespaceEngine<S>> {
-        NamespaceEngine::builder(self.store.clone())
+        Ok(NamespaceEngine::builder(self.store.clone())
             .namespace_id(namespace_id.clone())
             .writer_id(self.writer_id.clone())
             .writer_session_id(self.writer_session_id.clone())
@@ -424,7 +426,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             .build()
             .map_err(|error| {
                 CoreError::Internal(format!("failed to build grep worker engine: {error}"))
-            })
+            })?)
     }
 
     async fn seed_root(&self, state: &GrepRootState) -> crate::root::Result<LoadedGrepRoot> {
@@ -443,12 +445,13 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<loonfs_api::CreateCheckpointResponse> {
-        self.engine(namespace_id)?
+        Ok(self
+            .engine(namespace_id)?
             .create_checkpoint(
                 GREP_BACKFILL_CHECKPOINT_NAME.to_owned(),
                 Some(GREP_BACKFILL_CHECKPOINT_TTL_MS),
             )
-            .await
+            .await?)
     }
 
     async fn release_checkpoint_if_unreferenced(
@@ -500,7 +503,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             Err(GrepRootError::Conflict { .. }) => {
                 let winner = load_grep_root(&self.store, namespace_id)
                     .await
-                    .map_err(core_root_error)?;
+                    .map_err(GrepError::from)?;
                 if winner.as_ref().is_none_or(|root| {
                     !root_names_checkpoint(root.state(), &checkpoint.checkpoint_id)
                 }) {
@@ -510,7 +513,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 }
                 Ok(build_report(namespace_id, GrepBuildOutcome::Superseded))
             }
-            Err(error) => Err(core_root_error(error)),
+            Err(error) => Err(error.into()),
         }
     }
 
@@ -587,7 +590,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             Err(GrepRootError::Conflict { .. }) => {
                 Ok(build_report(namespace_id, GrepBuildOutcome::Superseded))
             }
-            Err(error) => Err(core_root_error(error)),
+            Err(error) => Err(error.into()),
         }
     }
 }
@@ -765,7 +768,8 @@ async fn load_and_fold_revision_contents<S: ObjectStore + ?Sized>(
         let contents = try_join_all(chunk.iter().map(|revision| {
             read_durable_content_bytes(store, content_store_id, &revision.content_ref)
         }))
-        .await?;
+        .await
+        .map_err(CoreError::from)?;
         for (revision, content) in chunk.iter().zip(contents) {
             if !is_indexable_text_content(&content.bytes) {
                 unit.skipped_revisions += 1;
@@ -900,7 +904,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         let policy = policy.normalized();
         let Some(current) = load_grep_root(&self.store, namespace_id)
             .await
-            .map_err(core_root_error)?
+            .map_err(GrepError::from)?
         else {
             return Ok(fold_report(namespace_id, GrepFoldOutcome::NotEnabled));
         };
@@ -967,10 +971,10 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                     .segments()
                     .iter()
                     .find(|segment| &segment.segment_id == segment_id)
-                    .ok_or_else(|| {
-                        CoreError::NamespaceCorrupt(format!(
+                    .ok_or_else(|| GrepError::CorruptIndex {
+                        message: format!(
                             "grep fold snapshot segment `{segment_id}` is missing from the root"
-                        ))
+                        ),
                     })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -1044,7 +1048,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             Err(GrepRootError::Conflict { .. }) => {
                 Ok(fold_report(namespace_id, GrepFoldOutcome::Superseded))
             }
-            Err(error) => Err(core_root_error(error)),
+            Err(error) => Err(error.into()),
         }
     }
 
@@ -1245,10 +1249,10 @@ async fn merge_snapshot_range<S: ObjectStore + ?Sized>(
 fn fold_snapshot_row(merged: &mut MergedRange, row: IndexRow, object_key: &str) -> Result<()> {
     let IndexRow::GramPostings { gram, .. } = &row;
     let gram = *gram;
-    let batch = row.postings().map_err(|error| {
-        CoreError::NamespaceCorrupt(format!(
+    let batch = row.postings().map_err(|error| GrepError::CorruptIndex {
+        message: format!(
             "index segment `{object_key}` carries an unreadable posting batch: {error}"
-        ))
+        ),
     })?;
     merged.postings.entry(gram).or_default().extend(batch);
     merged.rows += 1;
@@ -1381,12 +1385,14 @@ async fn ensure_live_namespace<S: ObjectStore + ?Sized>(
     if head.state.state == NamespaceState::Deleted {
         return Err(CoreError::NamespaceDeleted {
             namespace_id: namespace_id.clone(),
-        });
+        }
+        .into());
     }
     if head.state.state != NamespaceState::Active {
         return Err(CoreError::NamespacePartiallyInitialized {
             namespace_id: namespace_id.clone(),
-        });
+        }
+        .into());
     }
     Ok(())
 }
@@ -1474,7 +1480,7 @@ async fn write_immutable_object<S: ObjectStore + ?Sized>(
             if existing_object_matches(store, object_key, expected_bytes).await? {
                 Ok(())
             } else {
-                Err(CoreError::Store {
+                Err(GrepError::StoreUnavailable {
                     object_key: object_key.to_owned(),
                     message: "object already exists with different bytes".to_owned(),
                     class: StoreFailureClass::Other,
@@ -1485,20 +1491,14 @@ async fn write_immutable_object<S: ObjectStore + ?Sized>(
             let message = error.message();
             match existing_object_matches(store, object_key, expected_bytes).await {
                 Ok(true) => Ok(()),
-                Ok(false) => Err(CoreError::Store {
+                Ok(false) => Err(GrepError::StoreUnavailable {
                     object_key: object_key.to_owned(),
                     message: format!(
                         "{message}; immutable object exists with different bytes after transport error"
                     ),
                     class: StoreFailureClass::Other,
                 }),
-                Err(verify_error) => Err(CoreError::Store {
-                    object_key: object_key.to_owned(),
-                    message: format!(
-                        "{message}; failed to verify immutable write after transport error: {verify_error}"
-                    ),
-                    class: StoreFailureClass::Other,
-                }),
+                Err(verify_error) => Err(verify_error),
             }
         }
         Err(error) => Err(core_store_error(object_key, &error)),
@@ -1523,7 +1523,7 @@ async fn existing_object_matches<S: ObjectStore + ?Sized>(
         .get(object_key, None)
         .await
         .map_err(|error| core_store_error(object_key, &error))?
-        .ok_or_else(|| CoreError::Store {
+        .ok_or_else(|| GrepError::StoreUnavailable {
             object_key: object_key.to_owned(),
             message: "object is missing while verifying immutable write".to_owned(),
             class: StoreFailureClass::Other,
@@ -1539,32 +1539,16 @@ fn ensure_publication_budget(timer: &impl MonotonicTimer, started_ms: u64) -> Re
     Err(CoreError::MetadataPublicationBudgetExceeded {
         elapsed_ms,
         budget_ms: METADATA_PUBLICATION_BUDGET_MS,
-    })
-}
-
-fn core_root_error(error: GrepRootError) -> CoreError {
-    match error {
-        GrepRootError::Store {
-            object_key,
-            message,
-        } => CoreError::Store {
-            object_key,
-            message,
-            class: StoreFailureClass::Other,
-        },
-        GrepRootError::Conflict { object_key } => CoreError::CheckpointUnavailable(format!(
-            "grep root publication conflict for `{object_key}`; retry"
-        )),
-        error => CoreError::NamespaceCorrupt(error.to_string()),
     }
+    .into())
 }
 
-fn core_state_error(error: crate::root::GrepRootStateError) -> CoreError {
-    CoreError::Internal(format!("failed to build grep root state: {error}"))
+fn core_state_error(error: crate::root::GrepRootStateError) -> GrepError {
+    CoreError::Internal(format!("failed to build grep root state: {error}")).into()
 }
 
-fn core_store_error(object_key: &str, error: &ObjectStoreError) -> CoreError {
-    CoreError::Store {
+fn core_store_error(object_key: &str, error: &ObjectStoreError) -> GrepError {
+    GrepError::StoreUnavailable {
         object_key: object_key.to_owned(),
         message: error.message(),
         class: StoreFailureClass::of(error),
@@ -1577,5 +1561,7 @@ fn current_time_ms() -> Result<u64> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_millis() as u64)
-        .map_err(|error| CoreError::Internal(format!("system clock before unix epoch: {error}")))
+        .map_err(|error| {
+            CoreError::Internal(format!("system clock before unix epoch: {error}")).into()
+        })
 }

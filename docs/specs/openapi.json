@@ -350,6 +350,16 @@
               }
             }
           },
+          "403": {
+            "description": "The backing store rejected its configured credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
           "404": {
             "description": "Namespace not found",
             "content": {
@@ -360,8 +370,8 @@
               }
             }
           },
-          "501": {
-            "description": "Grep serving is disabled for this deployment",
+          "409": {
+            "description": "Lost a grep root-pointer publication race; retry",
             "content": {
               "application/json": {
                 "schema": {
@@ -370,8 +380,18 @@
               }
             }
           },
-          "503": {
-            "description": "Lost a grep root-pointer publication race; retry",
+          "500": {
+            "description": "The grep index is corrupt or its backing store is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "Grep serving is disabled for this deployment",
             "content": {
               "application/json": {
                 "schema": {
@@ -423,6 +443,16 @@
               }
             }
           },
+          "403": {
+            "description": "The backing store rejected its configured credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
           "404": {
             "description": "Namespace not found",
             "content": {
@@ -433,8 +463,8 @@
               }
             }
           },
-          "501": {
-            "description": "Grep serving is disabled for this deployment",
+          "409": {
+            "description": "Lost a grep root-pointer publication race; retry",
             "content": {
               "application/json": {
                 "schema": {
@@ -443,8 +473,18 @@
               }
             }
           },
-          "503": {
-            "description": "Lost a grep root-pointer publication race; retry",
+          "500": {
+            "description": "The grep index is corrupt or its backing store is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "Grep serving is disabled for this deployment",
             "content": {
               "application/json": {
                 "schema": {
@@ -488,6 +528,26 @@
           },
           "401": {
             "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The backing store rejected its configured credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The grep index is corrupt or its backing store is unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -2268,6 +2328,16 @@
               }
             }
           },
+          "403": {
+            "description": "The backing store rejected its configured credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
           "404": {
             "description": "Namespace not found",
             "content": {
@@ -2280,6 +2350,16 @@
           },
           "410": {
             "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The grep index is corrupt or its backing store is unavailable",
             "content": {
               "application/json": {
                 "schema": {

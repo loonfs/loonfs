@@ -140,8 +140,8 @@ async fn grep_worker_builds_the_gram_index_once_enabled() {
         .grep(&namespace_id, &invalid_limit)
         .await
         .expect_err("invalid limit must win before the missing feature");
-    let loonfs::Error::Core(core) = &error else {
-        panic!("expected a core error, got {error:?}");
+    let loonfs::Error::Grep(loonfs::GrepError::Core(core)) = &error else {
+        panic!("expected a grep core passthrough, got {error:?}");
     };
     assert_eq!(core.code(), ErrorCode::InvalidRequest);
 
@@ -150,10 +150,11 @@ async fn grep_worker_builds_the_gram_index_once_enabled() {
         .grep(&namespace_id, &grep_request("needle"))
         .await
         .expect_err("grep without the feature must be refused");
-    let loonfs::Error::Core(core) = &error else {
-        panic!("expected a core error, got {error:?}");
+    let loonfs::Error::Grep(grep) = &error else {
+        panic!("expected a grep error, got {error:?}");
     };
-    assert_eq!(core.code(), ErrorCode::NotSupported);
+    assert!(matches!(grep, loonfs::GrepError::NotEnabled));
+    assert_eq!(grep.code(), ErrorCode::NotSupported);
 
     let enabled = admin
         .enable_grams_index(&namespace_id)
@@ -211,10 +212,11 @@ async fn grep_worker_builds_the_gram_index_once_enabled() {
         .grep(&namespace_id, &grep_request("needle"))
         .await
         .expect_err("grep after disable must be refused");
-    let loonfs::Error::Core(core) = &error else {
-        panic!("expected a core error, got {error:?}");
+    let loonfs::Error::Grep(grep) = &error else {
+        panic!("expected a grep error, got {error:?}");
     };
-    assert_eq!(core.code(), ErrorCode::NotSupported);
+    assert!(matches!(grep, loonfs::GrepError::NotEnabled));
+    assert_eq!(grep.code(), ErrorCode::NotSupported);
 
     writer.shutdown_background().await.expect("writer shutdown");
 }
@@ -280,10 +282,11 @@ async fn a_publish_below_the_wal_threshold_does_not_schedule_grep_work() {
         .grep(&namespace_id, &grep_request("needle"))
         .await
         .expect_err("background metadata work must not materialize grep");
-    let loonfs::Error::Core(core) = error else {
-        panic!("expected core error, got {error:?}");
+    let loonfs::Error::Grep(grep) = error else {
+        panic!("expected grep error, got {error:?}");
     };
-    assert_eq!(core.code(), ErrorCode::NotSupported);
+    assert!(matches!(grep, loonfs::GrepError::Backfilling));
+    assert_eq!(grep.code(), ErrorCode::NotSupported);
 
     drive_worker_step(&grep_worker, &namespace_id, GramIndexBuildPolicy::default()).await;
     drive_worker_step(&grep_worker, &namespace_id, GramIndexBuildPolicy::default()).await;
@@ -705,8 +708,8 @@ async fn a_failed_candidate_read_surfaces_in_traversal_order() {
         .grep(&namespace_id, &grep_request("needle"))
         .await
         .expect_err("a reached candidate's failed read must fail its page");
-    let loonfs::Error::Core(core) = &error else {
-        panic!("expected a core error, got {error:?}");
+    let loonfs::Error::Grep(loonfs::GrepError::Core(core)) = &error else {
+        panic!("expected a grep core passthrough, got {error:?}");
     };
     assert_eq!(core.code(), ErrorCode::NamespaceCorrupt);
 
@@ -735,8 +738,8 @@ async fn a_failed_candidate_read_surfaces_in_traversal_order() {
         .grep(&namespace_id, &second_page)
         .await
         .expect_err("the deferred read error must surface on the next page");
-    let loonfs::Error::Core(core) = &error else {
-        panic!("expected a core error, got {error:?}");
+    let loonfs::Error::Grep(loonfs::GrepError::Core(core)) = &error else {
+        panic!("expected a grep core passthrough, got {error:?}");
     };
     assert_eq!(core.code(), ErrorCode::NamespaceCorrupt);
 
