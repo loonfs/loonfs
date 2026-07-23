@@ -2,6 +2,7 @@
 
 use crate::GramIndexBuildPolicy;
 use serde::Deserialize;
+use std::num::{NonZeroU64, NonZeroUsize};
 use thiserror::Error;
 
 /// Default cap on concurrently executing grep build or fold steps.
@@ -11,6 +12,10 @@ use thiserror::Error;
 pub const DEFAULT_MAX_CONCURRENT_STEPS: usize = 2;
 
 /// Bounded-work policy shared by embedded and standalone drivers.
+///
+/// Project-wide, zero may disable an explicitly documented cache. Work
+/// budgets and concurrency limits instead reject zero at their construction
+/// boundaries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GrepWorkerConfig {
@@ -32,31 +37,32 @@ pub struct GrepWorkerConfig {
 
 impl GrepWorkerConfig {
     /// Returns the bounded build/fold policy represented by this config.
-    pub fn build_policy(self) -> GramIndexBuildPolicy {
-        GramIndexBuildPolicy {
-            max_files_per_step: self.max_files_per_step,
-            max_content_bytes_per_step: self.max_content_bytes_per_step,
-            max_rows_per_segment: self.max_rows_per_segment,
-            max_l0_runs: self.max_l0_runs,
-            max_mid_runs: self.max_mid_runs,
-            max_fold_rows_per_step: self.max_fold_rows_per_step,
-        }
+    pub fn build_policy(self) -> Result<GramIndexBuildPolicy, GrepWorkerConfigError> {
+        Ok(GramIndexBuildPolicy {
+            max_files_per_step: nonzero_usize("max_files_per_step", self.max_files_per_step)?,
+            max_content_bytes_per_step: nonzero_u64(
+                "max_content_bytes_per_step",
+                self.max_content_bytes_per_step,
+            )?,
+            max_rows_per_segment: nonzero_usize("max_rows_per_segment", self.max_rows_per_segment)?,
+            max_l0_runs: nonzero_usize("max_l0_runs", self.max_l0_runs)?,
+            max_mid_runs: nonzero_usize("max_mid_runs", self.max_mid_runs)?,
+            max_fold_rows_per_step: nonzero_usize(
+                "max_fold_rows_per_step",
+                self.max_fold_rows_per_step,
+            )?,
+        })
+    }
+
+    /// Returns the validated deployment-wide concurrency limit.
+    pub fn concurrent_step_limit(self) -> Result<NonZeroUsize, GrepWorkerConfigError> {
+        nonzero_usize("max_concurrent_steps", self.max_concurrent_steps)
     }
 
     /// Rejects zero step budgets.
     pub fn validate(self) -> Result<(), GrepWorkerConfigError> {
-        if self.max_concurrent_steps == 0 {
-            return Err(GrepWorkerConfigError::InvalidField {
-                field: "max_concurrent_steps",
-                reason: "must be greater than zero".to_owned(),
-            });
-        }
-        if let Some(field) = self.build_policy().zero_budget_field() {
-            return Err(GrepWorkerConfigError::InvalidField {
-                field,
-                reason: "must be greater than zero".to_owned(),
-            });
-        }
+        self.concurrent_step_limit()?;
+        self.build_policy()?;
         Ok(())
     }
 }
@@ -66,14 +72,28 @@ impl Default for GrepWorkerConfig {
         let policy = GramIndexBuildPolicy::default();
         Self {
             max_concurrent_steps: DEFAULT_MAX_CONCURRENT_STEPS,
-            max_files_per_step: policy.max_files_per_step,
-            max_content_bytes_per_step: policy.max_content_bytes_per_step,
-            max_rows_per_segment: policy.max_rows_per_segment,
-            max_l0_runs: policy.max_l0_runs,
-            max_mid_runs: policy.max_mid_runs,
-            max_fold_rows_per_step: policy.max_fold_rows_per_step,
+            max_files_per_step: policy.max_files_per_step.get(),
+            max_content_bytes_per_step: policy.max_content_bytes_per_step.get(),
+            max_rows_per_segment: policy.max_rows_per_segment.get(),
+            max_l0_runs: policy.max_l0_runs.get(),
+            max_mid_runs: policy.max_mid_runs.get(),
+            max_fold_rows_per_step: policy.max_fold_rows_per_step.get(),
         }
     }
+}
+
+fn nonzero_usize(field: &'static str, value: usize) -> Result<NonZeroUsize, GrepWorkerConfigError> {
+    NonZeroUsize::new(value).ok_or_else(|| GrepWorkerConfigError::InvalidField {
+        field,
+        reason: "must be greater than zero".to_owned(),
+    })
+}
+
+fn nonzero_u64(field: &'static str, value: u64) -> Result<NonZeroU64, GrepWorkerConfigError> {
+    NonZeroU64::new(value).ok_or_else(|| GrepWorkerConfigError::InvalidField {
+        field,
+        reason: "must be greater than zero".to_owned(),
+    })
 }
 
 /// Invalid grep worker configuration.
@@ -98,7 +118,7 @@ mod tests {
     fn defaults_match_the_build_policy() {
         let config = GrepWorkerConfig::default();
 
-        assert_eq!(config.build_policy(), GramIndexBuildPolicy::default());
+        assert_eq!(config.build_policy(), Ok(GramIndexBuildPolicy::default()));
         assert_eq!(config.validate(), Ok(()));
     }
 
@@ -157,6 +177,62 @@ mod tests {
         ] {
             assert_eq!(
                 config.validate(),
+                Err(GrepWorkerConfigError::InvalidField {
+                    field,
+                    reason: "must be greater than zero".to_owned(),
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn policy_construction_rejects_each_zero_budget() {
+        for (field, config) in [
+            (
+                "max_files_per_step",
+                GrepWorkerConfig {
+                    max_files_per_step: 0,
+                    ..GrepWorkerConfig::default()
+                },
+            ),
+            (
+                "max_content_bytes_per_step",
+                GrepWorkerConfig {
+                    max_content_bytes_per_step: 0,
+                    ..GrepWorkerConfig::default()
+                },
+            ),
+            (
+                "max_rows_per_segment",
+                GrepWorkerConfig {
+                    max_rows_per_segment: 0,
+                    ..GrepWorkerConfig::default()
+                },
+            ),
+            (
+                "max_l0_runs",
+                GrepWorkerConfig {
+                    max_l0_runs: 0,
+                    ..GrepWorkerConfig::default()
+                },
+            ),
+            (
+                "max_mid_runs",
+                GrepWorkerConfig {
+                    max_mid_runs: 0,
+                    ..GrepWorkerConfig::default()
+                },
+            ),
+            (
+                "max_fold_rows_per_step",
+                GrepWorkerConfig {
+                    max_fold_rows_per_step: 0,
+                    ..GrepWorkerConfig::default()
+                },
+            ),
+        ] {
+            assert_eq!(
+                config.build_policy(),
                 Err(GrepWorkerConfigError::InvalidField {
                     field,
                     reason: "must be greater than zero".to_owned(),

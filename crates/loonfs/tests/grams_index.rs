@@ -18,6 +18,7 @@ use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
 };
 use std::collections::BTreeSet;
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -33,6 +34,10 @@ fn grep_request(pattern: &str) -> GrepRequest {
         allow_stale: false,
         allow_scan: false,
     }
+}
+
+fn nonzero_usize(value: usize) -> NonZeroUsize {
+    NonZeroUsize::new(value).expect("test value should be nonzero")
 }
 
 /// Content blob object keys currently in the store, for pinpointing the
@@ -332,7 +337,7 @@ async fn a_worker_policy_bounds_each_build_step() {
         .expect("build admin");
     let grep_worker = grep_worker(&store);
     let policy = GramIndexBuildPolicy {
-        max_files_per_step: 3,
+        max_files_per_step: nonzero_usize(3),
         ..GramIndexBuildPolicy::default()
     };
 
@@ -426,9 +431,10 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
     let content_bytes = format!("bounded needle file {:04}\n", 0).len();
     let max_content_bytes_per_step = (content_bytes * FILES_PER_STEP) as u64;
     let policy = GramIndexBuildPolicy {
-        max_files_per_step: FILES,
-        max_content_bytes_per_step,
-        max_l0_runs: usize::MAX,
+        max_files_per_step: nonzero_usize(FILES),
+        max_content_bytes_per_step: NonZeroU64::new(max_content_bytes_per_step)
+            .expect("content budget should be nonzero"),
+        max_l0_runs: nonzero_usize(usize::MAX),
         ..GramIndexBuildPolicy::default()
     };
     let mut ops = Vec::with_capacity(FILES);

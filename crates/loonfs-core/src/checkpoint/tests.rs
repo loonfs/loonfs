@@ -57,7 +57,7 @@ use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
 };
 use std::collections::BTreeSet;
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
 
@@ -126,7 +126,7 @@ async fn drain_reorganization<S: ObjectStore + ?Sized>(
     policy: MetadataLsmPolicy,
 ) -> ManifestId {
     let fold_policy = MetadataLsmPolicy {
-        max_l0_runs: 1,
+        max_l0_runs: NonZeroUsize::MIN,
         ..policy
     };
     loop {
@@ -1500,7 +1500,7 @@ async fn base_rebuild_rejects_divergent_revision_index() {
         .await
         .expect("l0 checkpoint");
     let fold_policy = MetadataLsmPolicy {
-        max_l0_runs: 1,
+        max_l0_runs: NonZeroUsize::MIN,
         ..MetadataLsmPolicy::default()
     };
     let mut rebuild_error = None;
@@ -2118,7 +2118,7 @@ async fn checkpoints_append_past_the_threshold_and_reorganization_drains() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
     let policy = MetadataLsmPolicy {
-        max_l0_runs: 2,
+        max_l0_runs: NonZeroUsize::new(2).expect("test run limit should be nonzero"),
         ..MetadataLsmPolicy::default()
     };
     bootstrap_namespace(&store, &namespace_id, &context, false)
@@ -2272,7 +2272,8 @@ async fn manifest_base_run_tables_have_sorted_segment_coverage() {
             .expect("write file");
     }
     let policy = MetadataLsmPolicy {
-        max_rows_per_segment: 2,
+        max_rows_per_segment: NonZeroUsize::new(2)
+            .expect("test segment row budget should be nonzero"),
         ..MetadataLsmPolicy::default()
     };
     let materialization_before = load_current_projection(&store, &namespace_id)
@@ -2336,7 +2337,7 @@ async fn byte_budgeted_cache_admits_large_table_scans() {
             .expect("write file");
     }
     let policy = MetadataLsmPolicy {
-        max_rows_per_segment: 1,
+        max_rows_per_segment: NonZeroUsize::MIN,
         ..MetadataLsmPolicy::default()
     };
     checkpoint_then_reorganize(&store, &namespace_id, &context, policy).await;
@@ -2407,7 +2408,7 @@ async fn concurrent_scans_share_one_fetch_per_segment() {
             .expect("write file");
     }
     let policy = MetadataLsmPolicy {
-        max_rows_per_segment: 1,
+        max_rows_per_segment: NonZeroUsize::MIN,
         ..MetadataLsmPolicy::default()
     };
     checkpoint_then_reorganize(&store, &namespace_id, &context, policy).await;
@@ -2550,7 +2551,7 @@ async fn table_range_page_merges_base_and_l0_in_row_key_order() {
         .expect("write c");
 
     let policy = MetadataLsmPolicy {
-        max_rows_per_segment: 1,
+        max_rows_per_segment: NonZeroUsize::MIN,
         ..MetadataLsmPolicy::default()
     };
     checkpoint_then_reorganize(&store, &namespace_id, &context, policy).await;
@@ -2608,7 +2609,7 @@ async fn byte_budgeted_cache_admits_large_range_scans() {
             .expect("write file");
     }
     let policy = MetadataLsmPolicy {
-        max_rows_per_segment: 1,
+        max_rows_per_segment: NonZeroUsize::MIN,
         ..MetadataLsmPolicy::default()
     };
     checkpoint_then_reorganize(&store, &namespace_id, &context, policy).await;
@@ -2687,7 +2688,7 @@ async fn maintenance_materialization_does_not_populate_metadata_table_cache() {
             .expect("write file");
     }
     let policy = MetadataLsmPolicy {
-        max_rows_per_segment: 1,
+        max_rows_per_segment: NonZeroUsize::MIN,
         ..MetadataLsmPolicy::default()
     };
     let manifest_id = checkpoint_then_reorganize(&store, &namespace_id, &context, policy).await;
@@ -2857,8 +2858,9 @@ async fn whole_run_compaction_rewrites_base_segments() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
     let policy = MetadataLsmPolicy {
-        max_l0_runs: 1,
-        max_rows_per_segment: 2,
+        max_l0_runs: NonZeroUsize::MIN,
+        max_rows_per_segment: NonZeroUsize::new(2)
+            .expect("test segment row budget should be nonzero"),
     };
     bootstrap_namespace(&store, &namespace_id, &context, false)
         .await
@@ -2957,8 +2959,9 @@ async fn whole_run_compaction_resegments_row_key_range_families_with_l0_runs() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
     let policy = MetadataLsmPolicy {
-        max_l0_runs: 1,
-        max_rows_per_segment: 2,
+        max_l0_runs: NonZeroUsize::MIN,
+        max_rows_per_segment: NonZeroUsize::new(2)
+            .expect("test segment row budget should be nonzero"),
     };
     bootstrap_namespace(&store, &namespace_id, &context, false)
         .await
@@ -3600,7 +3603,7 @@ async fn reorganization_resumes_from_the_manifest_after_interruption() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = test_context();
     let policy = MetadataLsmPolicy {
-        max_l0_runs: 1,
+        max_l0_runs: NonZeroUsize::MIN,
         ..MetadataLsmPolicy::default()
     };
     bootstrap_namespace(&store, &namespace_id, &context, false)
@@ -5661,7 +5664,7 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
             debug_assert_manifest_table_segments_do_not_overlap(&run_tables);
             (head_seq, flatten_manifest_tables(run_tables))
         }
-        Some(previous) if l0_run_count(&previous.manifest.payload) < policy.max_l0_runs => {
+        Some(previous) if l0_run_count(&previous.manifest.payload) < policy.max_l0_runs.get() => {
             let mut metadata_files = previous.manifest.payload.metadata_files.clone();
             if previous.manifest.payload.head_seq < head_seq {
                 metadata_files.extend(flatten_manifest_tables(
@@ -5856,7 +5859,7 @@ async fn over_budget_reorganization_aborts_without_publishing() {
         .state;
 
     let fold_everything = MetadataLsmPolicy {
-        max_l0_runs: 1,
+        max_l0_runs: NonZeroUsize::MIN,
         ..Default::default()
     };
     let overrun = SteppingTimer::new(20 * 60 * 1000);

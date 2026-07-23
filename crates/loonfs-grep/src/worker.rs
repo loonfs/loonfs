@@ -38,6 +38,7 @@ use loonfs_objectstore::{
     ObjectStore, ObjectStoreError, PutMode, PROVIDER_MULTIPART_THRESHOLD_BYTES,
 };
 use std::collections::{BTreeMap, BTreeSet};
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -61,59 +62,32 @@ const INDEX_GRAMS_BASE_LEVEL: u32 = 2;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GramIndexBuildPolicy {
     /// Revisions examined per step.
-    pub max_files_per_step: usize,
+    pub max_files_per_step: NonZeroUsize,
     /// Content bytes read per step.
-    pub max_content_bytes_per_step: u64,
+    pub max_content_bytes_per_step: NonZeroU64,
     /// Rows per written grep segment.
-    pub max_rows_per_segment: usize,
+    pub max_rows_per_segment: NonZeroUsize,
     /// Delta-level runs that trigger a fold into a fresh mid run.
-    pub max_l0_runs: usize,
+    pub max_l0_runs: NonZeroUsize,
     /// Mid-level runs that trigger a fold into a fresh base run.
-    pub max_mid_runs: usize,
+    pub max_mid_runs: NonZeroUsize,
     /// Rows one fold step merges before publishing and yielding.
-    pub max_fold_rows_per_step: usize,
-}
-
-impl GramIndexBuildPolicy {
-    /// Names the first zero budget so configuration boundaries can reject it.
-    pub fn zero_budget_field(&self) -> Option<&'static str> {
-        [
-            ("max_files_per_step", self.max_files_per_step == 0),
-            (
-                "max_content_bytes_per_step",
-                self.max_content_bytes_per_step == 0,
-            ),
-            ("max_rows_per_segment", self.max_rows_per_segment == 0),
-            ("max_l0_runs", self.max_l0_runs == 0),
-            ("max_mid_runs", self.max_mid_runs == 0),
-            ("max_fold_rows_per_step", self.max_fold_rows_per_step == 0),
-        ]
-        .into_iter()
-        .find_map(|(field, is_zero)| is_zero.then_some(field))
-    }
-
-    /// Normalizes directly supplied policies to at least one unit per budget.
-    pub fn normalized(self) -> Self {
-        Self {
-            max_files_per_step: self.max_files_per_step.max(1),
-            max_content_bytes_per_step: self.max_content_bytes_per_step.max(1),
-            max_rows_per_segment: self.max_rows_per_segment.max(1),
-            max_l0_runs: self.max_l0_runs.max(1),
-            max_mid_runs: self.max_mid_runs.max(1),
-            max_fold_rows_per_step: self.max_fold_rows_per_step.max(1),
-        }
-    }
+    pub max_fold_rows_per_step: NonZeroUsize,
 }
 
 impl Default for GramIndexBuildPolicy {
     fn default() -> Self {
         Self {
-            max_files_per_step: 256,
-            max_content_bytes_per_step: 64 * 1024 * 1024,
-            max_rows_per_segment: 65_536,
-            max_l0_runs: 8,
-            max_mid_runs: 8,
-            max_fold_rows_per_step: 131_072,
+            max_files_per_step: NonZeroUsize::new(256)
+                .expect("default file budget should be nonzero"),
+            max_content_bytes_per_step: NonZeroU64::new(64 * 1024 * 1024)
+                .expect("default content budget should be nonzero"),
+            max_rows_per_segment: NonZeroUsize::new(65_536)
+                .expect("default segment row budget should be nonzero"),
+            max_l0_runs: NonZeroUsize::new(8).expect("default delta run limit should be nonzero"),
+            max_mid_runs: NonZeroUsize::new(8).expect("default mid run limit should be nonzero"),
+            max_fold_rows_per_step: NonZeroUsize::new(131_072)
+                .expect("default fold row budget should be nonzero"),
         }
     }
 }
@@ -303,7 +277,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             return Ok(GrepDisableOutcome::NotEnabled);
         }
         let checkpoint_id = match current.state().lifecycle() {
-            GrepLifecycle::Backfilling { checkpoint_id, .. } => checkpoint_id.clone(),
+            GrepLifecycle::Backfilling { checkpoint_id, .. } => Some(checkpoint_id.clone()),
             GrepLifecycle::Steady | GrepLifecycle::Disabled => None,
         };
         let next = GrepRootState::new(
@@ -338,7 +312,6 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         namespace_id: &NamespaceId,
         policy: GramIndexBuildPolicy,
     ) -> Result<GrepBuildReport> {
-        let policy = policy.normalized();
         let Some(current) = load_grep_root(&self.store, namespace_id)
             .await
             .map_err(GrepError::from)?
@@ -359,9 +332,6 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 backfill_cursor,
                 checkpoint_id,
             } => {
-                let Some(checkpoint_id) = checkpoint_id else {
-                    return self.restart_backfill(namespace_id, &current).await;
-                };
                 let page = load_grep_checkpoint_revision_page(
                     &self.store,
                     namespace_id,
@@ -476,7 +446,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         current: &LoadedGrepRoot,
     ) -> Result<GrepBuildReport> {
         let previous_checkpoint_id = match current.state().lifecycle() {
-            GrepLifecycle::Backfilling { checkpoint_id, .. } => checkpoint_id.clone(),
+            GrepLifecycle::Backfilling { checkpoint_id, .. } => Some(checkpoint_id.clone()),
             GrepLifecycle::Steady | GrepLifecycle::Disabled => None,
         };
         let checkpoint = self.create_backfill_checkpoint(namespace_id).await?;
@@ -553,7 +523,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                     },
                     None,
                 ),
-                None => (GrepLifecycle::Steady, checkpoint_id.clone()),
+                None => (GrepLifecycle::Steady, Some(checkpoint_id.clone())),
             },
             GrepLifecycle::Steady => (GrepLifecycle::Steady, None),
             GrepLifecycle::Disabled => unreachable!("disabled returned before collection"),
@@ -615,7 +585,7 @@ fn backfilling_root(
         namespace_id.clone(),
         GrepLifecycle::Backfilling {
             backfill_cursor: String::new(),
-            checkpoint_id: Some(checkpoint_id),
+            checkpoint_id,
         },
         GrepIndexState::new(target_seq, 0, None, next_run_ordinal),
         Vec::new(),
@@ -627,7 +597,7 @@ fn root_names_checkpoint(root: &GrepRootState, checkpoint_id: &CheckpointId) -> 
     matches!(
         root.lifecycle(),
         GrepLifecycle::Backfilling {
-            checkpoint_id: Some(root_checkpoint_id),
+            checkpoint_id: root_checkpoint_id,
             ..
         } if root_checkpoint_id == checkpoint_id
     )
@@ -683,7 +653,7 @@ async fn collect_backfill_unit<S: ObjectStore + ?Sized>(
             }
         }
         unit.backfill_cursor = Some(row_key);
-        if planned_content_bytes >= policy.max_content_bytes_per_step {
+        if planned_content_bytes >= policy.max_content_bytes_per_step.get() {
             budget_reached = true;
             break;
         }
@@ -748,8 +718,9 @@ async fn collect_incremental_unit<S: ObjectStore + ?Sized>(
             {
                 let would_exceed_content_budget = planned_content_bytes > 0
                     && planned_content_bytes.saturating_add(content_ref.size_bytes)
-                        > policy.max_content_bytes_per_step;
-                if examined_files >= policy.max_files_per_step || would_exceed_content_budget {
+                        > policy.max_content_bytes_per_step.get();
+                if examined_files >= policy.max_files_per_step.get() || would_exceed_content_budget
+                {
                     if delta_index > 0 {
                         unit.built_through_seq = record.seq;
                         unit.run_seq = record.seq;
@@ -770,8 +741,8 @@ async fn collect_incremental_unit<S: ObjectStore + ?Sized>(
                         content_ref: content_ref.clone(),
                     });
                 }
-                if examined_files >= policy.max_files_per_step
-                    || planned_content_bytes >= policy.max_content_bytes_per_step
+                if examined_files >= policy.max_files_per_step.get()
+                    || planned_content_bytes >= policy.max_content_bytes_per_step.get()
                 {
                     unit.built_through_seq = record.seq;
                     unit.run_seq = record.seq;
@@ -856,14 +827,14 @@ async fn write_index_segments<S: ObjectStore + ?Sized>(
     run_seq: ChangeSeq,
     run_ordinal: u64,
     rows: Vec<IndexRow>,
-    max_rows_per_segment: usize,
+    max_rows_per_segment: NonZeroUsize,
     level: u32,
 ) -> Result<Vec<GrepSegmentRef>> {
     if rows.is_empty() {
         return Ok(Vec::new());
     }
     let mut requests = Vec::new();
-    for (segment_index, segment_rows) in rows.chunks(max_rows_per_segment.max(1)).enumerate() {
+    for (segment_index, segment_rows) in rows.chunks(max_rows_per_segment.get()).enumerate() {
         let segment_index = u32::try_from(segment_index)
             .map_err(|_| CoreError::Internal("index segment index overflow".to_owned()))?;
         requests.push((segment_index, segment_rows.to_vec()));
@@ -949,7 +920,6 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         namespace_id: &NamespaceId,
         policy: GramIndexBuildPolicy,
     ) -> Result<GrepFoldReport> {
-        let policy = policy.normalized();
         let Some(current) = load_grep_root(&self.store, namespace_id)
             .await
             .map_err(GrepError::from)?
@@ -970,7 +940,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                     current.state().segments(),
                     INDEX_GRAMS_MID_LEVEL,
                 );
-                let (snapshot_segment_ids, output_level) = if l0_runs >= policy.max_l0_runs {
+                let (snapshot_segment_ids, output_level) = if l0_runs >= policy.max_l0_runs.get() {
                     (
                         current
                             .state()
@@ -981,7 +951,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                             .collect(),
                         INDEX_GRAMS_MID_LEVEL,
                     )
-                } else if mid_runs >= policy.max_mid_runs {
+                } else if mid_runs >= policy.max_mid_runs.get() {
                     (
                         current
                             .state()
@@ -1032,7 +1002,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             namespace_id,
             &snapshot,
             &fold.row_key_cursor,
-            policy.max_fold_rows_per_step,
+            policy.max_fold_rows_per_step.get(),
         )
         .await?;
         let rows = gram_postings_rows(merged.postings)?;

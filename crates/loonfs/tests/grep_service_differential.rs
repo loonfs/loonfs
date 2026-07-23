@@ -22,6 +22,7 @@ use loonfs_grep::GramIndexBuildPolicy;
 use loonfs_grep::{GrepBuildOutcome, GrepFoldOutcome, GrepIndexSnapshot, GrepService, GrepWorker};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use std::collections::BTreeSet;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -35,6 +36,10 @@ fn request(pattern: &str) -> GrepRequest {
         allow_stale: false,
         allow_scan: false,
     }
+}
+
+fn nonzero_usize(value: usize) -> NonZeroUsize {
+    NonZeroUsize::new(value).expect("test value should be nonzero")
 }
 
 async fn read_context(store: &SharedObjectStore, namespace_id: &NamespaceId) -> RuntimeReadContext {
@@ -221,8 +226,8 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
         .await
         .expect("build writer");
     let policy = GramIndexBuildPolicy {
-        max_l0_runs: 2,
-        max_mid_runs: 2,
+        max_l0_runs: nonzero_usize(2),
+        max_mid_runs: nonzero_usize(2),
         ..GramIndexBuildPolicy::default()
     };
     let worker = worker(&store);

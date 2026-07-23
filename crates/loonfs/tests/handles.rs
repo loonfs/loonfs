@@ -608,6 +608,31 @@ fn builders_require_identity_and_a_runtime() {
 }
 
 #[test]
+fn writer_builder_rejects_zero_maintenance_concurrency() {
+    let temp_dir = tempdir().expect("tempdir");
+    for background_work in [FsBackgroundWork::Enabled, FsBackgroundWork::ManualOnly] {
+        let result = block_on(
+            FsWriter::builder(store_config(temp_dir.path()))
+                .writer_id("handle-test-writer")
+                .background_work(background_work)
+                .max_concurrent_maintenance(0)
+                .build(),
+        );
+
+        match result {
+            Err(RuntimeError::Config(message)) => {
+                assert!(message.contains("`max_concurrent_maintenance`"));
+                assert!(message.contains("`FsBackgroundWork::ManualOnly`"));
+            }
+            Err(other) => {
+                panic!("expected config error for zero maintenance cap, got {other:?}")
+            }
+            Ok(_) => panic!("zero maintenance concurrency must be rejected"),
+        }
+    }
+}
+
+#[test]
 fn admin_checkpoint_and_retention_are_explicit_one_shot_calls() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id();

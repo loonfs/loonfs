@@ -12,6 +12,7 @@ use crate::{
     PageRequest, Result, RevisionNo, RuntimeCacheConfig, RuntimeCacheStats, SharedObjectStore,
     StoreConfig, TraceMode, TraceStoreKind,
 };
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 /// Read-only handle for latest namespace views.
@@ -243,7 +244,8 @@ impl FsReaderBuilder {
         let background = BackgroundWork::new(
             FsBackgroundWork::ManualOnly,
             None,
-            crate::config::DEFAULT_MAX_CONCURRENT_MAINTENANCE,
+            NonZeroUsize::new(crate::config::DEFAULT_MAX_CONCURRENT_MAINTENANCE)
+                .expect("default maintenance concurrency should be nonzero"),
         );
         Ok(FsReader {
             core: self.core.open(

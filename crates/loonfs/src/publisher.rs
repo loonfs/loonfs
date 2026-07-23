@@ -1446,7 +1446,8 @@ mod tests {
             BackgroundWork::new(
                 FsBackgroundWork::ManualOnly,
                 None,
-                crate::config::DEFAULT_MAX_CONCURRENT_MAINTENANCE,
+                std::num::NonZeroUsize::new(crate::config::DEFAULT_MAX_CONCURRENT_MAINTENANCE)
+                    .expect("default maintenance concurrency should be nonzero"),
             ),
             None,
             None,

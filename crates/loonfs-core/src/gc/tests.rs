@@ -18,6 +18,7 @@ use loonfs_objectstore::keys::{
     namespace_config, wal_head, wal_segment_prefix,
 };
 use loonfs_objectstore::ObjectStore;
+use std::num::NonZeroUsize;
 
 /// GC lifecycle tests pin as one user owner; owner-specific release
 /// rules are exercised in the fork and release suites.
@@ -1060,7 +1061,7 @@ async fn gc_reclaims_manifests_superseded_by_wal_flushes() {
     // Reorganization folds the L0 runs into fresh base segments; the
     // superseded run tables then age out on the next pass.
     let fold_policy = crate::checkpoint::MetadataLsmPolicy {
-        max_l0_runs: 1,
+        max_l0_runs: NonZeroUsize::MIN,
         ..Default::default()
     };
     for _ in 0..16 {

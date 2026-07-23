@@ -8,6 +8,7 @@
 use crate::{NamespaceId, Result, RuntimeError};
 use std::collections::BTreeSet;
 use std::future::Future;
+use std::num::NonZeroUsize;
 use std::sync::Mutex;
 use tokio::task::JoinHandle;
 
@@ -40,7 +41,7 @@ pub(crate) struct BackgroundWork {
     /// per-namespace singleflight bounds each namespace to one tick; this
     /// bounds how many namespaces may tick at once, so a write burst across
     /// many namespaces cannot fan out into unbounded maintenance tasks.
-    max_concurrent: usize,
+    max_concurrent: NonZeroUsize,
     state: Mutex<BackgroundState>,
 }
 
@@ -63,14 +64,12 @@ impl BackgroundWork {
     pub(crate) fn new(
         policy: FsBackgroundWork,
         runtime: Option<tokio::runtime::Handle>,
-        max_concurrent: usize,
+        max_concurrent: NonZeroUsize,
     ) -> Self {
         Self {
             policy,
             runtime,
-            // A zero cap would silently disable auto maintenance; the
-            // policy is the switch for that, so the cap stays a bound.
-            max_concurrent: max_concurrent.max(1),
+            max_concurrent,
             state: Mutex::new(BackgroundState {
                 closed: false,
                 inflight: BTreeSet::new(),
@@ -101,10 +100,10 @@ impl BackgroundWork {
             state.pending.insert(namespace_id.clone());
             return false;
         }
-        if state.inflight.len() >= self.max_concurrent {
+        if state.inflight.len() >= self.max_concurrent.get() {
             tracing::debug!(
                 namespace_id = %namespace_id,
-                max_concurrent = self.max_concurrent,
+                max_concurrent = self.max_concurrent.get(),
                 "maintenance tick skipped at the concurrency cap; \
                  the next over-threshold publish reschedules it"
             );
@@ -206,6 +205,10 @@ mod tests {
         NamespaceId::parse("demo").expect("valid namespace id")
     }
 
+    fn concurrency_cap(value: usize) -> NonZeroUsize {
+        NonZeroUsize::new(value).expect("test cap should be nonzero")
+    }
+
     /// Sets its flag when dropped, mimicking the claim guard the auto-tick
     /// future carries: a refused spawn must drop the future so the guard
     /// releases the singleflight slot.
@@ -219,7 +222,7 @@ mod tests {
 
     #[test]
     fn a_request_during_an_active_tick_defers_and_reruns_exactly_once() {
-        let background = BackgroundWork::new(FsBackgroundWork::Enabled, None, 8);
+        let background = BackgroundWork::new(FsBackgroundWork::Enabled, None, concurrency_cap(8));
         let namespace_id = namespace_id();
 
         assert!(background.try_claim(&namespace_id), "first claim spawns");
@@ -244,7 +247,7 @@ mod tests {
 
     #[test]
     fn shutdown_wins_over_a_deferred_rerun() {
-        let background = BackgroundWork::new(FsBackgroundWork::Enabled, None, 8);
+        let background = BackgroundWork::new(FsBackgroundWork::Enabled, None, concurrency_cap(8));
         let namespace_id = namespace_id();
 
         assert!(background.try_claim(&namespace_id));
@@ -258,7 +261,7 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_after_shut_down_refuses_and_drops_the_future() {
-        let background = BackgroundWork::new(FsBackgroundWork::Enabled, None, 8);
+        let background = BackgroundWork::new(FsBackgroundWork::Enabled, None, concurrency_cap(8));
         let namespace_id = namespace_id();
 
         // The racy interleaving a shutdown must win: the claim lands first...
@@ -292,7 +295,7 @@ mod tests {
 
     #[tokio::test]
     async fn tasks_spawned_before_shut_down_are_drained() {
-        let background = BackgroundWork::new(FsBackgroundWork::Enabled, None, 8);
+        let background = BackgroundWork::new(FsBackgroundWork::Enabled, None, concurrency_cap(8));
         let ran = Arc::new(AtomicBool::new(false));
         let ran_in_task = ran.clone();
         background.spawn(async move {
@@ -309,7 +312,7 @@ mod tests {
 
     #[tokio::test]
     async fn drain_surfaces_panicked_tasks_as_an_error() {
-        let background = BackgroundWork::new(FsBackgroundWork::Enabled, None, 8);
+        let background = BackgroundWork::new(FsBackgroundWork::Enabled, None, concurrency_cap(8));
         background.spawn(async {
             panic!("injected background task panic");
         });
@@ -323,7 +326,7 @@ mod tests {
 
     #[tokio::test]
     async fn claims_are_singleflight_and_refused_after_shut_down() {
-        let background = BackgroundWork::new(FsBackgroundWork::Enabled, None, 8);
+        let background = BackgroundWork::new(FsBackgroundWork::Enabled, None, concurrency_cap(8));
         let namespace_id = namespace_id();
         assert!(background.try_claim(&namespace_id));
         assert!(
@@ -345,13 +348,14 @@ mod tests {
 
     #[tokio::test]
     async fn manual_only_policy_never_claims() {
-        let background = BackgroundWork::new(FsBackgroundWork::ManualOnly, None, 8);
+        let background =
+            BackgroundWork::new(FsBackgroundWork::ManualOnly, None, concurrency_cap(8));
         assert!(!background.try_claim(&namespace_id()));
     }
 
     #[tokio::test]
     async fn claims_stop_at_the_global_concurrency_cap() {
-        let background = BackgroundWork::new(FsBackgroundWork::Enabled, None, 2);
+        let background = BackgroundWork::new(FsBackgroundWork::Enabled, None, concurrency_cap(2));
         let first = NamespaceId::parse("first").expect("valid namespace id");
         let second = NamespaceId::parse("second").expect("valid namespace id");
         let third = NamespaceId::parse("third").expect("valid namespace id");
@@ -367,15 +371,6 @@ mod tests {
         assert!(
             background.try_claim(&third),
             "a released slot admits the waiting namespace"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_zero_cap_is_normalized_to_one_slot() {
-        let background = BackgroundWork::new(FsBackgroundWork::Enabled, None, 0);
-        assert!(
-            background.try_claim(&namespace_id()),
-            "the policy, not the cap, is the off switch"
         );
     }
 }

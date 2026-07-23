@@ -17,6 +17,7 @@ use loonfs_api::wire::sst_blocks::SegmentBlocksBuilder;
 use loonfs_api::{sha256_digest, ChangeSeq, MetadataTableId, NamespaceId};
 use loonfs_objectstore::keys::metadata_table;
 use loonfs_objectstore::ObjectStore;
+use std::num::NonZeroUsize;
 
 pub(super) async fn build_manifest_tables<S: ObjectStore + ?Sized>(
     store: &S,
@@ -24,7 +25,7 @@ pub(super) async fn build_manifest_tables<S: ObjectStore + ?Sized>(
     run_seq: ChangeSeq,
     level: u32,
     metadata_state: &MetadataState,
-    max_rows_per_segment: usize,
+    max_rows_per_segment: NonZeroUsize,
 ) -> Result<Vec<MetadataTableManifest>> {
     build_manifest_tables_from_rows(
         store,
@@ -78,7 +79,7 @@ pub(super) async fn build_manifest_l0_run_tables<S: ObjectStore + ?Sized>(
 
 #[derive(Debug, Clone, Copy)]
 pub(super) enum MetadataTableSegmentation {
-    Base { max_rows_per_segment: usize },
+    Base { max_rows_per_segment: NonZeroUsize },
     Full,
 }
 
@@ -233,15 +234,15 @@ pub(super) fn segment_manifest_rows(
         MetadataTableSegmentation::Full => vec![MetadataSstRows { rows }],
         MetadataTableSegmentation::Base {
             max_rows_per_segment,
-        } => segment_rows_by_row_key_range(rows, max_rows_per_segment.max(1)),
+        } => segment_rows_by_row_key_range(rows, max_rows_per_segment),
     }
 }
 
 pub(super) fn segment_rows_by_row_key_range(
     rows: Vec<MetadataRow>,
-    max_rows_per_segment: usize,
+    max_rows_per_segment: NonZeroUsize,
 ) -> Vec<MetadataSstRows> {
-    rows.chunks(max_rows_per_segment)
+    rows.chunks(max_rows_per_segment.get())
         .map(|rows| MetadataSstRows {
             rows: rows.to_vec(),
         })

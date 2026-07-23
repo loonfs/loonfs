@@ -3,6 +3,7 @@
 use crate::{GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepFoldOutcome, GrepWorker};
 use loonfs_api::{ChangeSeq, ErrorCode, NamespaceId};
 use loonfs_objectstore::ObjectStore;
+use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,11 +23,10 @@ pub struct GrepStepLimiter {
 }
 
 impl GrepStepLimiter {
-    /// Creates a shared limiter. Direct callers receive the same safe
-    /// normalization as directly supplied build policies; config rejects zero.
-    pub fn new(max_concurrent_steps: usize) -> Self {
+    /// Creates a shared limiter from a validated concurrency limit.
+    pub fn new(max_concurrent_steps: NonZeroUsize) -> Self {
         Self {
-            permits: Arc::new(Semaphore::new(max_concurrent_steps.max(1))),
+            permits: Arc::new(Semaphore::new(max_concurrent_steps.get())),
         }
     }
 

@@ -18,6 +18,7 @@ use loonfs_server::{
     app, GrepConfig, GrepMode, RuntimeCacheConfigOverrides, ServerConfig, StoreConfig,
 };
 use serde::de::DeserializeOwned;
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -196,7 +197,7 @@ async fn first_query_after_restart_resumes_stale_and_mid_backfill_namespaces() {
         .build_step(
             &backfill,
             GramIndexBuildPolicy {
-                max_files_per_step: 1,
+                max_files_per_step: NonZeroUsize::MIN,
                 ..GramIndexBuildPolicy::default()
             },
         )
