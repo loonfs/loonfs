@@ -12,7 +12,6 @@ use crate::root::{
 };
 use crate::service::is_indexable_text_content;
 use crate::{GrepError, Result};
-use bytes::Bytes;
 use futures::future::try_join_all;
 use loonfs_api::wire::control::NamespaceState;
 use loonfs_api::wire::manifest::hex_encode_bytes;
@@ -34,9 +33,7 @@ use loonfs_core::{
     Error as CoreError, MetadataProjectionLoadError, MonotonicTimer, NamespaceEngine,
     StdMonotonicTimer, StoreFailureClass,
 };
-use loonfs_objectstore::{
-    ObjectStore, ObjectStoreError, PutMode, PROVIDER_MULTIPART_THRESHOLD_BYTES,
-};
+use loonfs_objectstore::{ImmutableWriteError, ObjectStore, ObjectStoreError};
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
@@ -893,7 +890,10 @@ async fn write_index_segment<S: ObjectStore + ?Sized>(
             "failed to build index segment `{object_key}`: {error}"
         ))
     })?;
-    write_immutable_object(store, &object_key, &built.bytes).await?;
+    store
+        .put_immutable_verified(&object_key, bytes::Bytes::from(built.bytes.clone()))
+        .await
+        .map_err(grep_immutable_write_error)?;
     let filter_inline = (built.filter.stored_len <= INLINE_INDEX_FILTER_MAX_BYTES).then(|| {
         let start = built.filter.offset as usize;
         hex_encode_bytes(&built.bytes[start..start + built.filter.stored_len as usize])
@@ -1475,81 +1475,6 @@ fn count_deleted_key(key: &str, report: &mut GrepGcReport) {
     }
 }
 
-async fn write_immutable_object<S: ObjectStore + ?Sized>(
-    store: &S,
-    object_key: &str,
-    expected_bytes: &[u8],
-) -> Result<()> {
-    let write_result = if expected_bytes.len() as u64 >= PROVIDER_MULTIPART_THRESHOLD_BYTES {
-        store
-            .put_overwrite(object_key, Bytes::copy_from_slice(expected_bytes))
-            .await
-    } else {
-        store
-            .put(
-                object_key,
-                Bytes::copy_from_slice(expected_bytes),
-                PutMode::CreateIfAbsent,
-            )
-            .await
-    };
-    match write_result {
-        Ok(_) => Ok(()),
-        Err(ObjectStoreError::PreconditionFailed { .. }) => {
-            if existing_object_matches(store, object_key, expected_bytes).await? {
-                Ok(())
-            } else {
-                Err(GrepError::StoreUnavailable {
-                    object_key: object_key.to_owned(),
-                    message: "object already exists with different bytes".to_owned(),
-                    class: StoreFailureClass::Other,
-                })
-            }
-        }
-        Err(error @ ObjectStoreError::Transport { .. }) => {
-            let message = error.message();
-            match existing_object_matches(store, object_key, expected_bytes).await {
-                Ok(true) => Ok(()),
-                Ok(false) => Err(GrepError::StoreUnavailable {
-                    object_key: object_key.to_owned(),
-                    message: format!(
-                        "{message}; immutable object exists with different bytes after transport error"
-                    ),
-                    class: StoreFailureClass::Other,
-                }),
-                Err(verify_error) => Err(verify_error),
-            }
-        }
-        Err(error) => Err(core_store_error(object_key, &error)),
-    }
-}
-
-async fn existing_object_matches<S: ObjectStore + ?Sized>(
-    store: &S,
-    object_key: &str,
-    expected_bytes: &[u8],
-) -> Result<bool> {
-    if let Some(metadata) = store
-        .head(object_key)
-        .await
-        .map_err(|error| core_store_error(object_key, &error))?
-    {
-        if metadata.size_bytes != expected_bytes.len() as u64 {
-            return Ok(false);
-        }
-    }
-    let existing = store
-        .get(object_key, None)
-        .await
-        .map_err(|error| core_store_error(object_key, &error))?
-        .ok_or_else(|| GrepError::StoreUnavailable {
-            object_key: object_key.to_owned(),
-            message: "object is missing while verifying immutable write".to_owned(),
-            class: StoreFailureClass::Other,
-        })?;
-    Ok(existing.as_ref() == expected_bytes)
-}
-
 fn ensure_publication_budget(timer: &impl MonotonicTimer, started_ms: u64) -> Result<()> {
     let elapsed_ms = timer.monotonic_now_ms().saturating_sub(started_ms);
     if elapsed_ms <= METADATA_PUBLICATION_BUDGET_MS {
@@ -1571,6 +1496,21 @@ fn core_store_error(object_key: &str, error: &ObjectStoreError) -> GrepError {
         object_key: object_key.to_owned(),
         message: error.message(),
         class: StoreFailureClass::of(error),
+    }
+}
+
+fn grep_immutable_write_error(error: ImmutableWriteError) -> GrepError {
+    let object_key = error.object_key().to_owned();
+    match error {
+        ImmutableWriteError::DifferentObject { object_key } => GrepError::CorruptIndex {
+            message: format!("immutable object `{object_key}` contains different bytes"),
+        },
+        ImmutableWriteError::Transport { object_key, source } => {
+            core_store_error(&object_key, &source)
+        }
+        error => GrepError::CorruptIndex {
+            message: format!("{object_key}: {error}"),
+        },
     }
 }
 

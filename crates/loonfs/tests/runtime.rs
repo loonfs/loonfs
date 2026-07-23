@@ -2352,7 +2352,7 @@ fn put_file_bytes_gates_publish_on_its_own_content_write_without_probing() {
 }
 
 #[test]
-fn put_file_bytes_content_write_failure_leaves_nothing_visible_and_a_retry_lands() {
+fn put_file_bytes_retries_a_transient_content_write_failure() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id();
     let raw_store = Arc::new(FailContentBlobPutsStore::new(temp_dir.path()));
@@ -2362,50 +2362,20 @@ fn put_file_bytes_content_write_failure_leaves_nothing_visible_and_a_retry_lands
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
 
-    let commit_id = CommitId::parse("overlap-put-retry").expect("valid commit id");
     raw_store.fail_next_content_blob_puts(1);
-    let error = fs
-        .put_file_bytes_blocking(
-            &namespace_id,
-            "/docs/report.txt",
-            b"overlap survives",
-            PutFileOptions {
-                behavior: DestinationBehavior::NoReplace,
-                commit_id: Some(commit_id.clone()),
-            },
-        )
-        .expect_err("put should surface the failed content write");
-    // A put reports its own write's error, not publish plumbing.
-    assert!(
-        error.to_string().contains("injected content write failure"),
-        "unexpected error: {error}"
-    );
-
-    // Content is staged before the publish is submitted, so the failed write
-    // stopped the put with the head unmoved and nothing visible.
-    let error = fs
-        .stat_path_blocking(&namespace_id, "/docs/report.txt")
-        .expect_err("failed put should leave the path unbound");
-    assert!(matches!(
-        error,
-        RuntimeError::Core(error) if error.code() == loonfs::ErrorCode::PathNotFound
-    ));
-
-    // The failed attempt never committed, so the same commit id retries
-    // cleanly instead of resolving as a duplicate.
     fs.put_file_bytes_blocking(
         &namespace_id,
         "/docs/report.txt",
         b"overlap survives",
         PutFileOptions {
             behavior: DestinationBehavior::NoReplace,
-            commit_id: Some(commit_id),
+            commit_id: Some(CommitId::parse("overlap-put-retry").expect("valid commit id")),
         },
     )
-    .expect("same-commit-id retry should land");
+    .expect("immutable write retries the transient failure");
     let read = fs
         .read_file_bytes_blocking(&namespace_id, "/docs/report.txt")
-        .expect("read retried file");
+        .expect("read file");
     assert_eq!(read.bytes, b"overlap survives");
 }
 
@@ -2628,7 +2598,7 @@ fn zero_interval_publishes_sequential_submissions_immediately() {
 }
 
 #[test]
-fn concurrent_put_content_write_failure_leaves_the_other_put_committed() {
+fn concurrent_puts_both_commit_after_one_transient_content_failure() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id();
     let raw_store = Arc::new(FailContentBlobPutsStore::new(temp_dir.path()));
@@ -2639,9 +2609,8 @@ fn concurrent_put_content_write_failure_leaves_the_other_put_committed() {
             .await
             .expect("create namespace");
 
-        // Exactly one of the two concurrent content writes fails. Content is
-        // staged before a submission enters the commit window, so only the
-        // put whose own upload failed errors; the other publishes normally.
+        // One content write fails once before either submission enters the
+        // commit window. Its immutable retry is independent of its peer.
         raw_store.fail_next_content_blob_puts(1);
         let (a, b) = tokio::join!(
             fs.put_file_bytes(
@@ -2658,59 +2627,18 @@ fn concurrent_put_content_write_failure_leaves_the_other_put_committed() {
             ),
         );
 
-        let mut failed = Vec::new();
         for (path, bytes, result) in [
             ("/docs/a.txt", b"alpha" as &[u8], a),
             ("/docs/b.txt", b"beta" as &[u8], b),
         ] {
-            match result {
-                Ok(_) => {
-                    let read = fs
-                        .reader
-                        .read_file_bytes(&namespace_id, path)
-                        .await
-                        .expect("read the committed peer");
-                    assert_eq!(read.bytes, bytes);
-                }
-                Err(error) => {
-                    // The failing member reports its own write's error, and
-                    // its path stays unbound behind an unmoved head.
-                    assert!(
-                        error.to_string().contains("injected content write failure"),
-                        "unexpected error: {error}"
-                    );
-                    let error = fs
-                        .reader
-                        .stat_path(&namespace_id, path)
-                        .await
-                        .expect_err("failed put should leave the path unbound");
-                    assert!(matches!(
-                        error,
-                        RuntimeError::Core(error) if error.code() == loonfs::ErrorCode::PathNotFound
-                    ));
-                    failed.push((path, bytes));
-                }
-            }
+            result.expect("both puts survive the transient content failure");
+            let read = fs
+                .reader
+                .read_file_bytes(&namespace_id, path)
+                .await
+                .expect("read committed file");
+            assert_eq!(read.bytes, bytes);
         }
-        let [(failed_path, failed_bytes)] = failed[..] else {
-            panic!("exactly one put should fail its own content write");
-        };
-
-        // The failed member retries cleanly; its peer never needed one.
-        fs.put_file_bytes(
-            &namespace_id,
-            failed_path,
-            failed_bytes,
-            PutFileOptions::default(),
-        )
-        .await
-        .expect("retried put");
-        let read = fs
-            .reader
-            .read_file_bytes(&namespace_id, failed_path)
-            .await
-            .expect("read retried file");
-        assert_eq!(read.bytes, failed_bytes);
     });
 }
 

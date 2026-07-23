@@ -15,7 +15,9 @@ use crate::keyspace::{manifest_key, root_key};
 use bytes::Bytes;
 use loonfs_api::NamespaceId;
 use loonfs_core::StoreFailureClass;
-use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
+use loonfs_objectstore::{
+    ImmutableWriteError, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
+};
 
 /// A verified grep root pointer and metadata from the same store read.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -289,33 +291,11 @@ async fn write_grep_manifest<S: ObjectStore + ?Sized>(
     let object_key = manifest_key(state.namespace_id(), envelope.manifest_id());
     let bytes =
         Bytes::from(encode_grep_manifest(&envelope).map_err(|error| corrupt(&object_key, error))?);
-    match store.put_if_absent(&object_key, bytes.clone()).await {
-        Ok(_) => Ok(WrittenGrepManifest { envelope, bytes }),
-        Err(ObjectStoreError::PreconditionFailed { .. } | ObjectStoreError::Conflict { .. }) => {
-            let existing = load_grep_manifest(store, state.namespace_id(), envelope.manifest_id())
-                .await?
-                .ok_or_else(|| GrepRootError::MissingManifest {
-                    root_key: root_key(state.namespace_id()),
-                    manifest_key: object_key.clone(),
-                })?;
-            if existing.payload_checksum() == envelope.payload_checksum() {
-                Ok(WrittenGrepManifest {
-                    envelope: existing,
-                    bytes,
-                })
-            } else {
-                Err(GrepRootError::Corrupt {
-                    object_key,
-                    message: format!(
-                        "manifest conflict: expected payload checksum {}, actual {}",
-                        envelope.payload_checksum(),
-                        existing.payload_checksum()
-                    ),
-                })
-            }
-        }
-        Err(error) => Err(store_error(&object_key, &error)),
-    }
+    store
+        .put_immutable_verified(&object_key, bytes.clone())
+        .await
+        .map_err(immutable_write_error)?;
+    Ok(WrittenGrepManifest { envelope, bytes })
 }
 
 async fn verify_and_heal_advanced_manifest<S: ObjectStore + ?Sized>(
@@ -332,33 +312,10 @@ async fn verify_and_heal_advanced_manifest<S: ObjectStore + ?Sized>(
     {
         return Ok(());
     }
-    match store
-        .put_if_absent(&object_key, written.bytes.clone())
+    store
+        .put_immutable_verified(&object_key, written.bytes.clone())
         .await
-    {
-        Ok(_) => Ok(()),
-        Err(ObjectStoreError::PreconditionFailed { .. } | ObjectStoreError::Conflict { .. }) => {
-            let existing = load_grep_manifest(store, namespace_id, written.envelope.manifest_id())
-                .await?
-                .ok_or_else(|| GrepRootError::MissingManifest {
-                    root_key: root_key(namespace_id),
-                    manifest_key: object_key.clone(),
-                })?;
-            if existing.payload_checksum() == written.envelope.payload_checksum() {
-                Ok(())
-            } else {
-                Err(GrepRootError::Corrupt {
-                    object_key,
-                    message: format!(
-                        "manifest heal conflict: expected payload checksum {}, actual {}",
-                        written.envelope.payload_checksum(),
-                        existing.payload_checksum()
-                    ),
-                })
-            }
-        }
-        Err(error) => Err(store_error(&object_key, &error)),
-    }
+        .map_err(immutable_write_error)
 }
 
 fn corrupt(object_key: &str, error: impl ToString) -> GrepRootError {
@@ -373,5 +330,20 @@ fn store_error(object_key: &str, error: &ObjectStoreError) -> GrepRootError {
         object_key: object_key.to_owned(),
         message: error.message(),
         class: StoreFailureClass::of(error),
+    }
+}
+
+fn immutable_write_error(error: ImmutableWriteError) -> GrepRootError {
+    let fallback_object_key = error.object_key().to_owned();
+    match error {
+        ImmutableWriteError::DifferentObject { object_key } => GrepRootError::Corrupt {
+            object_key,
+            message: "immutable object contains different bytes".to_owned(),
+        },
+        ImmutableWriteError::Transport { object_key, source } => store_error(&object_key, &source),
+        error => GrepRootError::Corrupt {
+            object_key: fallback_object_key,
+            message: error.to_string(),
+        },
     }
 }

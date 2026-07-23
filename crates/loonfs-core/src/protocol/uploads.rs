@@ -16,7 +16,7 @@ use crate::namespace::control::{
     load_content_store_descriptor_control, load_namespace_descriptor_control,
     load_namespace_head_control,
 };
-use crate::storage::content::{probe_durable_content_reference, write_immutable_object};
+use crate::storage::content::probe_durable_content_reference;
 use crate::storage::content_admission::{ContentAdmission, PreparedContent};
 use bytes::Bytes;
 use loonfs_api::v0::{
@@ -234,7 +234,9 @@ pub(crate) async fn upload_content<S: ObjectStore + ?Sized>(
                     return Err(CoreError::UploadContentConflict { upload_id });
                 }
 
-                write_immutable_object(store, &object_key, bytes).await?;
+                store
+                    .put_immutable_verified(&object_key, Bytes::copy_from_slice(bytes))
+                    .await?;
                 state.staged_content_ref = Some(content_ref.clone());
 
                 Ok(UploadSessionUpdate::Replace {

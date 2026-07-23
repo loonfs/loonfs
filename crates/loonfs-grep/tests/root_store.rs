@@ -52,12 +52,27 @@ async fn seed_succeeds_once_and_second_seed_conflicts() {
     let store = LocalFsStore::new(temp_dir.path()).expect("local store");
     let state = root(namespace_id("docs"), ChangeSeq(0));
 
+    seed_grep_root(&store, &state, "seed")
+        .await
+        .expect("first seed succeeds");
+    assert!(matches!(
+        seed_grep_root(&store, &state, "seed").await,
+        Err(GrepRootError::Conflict { .. })
+    ));
+}
+
+#[tokio::test]
+async fn same_manifest_id_with_different_envelope_bytes_is_corrupt() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("local store");
+    let state = root(namespace_id("docs"), ChangeSeq(0));
+
     seed_grep_root(&store, &state, "seed-one")
         .await
         .expect("first seed succeeds");
     assert!(matches!(
         seed_grep_root(&store, &state, "seed-two").await,
-        Err(GrepRootError::Conflict { .. })
+        Err(GrepRootError::Corrupt { .. })
     ));
 }
 

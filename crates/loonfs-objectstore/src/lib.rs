@@ -11,6 +11,7 @@
 pub mod abs;
 mod configured;
 pub mod gcs;
+mod immutable_write;
 pub mod keys;
 mod keyspace;
 pub mod layout;
@@ -21,6 +22,7 @@ pub mod presign;
 pub mod provider;
 mod provider_object_store;
 pub mod r2;
+mod retry;
 pub mod s3;
 mod s3_compatible;
 mod secret;
@@ -30,6 +32,7 @@ pub mod timing;
 mod transfer_timeouts;
 
 pub use configured::{ConfiguredObjectStore, ConfiguredObjectStoreKind};
+pub use immutable_write::ImmutableWriteError;
 pub use object_store::ObjectStoreError as Error;
 pub use object_store::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode, Result,

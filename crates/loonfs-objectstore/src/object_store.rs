@@ -176,6 +176,22 @@ pub trait ObjectStore: Send + Sync + Debug {
         self.put(key, bytes, PutMode::CreateIfAbsent).await
     }
 
+    /// Writes `bytes` under an immutable `key` and accepts success only when
+    /// the key contains exactly those bytes.
+    ///
+    /// Payloads below 8 MiB use create-if-absent; payloads at or above 8 MiB
+    /// use the store's multipart-capable overwrite path. Transport retries
+    /// are safe only because every writer allowed to name this immutable key
+    /// must supply identical bytes. Mutable keys must use [`Self::put`] and
+    /// own their protocol-specific ambiguity resolution.
+    async fn put_immutable_verified(
+        &self,
+        key: &str,
+        bytes: Bytes,
+    ) -> std::result::Result<(), crate::ImmutableWriteError> {
+        crate::immutable_write::put(self, key, bytes).await
+    }
+
     async fn compare_and_swap(
         &self,
         key: &str,

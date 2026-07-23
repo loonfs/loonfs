@@ -1,11 +1,15 @@
-//! The shared provider transport: timeouts, per-operation deadlines,
-//! bounded retry loops for idempotent-safe writes, and multipart upload for
-//! large immutable payloads.
+//! The shared provider transport: timeouts, bounded retries for replay-safe
+//! delete and multipart stages, and multipart upload for large immutable
+//! payloads.
 
+use crate::immutable_write::{readback, ImmutableReadback};
 use crate::keyspace::{
     normalize_key_prefix, scope_list_prefix, scope_object_key, unscope_listed_key,
 };
 use crate::object_store::Result;
+use crate::retry::{
+    transport_retry_backoff, transport_retry_pause, OperationDeadline, TransportRetryPolicy,
+};
 use crate::timing::{MonotonicTimer, StdMonotonicTimer};
 use crate::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
 use async_trait::async_trait;
@@ -38,8 +42,8 @@ pub const PROVIDER_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Hard deadline for one logical object-store operation, consumed across
 /// every retry of that operation rather than restarting per attempt. Reads
-/// get it as the provider client's retry timeout; single-request writes and
-/// deletes get it through `TransportRetryPolicy`. The deadline gates
+/// get it as the provider client's retry timeout; verified immutable writes
+/// and deletes share it through `TransportRetryPolicy`. The deadline gates
 /// starting another attempt, and one outer attempt may itself contain the
 /// inner client's full retry budget for status-code retries — so one
 /// operation's total wall time is bounded by the deadline plus the inner
@@ -119,83 +123,6 @@ pub(crate) fn provider_retry_config() -> provider_store::RetryConfig {
         retry_timeout: PROVIDER_OP_DEADLINE,
         ..Default::default()
     }
-}
-
-/// Bounded retry for transient write failures, mirroring the retry budget the
-/// provider client already applies to reads.
-///
-/// The provider client retries transport errors on reads because GET is
-/// idempotent by method, but it refuses to re-send a PUT or DELETE that may
-/// already have reached the store. LoonFS knows more than the HTTP layer:
-/// overwrite puts, create-if-absent puts, and deletes are idempotent-safe at
-/// this contract's semantics, so they get the same bounded retry reads have.
-/// Both attempt count and elapsed time bound the loop: `op_deadline` is one
-/// deadline for the whole logical operation, never restarted per attempt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct TransportRetryPolicy {
-    max_retries: u32,
-    initial_backoff: Duration,
-    max_backoff: Duration,
-    op_deadline: Duration,
-}
-
-impl TransportRetryPolicy {
-    /// Matches the provider client's read retry budget: up to 10 retries with
-    /// exponential backoff from 100ms capped at 15s, all inside one
-    /// operation deadline.
-    const DEFAULT: Self = Self {
-        max_retries: 10,
-        initial_backoff: Duration::from_millis(100),
-        max_backoff: Duration::from_secs(15),
-        op_deadline: PROVIDER_OP_DEADLINE,
-    };
-}
-
-fn transport_retry_backoff(policy: &TransportRetryPolicy, retry: u32) -> Duration {
-    // Deterministic doubling: workspace policy avoids ambient randomness, and
-    // a bounded per-operation retry does not need jitter.
-    let doublings = retry.saturating_sub(1).min(16);
-    policy
-        .initial_backoff
-        .saturating_mul(1u32 << doublings)
-        .min(policy.max_backoff)
-}
-
-/// Elapsed-time state for one logical operation's retry loop: refuses new
-/// attempts once the deadline is consumed and never sleeps past it.
-struct OperationDeadline<'timer> {
-    timer: &'timer dyn MonotonicTimer,
-    started_ms: u64,
-    deadline: Duration,
-}
-
-impl<'timer> OperationDeadline<'timer> {
-    fn start(timer: &'timer dyn MonotonicTimer, deadline: Duration) -> Self {
-        Self {
-            timer,
-            started_ms: timer.monotonic_now_ms(),
-            deadline,
-        }
-    }
-
-    fn remaining(&self) -> Option<Duration> {
-        let elapsed_ms = self
-            .timer
-            .monotonic_now_ms()
-            .saturating_sub(self.started_ms);
-        let deadline_ms = u64::try_from(self.deadline.as_millis()).unwrap_or(u64::MAX);
-        if elapsed_ms >= deadline_ms {
-            return None;
-        }
-        Some(Duration::from_millis(deadline_ms - elapsed_ms))
-    }
-}
-
-#[allow(clippy::disallowed_methods)]
-async fn transport_retry_pause(backoff: Duration) {
-    // Write retries intentionally wait an isolated async timer between
-    // attempts, mirroring the backoff the provider client applies to reads.
-    tokio::time::sleep(backoff).await;
 }
 
 /// The size routing for multipart writes: payloads at or above the
@@ -338,17 +265,17 @@ impl ProviderObjectStore {
     /// retried in place on transient failures (part indices are stable, so a
     /// retry re-sends the same part), and a best-effort abort so a failed
     /// upload does not strand parts. An ambiguous completion — a transport
-    /// failure whose attempt may have landed — is resolved by reading the
-    /// object back and comparing bytes
+    /// failure whose attempt may have landed — is resolved by the immutable
+    /// operation's shared exact-byte read-back
     /// ([`MultipartWrite::resolve_ambiguous_completion`]).
     ///
     /// There is deliberately no whole-operation clock: every part attempt is
     /// individually bounded and every retry loop is count-bounded, so a
     /// healthy transfer takes as long as the link needs while a stuck one
-    /// still fails within one part's retry budget. Only overwrite puts route
-    /// here — providers complete multipart uploads as unconditional
-    /// overwrites, so the conditional modes stay on the single-request path
-    /// where real provider preconditions exist.
+    /// still fails within one part's retry budget. Completion itself is one
+    /// attempt: only [`ObjectStore::put_immutable_verified`] may replay an
+    /// object-publishing write. Conditional modes stay on the single-request
+    /// path where real provider preconditions exist.
     async fn put_large_multipart(
         &self,
         multipart: &dyn MultipartStore,
@@ -555,46 +482,17 @@ impl MultipartWrite<'_> {
         bytes: &Bytes,
     ) -> Result<ObjectMetadata> {
         let size_bytes = bytes.len() as u64;
-        let mut retries: u32 = 0;
-        // True once an attempt failed after possibly reaching the store, so
-        // no later failure can rule out that this completion landed.
-        let mut ambiguous_outcome = false;
-        loop {
-            let err = match self
-                .multipart
-                .complete_multipart(self.path, upload_id, parts.clone())
-                .await
-            {
-                Ok(result) => return Ok(ProviderObjectStore::from_put_result(result, size_bytes)),
-                Err(err) => err,
-            };
-            if !provider_transport_retryable(&err) {
-                if !ambiguous_outcome {
-                    return Err(map_provider_error(self.key, err));
-                }
-                // A definite refusal after an ambiguous attempt is not a
-                // definite failure: the ambiguous attempt may have landed
-                // and taken the upload id with it, in which case the
-                // provider reports the completed upload as gone. Only the
-                // object can say which happened.
-                return self
-                    .resolve_ambiguous_completion(upload_id, bytes, err)
-                    .await;
+        match self
+            .multipart
+            .complete_multipart(self.path, upload_id, parts)
+            .await
+        {
+            Ok(result) => Ok(ProviderObjectStore::from_put_result(result, size_bytes)),
+            Err(err) if provider_transport_retryable(&err) => {
+                self.resolve_ambiguous_completion(upload_id, bytes, err)
+                    .await
             }
-            ambiguous_outcome = true;
-            let Some(backoff) = self.store.next_write_backoff(
-                self.key,
-                "complete_multipart",
-                size_bytes,
-                &mut retries,
-                None,
-                &err,
-            ) else {
-                return self
-                    .resolve_ambiguous_completion(upload_id, bytes, err)
-                    .await;
-            };
-            transport_retry_pause(backoff).await;
+            Err(err) => Err(map_provider_error(self.key, err)),
         }
     }
 
@@ -616,36 +514,17 @@ impl MultipartWrite<'_> {
         bytes: &Bytes,
         final_err: provider_store::Error,
     ) -> Result<ObjectMetadata> {
-        match self.store.get_with_metadata(self.key).await {
-            Ok(Some(body)) if body.bytes.as_slice() == bytes.as_ref() => {
+        match readback(self.store, self.key, bytes).await {
+            Ok(ImmutableReadback::Identical(metadata)) => {
                 self.abort(upload_id).await;
-                Ok(body.metadata)
+                Ok(metadata)
             }
-            Ok(readback) => {
-                let outcome = match readback {
-                    Some(_) => "the object at the key does not hold the payload bytes",
-                    None => "no object exists at the key",
-                };
-                tracing::warn!(
-                    object_key = self.key,
-                    operation = "complete_multipart",
-                    outcome,
-                    "ambiguous multipart completion did not land",
-                );
-                // An upload-gone rejection maps to `NotFound`, which would
-                // misreport this write failure as a missing object; it
-                // surfaces as transport instead, so callers classify the
-                // unproven outcome as safe to retry. Every other final
-                // error keeps its own classification.
-                Err(match map_provider_error(self.key, final_err) {
-                    ObjectStoreError::NotFound { .. } => ObjectStoreError::transport(
-                        self.key,
-                        format!(
-                            "multipart upload is gone without a provable completion: {outcome}"
-                        ),
-                    ),
-                    other => other,
-                })
+            Ok(ImmutableReadback::Different) => self.unproven_completion(
+                final_err,
+                "the object at the key does not hold the payload bytes",
+            ),
+            Ok(ImmutableReadback::Missing) => {
+                self.unproven_completion(final_err, "no object exists at the key")
             }
             Err(verify_err) => {
                 let original = map_provider_error(self.key, final_err).message();
@@ -657,6 +536,20 @@ impl MultipartWrite<'_> {
                 ))
             }
         }
+    }
+
+    fn unproven_completion(
+        &self,
+        final_err: provider_store::Error,
+        outcome: &'static str,
+    ) -> Result<ObjectMetadata> {
+        tracing::warn!(
+            object_key = self.key,
+            operation = "complete_multipart",
+            outcome,
+            "ambiguous multipart completion did not land",
+        );
+        Err(map_provider_error(self.key, final_err))
     }
 
     async fn abort(&self, upload_id: &provider_store::MultipartId) {
@@ -788,31 +681,6 @@ impl ObjectStore for ProviderObjectStore {
     async fn put(&self, key: &str, bytes: Bytes, mode: PutMode) -> Result<ObjectMetadata> {
         let path = self.to_path(key)?;
         let size_bytes = bytes.len() as u64;
-
-        if matches!(mode, PutMode::CompareAndSwap { .. }) {
-            // Compare-and-swap is deliberately a single attempt: after an
-            // ambiguous transport failure the first attempt may have landed
-            // and changed the etag, so a blind re-send would report a false
-            // conflict for our own write. Callers own precondition semantics
-            // and recover by re-reading.
-            let options = PutOptions {
-                mode: map_put_mode(mode),
-                ..Default::default()
-            };
-            return match self
-                .inner
-                .put_opts(&path, PutPayload::from(bytes), options)
-                .await
-            {
-                Ok(result) => Ok(Self::from_put_result(result, size_bytes)),
-                Err(err) if provider_not_found(&err) => Err(ObjectStoreError::PreconditionFailed {
-                    object_key: key.to_owned(),
-                }),
-                Err(err) => Err(map_provider_error(key, err)),
-            };
-        }
-
-        let create_if_absent = matches!(mode, PutMode::CreateIfAbsent);
         if matches!(mode, PutMode::Overwrite)
             && size_bytes >= self.multipart_geometry.threshold_bytes
         {
@@ -822,62 +690,27 @@ impl ObjectStore for ProviderObjectStore {
                     .await;
             }
         }
-        let deadline =
-            OperationDeadline::start(self.timer.as_ref(), self.transport_retry.op_deadline);
-        let mut retries: u32 = 0;
-        // True once an attempt failed after possibly reaching the store, so a
-        // later "already exists" may be our own first attempt having landed.
-        let mut ambiguous_outcome = false;
-        loop {
-            let options = PutOptions {
-                mode: map_put_mode(mode.clone()),
-                ..Default::default()
-            };
-            let err = match self
-                .inner
-                .put_opts(&path, PutPayload::from(bytes.clone()), options)
-                .await
-            {
-                Ok(result) => return Ok(Self::from_put_result(result, size_bytes)),
-                Err(err) => err,
-            };
-
-            if create_if_absent && ambiguous_outcome && provider_precondition(&err) {
-                match self.get_with_metadata(key).await? {
-                    Some(body) if body.bytes.as_slice() == bytes.as_ref() => {
-                        // Our earlier attempt landed: report it as the
-                        // successful write it was, not a conflict.
-                        return Ok(body.metadata);
-                    }
-                    Some(_) => {
-                        return Err(ObjectStoreError::PreconditionFailed {
-                            object_key: key.to_owned(),
-                        })
-                    }
-                    // The conflicting object vanished, so the create can be
-                    // re-attempted within the remaining retry budget.
-                    None => {}
-                }
-            } else if provider_transport_retryable(&err) {
-                ambiguous_outcome = true;
-            } else {
-                return Err(map_provider_error(key, err));
+        // Raw flat writes are deliberately one attempt. In particular, a
+        // mutable overwrite cannot be replayed after an ambiguous transport
+        // outcome without changing write ordering. Immutable callers use
+        // `put_immutable_verified`, whose name supplies the retry invariant.
+        let compare_and_swap = matches!(mode, PutMode::CompareAndSwap { .. });
+        let options = PutOptions {
+            mode: map_put_mode(mode),
+            ..Default::default()
+        };
+        match self
+            .inner
+            .put_opts(&path, PutPayload::from(bytes), options)
+            .await
+        {
+            Ok(result) => Ok(Self::from_put_result(result, size_bytes)),
+            Err(err) if compare_and_swap && provider_not_found(&err) => {
+                Err(ObjectStoreError::PreconditionFailed {
+                    object_key: key.to_owned(),
+                })
             }
-
-            // The operation deadline is consumed across attempts, never
-            // restarted: no new attempt starts once it is spent, and the
-            // backoff never sleeps past it.
-            let Some(backoff) = self.next_write_backoff(
-                key,
-                "put",
-                size_bytes,
-                &mut retries,
-                Some(&deadline),
-                &err,
-            ) else {
-                return Err(map_provider_error(key, err));
-            };
-            transport_retry_pause(backoff).await;
+            Err(err) => Err(map_provider_error(key, err)),
         }
     }
 
@@ -961,13 +794,6 @@ enum RangedGet {
 
 fn provider_not_found(err: &provider_store::Error) -> bool {
     matches!(err, provider_store::Error::NotFound { .. })
-}
-
-fn provider_precondition(err: &provider_store::Error) -> bool {
-    matches!(
-        err,
-        provider_store::Error::AlreadyExists { .. } | provider_store::Error::Precondition { .. }
-    )
 }
 
 fn provider_transport_retryable(err: &provider_store::Error) -> bool {
@@ -1240,7 +1066,6 @@ mod tests {
 
     #[derive(Debug)]
     enum ReadScript {
-        NotFound,
         Transport,
     }
 
@@ -1336,10 +1161,6 @@ mod tests {
             self.gets.fetch_add(1, Ordering::SeqCst);
             let script = self.get_script.lock().expect("get script").pop_front();
             match script {
-                Some(ReadScript::NotFound) => Err(provider_store::Error::NotFound {
-                    path: location.to_string(),
-                    source: "scripted not found".into(),
-                }),
                 Some(ReadScript::Transport) => Err(transport_glitch()),
                 None => self.inner.get_opts(location, options).await,
             }
@@ -1609,7 +1430,116 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn overwrite_put_retries_transient_transport_failures() {
+    async fn mutable_overwrite_transport_failure_is_not_retried() {
+        let flaky = Arc::new(FlakyStore::default());
+        let store = retrying_store(Arc::clone(&flaky));
+        script_puts(&flaky, [WriteScript::FailWithoutLanding]);
+        let key = "namespaces/demo/uploads/upl_1.json";
+
+        let error = store
+            .put_overwrite(key, Bytes::from_static(b"session"))
+            .await
+            .expect_err("mutable overwrite must surface an ambiguous outcome");
+
+        assert!(matches!(error, ObjectStoreError::Transport { .. }));
+        assert_eq!(flaky.puts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn immutable_small_write_uses_create_if_absent() {
+        let flaky = Arc::new(FlakyStore::default());
+        let store = retrying_store(Arc::clone(&flaky));
+        let key = "namespaces/demo/uploads/upl_2.json";
+
+        store
+            .put_immutable_verified(key, Bytes::from_static(b"immutable bytes"))
+            .await
+            .expect("small immutable write");
+
+        assert_eq!(flaky.puts.load(Ordering::SeqCst), 1);
+        assert_eq!(flaky.multipart_creates.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            store.get(key, None).await.expect("get"),
+            Some(Bytes::from_static(b"immutable bytes"))
+        );
+    }
+
+    #[tokio::test]
+    async fn immutable_already_present_identical_is_accepted_without_rewrite() {
+        let flaky = Arc::new(FlakyStore::default());
+        let store = retrying_store(Arc::clone(&flaky));
+        let key = "namespaces/demo/wal/00000001.cbor.zst";
+        let bytes = Bytes::from_static(b"identical immutable bytes");
+        seed_scoped_object(&flaky, key, bytes.clone()).await;
+
+        store
+            .put_immutable_verified(key, bytes)
+            .await
+            .expect("identical object is accepted");
+
+        assert_eq!(flaky.puts.load(Ordering::SeqCst), 1);
+        assert_eq!(flaky.gets.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn immutable_different_bytes_at_key_are_corruption_class() {
+        let flaky = Arc::new(FlakyStore::default());
+        let store = retrying_store(Arc::clone(&flaky));
+        let key = "namespaces/demo/wal/00000002.cbor.zst";
+        seed_scoped_object(&flaky, key, Bytes::from_static(b"theirs")).await;
+
+        let error = store
+            .put_immutable_verified(key, Bytes::from_static(b"mine"))
+            .await
+            .expect_err("different immutable bytes are rejected");
+
+        assert!(matches!(
+            error,
+            crate::ImmutableWriteError::DifferentObject { object_key } if object_key == key
+        ));
+        assert_eq!(flaky.puts.load(Ordering::SeqCst), 1);
+        assert_eq!(flaky.gets.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn immutable_ambiguous_landed_write_is_accepted_by_readback() {
+        let flaky = Arc::new(FlakyStore::default());
+        let store = retrying_store(Arc::clone(&flaky));
+        script_puts(&flaky, [WriteScript::LandThenFail]);
+        let key = "namespaces/demo/uploads/upl_3.json";
+
+        store
+            .put_immutable_verified(key, Bytes::from_static(b"payload"))
+            .await
+            .expect("readback proves the first attempt landed");
+
+        assert_eq!(flaky.puts.load(Ordering::SeqCst), 2);
+        assert_eq!(flaky.gets.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn immutable_ambiguous_outcome_rejects_different_readback() {
+        let flaky = Arc::new(FlakyStore::default());
+        let store = retrying_store(Arc::clone(&flaky));
+        let key = "namespaces/demo/wal/00000003.cbor.zst";
+        seed_scoped_object(&flaky, key, Bytes::from_static(b"theirs")).await;
+        script_puts(&flaky, [WriteScript::FailWithoutLanding]);
+
+        let error = store
+            .put_immutable_verified(key, Bytes::from_static(b"mine"))
+            .await
+            .expect_err("ambiguous write cannot adopt different bytes");
+
+        assert!(matches!(
+            error,
+            crate::ImmutableWriteError::DifferentObject { .. }
+        ));
+        assert_eq!(flaky.puts.load(Ordering::SeqCst), 2);
+        assert_eq!(flaky.gets.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn immutable_transport_failures_retry_inside_the_operation() {
         let flaky = Arc::new(FlakyStore::default());
         let store = retrying_store(Arc::clone(&flaky));
         script_puts(
@@ -1619,107 +1549,38 @@ mod tests {
                 WriteScript::FailWithoutLanding,
             ],
         );
-        let key = "namespaces/demo/uploads/upl_1.json";
+        let key = "namespaces/demo/uploads/upl_4.json";
 
-        let metadata = store
-            .put_overwrite(key, Bytes::from_static(b"session"))
+        store
+            .put_immutable_verified(key, Bytes::from_static(b"payload"))
             .await
-            .expect("put succeeds after transient failures");
+            .expect("transient failures are retried");
 
         assert_eq!(flaky.puts.load(Ordering::SeqCst), 3);
-        assert!(metadata.etag.is_some());
-        assert_eq!(
-            store.get(key, None).await.expect("get"),
-            Some(Bytes::from_static(b"session"))
-        );
-    }
-
-    #[tokio::test]
-    async fn create_put_resolves_landed_first_attempt_as_success() {
-        let flaky = Arc::new(FlakyStore::default());
-        let store = retrying_store(Arc::clone(&flaky));
-        script_puts(&flaky, [WriteScript::LandThenFail]);
-        let key = "namespaces/demo/uploads/upl_2.json";
-
-        let metadata = store
-            .put_if_absent(key, Bytes::from_static(b"upload session"))
-            .await
-            .expect("landed first attempt reported as success");
-
-        assert_eq!(flaky.puts.load(Ordering::SeqCst), 2);
-        assert_eq!(flaky.gets.load(Ordering::SeqCst), 1);
-        let head = store.head(key).await.expect("head").expect("object exists");
-        assert_eq!(metadata.etag, head.etag);
-    }
-
-    #[tokio::test]
-    async fn create_put_reports_real_conflict_after_transport_failure() {
-        let flaky = Arc::new(FlakyStore::default());
-        let store = retrying_store(Arc::clone(&flaky));
-        let key = "namespaces/demo/wal/00000001.json";
-        store
-            .put_overwrite(key, Bytes::from_static(b"theirs"))
-            .await
-            .expect("seed conflicting object");
-        script_puts(&flaky, [WriteScript::FailWithoutLanding]);
-
-        let error = store
-            .put_if_absent(key, Bytes::from_static(b"mine"))
-            .await
-            .expect_err("conflicting object is still a conflict");
-
-        assert!(matches!(
-            error,
-            ObjectStoreError::PreconditionFailed { object_key } if object_key == key
-        ));
-        assert_eq!(flaky.puts.load(Ordering::SeqCst), 3);
-        assert_eq!(flaky.gets.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            store.get(key, None).await.expect("get"),
-            Some(Bytes::from_static(b"theirs"))
-        );
-    }
-
-    #[tokio::test]
-    async fn create_put_without_ambiguity_keeps_precondition_semantics() {
-        let flaky = Arc::new(FlakyStore::default());
-        let store = retrying_store(Arc::clone(&flaky));
-        let key = "namespaces/demo/wal/00000002.json";
-        store
-            .put_overwrite(key, Bytes::from_static(b"theirs"))
-            .await
-            .expect("seed existing object");
-
-        let error = store
-            .put_if_absent(key, Bytes::from_static(b"mine"))
-            .await
-            .expect_err("existing object fails the create precondition");
-
-        assert!(matches!(error, ObjectStoreError::PreconditionFailed { .. }));
-        assert_eq!(flaky.puts.load(Ordering::SeqCst), 2);
         assert_eq!(flaky.gets.load(Ordering::SeqCst), 0);
     }
 
-    #[tokio::test]
-    async fn create_put_retries_when_conflicting_object_vanishes() {
+    #[tokio::test(start_paused = true)]
+    async fn immutable_transport_failure_surfaces_after_the_retry_budget() {
         let flaky = Arc::new(FlakyStore::default());
         let store = retrying_store(Arc::clone(&flaky));
-        script_puts(&flaky, [WriteScript::LandThenFail]);
-        flaky
-            .get_script
-            .lock()
-            .expect("get script")
-            .push_back(ReadScript::NotFound);
-        let key = "namespaces/demo/uploads/upl_3.json";
+        script_puts(&flaky, (0..11).map(|_| WriteScript::FailWithoutLanding));
+        let key = "namespaces/demo/uploads/upl_9.json";
 
-        let metadata = store
-            .put_if_absent(key, Bytes::from_static(b"payload"))
+        let error = store
+            .put_immutable_verified(key, Bytes::from_static(b"payload"))
             .await
-            .expect("create succeeds once the conflicting object vanishes");
+            .expect_err("persistent failure exhausts the immutable retry budget");
 
-        assert_eq!(flaky.puts.load(Ordering::SeqCst), 3);
-        assert_eq!(flaky.gets.load(Ordering::SeqCst), 2);
-        assert!(metadata.etag.is_some());
+        assert!(matches!(
+            error,
+            crate::ImmutableWriteError::Transport {
+                source: ObjectStoreError::Transport { .. },
+                ..
+            }
+        ));
+        assert_eq!(flaky.puts.load(Ordering::SeqCst), 11);
+        assert_eq!(flaky.gets.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -1744,48 +1605,6 @@ mod tests {
         assert_eq!(
             store.get(key, None).await.expect("get"),
             Some(Bytes::from_static(b"one"))
-        );
-    }
-
-    #[tokio::test]
-    async fn write_retries_are_bounded_by_policy() {
-        let flaky = Arc::new(FlakyStore::default());
-        let store = retrying_store(Arc::clone(&flaky));
-        script_puts(&flaky, (0..6).map(|_| WriteScript::FailWithoutLanding));
-        let key = "namespaces/demo/uploads/upl_4.json";
-
-        let error = store
-            .put_overwrite(key, Bytes::from_static(b"payload"))
-            .await
-            .expect_err("persistent transport failure surfaces after the retry budget");
-
-        assert!(matches!(error, ObjectStoreError::Transport { .. }));
-        assert_eq!(flaky.puts.load(Ordering::SeqCst), 5);
-    }
-
-    /// The operation deadline is one budget across every retry: once the
-    /// elapsed observations consume it, the loop refuses further attempts
-    /// even though the count budget has room.
-    #[tokio::test]
-    async fn write_retries_stop_once_the_operation_deadline_is_spent() {
-        let flaky = Arc::new(FlakyStore::default());
-        // Each timer reading advances 45s against a 120s deadline: the
-        // deadline check after the second failed attempt finds it spent.
-        let store = retrying_store(Arc::clone(&flaky))
-            .with_monotonic_timer(Arc::new(SteppingTimer::new(45_000)));
-        script_puts(&flaky, (0..6).map(|_| WriteScript::FailWithoutLanding));
-        let key = "namespaces/demo/uploads/upl_9.json";
-
-        let error = store
-            .put_overwrite(key, Bytes::from_static(b"payload"))
-            .await
-            .expect_err("deadline exhaustion surfaces the transport failure");
-
-        assert!(matches!(error, ObjectStoreError::Transport { .. }));
-        let attempts = flaky.puts.load(Ordering::SeqCst);
-        assert!(
-            attempts < 5,
-            "deadline must stop the loop before the count budget ({attempts} attempts)"
         );
     }
 
@@ -1818,16 +1637,6 @@ mod tests {
             attempts < 5,
             "deadline must stop the loop before the count budget ({attempts} attempts)"
         );
-    }
-
-    #[test]
-    fn operation_deadline_remaining_caps_at_zero() {
-        let timer = SteppingTimer::new(70_000);
-        let deadline = OperationDeadline::start(&timer, Duration::from_secs(120));
-        // First reading after start: 70s elapsed, 50s left.
-        assert_eq!(deadline.remaining(), Some(Duration::from_secs(50)));
-        // Second reading: 140s elapsed, spent.
-        assert_eq!(deadline.remaining(), None);
     }
 
     #[tokio::test]
@@ -1961,6 +1770,51 @@ mod tests {
         )
         .await
         .expect("seed object");
+    }
+
+    #[tokio::test]
+    async fn immutable_large_write_routes_through_existing_multipart_path() {
+        let flaky = Arc::new(FlakyStore::default());
+        let store = retrying_store(Arc::clone(&flaky));
+        let payload =
+            multipart_payload(usize::try_from(PROVIDER_MULTIPART_THRESHOLD_BYTES).expect("usize"));
+
+        store
+            .put_immutable_verified(MULTIPART_KEY, Bytes::from(payload.clone()))
+            .await
+            .expect("large immutable write");
+
+        assert_eq!(flaky.puts.load(Ordering::SeqCst), 0);
+        assert_eq!(flaky.multipart_creates.load(Ordering::SeqCst), 1);
+        assert_eq!(part_attempts(&flaky, 0), 1);
+        assert_eq!(flaky.multipart_completes.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            store.get(MULTIPART_KEY, None).await.expect("get"),
+            Some(Bytes::from(payload))
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn immutable_large_write_owns_completion_retry() {
+        let flaky = Arc::new(FlakyStore::default());
+        let store = retrying_store(Arc::clone(&flaky));
+        let payload =
+            multipart_payload(usize::try_from(PROVIDER_MULTIPART_THRESHOLD_BYTES).expect("usize"));
+        script_complete(&flaky, [WriteScript::FailWithoutLanding]);
+
+        store
+            .put_immutable_verified(MULTIPART_KEY, Bytes::from(payload.clone()))
+            .await
+            .expect("immutable operation retries the whole multipart write");
+
+        assert_eq!(flaky.multipart_creates.load(Ordering::SeqCst), 2);
+        assert_eq!(flaky.multipart_completes.load(Ordering::SeqCst), 2);
+        assert_eq!(flaky.multipart_aborts.load(Ordering::SeqCst), 1);
+        assert_eq!(flaky.gets.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            store.get(MULTIPART_KEY, None).await.expect("get"),
+            Some(Bytes::from(payload))
+        );
     }
 
     #[tokio::test]
@@ -2134,8 +1988,8 @@ mod tests {
 
         assert_eq!(
             flaky.multipart_completes.load(Ordering::SeqCst),
-            2,
-            "the retry finds the landed completion's upload gone"
+            1,
+            "completion is attempted once before byte-identity resolution"
         );
         assert_eq!(
             flaky.gets.load(Ordering::SeqCst),
@@ -2164,28 +2018,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn multipart_complete_failure_without_landing_retries_the_completion() {
+    async fn raw_multipart_complete_failure_without_landing_is_not_retried() {
         let flaky = Arc::new(FlakyStore::default());
         let store = multipart_test_store(Arc::clone(&flaky));
         script_complete(&flaky, [WriteScript::FailWithoutLanding]);
         let payload = multipart_payload(1300);
 
-        store
+        let error = store
             .put_overwrite(MULTIPART_KEY, Bytes::from(payload.clone()))
             .await
-            .expect("completion retried after a transient failure");
+            .expect_err("raw overwrite surfaces the ambiguous completion");
 
-        assert_eq!(flaky.multipart_completes.load(Ordering::SeqCst), 2);
-        assert_eq!(flaky.multipart_aborts.load(Ordering::SeqCst), 0);
-        assert_eq!(
-            flaky.gets.load(Ordering::SeqCst),
-            0,
-            "a completion that succeeds on retry needs no read-back"
-        );
-        assert_eq!(
-            store.get(MULTIPART_KEY, None).await.expect("get"),
-            Some(Bytes::from(payload))
-        );
+        assert!(matches!(error, ObjectStoreError::Transport { .. }));
+        assert_eq!(flaky.multipart_completes.load(Ordering::SeqCst), 1);
+        assert_eq!(flaky.multipart_aborts.load(Ordering::SeqCst), 1);
+        assert_eq!(flaky.gets.load(Ordering::SeqCst), 1);
+        assert!(store.head(MULTIPART_KEY).await.expect("head").is_none());
     }
 
     /// The regression this fix exists for: an unproven completion must
@@ -2193,12 +2041,12 @@ mod tests {
     /// reconciled by size identity and reported success for bytes that were
     /// never written.
     #[tokio::test]
-    async fn multipart_complete_exhaustion_rejects_stale_same_size_object() {
+    async fn multipart_complete_rejects_stale_same_size_object() {
         let flaky = Arc::new(FlakyStore::default());
         let store = multipart_test_store(Arc::clone(&flaky));
         let stale = Bytes::from(vec![0xAA_u8; 1300]);
         seed_scoped_object(&flaky, MULTIPART_KEY, stale.clone()).await;
-        script_complete(&flaky, (0..5).map(|_| WriteScript::FailWithoutLanding));
+        script_complete(&flaky, [WriteScript::FailWithoutLanding]);
 
         let error = store
             .put_overwrite(MULTIPART_KEY, Bytes::from(multipart_payload(1300)))
@@ -2208,8 +2056,8 @@ mod tests {
         assert!(matches!(error, ObjectStoreError::Transport { .. }));
         assert_eq!(
             flaky.multipart_completes.load(Ordering::SeqCst),
-            5,
-            "1 attempt + max_retries"
+            1,
+            "raw overwrite does not replay completion"
         );
         assert_eq!(
             flaky.gets.load(Ordering::SeqCst),
@@ -2233,12 +2081,12 @@ mod tests {
     /// postcondition even though this upload's completion never landed —
     /// and the dangling upload is reclaimed rather than stranded.
     #[tokio::test]
-    async fn multipart_complete_exhaustion_accepts_identical_object_and_aborts() {
+    async fn multipart_complete_accepts_identical_object_and_aborts() {
         let flaky = Arc::new(FlakyStore::default());
         let store = multipart_test_store(Arc::clone(&flaky));
         let payload = multipart_payload(1300);
         seed_scoped_object(&flaky, MULTIPART_KEY, Bytes::from(payload.clone())).await;
-        script_complete(&flaky, (0..5).map(|_| WriteScript::FailWithoutLanding));
+        script_complete(&flaky, [WriteScript::FailWithoutLanding]);
 
         let metadata = store
             .put_overwrite(MULTIPART_KEY, Bytes::from(payload))
@@ -2259,10 +2107,8 @@ mod tests {
     }
 
     /// The lifecycle-abort race: the upload vanishes while the completion's
-    /// outcome is ambiguous and a stale object sits at the key. The gone
-    /// upload maps to not-found, which must surface as a retry-safe
-    /// transport failure about this write — not as a missing object, and
-    /// never as success.
+    /// outcome is ambiguous and a stale object sits at the key. The stale
+    /// object is never accepted as this write.
     #[tokio::test]
     async fn multipart_complete_gone_upload_with_stale_object_fails_as_transport() {
         let flaky = Arc::new(FlakyStore::default());
@@ -2277,12 +2123,7 @@ mod tests {
             .expect_err("a vanished upload with a stale object is a failed write");
 
         assert!(matches!(error, ObjectStoreError::Transport { .. }));
-        let message = error.message();
-        assert!(
-            message.contains("without a provable completion"),
-            "message names the unproven outcome: {message}"
-        );
-        assert_eq!(flaky.multipart_completes.load(Ordering::SeqCst), 2);
+        assert_eq!(flaky.multipart_completes.load(Ordering::SeqCst), 1);
         assert_eq!(flaky.gets.load(Ordering::SeqCst), 1);
         assert_eq!(flaky.multipart_aborts.load(Ordering::SeqCst), 1);
         assert_eq!(
@@ -2290,34 +2131,6 @@ mod tests {
             Some(stale),
             "the stale object is untouched"
         );
-    }
-
-    /// A definite refusal that follows an ambiguous attempt verifies before
-    /// failing, and a disproven completion surfaces the refusal under its
-    /// own classification instead of as network weather.
-    #[tokio::test]
-    async fn multipart_complete_definite_rejection_after_ambiguity_keeps_its_class() {
-        let flaky = Arc::new(FlakyStore::default());
-        let store = multipart_test_store(Arc::clone(&flaky));
-        seed_scoped_object(&flaky, MULTIPART_KEY, Bytes::from(vec![0xAA_u8; 1300])).await;
-        script_complete(
-            &flaky,
-            [WriteScript::FailWithoutLanding, WriteScript::FailAuth],
-        );
-
-        let error = store
-            .put_overwrite(MULTIPART_KEY, Bytes::from(multipart_payload(1300)))
-            .await
-            .expect_err("auth rejection surfaces after the outcome is disproven");
-
-        assert!(matches!(error, ObjectStoreError::PermissionDenied { .. }));
-        assert_eq!(flaky.multipart_completes.load(Ordering::SeqCst), 2);
-        assert_eq!(
-            flaky.gets.load(Ordering::SeqCst),
-            1,
-            "the ambiguous prior attempt forces a read-back first"
-        );
-        assert_eq!(flaky.multipart_aborts.load(Ordering::SeqCst), 1);
     }
 
     /// A first-attempt refusal is definite: nothing can have landed, so no
@@ -2346,7 +2159,7 @@ mod tests {
     async fn multipart_complete_unverifiable_outcome_surfaces_both_failures() {
         let flaky = Arc::new(FlakyStore::default());
         let store = multipart_test_store(Arc::clone(&flaky));
-        script_complete(&flaky, (0..5).map(|_| WriteScript::FailWithoutLanding));
+        script_complete(&flaky, [WriteScript::FailWithoutLanding]);
         flaky
             .get_script
             .lock()
