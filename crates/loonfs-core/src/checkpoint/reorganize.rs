@@ -99,7 +99,7 @@ pub struct MetadataReorganizeReport {
 /// process restarts.
 #[tracing::instrument(
     level = "info",
-    name = "loon.phase",
+    name = "loonfs.phase",
     err,
     skip_all,
     fields(phase = "reorganize_metadata", key_class = "manifest")

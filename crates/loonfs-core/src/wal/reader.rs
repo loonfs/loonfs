@@ -47,7 +47,7 @@ async fn prefetch_recent_segments<S: ObjectStore + ?Sized>(
 
 #[tracing::instrument(
     level = "info",
-    name = "loon.phase",
+    name = "loonfs.phase",
     err,
     skip_all,
     fields(phase = "load_validated_wal_chain", key_class = "wal_segment")

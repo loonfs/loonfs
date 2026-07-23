@@ -17,7 +17,7 @@ impl FsCore {
     /// head.
     #[tracing::instrument(
         level = "info",
-        name = "loon.stat",
+        name = "loonfs.stat",
         err,
         skip_all,
         fields(

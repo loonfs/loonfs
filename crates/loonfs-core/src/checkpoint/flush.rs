@@ -119,7 +119,7 @@ pub(super) async fn try_flush_wal<S: ObjectStore + ?Sized>(
     let publication_started_ms = timer.monotonic_now_ms();
     let projection = load_root_projection(store, namespace_id)
         .instrument(tracing::info_span!(
-            "loon.phase",
+            "loonfs.phase",
             phase = "scan_namespace_state"
         ))
         .await?;
@@ -301,7 +301,7 @@ pub(super) async fn load_root_projection<'a, S: ObjectStore + ?Sized>(
         CoreError::MetadataProjection(MetadataProjectionLoadError::WalChainLoad(error))
     })?;
     let replayed = {
-        let _span = tracing::info_span!("loon.phase", phase = "project_metadata_state").entered();
+        let _span = tracing::info_span!("loonfs.phase", phase = "project_metadata_state").entered();
         project_validated_wal_tail(
             &manifest_head,
             &MetadataState::default(),

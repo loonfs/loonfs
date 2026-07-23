@@ -566,7 +566,7 @@ pub(super) async fn filesystem_operation(
     };
     let response_result = if let Some(payload_class) = put_payload_class {
         let span = tracing::info_span!(
-            "loon.put",
+            "loonfs.put",
             operation = "put",
             mode = "remote",
             store_kind = TraceStoreKind::from(state.config.store.kind()).as_str(),

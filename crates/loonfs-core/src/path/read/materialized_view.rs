@@ -323,7 +323,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         })?;
         let replayed = {
             let _span =
-                tracing::info_span!("loon.phase", phase = "project_metadata_state").entered();
+                tracing::info_span!("loonfs.phase", phase = "project_metadata_state").entered();
             project_validated_wal_tail(
                 &manifest_head,
                 &MetadataState::default(),
@@ -350,7 +350,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
 
     #[tracing::instrument(
         level = "info",
-        name = "loon.phase",
+        name = "loonfs.phase",
         err,
         skip_all,
         fields(phase = "walk_path")
@@ -519,7 +519,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
 
     #[tracing::instrument(
         level = "info",
-        name = "loon.phase",
+        name = "loonfs.phase",
         err,
         skip_all,
         fields(phase = "walk_path")
@@ -566,7 +566,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .as_ref()
             .map(|cursor| cursor.last_name_key.as_str());
         let select_span = tracing::info_span!(
-            "loon.phase",
+            "loonfs.phase",
             phase = "list_page_select_children",
             list_page_requested_limit = request.limit.as_usize() as u64,
             list_page_children_returned = tracing::field::Empty,
@@ -599,7 +599,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         };
 
         let build_span = tracing::info_span!(
-            "loon.phase",
+            "loonfs.phase",
             phase = "list_page_build_entries",
             list_page_children_returned = children.len() as u64,
             list_page_visible_child_calls = tracing::field::Empty,

@@ -19,7 +19,7 @@ impl FsCore {
     /// error.
     #[tracing::instrument(
         level = "info",
-        name = "loon.compaction",
+        name = "loonfs.compaction",
         err,
         skip_all,
         fields(
@@ -299,7 +299,7 @@ impl FsCore {
     /// metadata.
     #[tracing::instrument(
         level = "info",
-        name = "loon.compaction",
+        name = "loonfs.compaction",
         err,
         skip_all,
         fields(
@@ -341,7 +341,7 @@ impl FsCore {
     /// checkpoint record.
     #[tracing::instrument(
         level = "info",
-        name = "loon.compaction",
+        name = "loonfs.compaction",
         err,
         skip_all,
         fields(

@@ -17,7 +17,7 @@ impl FsCore {
     /// replace semantics.
     #[tracing::instrument(
         level = "info",
-        name = "loon.put",
+        name = "loonfs.put",
         err,
         skip_all,
         fields(
@@ -49,7 +49,7 @@ impl FsCore {
     /// unmoved head.
     #[tracing::instrument(
         level = "info",
-        name = "loon.prepare",
+        name = "loonfs.prepare",
         err,
         skip_all,
         fields(
@@ -88,7 +88,7 @@ impl FsCore {
     /// selects create-only or replace semantics.
     #[tracing::instrument(
         level = "info",
-        name = "loon.put",
+        name = "loonfs.put",
         err,
         skip_all,
         fields(
@@ -136,7 +136,7 @@ impl FsCore {
     /// [`Self::put_file_prepared`].
     #[tracing::instrument(
         level = "info",
-        name = "loon.put",
+        name = "loonfs.put",
         err,
         skip_all,
         fields(
@@ -173,7 +173,7 @@ impl FsCore {
     /// I/O.
     #[tracing::instrument(
         level = "info",
-        name = "loon.prepare",
+        name = "loonfs.prepare",
         err,
         skip_all,
         fields(
@@ -536,7 +536,7 @@ impl FsCore {
             };
             {
                 let _span = tracing::info_span!(
-                    "loon.phase",
+                    "loonfs.phase",
                     phase = "batch_update_cache",
                     mode = self.inner.config.trace_mode.as_str(),
                     store_kind = self.inner.config.trace_store_kind.as_str(),
@@ -590,7 +590,7 @@ impl FsCore {
             .collect();
         {
             let _span = tracing::info_span!(
-                "loon.phase",
+                "loonfs.phase",
                 phase = "batch_update_cache",
                 mode = self.inner.config.trace_mode.as_str(),
                 store_kind = self.inner.config.trace_store_kind.as_str(),

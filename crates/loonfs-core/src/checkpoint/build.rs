@@ -88,7 +88,7 @@ pub(super) struct MetadataSstRows {
 
 #[tracing::instrument(
     level = "info",
-    name = "loon.phase",
+    name = "loonfs.phase",
     err,
     skip_all,
     fields(phase = "write_manifest_tables", key_class = "manifest_table")
