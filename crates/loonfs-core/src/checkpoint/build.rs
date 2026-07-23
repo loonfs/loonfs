@@ -8,7 +8,7 @@ use super::runs::{
 };
 use crate::error::{CoreError, Result};
 use crate::metadata::MetadataState;
-use crate::storage::content::write_immutable_object;
+use bytes::Bytes;
 use futures::future::try_join_all;
 use loonfs_api::wire::manifest::{
     hex_encode_bytes, MetadataFileRef, MetadataRow, MetadataTableFamily,
@@ -203,7 +203,9 @@ pub(super) async fn write_manifest_segment<S: ObjectStore + ?Sized>(
             request.object_key
         ))
     })?;
-    write_immutable_object(store, &request.object_key, &built.bytes).await?;
+    store
+        .put_immutable_verified(&request.object_key, Bytes::from(built.bytes.clone()))
+        .await?;
     let filter_inline = (built.filter.stored_len <= INLINE_SEGMENT_FILTER_MAX_BYTES).then(|| {
         let start = built.filter.offset as usize;
         hex_encode_bytes(&built.bytes[start..start + built.filter.stored_len as usize])

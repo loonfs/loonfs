@@ -12,14 +12,14 @@ use crate::metadata::VisiblePathError;
 use crate::namespace::catalog::NamespaceCatalogLoadError;
 use crate::namespace::control::ControlObjectLoadError;
 use crate::namespace::writer_epoch::WriterEpochAcquireError;
-use crate::storage::content::{DurableContentValidationError, ImmutableObjectWriteError};
+use crate::storage::content::DurableContentValidationError;
 use crate::wal::{WalBuildError, WalChainLoadError, WalReplayError};
 use loonfs_api::wire::control::{CheckpointRecordLifecycle, HeadState};
 use loonfs_api::{
     ChangeSeq, CommitId, CommitIdValidationError, ErrorDetails, GeneratedIdValidationError,
     InodeId, InodeKind, NamespaceId, NamespaceIdValidationError, UploadId, WriterEpoch,
 };
-use loonfs_objectstore::ObjectStoreError;
+use loonfs_objectstore::{ImmutableWriteError, ObjectStoreError};
 use thiserror::Error;
 
 /// Public error type returned by `loonfs-core`.
@@ -274,17 +274,24 @@ impl From<NamespaceCatalogLoadError> for CoreError {
     }
 }
 
-impl From<ImmutableObjectWriteError> for CoreError {
-    fn from(value: ImmutableObjectWriteError) -> Self {
+impl From<ImmutableWriteError> for CoreError {
+    fn from(value: ImmutableWriteError) -> Self {
+        let fallback_object_key = value.object_key().to_owned();
         match value {
-            ImmutableObjectWriteError::Store {
+            ImmutableWriteError::DifferentObject { object_key } => Self::Store {
                 object_key,
-                message,
-                class,
-            } => Self::Store {
+                message: "immutable object already exists with different bytes".to_owned(),
+                class: StoreFailureClass::Other,
+            },
+            ImmutableWriteError::Transport { object_key, source } => Self::Store {
                 object_key,
-                message,
-                class,
+                message: source.message(),
+                class: StoreFailureClass::of(&source),
+            },
+            error => Self::Store {
+                object_key: fallback_object_key,
+                message: error.to_string(),
+                class: StoreFailureClass::Other,
             },
         }
     }
