@@ -2187,8 +2187,7 @@ mod tests {
             .expect("load namespace catalog");
         let prepared_content = loonfs_core::content::prepare_existing_content_ref(
             &store,
-            &namespace_id,
-            catalog.content_store_id(),
+            &catalog,
             staged.content_ref,
         )
         .await

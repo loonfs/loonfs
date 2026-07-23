@@ -207,6 +207,9 @@ async fn warm_phase_request_accounting() {
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
         .await
         .expect("create namespace");
+    let catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &namespace_id)
+        .await
+        .expect("load namespace catalog");
     // The bench publishes 100-mutation batches (one WAL segment each) and
     // ticks a few times across the build; mirror that shape.
     let mut index = 0usize;
@@ -225,8 +228,7 @@ async fn warm_phase_request_accounting() {
             // content HEAD and one full GET by design.
             let prepared = loonfs_core::content::prepare_existing_content_ref(
                 &store,
-                &namespace_id,
-                &stored.content_store_id,
+                &catalog,
                 stored.content_ref,
             )
             .await

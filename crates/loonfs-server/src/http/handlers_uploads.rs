@@ -9,8 +9,9 @@ use crate::config::ServerConfig;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
-use loonfs::content_tokens::{mint_content_token, verify_content_token, ContentTokenError};
+use loonfs::content_tokens::{mint_content_token, ContentTokenError};
 use loonfs::publish::PreparedContent;
+use loonfs::FsWriter;
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
 use loonfs_api::ErrorCode;
@@ -150,20 +151,27 @@ fn direct_put_presign_time() -> SystemTime {
     SystemTime::now()
 }
 
-pub(super) fn content_preparation_for_put(
+pub(super) async fn content_preparation_for_put(
+    writer: &FsWriter,
     config: &ServerConfig,
     namespace_id: &NamespaceId,
     content_ref: &ContentRef,
     tokens: &[ValidatedContentToken],
     now_ms: u64,
-) -> PutContentPreparation {
+) -> Result<PutContentPreparation, ApiResponseError> {
     let mut prepared_content = Vec::new();
     let mut first_error = None;
-    for token in tokens
+    let matching_tokens = tokens
         .iter()
         .filter(|token| token.content_ref == *content_ref)
-    {
-        match verify_content_token(config.content_token_secret(), namespace_id, token, now_ms) {
+        .cloned()
+        .collect::<Vec<_>>();
+    for token in &matching_tokens {
+        match writer
+            .prepare_content_token(namespace_id, config.content_token_secret(), token, now_ms)
+            .await
+            .map_err(|error| ApiResponseError::runtime_for_namespace(namespace_id, error))?
+        {
             Ok(prepared) => prepared_content.push(prepared),
             Err(error) => {
                 tracing::debug!(
@@ -178,11 +186,11 @@ pub(super) fn content_preparation_for_put(
     }
 
     if !prepared_content.is_empty() {
-        PutContentPreparation::Ready(prepared_content)
+        Ok(PutContentPreparation::Ready(prepared_content))
     } else if let Some(error) = first_error {
-        PutContentPreparation::Rejected(error)
+        Ok(PutContentPreparation::Rejected(error))
     } else {
-        PutContentPreparation::Absent
+        Ok(PutContentPreparation::Absent)
     }
 }
 

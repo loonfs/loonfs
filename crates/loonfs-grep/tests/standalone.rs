@@ -226,7 +226,10 @@ async fn put_file_at(
         .await
         .expect("store content");
     let content_ref = stored.content_ref.clone();
-    let prepared = prepare_stored_content(namespace_id.clone(), stored);
+    let catalog = loonfs_core::control::load_namespace_catalog_entry(&**store, namespace_id)
+        .await
+        .expect("load namespace catalog");
+    let prepared = prepare_stored_content(&catalog, stored).expect("prepare stored content");
     let result = engine
         .publish_namespace_mutations_batch(vec![NamespaceMutationCandidate::path_prepared(
             PathMutationIntent::PutFile {

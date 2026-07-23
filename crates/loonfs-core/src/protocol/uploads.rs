@@ -25,7 +25,7 @@ use loonfs_api::wire::control::{
     encode_control_object, CompletedUpload, ControlObjectKind, UploadSessionEnvelope,
     UploadSessionState,
 };
-use loonfs_api::{ContentRef, ContentRefKind, NamespaceId, UploadId};
+use loonfs_api::{ContentRef, ContentRefKind, ContentStoreId, NamespaceId, UploadId};
 use loonfs_objectstore::keys::{content_blob, namespace_config, upload_session};
 use loonfs_objectstore::ObjectStore;
 
@@ -242,6 +242,7 @@ pub(crate) async fn upload_content<S: ObjectStore + ?Sized>(
 pub(crate) async fn complete_upload<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
+    content_store_id: &ContentStoreId,
     upload_id: &UploadId,
     request: &CompleteUploadRequest,
     context: &MutationContext,
@@ -254,13 +255,14 @@ pub(crate) async fn complete_upload<S: ObjectStore + ?Sized>(
         UPLOAD_SESSION_RETRY_LIMIT,
         |mut state| {
             let namespace_id = namespace_id.clone();
+            let content_store_id = content_store_id.clone();
             let upload_id = upload_id.to_owned();
             let request = request.clone();
             async move {
                 if let Some(completed) = &state.completed {
                     if completed.content_ref == request.content_ref {
                         let prepared_content = prepare_completed_upload_content(
-                            namespace_id.clone(),
+                            content_store_id.clone(),
                             completed.content_ref.clone(),
                         );
                         return Ok(UploadSessionUpdate::Noop((
@@ -278,10 +280,11 @@ pub(crate) async fn complete_upload<S: ObjectStore + ?Sized>(
 
                 let prepared_content = match state.staged_content_ref.clone() {
                     Some(content_ref) => {
-                        prepare_completed_upload_content(namespace_id.clone(), content_ref)
+                        prepare_completed_upload_content(content_store_id.clone(), content_ref)
                     }
                     None => {
-                        stage_direct_put_content_ref(store, &namespace_id, &state, &request).await?
+                        stage_direct_put_content_ref(store, &content_store_id, &state, &request)
+                            .await?
                     }
                 };
                 let staged_content_ref = prepared_content.content_ref().clone();
@@ -317,16 +320,16 @@ pub(crate) async fn complete_upload<S: ObjectStore + ?Sized>(
 }
 
 fn prepare_completed_upload_content(
-    namespace_id: NamespaceId,
+    content_store_id: ContentStoreId,
     content_ref: ContentRef,
 ) -> PreparedContent {
-    let admission = ContentAdmission::for_durable_content_write(namespace_id, content_ref.clone());
-    PreparedContent::from_admission(content_ref, admission)
+    let admission = ContentAdmission::for_durable_content_write(content_store_id, content_ref);
+    PreparedContent::from_admission(admission)
 }
 
 async fn stage_direct_put_content_ref<S: ObjectStore + ?Sized>(
     store: &S,
-    namespace_id: &NamespaceId,
+    content_store_id: &ContentStoreId,
     state: &UploadSessionState,
     request: &CompleteUploadRequest,
 ) -> Result<PreparedContent> {
@@ -354,12 +357,11 @@ async fn stage_direct_put_content_ref<S: ObjectStore + ?Sized>(
     // object can exist at this key with bytes that do not hash to the
     // content ref. One HEAD proves existence and the declared size without
     // pulling the payload back through the server.
-    let content_store_id = load_namespace_content_store_id(store, namespace_id).await?;
-    probe_durable_content_reference(store, &content_store_id, &request.content_ref)
+    probe_durable_content_reference(store, content_store_id, &request.content_ref)
         .await
         .map_err(|err| CoreError::InvalidUploadContent(err.to_string()))?;
     Ok(prepare_completed_upload_content(
-        namespace_id.clone(),
+        content_store_id.clone(),
         request.content_ref.clone(),
     ))
 }

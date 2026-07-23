@@ -3,7 +3,7 @@
 
 use crate::error::{CoreError, StoreFailureClass};
 use crate::invariants::InvariantId;
-use crate::namespace::catalog::load_namespace_content_store_id;
+use crate::namespace::catalog::{load_namespace_content_store_id, VerifiedNamespaceCatalogEntry};
 use crate::storage::content_admission::{ContentAdmission, PreparedContent};
 use bytes::Bytes;
 use loonfs_api::{sha256_digest, ContentRef, ContentRefKind, ContentStoreId, NamespaceId};
@@ -63,6 +63,13 @@ pub enum DurableContentValidationError {
         expected: String,
         actual: String,
     },
+    #[error(
+        "stored content belongs to content store `{actual}`, not namespace-bound store `{expected}`"
+    )]
+    ContentStoreMismatch {
+        expected: ContentStoreId,
+        actual: ContentStoreId,
+    },
     #[error("object store error for `{object_key}`: {message}")]
     Store { object_key: String, message: String },
 }
@@ -92,29 +99,39 @@ pub async fn validate_durable_content_reference<S: ObjectStore + ?Sized>(
 /// Prepares content from an acknowledged LoonFS-managed durable write.
 ///
 /// Consuming [`StoredContent`] ties the proof to the successful return from
-/// [`store_bytes_as_content`] or [`store_bytes_as_content_with_store_id`].
+/// [`store_bytes_as_content`] or [`store_bytes_as_content_with_store_id`]. The
+/// verified catalog prevents pairing that acknowledgement with an unrelated
+/// namespace binding.
 pub fn prepare_stored_content(
-    namespace_id: NamespaceId,
+    catalog: &VerifiedNamespaceCatalogEntry,
     stored_content: StoredContent,
-) -> PreparedContent {
+) -> Result<PreparedContent, DurableContentValidationError> {
+    if stored_content.content_store_id != *catalog.content_store_id() {
+        return Err(DurableContentValidationError::ContentStoreMismatch {
+            expected: catalog.content_store_id().clone(),
+            actual: stored_content.content_store_id,
+        });
+    }
+    let content_store_id = stored_content.content_store_id;
     let content_ref = stored_content.content_ref;
-    let admission = ContentAdmission::for_durable_content_write(namespace_id, content_ref.clone());
-    PreparedContent::from_admission(content_ref, admission)
+    let admission = ContentAdmission::for_durable_content_write(content_store_id, content_ref);
+    Ok(PreparedContent::from_admission(admission))
 }
 
 /// Fully validates an existing durable content reference for publication.
 ///
-/// This performs one object HEAD followed by one full GET and digest check.
+/// The verified catalog selects the store to validate. This performs one
+/// object HEAD followed by one full GET and digest check.
 pub async fn prepare_existing_content_ref<S: ObjectStore + ?Sized>(
     store: &S,
-    namespace_id: &NamespaceId,
-    content_store_id: &ContentStoreId,
+    catalog: &VerifiedNamespaceCatalogEntry,
     content_ref: ContentRef,
 ) -> Result<PreparedContent, DurableContentValidationError> {
+    let content_store_id = catalog.content_store_id();
     validate_durable_content_reference(store, content_store_id, &content_ref).await?;
     let admission =
-        ContentAdmission::for_durable_content_write(namespace_id.clone(), content_ref.clone());
-    Ok(PreparedContent::from_admission(content_ref, admission))
+        ContentAdmission::for_durable_content_write(content_store_id.clone(), content_ref);
+    Ok(PreparedContent::from_admission(admission))
 }
 
 /// Proves a content reference is durable — the object exists and carries the

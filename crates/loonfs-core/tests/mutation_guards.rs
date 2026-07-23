@@ -159,19 +159,25 @@ fn prepared_commit_candidate<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     request: ApiCommitRequest,
 ) -> Result<NamespaceMutationCandidate, CoreError> {
-    let content_store_id = load_namespace_descriptor_state(store, namespace_id).content_store_id;
     let mut seen = HashSet::new();
     let mut prepared = Vec::new();
+    let mut catalog = None;
     for content_ref in request.ops.iter().filter_map(|op| match op {
         ApiCommitOp::CreateFile { content_ref, .. }
         | ApiCommitOp::ReplaceFile { content_ref, .. } => Some(content_ref),
         _ => None,
     }) {
         if seen.insert(content_ref.clone()) {
+            if catalog.is_none() {
+                catalog = Some(block_on(
+                    loonfs_core::control::load_namespace_catalog_entry(store, namespace_id),
+                )?);
+            }
             prepared.push(block_on(prepare_existing_content_ref(
                 store,
-                namespace_id,
-                &content_store_id,
+                catalog
+                    .as_ref()
+                    .expect("external content should load the namespace catalog"),
                 content_ref.clone(),
             ))?);
         }
@@ -293,12 +299,14 @@ fn admitted_candidate<S: ObjectStore + ?Sized>(
 ) -> NamespaceMutationCandidate {
     match &intent {
         PathMutationIntent::PutFile { content_ref, .. } => {
-            let content_store_id =
-                load_namespace_descriptor_state(store, namespace_id).content_store_id;
-            let prepared = block_on(prepare_existing_content_ref(
+            let catalog = block_on(loonfs_core::control::load_namespace_catalog_entry(
                 store,
                 namespace_id,
-                &content_store_id,
+            ))
+            .expect("load namespace catalog");
+            let prepared = block_on(prepare_existing_content_ref(
+                store,
+                &catalog,
                 content_ref.clone(),
             ))
             .expect("prepare existing content");
@@ -1814,9 +1822,12 @@ async fn valid_content_admission_skips_durable_content_validation() {
         )
         .expect("mint token"),
     };
+    let catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &namespace_id)
+        .await
+        .expect("load namespace catalog");
     let prepared = verify_content_token(
         "test-content-token-secret",
-        &namespace_id,
+        &catalog,
         &token,
         context.now_ms,
     )

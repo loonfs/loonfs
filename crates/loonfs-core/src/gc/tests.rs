@@ -106,7 +106,10 @@ async fn write_file<S: ObjectStore>(
         .await
         .expect("store content");
     let content_ref = stored.content_ref.clone();
-    let prepared = prepare_stored_content(namespace_id.clone(), stored);
+    let catalog = crate::namespace::catalog::load_namespace_catalog_entry(store, namespace_id)
+        .await
+        .expect("load namespace catalog");
+    let prepared = prepare_stored_content(&catalog, stored).expect("prepare stored content");
     NamespaceCommitEngine::new(namespace_id.clone())
         .publish_batch(
             store,

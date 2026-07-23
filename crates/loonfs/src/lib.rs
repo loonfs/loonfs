@@ -87,12 +87,12 @@ pub mod publish {
 
 /// Server-integration seam for producer-only content preparation proofs.
 ///
-/// A serving session mints short-lived wire tokens after durable preparation
-/// and verifies expiry once before yielding opaque prepared content. Its
-/// internal admission records accepted durability evidence and does not expire.
-/// Most embedded users never need this module.
+/// A serving session mints short-lived wire tokens after durable preparation;
+/// [`FsWriter::prepare_content_token`] verifies them against the namespace's
+/// catalog binding. The resulting admission records accepted durability
+/// evidence and does not expire. Most embedded users never need this module.
 pub mod content_tokens {
-    pub use loonfs_core::content::{mint_content_token, verify_content_token, ContentTokenError};
+    pub use loonfs_core::content::{mint_content_token, ContentTokenError};
 }
 
 /// Server-integration seam: the resolved direct-put upload target a serving

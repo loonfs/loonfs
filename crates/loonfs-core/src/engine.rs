@@ -459,9 +459,35 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         upload_id: &UploadId,
         request: &CompleteUploadRequest,
     ) -> CoreResult<(CompleteUploadResponse, PreparedContent)> {
+        let catalog = crate::namespace::catalog::load_namespace_catalog_entry(
+            &self.store,
+            &self.namespace_id,
+        )
+        .await?;
+        self.complete_upload_prepared_with_catalog(&catalog, upload_id, request)
+            .await
+    }
+
+    /// Completes an upload with a namespace catalog binding already resolved
+    /// by the runtime.
+    pub async fn complete_upload_prepared_with_catalog(
+        &self,
+        catalog: &VerifiedNamespaceCatalogEntry,
+        upload_id: &UploadId,
+        request: &CompleteUploadRequest,
+    ) -> CoreResult<(CompleteUploadResponse, PreparedContent)> {
+        if catalog.namespace_id() != &self.namespace_id {
+            return Err(
+                crate::commit_engine::ContentPreparationError::ContentNotPrepared {
+                    content_ref_digest: request.content_ref.digest.clone(),
+                }
+                .into(),
+            );
+        }
         crate::protocol::complete_upload(
             &self.store,
             &self.namespace_id,
+            catalog.content_store_id(),
             upload_id,
             request,
             &self.mutation_context()?,

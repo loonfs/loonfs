@@ -92,7 +92,11 @@ impl VisibilityHarness {
             .await
             .expect("stage content");
         let content_ref = stored.content_ref.clone();
-        let prepared = prepare_stored_content(self.namespace_id().clone(), stored);
+        let catalog =
+            loonfs_core::control::load_namespace_catalog_entry(&self.store, self.namespace_id())
+                .await
+                .expect("load namespace catalog");
+        let prepared = prepare_stored_content(&catalog, stored).expect("prepare stored content");
         self.publish(NamespaceMutationCandidate::path_prepared(
             PathMutationIntent::PutFile {
                 commit_id: CommitId::generate(),
