@@ -1,3 +1,7 @@
+//! Shared fixtures for the crate's integration tests.
+
+#![allow(dead_code)]
+
 use loonfs_client::{Client, ClientConfig};
 use loonfs_server::{app, GrepConfig, RuntimeCacheConfigOverrides, ServerConfig, StoreConfig};
 use std::path::PathBuf;
@@ -74,5 +78,109 @@ pub(crate) fn test_config(
         max_concurrent_maintenance: loonfs::DEFAULT_MAX_CONCURRENT_MAINTENANCE,
         allow_unauthenticated_remote: false,
         store,
+    }
+}
+
+pub(crate) mod http_split_support {
+    #![allow(dead_code)]
+
+    use loonfs_api::{
+        v0::{
+            BeginUploadRequest, CommitSubmissionRequest, CompleteUploadRequest,
+            CompleteUploadResponse, ValidatedContentToken,
+        },
+        DestinationBehavior, NamespaceId,
+    };
+    use loonfs_client::{Client, PutFileOptions};
+
+    use loonfs_server::{ServerConfig, StoreConfig};
+
+    use loonfs_test_support::http::raw_agent;
+
+    pub(crate) const TEST_CONTENT_TOKEN_SECRET: &str = "test-content-token-secret";
+
+    pub(crate) fn replace_file_options() -> PutFileOptions {
+        PutFileOptions {
+            behavior: DestinationBehavior::Replace,
+            ..PutFileOptions::default()
+        }
+    }
+
+    pub(crate) fn test_config(
+        store_root: std::path::PathBuf,
+        writer_id: &str,
+        key_prefix: &str,
+    ) -> ServerConfig {
+        super::test_config(
+            StoreConfig::LocalFs {
+                root: store_root.display().to_string(),
+                key_prefix: Some(key_prefix.to_owned()),
+            },
+            "test-token",
+            TEST_CONTENT_TOKEN_SECRET,
+            writer_id,
+        )
+    }
+
+    pub(crate) fn send_commit_submission(
+        server_url: &str,
+        namespace_id: &NamespaceId,
+        request: &CommitSubmissionRequest,
+    ) -> Result<ureq::Response, Box<ureq::Error>> {
+        send_commit_json(server_url, namespace_id, request)
+    }
+
+    pub(crate) fn send_commit_json(
+        server_url: &str,
+        namespace_id: &NamespaceId,
+        request: &impl serde::Serialize,
+    ) -> Result<ureq::Response, Box<ureq::Error>> {
+        raw_agent()
+            .post(&format!(
+                "{server_url}/v0/namespaces/{namespace_id}/commits"
+            ))
+            .set("authorization", "Bearer test-token")
+            .send_json(request)
+            .map_err(Box::new)
+    }
+
+    pub(crate) fn stage_uploaded_content(
+        client: &Client,
+        namespace_id: &NamespaceId,
+        file_bytes: &[u8],
+    ) -> CompleteUploadResponse {
+        let begin = client
+            .begin_upload(namespace_id, &BeginUploadRequest::default())
+            .expect("begin upload");
+        let staged = client
+            .upload_content(namespace_id, &begin.upload_id, file_bytes)
+            .expect("upload content");
+        let complete_request = CompleteUploadRequest {
+            content_ref: staged.content_ref,
+        };
+        let complete = client
+            .complete_upload(namespace_id, &begin.upload_id, &complete_request)
+            .expect("complete upload");
+        let repeated = client
+            .complete_upload(namespace_id, &begin.upload_id, &complete_request)
+            .expect("repeat complete upload");
+        assert_eq!(repeated.namespace_id, complete.namespace_id);
+        assert_eq!(repeated.upload_id, complete.upload_id);
+        assert_eq!(repeated.content_ref, complete.content_ref);
+        assert!(complete.validated_content_token.is_some());
+        assert!(repeated.validated_content_token.is_some());
+        complete
+    }
+
+    pub(crate) fn validated_content_token(
+        completed: &CompleteUploadResponse,
+    ) -> ValidatedContentToken {
+        ValidatedContentToken {
+            content_ref: completed.content_ref.clone(),
+            token: completed
+                .validated_content_token
+                .clone()
+                .expect("completed upload carries token"),
+        }
     }
 }
