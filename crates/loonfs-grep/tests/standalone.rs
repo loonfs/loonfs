@@ -16,7 +16,7 @@ use std::sync::Arc;
 use tempfile::tempdir;
 
 #[tokio::test]
-async fn standalone_once_advances_the_index_is_idempotent_and_rejects_bad_config() {
+async fn standalone_once_after_external_enable_indexes_in_one_sweep_and_is_idempotent() {
     let temp_dir = tempdir().expect("tempdir");
     let store_root = temp_dir.path().join("store");
     let store = Arc::new(LocalFsStore::new(&store_root).expect("store"));
@@ -33,6 +33,23 @@ async fn standalone_once_advances_the_index_is_idempotent_and_rejects_bad_config
         .await
         .expect("bootstrap namespace");
     put_file(&store, &engine, &namespace_id).await;
+
+    let config_path = temp_dir.path().join("worker.toml");
+    write_config(&config_path, &store_root, "", "");
+    let disabled = run_once(&config_path, &[&namespace_id]);
+    assert!(
+        disabled.status.success(),
+        "disabled one-shot failed: {}",
+        String::from_utf8_lossy(&disabled.stderr)
+    );
+    assert!(
+        load_grep_root(&*store, &namespace_id)
+            .await
+            .expect("load absent root")
+            .is_none(),
+        "a disabled one-shot must leave grep disabled"
+    );
+
     GrepWorker::new(
         store.clone(),
         "standalone-enable",
@@ -43,8 +60,6 @@ async fn standalone_once_advances_the_index_is_idempotent_and_rejects_bad_config
     .await
     .expect("enable grep");
 
-    let config_path = temp_dir.path().join("worker.toml");
-    write_config(&config_path, &store_root, "", "");
     let first = run_once(&config_path, &[&namespace_id]);
     assert!(
         first.status.success(),

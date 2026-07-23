@@ -3,6 +3,7 @@
 use clap::Parser;
 use loonfs_api::NamespaceId;
 use loonfs_core::control::load_namespace_head_control;
+use loonfs_grep::root::{load_grep_root, GrepLifecycle};
 use loonfs_grep::{
     GrepDriver, GrepDriverParked, GrepDriverState, GrepDriverTask, GrepWorker, GrepWorkerConfig,
 };
@@ -238,13 +239,37 @@ async fn poll_namespace(
             _ = interval.tick() => {
                 match load_namespace_head_control(&*store, &namespace_id).await {
                     Ok(head) => {
-                        let behind = matches!(
-                            driver.state(),
+                        let should_nudge = match driver.state() {
                             GrepDriverState::Parked(GrepDriverParked::CaughtUp {
                                 built_through_seq,
-                            }) if built_through_seq < head.state.seq
-                        );
-                        if behind {
+                            }) => built_through_seq < head.state.seq,
+                            GrepDriverState::Parked(GrepDriverParked::NotEnabled) => {
+                                // Assigned namespaces are an explicit, small operator-chosen set,
+                                // so one small conditional read per existing poll interval is
+                                // cheaper than introducing a second cadence concept.
+                                match load_grep_root(&*store, &namespace_id).await {
+                                    Ok(Some(root)) => matches!(
+                                        root.state().lifecycle(),
+                                        GrepLifecycle::Backfilling { .. } | GrepLifecycle::Steady
+                                    ),
+                                    Ok(None) => false,
+                                    Err(error) => {
+                                        tracing::warn!(
+                                            namespace_id = %namespace_id,
+                                            phase = "grep_root_poll",
+                                            result = "error",
+                                            error = %error,
+                                            "grep namespace root poll failed"
+                                        );
+                                        false
+                                    }
+                                }
+                            }
+                            GrepDriverState::Active
+                            | GrepDriverState::BackingOff { .. }
+                            | GrepDriverState::Stopped => false,
+                        };
+                        if should_nudge {
                             driver.nudge();
                         }
                     }
@@ -325,3 +350,7 @@ fn current_time_ms() -> Result<u64, loonfs_core::Error> {
             loonfs_core::Error::Internal(format!("system clock before unix epoch: {error}"))
         })
 }
+
+#[cfg(test)]
+#[path = "main_tests.rs"]
+mod tests;
