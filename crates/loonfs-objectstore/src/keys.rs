@@ -4,74 +4,130 @@ use crate::layout::ObjectLayout;
 use crate::object_store::Result;
 use loonfs_api::{ManifestObjectId, NamespaceId};
 
+/// Builds the listing prefix containing every durable object owned by one namespace.
+///
+/// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
 pub fn namespace_prefix(namespace_id: &NamespaceId) -> String {
     ObjectLayout::new().namespace_root_prefix(namespace_id.as_str())
 }
 
+/// Builds the immutable configuration key for one namespace.
+///
+/// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
 pub fn namespace_config(namespace: &str) -> String {
     ObjectLayout::new().namespace_config(namespace)
 }
 
+/// Builds the authoritative WAL head key for one namespace.
+///
+/// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
 pub fn wal_head(namespace: &str) -> String {
     ObjectLayout::new().wal_head(namespace)
 }
 
+/// Builds the retained-history floor key for one namespace.
+///
+/// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
 pub fn wal_floor(namespace: &str) -> String {
     ObjectLayout::new().wal_floor(namespace)
 }
 
+/// Builds the immutable WAL object key for a segment identity.
+///
+/// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
 pub fn wal_segment(namespace: &str, segment_id: &str) -> String {
     ObjectLayout::new().wal_segment(namespace, segment_id)
 }
 
+/// Builds the listing prefix containing only WAL segment objects for one namespace.
+///
+/// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
 pub fn wal_segment_prefix(namespace: &str) -> String {
     ObjectLayout::new().wal_segment_prefix(namespace)
 }
 
+/// Extracts a segment identity from a current-format WAL object key.
+///
+/// Returns `None` for foreign or differently suffixed objects. See
+/// [durable object families](../../../docs/specs/format.md#12-durable-object-families).
 pub fn wal_segment_id_from_key(key: &str) -> Option<&str> {
     ObjectLayout::new().wal_segment_id_from_key(key)
 }
 
+/// Builds the materialized metadata-root key for one namespace.
+///
+/// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
 pub fn metadata_root(namespace: &str) -> String {
     ObjectLayout::new().metadata_root(namespace)
 }
 
+/// Builds the listing prefix containing namespace-manifest candidates.
+///
+/// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
 pub fn metadata_manifest_prefix(namespace: &str) -> String {
     ObjectLayout::new().metadata_manifest_prefix(namespace)
 }
 
+/// Builds the listing prefix containing metadata SST objects owned by one namespace.
+///
+/// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
 pub fn metadata_table_prefix(namespace: &str) -> String {
     ObjectLayout::new().metadata_table_prefix(namespace)
 }
 
+/// Builds the immutable manifest key for one speculative manifest identity.
+///
+/// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
 pub fn metadata_manifest_object(namespace: &str, manifest_object_id: &ManifestObjectId) -> String {
     ObjectLayout::new().metadata_manifest_object(namespace, manifest_object_id)
 }
 
+/// Builds the immutable metadata SST key for one table identity.
+///
+/// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
 pub fn metadata_table(namespace: &str, table_id: &str) -> String {
     ObjectLayout::new().metadata_table(namespace, table_id)
 }
 
+/// Builds the mutable lifecycle key for one checkpoint record.
+///
+/// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
 pub fn checkpoint_record(namespace: &str, checkpoint_id: &str) -> String {
     ObjectLayout::new().checkpoint_record(namespace, checkpoint_id)
 }
 
+/// Builds the listing prefix containing checkpoint records for one namespace.
+///
+/// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
 pub fn checkpoint_prefix(namespace: &str) -> String {
     ObjectLayout::new().checkpoint_prefix(namespace)
 }
 
+/// Builds the listing prefix containing durable upload sessions for one namespace.
+///
+/// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
 pub fn upload_session_prefix(namespace: &str) -> String {
     ObjectLayout::new().upload_session_prefix(namespace)
 }
 
+/// Builds the mutable lifecycle key for one upload session.
+///
+/// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
 pub fn upload_session(namespace: &str, upload_id: &str) -> String {
     ObjectLayout::new().upload_session(namespace, upload_id)
 }
 
+/// Builds the immutable descriptor key for one content store.
+///
+/// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
 pub fn content_store_descriptor(content_store: &str) -> String {
     ObjectLayout::new().content_store_descriptor(content_store)
 }
 
+/// Builds the immutable content-object key for a whole-file digest.
+///
+/// The operation fails when `digest` is not the canonical whole-file SHA-256
+/// spelling. See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
 pub fn content_blob(content_store: &str, digest: &str) -> Result<String> {
     ObjectLayout::new().content_blob(content_store, digest)
 }

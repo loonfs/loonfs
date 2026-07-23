@@ -20,6 +20,7 @@ pub enum UploadMode {
 }
 
 impl UploadMode {
+    /// Reports whether the service, rather than the client, transfers bytes to object storage.
     pub fn is_service_proxied(&self) -> bool {
         matches!(self, Self::ServiceProxied)
     }
@@ -64,7 +65,9 @@ pub enum ObjectTransferAccess {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct DirectPutUpload {
+    /// Exact immutable object identity and byte length covered by the signed request.
     pub content_ref: ContentRef,
+    /// Short-lived write capability the client uses without learning the raw object key.
     pub access: ObjectTransferAccess,
 }
 
@@ -72,6 +75,7 @@ pub struct DirectPutUpload {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ValidatedContentToken {
+    /// Content identity the server attests it already verified.
     pub content_ref: ContentRef,
     /// Opaque, server-signed token. Clients must not parse it.
     pub token: String,
@@ -81,9 +85,13 @@ pub struct ValidatedContentToken {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct BeginUploadResponse {
+    /// Namespace authorized to consume the eventual staged content.
     pub namespace_id: NamespaceId,
+    /// Durable session identity used by subsequent append and completion calls.
     pub upload_id: UploadId,
+    /// Transport selected after applying server capability and request validation.
     pub mode: UploadMode,
+    /// Presigned write details for `DirectPut`, or `None` for `ServiceProxied`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub direct_put: Option<DirectPutUpload>,
 }
@@ -92,8 +100,11 @@ pub struct BeginUploadResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct UploadContentResponse {
+    /// Namespace that owns the upload session.
     pub namespace_id: NamespaceId,
+    /// Session into which the service staged these bytes.
     pub upload_id: UploadId,
+    /// Digest and byte length computed from the accepted body.
     pub content_ref: ContentRef,
 }
 
@@ -101,6 +112,7 @@ pub struct UploadContentResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct CompleteUploadRequest {
+    /// Content identity the caller expects the session to have staged.
     pub content_ref: ContentRef,
 }
 
@@ -108,9 +120,13 @@ pub struct CompleteUploadRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct CompleteUploadResponse {
+    /// Namespace that owns the completed session.
     pub namespace_id: NamespaceId,
+    /// Session whose result is now frozen for idempotent completion retries.
     pub upload_id: UploadId,
+    /// Verified immutable content selected by the completed session.
     pub content_ref: ContentRef,
+    /// Opaque server proof for a later commit, or `None` when the backend needs no token.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub validated_content_token: Option<String>,
 }

@@ -95,11 +95,15 @@ pub struct CapabilityDocument {
 /// Violation of the capability document rules.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum CapabilityDocumentError {
+    /// Reports a feature whose dotted plane prefix has no advertised profile.
     #[error(
         "feature `{feature}` is not parented by an advertised profile \
          (its first dotted segment must be one of the advertised plane names)"
     )]
-    UnparentedFeature { feature: String },
+    UnparentedFeature {
+        /// Feature key rejected while validating the deployment document.
+        feature: String,
+    },
 }
 
 impl CapabilityDocument {

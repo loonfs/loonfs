@@ -11,6 +11,8 @@
 //! ids/paths/errors/wire-format modules and re-exports the common v0
 //! surface as a curated explicit list below.
 
+#![warn(missing_docs)]
+
 mod capability;
 mod content;
 mod control;
@@ -28,27 +30,41 @@ pub mod v0;
 mod wal;
 
 pub mod wire {
+    //! Durable wire formats grouped by their owning format family.
+
     pub mod hex {
+        //! Lowercase hexadecimal primitives shared by durable codecs.
+
         pub use crate::hex::*;
     }
 
     pub mod manifest {
+        //! Namespace-manifest envelopes, rows, and key constructors.
+
         pub use crate::manifest::*;
     }
 
     pub mod control {
+        //! Mutable namespace control-object envelopes and payloads.
+
         pub use crate::control::*;
     }
 
     pub mod envelope {
+        //! Errors shared by the durable envelope codecs.
+
         pub use crate::envelope::EnvelopeCodecError;
     }
 
     pub mod sst_blocks {
+        //! Metadata SST block handles, builders, and codecs.
+
         pub use crate::sst_blocks::*;
     }
 
     pub mod wal {
+        //! WAL segment envelopes, records, and codecs.
+
         pub use crate::wal::*;
     }
 }

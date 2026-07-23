@@ -67,16 +67,22 @@ pub(crate) const ZSTD_LEVEL: i32 = 3;
 /// verify it: the CRC32C of the stored bytes and their decoded length.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockHandle {
+    /// Zero-based byte offset of the section within its immutable segment object.
     pub offset: u64,
+    /// Number of bytes to range-read and checksum before decoding.
     pub stored_len: u32,
+    /// Expected byte length after optional section decompression.
     pub decoded_len: u32,
+    /// CRC32C over the exact `stored_len` bytes at `offset`.
     pub crc32c: u32,
 }
 
 /// One index entry: the last row key of a data block plus its handle.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SegmentIndexEntry {
+    /// Greatest row key in `block`, used to binary-search candidate blocks.
     pub last_key: String,
+    /// Data-section location and integrity metadata.
     pub block: BlockHandle,
 }
 
@@ -84,11 +90,17 @@ pub struct SegmentIndexEntry {
 /// descriptor must carry to read them back.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuiltSegmentBlocks {
+    /// Complete immutable object body, with data sections followed by filter and index sections.
     pub bytes: Vec<u8>,
+    /// Handle callers persist in the segment descriptor to bootstrap reads.
     pub index: BlockHandle,
+    /// Handle callers persist for negative point-lookup filtering.
     pub filter: BlockHandle,
+    /// Number of rows accepted by the builder, including adjacent duplicate keys.
     pub row_count: u64,
+    /// Least row key in the non-empty segment.
     pub min_key: String,
+    /// Greatest row key in the non-empty segment.
     pub max_key: String,
 }
 
@@ -97,7 +109,9 @@ pub struct BuiltSegmentBlocks {
 /// own row payload through [`decode_data_block_rows`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecodedDataBlock<R = MetadataRow> {
+    /// Reconstructed row keys in the same ascending order as `rows`.
     pub row_keys: Vec<String>,
+    /// Decoded row payloads positionally paired with `row_keys`.
     pub rows: Vec<R>,
 }
 
@@ -109,20 +123,50 @@ pub struct SegmentFilter {
     bits: Vec<u8>,
 }
 
+/// Describes a violation encountered while building or validating an SST section.
+///
+/// See [metadata segments](../../../docs/specs/format.md#421-metadata-segments).
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum SstBlockCodecError {
+    /// Reports a request to finish a segment before any row was supplied.
     #[error("segment must contain at least one row")]
     EmptySegment,
+    /// Reports a builder input that would violate durable ascending row-key order.
     #[error("row key `{offered}` is not in ascending order after `{previous}`")]
-    RowKeysOutOfOrder { previous: String, offered: String },
+    RowKeysOutOfOrder {
+        /// Last key the builder accepted.
+        previous: String,
+        /// Descending key rejected by the builder.
+        offered: String,
+    },
+    /// Reports a range-read body whose byte count disagrees with its handle.
     #[error("stored bytes length {actual} does not match handle length {expected}")]
-    StoredLengthMismatch { expected: u32, actual: usize },
+    StoredLengthMismatch {
+        /// Stored byte count recorded in the persisted `BlockHandle`.
+        expected: u32,
+        /// Byte count returned to the decoder.
+        actual: usize,
+    },
+    /// Reports stored section bytes that fail the CRC32C recorded in their handle.
     #[error("block checksum mismatch: expected {expected:#010x}, actual {actual:#010x}")]
-    ChecksumMismatch { expected: u32, actual: u32 },
+    ChecksumMismatch {
+        /// CRC32C recorded in the persisted `BlockHandle`.
+        expected: u32,
+        /// CRC32C recomputed from the supplied stored bytes.
+        actual: u32,
+    },
+    /// Reports a section whose decompressed size disagrees with its handle.
     #[error("decoded length {actual} does not match handle length {expected}")]
-    DecodedLengthMismatch { expected: u32, actual: usize },
+    DecodedLengthMismatch {
+        /// Decoded byte count recorded in the persisted `BlockHandle`.
+        expected: u32,
+        /// Byte count produced by section decompression.
+        actual: usize,
+    },
+    /// Reports structurally invalid framing, ordering, UTF-8, or filter metadata.
     #[error("malformed block: {0}")]
     Malformed(String),
+    /// Reports a CBOR or zstd failure while encoding or decoding a section.
     #[error("block codec error: {0}")]
     Codec(String),
 }
@@ -149,6 +193,7 @@ impl Default for SegmentBlocksBuilder {
 }
 
 impl SegmentBlocksBuilder {
+    /// Creates a builder that closes a data block after reaching the target decoded byte size.
     pub fn new(target_block_bytes: NonZeroUsize) -> Self {
         Self {
             target_block_bytes: target_block_bytes.get(),

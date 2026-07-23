@@ -35,35 +35,74 @@ string_id! {
 /// as given.
 pub const MAX_DISPLAY_NAME_BYTES: usize = 255;
 
+/// Describes why caller-supplied path or display-name text is not admissible.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum PathError {
+    /// Reports an empty string where an absolute path was required.
     #[error("absolute path must not be empty")]
     EmptyPath,
+    /// Reports a path that does not begin at the namespace root.
     #[error("path `{path:?}` is not absolute")]
-    RelativePath { path: String },
+    RelativePath {
+        /// Rejected path, preserved for an escaped diagnostic.
+        path: String,
+    },
+    /// Reports an explicit current-directory component, which normalization never accepts.
     #[error("path `{path:?}` contains `.` component")]
-    DotComponent { path: String },
+    DotComponent {
+        /// Rejected path, preserved for an escaped diagnostic.
+        path: String,
+    },
+    /// Reports a parent-directory component, which could otherwise escape the requested path.
     #[error("path `{path:?}` contains `..` component")]
-    ParentComponent { path: String },
+    ParentComponent {
+        /// Rejected path, preserved for an escaped diagnostic.
+        path: String,
+    },
+    /// Reports an empty string where one stored path component was required.
     #[error("display name must not be empty")]
     EmptyDisplayName,
+    /// Reports a display name containing the path-component separator.
     #[error("display name `{display_name:?}` contains `/`")]
-    DisplayNameContainsSeparator { display_name: String },
+    DisplayNameContainsSeparator {
+        /// Rejected component spelling, preserved for an escaped diagnostic.
+        display_name: String,
+    },
+    /// Reports `.` or `..`, whose navigation meaning prevents storing them as names.
     #[error("display name `{display_name:?}` is reserved")]
-    ReservedDisplayName { display_name: String },
+    ReservedDisplayName {
+        /// Reserved spelling supplied by the caller.
+        display_name: String,
+    },
+    /// Reports a Unicode control character that cannot appear in a stored display name.
     #[error("display name contains control character U+{code_point:04X}")]
-    DisplayNameContainsControlCharacter { code_point: u32 },
+    DisplayNameContainsControlCharacter {
+        /// Unicode scalar value of the first rejected control character.
+        code_point: u32,
+    },
+    /// Reports a display name exceeding the stored UTF-8 component limit.
     #[error("display name is {byte_length} bytes; the maximum is {MAX_DISPLAY_NAME_BYTES} bytes")]
-    DisplayNameTooLong { byte_length: usize },
+    DisplayNameTooLong {
+        /// UTF-8 byte length of the rejected display name.
+        byte_length: usize,
+    },
+    /// Reports a valid display spelling whose canonical lookup key exceeds its durable bound.
     #[error(
         "display name folds to a {byte_length}-byte name key; the maximum is \
          {max} bytes",
         max = crate::ids::MAX_NAME_KEY_BYTES
     )]
-    FoldedNameKeyTooLong { byte_length: usize },
+    FoldedNameKeyTooLong {
+        /// UTF-8 byte length after normalization and case folding.
+        byte_length: usize,
+    },
 }
 
 impl AbsolutePath {
+    /// Parses and normalizes an absolute path while preserving each component's display spelling.
+    ///
+    /// Empty and relative paths, explicit `.` or `..` components, and components
+    /// outside the [`DisplayName`] grammar are rejected.
     pub fn parse(value: impl AsRef<str>) -> Result<Self, PathError> {
         let value = value.as_ref();
         if value.is_empty() {
@@ -100,6 +139,7 @@ impl AbsolutePath {
         Ok(Self::from_components(components))
     }
 
+    /// Constructs the namespace root path without parsing caller input.
     pub fn root() -> Self {
         Self {
             normalized: "/".to_owned(),
@@ -107,18 +147,22 @@ impl AbsolutePath {
         }
     }
 
+    /// Returns the normalized absolute spelling, with `/` as the sole root representation.
     pub fn as_str(&self) -> &str {
         &self.normalized
     }
 
+    /// Reports whether the path has no components.
     pub fn is_root(&self) -> bool {
         self.components.is_empty()
     }
 
+    /// Returns components in root-to-leaf order with their original display spelling.
     pub fn components(&self) -> &[PathComponent] {
         &self.components
     }
 
+    /// Returns the path one component above this one, or `None` at the root.
     pub fn parent(&self) -> Option<Self> {
         if self.is_root() {
             return None;
@@ -132,10 +176,12 @@ impl AbsolutePath {
         ))
     }
 
+    /// Returns the leaf component, or `None` when this path is the root.
     pub fn final_component(&self) -> Option<&PathComponent> {
         self.components.last()
     }
 
+    /// Appends an already-validated display name without changing existing component spelling.
     pub fn join(&self, display_name: &DisplayName) -> Self {
         let mut components = self.components.clone();
         components.push(PathComponent(display_name.as_str().to_owned()));
@@ -179,10 +225,12 @@ fn normalized_path(components: &[PathComponent]) -> String {
 }
 
 impl PathComponent {
+    /// Returns the display spelling retained when the containing path was parsed.
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
+    /// Copies this parser-validated component into the equivalent `DisplayName`.
     pub fn to_display_name(&self) -> DisplayName {
         DisplayName(self.0.clone())
     }
@@ -241,6 +289,7 @@ fn validate_display_name(value: &str) -> Result<(), PathError> {
 }
 
 impl PathError {
+    /// Returns rejected path text suitable for an API error, omitting hostile or oversized names.
     pub fn invalid_path_input(&self) -> &str {
         match self {
             Self::EmptyPath => "",

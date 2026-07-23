@@ -16,11 +16,16 @@ use thiserror::Error;
 pub enum ImmutableWriteError {
     /// The key names bytes other than the immutable payload supplied here.
     #[error("immutable object `{object_key}` already exists with different bytes")]
-    DifferentObject { object_key: String },
+    DifferentObject {
+        /// Durable key whose existing bytes violated immutability.
+        object_key: String,
+    },
     /// The storage boundary failed before byte identity could be established.
     #[error("immutable write transport failed for `{object_key}`: {source}")]
     Transport {
+        /// Durable key whose byte identity could not be established.
         object_key: String,
+        /// Final storage failure after retry and read-back reconciliation.
         #[source]
         source: ObjectStoreError,
     },

@@ -23,6 +23,7 @@ use tokio::sync::Mutex;
 /// holding process dies. Never listed as an object (see `is_scratch_name`).
 const STORE_LOCK_FILE_NAME: &str = ".loonfs-store.lock";
 
+/// Implements the object-store contract on a local directory for development and tests.
 #[derive(Debug)]
 pub struct LocalFsStore {
     root: PathBuf,
@@ -30,6 +31,9 @@ pub struct LocalFsStore {
 }
 
 impl LocalFsStore {
+    /// Opens a local store, creating its root directory when necessary.
+    ///
+    /// Construction fails when the root cannot be created.
     pub fn new(root: impl Into<PathBuf>) -> Result<Self> {
         let root = root.into();
         std::fs::create_dir_all(&root).map_err(|err| {
@@ -65,6 +69,7 @@ impl LocalFsStore {
         .map_err(|err| ObjectStoreError::transport(key, format!("store lock task failed: {err}")))?
     }
 
+    /// Returns the filesystem directory beneath which validated object keys are resolved.
     pub fn root(&self) -> &Path {
         &self.root
     }

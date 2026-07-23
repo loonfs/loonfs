@@ -9,22 +9,34 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
 
+/// Supplies explicit S3 credentials and account addressing for Cloudflare R2.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CloudflareR2StoreConfig {
+    /// R2 bucket that acts as the LoonFS object-store root.
     pub bucket: String,
+    /// Cloudflare account identity, required even though requests use the explicit endpoint.
     pub account_id: String,
+    /// Account-level R2 S3 endpoint; this adapter always uses path-style bucket addressing.
     pub endpoint_url: String,
+    /// S3-compatible access-key id used for request signing.
     pub access_key_id: SecretString,
+    /// S3-compatible secret used for request signing.
     pub secret_access_key: SecretString,
+    /// Logical prefix prepended to every key, or `None` to use the bucket root.
     pub key_prefix: Option<String>,
 }
 
+/// Implements the LoonFS storage contract on Cloudflare R2's S3-compatible API.
 #[derive(Debug)]
 pub struct CloudflareR2Store {
     inner: S3CompatibleStore,
 }
 
 impl CloudflareR2Store {
+    /// Builds an R2 adapter with path-style addressing and checksum-compatible upload settings.
+    ///
+    /// Construction fails for a blank account id or any invalid shared
+    /// S3-compatible configuration, including credentials, endpoint, and key prefix.
     pub fn new(config: CloudflareR2StoreConfig) -> Result<Self> {
         if config.account_id.trim().is_empty() {
             return Err(ObjectStoreError::Configuration(

@@ -21,74 +21,123 @@ use std::time::{Duration, Instant};
 /// error strings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObjectStoreMetricSample {
+    /// Contract operation that produced the sample.
     pub operation: ObjectStoreOperation,
+    /// End-to-end operation latency in microseconds, including provider waits.
     pub elapsed_micros: u128,
+    /// Cardinality-bounded success or failure classification.
     pub result: ObjectStoreResultClass,
+    /// Request payload bytes for a put, including failed attempts; otherwise `None`.
     pub bytes_in: Option<u64>,
+    /// Response payload bytes for a successful get, including zero; otherwise `None`.
     pub bytes_out: Option<u64>,
+    /// Keys yielded by a listing before completion or drop; otherwise `None`.
     pub item_count: Option<u64>,
+    /// Durable-family grouping derived without retaining the raw key.
     pub key_class: KeyClass,
+    /// Read-range or listing shape when applicable; otherwise `None`.
     pub range_class: Option<RangeClass>,
+    /// Requested conditional-write class for a put; otherwise `None`.
     pub put_mode: Option<PutModeClass>,
+    /// Deployment-supplied provider label, or `None` when the wrapper was left unlabeled.
     pub store_kind: Option<String>,
 }
 
+/// Classifies the method measured by one object-store sample.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ObjectStoreOperation {
+    /// Measures a metadata-only point read.
     Head,
+    /// Measures a self-consistent full-object read with identity metadata.
     GetWithMetadata,
+    /// Measures a full or ranged byte read.
     Get,
+    /// Measures an overwrite or conditional write.
     Put,
+    /// Measures an idempotent object delete.
     Delete,
+    /// Measures a listing collected to completion.
     ListPrefix,
+    /// Measures a listing stream until completion or early drop.
     ListPrefixStream,
 }
 
+/// Collapses object-store outcomes into a bounded metrics vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ObjectStoreResultClass {
+    /// Indicates the operation returned its requested value or mutation result.
     Ok,
+    /// Indicates an optional read observed absence or an explicit lookup returned not found.
     NotFound,
+    /// Indicates key or prefix validation failed before provider IO.
     InvalidKey,
+    /// Indicates a content reference could not resolve to an immutable key.
     InvalidContentRef,
+    /// Indicates requested byte-range bounds were invalid for the object.
     InvalidRange,
+    /// Indicates a create-if-absent or compare-and-swap condition did not hold.
     PreconditionFailed,
+    /// Indicates a test-injected concurrency conflict.
     Conflict,
+    /// Indicates the provider rejected identity or authorization.
     PermissionDenied,
+    /// Indicates the configured store lacks a required capability.
     Unsupported,
+    /// Indicates configuration, IO, timeout, protocol, or provider transport failure.
     Transport,
+    /// Reserves a forward-compatible bucket for errors outside the current registry.
     OtherError,
 }
 
+/// Groups durable keys into low-cardinality operational families.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum KeyClass {
+    /// Groups immutable whole-file byte objects.
     Content,
+    /// Groups small control records not assigned a more specific class.
     Metadata,
+    /// Groups the authoritative namespace WAL head.
     NamespaceHead,
+    /// Groups immutable WAL segment payloads.
     WalSegment,
+    /// Groups namespace manifests and their mutable root pointer.
     NamespaceManifest,
+    /// Groups immutable metadata SST segments.
     MetadataSst,
+    /// Groups checkpoint records and retained-history floors consulted by garbage collection.
     GcControl,
+    /// Groups unrecognized keys and coarse listing prefixes.
     Unknown,
 }
 
+/// Classifies the shape of bytes requested by a get or listing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RangeClass {
+    /// Indicates a get without explicit range bounds.
     FullObject,
+    /// Indicates bytes starting at zero or a prefix-listing operation.
     Prefix,
+    /// Indicates a range extending from a nonzero start to the sentinel maximum end.
     Suffix,
+    /// Indicates a finite nonempty range with both bounds inside the keyspace.
     Bounded,
+    /// Indicates equal range bounds and therefore a zero-byte read.
     Empty,
 }
 
+/// Classifies the precondition semantics requested by a put.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PutModeClass {
+    /// Indicates an unconditional replacement.
     Overwrite,
+    /// Indicates creation only while the key is absent.
     CreateIfAbsent,
+    /// Indicates replacement only while an opaque compare token matches.
     CompareAndSwap,
 }
 
@@ -96,6 +145,7 @@ pub enum PutModeClass {
 ///
 /// Implementations should aggregate or export samples without blocking the object-store hot path.
 pub trait ObjectStoreMetricsRecorder: Send + Sync + 'static {
+    /// Accepts one completed sample without access to raw keys or provider error text.
     fn record(&self, sample: ObjectStoreMetricSample);
 }
 
@@ -106,6 +156,7 @@ pub struct VecObjectStoreMetricsRecorder {
 }
 
 impl VecObjectStoreMetricsRecorder {
+    /// Returns a snapshot copy of every sample recorded so far.
     pub fn samples(&self) -> Vec<ObjectStoreMetricSample> {
         self.samples
             .lock()
@@ -132,6 +183,9 @@ pub struct JsonlObjectStoreMetricsRecorder {
 }
 
 impl JsonlObjectStoreMetricsRecorder {
+    /// Creates or truncates a JSONL output file, creating missing parent directories.
+    ///
+    /// The operation fails when directories or the output file cannot be created.
     pub fn create(path: impl AsRef<Path>) -> io::Result<Self> {
         let path = path.as_ref();
         if let Some(parent) = path.parent() {
@@ -144,6 +198,9 @@ impl JsonlObjectStoreMetricsRecorder {
         })
     }
 
+    /// Flushes buffered samples to the underlying file.
+    ///
+    /// The operation fails when the filesystem cannot accept pending bytes.
     pub fn flush(&self) -> io::Result<()> {
         self.writer
             .lock()
@@ -163,6 +220,10 @@ impl ObjectStoreMetricsRecorder for JsonlObjectStoreMetricsRecorder {
     }
 }
 
+/// Records one bounded-cardinality sample around each operation on an inner store.
+///
+/// Results and storage semantics pass through unchanged; streamed listings emit
+/// their sample when the stream is completed or dropped.
 pub struct InstrumentedObjectStore<S> {
     inner: S,
     recorder: Arc<dyn ObjectStoreMetricsRecorder>,
@@ -179,6 +240,7 @@ impl<S: fmt::Debug> fmt::Debug for InstrumentedObjectStore<S> {
 }
 
 impl<S> InstrumentedObjectStore<S> {
+    /// Wraps a store with the supplied synchronous recorder and no provider label.
     pub fn new(inner: S, recorder: Arc<dyn ObjectStoreMetricsRecorder>) -> Self {
         Self {
             inner,
@@ -187,11 +249,13 @@ impl<S> InstrumentedObjectStore<S> {
         }
     }
 
+    /// Attaches a low-cardinality provider label copied into subsequent samples.
     pub fn store_kind(mut self, store_kind: impl Into<String>) -> Self {
         self.store_kind = Some(store_kind.into());
         self
     }
 
+    /// Removes instrumentation and returns ownership of the wrapped store.
     pub fn into_inner(self) -> S {
         self.inner
     }

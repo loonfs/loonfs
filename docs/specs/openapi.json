@@ -2909,18 +2909,22 @@
                 "type": "null"
               },
               {
-                "$ref": "#/components/schemas/DirectPutUpload"
+                "$ref": "#/components/schemas/DirectPutUpload",
+                "description": "Presigned write details for `DirectPut`, or `None` for `ServiceProxied`."
               }
             ]
           },
           "mode": {
-            "$ref": "#/components/schemas/UploadMode"
+            "$ref": "#/components/schemas/UploadMode",
+            "description": "Transport selected after applying server capability and request validation."
           },
           "namespace_id": {
-            "$ref": "#/components/schemas/NamespaceId"
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace authorized to consume the eventual staged content."
           },
           "upload_id": {
-            "$ref": "#/components/schemas/UploadId"
+            "$ref": "#/components/schemas/UploadId",
+            "description": "Durable session identity used by subsequent append and completion calls."
           }
         }
       },
@@ -2984,16 +2988,19 @@
         ],
         "properties": {
           "after_seq": {
-            "$ref": "#/components/schemas/ChangeSeq"
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Exclusive cursor supplied by the caller, or the endpoint's initial position."
           },
           "changes": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/CommittedChange"
-            }
+            },
+            "description": "Logical commits after `after_seq`, ordered by ascending namespace sequence."
           },
           "namespace_id": {
-            "$ref": "#/components/schemas/NamespaceId"
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace whose ordered commit stream was read."
           },
           "next_after_seq": {
             "oneOf": [
@@ -3001,12 +3008,14 @@
                 "type": "null"
               },
               {
-                "$ref": "#/components/schemas/ChangeSeq"
+                "$ref": "#/components/schemas/ChangeSeq",
+                "description": "Cursor to request when another page remains, or `None` at `through_seq`."
               }
             ]
           },
           "through_seq": {
-            "$ref": "#/components/schemas/ChangeSeq"
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Snapshot head through which this page was evaluated."
           }
         }
       },
@@ -3019,6 +3028,7 @@
           {
             "type": "object",
             "title": "CommitDeltaCreateInode",
+            "description": "Announces a newly allocated inode and its immutable kind.",
             "required": [
               "semantic_op_index",
               "delta_index",
@@ -3030,13 +3040,16 @@
               "delta_index": {
                 "type": "integer",
                 "format": "int32",
+                "description": "Stable ordering position of this fact within the commit.",
                 "minimum": 0
               },
               "inode_id": {
-                "$ref": "#/components/schemas/InodeId"
+                "$ref": "#/components/schemas/InodeId",
+                "description": "Newly allocated namespace-scoped inode identity."
               },
               "inode_kind": {
-                "$ref": "#/components/schemas/InodeKind"
+                "$ref": "#/components/schemas/InodeKind",
+                "description": "File-or-directory classification fixed at creation."
               },
               "kind": {
                 "type": "string",
@@ -3047,6 +3060,7 @@
               "semantic_op_index": {
                 "type": "integer",
                 "format": "int32",
+                "description": "Zero-based request-operation position that produced this fact.",
                 "minimum": 0
               }
             }
@@ -3054,6 +3068,7 @@
           {
             "type": "object",
             "title": "CommitDeltaBindDirentry",
+            "description": "Announces a newly visible generation of a directory binding.",
             "required": [
               "semantic_op_index",
               "delta_index",
@@ -3065,15 +3080,18 @@
             ],
             "properties": {
               "child_inode_id": {
-                "$ref": "#/components/schemas/InodeId"
+                "$ref": "#/components/schemas/InodeId",
+                "description": "Inode made reachable by the binding."
               },
               "delta_index": {
                 "type": "integer",
                 "format": "int32",
+                "description": "Stable ordering position and binding identity within the commit.",
                 "minimum": 0
               },
               "display_name": {
-                "$ref": "#/components/schemas/DisplayName"
+                "$ref": "#/components/schemas/DisplayName",
+                "description": "User-facing spelling retained for directory responses."
               },
               "kind": {
                 "type": "string",
@@ -3082,14 +3100,17 @@
                 ]
               },
               "name_key": {
-                "$ref": "#/components/schemas/NameKey"
+                "$ref": "#/components/schemas/NameKey",
+                "description": "Policy-derived key used for uniqueness and lookup."
               },
               "parent_inode_id": {
-                "$ref": "#/components/schemas/InodeId"
+                "$ref": "#/components/schemas/InodeId",
+                "description": "Directory receiving the binding."
               },
               "semantic_op_index": {
                 "type": "integer",
                 "format": "int32",
+                "description": "Zero-based request-operation position that produced this fact.",
                 "minimum": 0
               }
             }
@@ -3097,6 +3118,7 @@
           {
             "type": "object",
             "title": "CommitDeltaUnbindDirentry",
+            "description": "Announces retirement of one exact historical directory binding.",
             "required": [
               "semantic_op_index",
               "delta_index",
@@ -3111,17 +3133,21 @@
               "bind_delta_index": {
                 "type": "integer",
                 "format": "int32",
+                "description": "Delta position that disambiguates the generation within `bind_seq`.",
                 "minimum": 0
               },
               "bind_seq": {
-                "$ref": "#/components/schemas/ChangeSeq"
+                "$ref": "#/components/schemas/ChangeSeq",
+                "description": "Sequence that created the exact retired binding generation."
               },
               "child_inode_id": {
-                "$ref": "#/components/schemas/InodeId"
+                "$ref": "#/components/schemas/InodeId",
+                "description": "Child identity on the retired binding."
               },
               "delta_index": {
                 "type": "integer",
                 "format": "int32",
+                "description": "Stable ordering position of this unbind within the commit.",
                 "minimum": 0
               },
               "kind": {
@@ -3131,14 +3157,17 @@
                 ]
               },
               "name_key": {
-                "$ref": "#/components/schemas/NameKey"
+                "$ref": "#/components/schemas/NameKey",
+                "description": "Canonical lookup key of the retired binding."
               },
               "parent_inode_id": {
-                "$ref": "#/components/schemas/InodeId"
+                "$ref": "#/components/schemas/InodeId",
+                "description": "Directory from which the binding was removed."
               },
               "semantic_op_index": {
                 "type": "integer",
                 "format": "int32",
+                "description": "Zero-based request-operation position that produced this fact.",
                 "minimum": 0
               }
             }
@@ -3146,6 +3175,7 @@
           {
             "type": "object",
             "title": "CommitDeltaAppendFileRevision",
+            "description": "Announces publication of the next immutable content revision of a file.",
             "required": [
               "semantic_op_index",
               "delta_index",
@@ -3156,15 +3186,18 @@
             ],
             "properties": {
               "content_ref": {
-                "$ref": "#/components/schemas/ContentRef"
+                "$ref": "#/components/schemas/ContentRef",
+                "description": "Immutable content published by the revision."
               },
               "delta_index": {
                 "type": "integer",
                 "format": "int32",
+                "description": "Stable ordering position of this revision within the commit.",
                 "minimum": 0
               },
               "inode_id": {
-                "$ref": "#/components/schemas/InodeId"
+                "$ref": "#/components/schemas/InodeId",
+                "description": "File inode whose history advanced."
               },
               "kind": {
                 "type": "string",
@@ -3173,11 +3206,13 @@
                 ]
               },
               "revision_no": {
-                "$ref": "#/components/schemas/RevisionNo"
+                "$ref": "#/components/schemas/RevisionNo",
+                "description": "New monotonic position in that file's revision history."
               },
               "semantic_op_index": {
                 "type": "integer",
                 "format": "int32",
+                "description": "Zero-based request-operation position that produced this fact.",
                 "minimum": 0
               }
             }
@@ -3185,6 +3220,7 @@
           {
             "type": "object",
             "title": "CommitDeltaTombstoneSubtree",
+            "description": "Announces a tombstone that hides one rooted subtree.",
             "required": [
               "semantic_op_index",
               "delta_index",
@@ -3195,6 +3231,7 @@
               "delta_index": {
                 "type": "integer",
                 "format": "int32",
+                "description": "Stable ordering position and tombstone identity within the commit.",
                 "minimum": 0
               },
               "kind": {
@@ -3204,11 +3241,13 @@
                 ]
               },
               "root_inode_id": {
-                "$ref": "#/components/schemas/InodeId"
+                "$ref": "#/components/schemas/InodeId",
+                "description": "Inode at the root of the newly hidden subtree."
               },
               "semantic_op_index": {
                 "type": "integer",
                 "format": "int32",
+                "description": "Zero-based request-operation position that produced this fact.",
                 "minimum": 0
               }
             }
@@ -3216,6 +3255,7 @@
           {
             "type": "object",
             "title": "CommitDeltaRevokeSubtreeTombstone",
+            "description": "Announces a compensating event that revokes one exact subtree tombstone.",
             "required": [
               "semantic_op_index",
               "delta_index",
@@ -3228,6 +3268,7 @@
               "delta_index": {
                 "type": "integer",
                 "format": "int32",
+                "description": "Stable ordering position of this revoke within the commit.",
                 "minimum": 0
               },
               "kind": {
@@ -3237,16 +3278,19 @@
                 ]
               },
               "root_inode_id": {
-                "$ref": "#/components/schemas/InodeId"
+                "$ref": "#/components/schemas/InodeId",
+                "description": "Root inode governed by the targeted tombstone."
               },
               "semantic_op_index": {
                 "type": "integer",
                 "format": "int32",
+                "description": "Zero-based request-operation position that produced this fact.",
                 "minimum": 0
               },
               "target_delta_index": {
                 "type": "integer",
                 "format": "int32",
+                "description": "Delta position that identifies the targeted deletion within `target_seq`.",
                 "minimum": 0
               },
               "target_seq": {
@@ -3275,7 +3319,8 @@
             ],
             "properties": {
               "display_name": {
-                "$ref": "#/components/schemas/DisplayName"
+                "$ref": "#/components/schemas/DisplayName",
+                "description": "Requested child spelling, whose derived name key must be absent."
               },
               "kind": {
                 "type": "string",
@@ -3284,7 +3329,8 @@
                 ]
               },
               "parent_inode_id": {
-                "$ref": "#/components/schemas/InodeId"
+                "$ref": "#/components/schemas/InodeId",
+                "description": "Visible directory that will own the new binding."
               }
             }
           },
@@ -3300,10 +3346,12 @@
             ],
             "properties": {
               "content_ref": {
-                "$ref": "#/components/schemas/ContentRef"
+                "$ref": "#/components/schemas/ContentRef",
+                "description": "Immutable initial bytes, which must have valid preparation proof before publication."
               },
               "display_name": {
-                "$ref": "#/components/schemas/DisplayName"
+                "$ref": "#/components/schemas/DisplayName",
+                "description": "Requested child spelling, whose derived name key must be absent."
               },
               "kind": {
                 "type": "string",
@@ -3312,7 +3360,8 @@
                 ]
               },
               "parent_inode_id": {
-                "$ref": "#/components/schemas/InodeId"
+                "$ref": "#/components/schemas/InodeId",
+                "description": "Visible directory that will own the new binding."
               }
             }
           },
@@ -3328,13 +3377,16 @@
             ],
             "properties": {
               "base_revision_no": {
-                "$ref": "#/components/schemas/RevisionNo"
+                "$ref": "#/components/schemas/RevisionNo",
+                "description": "Revision the caller observed; the operation conflicts if it is no longer current."
               },
               "content_ref": {
-                "$ref": "#/components/schemas/ContentRef"
+                "$ref": "#/components/schemas/ContentRef",
+                "description": "Immutable replacement bytes, which must have valid preparation proof before publication."
               },
               "inode_id": {
-                "$ref": "#/components/schemas/InodeId"
+                "$ref": "#/components/schemas/InodeId",
+                "description": "Visible file inode receiving a new revision."
               },
               "kind": {
                 "type": "string",
@@ -3356,10 +3408,12 @@
             ],
             "properties": {
               "base_revision_no": {
-                "$ref": "#/components/schemas/RevisionNo"
+                "$ref": "#/components/schemas/RevisionNo",
+                "description": "Current revision the caller observed; concurrent advancement causes a conflict."
               },
               "inode_id": {
-                "$ref": "#/components/schemas/InodeId"
+                "$ref": "#/components/schemas/InodeId",
+                "description": "Visible file inode receiving the restored content as a new revision."
               },
               "kind": {
                 "type": "string",
@@ -3368,7 +3422,8 @@
                 ]
               },
               "source_revision_no": {
-                "$ref": "#/components/schemas/RevisionNo"
+                "$ref": "#/components/schemas/RevisionNo",
+                "description": "Existing historical revision whose content is copied forward."
               }
             }
           },
@@ -3382,7 +3437,8 @@
             ],
             "properties": {
               "inode_id": {
-                "$ref": "#/components/schemas/InodeId"
+                "$ref": "#/components/schemas/InodeId",
+                "description": "Visible file whose exact parent binding and subtree visibility are validated."
               },
               "kind": {
                 "type": "string",
@@ -3404,7 +3460,8 @@
             ],
             "properties": {
               "inode_id": {
-                "$ref": "#/components/schemas/InodeId"
+                "$ref": "#/components/schemas/InodeId",
+                "description": "Visible inode whose current binding will be replaced."
               },
               "kind": {
                 "type": "string",
@@ -3413,10 +3470,12 @@
                 ]
               },
               "new_display_name": {
-                "$ref": "#/components/schemas/DisplayName"
+                "$ref": "#/components/schemas/DisplayName",
+                "description": "Destination spelling, whose derived key must not name another child."
               },
               "new_parent_inode_id": {
-                "$ref": "#/components/schemas/InodeId"
+                "$ref": "#/components/schemas/InodeId",
+                "description": "Visible destination directory, which may equal the current parent."
               }
             }
           },
@@ -3436,7 +3495,8 @@
                 ]
               },
               "root_inode_id": {
-                "$ref": "#/components/schemas/InodeId"
+                "$ref": "#/components/schemas/InodeId",
+                "description": "Visible non-root directory whose entire reachable subtree becomes tombstoned."
               }
             }
           },
@@ -3453,13 +3513,16 @@
             ],
             "properties": {
               "deleted_at_seq": {
-                "$ref": "#/components/schemas/ChangeSeq"
+                "$ref": "#/components/schemas/ChangeSeq",
+                "description": "Observed deletion sequence, which prevents cancelling a newer tombstone generation."
               },
               "display_name": {
-                "$ref": "#/components/schemas/DisplayName"
+                "$ref": "#/components/schemas/DisplayName",
+                "description": "Recovered child spelling, whose derived key must be absent."
               },
               "inode_id": {
-                "$ref": "#/components/schemas/InodeId"
+                "$ref": "#/components/schemas/InodeId",
+                "description": "Deleted inode to make reachable again."
               },
               "kind": {
                 "type": "string",
@@ -3468,7 +3531,8 @@
                 ]
               },
               "parent_inode_id": {
-                "$ref": "#/components/schemas/InodeId"
+                "$ref": "#/components/schemas/InodeId",
+                "description": "Visible directory that will own the recovered binding."
               }
             }
           }
@@ -3488,7 +3552,8 @@
             ],
             "properties": {
               "inode_id": {
-                "$ref": "#/components/schemas/InodeId"
+                "$ref": "#/components/schemas/InodeId",
+                "description": "File inode whose visible revision is tested."
               },
               "kind": {
                 "type": "string",
@@ -3497,7 +3562,8 @@
                 ]
               },
               "revision_no": {
-                "$ref": "#/components/schemas/RevisionNo"
+                "$ref": "#/components/schemas/RevisionNo",
+                "description": "Exact revision required at commit evaluation time."
               }
             }
           },
@@ -3511,7 +3577,8 @@
             ],
             "properties": {
               "inode_id": {
-                "$ref": "#/components/schemas/InodeId"
+                "$ref": "#/components/schemas/InodeId",
+                "description": "Inode whose ancestor chain must contain no active tombstone."
               },
               "kind": {
                 "type": "string",
@@ -3538,10 +3605,12 @@
                 ]
               },
               "name_key": {
-                "$ref": "#/components/schemas/NameKey"
+                "$ref": "#/components/schemas/NameKey",
+                "description": "Canonical lookup key that must not have an active binding."
               },
               "parent_inode_id": {
-                "$ref": "#/components/schemas/InodeId"
+                "$ref": "#/components/schemas/InodeId",
+                "description": "Visible directory in which absence is tested."
               }
             }
           },
@@ -3561,13 +3630,16 @@
               "bind_delta_index": {
                 "type": "integer",
                 "format": "int32",
+                "description": "Delta position that disambiguates the generation within `bind_seq`.",
                 "minimum": 0
               },
               "bind_seq": {
-                "$ref": "#/components/schemas/ChangeSeq"
+                "$ref": "#/components/schemas/ChangeSeq",
+                "description": "Sequence that created the exact observed binding generation."
               },
               "child_inode_id": {
-                "$ref": "#/components/schemas/InodeId"
+                "$ref": "#/components/schemas/InodeId",
+                "description": "Child identity expected at that name."
               },
               "kind": {
                 "type": "string",
@@ -3576,10 +3648,12 @@
                 ]
               },
               "name_key": {
-                "$ref": "#/components/schemas/NameKey"
+                "$ref": "#/components/schemas/NameKey",
+                "description": "Canonical name key of the observed binding."
               },
               "parent_inode_id": {
-                "$ref": "#/components/schemas/InodeId"
+                "$ref": "#/components/schemas/InodeId",
+                "description": "Directory expected to own the observed binding."
               }
             }
           },
@@ -3593,7 +3667,8 @@
             ],
             "properties": {
               "inode_id": {
-                "$ref": "#/components/schemas/InodeId"
+                "$ref": "#/components/schemas/InodeId",
+                "description": "Visible directory that must have no active child bindings."
               },
               "kind": {
                 "type": "string",
@@ -3716,7 +3791,8 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Caller annotation, omitted when absent and carrying no filesystem semantics."
           },
           "seq": {
             "$ref": "#/components/schemas/ChangeSeq",
@@ -3732,7 +3808,8 @@
         ],
         "properties": {
           "content_ref": {
-            "$ref": "#/components/schemas/ContentRef"
+            "$ref": "#/components/schemas/ContentRef",
+            "description": "Content identity the caller expects the session to have staged."
           }
         }
       },
@@ -3746,19 +3823,23 @@
         ],
         "properties": {
           "content_ref": {
-            "$ref": "#/components/schemas/ContentRef"
+            "$ref": "#/components/schemas/ContentRef",
+            "description": "Verified immutable content selected by the completed session."
           },
           "namespace_id": {
-            "$ref": "#/components/schemas/NamespaceId"
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace that owns the completed session."
           },
           "upload_id": {
-            "$ref": "#/components/schemas/UploadId"
+            "$ref": "#/components/schemas/UploadId",
+            "description": "Session whose result is now frozen for idempotent completion retries."
           },
           "validated_content_token": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Opaque server proof for a later commit, or `None` when the backend needs no token."
           }
         }
       },
@@ -3917,10 +3998,12 @@
         ],
         "properties": {
           "access": {
-            "$ref": "#/components/schemas/ObjectTransferAccess"
+            "$ref": "#/components/schemas/ObjectTransferAccess",
+            "description": "Short-lived write capability the client uses without learning the raw object key."
           },
           "content_ref": {
-            "$ref": "#/components/schemas/ContentRef"
+            "$ref": "#/components/schemas/ContentRef",
+            "description": "Exact immutable object identity and byte length covered by the signed request."
           }
         }
       },
@@ -4149,7 +4232,8 @@
                 "description": "Also create missing ancestor directories (the same auto-create\n`put_file` performs). The final component must still be new."
               },
               "path": {
-                "type": "string"
+                "type": "string",
+                "description": "Absolute destination path, rejected when invalid or already bound."
               }
             }
           },
@@ -4164,10 +4248,12 @@
             ],
             "properties": {
               "behavior": {
-                "$ref": "#/components/schemas/DestinationBehavior"
+                "$ref": "#/components/schemas/DestinationBehavior",
+                "description": "Whether an existing file may receive a new revision instead of causing a conflict."
               },
               "content_ref": {
-                "$ref": "#/components/schemas/ContentRef"
+                "$ref": "#/components/schemas/ContentRef",
+                "description": "Immutable bytes that must be covered by a valid preparation proof."
               },
               "kind": {
                 "type": "string",
@@ -4176,7 +4262,8 @@
                 ]
               },
               "path": {
-                "type": "string"
+                "type": "string",
+                "description": "Absolute destination path; missing ancestors are created automatically."
               }
             }
           },
@@ -4190,7 +4277,8 @@
             ],
             "properties": {
               "behavior": {
-                "$ref": "#/components/schemas/DeleteDirectoryBehavior"
+                "$ref": "#/components/schemas/DeleteDirectoryBehavior",
+                "description": "Whether a non-empty directory may be tombstoned recursively."
               },
               "expected_inode_id": {
                 "oneOf": [
@@ -4210,7 +4298,8 @@
                 ]
               },
               "path": {
-                "type": "string"
+                "type": "string",
+                "description": "Absolute path that must resolve to a visible inode."
               }
             }
           },
@@ -4225,10 +4314,12 @@
             ],
             "properties": {
               "behavior": {
-                "$ref": "#/components/schemas/DestinationBehavior"
+                "$ref": "#/components/schemas/DestinationBehavior",
+                "description": "Whether an existing destination file may be replaced."
               },
               "from_path": {
-                "type": "string"
+                "type": "string",
+                "description": "Absolute source path that must resolve to a visible inode."
               },
               "kind": {
                 "type": "string",
@@ -4237,7 +4328,8 @@
                 ]
               },
               "to_path": {
-                "type": "string"
+                "type": "string",
+                "description": "Absolute destination whose parent must be visible and writable."
               }
             }
           },
@@ -4252,10 +4344,12 @@
             ],
             "properties": {
               "behavior": {
-                "$ref": "#/components/schemas/DestinationBehavior"
+                "$ref": "#/components/schemas/DestinationBehavior",
+                "description": "Whether an existing destination file may receive a copied revision."
               },
               "from_path": {
-                "type": "string"
+                "type": "string",
+                "description": "Absolute source path that must resolve to a visible file."
               },
               "kind": {
                 "type": "string",
@@ -4264,7 +4358,8 @@
                 ]
               },
               "to_path": {
-                "type": "string"
+                "type": "string",
+                "description": "Absolute destination whose parent must be visible and writable."
               }
             }
           },
@@ -4280,10 +4375,12 @@
             ],
             "properties": {
               "deleted_at_seq": {
-                "$ref": "#/components/schemas/ChangeSeq"
+                "$ref": "#/components/schemas/ChangeSeq",
+                "description": "Observed deletion sequence, which prevents cancelling a newer tombstone generation."
               },
               "inode_id": {
-                "$ref": "#/components/schemas/InodeId"
+                "$ref": "#/components/schemas/InodeId",
+                "description": "Deleted inode to make reachable again."
               },
               "kind": {
                 "type": "string",
@@ -4292,7 +4389,8 @@
                 ]
               },
               "path": {
-                "type": "string"
+                "type": "string",
+                "description": "Absolute destination path whose parent must be visible and whose name must be absent."
               }
             }
           },
@@ -4313,10 +4411,12 @@
                 ]
               },
               "path": {
-                "type": "string"
+                "type": "string",
+                "description": "Absolute path that must resolve to a visible file."
               },
               "source_revision_no": {
-                "$ref": "#/components/schemas/RevisionNo"
+                "$ref": "#/components/schemas/RevisionNo",
+                "description": "Existing historical revision whose content will be copied into a new current revision."
               }
             }
           }
@@ -5121,13 +5221,16 @@
         ],
         "properties": {
           "content_ref": {
-            "$ref": "#/components/schemas/ContentRef"
+            "$ref": "#/components/schemas/ContentRef",
+            "description": "Digest and byte length computed from the accepted body."
           },
           "namespace_id": {
-            "$ref": "#/components/schemas/NamespaceId"
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace that owns the upload session."
           },
           "upload_id": {
-            "$ref": "#/components/schemas/UploadId"
+            "$ref": "#/components/schemas/UploadId",
+            "description": "Session into which the service staged these bytes."
           }
         }
       },
@@ -5152,7 +5255,8 @@
         ],
         "properties": {
           "content_ref": {
-            "$ref": "#/components/schemas/ContentRef"
+            "$ref": "#/components/schemas/ContentRef",
+            "description": "Content identity the server attests it already verified."
           },
           "token": {
             "type": "string",

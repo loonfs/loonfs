@@ -9,6 +9,7 @@ use std::fmt::Debug;
 use std::sync::Arc;
 use thiserror::Error;
 
+/// Shares one provider client across handles without changing its storage semantics.
 pub type SharedObjectStore = Arc<dyn ObjectStore>;
 
 /// Metadata returned by a successful `head`, full-object `get`, or `put` call.
@@ -21,6 +22,7 @@ pub struct ObjectMetadata {
     pub etag: Option<String>,
     /// Provider version identifier when available.
     pub version: Option<String>,
+    /// Complete object length in bytes at the observed version.
     pub size_bytes: u64,
     /// Provider last-modified time in unix milliseconds, when available.
     ///
@@ -33,7 +35,9 @@ pub struct ObjectMetadata {
 /// Full object bytes returned with metadata from the same read operation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObjectBody {
+    /// Identity, size, and modification metadata observed with these exact bytes.
     pub metadata: ObjectMetadata,
+    /// Complete object payload from the same read as `metadata`.
     pub bytes: Vec<u8>,
 }
 
@@ -45,7 +49,10 @@ pub enum PutMode {
     /// Write only if the key does not already exist. Returns `PreconditionFailed` if it does.
     CreateIfAbsent,
     /// Write only if the current etag matches. Returns `PreconditionFailed` on mismatch.
-    CompareAndSwap { expected_etag: String },
+    CompareAndSwap {
+        /// Opaque token returned by a prior observation of this same key.
+        expected_etag: String,
+    },
 }
 
 /// A byte range for partial object reads.
@@ -66,28 +73,54 @@ pub struct ByteRange {
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum ObjectStoreError {
+    /// Reports a required object that was absent, distinct from optional-read `None`.
     #[error("object not found `{object_key}`")]
-    NotFound { object_key: String },
+    NotFound {
+        /// Logical object key that was required.
+        object_key: String,
+    },
+    /// Reports a logical key that is empty, escaping, malformed, or otherwise outside its scope.
     #[error("invalid object key `{object_key}`: {message}")]
-    InvalidKey { object_key: String, message: String },
+    InvalidKey {
+        /// Caller-supplied key rejected before provider IO.
+        object_key: String,
+        /// Specific key-validation failure.
+        message: String,
+    },
     /// Not object-scoped: the content ref never resolved to an object key.
     #[error("invalid content ref: {0}")]
     InvalidContentRef(String),
+    /// Reports a byte range whose bounds cannot select a valid position in the object.
     #[error("invalid byte range for `{object_key}`")]
-    InvalidRange { object_key: String },
+    InvalidRange {
+        /// Object for which the caller supplied invalid range bounds.
+        object_key: String,
+    },
+    /// Reports a create-if-absent or compare-and-swap condition that did not hold.
     #[error("precondition failed for `{object_key}`")]
-    PreconditionFailed { object_key: String },
+    PreconditionFailed {
+        /// Object whose current state disagreed with the requested write mode.
+        object_key: String,
+    },
     /// Producible only by test fault injection; no real provider constructs
     /// it. Core treats it alongside
     /// [`Self::PreconditionFailed`] so injected conflicts exercise the
     /// same recovery paths.
     #[error("conflict for `{object_key}`")]
-    Conflict { object_key: String },
+    Conflict {
+        /// Object targeted by the injected concurrency conflict.
+        object_key: String,
+    },
     /// The provider rejected the caller's identity or authorization —
     /// wrong, expired, or insufficient credentials. Configuration-shaped
     /// and never transient: retrying cannot help, an operator can.
     #[error("permission denied for `{object_key}`: {message}")]
-    PermissionDenied { object_key: String, message: String },
+    PermissionDenied {
+        /// Object or listing prefix the provider refused to authorize.
+        object_key: String,
+        /// Sanitized provider explanation with credential material removed.
+        message: String,
+    },
     /// Not object-scoped: the store lacks a required capability.
     #[error("unsupported capability: {0}")]
     Unsupported(&'static str),
@@ -95,8 +128,14 @@ pub enum ObjectStoreError {
     /// any object was addressed.
     #[error("invalid object store configuration: {0}")]
     Configuration(String),
+    /// Reports an IO, timeout, protocol, or provider failure with ambiguous completion.
     #[error("transport error for `{object_key}`: {message}")]
-    Transport { object_key: String, message: String },
+    Transport {
+        /// Object or listing prefix whose operation did not complete observably.
+        object_key: String,
+        /// Sanitized provider or local-IO diagnostic.
+        message: String,
+    },
 }
 
 impl ObjectStoreError {
@@ -148,30 +187,67 @@ impl ObjectStoreError {
 /// Facade alias: signatures inside this crate use `Result<T>`.
 pub type Result<T> = std::result::Result<T, ObjectStoreError>;
 
+/// Defines the provider-independent durability and consistency boundary LoonFS relies on.
+///
+/// Implementations must satisfy the
+/// [required guarantees](../../../docs/specs/format.md#11-required-guarantees).
 #[async_trait]
 pub trait ObjectStore: Send + Sync + Debug {
+    /// Reads metadata for one key, returning `None` when the object is absent.
+    ///
+    /// The returned compare token belongs to this exact observation. Invalid
+    /// keys and provider failures are returned as [`ObjectStoreError`].
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>>;
 
+    /// Reads complete bytes and identity metadata from one self-consistent observation.
+    ///
+    /// Returns `None` when the object is absent; invalid keys and provider
+    /// failures are returned as [`ObjectStoreError`].
     async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>>;
 
+    /// Reads a full object or one half-open byte range, returning `None` when absent.
+    ///
+    /// A range ending beyond the object is truncated; a descending range or
+    /// start beyond the object returns [`ObjectStoreError::InvalidRange`].
     async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Option<Bytes>>;
 
+    /// Writes bytes under the requested overwrite or provider-enforced precondition.
+    ///
+    /// Successful completion is immediately authoritative. Invalid keys,
+    /// failed conditions, permission failures, and ambiguous transport failures are returned.
     async fn put(&self, key: &str, bytes: Bytes, mode: PutMode) -> Result<ObjectMetadata>;
 
+    /// Deletes a key idempotently and makes its absence immediately authoritative.
+    ///
+    /// Missing objects succeed; invalid keys, permission failures, and
+    /// ambiguous transport failures are returned.
     async fn delete(&self, key: &str) -> Result<()>;
 
+    /// Streams keys under `prefix` in ascending lexicographic order.
+    ///
+    /// Invalid prefixes and listing failures arrive as stream items.
     fn list_prefix_stream(&self, prefix: &str) -> BoxStream<'static, Result<String>>;
 
+    /// Collects and sorts every key under `prefix`.
+    ///
+    /// The operation fails if prefix validation or any streamed provider page fails.
     async fn list_prefix(&self, prefix: &str) -> Result<Vec<String>> {
         let mut keys: Vec<String> = self.list_prefix_stream(prefix).try_collect().await?;
         keys.sort();
         Ok(keys)
     }
 
+    /// Writes bytes unconditionally, replacing any existing object at `key`.
+    ///
+    /// Invalid keys, permission failures, and ambiguous transport failures are returned.
     async fn put_overwrite(&self, key: &str, bytes: Bytes) -> Result<ObjectMetadata> {
         self.put(key, bytes, PutMode::Overwrite).await
     }
 
+    /// Creates `key` only when no object is present.
+    ///
+    /// Existing objects return [`ObjectStoreError::PreconditionFailed`];
+    /// invalid keys, permission failures, and transport failures are also returned.
     async fn put_if_absent(&self, key: &str, bytes: Bytes) -> Result<ObjectMetadata> {
         self.put(key, bytes, PutMode::CreateIfAbsent).await
     }
@@ -193,6 +269,11 @@ pub trait ObjectStore: Send + Sync + Debug {
         crate::immutable_write::put(self, key, bytes).await
     }
 
+    /// Replaces `key` only while its current opaque token equals `expected_etag`.
+    ///
+    /// A missing object or stale token returns
+    /// [`ObjectStoreError::PreconditionFailed`]; invalid keys, permission
+    /// failures, and transport failures are also returned.
     async fn compare_and_swap(
         &self,
         key: &str,

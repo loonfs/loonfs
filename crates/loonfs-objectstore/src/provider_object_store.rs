@@ -26,8 +26,10 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Configures logical key scoping for a generic provider client.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderObjectStoreConfig {
+    /// Prefix prepended to every provider key, or `None` to expose the bucket root.
     pub key_prefix: Option<String>,
 }
 
@@ -142,6 +144,7 @@ impl MultipartGeometry {
     };
 }
 
+/// Adapts the upstream `object_store` provider surface to the narrower LoonFS contract.
 #[derive(Clone)]
 pub struct ProviderObjectStore {
     inner: Arc<dyn provider_store::ObjectStore>,
@@ -166,6 +169,10 @@ impl fmt::Debug for ProviderObjectStore {
 }
 
 impl ProviderObjectStore {
+    /// Wraps a provider client and optional native multipart surface.
+    ///
+    /// Construction fails when `config.key_prefix` is not a normalized,
+    /// non-escaping logical prefix.
     pub fn new(
         inner: Arc<dyn provider_store::ObjectStore>,
         multipart: Option<Arc<dyn MultipartStore>>,

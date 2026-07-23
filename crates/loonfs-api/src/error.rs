@@ -71,7 +71,10 @@ macro_rules! error_codes {
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         #[non_exhaustive]
         pub enum ErrorCode {
-            $($variant,)+
+            $(
+                #[doc = concat!("Carries the stable wire code `", $wire, "`.")]
+                $variant,
+            )+
         }
 
         impl ErrorCode {

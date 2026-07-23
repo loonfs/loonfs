@@ -15,6 +15,7 @@ const SERVER_GENERATED_ID_BODY_LEN: usize = 32;
 
 macro_rules! validation_error {
     ($name:ident, $message:literal) => {
+        /// Describes why supplied text does not satisfy this identifier's validation contract.
         #[derive(Debug, Clone, PartialEq, Eq, Error)]
         #[error($message)]
         pub struct $name {
@@ -23,10 +24,12 @@ macro_rules! validation_error {
         }
 
         impl $name {
+            /// Returns the rejected input, or an empty string when echoing it would be unsafe.
             pub fn value(&self) -> &str {
                 &self.value
             }
 
+            /// Returns the specific grammar rule the rejected input violated.
             pub fn reason(&self) -> &str {
                 &self.reason
             }

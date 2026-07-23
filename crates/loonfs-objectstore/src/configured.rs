@@ -18,12 +18,18 @@ use futures::stream::{self, BoxStream, StreamExt};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+/// Identifies the concrete provider backing a [`ConfiguredObjectStore`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfiguredObjectStoreKind {
+    /// Stores objects beneath a local filesystem root.
     LocalFs,
+    /// Uses AWS S3 through its SigV4 API.
     AwsS3,
+    /// Uses Cloudflare R2 through its S3-compatible API.
     CloudflareR2,
+    /// Uses Google Cloud Storage's native generation-aware API.
     GcpGcs,
+    /// Uses Azure Blob Storage's native shared-key API.
     AzureAbs,
 }
 
@@ -41,6 +47,7 @@ impl ConfiguredObjectStoreKind {
     }
 }
 
+/// Dispatches the common storage contract to one validated runtime provider.
 #[derive(Debug)]
 pub struct ConfiguredObjectStore {
     kind: ConfiguredObjectStoreKind,
@@ -61,6 +68,9 @@ enum ConfiguredObjectStoreInner {
 }
 
 impl ConfiguredObjectStore {
+    /// Opens a local-filesystem provider with optional logical key scoping.
+    ///
+    /// Construction fails when the root cannot be created or `key_prefix` is invalid.
     pub fn local_fs(root: impl Into<PathBuf>, key_prefix: Option<&str>) -> Result<Self> {
         Ok(Self {
             kind: ConfiguredObjectStoreKind::LocalFs,
@@ -72,6 +82,9 @@ impl ConfiguredObjectStore {
         })
     }
 
+    /// Builds an AWS S3 store and matching direct-transfer presigner.
+    ///
+    /// Construction fails when signing, provider, runtime, or key-prefix configuration is invalid.
     pub fn aws_s3(config: AwsS3StoreConfig) -> Result<Self> {
         let transfer_issuer = Some(Arc::new(S3CompatiblePresigner::new(S3PresignerConfig {
             bucket: config.bucket.clone(),
@@ -91,6 +104,9 @@ impl ConfiguredObjectStore {
         })
     }
 
+    /// Builds a Cloudflare R2 store and matching direct-transfer presigner.
+    ///
+    /// Construction fails when signing, provider, runtime, or key-prefix configuration is invalid.
     pub fn cloudflare_r2(config: CloudflareR2StoreConfig) -> Result<Self> {
         let transfer_issuer = Some(Arc::new(S3CompatiblePresigner::new(S3PresignerConfig {
             bucket: config.bucket.clone(),
@@ -110,6 +126,9 @@ impl ConfiguredObjectStore {
         })
     }
 
+    /// Builds a native GCS store without direct-transfer issuance.
+    ///
+    /// Construction fails when credentials, provider runtime, or key-prefix configuration is invalid.
     pub fn gcp_gcs(config: GcpGcsStoreConfig) -> Result<Self> {
         let store = GcpGcsStore::new(config)?;
         Ok(Self {
@@ -119,6 +138,9 @@ impl ConfiguredObjectStore {
         })
     }
 
+    /// Builds a native Azure Blob store without direct-transfer issuance.
+    ///
+    /// Construction fails when credentials, provider runtime, or key-prefix configuration is invalid.
     pub fn azure_abs(config: AzureAbsStoreConfig) -> Result<Self> {
         let store = AzureAbsStore::new(config)?;
         Ok(Self {
@@ -128,10 +150,14 @@ impl ConfiguredObjectStore {
         })
     }
 
+    /// Returns the provider selected when this store was constructed.
     pub fn kind(&self) -> ConfiguredObjectStoreKind {
         self.kind
     }
 
+    /// Returns a direct-upload issuer for supported S3-compatible providers.
+    ///
+    /// Local filesystem, GCS, and Azure stores return `None`.
     pub fn transfer_issuer(&self) -> Option<Arc<dyn ObjectTransferIssuer>> {
         self.transfer_issuer.clone()
     }

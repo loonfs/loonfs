@@ -199,6 +199,7 @@ pub enum FilesystemOperation {
     /// Create one directory.
     #[cfg_attr(feature = "openapi", schema(title = "FsOpCreateDirectory"))]
     CreateDirectory {
+        /// Absolute destination path, rejected when invalid or already bound.
         path: String,
         /// Also create missing ancestor directories (the same auto-create
         /// `put_file` performs). The final component must still be new.
@@ -208,15 +209,20 @@ pub enum FilesystemOperation {
     /// Create or replace one file with an already-durable content ref.
     #[cfg_attr(feature = "openapi", schema(title = "FsOpPutFile"))]
     PutFile {
+        /// Absolute destination path; missing ancestors are created automatically.
         path: String,
+        /// Immutable bytes that must be covered by a valid preparation proof.
         content_ref: ContentRef,
+        /// Whether an existing file may receive a new revision instead of causing a conflict.
         #[serde(default)]
         behavior: DestinationBehavior,
     },
     /// Delete one path.
     #[cfg_attr(feature = "openapi", schema(title = "FsOpDeletePath"))]
     DeletePath {
+        /// Absolute path that must resolve to a visible inode.
         path: String,
+        /// Whether a non-empty directory may be tombstoned recursively.
         #[serde(default)]
         behavior: DeleteDirectoryBehavior,
         /// When set, the delete applies only if the path still resolves to
@@ -228,16 +234,22 @@ pub enum FilesystemOperation {
     /// Move one path to another path.
     #[cfg_attr(feature = "openapi", schema(title = "FsOpMovePath"))]
     MovePath {
+        /// Absolute source path that must resolve to a visible inode.
         from_path: String,
+        /// Absolute destination whose parent must be visible and writable.
         to_path: String,
+        /// Whether an existing destination file may be replaced.
         #[serde(default)]
         behavior: DestinationBehavior,
     },
     /// Copy one file path to another path.
     #[cfg_attr(feature = "openapi", schema(title = "FsOpCopyPath"))]
     CopyPath {
+        /// Absolute source path that must resolve to a visible file.
         from_path: String,
+        /// Absolute destination whose parent must be visible and writable.
         to_path: String,
+        /// Whether an existing destination file may receive a copied revision.
         #[serde(default)]
         behavior: DestinationBehavior,
     },
@@ -248,14 +260,19 @@ pub enum FilesystemOperation {
     /// request never cancels a later delete.
     #[cfg_attr(feature = "openapi", schema(title = "FsOpUndelete"))]
     Undelete {
+        /// Deleted inode to make reachable again.
         inode_id: InodeId,
+        /// Observed deletion sequence, which prevents cancelling a newer tombstone generation.
         deleted_at_seq: ChangeSeq,
+        /// Absolute destination path whose parent must be visible and whose name must be absent.
         path: String,
     },
     /// Restore an older revision as the current revision for a path.
     #[cfg_attr(feature = "openapi", schema(title = "FsOpRestoreRevision"))]
     RestoreRevision {
+        /// Absolute path that must resolve to a visible file.
         path: String,
+        /// Existing historical revision whose content will be copied into a new current revision.
         source_revision_no: RevisionNo,
     },
 }
