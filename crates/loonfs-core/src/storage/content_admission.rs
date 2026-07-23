@@ -188,12 +188,12 @@ mod tests {
     fn hmac_sha256_matches_rfc_4231_vectors() {
         let case_one = hmac_sha256(&[0x0b; 20], b"Hi There");
         assert_eq!(
-            loonfs_api::wire::manifest::hex_encode_bytes(&case_one),
+            loonfs_api::wire::hex::hex_encode_bytes(&case_one),
             "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
         );
         let case_two = hmac_sha256(b"Jefe", b"what do ya want for nothing?");
         assert_eq!(
-            loonfs_api::wire::manifest::hex_encode_bytes(&case_two),
+            loonfs_api::wire::hex::hex_encode_bytes(&case_two),
             "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
         );
     }

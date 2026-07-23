@@ -31,9 +31,10 @@ use futures::future::try_join_all;
 #[cfg(test)]
 use loonfs_api::manifest_object_id_manifest_id;
 use loonfs_api::wire::control::HeadState;
+use loonfs_api::wire::hex::hex_decode_bytes;
 use loonfs_api::wire::manifest::{
-    decode_namespace_manifest_json, hex_decode_bytes, MetadataFileRef, MetadataRow,
-    MetadataTableFamily, NamespaceManifestEnvelope,
+    decode_namespace_manifest_json, MetadataFileRef, MetadataRow, MetadataTableFamily,
+    NamespaceManifestEnvelope,
 };
 use loonfs_api::wire::sst_blocks::{
     decode_data_block, decode_filter_block, decode_index_block, index_blocks_for_key_range,

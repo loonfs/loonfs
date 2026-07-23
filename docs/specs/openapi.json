@@ -4267,7 +4267,7 @@
           {
             "type": "object",
             "title": "FsOpUndelete",
-            "description": "Restore an older revision as the current revision for a path.\nRecover a deleted file or subtree: revoke the deletion of\n`inode_id` recorded at `deleted_at_seq` (both reported by the\ndelete and by the change feed) and re-bind it at `path`. Answers\n`not_deleted` when that generation is not the live one, so a stale\nrequest never cancels a later delete.",
+            "description": "Recover a deleted file or subtree: revoke the deletion of\n`inode_id` recorded at `deleted_at_seq` (both reported by the\ndelete and by the change feed) and re-bind it at `path`. Answers\n`not_deleted` when that generation is not the live one, so a stale\nrequest never cancels a later delete.",
             "required": [
               "inode_id",
               "deleted_at_seq",
@@ -4295,6 +4295,7 @@
           {
             "type": "object",
             "title": "FsOpRestoreRevision",
+            "description": "Restore an older revision as the current revision for a path.",
             "required": [
               "path",
               "source_revision_no",

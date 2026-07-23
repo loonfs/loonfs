@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ObjectOpKind {
+pub enum ObjectOperationKind {
     Head,
     Get,
     Put,
@@ -15,8 +15,8 @@ pub enum ObjectOpKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ObjectOp {
+pub struct ObjectOperation {
     pub step: u64,
-    pub kind: ObjectOpKind,
+    pub kind: ObjectOperationKind,
     pub key: String,
 }

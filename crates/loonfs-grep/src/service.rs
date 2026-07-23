@@ -12,7 +12,7 @@ use crate::query::{plan_pattern, GramPlanOutcome, GramQueryPlan};
 use crate::root::{load_grep_manifest, load_grep_root_pointer, GrepLifecycle, GrepRootState};
 use crate::{GrepError, Result};
 use futures::future::{join_all, try_join_all};
-use loonfs_api::wire::manifest::hex_decode_bytes;
+use loonfs_api::wire::hex::hex_decode_bytes;
 use loonfs_api::wire::sst_blocks::{decode_filter_block, index_blocks_for_key_range};
 use loonfs_api::wire::wal::WalDelta;
 use loonfs_api::{

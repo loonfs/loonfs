@@ -62,7 +62,7 @@ pub enum EnvelopeCodecError {
         found: u32,
         supported: u32,
     },
-    #[error("envelope payload checksum mismatch: expected {expected}, actual {actual}")]
+    #[error("envelope payload checksum mismatch: expected `{expected}`, actual `{actual}`")]
     ChecksumMismatch { expected: String, actual: String },
     #[error(
         "envelope checksum `{checksum}` does not match its payload `{actual}`: \

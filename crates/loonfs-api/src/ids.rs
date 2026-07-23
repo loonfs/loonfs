@@ -13,73 +13,43 @@ const SERVER_GENERATED_ID_BODY_LEN: usize = 32;
 // Validation errors
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-#[error("invalid namespace_id {value:?}: {reason}")]
-pub struct NamespaceIdValidationError {
-    value: String,
-    reason: String,
+macro_rules! validation_error {
+    ($name:ident, $message:literal) => {
+        #[derive(Debug, Clone, PartialEq, Eq, Error)]
+        #[error($message)]
+        pub struct $name {
+            value: String,
+            reason: String,
+        }
+
+        impl $name {
+            pub fn value(&self) -> &str {
+                &self.value
+            }
+
+            pub fn reason(&self) -> &str {
+                &self.reason
+            }
+        }
+    };
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-#[error("invalid commit_id {value:?}: {reason}")]
-pub struct CommitIdValidationError {
-    value: String,
-    reason: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-#[error("invalid generated id {value:?}: {reason}")]
-pub struct GeneratedIdValidationError {
-    value: String,
-    reason: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-#[error("invalid name_key {value:?}: {reason}")]
-pub struct NameKeyValidationError {
-    value: String,
-    reason: String,
-}
-
-impl NamespaceIdValidationError {
-    pub fn value(&self) -> &str {
-        &self.value
-    }
-
-    pub fn reason(&self) -> &str {
-        &self.reason
-    }
-}
-
-impl CommitIdValidationError {
-    pub fn value(&self) -> &str {
-        &self.value
-    }
-
-    pub fn reason(&self) -> &str {
-        &self.reason
-    }
-}
-
-impl GeneratedIdValidationError {
-    pub fn value(&self) -> &str {
-        &self.value
-    }
-
-    pub fn reason(&self) -> &str {
-        &self.reason
-    }
-}
-
-impl NameKeyValidationError {
-    pub fn value(&self) -> &str {
-        &self.value
-    }
-
-    pub fn reason(&self) -> &str {
-        &self.reason
-    }
-}
+validation_error!(
+    NamespaceIdValidationError,
+    "invalid namespace_id {value:?}: {reason}"
+);
+validation_error!(
+    CommitIdValidationError,
+    "invalid commit_id {value:?}: {reason}"
+);
+validation_error!(
+    GeneratedIdValidationError,
+    "invalid generated id {value:?}: {reason}"
+);
+validation_error!(
+    NameKeyValidationError,
+    "invalid name_key {value:?}: {reason}"
+);
 
 // ---------------------------------------------------------------------------
 // Id macros
@@ -261,6 +231,11 @@ pub fn generated_id(prefix: &'static str) -> String {
     format!("{prefix}_{}", Uuid::new_v4().simple())
 }
 
+fn generated_position_suffix() -> String {
+    let suffix = Uuid::new_v4().simple().to_string();
+    suffix[..16].to_owned()
+}
+
 fn validate_generated_id(
     prefix: &'static str,
     value: &str,
@@ -278,10 +253,7 @@ fn validate_generated_id(
             format!("body must be {SERVER_GENERATED_ID_BODY_LEN} lowercase hex characters"),
         ));
     }
-    if !body
-        .bytes()
-        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
+    if !body.bytes().all(is_lower_hex_byte) {
         return Err(generated_id_error(
             value,
             "body must contain only lowercase hex characters".to_owned(),
@@ -312,6 +284,8 @@ fn validate_commit_id(value: &str) -> Result<(), CommitIdValidationError> {
 /// expands at most threefold in bytes, so 768 admits every key derivable
 /// from a valid name while bounding row keys, filter keys, and cursors.
 pub const MAX_NAME_KEY_BYTES: usize = 768;
+/// Maximum validated namespace and commit id length in UTF-8 bytes.
+pub const MAX_ID_BYTES: usize = 128;
 
 fn validate_name_key(value: &str) -> Result<(), NameKeyValidationError> {
     if value.is_empty() {
@@ -327,32 +301,35 @@ fn validate_name_key(value: &str) -> Result<(), NameKeyValidationError> {
         return Err(name_key_error(value, "must not contain control characters"));
     }
     if value.len() > MAX_NAME_KEY_BYTES {
+        // An oversized or hostile name must not ride along in error payloads that serialize onto the wire.
         return Err(name_key_error(
             "",
-            "exceeds the maximum name key length of 768 bytes",
+            format!("exceeds the maximum name key length of {MAX_NAME_KEY_BYTES} bytes"),
         ));
     }
     Ok(())
 }
 
-fn check_wal_segment_id(value: &str) -> Result<(), GeneratedIdValidationError> {
+fn validate_position_suffix_id(
+    value: &str,
+    position_label: (&str, &str),
+) -> Result<(), GeneratedIdValidationError> {
     let Some((position, suffix)) = value.split_once('-') else {
         return Err(generated_id_error(
             value,
-            "must be `<20 digit start_seq>-<16 lowercase hex>`".to_owned(),
+            format!(
+                "must be `<20 digit {}>-<16 lowercase hex>`",
+                position_label.0
+            ),
         ));
     };
     if position.len() != 20 || !position.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(generated_id_error(
             value,
-            "position prefix must be 20 decimal digits".to_owned(),
+            format!("{} prefix must be 20 decimal digits", position_label.1),
         ));
     }
-    if suffix.len() != 16
-        || !suffix
-            .bytes()
-            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
-    {
+    if suffix.len() != 16 || !suffix.bytes().all(is_lower_hex_byte) {
         return Err(generated_id_error(
             value,
             "suffix must be 16 lowercase hex characters".to_owned(),
@@ -361,44 +338,22 @@ fn check_wal_segment_id(value: &str) -> Result<(), GeneratedIdValidationError> {
     Ok(())
 }
 
-fn check_manifest_object_id(value: &str) -> Result<(), GeneratedIdValidationError> {
-    let Some((position, suffix)) = value.split_once('-') else {
-        return Err(generated_id_error(
-            value,
-            "must be `<20 digit manifest_id>-<16 lowercase hex>`".to_owned(),
-        ));
-    };
-    if position.len() != 20 || !position.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Err(generated_id_error(
-            value,
-            "manifest id prefix must be 20 decimal digits".to_owned(),
-        ));
-    }
-    if suffix.len() != 16
-        || !suffix
-            .bytes()
-            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
-    {
-        return Err(generated_id_error(
-            value,
-            "suffix must be 16 lowercase hex characters".to_owned(),
-        ));
-    }
-    Ok(())
+fn is_lower_hex_byte(byte: u8) -> bool {
+    byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
 }
 
-fn validate_id_grammar(value: &str) -> Result<(), &'static str> {
+fn validate_id_grammar(value: &str) -> Result<(), String> {
     if value.is_empty() {
-        return Err("must not be empty");
+        return Err("must not be empty".to_owned());
     }
-    if value.len() > 128 {
-        return Err("must be 128 bytes or fewer");
+    if value.len() > MAX_ID_BYTES {
+        return Err(format!("must be {MAX_ID_BYTES} bytes or fewer"));
     }
     if value.trim() != value {
-        return Err("must not have leading or trailing whitespace");
+        return Err("must not have leading or trailing whitespace".to_owned());
     }
     if matches!(value, "." | "..") {
-        return Err("must not be `.` or `..`");
+        return Err("must not be `.` or `..`".to_owned());
     }
 
     let mut chars = value.chars();
@@ -406,10 +361,12 @@ fn validate_id_grammar(value: &str) -> Result<(), &'static str> {
         .next()
         .expect("empty id returned before char validation");
     if !first.is_ascii_lowercase() && !first.is_ascii_digit() {
-        return Err("must start with a lowercase ASCII letter or digit");
+        return Err("must start with a lowercase ASCII letter or digit".to_owned());
     }
     if !chars.all(is_allowed_id_tail_char) {
-        return Err("must contain only lowercase ASCII letters, digits, `.`, `_`, or `-`");
+        return Err(
+            "must contain only lowercase ASCII letters, digits, `.`, `_`, or `-`".to_owned(),
+        );
     }
 
     Ok(())
@@ -419,17 +376,17 @@ fn is_allowed_id_tail_char(ch: char) -> bool {
     ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '.' | '_' | '-')
 }
 
-fn namespace_id_error(value: &str, reason: &'static str) -> NamespaceIdValidationError {
+fn namespace_id_error(value: &str, reason: impl Into<String>) -> NamespaceIdValidationError {
     NamespaceIdValidationError {
         value: value.to_owned(),
-        reason: reason.to_owned(),
+        reason: reason.into(),
     }
 }
 
-fn commit_id_error(value: &str, reason: &'static str) -> CommitIdValidationError {
+fn commit_id_error(value: &str, reason: impl Into<String>) -> CommitIdValidationError {
     CommitIdValidationError {
         value: value.to_owned(),
-        reason: reason.to_owned(),
+        reason: reason.into(),
     }
 }
 
@@ -440,10 +397,10 @@ fn generated_id_error(value: &str, reason: String) -> GeneratedIdValidationError
     }
 }
 
-fn name_key_error(value: &str, reason: &'static str) -> NameKeyValidationError {
+fn name_key_error(value: &str, reason: impl Into<String>) -> NameKeyValidationError {
     NameKeyValidationError {
         value: value.to_owned(),
-        reason: reason.to_owned(),
+        reason: reason.into(),
     }
 }
 
@@ -515,21 +472,26 @@ string_id! {
     /// Durable object id for one namespace manifest candidate.
     ManifestObjectId,
     error = GeneratedIdValidationError,
-    validate = check_manifest_object_id
+    validate = |value| {
+        validate_position_suffix_id(value, ("manifest_id", "manifest id"))
+    }
 }
 
 impl ManifestObjectId {
     /// Manifest object ids order by logical manifest position and stay unique
     /// under races.
     pub fn generate(manifest_id: ManifestId) -> Self {
-        let suffix = Uuid::new_v4().simple().to_string();
-        Self(format!("{:020}-{}", manifest_id.0, &suffix[..16]))
+        Self(format!(
+            "{:020}-{}",
+            manifest_id.0,
+            generated_position_suffix()
+        ))
     }
 }
 
 /// Logical manifest id encoded in a manifest object id's 20-digit prefix.
 pub fn manifest_object_id_manifest_id(object_id: &str) -> Option<ManifestId> {
-    check_manifest_object_id(object_id).ok()?;
+    validate_position_suffix_id(object_id, ("manifest_id", "manifest id")).ok()?;
     let (position, _) = object_id.split_once('-')?;
     position.parse().ok().map(ManifestId)
 }
@@ -538,7 +500,9 @@ string_id! {
     /// Durable id for one WAL segment.
     WalSegmentId,
     error = GeneratedIdValidationError,
-    validate = check_wal_segment_id
+    validate = |value| {
+        validate_position_suffix_id(value, ("start_seq", "position"))
+    }
 }
 
 impl WalSegmentId {
@@ -551,8 +515,11 @@ impl WalSegmentId {
     /// compare-and-swap chooses among them. The name is an inspection and
     /// reclamation hint only — recovery authority is the head and chain.
     pub fn generate(start_seq: ChangeSeq) -> Self {
-        let suffix = Uuid::new_v4().simple().to_string();
-        Self(format!("{:020}-{}", start_seq.0, &suffix[..16]))
+        Self(format!(
+            "{:020}-{}",
+            start_seq.0,
+            generated_position_suffix()
+        ))
     }
 }
 
@@ -563,7 +530,7 @@ impl WalSegmentId {
 /// itself, the parsed position is an inspection and reclamation hint only —
 /// recovery authority is the head and chain.
 pub fn wal_segment_id_start_seq(segment_id: &str) -> Option<ChangeSeq> {
-    check_wal_segment_id(segment_id).ok()?;
+    validate_position_suffix_id(segment_id, ("start_seq", "position")).ok()?;
     let (position, _) = segment_id.split_once('-')?;
     position.parse().ok().map(ChangeSeq)
 }
@@ -598,6 +565,9 @@ numeric_id! {
     /// Inodes are stable across renames.
     InodeId
 }
+
+/// Inode 1 is always the root directory of a namespace.
+pub const ROOT_INODE_ID: InodeId = InodeId(1);
 
 numeric_id! {
     /// Monotonically increasing file revision counter within one file inode.

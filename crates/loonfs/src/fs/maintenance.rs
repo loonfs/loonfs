@@ -8,7 +8,7 @@ use crate::{
     MaintenanceTickResult, NamespaceId, ReleaseCheckpointResponse,
 };
 use crate::{Result, RuntimeError};
-use loonfs_api::{DisableGramsIndexResponse, EnableGramsIndexResponse};
+use loonfs_api::v0::{DisableGramsIndexResponse, EnableGramsIndexResponse};
 
 impl FsCore {
     /// Runs one bounded maintenance step against a namespace.

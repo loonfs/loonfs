@@ -19,13 +19,16 @@
 use crate::{Client, ClientError, MutationOptions, NamespacePath};
 use async_trait::async_trait;
 use loonfs_api::{
-    v0::ChangesResponse, AdvanceRetentionResponse, AuthoritativePathEntry, ChangeSeq, CommitId,
-    CommitResponse, CreateCheckpointRequest, CreateCheckpointResponse, DeleteNamespaceResponse,
-    DestinationBehavior, DisableGramsIndexResponse, EnableGramsIndexResponse, ErrorCode,
-    ErrorDetails, FlushWalResponse, GcRequest, GcResponse, GrepRequest, GrepResponse, InodeId,
-    ListFileRevisionsResponse, MaintenanceTickRequest, MaintenanceTickResponse, NamespaceId,
-    NamespaceStatusResponse, NamespaceSummary, ReleaseCheckpointResponse, RepairNamespaceResponse,
-    RevisionNo,
+    v0::{
+        ChangesResponse, DisableGramsIndexResponse, EnableGramsIndexResponse,
+        RepairNamespaceResponse,
+    },
+    AdvanceRetentionResponse, AuthoritativePathEntry, ChangeSeq, CommitId, CommitResponse,
+    CreateCheckpointRequest, CreateCheckpointResponse, DeleteNamespaceResponse,
+    DestinationBehavior, ErrorCode, ErrorDetails, FlushWalResponse, GcRequest, GcResponse,
+    GrepRequest, GrepResponse, InodeId, ListFileRevisionsResponse, MaintenanceTickRequest,
+    MaintenanceTickResponse, NamespaceId, NamespaceStatusResponse, NamespaceSummary,
+    ReleaseCheckpointResponse, RevisionNo,
 };
 use thiserror::Error;
 

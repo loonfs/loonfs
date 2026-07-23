@@ -2,7 +2,11 @@
 
 use crate::layout::ObjectLayout;
 use crate::object_store::Result;
-use loonfs_api::ManifestObjectId;
+use loonfs_api::{ManifestObjectId, NamespaceId};
+
+pub fn namespace_prefix(namespace_id: &NamespaceId) -> String {
+    ObjectLayout::new().namespace_root_prefix(namespace_id.as_str())
+}
 
 pub fn namespace_config(namespace: &str) -> String {
     ObjectLayout::new().namespace_config(namespace)
@@ -76,10 +80,21 @@ pub fn content_blob(content_store: &str, digest: &str) -> Result<String> {
 mod tests {
     use super::{
         checkpoint_record, content_blob, content_store_descriptor, metadata_manifest_object,
-        metadata_root, metadata_table, namespace_config, upload_session, wal_floor, wal_head,
-        wal_segment, wal_segment_id_from_key, wal_segment_prefix,
+        metadata_root, metadata_table, namespace_config, namespace_prefix, upload_session,
+        wal_floor, wal_head, wal_segment, wal_segment_id_from_key, wal_segment_prefix,
     };
-    use loonfs_api::ManifestObjectId;
+    use crate::layout::ObjectLayout;
+    use loonfs_api::{ManifestObjectId, NamespaceId};
+
+    #[test]
+    fn namespace_prefix_matches_layout_root_prefix() {
+        let namespace_id = NamespaceId::parse("ns-1").expect("valid namespace id");
+
+        assert_eq!(
+            namespace_prefix(&namespace_id),
+            ObjectLayout::new().namespace_root_prefix(namespace_id.as_str())
+        );
+    }
 
     /// Pins every standard key pattern in the format spec's "Durable object
     /// families" table to the key this crate actually builds for that family.

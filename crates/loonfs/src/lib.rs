@@ -44,20 +44,19 @@ use thiserror::Error;
 pub use loonfs_api::v0::{
     BeginUploadRequest, BeginUploadResponse, ChangesResponse, CommitDelta, CommitOp,
     CommitPrecondition, CommitRequest, CommitResponse, CommittedChange, CompleteUploadRequest,
-    CompleteUploadResponse, DirectPutUpload, ObjectTransferAccess, UploadContentResponse,
-    UploadMode,
+    CompleteUploadResponse, DirectPutUpload, DisableGramsIndexResponse, EnableGramsIndexResponse,
+    ObjectTransferAccess, RepairNamespaceResponse, UploadContentResponse, UploadMode,
 };
 pub use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, CapabilityDocument,
     ChangeSeq, CheckpointId, CommitId, ContentRef, ContentRefKind, CreateCheckpointRequest,
     CreateCheckpointResponse, DeleteDirectoryBehavior, DeleteNamespaceResponse,
-    DestinationBehavior, DirectoryPageCursor, DisableGramsIndexResponse, EffectiveLimit,
-    EnableGramsIndexResponse, FileRevision, FileRevisionsPageCursor, FlushWalOutcome,
-    FlushWalResponse, GrepMatch, GrepRequest, GrepResponse, InodeId, InodeKind,
-    ListFileRevisionsResponse, ListPathEntriesResponse, ManifestId, NameKey, NamespaceId,
-    NamespaceStatusResponse, NamespaceSummary, Page, PageRequest, PaginationPolicy,
-    ReleaseCheckpointResponse, RepairNamespaceOutcome, RepairNamespaceResponse, RevisionNo,
-    UploadId, FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK,
+    DestinationBehavior, DirectoryPageCursor, EffectiveLimit, FileRevision,
+    FileRevisionsPageCursor, FlushWalOutcome, FlushWalResponse, GrepMatch, GrepRequest,
+    GrepResponse, InodeId, InodeKind, ListFileRevisionsResponse, ListPathEntriesResponse,
+    ManifestId, NameKey, NamespaceId, NamespaceStatusResponse, NamespaceSummary, Page, PageRequest,
+    PaginationPolicy, ReleaseCheckpointResponse, RepairNamespaceOutcome, RevisionNo, UploadId,
+    FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK,
     FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_PUT, PROFILE_ADMIN_V0, PROFILE_CORE_V0,
     PROFILE_QUERY_V0, PROTOCOL_VERSION,
 };

@@ -14,7 +14,7 @@ use crate::service::is_indexable_text_content;
 use crate::{GrepError, Result};
 use futures::future::try_join_all;
 use loonfs_api::wire::control::NamespaceState;
-use loonfs_api::wire::manifest::hex_encode_bytes;
+use loonfs_api::wire::hex::hex_encode_bytes;
 use loonfs_api::wire::sst_blocks::{index_blocks_for_key_range, SegmentBlocksBuilder};
 use loonfs_api::wire::wal::WalDelta;
 use loonfs_api::{

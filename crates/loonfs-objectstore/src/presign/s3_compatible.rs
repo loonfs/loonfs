@@ -2,6 +2,7 @@
 
 use super::{ObjectTransferIssuer, PresignedPutRequest, PresignedUrl};
 use crate::keyspace::{parse_endpoint_url, scope_object_key};
+use crate::layout::sha256_hex_from_digest;
 use crate::object_store::Result;
 use crate::presign::aws_sigv4::{
     aws_dates, canonical_query_string, hex_lower, hmac_sha256, normalize_header_value,
@@ -18,6 +19,7 @@ use std::time::SystemTime;
 
 const S3_CREATE_ONLY_HEADER: &str = "if-none-match";
 const S3_SHA256_CHECKSUM_HEADER: &str = "x-amz-checksum-sha256";
+const MAX_PRESIGN_EXPIRY: u64 = 7 * 24 * 60 * 60;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct S3PresignerConfig {
@@ -139,10 +141,10 @@ impl ObjectTransferIssuer for S3CompatiblePresigner {
                 "presigned URL expiry must be greater than zero".to_owned(),
             ));
         }
-        if request.expires_in.as_secs() > 604_800 {
-            return Err(ObjectStoreError::Configuration(
-                "presigned URL expiry must not exceed seven days".to_owned(),
-            ));
+        if request.expires_in.as_secs() > MAX_PRESIGN_EXPIRY {
+            return Err(ObjectStoreError::Configuration(format!(
+                "presigned URL expiry must not exceed {MAX_PRESIGN_EXPIRY} seconds"
+            )));
         }
 
         let endpoint = self.endpoint(request.object_key)?;
@@ -238,19 +240,15 @@ fn s3_sha256_checksum_header(content_ref: &ContentRef) -> Result<String> {
     let digest_hex = content_ref.digest.strip_prefix("sha256:").ok_or_else(|| {
         invalid_direct_put_content("direct_put content_ref digest must use sha256")
     })?;
-    if digest_hex.len() != 64 {
-        return Err(invalid_direct_put_content(
-            "direct_put content_ref sha256 digest must be 64 hex characters",
-        ));
-    }
-    if !digest_hex
-        .bytes()
-        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        return Err(invalid_direct_put_content(
-            "direct_put content_ref sha256 digest must be lowercase hex",
-        ));
-    }
+    let digest_hex = sha256_hex_from_digest(&content_ref.digest).map_err(|_| {
+        if digest_hex.len() != 64 {
+            invalid_direct_put_content(
+                "direct_put content_ref sha256 digest must be 64 hex characters",
+            )
+        } else {
+            invalid_direct_put_content("direct_put content_ref sha256 digest must be lowercase hex")
+        }
+    })?;
 
     let mut digest = [0_u8; 32];
     for (index, byte) in digest.iter_mut().enumerate() {

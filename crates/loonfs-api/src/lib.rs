@@ -17,6 +17,7 @@ mod control;
 mod digest;
 mod envelope;
 mod error;
+mod hex;
 mod ids;
 mod manifest;
 mod name_policy;
@@ -27,6 +28,10 @@ pub mod v0;
 mod wal;
 
 pub mod wire {
+    pub mod hex {
+        pub use crate::hex::*;
+    }
+
     pub mod manifest {
         pub use crate::manifest::*;
     }
@@ -53,10 +58,10 @@ pub use capability::{
     FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK, FEATURE_QUERY_GREP,
     FEATURE_UPLOADS_DIRECT_PUT, LIMIT_COMMIT_MAX_BODY_BYTES, LIMIT_COMMIT_MAX_OPERATIONS,
     LIMIT_DOWNLOAD_MAX_CONCURRENT, LIMIT_DOWNLOAD_MAX_CONTENT_BYTES, LIMIT_GC_MIN_GRACE_WINDOW_MS,
-    LIMIT_QUERY_GREP_DEFAULT, LIMIT_QUERY_GREP_MAX, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES,
-    LIMIT_QUERY_GREP_TAIL_BUDGET_FILES, LIMIT_UPLOAD_MAX_CONCURRENT,
-    LIMIT_UPLOAD_MAX_CONTENT_BYTES, PROFILE_ADMIN_V0, PROFILE_CORE_V0, PROFILE_QUERY_V0,
-    PROTOCOL_VERSION,
+    LIMIT_PAGINATION_DEFAULT, LIMIT_PAGINATION_MAX, LIMIT_QUERY_GREP_DEFAULT, LIMIT_QUERY_GREP_MAX,
+    LIMIT_QUERY_GREP_SCAN_BUDGET_FILES, LIMIT_QUERY_GREP_TAIL_BUDGET_FILES,
+    LIMIT_UPLOAD_MAX_CONCURRENT, LIMIT_UPLOAD_MAX_CONTENT_BYTES, PROFILE_ADMIN_V0, PROFILE_CORE_V0,
+    PROFILE_QUERY_V0, PROTOCOL_VERSION,
 };
 pub use content::{ContentRef, ContentRefKind};
 pub use digest::sha256_digest;
@@ -66,7 +71,7 @@ pub use ids::{
     CheckpointId, CommitId, CommitIdValidationError, ContentStoreId, GeneratedIdValidationError,
     IndexSegmentId, InodeId, InodeKind, ManifestId, ManifestObjectId, MetadataTableId, NameKey,
     NameKeyValidationError, NamespaceId, NamespaceIdValidationError, RevisionNo, UploadId,
-    WalSegmentId, WriterEpoch, MAX_NAME_KEY_BYTES,
+    WalSegmentId, WriterEpoch, MAX_ID_BYTES, MAX_NAME_KEY_BYTES, ROOT_INODE_ID,
 };
 pub use name_policy::{name_key_for_display_name, NamePolicy};
 pub use pagination::{
@@ -74,23 +79,22 @@ pub use pagination::{
     encode_directory_cursor, encode_file_revisions_cursor, encode_grep_cursor, DirectoryPageCursor,
     EffectiveLimit, FileRevisionsPageCursor, GrepPageCursor, LimitError, Page, PageCursorError,
     PageRequest, PaginationPolicy, PaginationPolicyError, DEFAULT_MAX_PAGE_LIMIT,
-    DEFAULT_PAGE_LIMIT, LIMIT_PAGINATION_DEFAULT, LIMIT_PAGINATION_MAX, PAGE_CURSOR_VERSION,
+    DEFAULT_PAGE_LIMIT, PAGE_CURSOR_VERSION,
 };
 pub use path::{AbsolutePath, DisplayName, PathComponent, PathError, MAX_DISPLAY_NAME_BYTES};
 
 // Curated root re-exports of the common v0 HTTP surface. v0 HTTP shapes live
 // in `v0`; add here only what most consumers touch.
 pub use v0::{
-    AdvanceRetentionResponse, ApiError, AuthoritativeFileBytes, AuthoritativePathEntry,
-    CommitResponse, CommitSubmissionRequest, CreateCheckpointRequest, CreateCheckpointResponse,
-    CreateNamespaceRequest, DeleteDirectoryBehavior, DeleteNamespaceResponse, DestinationBehavior,
-    DisableGramsIndexResponse, EnableGramsIndexResponse, ErrorDetails, FileRevision,
-    FilesystemOperation, FilesystemOperationRequest, FlushWalOutcome, FlushWalResponse,
-    ForkNamespaceRequest, GcRequest, GcResponse, GrepGcResponse, GrepMatch, GrepRequest,
-    GrepResponse, ListFileRevisionsResponse, ListPathEntriesResponse, MaintenanceTickOutcome,
-    MaintenanceTickRequest, MaintenanceTickResponse, NamespaceStatusResponse, NamespaceSummary,
-    ReleaseCheckpointResponse, RepairNamespaceOutcome, RepairNamespaceResponse,
-    RestoreFileRevisionRequest,
+    AdvanceRetentionResponse, ApiError, AuthoritativeFileBytes, AuthoritativePathEntry, CommitOp,
+    CommitPrecondition, CommitResponse, CommitSubmissionRequest, CreateCheckpointRequest,
+    CreateCheckpointResponse, CreateNamespaceRequest, DeleteDirectoryBehavior,
+    DeleteNamespaceResponse, DestinationBehavior, ErrorDetails, FileRevision, FilesystemOperation,
+    FilesystemOperationRequest, FlushWalOutcome, FlushWalResponse, ForkNamespaceRequest, GcRequest,
+    GcResponse, GrepMatch, GrepRequest, GrepResponse, ListFileRevisionsResponse,
+    ListPathEntriesResponse, MaintenanceTickOutcome, MaintenanceTickRequest,
+    MaintenanceTickResponse, NamespaceStatusResponse, NamespaceSummary, ReleaseCheckpointResponse,
+    RepairNamespaceOutcome, RestoreFileRevisionRequest,
 };
 
 #[cfg(test)]

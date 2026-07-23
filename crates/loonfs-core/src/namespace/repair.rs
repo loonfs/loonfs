@@ -11,7 +11,8 @@ use crate::checkpoint::{load_namespace_manifest_envelope, ManifestLoadFailureCla
 use crate::context::MutationContext;
 use crate::error::{CoreError, MetadataProjectionLoadError};
 use crate::gc::{reap_abandoned_bootstrap, AbandonedBootstrapReap};
-use loonfs_api::{NamespaceId, NamespaceSummary, RepairNamespaceOutcome, RepairNamespaceResponse};
+use loonfs_api::v0::RepairNamespaceResponse;
+use loonfs_api::{NamespaceId, NamespaceSummary, RepairNamespaceOutcome};
 use loonfs_objectstore::keys::namespace_config;
 use loonfs_objectstore::ObjectStore;
 

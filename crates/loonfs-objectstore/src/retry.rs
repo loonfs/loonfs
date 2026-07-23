@@ -1,7 +1,7 @@
 //! Shared bounded-backoff machinery for replay-safe store operations.
 
 use crate::timing::MonotonicTimer;
-use crate::PROVIDER_OP_DEADLINE;
+use crate::PROVIDER_OPERATION_DEADLINE;
 use std::time::Duration;
 
 /// Bounded retry configuration matching the provider client's read budget.
@@ -10,7 +10,7 @@ pub(crate) struct TransportRetryPolicy {
     pub(crate) max_retries: u32,
     pub(crate) initial_backoff: Duration,
     pub(crate) max_backoff: Duration,
-    pub(crate) op_deadline: Duration,
+    pub(crate) operation_deadline: Duration,
 }
 
 impl TransportRetryPolicy {
@@ -18,7 +18,7 @@ impl TransportRetryPolicy {
         max_retries: 10,
         initial_backoff: Duration::from_millis(100),
         max_backoff: Duration::from_secs(15),
-        op_deadline: PROVIDER_OP_DEADLINE,
+        operation_deadline: PROVIDER_OPERATION_DEADLINE,
     };
 }
 
@@ -61,6 +61,7 @@ impl<'timer> OperationDeadline<'timer> {
 
 #[allow(clippy::disallowed_methods)]
 pub(crate) async fn transport_retry_pause(backoff: Duration) {
-    // Replay-safe operations wait at this isolated timer boundary between attempts.
+    // Replay-safe operations wait at this isolated timer boundary so backoff
+    // pacing never feeds protocol state and replay stays deterministic.
     tokio::time::sleep(backoff).await;
 }

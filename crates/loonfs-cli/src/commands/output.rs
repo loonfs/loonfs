@@ -4,12 +4,13 @@ use crate::args::CommandKind;
 use crate::config::{CliConfig, ProfileConfig};
 use crate::error::CliError;
 use crate::profiles::ProfileSummary;
-use loonfs_api::v0::ChangesResponse;
+use loonfs_api::v0::{
+    ChangesResponse, DisableGramsIndexResponse, EnableGramsIndexResponse, RepairNamespaceResponse,
+};
 use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativePathEntry, CreateCheckpointResponse,
-    DeleteNamespaceResponse, DisableGramsIndexResponse, EnableGramsIndexResponse, FileRevision,
-    FlushWalResponse, GcResponse, GrepMatch, MaintenanceTickResponse, NamespaceSummary,
-    ReleaseCheckpointResponse, RepairNamespaceResponse,
+    DeleteNamespaceResponse, FileRevision, FlushWalResponse, GcResponse, GrepMatch,
+    MaintenanceTickResponse, NamespaceSummary, ReleaseCheckpointResponse,
 };
 use serde::Serialize;
 

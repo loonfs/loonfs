@@ -1,7 +1,7 @@
 //! Serializable simulation traces and their shared recorder.
 
 use crate::fault::ObjectStoreFault;
-use crate::object_op::ObjectOp;
+use crate::object_operation::ObjectOperation;
 use crate::rng::SimSeed;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
@@ -31,7 +31,7 @@ pub struct SimTraceEvent {
     pub step: u64,
     pub actor: Option<String>,
     pub operation: String,
-    pub object_op: Option<ObjectOp>,
+    pub object_op: Option<ObjectOperation>,
     pub injected_fault: Option<ObjectStoreFault>,
     pub result: SimEventResult,
     pub model_hash: Option<String>,

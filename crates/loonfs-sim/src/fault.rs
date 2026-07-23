@@ -1,6 +1,6 @@
 //! Serializable object-store fault schedules.
 
-use crate::object_op::{ObjectOp, ObjectOpKind};
+use crate::object_operation::{ObjectOperation, ObjectOperationKind};
 use crate::rng::SimSeed;
 use serde::{Deserialize, Serialize};
 
@@ -19,13 +19,13 @@ pub enum ObjectStoreFault {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScheduledFault {
     pub step: u64,
-    pub op_kind: Option<ObjectOpKind>,
+    pub op_kind: Option<ObjectOperationKind>,
     pub key_contains: Option<String>,
     pub fault: ObjectStoreFault,
 }
 
 impl ScheduledFault {
-    pub fn matches(&self, op: &ObjectOp) -> bool {
+    pub fn matches(&self, op: &ObjectOperation) -> bool {
         self.step == op.step
             && self.op_kind.is_none_or(|kind| kind == op.kind)
             && self
@@ -49,7 +49,7 @@ impl FaultSchedule {
         }
     }
 
-    pub fn fault_for(&self, op: &ObjectOp) -> Option<&ScheduledFault> {
+    pub fn fault_for(&self, op: &ObjectOperation) -> Option<&ScheduledFault> {
         self.faults.iter().find(|fault| fault.matches(op))
     }
 }
@@ -64,7 +64,7 @@ mod tests {
             seed: SimSeed(11),
             faults: vec![ScheduledFault {
                 step: 3,
-                op_kind: Some(ObjectOpKind::PutIfAbsent),
+                op_kind: Some(ObjectOperationKind::PutIfAbsent),
                 key_contains: Some("head".to_owned()),
                 fault: ObjectStoreFault::PutSucceedsButResponseLost,
             }],
@@ -81,20 +81,20 @@ mod tests {
             seed: SimSeed(1),
             faults: vec![ScheduledFault {
                 step: 2,
-                op_kind: Some(ObjectOpKind::Get),
+                op_kind: Some(ObjectOperationKind::Get),
                 key_contains: Some("wal".to_owned()),
                 fault: ObjectStoreFault::GetReturnsStaleValue,
             }],
         };
 
-        let matching = ObjectOp {
+        let matching = ObjectOperation {
             step: 2,
-            kind: ObjectOpKind::Get,
+            kind: ObjectOperationKind::Get,
             key: "namespaces/ns/wal/1".to_owned(),
         };
-        let wrong_kind = ObjectOp {
+        let wrong_kind = ObjectOperation {
             step: 2,
-            kind: ObjectOpKind::Head,
+            kind: ObjectOperationKind::Head,
             key: "namespaces/ns/wal/1".to_owned(),
         };
 

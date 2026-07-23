@@ -17,13 +17,13 @@ use loonfs::{
     RestoreRevisionOptions, RuntimeError, SharedObjectStore, TraceStoreKind, UndeleteOptions,
 };
 use loonfs_api::{
+    v0::{DisableGramsIndexResponse, EnableGramsIndexResponse, RepairNamespaceResponse},
     AdvanceRetentionResponse, AuthoritativePathEntry, ChangeSeq, CheckpointId, CommitId,
     CommitResponse, CreateCheckpointRequest, CreateCheckpointResponse, DeleteDirectoryBehavior,
-    DestinationBehavior, DisableGramsIndexResponse, EffectiveLimit, EnableGramsIndexResponse,
-    FlushWalResponse, GcRequest, GcResponse, GrepRequest, GrepResponse, InodeId,
-    ListFileRevisionsResponse, MaintenanceTickRequest, MaintenanceTickResponse, NamespaceId,
-    NamespaceStatusResponse, NamespaceSummary, PaginationPolicy, ReleaseCheckpointResponse,
-    RepairNamespaceResponse, RevisionNo,
+    DestinationBehavior, EffectiveLimit, FlushWalResponse, GcRequest, GcResponse, GrepRequest,
+    GrepResponse, InodeId, ListFileRevisionsResponse, MaintenanceTickRequest,
+    MaintenanceTickResponse, NamespaceId, NamespaceStatusResponse, NamespaceSummary,
+    PaginationPolicy, ReleaseCheckpointResponse, RevisionNo,
 };
 use loonfs_client::{Client, ClientConfig, NamespacePath};
 use std::sync::Arc;

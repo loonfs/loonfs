@@ -590,7 +590,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 .expect("non-zero page limit with more children must return an item");
             Some(DirectoryPageCursor {
                 head_seq: self.head.seq,
-                dir_inode_id: resolved.inode_id,
+                directory_inode_id: resolved.inode_id,
                 last_name_key: last.binding.name_key.clone(),
             })
         } else {

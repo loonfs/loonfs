@@ -45,6 +45,10 @@ pub const LIMIT_DOWNLOAD_MAX_CONCURRENT: &str = "download.max_concurrent";
 pub const LIMIT_COMMIT_MAX_BODY_BYTES: &str = "commit.max_body_bytes";
 /// Advisory limit: the most semantic operations one explicit commit accepts.
 pub const LIMIT_COMMIT_MAX_OPERATIONS: &str = "commit.max_operations";
+/// Advisory capability key for the default page size applied when callers omit `limit`.
+pub const LIMIT_PAGINATION_DEFAULT: &str = "pagination.default_limit";
+/// Advisory capability key for the largest page size accepted by a deployment.
+pub const LIMIT_PAGINATION_MAX: &str = "pagination.max_limit";
 /// Advisory limit: the smallest accepted `grace_window_ms` on a `gc`
 /// request; smaller values answer `invalid_request`. Derived from the
 /// publication budgets, not tuned.
@@ -129,20 +133,19 @@ impl CapabilityDocument {
     pub fn retain_well_formed(&mut self) {
         let advertised_planes: Vec<&str> = self.profiles.iter().map(|p| plane_name(p)).collect();
         self.features
-            .retain(|feature, _| match feature.split('.').next() {
-                Some(plane) if !plane.is_empty() => advertised_planes.contains(&plane),
-                _ => false,
-            });
+            .retain(|feature, _| feature_is_parented(&advertised_planes, feature));
     }
 
     fn feature_is_parented(&self, feature: &str) -> bool {
-        match feature.split('.').next() {
-            Some(plane) if !plane.is_empty() => self
-                .profiles
-                .iter()
-                .any(|profile| plane_name(profile) == plane),
-            _ => false,
-        }
+        let advertised_planes: Vec<&str> = self.profiles.iter().map(|p| plane_name(p)).collect();
+        feature_is_parented(&advertised_planes, feature)
+    }
+}
+
+fn feature_is_parented(planes: &[&str], feature: &str) -> bool {
+    match feature.split('.').next() {
+        Some(plane) if !plane.is_empty() => planes.contains(&plane),
+        _ => false,
     }
 }
 

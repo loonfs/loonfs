@@ -47,7 +47,7 @@ pub(crate) async fn put<S: ObjectStore + ?Sized>(
     } else {
         PutMode::CreateIfAbsent
     };
-    let deadline = OperationDeadline::start(&timer, retry_policy.op_deadline);
+    let deadline = OperationDeadline::start(&timer, retry_policy.operation_deadline);
     let mut retries = 0;
     let mut ambiguous_transport = None;
 
@@ -62,47 +62,31 @@ pub(crate) async fn put<S: ObjectStore + ?Sized>(
                     .await;
             }
             Err(error @ ObjectStoreError::Transport { .. }) => {
+                let Some(remaining) = deadline.remaining() else {
+                    return resolve_readback(store, key, &bytes, error).await;
+                };
+                if retries >= retry_policy.max_retries {
+                    return resolve_readback(store, key, &bytes, error).await;
+                }
+                retries += 1;
+                let backoff = transport_retry_backoff(&retry_policy, retries).min(remaining);
+                tracing::info!(
+                    object_key = key,
+                    operation = "put_immutable_verified",
+                    retry = retries,
+                    max_retries = retry_policy.max_retries,
+                    backoff_ms = u64::try_from(backoff.as_millis()).unwrap_or(u64::MAX),
+                    error = %error,
+                    "transient immutable write failure, backing off before retry",
+                );
                 ambiguous_transport = Some(error);
+                transport_retry_pause(backoff).await;
             }
             Err(error) if ambiguous_transport.is_some() => {
                 return resolve_readback(store, key, &bytes, error).await;
             }
             Err(error) => return Err(transport(key, error)),
         }
-
-        let error = ambiguous_transport
-            .as_ref()
-            .expect("transport branch should retain its ambiguous error");
-        let Some(remaining) = deadline.remaining() else {
-            return resolve_readback(
-                store,
-                key,
-                &bytes,
-                ambiguous_transport.expect("transport error should be retained"),
-            )
-            .await;
-        };
-        if retries >= retry_policy.max_retries {
-            return resolve_readback(
-                store,
-                key,
-                &bytes,
-                ambiguous_transport.expect("transport error should be retained"),
-            )
-            .await;
-        }
-        retries += 1;
-        let backoff = transport_retry_backoff(&retry_policy, retries).min(remaining);
-        tracing::info!(
-            object_key = key,
-            operation = "put_immutable_verified",
-            retry = retries,
-            max_retries = retry_policy.max_retries,
-            backoff_ms = u64::try_from(backoff.as_millis()).unwrap_or(u64::MAX),
-            error = %error,
-            "transient immutable write failure, backing off before retry",
-        );
-        transport_retry_pause(backoff).await;
     }
 }
 
@@ -142,7 +126,7 @@ pub(crate) async fn readback<S: ObjectStore + ?Sized>(
     store: &S,
     key: &str,
     expected: &Bytes,
-) -> std::result::Result<ImmutableReadback, ObjectStoreError> {
+) -> crate::Result<ImmutableReadback> {
     match store.get_with_metadata(key).await? {
         Some(body) if body.bytes.as_slice() == expected.as_ref() => {
             Ok(ImmutableReadback::Identical(body.metadata))
@@ -162,30 +146,8 @@ fn transport(key: &str, source: ObjectStoreError) -> ImmutableWriteError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::timing::MonotonicTimer;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use crate::test_support::SteppingTimer;
     use std::time::Duration;
-
-    #[derive(Debug)]
-    struct SteppingTimer {
-        now_ms: AtomicU64,
-        step_ms: u64,
-    }
-
-    impl SteppingTimer {
-        fn new(step_ms: u64) -> Self {
-            Self {
-                now_ms: AtomicU64::new(0),
-                step_ms,
-            }
-        }
-    }
-
-    impl MonotonicTimer for SteppingTimer {
-        fn monotonic_now_ms(&self) -> u64 {
-            self.now_ms.fetch_add(self.step_ms, Ordering::SeqCst)
-        }
-    }
 
     #[test]
     fn immutable_retry_deadline_is_one_budget_across_attempts() {

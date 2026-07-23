@@ -383,7 +383,7 @@ fn head_state_reading_is_fail_closed_on_unknown_lifecycle_states() {
 #[test]
 fn control_objects_match_golden_bytes() {
     check_control_golden(
-        "control_namespace_head.v1.json",
+        "control_wal_head.v1.json",
         ControlObjectKind::WalHead,
         sample_head_state(),
     );
@@ -398,7 +398,7 @@ fn control_objects_match_golden_bytes() {
         sample_condemned_head_state(),
     );
     check_control_golden(
-        "control_namespace_descriptor.v1.json",
+        "control_namespace_config.v1.json",
         ControlObjectKind::NamespaceConfig,
         NamespaceConfigState {
             namespace_id: namespace_id(),
@@ -971,7 +971,9 @@ fn sample_segment_blocks() -> loonfs_api::wire::sst_blocks::BuiltSegmentBlocks {
     use loonfs_api::wire::sst_blocks::SegmentBlocksBuilder;
     // A tiny target block size forces several data blocks, so the fixture
     // pins block splitting, restart points, and the index shape at once.
-    let mut builder = SegmentBlocksBuilder::new(256);
+    let mut builder = SegmentBlocksBuilder::new(
+        std::num::NonZeroUsize::new(256).expect("target block size should be non-zero"),
+    );
     let rows = [
         MetadataRow::CommitReceipt {
             commit_id: commit_id(),

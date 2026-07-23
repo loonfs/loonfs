@@ -42,13 +42,16 @@ pub struct Gram(pub [u8; GRAM_LEN]);
 impl Gram {
     /// The gram as the six lowercase hex characters row keys embed.
     pub fn as_hex(&self) -> String {
-        loonfs_api::wire::manifest::hex_encode_bytes(&self.0)
+        loonfs_api::wire::hex::hex_encode_bytes(&self.0)
     }
 
     /// Parses the row-key hex form back into a gram.
     pub fn from_hex(hex: &str) -> Result<Self, IndexGramsCodecError> {
-        let bytes = loonfs_api::wire::manifest::hex_decode_bytes(hex)
-            .map_err(|reason| IndexGramsCodecError::InvalidGram { reason })?;
+        let bytes = loonfs_api::wire::hex::hex_decode_bytes(hex).map_err(|reason| {
+            IndexGramsCodecError::InvalidGram {
+                reason: reason.to_string(),
+            }
+        })?;
         let bytes: [u8; GRAM_LEN] =
             bytes
                 .try_into()
