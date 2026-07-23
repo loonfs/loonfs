@@ -5,7 +5,7 @@ use super::{
     CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord, InodeRecord, MetadataState,
     RevisionRecord, SubtreeTombstoneAction, SubtreeTombstoneRecord,
 };
-use crate::invariants::InvariantId;
+use crate::invariants::{push_unique_invariant, InvariantId};
 use loonfs_api::wire::wal::{WalCommitDelta, WalCommitPayload, WalDelta};
 use loonfs_api::{ChangeSeq, CommitId};
 use serde::{Deserialize, Serialize};
@@ -202,11 +202,5 @@ impl MetadataState {
             InvariantId::WalReplayRecordsCommitReceipt,
         );
         checked_invariants
-    }
-}
-
-fn push_unique_invariant(invariants: &mut Vec<InvariantId>, id: InvariantId) {
-    if !invariants.contains(&id) {
-        invariants.push(id);
     }
 }

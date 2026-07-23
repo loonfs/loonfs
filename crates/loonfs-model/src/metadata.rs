@@ -123,7 +123,7 @@ impl MetadataState {
                     metadata_state.direntry_binds.push(DirentryBindRecord {
                         parent_inode_id: *parent_inode_id,
                         name_key: name_key.as_str().to_owned(),
-                        display_name: display_name.clone(),
+                        display_name: display_name.as_str().to_owned(),
                         child_inode_id: *child_inode_id,
                         bind_seq: committed_seq,
                         bind_delta_index: *delta_index,
@@ -241,7 +241,8 @@ mod tests {
                 delta_index: 7,
                 parent_inode_id: InodeId(1),
                 name_key: NameKey::parse("persisted-key").expect("valid name key"),
-                display_name: "Report.TXT".to_owned(),
+                display_name: loonfs_api::DisplayName::parse("Report.TXT")
+                    .expect("valid display name"),
                 child_inode_id: InodeId(2),
             }],
         );

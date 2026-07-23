@@ -24,9 +24,8 @@ use super::build::{
     build_manifest_tables_from_rows, debug_assert_manifest_table_segments_do_not_overlap,
     MetadataTableSegmentation,
 };
-use super::flush::{
-    ensure_metadata_publication_budget, next_manifest_id_after, MANIFEST_ALLOCATION_RETRY_LIMIT,
-};
+use super::error::ManifestLoadError;
+use super::flush::{ensure_metadata_publication_budget, next_manifest_id_after};
 use super::load::{
     load_namespace_manifest_envelope_if_present, load_verified_manifest_tables,
     validate_direntry_child_bind_index, validate_revision_by_inode_desc_index,
@@ -38,10 +37,12 @@ use super::runs::{
 };
 use crate::context::MutationContext;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
+use crate::limits::CONTENTION_RETRY_LIMIT;
 use crate::namespace::control::{read_metadata_root_object, read_wal_floor_seq_or_zero};
 use crate::timing::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_api::wire::manifest::{
-    MetadataRow, MetadataTableFamily, NamespaceManifestEnvelope, NamespaceManifestPayload,
+    MetadataFileRef, MetadataRow, MetadataTableFamily, NamespaceManifestEnvelope,
+    NamespaceManifestPayload,
 };
 use loonfs_api::{ChangeSeq, ManifestId, ManifestObjectId, NamespaceId};
 use loonfs_objectstore::keys::metadata_manifest_object;
@@ -126,9 +127,7 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     let publication_started_ms = timer.monotonic_now_ms();
     let root = read_metadata_root_object(store, namespace_id)
         .await
-        .map_err(|error| {
-            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
-        })?
+        .map_err(CoreError::load_head)?
         .envelope
         .state;
     let tables = load_verified_manifest_tables(store, namespace_id, &root.manifest_object_id)
@@ -200,9 +199,7 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     }
     let floor_seq = read_wal_floor_seq_or_zero(store, namespace_id)
         .await
-        .map_err(|error| {
-            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
-        })?;
+        .map_err(CoreError::load_head)?;
     drop_rows_below_retention_floor(&mut rows_by_family, floor_seq)?;
 
     let run_tables = build_manifest_tables_from_rows(
@@ -321,13 +318,13 @@ async fn write_reorganized_manifest<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     previous: &NamespaceManifestEnvelope,
-    metadata_files: Vec<loonfs_api::wire::manifest::MetadataFileRef>,
+    metadata_files: Vec<MetadataFileRef>,
     base_seq: ChangeSeq,
     retention_floor_seq: ChangeSeq,
     writer_version: &str,
 ) -> Result<NamespaceManifestEnvelope> {
     let manifest_id = next_manifest_id_after(previous.payload.manifest_id)?;
-    for _allocation_attempt in 0..MANIFEST_ALLOCATION_RETRY_LIMIT {
+    for _allocation_attempt in 0..CONTENTION_RETRY_LIMIT {
         let manifest_object_id = ManifestObjectId::generate(manifest_id);
         let manifest_key = metadata_manifest_object(namespace_id.as_str(), &manifest_object_id);
         match load_namespace_manifest_envelope_if_present(
@@ -368,7 +365,7 @@ async fn write_reorganized_manifest<S: ObjectStore + ?Sized>(
         match write_namespace_manifest(store, &manifest).await {
             Ok(()) => return Ok(manifest),
             Err(MetadataProjectionLoadError::ManifestLoad(
-                super::error::ManifestLoadError::ManifestConflict { .. },
+                ManifestLoadError::ManifestConflict { .. },
             )) => continue,
             Err(error) => return Err(CoreError::MetadataProjection(error)),
         }

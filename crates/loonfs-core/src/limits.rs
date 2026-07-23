@@ -26,6 +26,9 @@ pub const MAX_COMMIT_CONTENT_TOKENS: usize = 4096;
 /// its in-memory coverage work while it occupies the serialized publisher.
 pub const MAX_COMMIT_EXTERNAL_CONTENT_REFS: usize = 4096;
 
+/// Maximum attempts for a bounded compare-and-swap or allocation contention loop.
+pub const CONTENTION_RETRY_LIMIT: usize = 8;
+
 /// Provider operation deadline, in milliseconds (`loonfs-objectstore`
 /// consumes it across every retry of one single-request operation).
 /// Multipart transfers of large immutable payloads carry no

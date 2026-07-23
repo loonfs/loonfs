@@ -18,7 +18,7 @@
 //! ```no_run
 //! use loonfs_api::{AbsolutePath, CommitId, NamespaceId};
 //! use loonfs_core::publish::{
-//!     NamespaceCommitEngine, NamespaceMutationCandidate, PathMutationIntent,
+//!     NamespaceCommitEngine, NamespaceMutationCandidate, PathMutationIntent, PublishTailOptions,
 //! };
 //! use loonfs_core::{BootstrapOptions, MutationContext, NamespaceEngine};
 //! use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -49,6 +49,7 @@
 //!         parents: false,
 //!     })],
 //!     &context,
+//!     &PublishTailOptions::default(),
 //! );
 //! ```
 
@@ -72,6 +73,7 @@ mod storage;
 pub mod timing;
 mod wal;
 
+/// Cache types and configuration for runtime read paths.
 pub mod cache {
     pub use crate::checkpoint::{
         ManifestLoadError, ManifestLoadFailureClass, MetadataTableCache, MetadataTableCacheConfig,
@@ -83,6 +85,7 @@ pub mod cache {
     pub use crate::namespace::status::{load_namespace_head_summary, NamespaceHeadSummary};
 }
 
+/// Typed namespace control-object loaders and verified catalog state.
 pub mod control {
     pub use crate::namespace::catalog::{
         load_namespace_catalog_entry, NamespaceCatalogLoadError, VerifiedNamespaceCatalogEntry,
@@ -97,6 +100,7 @@ pub mod control {
     };
 }
 
+/// Commit publication types for runtime integrations.
 pub mod publish {
     pub use crate::commit::{CommitHeadPublishError, SemanticMutationIdentity};
     pub use crate::commit_engine::{
@@ -129,6 +133,6 @@ pub mod grep {
         load_grep_change_feed, load_grep_checkpoint_revision_page, GrepChangeFeed,
         GrepCheckpointRevisionPage,
     };
-    pub use crate::metadata::MetadataViewSession;
+    pub use crate::metadata::{LeafRevisionPrefetch, MetadataViewSession};
     pub use crate::path::read::LoadedMetadataView;
 }

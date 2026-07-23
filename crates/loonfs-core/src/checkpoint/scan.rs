@@ -22,7 +22,13 @@ use std::sync::Arc;
 /// Segment fetches issued per wave during a scan. Wide directories touch
 /// hundreds of segments per page; deeper waves amortize the per-wave await
 /// without unbounded fan-out.
-pub(super) const MAX_MATERIALIZED_TABLE_FETCHES: usize = 16;
+pub(super) const MAX_MATERIALIZED_TABLE_LOADS: usize = 16;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Readahead {
+    Enabled,
+    Disabled,
+}
 
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,7 +65,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         // Matching on the stored row key: the scan already selected the rows
         // by that key, and recomputing keys from rows allocates per row.
         Ok(self
-            .scan_prefix_rows(family, key, Some(filter_probe), true)
+            .scan_prefix_rows(family, key, Some(filter_probe), Readahead::Enabled)
             .await?
             .into_iter()
             .find(|(row_key, _)| row_key == key)
@@ -72,7 +78,8 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         prefix: &str,
     ) -> Result<Vec<MetadataRow>, ManifestLoadError> {
         Ok(strip_row_keys(
-            self.scan_prefix_rows(family, prefix, None, true).await?,
+            self.scan_prefix_rows(family, prefix, None, Readahead::Enabled)
+                .await?,
         ))
     }
 
@@ -86,7 +93,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         family: MetadataTableFamily,
         prefix: &str,
         filter_probe: &str,
-        readahead: bool,
+        readahead: Readahead,
     ) -> Result<Vec<MetadataRow>, ManifestLoadError> {
         Ok(strip_row_keys(
             self.scan_prefix_rows(family, prefix, Some(filter_probe), readahead)
@@ -120,8 +127,15 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        self.scan_range_page_rows(family, lower_bound, upper_bound, limit, None, true)
-            .await
+        self.scan_range_page_rows(
+            family,
+            lower_bound,
+            upper_bound,
+            limit,
+            None,
+            Readahead::Enabled,
+        )
+        .await
     }
 
     /// [`Self::scan_range_page`] for a point lookup within one filter key's
@@ -144,7 +158,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
                 upper_bound,
                 limit,
                 Some(filter_probe),
-                true,
+                Readahead::Enabled,
             )
             .await?,
         ))
@@ -157,7 +171,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         family: MetadataTableFamily,
         prefix: &str,
         filter_probe: Option<&str>,
-        readahead: bool,
+        readahead: Readahead,
     ) -> Result<Vec<(String, MetadataRow)>, ManifestLoadError> {
         let upper_bound = string_prefix_upper_bound(prefix);
         self.scan_range_page_rows(
@@ -209,7 +223,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         upper_bound: Option<&str>,
         limit: usize,
         filter_probe: Option<&str>,
-        readahead: bool,
+        readahead: Readahead,
     ) -> Result<Vec<(String, MetadataRow)>, ManifestLoadError> {
         let mut candidates = Vec::new();
         for run in self.scan_runs.iter() {
@@ -241,7 +255,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
                 break;
             }
 
-            let chunk_end = (next_descriptor_index + MAX_MATERIALIZED_TABLE_FETCHES)
+            let chunk_end = (next_descriptor_index + MAX_MATERIALIZED_TABLE_LOADS)
                 .min(matching_descriptors.len());
             let loaded_segments = try_join_all(
                 matching_descriptors[next_descriptor_index..chunk_end]
@@ -287,7 +301,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
             return Ok(descriptors);
         };
         let mut admitted = Vec::with_capacity(descriptors.len());
-        for chunk in descriptors.chunks(MAX_MATERIALIZED_TABLE_FETCHES) {
+        for chunk in descriptors.chunks(MAX_MATERIALIZED_TABLE_LOADS) {
             let checks = try_join_all(
                 chunk
                     .iter()
@@ -311,7 +325,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         descriptor: &MetadataFileRef,
         lower_bound: &str,
         upper_bound: Option<&str>,
-        readahead: bool,
+        readahead: Readahead,
     ) -> Result<SegmentKeyRangeBlocks, ManifestLoadError> {
         load_manifest_segment_rows_in_key_range_with_cache(
             self.store,

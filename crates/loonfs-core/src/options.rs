@@ -1,6 +1,6 @@
 //! Per-operation options structs for the engine surface.
 
-use loonfs_api::{CommitId, DeleteDirectoryBehavior, DestinationBehavior};
+use loonfs_api::{ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior};
 
 /// Options for namespace bootstrap.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -14,7 +14,7 @@ pub struct BootstrapOptions {
 pub struct DeleteNamespaceOptions {
     /// Delete only if the head is still at this sequence. A mismatch fails
     /// with `stale_head` instead of deleting work the caller has not seen.
-    pub expected_head_seq: Option<loonfs_api::ChangeSeq>,
+    pub expected_head_seq: Option<ChangeSeq>,
 }
 
 /// Options for path-oriented writes.

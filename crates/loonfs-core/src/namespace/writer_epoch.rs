@@ -14,6 +14,7 @@ const MAX_WRITER_EPOCH_ACQUIRE_ATTEMPTS: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
 pub enum WriterEpochAcquireError {
+    // Control loads map differently from head writes, so conversion stays explicit.
     #[error(transparent)]
     LoadHead(ControlObjectLoadError),
     #[error("namespace `{namespace_id}` is deleted")]
@@ -24,7 +25,7 @@ pub enum WriterEpochAcquireError {
     EmptyWriterSessionId,
     #[error("missing head etag for `{object_key}`")]
     MissingHeadEtag { object_key: String },
-    #[error("writer epoch overflow from `{active:?}`")]
+    #[error("writer epoch overflow from `{active}`")]
     WriterEpochOverflow { active: WriterEpoch },
     #[error("failed to write head object during writer epoch acquire: {0}")]
     HeadWrite(String),
@@ -54,19 +55,19 @@ pub enum WriterEpochAcquireError {
 pub(crate) async fn acquire_writer_epoch<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    params: &MutationContext,
+    context: &MutationContext,
 ) -> Result<AcquiredWriter, WriterEpochAcquireError> {
-    if params.writer_id.trim().is_empty() {
+    if context.writer_id.trim().is_empty() {
         return Err(WriterEpochAcquireError::EmptyWriterId);
     }
-    if params.writer_session_id.trim().is_empty() {
+    if context.writer_session_id.trim().is_empty() {
         return Err(WriterEpochAcquireError::EmptyWriterSessionId);
     }
 
     update_head(
         store,
         namespace_id,
-        &params.writer_version,
+        &context.writer_version,
         MAX_WRITER_EPOCH_ACQUIRE_ATTEMPTS,
         |loaded_head| {
             let head = &loaded_head.envelope.state;
@@ -79,12 +80,12 @@ pub(crate) async fn acquire_writer_epoch<S: ObjectStore + ?Sized>(
                 });
             }
             if let Some(writer) = head.writer.as_ref() {
-                if writer.writer_id == params.writer_id
-                    && writer.writer_session_id == params.writer_session_id
+                if writer.writer_id == context.writer_id
+                    && writer.writer_session_id == context.writer_session_id
                 {
                     return Ok(HeadUpdate::Noop(AcquiredWriter {
-                        writer_id: params.writer_id.clone(),
-                        writer_session_id: params.writer_session_id.clone(),
+                        writer_id: context.writer_id.clone(),
+                        writer_session_id: context.writer_session_id.clone(),
                         writer_epoch: head.writer_epoch,
                     }));
                 }
@@ -92,10 +93,10 @@ pub(crate) async fn acquire_writer_epoch<S: ObjectStore + ?Sized>(
 
             let next_epoch = next_writer_epoch(head.writer_epoch)?;
             Ok(HeadUpdate::Replace {
-                next: Box::new(head_with_writer(head, next_epoch, params)),
+                next: Box::new(head_with_writer(head, next_epoch, context)),
                 outcome: AcquiredWriter {
-                    writer_id: params.writer_id.clone(),
-                    writer_session_id: params.writer_session_id.clone(),
+                    writer_id: context.writer_id.clone(),
+                    writer_session_id: context.writer_session_id.clone(),
                     writer_epoch: next_epoch,
                 },
             })
@@ -115,7 +116,7 @@ fn next_writer_epoch(active: WriterEpoch) -> Result<WriterEpoch, WriterEpochAcqu
 fn head_with_writer(
     current_head: &HeadState,
     writer_epoch: WriterEpoch,
-    params: &MutationContext,
+    context: &MutationContext,
 ) -> HeadState {
     HeadState {
         namespace_id: current_head.namespace_id.clone(),
@@ -123,9 +124,9 @@ fn head_with_writer(
         head_commit_id: current_head.head_commit_id.clone(),
         writer_epoch,
         writer: Some(WriterBlock {
-            writer_id: params.writer_id.clone(),
-            writer_session_id: params.writer_session_id.clone(),
-            acquired_at_ms: params.now_ms,
+            writer_id: context.writer_id.clone(),
+            writer_session_id: context.writer_session_id.clone(),
+            acquired_at_ms: context.now_ms,
         }),
         next_inode_id: current_head.next_inode_id,
         visible_wal_tip: current_head.visible_wal_tip.clone(),
@@ -139,9 +140,14 @@ impl From<ControlUpdateError> for WriterEpochAcquireError {
         match value {
             ControlUpdateError::LoadHead(error) => Self::LoadHead(error),
             ControlUpdateError::MissingEtag { object_key } => Self::MissingHeadEtag { object_key },
-            ControlUpdateError::Codec(message) | ControlUpdateError::Store(message) => {
-                Self::HeadWrite(message)
+            ControlUpdateError::Codec {
+                object_key,
+                message,
             }
+            | ControlUpdateError::Store {
+                object_key,
+                message,
+            } => Self::HeadWrite(format!("`{object_key}`: {message}")),
             ControlUpdateError::RetryExhausted { attempts } => Self::RetryExhausted { attempts },
         }
     }
@@ -169,6 +175,7 @@ mod tests {
                 store,
                 vec![NamespaceMutationCandidate::commit(request)],
                 context,
+                &crate::protocol::PublishTailOptions::default(),
             )
             .await
             .results
@@ -411,7 +418,8 @@ mod tests {
             preconditions: Vec::new(),
             ops: vec![ApiCommitOp::CreateDirectory {
                 parent_inode_id: InodeId(1),
-                display_name: display_name.to_owned(),
+                display_name: loonfs_api::DisplayName::parse(display_name)
+                    .expect("valid display name"),
             }],
             message: None,
         }

@@ -14,5 +14,4 @@ pub(crate) mod status;
 pub(crate) mod writer_epoch;
 
 pub use bootstrap::BootstrapNamespaceError;
-pub use loonfs_api::wire::control::{HeadState, HeadStateEnvelope};
 pub use repair::repair_namespace;

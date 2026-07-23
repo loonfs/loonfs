@@ -889,7 +889,8 @@ async fn commit_operations_with_external_ref_fails_typed_without_content_io() {
                 preconditions: Vec::new(),
                 ops: vec![CommitOp::CreateFile {
                     parent_inode_id: InodeId(1),
-                    display_name: "file.txt".to_owned(),
+                    display_name: loonfs_api::DisplayName::parse("file.txt")
+                        .expect("valid display name"),
                     content_ref: content_ref.clone(),
                 }],
                 message: None,
@@ -996,22 +997,26 @@ async fn prepared_commit_after_concurrent_preparations_uses_no_publication_conte
                 ops: vec![
                     CommitOp::CreateFile {
                         parent_inode_id: InodeId(1),
-                        display_name: "first.txt".to_owned(),
+                        display_name: loonfs_api::DisplayName::parse("first.txt")
+                            .expect("valid display name"),
                         content_ref: first.clone(),
                     },
                     CommitOp::CreateFile {
                         parent_inode_id: InodeId(1),
-                        display_name: "first-copy.txt".to_owned(),
+                        display_name: loonfs_api::DisplayName::parse("first-copy.txt")
+                            .expect("valid display name"),
                         content_ref: first,
                     },
                     CommitOp::CreateFile {
                         parent_inode_id: InodeId(1),
-                        display_name: "second.txt".to_owned(),
+                        display_name: loonfs_api::DisplayName::parse("second.txt")
+                            .expect("valid display name"),
                         content_ref: second,
                     },
                     CommitOp::CreateFile {
                         parent_inode_id: InodeId(1),
-                        display_name: "third.txt".to_owned(),
+                        display_name: loonfs_api::DisplayName::parse("third.txt")
+                            .expect("valid display name"),
                         content_ref: third,
                     },
                 ],

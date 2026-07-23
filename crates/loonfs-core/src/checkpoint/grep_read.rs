@@ -50,9 +50,7 @@ pub async fn load_grep_change_feed<S: ObjectStore + ?Sized>(
 ) -> Result<GrepChangeFeed> {
     let head = load_namespace_head_control(store, namespace_id)
         .await
-        .map_err(|error| {
-            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
-        })?
+        .map_err(CoreError::load_head)?
         .state;
     if head.state == NamespaceState::Deleted {
         return Err(CoreError::NamespaceDeleted {
@@ -61,9 +59,7 @@ pub async fn load_grep_change_feed<S: ObjectStore + ?Sized>(
     }
     let floor_seq = read_wal_floor_seq_or_zero(store, namespace_id)
         .await
-        .map_err(|error| {
-            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
-        })?;
+        .map_err(CoreError::load_head)?;
     if after_seq < floor_seq {
         return Ok(GrepChangeFeed::RebootstrapRequired);
     }

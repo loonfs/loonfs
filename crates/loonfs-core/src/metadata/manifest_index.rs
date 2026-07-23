@@ -6,7 +6,9 @@ use super::row_decode::{
     direntry_unbind_from_manifest_row, inode_from_manifest_row, revision_from_manifest_row,
     tombstone_from_manifest_row,
 };
-use crate::checkpoint::{string_prefix_upper_bound, ManifestLoadError, VerifiedMetadataTables};
+use crate::checkpoint::{
+    string_prefix_upper_bound, ManifestLoadError, Readahead, VerifiedMetadataTables,
+};
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
 use crate::metadata::{
@@ -15,7 +17,7 @@ use crate::metadata::{
 };
 use loonfs_api::wire::manifest::lookup_keys;
 use loonfs_api::wire::manifest::MetadataTableFamily;
-use loonfs_api::{ChangeSeq, CommitId, InodeId, RevisionNo};
+use loonfs_api::{ChangeSeq, CommitId, InodeId, NameKey, RevisionNo};
 use loonfs_objectstore::ObjectStore;
 
 pub(super) fn manifest_error_to_core(error: ManifestLoadError) -> CoreError {
@@ -79,16 +81,16 @@ pub(super) async fn direntry_binds_for_parent_name_key_page<S: ObjectStore + ?Si
 pub(super) async fn direntry_binds_for_parent_name<S: ObjectStore + ?Sized>(
     tables: &VerifiedMetadataTables<'_, S>,
     parent_inode_id: InodeId,
-    name_key: &str,
+    name_key: &NameKey,
 ) -> Result<Vec<DirentryBindRecord>> {
-    let filter_probe = lookup_keys::direntry_bind_probe(parent_inode_id, name_key);
-    let prefix = lookup_keys::direntry_bind_prefix(parent_inode_id, name_key);
+    let filter_probe = lookup_keys::direntry_bind_probe(parent_inode_id, name_key.as_str());
+    let prefix = lookup_keys::direntry_bind_prefix(parent_inode_id, name_key.as_str());
     tables
         .scan_prefix_for_lookup(
             MetadataTableFamily::DirentryBinds,
             &prefix,
             &filter_probe,
-            false,
+            Readahead::Disabled,
         )
         .await
         .map_err(manifest_error_to_core)?
@@ -108,7 +110,7 @@ pub(super) async fn direntry_binds_for_child<S: ObjectStore + ?Sized>(
             MetadataTableFamily::DirentryChildBinds,
             &prefix,
             &filter_probe,
-            true,
+            Readahead::Enabled,
         )
         .await
         .map_err(manifest_error_to_core)?
@@ -134,7 +136,7 @@ pub(super) async fn direntry_unbinds_for_binding<S: ObjectStore + ?Sized>(
             MetadataTableFamily::DirentryUnbinds,
             &prefix,
             &filter_probe,
-            false,
+            Readahead::Disabled,
         )
         .await
         .map_err(manifest_error_to_core)?
@@ -154,12 +156,14 @@ pub(super) async fn direntry_unbinds_for_binding<S: ObjectStore + ?Sized>(
 pub(super) async fn direntry_unbinds_for_parent_name_range<S: ObjectStore + ?Sized>(
     tables: &VerifiedMetadataTables<'_, S>,
     parent_inode_id: InodeId,
-    first_name_key: &str,
-    last_name_key: &str,
+    first_name_key: &NameKey,
+    last_name_key: &NameKey,
 ) -> Result<Vec<DirentryUnbindRecord>> {
     const UNBIND_RANGE_SCAN_LIMIT: usize = 512;
-    let mut lower_bound = lookup_keys::direntry_unbind_name_prefix(parent_inode_id, first_name_key);
-    let last_name_prefix = lookup_keys::direntry_unbind_name_prefix(parent_inode_id, last_name_key);
+    let mut lower_bound =
+        lookup_keys::direntry_unbind_name_prefix(parent_inode_id, first_name_key.as_str());
+    let last_name_prefix =
+        lookup_keys::direntry_unbind_name_prefix(parent_inode_id, last_name_key.as_str());
     let upper_bound = string_prefix_upper_bound(&last_name_prefix);
 
     let mut unbinds = Vec::new();
@@ -285,7 +289,7 @@ pub(super) async fn tombstones_for_root<S: ObjectStore + ?Sized>(
             MetadataTableFamily::Tombstones,
             &prefix,
             &filter_probe,
-            true,
+            Readahead::Enabled,
         )
         .await
         .map_err(manifest_error_to_core)?
@@ -305,7 +309,7 @@ pub(super) async fn commit_receipt<S: ObjectStore + ?Sized>(
             MetadataTableFamily::CommitReceipts,
             &prefix,
             &filter_probe,
-            false,
+            Readahead::Disabled,
         )
         .await
         .map_err(manifest_error_to_core)?

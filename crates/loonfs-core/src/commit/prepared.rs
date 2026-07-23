@@ -101,7 +101,7 @@ mod tests {
             writer_epoch: WriterEpoch(1),
             ops: vec![CommitOp::CreateDirectory {
                 parent_inode_id: InodeId(1),
-                display_name: "docs".to_owned(),
+                display_name: loonfs_api::DisplayName::parse("docs").expect("valid display name"),
             }],
             preconditions: Vec::new(),
             message: None,
@@ -117,7 +117,7 @@ mod tests {
             validated_ops: vec![ValidatedOp::CreateDir {
                 op_index: 0,
                 parent_inode_id: InodeId(1),
-                display_name: "docs".to_owned(),
+                display_name: loonfs_api::DisplayName::parse("docs").expect("valid display name"),
                 name_key: NameKey::parse("docs").expect("valid name key"),
                 child_inode_id: InodeId(2),
                 create_inode_delta_index: 0,

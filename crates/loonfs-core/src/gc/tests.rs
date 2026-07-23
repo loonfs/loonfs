@@ -5,6 +5,7 @@ use super::reap::{condemn_checkpoint_if_aged, list_prefix, CheckpointCondemn};
 use super::run::{gc_namespace, gc_namespace_with_reverify_chunk};
 use crate::checkpoint::advance_retention_floor;
 use crate::checkpoint::record::set_checkpoint_record_state;
+use crate::checkpoint::tests::create_checkpoint;
 use crate::context::MutationContext;
 use crate::error::CoreError;
 use crate::limits::GC_MIN_GRACE_WINDOW_MS;
@@ -20,24 +21,6 @@ use loonfs_objectstore::keys::{
 use loonfs_objectstore::ObjectStore;
 use std::num::NonZeroUsize;
 
-/// GC lifecycle tests pin as one user owner; owner-specific release
-/// rules are exercised in the fork and release suites.
-async fn create_checkpoint<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    context: &MutationContext,
-) -> Result<loonfs_api::CreateCheckpointResponse, CoreError> {
-    crate::checkpoint::create_checkpoint(
-        store,
-        namespace_id,
-        CheckpointOwner::User {
-            name: "test-pin".to_owned(),
-        },
-        None,
-        context,
-    )
-    .await
-}
 use crate::commit_engine::{NamespaceCommitEngine, NamespaceMutationCandidate};
 use crate::namespace::bootstrap::bootstrap_namespace;
 use crate::namespace::delete::delete_namespace;
@@ -81,7 +64,7 @@ async fn now_after_newest_object(
     namespace_id: &NamespaceId,
     offset_ms: u64,
 ) -> u64 {
-    let prefix = format!("namespaces/{}/", namespace_id.as_str());
+    let prefix = loonfs_objectstore::keys::namespace_prefix(namespace_id);
     let mut newest = 0;
     for key in store.list_prefix(&prefix).await.expect("list namespace") {
         let modified = store
@@ -125,6 +108,7 @@ async fn write_file<S: ObjectStore>(
                 vec![prepared],
             )],
             context,
+            &crate::protocol::PublishTailOptions::default(),
         )
         .await
         .results

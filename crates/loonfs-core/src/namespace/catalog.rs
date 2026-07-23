@@ -11,7 +11,7 @@ use crate::namespace::control::{
 use bytes::Bytes;
 use loonfs_api::wire::control::NamespaceConfigState;
 use loonfs_api::wire::control::NamespaceState;
-use loonfs_api::{ContentStoreId, NamespaceId, NamespaceIdValidationError};
+use loonfs_api::{ContentStoreId, NamespaceId};
 use loonfs_objectstore::keys::{metadata_root, namespace_config, wal_floor, wal_head};
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 use thiserror::Error;
@@ -65,8 +65,6 @@ pub(crate) enum NamespaceInitializationState {
 // explicit so `?` cannot pick a variant silently.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub(crate) enum NamespaceInitializationError {
-    #[error(transparent)]
-    InvalidNamespaceId(#[from] NamespaceIdValidationError),
     #[error("failed to inspect namespace descriptor object `{object_key}`: {message}")]
     InspectNamespaceDescriptor {
         object_key: String,
@@ -132,8 +130,6 @@ pub(crate) async fn namespace_initialization_state<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> Result<NamespaceInitializationState, NamespaceInitializationError> {
-    NamespaceId::parse(namespace_id.as_str())?;
-
     let descriptor_key = namespace_config(namespace_id.as_str());
     let head_key = wal_head(namespace_id.as_str());
 
@@ -270,9 +266,6 @@ pub(crate) fn map_namespace_initialization_error_to_core(
     error: NamespaceInitializationError,
 ) -> CoreError {
     match error {
-        NamespaceInitializationError::InvalidNamespaceId(error) => {
-            CoreError::InvalidNamespaceId(error)
-        }
         NamespaceInitializationError::LoadNamespaceDescriptor(error) => {
             CoreError::MetadataProjection(MetadataProjectionLoadError::LoadNamespaceDescriptor(
                 error,
@@ -346,11 +339,11 @@ fn namespace_install_conflict_error(
     state: NamespaceInitializationState,
 ) -> CoreError {
     match state {
-        NamespaceInitializationState::Complete => CoreError::NamespaceAlreadyExists {
+        NamespaceInitializationState::Complete => CoreError::NamespaceExists {
             namespace_id: namespace_id.clone(),
         },
         NamespaceInitializationState::Partial | NamespaceInitializationState::PreHeadDebris => {
-            CoreError::NamespacePartiallyInitialized {
+            CoreError::NamespacePartial {
                 namespace_id: namespace_id.clone(),
             }
         }

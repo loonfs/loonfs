@@ -3,8 +3,9 @@
 
 use super::error::ManifestLoadError;
 use super::load::load_namespace_manifest_envelope_if_present;
-use crate::error::CoreError;
 use crate::error::MetadataProjectionLoadError;
+use crate::error::{CoreError, Result};
+use crate::limits::CONTENTION_RETRY_LIMIT;
 use crate::namespace::control::read_metadata_root_object;
 use bytes::Bytes;
 use loonfs_api::wire::control::{
@@ -14,10 +15,6 @@ use loonfs_api::wire::manifest::{encode_namespace_manifest_json, NamespaceManife
 use loonfs_api::{ChangeSeq, ManifestId, ManifestObjectId, NamespaceId};
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
-
-// Root CAS retries are about publisher concurrency, not manifest id
-// allocation. Keep this separate so errors describe the failed phase.
-pub(super) const ROOT_CAS_RETRY_LIMIT: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ManifestPublicationOutcome {
@@ -38,7 +35,7 @@ pub(super) enum ManifestPublicationOutcome {
 pub(crate) async fn write_namespace_manifest<S: ObjectStore + ?Sized>(
     store: &S,
     manifest: &NamespaceManifestEnvelope,
-) -> Result<(), MetadataProjectionLoadError> {
+) -> std::result::Result<(), MetadataProjectionLoadError> {
     let manifest_key = metadata_manifest_object(
         manifest.payload.namespace_id.as_str(),
         &manifest.payload.manifest_object_id,
@@ -106,7 +103,7 @@ pub(super) async fn publish_metadata_root<S: ObjectStore + ?Sized>(
     expected_predecessor: &ManifestObjectId,
     updated_at_ms: u64,
     writer_version: &str,
-) -> Result<ManifestPublicationOutcome, CoreError> {
+) -> Result<ManifestPublicationOutcome> {
     // Manifest publication CASes metadata/root.json, never the WAL head:
     // head watchers see only commits. Updates are monotonic in
     // manifest_head_seq; a same-seq replacement may reference a different
@@ -124,12 +121,10 @@ pub(super) async fn publish_metadata_root<S: ObjectStore + ?Sized>(
     let manifest_id = manifest.payload.manifest_id;
     let manifest_object_id = manifest.payload.manifest_object_id.clone();
     let manifest_head_seq = manifest.payload.head_seq;
-    for _attempt in 0..ROOT_CAS_RETRY_LIMIT {
+    for _attempt in 0..CONTENTION_RETRY_LIMIT {
         let loaded = read_metadata_root_object(store, namespace_id)
             .await
-            .map_err(|error| {
-                CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
-            })?;
+            .map_err(CoreError::load_head)?;
         let current = &loaded.envelope.state;
         if current.manifest_id == manifest_id
             && current.manifest_object_id == manifest_object_id
@@ -180,11 +175,7 @@ pub(super) async fn publish_metadata_root<S: ObjectStore + ?Sized>(
             Err(error) => {
                 let recovered = read_metadata_root_object(store, namespace_id)
                     .await
-                    .map_err(|reload_error| {
-                        CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(
-                            reload_error,
-                        ))
-                    })?
+                    .map_err(CoreError::load_head)?
                     .envelope
                     .state;
                 if root_points_to_candidate(&recovered, &next) {

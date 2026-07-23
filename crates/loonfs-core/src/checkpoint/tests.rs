@@ -64,7 +64,7 @@ use tempfile::tempdir;
 /// Every lifecycle test in this file pins as one user owner; owner-specific
 /// behavior (fork owners, distinct-owner records) is exercised explicitly
 /// where it matters.
-async fn create_checkpoint<S: ObjectStore + ?Sized>(
+pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
@@ -1049,7 +1049,7 @@ fn drop_pass_keeps_the_floor_visible_binding_across_a_later_rename() {
     let bind = |seq: u64, delta: u32| MetadataRow::DirentryBind {
         parent_inode_id: InodeId(1),
         name_key: NameKey::parse("docs").expect("valid name key"),
-        display_name: "docs".to_owned(),
+        display_name: loonfs_api::DisplayName::parse("docs").expect("valid display name"),
         child_inode_id: InodeId(2),
         bind_seq: ChangeSeq(seq),
         bind_delta_index: delta,
@@ -1092,7 +1092,7 @@ fn drop_pass_resolves_same_seq_rebinds_by_delta_index() {
     let bind = |delta: u32| MetadataRow::DirentryBind {
         parent_inode_id: InodeId(1),
         name_key: NameKey::parse("docs").expect("valid name key"),
-        display_name: "docs".to_owned(),
+        display_name: loonfs_api::DisplayName::parse("docs").expect("valid display name"),
         child_inode_id: InodeId(2),
         bind_seq: ChangeSeq(1),
         bind_delta_index: delta,
@@ -1144,7 +1144,7 @@ fn drop_pass_refuses_superseded_bind_without_unbind() {
     let bind = |delta: u32| MetadataRow::DirentryBind {
         parent_inode_id: InodeId(1),
         name_key: NameKey::parse("docs").expect("valid name key"),
-        display_name: "docs".to_owned(),
+        display_name: loonfs_api::DisplayName::parse("docs").expect("valid display name"),
         child_inode_id: InodeId(2),
         bind_seq: ChangeSeq(1),
         bind_delta_index: delta,
@@ -1390,7 +1390,7 @@ async fn base_rebuild_drops_bindings_unbound_below_floor() {
     );
     assert!(!binds.iter().any(|row| matches!(
         row,
-        MetadataRow::DirentryBind { display_name, .. } if display_name == "tmp.txt"
+        MetadataRow::DirentryBind { display_name, .. } if display_name.as_str() == "tmp.txt"
     )));
     let unbinds = manifest_rows_for_family(
         &materialized.metadata_state,
@@ -2584,7 +2584,9 @@ async fn table_range_page_merges_base_and_l0_in_row_key_order() {
     let display_names = page
         .into_iter()
         .filter_map(|row| match row {
-            MetadataRow::DirentryBind { display_name, .. } => Some(display_name),
+            MetadataRow::DirentryBind { display_name, .. } => {
+                Some(display_name.as_str().to_owned())
+            }
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -2791,7 +2793,7 @@ async fn lookup_skips_segments_whose_filter_rules_the_name_out() {
             ApiMetadataTableFamily::DirentryBinds,
             &prefix,
             &filter_probe,
-            false,
+            super::scan::Readahead::Disabled,
         )
         .await
         .expect("filtered lookup");
@@ -4227,7 +4229,12 @@ async fn point_lookups_skip_inline_filtered_runs_without_fetches() {
 
     store.reset_metadata_sst_gets();
     let rows = tables
-        .scan_prefix_for_lookup(ApiMetadataTableFamily::DirentryBinds, &prefix, &probe, true)
+        .scan_prefix_for_lookup(
+            ApiMetadataTableFamily::DirentryBinds,
+            &prefix,
+            &probe,
+            super::scan::Readahead::Enabled,
+        )
         .await
         .expect("point lookup");
     assert_eq!(rows.len(), 1, "exactly one bind row for the probed name");
@@ -4258,7 +4265,12 @@ async fn point_lookups_skip_inline_filtered_runs_without_fetches() {
         .expect("load stripped tables");
     store.reset_metadata_sst_gets();
     let stripped_rows = stripped_tables
-        .scan_prefix_for_lookup(ApiMetadataTableFamily::DirentryBinds, &prefix, &probe, true)
+        .scan_prefix_for_lookup(
+            ApiMetadataTableFamily::DirentryBinds,
+            &prefix,
+            &probe,
+            super::scan::Readahead::Enabled,
+        )
         .await
         .expect("point lookup without inline filters");
     assert_eq!(stripped_rows, rows);

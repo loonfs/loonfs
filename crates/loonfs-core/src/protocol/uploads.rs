@@ -8,6 +8,7 @@ use crate::control_update::{
 use crate::engine::{BeginDirectPutUploadTargetResponse, DirectPutUploadTarget};
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
+use crate::limits::CONTENTION_RETRY_LIMIT;
 use crate::namespace::catalog::{
     load_namespace_content_store_id, map_namespace_initialization_error_to_core,
     namespace_initialization_state, NamespaceInitializationState,
@@ -30,8 +31,6 @@ use loonfs_api::wire::control::{
 use loonfs_api::{ContentRef, ContentRefKind, ContentStoreId, NamespaceId, UploadId};
 use loonfs_objectstore::keys::{content_blob, namespace_config, upload_session};
 use loonfs_objectstore::ObjectStore;
-
-const UPLOAD_SESSION_RETRY_LIMIT: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum UploadSessionSweep {
@@ -178,7 +177,7 @@ async fn ensure_upload_namespace_available<S: ObjectStore + ?Sized>(
             ),
         )),
         Ok(NamespaceInitializationState::Partial | NamespaceInitializationState::PreHeadDebris) => {
-            Err(CoreError::NamespacePartiallyInitialized {
+            Err(CoreError::NamespacePartial {
                 namespace_id: namespace_id.clone(),
             })
         }
@@ -203,7 +202,7 @@ pub(crate) async fn upload_content<S: ObjectStore + ?Sized>(
         namespace_id,
         upload_id,
         &context.writer_version,
-        UPLOAD_SESSION_RETRY_LIMIT,
+        CONTENTION_RETRY_LIMIT,
         |mut state| {
             let content_ref = content_ref.clone();
             let object_key = object_key.clone();
@@ -266,7 +265,7 @@ pub(crate) async fn complete_upload<S: ObjectStore + ?Sized>(
         namespace_id,
         upload_id,
         &context.writer_version,
-        UPLOAD_SESSION_RETRY_LIMIT,
+        CONTENTION_RETRY_LIMIT,
         |mut state| {
             let namespace_id = namespace_id.clone();
             let content_store_id = content_store_id.clone();

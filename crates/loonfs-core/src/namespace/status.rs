@@ -50,7 +50,7 @@ pub async fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
             ));
         }
         Ok(NamespaceInitializationState::Partial | NamespaceInitializationState::PreHeadDebris) => {
-            return Err(CoreError::NamespacePartiallyInitialized {
+            return Err(CoreError::NamespacePartial {
                 namespace_id: expected_namespace_id.clone(),
             });
         }

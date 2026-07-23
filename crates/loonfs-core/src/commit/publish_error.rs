@@ -55,8 +55,8 @@ pub enum CommitHeadPublishError {
     /// response). The commit may or may not be visible.
     #[error("head compare-and-swap outcome unknown: {0}")]
     OutcomeUnknown(String),
-    #[error("head codec error: {0}")]
-    Codec(String),
-    #[error("head object store error: {0}")]
-    Store(String),
+    #[error("head codec error for `{object_key}`: {message}")]
+    Codec { object_key: String, message: String },
+    #[error("head object store error for `{object_key}`: {message}")]
+    Store { object_key: String, message: String },
 }

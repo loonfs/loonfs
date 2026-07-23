@@ -67,9 +67,8 @@ pub(super) struct MetadataTableCacheKey {
 /// One decoded, verified object the cache holds: a CRC-checked segment
 /// section (index, filter, or data) or a validated namespace manifest.
 /// Everything shares the cache and its byte budget; the key's `block_kind`
-/// and `block_offset` make collisions between kinds impossible. Data
-/// Data blocks hold metadata rows; a key's identity is the segment payload
-/// checksum, so entries for distinct immutable objects cannot collide.
+/// and `block_offset` make collisions between kinds impossible. Data blocks
+/// hold metadata rows.
 #[derive(Debug, Clone)]
 pub(super) enum DecodedMetadataTableBlock {
     Index {
@@ -165,7 +164,7 @@ impl MetadataTableCache {
     }
 
     /// Resolves one block access through a single-flight cell.
-    pub(super) async fn get_or_fetch<E, F, Fut>(
+    pub(super) async fn get_or_load<E, F, Fut>(
         &self,
         cache_key: &MetadataTableCacheKey,
         fetch: F,
@@ -178,7 +177,7 @@ impl MetadataTableCache {
             let mut in_flight = self
                 .in_flight
                 .lock()
-                .expect("metadata table cache in-flight lock poisoned");
+                .expect("metadata table cache in-flight lock should not be poisoned");
             Arc::clone(
                 in_flight
                     .entry(cache_key.clone())
@@ -199,7 +198,7 @@ impl MetadataTableCache {
         let mut in_flight = self
             .in_flight
             .lock()
-            .expect("metadata table cache in-flight lock poisoned");
+            .expect("metadata table cache in-flight lock should not be poisoned");
         if in_flight
             .get(cache_key)
             .is_some_and(|current| Arc::ptr_eq(current, &cell))
@@ -237,7 +236,7 @@ impl MetadataTableCache {
         let mut inner = self
             .inner
             .lock()
-            .expect("metadata table cache lock poisoned");
+            .expect("metadata table cache lock should not be poisoned");
         let Some(block) = inner.entries.get(key).map(|slot| slot.block.clone()) else {
             self.stats.misses.fetch_add(1, Ordering::SeqCst);
             return None;
@@ -254,7 +253,7 @@ impl MetadataTableCache {
         let mut inner = self
             .inner
             .lock()
-            .expect("metadata table cache lock poisoned");
+            .expect("metadata table cache lock should not be poisoned");
         let decoded_byte_len = block.decoded_byte_len();
         if let Some(previous) = inner.entries.insert(
             key.clone(),
@@ -420,7 +419,7 @@ impl WalTailProjectionCache {
         let inner = self
             .inner
             .lock()
-            .expect("wal tail projection cache lock poisoned");
+            .expect("wal tail projection cache lock should not be poisoned");
         WalTailProjectionCacheStats {
             hits: self.stats.hits.load(Ordering::SeqCst),
             misses: self.stats.misses.load(Ordering::SeqCst),
@@ -443,7 +442,7 @@ impl WalTailProjectionCache {
         let mut inner = self
             .inner
             .lock()
-            .expect("wal tail projection cache lock poisoned");
+            .expect("wal tail projection cache lock should not be poisoned");
         let Some(rows) = inner.entries.get(key).map(CachedWalTailProjection::rows) else {
             self.stats.misses.fetch_add(1, Ordering::SeqCst);
             return None;
@@ -473,7 +472,7 @@ impl WalTailProjectionCache {
         let mut inner = self
             .inner
             .lock()
-            .expect("wal tail projection cache lock poisoned");
+            .expect("wal tail projection cache lock should not be poisoned");
         if let Some(previous) = inner.entries.insert(key.clone(), cached) {
             let (rows, bytes) = previous.weight();
             inner.cached_rows = inner.cached_rows.saturating_sub(rows);
@@ -508,7 +507,7 @@ impl WalTailProjectionCache {
         let mut inner = self
             .inner
             .lock()
-            .expect("wal tail projection cache lock poisoned");
+            .expect("wal tail projection cache lock should not be poisoned");
         let keys = inner
             .entries
             .keys()
@@ -653,14 +652,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_or_fetch_retries_after_a_failed_fetch() {
+    async fn get_or_load_retries_after_a_failed_load() {
         let cache = MetadataTableCache::new(MetadataTableCacheConfig::default());
         let failed: Result<_, String> = cache
-            .get_or_fetch(&key("a"), || async { Err("transport".to_owned()) })
+            .get_or_load(&key("a"), || async { Err("transport".to_owned()) })
             .await;
         assert!(failed.is_err());
         let recovered: Result<_, String> = cache
-            .get_or_fetch(&key("a"), || async { Ok(block(1)) })
+            .get_or_load(&key("a"), || async { Ok(block(1)) })
             .await;
         assert!(
             recovered.is_ok(),
@@ -669,14 +668,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_or_fetch_counts_one_miss_and_populates_for_later_hits() {
+    async fn get_or_load_counts_one_miss_and_populates_for_later_hits() {
         let cache = MetadataTableCache::new(MetadataTableCacheConfig::default());
         let fetched: Result<_, String> = cache
-            .get_or_fetch(&key("a"), || async { Ok(block(1)) })
+            .get_or_load(&key("a"), || async { Ok(block(1)) })
             .await;
         assert!(fetched.is_ok());
         let cached: Result<_, String> = cache
-            .get_or_fetch(&key("a"), || async {
+            .get_or_load(&key("a"), || async {
                 Err("a populated key must not re-fetch".to_owned())
             })
             .await;

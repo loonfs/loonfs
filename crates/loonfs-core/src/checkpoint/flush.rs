@@ -10,7 +10,8 @@
 use super::build::build_manifest_l0_run_tables;
 use super::error::ManifestLoadError;
 use super::load::{
-    head_from_manifest, load_namespace_manifest_envelope_if_present, load_verified_manifest_tables,
+    ensure_root_matches_manifest, head_from_manifest, load_namespace_manifest_envelope_if_present,
+    load_verified_manifest_tables,
 };
 use super::publish::{publish_metadata_root, write_namespace_manifest, ManifestPublicationOutcome};
 use super::runs::flatten_manifest_tables;
@@ -20,7 +21,7 @@ use crate::context::MutationContext;
 use crate::error::CoreError;
 use crate::error::MetadataProjectionLoadError;
 use crate::error::Result;
-use crate::limits::METADATA_PUBLICATION_BUDGET_MS;
+use crate::limits::{CONTENTION_RETRY_LIMIT, METADATA_PUBLICATION_BUDGET_MS};
 use crate::metadata::MetadataState;
 use crate::namespace::catalog::load_namespace_catalog_entry;
 use crate::namespace::control::{read_head_and_metadata_root, read_wal_floor_seq_or_zero};
@@ -35,13 +36,6 @@ use loonfs_api::{
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::ObjectStore;
 use tracing::Instrument;
-
-// Manifest id allocation can race with other manifest publishers. Exhausting
-// this loop means the candidate id range was already occupied.
-pub(super) const MANIFEST_ALLOCATION_RETRY_LIMIT: usize = 8;
-// A WAL flush can race with another manifest publisher. Each retry
-// rebases onto a fresh projection of the newest head and root.
-const WAL_FLUSH_RETRY_LIMIT: usize = 8;
 
 /// The basis one flush attempt settled on: the manifest this attempt
 /// published, or the one already covering the head.
@@ -93,7 +87,7 @@ pub(super) async fn flush_wal_with_timer<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     timer: &dyn MonotonicTimer,
 ) -> Result<FlushWalResponse> {
-    for _attempt in 0..WAL_FLUSH_RETRY_LIMIT {
+    for _attempt in 0..CONTENTION_RETRY_LIMIT {
         match try_flush_wal(store, namespace_id, context, timer).await? {
             TryFlushWal::Flushed(basis) => {
                 return Ok(FlushWalResponse {
@@ -149,7 +143,7 @@ pub(super) async fn try_flush_wal<S: ObjectStore + ?Sized>(
 
     let manifest_id = next_manifest_id_after(projection.root.manifest_id)?;
     let mut written_manifest = None;
-    for _allocation_attempt in 0..MANIFEST_ALLOCATION_RETRY_LIMIT {
+    for _allocation_attempt in 0..CONTENTION_RETRY_LIMIT {
         let manifest_object_id = ManifestObjectId::generate(manifest_id);
         let manifest_key = metadata_manifest_object(namespace_id.as_str(), &manifest_object_id);
         match load_namespace_manifest_envelope_if_present(
@@ -270,14 +264,10 @@ pub(super) async fn load_root_projection<'a, S: ObjectStore + ?Sized>(
         .map_err(|error| CoreError::MetadataProjection(error.into()))?;
     let (loaded_head, loaded_root) = read_head_and_metadata_root(store, namespace_id)
         .await
-        .map_err(|error| {
-            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
-        })?;
+        .map_err(CoreError::load_head)?;
     let floor_seq = read_wal_floor_seq_or_zero(store, namespace_id)
         .await
-        .map_err(|error| {
-            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
-        })?;
+        .map_err(CoreError::load_head)?;
     let head = loaded_head.envelope.state;
     let root = loaded_root.envelope.state;
     if head.state == NamespaceState::Deleted {
@@ -293,15 +283,7 @@ pub(super) async fn load_root_projection<'a, S: ObjectStore + ?Sized>(
             .map_err(|error| {
                 CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
             })?;
-    if manifest_tables.manifest().payload_checksum != root.manifest_payload_checksum {
-        return Err(CoreError::NamespaceCorrupt(format!(
-            "metadata root for `{}` references manifest `{}` with checksum {} but the manifest carries {}",
-            namespace_id.as_str(),
-            root.manifest_id,
-            root.manifest_payload_checksum,
-            manifest_tables.manifest().payload_checksum,
-        )));
-    }
+    ensure_root_matches_manifest(namespace_id, &root, manifest_tables.manifest())?;
     let manifest_head = head_from_manifest(&head, manifest_tables.manifest());
     let wal_chain = load_validated_wal_chain(
         store,

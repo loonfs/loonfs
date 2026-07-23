@@ -16,6 +16,7 @@ use crate::commit::CommitHeadPublishError;
 use crate::context::MutationContext;
 use crate::error::CoreError;
 use crate::error::Result;
+use crate::limits::CONTENTION_RETRY_LIMIT;
 use crate::namespace::bootstrap::bootstrap_metadata_state;
 use crate::timing::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_api::wire::control::HeadState;
@@ -30,11 +31,6 @@ use loonfs_objectstore::ObjectStore;
 use super::load::append_rows_to_metadata;
 #[cfg(test)]
 use crate::metadata::MetadataStateBuilder;
-
-// Checkpoint publication can race with another manifest update. Retrying here
-// preserves one checkpoint id while rebasing its checkpoint record onto the
-// newest current manifest.
-pub(super) const CHECKPOINT_PUBLICATION_RETRY_LIMIT: usize = 8;
 
 pub(crate) use crate::limits::CHECKPOINT_VERIFY_BUDGET_MS;
 
@@ -64,7 +60,7 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
     validate_checkpoint_owner(&owner, expires_at_ms)?;
     let timer = StdMonotonicTimer::default();
     let mut saw_root_cas_race = false;
-    for _publication_attempt in 0..CHECKPOINT_PUBLICATION_RETRY_LIMIT {
+    for _publication_attempt in 0..CONTENTION_RETRY_LIMIT {
         let basis = match try_flush_wal(store, namespace_id, context, &timer).await? {
             TryFlushWal::Flushed(basis) => basis,
             TryFlushWal::RaceLost => {

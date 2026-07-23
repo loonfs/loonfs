@@ -6,7 +6,7 @@ use crate::envelope::EnvelopeCodecError;
 use crate::sst_blocks::BlockHandle;
 use crate::WriterEpoch;
 use crate::{
-    ChangeSeq, CheckpointId, CommitId, ContentRef, InodeId, InodeKind, ManifestId,
+    ChangeSeq, CheckpointId, CommitId, ContentRef, DisplayName, InodeId, InodeKind, ManifestId,
     ManifestObjectId, MetadataTableId, NameKey, NamespaceId, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
@@ -94,7 +94,7 @@ pub enum MetadataRow {
     DirentryBind {
         parent_inode_id: InodeId,
         name_key: NameKey,
-        display_name: String,
+        display_name: DisplayName,
         child_inode_id: InodeId,
         bind_seq: ChangeSeq,
         bind_delta_index: u32,
@@ -656,7 +656,7 @@ mod tests {
         let row = super::MetadataRow::DirentryBind {
             parent_inode_id: InodeId(9),
             name_key: NameKey::parse("report.txt").expect("valid name key"),
-            display_name: "Report.txt".to_owned(),
+            display_name: crate::DisplayName::parse("Report.txt").expect("valid display name"),
             child_inode_id: InodeId(42),
             bind_seq: ChangeSeq(17),
             bind_delta_index: 3,
@@ -677,7 +677,7 @@ mod tests {
         let row = super::MetadataRow::DirentryBind {
             parent_inode_id: InodeId(9),
             name_key: NameKey::parse("report-2024").expect("valid name key"),
-            display_name: "report-2024".to_owned(),
+            display_name: crate::DisplayName::parse("report-2024").expect("valid display name"),
             child_inode_id: InodeId(42),
             bind_seq: ChangeSeq(17),
             bind_delta_index: 3,

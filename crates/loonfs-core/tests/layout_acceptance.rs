@@ -17,7 +17,9 @@ use loonfs_core::cache::{
 use loonfs_core::content::{prepare_existing_content_ref, store_bytes_as_content};
 use loonfs_core::control::load_namespace_read_anchor;
 use loonfs_core::gc::{gc_namespace, GcConfig};
-use loonfs_core::publish::{NamespaceCommitEngine, NamespaceMutationCandidate, PathMutationIntent};
+use loonfs_core::publish::{
+    NamespaceCommitEngine, NamespaceMutationCandidate, PathMutationIntent, PublishTailOptions,
+};
 use loonfs_core::{BootstrapOptions, MutationContext, NamespaceEngine, RuntimeReadContext};
 use loonfs_objectstore::keys::{wal_head, wal_segment_prefix};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -58,6 +60,7 @@ async fn put_file<S: ObjectStore + ?Sized>(
                 vec![prepared],
             )],
             context,
+            &PublishTailOptions::default(),
         )
         .await
         .results

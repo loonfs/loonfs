@@ -1634,7 +1634,8 @@ fn undelete_rejects_deletions_from_the_same_commit() {
                         inode_id: entry.inode_id,
                         deleted_at_seq: guessed_seq,
                         parent_inode_id: InodeId(1),
-                        display_name: "resurrected.txt".to_owned(),
+                        display_name: loonfs_api::DisplayName::parse("resurrected.txt")
+                            .expect("valid display name"),
                     },
                 ],
                 message: None,
@@ -2903,7 +2904,8 @@ fn explicit_commit_appears_in_change_feed() {
                 preconditions: Vec::new(),
                 ops: vec![CommitOp::CreateDirectory {
                     parent_inode_id: InodeId(1),
-                    display_name: "docs".to_owned(),
+                    display_name: loonfs_api::DisplayName::parse("docs")
+                        .expect("valid display name"),
                 }],
                 message: Some("create docs".to_owned()),
             },
@@ -3194,7 +3196,7 @@ fn maintenance_tick_counts_segments_not_commits() {
                 preconditions: Vec::new(),
                 ops: vec![CommitOp::CreateDirectory {
                     parent_inode_id: InodeId(1),
-                    display_name: "a".to_owned(),
+                    display_name: loonfs_api::DisplayName::parse("a").expect("valid display name"),
                 }],
                 message: None,
             },
@@ -3203,7 +3205,7 @@ fn maintenance_tick_counts_segments_not_commits() {
                 preconditions: Vec::new(),
                 ops: vec![CommitOp::CreateDirectory {
                     parent_inode_id: InodeId(1),
-                    display_name: "b".to_owned(),
+                    display_name: loonfs_api::DisplayName::parse("b").expect("valid display name"),
                 }],
                 message: None,
             },
@@ -3235,7 +3237,7 @@ fn maintenance_tick_counts_segments_not_commits() {
             preconditions: Vec::new(),
             ops: vec![CommitOp::CreateDirectory {
                 parent_inode_id: InodeId(1),
-                display_name: "c".to_owned(),
+                display_name: loonfs_api::DisplayName::parse("c").expect("valid display name"),
             }],
             message: None,
         },

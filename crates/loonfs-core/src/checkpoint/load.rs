@@ -19,18 +19,19 @@ use super::runs::{runs_in_materialization_order, runs_in_scan_order};
 use super::runs::{MetadataTableManifest, MAX_MAINTENANCE_TABLE_IO};
 #[cfg(test)]
 use super::scan::ManifestMaterializationForInspection;
-use super::scan::{ordered_manifest_tables, VerifiedMetadataTables};
+use super::scan::{ordered_manifest_tables, Readahead, VerifiedMetadataTables};
 use super::validate::{
     validate_manifest_materialization_ranges, validate_manifest_row_seq_range,
     validate_namespace_manifest,
 };
+use crate::error::CoreError;
 #[cfg(test)]
 use crate::metadata::{MetadataState, MetadataStateBuilder};
 #[cfg(test)]
 use futures::future::try_join_all;
 #[cfg(test)]
 use loonfs_api::manifest_object_id_manifest_id;
-use loonfs_api::wire::control::HeadState;
+use loonfs_api::wire::control::{HeadState, MetadataRootState};
 use loonfs_api::wire::hex::hex_decode_bytes;
 use loonfs_api::wire::manifest::{
     decode_namespace_manifest_json, MetadataFileRef, MetadataRow, MetadataTableFamily,
@@ -51,6 +52,22 @@ use loonfs_objectstore::ObjectStore;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 use tracing::Instrument;
+
+pub(super) fn ensure_root_matches_manifest(
+    namespace_id: &NamespaceId,
+    root: &MetadataRootState,
+    manifest: &NamespaceManifestEnvelope,
+) -> crate::error::Result<()> {
+    if manifest.payload_checksum != root.manifest_payload_checksum {
+        return Err(CoreError::NamespaceCorrupt(format!(
+            "metadata root for namespace `{namespace_id}` references manifest `{}` with checksum `{}`, but the manifest carries `{}`",
+            root.manifest_id,
+            root.manifest_payload_checksum,
+            manifest.payload_checksum,
+        )));
+    }
+    Ok(())
+}
 
 #[cfg(test)]
 pub(crate) async fn load_manifest_materialization_for_inspection<S: ObjectStore + ?Sized>(
@@ -194,7 +211,7 @@ pub(crate) async fn load_verified_manifest_tables_with_cache<'a, S: ObjectStore 
                 block_kind: MetadataTableBlockKind::Manifest,
                 block_offset: 0,
             };
-            cache.get_or_fetch(&cache_key, fetch).await?
+            cache.get_or_load(&cache_key, fetch).await?
         }
         None => fetch().await?,
     };
@@ -587,7 +604,7 @@ impl SessionBlockMemo {
     fn get(&self, cache_key: &MetadataTableCacheKey) -> Option<DecodedMetadataTableBlock> {
         self.blocks
             .lock()
-            .expect("session block memo lock poisoned")
+            .expect("session block memo lock should not be poisoned")
             .get(cache_key)
             .cloned()
     }
@@ -595,7 +612,7 @@ impl SessionBlockMemo {
     fn record(&self, cache_key: &MetadataTableCacheKey, block: &DecodedMetadataTableBlock) {
         self.blocks
             .lock()
-            .expect("session block memo lock poisoned")
+            .expect("session block memo lock should not be poisoned")
             .insert(cache_key.clone(), block.clone());
     }
 }
@@ -609,7 +626,7 @@ impl SessionBlockMemo {
 const RANGE_SCAN_READAHEAD_BLOCKS: usize = 32;
 /// Longest single ranged GET issued while bulk-reading a block span; longer
 /// spans split into consecutive requests.
-const MAX_BULK_FETCH_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_BULK_LOAD_BYTES: u64 = 4 * 1024 * 1024;
 
 /// Loads a segment's full row set: every data block, in key order, checked
 /// against the descriptor's row count and key bounds. Production reads go
@@ -629,7 +646,7 @@ pub(super) async fn load_manifest_segment_rows_with_cache<S: ObjectStore + ?Size
         descriptor,
         "",
         None,
-        false,
+        Readahead::Disabled,
     )
     .await?;
     let row_count = row_set.rows().count();
@@ -666,14 +683,14 @@ pub(super) async fn load_manifest_segment_rows_in_key_range_with_cache<S: Object
     descriptor: &MetadataFileRef,
     lower_bound: &str,
     upper_bound: Option<&str>,
-    readahead: bool,
+    readahead: Readahead,
 ) -> Result<SegmentKeyRangeBlocks, ManifestLoadError> {
     let index = load_segment_index(store, table_cache, memo, descriptor).await?;
     let needed = index_blocks_for_key_range(&index, lower_bound, upper_bound);
 
     // A paged scan marches onward through the segment: read ahead so the
     // following pages are served from the memo instead of their own GETs.
-    let extended_end = if readahead {
+    let extended_end = if readahead == Readahead::Enabled {
         needed
             .start
             .saturating_add(RANGE_SCAN_READAHEAD_BLOCKS)
@@ -762,7 +779,7 @@ fn segment_codec_error(object_key: &str, err: impl std::fmt::Display) -> Manifes
 /// publishes every section to the memo and shared cache. Sized to catch
 /// delta-run segments (one or two data blocks) while leaving base segments
 /// on the per-section path.
-const WHOLE_SEGMENT_FETCH_MAX_BYTES: u64 = 128 * 1024;
+const WHOLE_SEGMENT_LOAD_MAX_BYTES: u64 = 128 * 1024;
 
 /// A segment object's total stored length: the index block is the last
 /// section, so it ends the object.
@@ -787,7 +804,7 @@ async fn load_and_publish_segment_sections<S: ObjectStore + ?Sized>(
     let filter_handle = descriptor.filter_block;
     let index_handle = descriptor.index_block;
     let object_len = segment_object_len(descriptor);
-    let fetch_whole_object = object_len <= WHOLE_SEGMENT_FETCH_MAX_BYTES;
+    let fetch_whole_object = object_len <= WHOLE_SEGMENT_LOAD_MAX_BYTES;
     let fetch_offset = match want {
         MetadataTableBlockKind::Data | MetadataTableBlockKind::Manifest => {
             return Err(segment_codec_error(
@@ -930,7 +947,7 @@ async fn load_segment_index<S: ObjectStore + ?Sized>(
         .await
     };
     let block = match table_cache {
-        Some(cache) => cache.get_or_fetch(&cache_key, fetch).await?,
+        Some(cache) => cache.get_or_load(&cache_key, fetch).await?,
         None => fetch().await?,
     };
     memo.record(&cache_key, &block);
@@ -991,7 +1008,7 @@ pub(super) async fn load_segment_filter<S: ObjectStore + ?Sized>(
         .await
     };
     let block = match table_cache {
-        Some(cache) => cache.get_or_fetch(&cache_key, fetch).await?,
+        Some(cache) => cache.get_or_load(&cache_key, fetch).await?,
         None => fetch().await?,
     };
     memo.record(&cache_key, &block);
@@ -1035,7 +1052,7 @@ async fn load_segment_data_block<S: ObjectStore + ?Sized>(
         ))
     };
     let block = match table_cache {
-        Some(cache) => cache.get_or_fetch(&cache_key, fetch).await?,
+        Some(cache) => cache.get_or_load(&cache_key, fetch).await?,
         None => fetch().await?,
     };
     memo.record(&cache_key, &block);
@@ -1101,7 +1118,7 @@ async fn load_segment_data_block_span<S: ObjectStore + ?Sized>(
         let mut span_bytes = 0u64;
         while cursor < entries.len()
             && blocks[cursor].is_none()
-            && span_bytes + u64::from(entries[cursor].block.stored_len) <= MAX_BULK_FETCH_BYTES
+            && span_bytes + u64::from(entries[cursor].block.stored_len) <= MAX_BULK_LOAD_BYTES
         {
             span_bytes += u64::from(entries[cursor].block.stored_len);
             cursor += 1;
@@ -1130,7 +1147,7 @@ async fn load_segment_data_block_span<S: ObjectStore + ?Sized>(
             };
             match table_cache {
                 Some(cache) => {
-                    cache.get_or_fetch(&first_key, fetch).await?;
+                    cache.get_or_load(&first_key, fetch).await?;
                 }
                 None => {
                     fetch().await?;
@@ -1154,7 +1171,7 @@ async fn load_segment_data_block_span<S: ObjectStore + ?Sized>(
 
     Ok(blocks
         .into_iter()
-        .map(|block| block.expect("every selected block is resolved above"))
+        .map(|block| block.expect("every selected block should be resolved above"))
         .collect())
 }
 
@@ -1199,38 +1216,53 @@ async fn load_and_publish_span<S: ObjectStore + ?Sized>(
             first_block = Some(cache_block);
         }
     }
-    Ok(first_block.expect("a span always holds at least one block"))
+    Ok(first_block.expect("a span should always hold at least one block"))
 }
 
 pub(super) fn decoded_manifest_block_weight(
     family: MetadataTableFamily,
     rows: &[MetadataRow],
 ) -> usize {
+    // Approximate decoded map/vector bookkeeping beyond owned row payloads.
+    const BLOCK_ENTRY_OVERHEAD: usize = 64;
+    const BLOCK_ALLOCATION_OVERHEAD: usize = 128;
     let row_weight = rows
         .iter()
-        .map(|row| 64 + row.row_key_for_family(family).len() + decoded_manifest_row_weight(row))
+        .map(|row| {
+            BLOCK_ENTRY_OVERHEAD
+                + row.row_key_for_family(family).len()
+                + decoded_manifest_row_weight(row)
+        })
         .sum::<usize>();
-    row_weight.saturating_add(128)
+    row_weight.saturating_add(BLOCK_ALLOCATION_OVERHEAD)
 }
 
 pub(super) fn decoded_manifest_row_weight(row: &MetadataRow) -> usize {
+    // Approximate inline row storage and heap allocation metadata.
+    const FIXED_ROW_OVERHEAD: usize = 32;
+    const ALLOCATED_ROW_OVERHEAD: usize = 96;
     match row {
-        MetadataRow::Inode { .. } => 32,
+        MetadataRow::Inode { .. } => FIXED_ROW_OVERHEAD,
         MetadataRow::DirentryBind {
             name_key,
             display_name,
             ..
-        } => 96 + name_key.as_str().len() + display_name.len(),
-        MetadataRow::DirentryUnbind { name_key, .. } => 96 + name_key.as_str().len(),
-        MetadataRow::Revision { content_ref, .. } => 96 + content_ref.digest.len(),
-        MetadataRow::Tombstone { .. } => 32,
+        } => ALLOCATED_ROW_OVERHEAD + name_key.as_str().len() + display_name.as_str().len(),
+        MetadataRow::DirentryUnbind { name_key, .. } => {
+            ALLOCATED_ROW_OVERHEAD + name_key.as_str().len()
+        }
+        MetadataRow::Revision { content_ref, .. } => {
+            ALLOCATED_ROW_OVERHEAD + content_ref.digest.len()
+        }
+        MetadataRow::Tombstone { .. } => FIXED_ROW_OVERHEAD,
         MetadataRow::CommitReceipt {
             commit_id,
             semantic_commit_fingerprint,
             message,
             ..
         } => {
-            96 + commit_id.as_str().len()
+            ALLOCATED_ROW_OVERHEAD
+                + commit_id.as_str().len()
                 + semantic_commit_fingerprint.len()
                 + message.as_ref().map_or(0, String::len)
         }

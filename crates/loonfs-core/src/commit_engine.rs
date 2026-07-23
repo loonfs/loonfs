@@ -11,7 +11,7 @@ use crate::error::{
 use crate::metadata::MetadataState;
 use crate::namespace::catalog::{load_namespace_catalog_entry, VerifiedNamespaceCatalogEntry};
 use crate::namespace::writer_epoch::acquire_writer_epoch;
-use crate::path::write::{path_intent_fingerprint_for_path_intent, PathMutationIntent};
+use crate::path::write::{path_intent_fingerprint, PathMutationIntent};
 use crate::protocol::{load_publish_metadata_view, PublishTailOptions, PublishTailProjection};
 use crate::storage::content_admission::{ContentAdmission, ContentTokenError, PreparedContent};
 use crate::timing::{MonotonicTimer, StdMonotonicTimer};
@@ -139,10 +139,8 @@ impl NamespaceMutationCandidate {
                         CoreError::Internal(format!("failed to fingerprint commit request: {err}"))
                     })
             }
-            NamespaceMutation::Path(intent) => {
-                path_intent_fingerprint_for_path_intent(namespace_id, intent)
-                    .map(SemanticMutationIdentity::PathIntent)
-            }
+            NamespaceMutation::Path(intent) => path_intent_fingerprint(namespace_id, intent)
+                .map(SemanticMutationIdentity::PathIntent),
         }
     }
 
@@ -318,11 +316,11 @@ impl NamespaceCommitEngine {
         // thread panicked mid-update.
         self.session
             .lock()
-            .expect("writer session state lock poisoned")
+            .expect("writer session state lock should not be poisoned")
     }
 
     #[cfg(test)]
-    pub(crate) fn with_monotonic_timer(mut self, timer: Arc<dyn MonotonicTimer>) -> Self {
+    pub(crate) fn monotonic_timer(mut self, timer: Arc<dyn MonotonicTimer>) -> Self {
         self.timer = timer;
         self
     }
@@ -346,21 +344,6 @@ impl NamespaceCommitEngine {
     }
 
     pub async fn publish_batch<S: ObjectStore + ?Sized>(
-        &mut self,
-        store: &S,
-        candidates: Vec<NamespaceMutationCandidate>,
-        context: &MutationContext,
-    ) -> NamespaceCommitEnginePublishResult {
-        self.publish_batch_with_tail_options(
-            store,
-            candidates,
-            context,
-            &PublishTailOptions::default(),
-        )
-        .await
-    }
-
-    pub async fn publish_batch_with_tail_options<S: ObjectStore + ?Sized>(
         &mut self,
         store: &S,
         candidates: Vec<NamespaceMutationCandidate>,
@@ -569,7 +552,7 @@ pub(crate) async fn publish_namespace_mutations_batch<S: ObjectStore + ?Sized>(
 ) -> Vec<Result<ApiCommitResponse>> {
     let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
     engine
-        .publish_batch(store, candidates, context)
+        .publish_batch(store, candidates, context, &PublishTailOptions::default())
         .await
         .results
 }
@@ -578,6 +561,7 @@ pub(crate) async fn publish_namespace_mutations_batch<S: ObjectStore + ?Sized>(
 mod tests {
     use super::*;
     use crate::error::ErrorCode;
+    use crate::limits::WAL_PUBLISH_BUDGET_MS;
     use crate::namespace::bootstrap::bootstrap_namespace;
     use crate::namespace::control::read_head_object;
     use futures::StreamExt;
@@ -626,7 +610,8 @@ mod tests {
             ops: (0..=crate::limits::MAX_COMMIT_OPERATIONS)
                 .map(|index| loonfs_api::v0::CommitOp::CreateDirectory {
                     parent_inode_id: InodeId(1),
-                    display_name: format!("dir-{index}"),
+                    display_name: loonfs_api::DisplayName::parse(format!("dir-{index}"))
+                        .expect("valid display name"),
                 })
                 .collect(),
             message: None,
@@ -647,7 +632,8 @@ mod tests {
                 preconditions: Vec::new(),
                 ops: vec![loonfs_api::v0::CommitOp::CreateDirectory {
                     parent_inode_id: InodeId(1),
-                    display_name: "docs".to_owned(),
+                    display_name: loonfs_api::DisplayName::parse("docs")
+                        .expect("valid display name"),
                 }],
                 message: None,
             },
@@ -664,7 +650,8 @@ mod tests {
             preconditions: Vec::new(),
             ops: vec![loonfs_api::v0::CommitOp::CreateDirectory {
                 parent_inode_id: InodeId(1),
-                display_name: display_name.to_owned(),
+                display_name: loonfs_api::DisplayName::parse(display_name)
+                    .expect("valid display name"),
             }],
             message: None,
         })
@@ -690,7 +677,12 @@ mod tests {
 
         let mut engine_a = NamespaceCommitEngine::new(namespace_id.clone());
         let first = engine_a
-            .publish_batch(&store, vec![create_dir("from-a-first", "alpha")], &writer_a)
+            .publish_batch(
+                &store,
+                vec![create_dir("from-a-first", "alpha")],
+                &writer_a,
+                &PublishTailOptions::default(),
+            )
             .await;
         first.results[0].as_ref().expect("writer a first commit");
 
@@ -699,7 +691,12 @@ mod tests {
         let writer_b = context("writer-b", "session-b");
         let mut engine_b = NamespaceCommitEngine::new(namespace_id.clone());
         let takeover = engine_b
-            .publish_batch(&store, vec![create_dir("from-b-first", "beta")], &writer_b)
+            .publish_batch(
+                &store,
+                vec![create_dir("from-b-first", "beta")],
+                &writer_b,
+                &PublishTailOptions::default(),
+            )
             .await;
         takeover.results[0]
             .as_ref()
@@ -720,6 +717,7 @@ mod tests {
                     &store,
                     vec![create_dir("from-a-second", "gamma")],
                     &writer_a,
+                    &PublishTailOptions::default(),
                 )
                 .await;
             let error = fenced.results[0].as_ref().expect_err("fenced publish");
@@ -748,7 +746,12 @@ mod tests {
         let mut engine_a1 =
             NamespaceCommitEngine::new(namespace_id.clone()).writer_session(Arc::clone(&session));
         engine_a1
-            .publish_batch(&store, vec![create_dir("from-a-first", "alpha")], &writer_a)
+            .publish_batch(
+                &store,
+                vec![create_dir("from-a-first", "alpha")],
+                &writer_a,
+                &PublishTailOptions::default(),
+            )
             .await
             .results
             .remove(0)
@@ -757,7 +760,12 @@ mod tests {
         let writer_b = context("writer-b", "session-b");
         let mut engine_b = NamespaceCommitEngine::new(namespace_id.clone());
         engine_b
-            .publish_batch(&store, vec![create_dir("from-b-first", "beta")], &writer_b)
+            .publish_batch(
+                &store,
+                vec![create_dir("from-b-first", "beta")],
+                &writer_b,
+                &PublishTailOptions::default(),
+            )
             .await
             .results
             .remove(0)
@@ -768,6 +776,7 @@ mod tests {
                 &store,
                 vec![create_dir("from-a-second", "gamma")],
                 &writer_a,
+                &PublishTailOptions::default(),
             )
             .await;
         let error = fenced.results[0].as_ref().expect_err("fenced publish");
@@ -786,7 +795,12 @@ mod tests {
         let mut engine_a2 =
             NamespaceCommitEngine::new(namespace_id.clone()).writer_session(session);
         let still_fenced = engine_a2
-            .publish_batch(&store, vec![create_dir("from-a-third", "delta")], &writer_a)
+            .publish_batch(
+                &store,
+                vec![create_dir("from-a-third", "delta")],
+                &writer_a,
+                &PublishTailOptions::default(),
+            )
             .await;
         let error = still_fenced.results[0]
             .as_ref()
@@ -809,7 +823,7 @@ mod tests {
     impl MonotonicTimer for ExpiredBudgetTimer {
         fn monotonic_now_ms(&self) -> u64 {
             self.0
-                .fetch_add(crate::protocol::PUBLISH_BUDGET_MS + 1_000, Ordering::SeqCst)
+                .fetch_add(WAL_PUBLISH_BUDGET_MS + 1_000, Ordering::SeqCst)
         }
     }
 
@@ -829,9 +843,14 @@ mod tests {
             .state;
 
         let mut over_budget = NamespaceCommitEngine::new(namespace_id.clone())
-            .with_monotonic_timer(Arc::new(ExpiredBudgetTimer(AtomicU64::new(0))));
+            .monotonic_timer(Arc::new(ExpiredBudgetTimer(AtomicU64::new(0))));
         let abandoned = over_budget
-            .publish_batch(&store, vec![create_dir("budgeted", "alpha")], &writer)
+            .publish_batch(
+                &store,
+                vec![create_dir("budgeted", "alpha")],
+                &writer,
+                &PublishTailOptions::default(),
+            )
             .await;
         let error = abandoned.results[0]
             .as_ref()
@@ -863,7 +882,12 @@ mod tests {
         // fresh segment; the orphan stays behind.
         let mut healthy = NamespaceCommitEngine::new(namespace_id.clone());
         let retried = healthy
-            .publish_batch(&store, vec![create_dir("budgeted", "alpha")], &writer)
+            .publish_batch(
+                &store,
+                vec![create_dir("budgeted", "alpha")],
+                &writer,
+                &PublishTailOptions::default(),
+            )
             .await;
         let response = retried.results[0].as_ref().expect("rebuilt publish");
         assert_eq!(response.committed_seq, ChangeSeq(1));
@@ -891,11 +915,16 @@ mod tests {
             .await
             .expect("bootstrap");
         let mut seed = NamespaceCommitEngine::new(namespace_id.clone());
-        seed.publish_batch(&store, vec![create_dir("seed-commit", "docs")], &writer)
-            .await
-            .results
-            .remove(0)
-            .expect("seed publish");
+        seed.publish_batch(
+            &store,
+            vec![create_dir("seed-commit", "docs")],
+            &writer,
+            &PublishTailOptions::default(),
+        )
+        .await
+        .results
+        .remove(0)
+        .expect("seed publish");
         crate::checkpoint::create_checkpoint(
             &store,
             &namespace_id,
@@ -913,7 +942,12 @@ mod tests {
         let mut uncached = NamespaceCommitEngine::new(namespace_id.clone());
         store.reset_metadata_sst_gets();
         uncached
-            .publish_batch(&store, vec![create_dir("uncached-a", "alpha")], &writer)
+            .publish_batch(
+                &store,
+                vec![create_dir("uncached-a", "alpha")],
+                &writer,
+                &PublishTailOptions::default(),
+            )
             .await
             .results
             .remove(0)
@@ -924,7 +958,12 @@ mod tests {
         );
         store.reset_metadata_sst_gets();
         uncached
-            .publish_batch(&store, vec![create_dir("uncached-b", "beta")], &writer)
+            .publish_batch(
+                &store,
+                vec![create_dir("uncached-b", "beta")],
+                &writer,
+                &PublishTailOptions::default(),
+            )
             .await
             .results
             .remove(0)
@@ -938,7 +977,12 @@ mod tests {
         let mut cached = NamespaceCommitEngine::new(namespace_id.clone()).table_cache(cache);
         store.reset_metadata_sst_gets();
         cached
-            .publish_batch(&store, vec![create_dir("cached-a", "gamma")], &writer)
+            .publish_batch(
+                &store,
+                vec![create_dir("cached-a", "gamma")],
+                &writer,
+                &PublishTailOptions::default(),
+            )
             .await
             .results
             .remove(0)
@@ -949,7 +993,12 @@ mod tests {
         );
         store.reset_metadata_sst_gets();
         cached
-            .publish_batch(&store, vec![create_dir("cached-b", "delta")], &writer)
+            .publish_batch(
+                &store,
+                vec![create_dir("cached-b", "delta")],
+                &writer,
+                &PublishTailOptions::default(),
+            )
             .await
             .results
             .remove(0)

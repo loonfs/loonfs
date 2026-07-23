@@ -525,12 +525,7 @@ impl FsCore {
                 Box::pin(async {
                     let mut engine = engine.lock().await;
                     engine
-                        .publish_batch_with_tail_options(
-                            &store,
-                            candidates,
-                            &context,
-                            &tail_options,
-                        )
+                        .publish_batch(&store, candidates, &context, &tail_options)
                         .await
                 })
                 .await
@@ -576,7 +571,13 @@ impl FsCore {
         let mut engine = loonfs_core::publish::NamespaceCommitEngine::new(namespace_id.clone())
             .writer_session(self.inner.writer_sessions.state(namespace_id));
         // Boxed for the same type-recursion reason as the cached-engine path.
-        let publish = Box::pin(engine.publish_batch(&store, candidates, &context)).await;
+        let publish = Box::pin(engine.publish_batch(
+            &store,
+            candidates,
+            &context,
+            &loonfs_core::publish::PublishTailOptions::default(),
+        ))
+        .await;
         let wal_tail_segments = publish.wal_tail_segments;
         let results: Vec<_> = publish
             .results

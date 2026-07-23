@@ -1,8 +1,8 @@
 //! Publishes a prepared WAL segment: the segment PUT and the head
 //! compare-and-swap that makes its commits visible.
 
-use super::{push_unique_invariant, CommitHeadPublishError, CommitPlan};
-use crate::invariants::InvariantId;
+use super::{CommitHeadPublishError, CommitPlan};
+use crate::invariants::{push_unique_invariant, InvariantId};
 use crate::wal::PreparedWalSegment;
 use bytes::Bytes;
 use loonfs_api::wire::control::{
@@ -86,6 +86,7 @@ pub fn prepare_commit_head_publish(
         });
     }
 
+    let object_key = wal_head(current_head.namespace_id.as_str());
     let new_tip = wal.envelope.pointer(wal.object_key.clone());
     let resulting_head = HeadState {
         namespace_id: current_head.namespace_id.clone(),
@@ -103,9 +104,15 @@ pub fn prepare_commit_head_publish(
         writer_version,
         resulting_head.clone(),
     )
-    .map_err(|err| CommitHeadPublishError::Codec(err.to_string()))?;
-    let encoded_bytes = encode_control_object(&envelope)
-        .map_err(|err| CommitHeadPublishError::Codec(err.to_string()))?;
+    .map_err(|err| CommitHeadPublishError::Codec {
+        object_key: object_key.clone(),
+        message: err.to_string(),
+    })?;
+    let encoded_bytes =
+        encode_control_object(&envelope).map_err(|err| CommitHeadPublishError::Codec {
+            object_key: object_key.clone(),
+            message: err.to_string(),
+        })?;
 
     let mut checked_invariants = plan.checked_invariants.clone();
     push_unique_invariant(
@@ -114,7 +121,7 @@ pub fn prepare_commit_head_publish(
     );
 
     Ok(PreparedCommitHeadPublish {
-        object_key: wal_head(current_head.namespace_id.as_str()),
+        object_key,
         resulting_head,
         envelope,
         encoded_bytes,
@@ -162,10 +169,10 @@ pub async fn publish_commit_head<S: ObjectStore + ?Sized>(
             Bytes::copy_from_slice(&prepared.encoded_bytes),
         )
         .await
-        .map_err(map_object_store_error)
+        .map_err(|error| map_object_store_error(&prepared.object_key, error))
 }
 
-fn map_object_store_error(err: ObjectStoreError) -> CommitHeadPublishError {
+fn map_object_store_error(object_key: &str, err: ObjectStoreError) -> CommitHeadPublishError {
     match err {
         ObjectStoreError::PreconditionFailed { .. } | ObjectStoreError::Conflict { .. } => {
             CommitHeadPublishError::StaleHead
@@ -175,7 +182,10 @@ fn map_object_store_error(err: ObjectStoreError) -> CommitHeadPublishError {
         ObjectStoreError::Transport { message, .. } => {
             CommitHeadPublishError::OutcomeUnknown(message)
         }
-        other => CommitHeadPublishError::Store(other.to_string()),
+        other => CommitHeadPublishError::Store {
+            object_key: object_key.to_owned(),
+            message: other.to_string(),
+        },
     }
 }
 
@@ -187,23 +197,29 @@ mod tests {
     #[test]
     fn head_cas_transport_failure_maps_to_unknown_outcome_not_failure() {
         assert_eq!(
-            map_object_store_error(ObjectStoreError::transport(
+            map_object_store_error(
                 "namespaces/demo/control/head.json",
-                "timeout",
-            )),
+                ObjectStoreError::transport("namespaces/demo/control/head.json", "timeout"),
+            ),
             CommitHeadPublishError::OutcomeUnknown("timeout".to_owned())
         );
         assert_eq!(
-            map_object_store_error(ObjectStoreError::PreconditionFailed {
-                object_key: "namespaces/demo/control/head.json".to_owned(),
-            }),
+            map_object_store_error(
+                "namespaces/demo/control/head.json",
+                ObjectStoreError::PreconditionFailed {
+                    object_key: "namespaces/demo/control/head.json".to_owned(),
+                },
+            ),
             CommitHeadPublishError::StaleHead
         );
         assert!(matches!(
-            map_object_store_error(ObjectStoreError::NotFound {
-                object_key: "namespaces/demo/control/head.json".to_owned(),
-            }),
-            CommitHeadPublishError::Store(_)
+            map_object_store_error(
+                "namespaces/demo/control/head.json",
+                ObjectStoreError::NotFound {
+                    object_key: "namespaces/demo/control/head.json".to_owned(),
+                },
+            ),
+            CommitHeadPublishError::Store { .. }
         ));
     }
     use loonfs_api::wire::control::WriterBlock;

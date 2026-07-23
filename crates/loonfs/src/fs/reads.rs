@@ -79,7 +79,7 @@ impl FsCore {
             cursor = next_cursor;
             if cursor.is_none() {
                 envelope_ref.entries = entries;
-                return Ok(envelope.expect("first page initializes response envelope"));
+                return Ok(envelope.expect("first page should initialize response envelope"));
             }
         }
     }

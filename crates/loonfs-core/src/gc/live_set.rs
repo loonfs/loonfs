@@ -3,11 +3,10 @@
 
 use super::config::GcConfig;
 use super::fork_checkpoints::fork_target_proven_gone;
-use super::reap::{list_prefix, load_error};
-use super::run::LiveSet;
+use super::reap::list_prefix;
 use crate::checkpoint::load_namespace_manifest_envelope_if_present;
 use crate::context::MutationContext;
-use crate::error::{CoreError, MetadataProjectionLoadError};
+use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::namespace::control::{
     read_head_object, read_metadata_root_object, read_wal_floor_object, ControlObjectLoadError,
 };
@@ -20,6 +19,23 @@ use loonfs_api::{ChangeSeq, ManifestObjectId, NamespaceId};
 use loonfs_objectstore::keys::{checkpoint_prefix, metadata_manifest_object};
 use loonfs_objectstore::ObjectStore;
 use std::collections::{BTreeMap, BTreeSet};
+
+/// Everything reachable from the fresh root set (rule 4).
+pub(super) struct LiveSet {
+    pub(super) manifests: BTreeSet<ManifestObjectId>,
+    pub(super) tables: BTreeSet<String>,
+    pub(super) wal_segments: BTreeSet<String>,
+    pub(super) checkpoint_keys: BTreeSet<String>,
+    /// Still-active records whose basis manifest is verifiably absent —
+    /// the crash window between record write and verification. The pass
+    /// releases them; they never degrade sweeping.
+    pub(super) missing_basis_records: Vec<String>,
+    /// Record resolution failed somewhere: manifest/table deletion must not
+    /// proceed on this pass.
+    pub(super) degraded: bool,
+    /// The inspected namespace head is the terminal, absorbing tombstone.
+    pub(super) namespace_deleted: bool,
+}
 
 /// Delete-time re-verification state (rule 3): deletion decisions consult a
 /// live set no staler than `reverify_chunk` candidates. Rule 5 degradation
@@ -47,7 +63,7 @@ impl SweepVerifier {
         namespace_id: &NamespaceId,
         config: &GcConfig,
         context: &MutationContext,
-    ) -> Result<(), CoreError> {
+    ) -> Result<()> {
         if self.decided_since_collect >= self.reverify_chunk {
             self.live = collect_live_set(store, namespace_id, config, context).await?;
             self.degraded |= self.live.degraded;
@@ -63,22 +79,22 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     config: &GcConfig,
     context: &MutationContext,
-) -> Result<LiveSet, CoreError> {
+) -> Result<LiveSet> {
     let now_ms = context.now_ms;
     let loaded_head = read_head_object(store, namespace_id)
         .await
-        .map_err(load_error)?;
+        .map_err(CoreError::load_head)?;
     let head = loaded_head.envelope.state;
     let root = read_metadata_root_object(store, namespace_id)
         .await
-        .map_err(load_error)?
+        .map_err(CoreError::load_head)?
         .envelope
         .state;
     let floor_seq = match read_wal_floor_object(store, namespace_id).await {
         Ok(loaded) => loaded.envelope.state.floor_seq,
         // A missing floor means retain everything (format spec, "WAL floor").
         Err(ControlObjectLoadError::MissingObject { .. }) => ChangeSeq(0),
-        Err(error) => return Err(load_error(error)),
+        Err(error) => return Err(CoreError::load_head(error)),
     };
 
     let namespace_deleted = head.state == NamespaceState::Deleted;

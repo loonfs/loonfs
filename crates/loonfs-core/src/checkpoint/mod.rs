@@ -13,10 +13,14 @@
 //! - [`build`] segments metadata rows and writes the immutable SST objects.
 //! - [`publish`] writes manifest objects and advances `metadata/root.json`
 //!   by compare-and-swap.
+//! - [`record`] and [`release`] manage durable checkpoint records.
 //! - [`load`] and [`validate`] provide envelope-only loading and
 //!   descriptor-only table verification (full-row inspection
 //!   materialization is test-only).
 //! - [`scan`] answers verified row scans over loaded manifest tables.
+//! - [`grep_read`] exposes checkpoint-backed grep reads, while [`row`]
+//!   handles manifest-row encoding.
+//! - [`reorganize`] compacts bounded family groups into new base runs.
 //! - [`retention`] advances the retention floor behind verified progress.
 //! - [`runs`] models the LSM run layout shared by all of the above, and
 //!   [`cache`] holds decoded SST blocks keyed by content digest.
@@ -66,4 +70,4 @@ pub(crate) use self::record::{freshen_fork_checkpoint, read_checkpoint_record};
 pub(crate) use self::release::release_checkpoint;
 pub(crate) use self::reorganize::reorganize_metadata_step;
 pub(crate) use self::retention::advance_retention_floor;
-pub(crate) use self::scan::{string_prefix_upper_bound, VerifiedMetadataTables};
+pub(crate) use self::scan::{string_prefix_upper_bound, Readahead, VerifiedMetadataTables};

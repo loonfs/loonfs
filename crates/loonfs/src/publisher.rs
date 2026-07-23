@@ -53,6 +53,7 @@ use crate::{CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, RuntimeE
 use loonfs_api::v0::{CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse};
 use loonfs_api::{CommitId, NamespaceId};
 use loonfs_core::commit::{CommitHeadPublishError, SemanticMutationIdentity};
+use loonfs_core::limits::CONTENTION_RETRY_LIMIT;
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::{Arc, Mutex, Weak};
@@ -74,7 +75,6 @@ type DeleteResult = Result<DeleteNamespaceResponse, CoreError>;
 pub type PublishObserver = Arc<dyn Fn(&NamespaceId, loonfs_api::ChangeSeq) + Send + Sync + 'static>;
 
 const MAX_BATCH_CANDIDATES: usize = 1024;
-const HEAD_CAS_RETRY_LIMIT: usize = 8;
 
 /// Shared front door to the per-namespace publishers of one runtime core.
 ///
@@ -696,7 +696,7 @@ impl NamespacePublisher {
         let (results, retry_count) = async {
             let mut results = Vec::new();
             let mut retry_count = 0_u64;
-            for attempt in 0..HEAD_CAS_RETRY_LIMIT {
+            for attempt in 0..CONTENTION_RETRY_LIMIT {
                 let batch_candidates = candidates
                     .iter()
                     .map(|candidate| candidate.candidate.clone())
@@ -717,7 +717,7 @@ impl NamespacePublisher {
                 if !results.iter().any(is_retryable_head_publish) {
                     break;
                 }
-                if attempt + 1 == HEAD_CAS_RETRY_LIMIT {
+                if attempt + 1 == CONTENTION_RETRY_LIMIT {
                     break;
                 }
                 retry_count += 1;
@@ -1510,14 +1510,15 @@ mod tests {
 
     fn create_directory_request(
         commit_id: impl Into<String>,
-        display_name: impl Into<String>,
+        display_name: impl AsRef<str>,
     ) -> CommitRequest {
         CommitRequest {
             commit_id: CommitId::parse(commit_id.into()).expect("valid commit id"),
             preconditions: Vec::new(),
             ops: vec![CommitOp::CreateDirectory {
                 parent_inode_id: InodeId(1),
-                display_name: display_name.into(),
+                display_name: loonfs_api::DisplayName::parse(display_name.as_ref())
+                    .expect("valid display name"),
             }],
             message: None,
         }
@@ -2133,7 +2134,7 @@ mod tests {
             preconditions: Vec::new(),
             ops: vec![CommitOp::CreateDirectory {
                 parent_inode_id: InodeId(1),
-                display_name: "alpha".to_owned(),
+                display_name: loonfs_api::DisplayName::parse("alpha").expect("valid display name"),
             }],
             message: None,
         };
@@ -2142,7 +2143,7 @@ mod tests {
             preconditions: Vec::new(),
             ops: vec![CommitOp::CreateDirectory {
                 parent_inode_id: InodeId(1),
-                display_name: "beta".to_owned(),
+                display_name: loonfs_api::DisplayName::parse("beta").expect("valid display name"),
             }],
             message: None,
         };
@@ -2211,7 +2212,7 @@ mod tests {
             preconditions: Vec::new(),
             ops: vec![CommitOp::CreateDirectory {
                 parent_inode_id: InodeId(1),
-                display_name: "alpha".to_owned(),
+                display_name: loonfs_api::DisplayName::parse("alpha").expect("valid display name"),
             }],
             message: None,
         };

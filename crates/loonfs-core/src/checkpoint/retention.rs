@@ -1,9 +1,10 @@
 //! Retention floor advancement against the current verified manifest.
 
-use super::load::load_verified_manifest_tables;
+use super::load::{ensure_root_matches_manifest, load_verified_manifest_tables};
 use crate::context::MutationContext;
-use crate::error::CoreError;
 use crate::error::MetadataProjectionLoadError;
+use crate::error::{CoreError, Result};
+use crate::limits::CONTENTION_RETRY_LIMIT;
 use crate::namespace::control::{read_metadata_root_object, read_wal_floor_object};
 use bytes::Bytes;
 use loonfs_api::wire::control::{
@@ -13,13 +14,12 @@ use loonfs_api::{AdvanceRetentionResponse, NamespaceId};
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 
 const MAX_RETENTION_PROBE_IO: usize = 8;
-const FLOOR_CAS_RETRY_LIMIT: usize = 8;
 
 pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
-) -> Result<AdvanceRetentionResponse, CoreError> {
+) -> Result<AdvanceRetentionResponse> {
     // Floor advancement is a GC-family operation: it derives its target from
     // the published metadata root, verifies that basis, and CASes only
     // `wal/floor.json`. The WAL head is never touched — it changes only when
@@ -27,9 +27,7 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
     // any replacement covers at least this basis's coverage above the floor.
     let loaded_root = read_metadata_root_object(store, namespace_id)
         .await
-        .map_err(|error| {
-            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
-        })?;
+        .map_err(CoreError::load_head)?;
     let root = loaded_root.envelope.state;
     let manifest_tables =
         load_verified_manifest_tables(store, namespace_id, &root.manifest_object_id)
@@ -37,23 +35,13 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
             .map_err(|error| {
                 CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
             })?;
-    if manifest_tables.manifest().payload_checksum != root.manifest_payload_checksum {
-        return Err(CoreError::NamespaceCorrupt(format!(
-            "metadata root for `{}` references manifest `{}` with checksum {} but the manifest carries {}",
-            namespace_id.as_str(),
-            root.manifest_id,
-            root.manifest_payload_checksum,
-            manifest_tables.manifest().payload_checksum,
-        )));
-    }
+    ensure_root_matches_manifest(namespace_id, &root, manifest_tables.manifest())?;
     // Grep tolerates retention gaps by checkpointed rebootstrap, so its
     // independent watermark never holds the core WAL floor back.
     let target_floor = manifest_tables.manifest().payload.head_seq;
     let current_floor = read_wal_floor_object(store, namespace_id)
         .await
-        .map_err(|error| {
-            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
-        })?;
+        .map_err(CoreError::load_head)?;
     if current_floor.envelope.state.floor_seq >= target_floor {
         // Already advanced; skip the existence probes on the idempotent
         // re-invocation path.
@@ -96,12 +84,10 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
     }
 
     // Monotonic floor CAS: never decrease.
-    for _attempt in 0..FLOOR_CAS_RETRY_LIMIT {
+    for _attempt in 0..CONTENTION_RETRY_LIMIT {
         let loaded = read_wal_floor_object(store, namespace_id)
             .await
-            .map_err(|error| {
-                CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
-            })?;
+            .map_err(CoreError::load_head)?;
         if loaded.envelope.state.floor_seq >= target_floor {
             return Ok(AdvanceRetentionResponse {
                 namespace_id: namespace_id.clone(),

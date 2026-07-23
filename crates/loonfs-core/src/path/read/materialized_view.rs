@@ -7,10 +7,10 @@ use crate::checkpoint::{
     VerifiedMetadataTables, WalTailProjectionCache, WalTailProjectionCacheKey,
 };
 use crate::error::MetadataProjectionLoadError;
-use crate::error::{CoreError, MetadataViewError};
+use crate::error::{CoreError, MetadataViewError, Result};
 use crate::metadata::{
-    MetadataState, MetadataView, MetadataViewSession, ResolvedVisiblePath, RevisionRecord,
-    VisibleChildEntry,
+    LeafRevisionPrefetch, MetadataState, MetadataView, MetadataViewSession, ResolvedVisiblePath,
+    RevisionRecord, VisibleChildEntry,
 };
 use crate::namespace::catalog::{load_namespace_catalog_entry, VerifiedNamespaceCatalogEntry};
 #[cfg(test)]
@@ -24,8 +24,8 @@ use loonfs_api::wire::wal::WalCommitPayload;
 use loonfs_api::ManifestObjectId;
 use loonfs_api::{
     AbsolutePath, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq, ContentStoreId,
-    DirectoryPageCursor, DisplayName, FileRevision, FileRevisionsPageCursor, InodeId, InodeKind,
-    ManifestId, NamePolicy, NamespaceId, Page, PageRequest, RevisionNo,
+    DirectoryPageCursor, FileRevision, FileRevisionsPageCursor, InodeId, InodeKind, ManifestId,
+    NamePolicy, NamespaceId, Page, PageRequest, RevisionNo,
 };
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
@@ -97,7 +97,7 @@ pub(crate) async fn load_metadata_view<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
     namespace_id: &NamespaceId,
     context: ReadLoadContext<'a>,
-) -> Result<LoadedMetadataView<'a, S>, CoreError> {
+) -> Result<LoadedMetadataView<'a, S>> {
     match context.view {
         #[cfg(test)]
         ReadViewContext::Latest => {
@@ -185,7 +185,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         lower_bound: &str,
         upper_bound: Option<&str>,
         limit: usize,
-    ) -> Result<Vec<(String, InodeId)>, CoreError> {
+    ) -> Result<Vec<(String, InodeId)>> {
         let page = self
             .tables
             .scan_range_page_with_keys(
@@ -216,7 +216,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         &self,
         store: &S,
         built_through_seq: ChangeSeq,
-    ) -> Result<Vec<WalCommitPayload>, CoreError> {
+    ) -> Result<Vec<WalCommitPayload>> {
         if built_through_seq >= self.head.seq {
             return Ok(Vec::new());
         }
@@ -252,7 +252,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         manifest_id: ManifestId,
         manifest_object_id: ManifestObjectId,
         load_context: ReadLoadContext<'a>,
-    ) -> Result<Self, CoreError> {
+    ) -> Result<Self> {
         if &head.namespace_id != namespace_id {
             return Err(CoreError::NamespaceCorrupt(format!(
                 "head namespace `{}` does not match requested namespace `{}`",
@@ -355,16 +355,15 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         skip_all,
         fields(phase = "walk_path")
     )]
-    pub(crate) async fn resolve_path(
-        &self,
-        absolute_path: &str,
-    ) -> Result<AuthoritativePathEntry, CoreError> {
+    pub(crate) async fn resolve_path(&self, absolute_path: &str) -> Result<AuthoritativePathEntry> {
         let absolute_path = parse_absolute_path_for_core(absolute_path)?;
         // One session serves the resolution and the entry build: the walk's
         // preloaded probes (including the leaf's head revision) are exactly
         // what the entry build reads back as cache hits.
         let mut session = self.metadata_view().session();
-        let resolved = session.resolve_visible_path(&absolute_path, true).await?;
+        let resolved = session
+            .resolve_visible_path(&absolute_path, LeafRevisionPrefetch::Prefetch)
+            .await?;
         self.build_authoritative_path_entry_with_session(&mut session, &resolved)
             .await
     }
@@ -374,7 +373,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         store: &S,
         absolute_path: &str,
         max_content_bytes: Option<u64>,
-    ) -> Result<AuthoritativeFileBytes, CoreError> {
+    ) -> Result<AuthoritativeFileBytes> {
         let entry = self.resolve_path(absolute_path).await?;
         if entry.inode_kind != InodeKind::File {
             return Err(CoreError::ExpectedFile {
@@ -398,7 +397,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         &self,
         absolute_path: &str,
         request: PageRequest<FileRevisionsPageCursor>,
-    ) -> Result<Page<FileRevision, FileRevisionsPageCursor>, CoreError> {
+    ) -> Result<Page<FileRevision, FileRevisionsPageCursor>> {
         let entry = self.resolve_path(absolute_path).await?;
         if entry.inode_kind != InodeKind::File {
             return Err(CoreError::ExpectedFile {
@@ -414,7 +413,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         &self,
         inode_id: InodeId,
         request: PageRequest<FileRevisionsPageCursor>,
-    ) -> Result<Page<FileRevision, FileRevisionsPageCursor>, CoreError> {
+    ) -> Result<Page<FileRevision, FileRevisionsPageCursor>> {
         let inode = self
             .metadata_view()
             .inode_at_seq(inode_id)
@@ -483,7 +482,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         absolute_path: &str,
         revision_no: RevisionNo,
         max_content_bytes: Option<u64>,
-    ) -> Result<AuthoritativeFileBytes, CoreError> {
+    ) -> Result<AuthoritativeFileBytes> {
         let mut entry = self.resolve_path(absolute_path).await?;
         if entry.inode_kind != InodeKind::File {
             return Err(CoreError::ExpectedFile {
@@ -510,7 +509,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         inode_id: InodeId,
         revision_no: RevisionNo,
         max_content_bytes: Option<u64>,
-    ) -> Result<Vec<u8>, CoreError> {
+    ) -> Result<Vec<u8>> {
         let revision = self.revision_for_inode(inode_id, revision_no).await?;
         ensure_within_read_limit(revision.content_ref.size_bytes, max_content_bytes)?;
         let read = read_durable_content_bytes(store, &self.content_store_id, &revision.content_ref)
@@ -529,12 +528,14 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         &self,
         absolute_path: &str,
         request: PageRequest<DirectoryPageCursor>,
-    ) -> Result<Page<AuthoritativePathEntry, DirectoryPageCursor>, CoreError> {
+    ) -> Result<Page<AuthoritativePathEntry, DirectoryPageCursor>> {
         validate_cursor_head(self.head.seq, request.cursor.as_ref())?;
 
         let absolute_path = parse_absolute_path_for_core(absolute_path)?;
         let mut session = self.metadata_view().session();
-        let resolved = session.resolve_visible_path(&absolute_path, false).await?;
+        let resolved = session
+            .resolve_visible_path(&absolute_path, LeafRevisionPrefetch::Skip)
+            .await?;
         if let Some(cursor) = request.cursor.as_ref() {
             validate_directory_cursor(cursor, &resolved)?;
         }
@@ -680,7 +681,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         &self,
         session: &mut MetadataViewSession<'_, '_, S>,
         resolved: &ResolvedVisiblePath,
-    ) -> Result<AuthoritativePathEntry, CoreError> {
+    ) -> Result<AuthoritativePathEntry> {
         let revision = if resolved.inode_kind == InodeKind::File {
             session
                 .latest_revision_head_of_visible(resolved.inode_id)
@@ -694,7 +695,6 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         let size_bytes = content_ref
             .as_ref()
             .map(|content_ref| content_ref.size_bytes);
-
         Ok(AuthoritativePathEntry {
             namespace_id: self.namespace_id.clone(),
             absolute_path: resolved.absolute_path.clone(),
@@ -715,12 +715,10 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         session: &mut MetadataViewSession<'_, '_, S>,
         resolved_dir: &ResolvedVisiblePath,
         child: VisibleChildEntry,
-    ) -> Result<AuthoritativePathEntry, CoreError> {
+    ) -> Result<AuthoritativePathEntry> {
         let child_path = AbsolutePath::parse(&resolved_dir.absolute_path)
             .map_err(map_path_error_to_core)?
-            .join(
-                &DisplayName::parse(&child.binding.display_name).map_err(map_path_error_to_core)?,
-            );
+            .join(&child.binding.display_name);
         self.build_authoritative_path_entry_with_session(
             session,
             &ResolvedVisiblePath {
@@ -728,7 +726,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 inode_id: child.binding.child_inode_id,
                 inode_kind: child.inode.inode_kind,
                 parent_inode_id: Some(child.binding.parent_inode_id),
-                display_name: child.binding.display_name,
+                display_name: child.binding.display_name.to_string(),
             },
         )
         .await
@@ -738,7 +736,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         &self,
         inode_id: InodeId,
         revision_no: RevisionNo,
-    ) -> Result<RevisionRecord, CoreError> {
+    ) -> Result<RevisionRecord> {
         self.metadata_view()
             .revision_for_inode(inode_id, revision_no)
             .await
@@ -757,10 +755,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
 /// Refuses a buffered content read whose resolved size exceeds the caller's
 /// budget. The check runs on metadata, before any content fetch, so an
 /// over-limit read costs no object-store traffic and allocates nothing.
-fn ensure_within_read_limit(
-    size_bytes: u64,
-    max_content_bytes: Option<u64>,
-) -> Result<(), CoreError> {
+fn ensure_within_read_limit(size_bytes: u64, max_content_bytes: Option<u64>) -> Result<()> {
     match max_content_bytes {
         Some(max_bytes) if size_bytes > max_bytes => Err(CoreError::ContentTooLarge {
             size_bytes,
@@ -772,9 +767,9 @@ fn ensure_within_read_limit(
 
 fn validate_file_revisions_cursor(
     cursor: &FileRevisionsPageCursor,
-    head_seq: loonfs_api::ChangeSeq,
+    head_seq: ChangeSeq,
     inode_id: InodeId,
-) -> Result<(), CoreError> {
+) -> Result<()> {
     if cursor.head_seq != head_seq {
         // A stale snapshot is the same restart-from-fresh-state condition
         // directory listing reports, not a malformed request: both answer

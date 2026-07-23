@@ -1,6 +1,6 @@
 //! GC configuration and the per-run report.
 
-use crate::error::CoreError;
+use crate::error::{CoreError, Result};
 use crate::limits::GC_MIN_GRACE_WINDOW_MS;
 use serde::{Deserialize, Serialize};
 
@@ -24,7 +24,7 @@ impl Default for GcConfig {
 }
 
 impl GcConfig {
-    pub(super) fn validate(&self) -> Result<(), CoreError> {
+    pub(super) fn validate(&self) -> Result<()> {
         // The minimum grace window is derived from the publication budgets
         // and provider deadlines in `limits`. Below it, a publish still in
         // flight could have written objects that already look old enough to

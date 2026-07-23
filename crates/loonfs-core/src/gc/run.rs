@@ -11,43 +11,24 @@ use super::reap::{
     CheckpointCondemn,
 };
 use crate::context::MutationContext;
-use crate::error::CoreError;
+use crate::error::{CoreError, Result};
 use crate::namespace::catalog::{
     map_namespace_initialization_error_to_core, namespace_initialization_state,
     NamespaceInitializationState,
 };
 use crate::protocol::{condemn_upload_session_if_aged, UploadSessionSweep};
-use loonfs_api::{ManifestObjectId, NamespaceId, UploadId};
+use loonfs_api::{NamespaceId, UploadId};
 use loonfs_objectstore::keys::{
     checkpoint_prefix, metadata_manifest_prefix, metadata_table_prefix, upload_session_prefix,
     wal_segment_prefix,
 };
 use loonfs_objectstore::ObjectStore;
-use std::collections::BTreeSet;
-
-/// Everything reachable from the fresh root set (rule 4).
-pub(super) struct LiveSet {
-    pub(super) manifests: BTreeSet<ManifestObjectId>,
-    pub(super) tables: BTreeSet<String>,
-    pub(super) wal_segments: BTreeSet<String>,
-    pub(super) checkpoint_keys: BTreeSet<String>,
-    /// Still-active records whose basis manifest is verifiably absent —
-    /// the crash window between record write and verification. The pass
-    /// releases them; they never degrade sweeping.
-    pub(super) missing_basis_records: Vec<String>,
-    /// Record resolution failed somewhere: manifest/table deletion must not
-    /// proceed on this pass.
-    pub(super) degraded: bool,
-    /// The inspected namespace head is the terminal, absorbing tombstone.
-    pub(super) namespace_deleted: bool,
-}
-
 pub async fn gc_namespace<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     config: &GcConfig,
     context: &MutationContext,
-) -> Result<GcReport, CoreError> {
+) -> Result<GcReport> {
     gc_namespace_with_reverify_chunk(store, namespace_id, config, context, SWEEP_REVERIFY_CHUNK)
         .await
 }
@@ -65,7 +46,7 @@ pub(super) async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
     config: &GcConfig,
     context: &MutationContext,
     reverify_chunk: usize,
-) -> Result<GcReport, CoreError> {
+) -> Result<GcReport> {
     config.validate()?;
     let initialization_state = namespace_initialization_state(store, namespace_id)
         .await

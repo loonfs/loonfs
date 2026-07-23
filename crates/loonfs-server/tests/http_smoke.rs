@@ -731,7 +731,8 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
                 preconditions: Vec::new(),
                 ops: vec![CommitOp::CreateFile {
                     parent_inode_id: InodeId(1),
-                    display_name: "uploaded.txt".to_owned(),
+                    display_name: loonfs_api::DisplayName::parse("uploaded.txt")
+                        .expect("valid display name"),
                     content_ref: content_ref.clone(),
                 }],
                 message: Some("upload over http".to_owned()),
@@ -788,7 +789,7 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
                 name_key,
                 display_name,
                 ..
-            } if name_key.as_str() == "uploaded.txt" && display_name == "uploaded.txt"
+            } if name_key.as_str() == "uploaded.txt" && display_name.as_str() == "uploaded.txt"
         ));
 
         let empty = harness
@@ -1067,22 +1068,26 @@ async fn commit_with_valid_tokens_for_all_distinct_refs_succeeds() {
                 ops: vec![
                     CommitOp::CreateFile {
                         parent_inode_id: InodeId(1),
-                        display_name: "first.txt".to_owned(),
+                        display_name: loonfs_api::DisplayName::parse("first.txt")
+                            .expect("valid display name"),
                         content_ref: first.content_ref.clone(),
                     },
                     CommitOp::CreateFile {
                         parent_inode_id: InodeId(1),
-                        display_name: "first-copy.txt".to_owned(),
+                        display_name: loonfs_api::DisplayName::parse("first-copy.txt")
+                            .expect("valid display name"),
                         content_ref: first.content_ref.clone(),
                     },
                     CommitOp::CreateFile {
                         parent_inode_id: InodeId(1),
-                        display_name: "second.txt".to_owned(),
+                        display_name: loonfs_api::DisplayName::parse("second.txt")
+                            .expect("valid display name"),
                         content_ref: second.content_ref.clone(),
                     },
                     CommitOp::CreateFile {
                         parent_inode_id: InodeId(1),
-                        display_name: "third.txt".to_owned(),
+                        display_name: loonfs_api::DisplayName::parse("third.txt")
+                            .expect("valid display name"),
                         content_ref: third.content_ref.clone(),
                     },
                 ],
@@ -1144,12 +1149,14 @@ async fn commit_with_one_missing_proof_reports_first_uncovered_digest() {
                 ops: vec![
                     CommitOp::CreateFile {
                         parent_inode_id: InodeId(1),
-                        display_name: "covered.txt".to_owned(),
+                        display_name: loonfs_api::DisplayName::parse("covered.txt")
+                            .expect("valid display name"),
                         content_ref: covered.content_ref.clone(),
                     },
                     CommitOp::CreateFile {
                         parent_inode_id: InodeId(1),
-                        display_name: "uncovered.txt".to_owned(),
+                        display_name: loonfs_api::DisplayName::parse("uncovered.txt")
+                            .expect("valid display name"),
                         content_ref: uncovered.content_ref.clone(),
                     },
                 ],
@@ -1196,7 +1203,8 @@ async fn commit_with_invalid_relevant_token_reports_token_failure() {
                 preconditions: Vec::new(),
                 ops: vec![CommitOp::CreateFile {
                     parent_inode_id: InodeId(1),
-                    display_name: "invalid.txt".to_owned(),
+                    display_name: loonfs_api::DisplayName::parse("invalid.txt")
+                        .expect("valid display name"),
                     content_ref: completed.content_ref.clone(),
                 }],
                 message: None,
@@ -1244,7 +1252,8 @@ async fn landed_commit_replays_byte_for_byte_with_over_limit_absent_expired_or_g
                 preconditions: Vec::new(),
                 ops: vec![CommitOp::CreateFile {
                     parent_inode_id: InodeId(1),
-                    display_name: "replay.txt".to_owned(),
+                    display_name: loonfs_api::DisplayName::parse("replay.txt")
+                        .expect("valid display name"),
                     content_ref: content_ref.clone(),
                 }],
                 message: None,
@@ -1350,7 +1359,8 @@ async fn commit_operation_and_prepared_proof_limits_reject_new_requests() {
                 ops: (0..4097)
                     .map(|index| CommitOp::CreateDirectory {
                         parent_inode_id: InodeId(1),
-                        display_name: format!("dir-{index}"),
+                        display_name: loonfs_api::DisplayName::parse(format!("dir-{index}"))
+                            .expect("valid display name"),
                     })
                     .collect(),
                 message: None,
@@ -1370,7 +1380,8 @@ async fn commit_operation_and_prepared_proof_limits_reject_new_requests() {
                 preconditions: Vec::new(),
                 ops: vec![CommitOp::CreateFile {
                     parent_inode_id: InodeId(1),
-                    display_name: "never-committed.txt".to_owned(),
+                    display_name: loonfs_api::DisplayName::parse("never-committed.txt")
+                        .expect("valid display name"),
                     content_ref: completed.content_ref,
                 }],
                 message: None,
@@ -1424,7 +1435,8 @@ async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
                         preconditions: Vec::new(),
                         ops: vec![CommitOp::CreateFile {
                             parent_inode_id: InodeId(1),
-                            display_name: "restore.txt".to_owned(),
+                            display_name: loonfs_api::DisplayName::parse("restore.txt")
+                                .expect("valid display name"),
                             content_ref: first_content_ref.clone(),
                         }],
                         message: None,
@@ -1695,7 +1707,8 @@ async fn http_commit_restore_revision_missing_source_returns_revision_not_found(
                         preconditions: Vec::new(),
                         ops: vec![CommitOp::CreateFile {
                             parent_inode_id: InodeId(1),
-                            display_name: "restore.txt".to_owned(),
+                            display_name: loonfs_api::DisplayName::parse("restore.txt")
+                                .expect("valid display name"),
                             content_ref: first.content_ref.clone(),
                         }],
                         message: None,
@@ -1764,7 +1777,8 @@ async fn http_commit_rejects_same_commit_id_with_different_payload() {
                 preconditions: Vec::new(),
                 ops: vec![CommitOp::CreateFile {
                     parent_inode_id: InodeId(1),
-                    display_name: "first.txt".to_owned(),
+                    display_name: loonfs_api::DisplayName::parse("first.txt")
+                        .expect("valid display name"),
                     content_ref: first.content_ref.clone(),
                 }],
                 message: Some("first commit".to_owned()),
@@ -1783,7 +1797,8 @@ async fn http_commit_rejects_same_commit_id_with_different_payload() {
                 preconditions: first_request.commit.preconditions.clone(),
                 ops: vec![CommitOp::CreateFile {
                     parent_inode_id: InodeId(1),
-                    display_name: "second.txt".to_owned(),
+                    display_name: loonfs_api::DisplayName::parse("second.txt")
+                        .expect("valid display name"),
                     content_ref: second.content_ref.clone(),
                 }],
                 message: Some("second commit".to_owned()),
@@ -1852,7 +1867,8 @@ async fn http_commit_name_collision_reports_readable_error_message() {
                         preconditions: Vec::new(),
                         ops: vec![CommitOp::CreateFile {
                             parent_inode_id: InodeId(1),
-                            display_name: "taken.txt".to_owned(),
+                            display_name: loonfs_api::DisplayName::parse("taken.txt")
+                                .expect("valid display name"),
                             content_ref: content_ref.clone(),
                         }],
                         message: None,
@@ -1870,7 +1886,8 @@ async fn http_commit_name_collision_reports_readable_error_message() {
                     preconditions: Vec::new(),
                     ops: vec![CommitOp::CreateFile {
                         parent_inode_id: InodeId(1),
-                        display_name: "taken.txt".to_owned(),
+                        display_name: loonfs_api::DisplayName::parse("taken.txt")
+                            .expect("valid display name"),
                         content_ref,
                     }],
                     message: None,

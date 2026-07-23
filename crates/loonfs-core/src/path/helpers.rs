@@ -1,7 +1,7 @@
 //! Path parsing helpers shared by the read and write paths.
 
 use crate::error::{CoreError, Result};
-use loonfs_api::{AbsolutePath, PathError};
+use loonfs_api::{AbsolutePath, DisplayName, PathError};
 
 /// Checks the mutation-path invariant without keeping the parsed path: the
 /// path must parse as an absolute path and must not be the root.
@@ -43,9 +43,9 @@ pub(crate) fn map_path_error_to_core(error: PathError) -> CoreError {
     CoreError::InvalidPath(error.invalid_path_input().to_owned())
 }
 
-pub(crate) fn final_component(absolute_path: &AbsolutePath) -> Result<String> {
+pub(crate) fn final_component(absolute_path: &AbsolutePath) -> Result<DisplayName> {
     absolute_path
         .final_component()
-        .map(|component| component.as_str().to_owned())
+        .map(|component| component.to_display_name())
         .ok_or_else(|| CoreError::InvalidPath(absolute_path.as_str().to_owned()))
 }

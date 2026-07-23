@@ -1,3 +1,5 @@
+//! Commit and publication guard-flow integration tests.
+
 #![allow(clippy::panic)]
 // These integration tests use panic in unexpected match arms for precise diagnostics.
 
@@ -23,7 +25,7 @@ use loonfs_api::{
     },
     wire::wal::{decode_wal_segment_envelope_zstd, WalDelta},
     AbsolutePath, AuthoritativePathEntry, ChangeSeq, CommitId, ContentRef, ContentRefKind,
-    ContentStoreId, DeleteDirectoryBehavior, DestinationBehavior, DirectoryPageCursor,
+    ContentStoreId, DeleteDirectoryBehavior, DestinationBehavior, DirectoryPageCursor, DisplayName,
     EffectiveLimit, InodeId, InodeKind, ManifestId, NameKey, NamespaceId, Page, PageRequest,
     RepairNamespaceOutcome, RevisionNo, UploadId, WriterEpoch,
 };
@@ -41,7 +43,9 @@ use loonfs_core::content::{
 };
 use loonfs_core::control::{load_namespace_head_control, load_namespace_read_anchor};
 use loonfs_core::metadata::MetadataState;
-use loonfs_core::publish::{NamespaceCommitEngine, NamespaceMutationCandidate, PathMutationIntent};
+use loonfs_core::publish::{
+    NamespaceCommitEngine, NamespaceMutationCandidate, PathMutationIntent, PublishTailOptions,
+};
 use loonfs_core::{
     repair_namespace, BeginDirectPutUploadTargetResponse, BootstrapOptions, Error as CoreError,
     ErrorCode, MutationContext, NamespaceEngine, RuntimeReadContext,
@@ -55,7 +59,6 @@ use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
 };
 use std::collections::HashSet;
-use std::future::Future;
 use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -69,10 +72,6 @@ struct BindingIdentity {
     child_inode_id: InodeId,
     bind_seq: ChangeSeq,
     bind_delta_index: u32,
-}
-
-fn block_on<T>(future: impl Future<Output = T>) -> T {
-    tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(future))
 }
 
 fn namespace_engine<'a, S: ObjectStore + ?Sized>(
@@ -89,33 +88,36 @@ fn namespace_engine<'a, S: ObjectStore + ?Sized>(
         .expect("test context should build namespace engine")
 }
 
-fn bootstrap_namespace<S: ObjectStore + ?Sized>(
+async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
     allow_existing: bool,
 ) -> Result<loonfs_api::NamespaceSummary, loonfs_core::BootstrapNamespaceError> {
-    block_on(
-        namespace_engine(store, namespace_id, context)
-            .bootstrap_namespace(BootstrapOptions { allow_existing }),
-    )
+    namespace_engine(store, namespace_id, context)
+        .bootstrap_namespace(BootstrapOptions { allow_existing })
+        .await
 }
 
-fn fork_namespace<S: ObjectStore + ?Sized>(
+async fn fork_namespace<S: ObjectStore + ?Sized>(
     store: &S,
     source_namespace_id: &NamespaceId,
     new_namespace_id: &NamespaceId,
     context: &MutationContext,
 ) -> Result<loonfs_api::NamespaceSummary, CoreError> {
-    block_on(namespace_engine(store, source_namespace_id, context).fork_namespace(new_namespace_id))
+    namespace_engine(store, source_namespace_id, context)
+        .fork_namespace(new_namespace_id)
+        .await
 }
 
-fn load_namespace_descriptor_state<S: ObjectStore + ?Sized>(
+async fn load_namespace_descriptor_state<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> NamespaceConfigState {
     let descriptor_key = namespace_config(namespace_id.as_str());
-    let descriptor_bytes = block_on(store.get(&descriptor_key, None))
+    let descriptor_bytes = store
+        .get(&descriptor_key, None)
+        .await
         .expect("read namespace descriptor")
         .expect("namespace descriptor exists");
     decode_control_object(&descriptor_bytes, ControlObjectKind::NamespaceConfig)
@@ -123,38 +125,38 @@ fn load_namespace_descriptor_state<S: ObjectStore + ?Sized>(
         .state
 }
 
-fn commit_operations<S: ObjectStore + ?Sized>(
+async fn commit_operations<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     request: ApiCommitRequest,
     context: &MutationContext,
 ) -> Result<loonfs_api::v0::CommitResponse, CoreError> {
-    let candidate = prepared_commit_candidate(store, namespace_id, request)?;
+    let candidate = prepared_commit_candidate(store, namespace_id, request).await?;
     publish_namespace_mutations_batch(store, namespace_id, vec![candidate], context)
+        .await
         .into_iter()
         .next()
         .expect("single commit result")
 }
 
-fn commit_operations_batch<S: ObjectStore + ?Sized>(
+async fn commit_operations_batch<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     requests: Vec<ApiCommitRequest>,
     context: &MutationContext,
 ) -> Vec<Result<loonfs_api::v0::CommitResponse, CoreError>> {
     let request_count = requests.len();
-    let candidates = requests
-        .into_iter()
-        .map(|request| prepared_commit_candidate(store, namespace_id, request))
-        .collect::<Result<Vec<_>, _>>();
-    let candidates = match candidates {
-        Ok(candidates) => candidates,
-        Err(error) => return (0..request_count).map(|_| Err(error.clone())).collect(),
-    };
-    publish_namespace_mutations_batch(store, namespace_id, candidates, context)
+    let mut candidates = Vec::with_capacity(request_count);
+    for request in requests {
+        match prepared_commit_candidate(store, namespace_id, request).await {
+            Ok(candidate) => candidates.push(candidate),
+            Err(error) => return (0..request_count).map(|_| Err(error.clone())).collect(),
+        }
+    }
+    publish_namespace_mutations_batch(store, namespace_id, candidates, context).await
 }
 
-fn prepared_commit_candidate<S: ObjectStore + ?Sized>(
+async fn prepared_commit_candidate<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     request: ApiCommitRequest,
@@ -169,17 +171,20 @@ fn prepared_commit_candidate<S: ObjectStore + ?Sized>(
     }) {
         if seen.insert(content_ref.clone()) {
             if catalog.is_none() {
-                catalog = Some(block_on(
-                    loonfs_core::control::load_namespace_catalog_entry(store, namespace_id),
-                )?);
+                catalog = Some(
+                    loonfs_core::control::load_namespace_catalog_entry(store, namespace_id).await?,
+                );
             }
-            prepared.push(block_on(prepare_existing_content_ref(
-                store,
-                catalog
-                    .as_ref()
-                    .expect("external content should load the namespace catalog"),
-                content_ref.clone(),
-            ))?);
+            prepared.push(
+                prepare_existing_content_ref(
+                    store,
+                    catalog
+                        .as_ref()
+                        .expect("external content should load the namespace catalog"),
+                    content_ref.clone(),
+                )
+                .await?,
+            );
         }
     }
     Ok(NamespaceMutationCandidate::commit_prepared(
@@ -187,78 +192,82 @@ fn prepared_commit_candidate<S: ObjectStore + ?Sized>(
     ))
 }
 
-fn publish_namespace_mutations_batch<S: ObjectStore + ?Sized>(
+async fn publish_namespace_mutations_batch<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     candidates: Vec<NamespaceMutationCandidate>,
     context: &MutationContext,
 ) -> Vec<Result<loonfs_api::v0::CommitResponse, CoreError>> {
     let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
-    block_on(engine.publish_batch(store, candidates, context)).results
+    engine
+        .publish_batch(store, candidates, context, &PublishTailOptions::default())
+        .await
+        .results
 }
 
-fn begin_upload<S: ObjectStore + ?Sized>(
+async fn begin_upload<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
 ) -> Result<loonfs_api::v0::BeginUploadResponse, CoreError> {
-    block_on(
-        namespace_engine(store, namespace_id, context)
-            .begin_upload(loonfs_api::v0::BeginUploadRequest::default()),
-    )
+    namespace_engine(store, namespace_id, context)
+        .begin_upload(loonfs_api::v0::BeginUploadRequest::default())
+        .await
 }
 
-fn begin_direct_put_upload_target<S: ObjectStore + ?Sized>(
+async fn begin_direct_put_upload_target<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     content_ref: ContentRef,
     context: &MutationContext,
 ) -> Result<BeginDirectPutUploadTargetResponse, CoreError> {
-    block_on(
-        namespace_engine(store, namespace_id, context).begin_direct_put_upload_target(content_ref),
-    )
+    namespace_engine(store, namespace_id, context)
+        .begin_direct_put_upload_target(content_ref)
+        .await
 }
 
-fn upload_content<S: ObjectStore + ?Sized>(
+async fn upload_content<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
     bytes: &[u8],
     context: &MutationContext,
 ) -> Result<loonfs_api::v0::UploadContentResponse, CoreError> {
-    block_on(namespace_engine(store, namespace_id, context).upload_content(upload_id, bytes))
+    namespace_engine(store, namespace_id, context)
+        .upload_content(upload_id, bytes)
+        .await
 }
 
-fn complete_upload<S: ObjectStore + ?Sized>(
+async fn complete_upload<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
     request: &CompleteUploadRequest,
     context: &MutationContext,
 ) -> Result<loonfs_api::v0::CompleteUploadResponse, CoreError> {
-    block_on(namespace_engine(store, namespace_id, context).complete_upload(upload_id, request))
+    namespace_engine(store, namespace_id, context)
+        .complete_upload(upload_id, request)
+        .await
 }
 
-fn list_changes_after<S: ObjectStore + ?Sized>(
+async fn list_changes_after<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     after_seq: ChangeSeq,
 ) -> Result<loonfs_api::v0::ChangesResponse, CoreError> {
-    block_on(
-        namespace_engine(store, namespace_id, &mutation_context())
-            .list_changes_after(after_seq, page_limit(loonfs_api::DEFAULT_PAGE_LIMIT)),
-    )
+    namespace_engine(store, namespace_id, &mutation_context())
+        .list_changes_after(after_seq, page_limit(loonfs_api::DEFAULT_PAGE_LIMIT))
+        .await
 }
 
-fn create_checkpoint<S: ObjectStore + ?Sized>(
+async fn create_checkpoint<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
 ) -> Result<loonfs_api::CreateCheckpointResponse, CoreError> {
-    block_on(
-        namespace_engine(store, namespace_id, context)
-            .create_checkpoint("test-pin".to_owned(), None),
-    )
+    namespace_engine(store, namespace_id, context)
+        .create_checkpoint("test-pin".to_owned(), None)
+        .await
 }
 
 fn test_commit_id(commit_id: Option<&str>) -> CommitId {
@@ -267,14 +276,19 @@ fn test_commit_id(commit_id: Option<&str>) -> CommitId {
         .unwrap_or_else(CommitId::generate)
 }
 
+fn test_display_name(value: impl AsRef<str>) -> DisplayName {
+    DisplayName::parse(value.as_ref()).expect("test display name should be valid")
+}
+
 /// Pins the current head and manifest the way the runtime does before a
 /// read.
-fn read_context<S: ObjectStore + ?Sized>(
+async fn read_context<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> RuntimeReadContext {
-    let (head, root) =
-        block_on(load_namespace_read_anchor(store, namespace_id)).expect("load read anchor");
+    let (head, root) = load_namespace_read_anchor(store, namespace_id)
+        .await
+        .expect("load read anchor");
     RuntimeReadContext {
         head: head.state,
         head_etag: head.identity.etag,
@@ -292,24 +306,19 @@ fn read_context<S: ObjectStore + ?Sized>(
 
 /// Publishes one path intent through the commit engine — the single publish
 /// pipeline.
-fn admitted_candidate<S: ObjectStore + ?Sized>(
+async fn admitted_candidate<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     intent: PathMutationIntent,
 ) -> NamespaceMutationCandidate {
     match &intent {
         PathMutationIntent::PutFile { content_ref, .. } => {
-            let catalog = block_on(loonfs_core::control::load_namespace_catalog_entry(
-                store,
-                namespace_id,
-            ))
-            .expect("load namespace catalog");
-            let prepared = block_on(prepare_existing_content_ref(
-                store,
-                &catalog,
-                content_ref.clone(),
-            ))
-            .expect("prepare existing content");
+            let catalog = loonfs_core::control::load_namespace_catalog_entry(store, namespace_id)
+                .await
+                .expect("load namespace catalog");
+            let prepared = prepare_existing_content_ref(store, &catalog, content_ref.clone())
+                .await
+                .expect("prepare existing content");
             NamespaceMutationCandidate::path_prepared(intent, vec![prepared])
         }
         _ => NamespaceMutationCandidate::path(intent),
@@ -322,25 +331,30 @@ async fn submit_intent_async<S: ObjectStore + ?Sized>(
     intent: PathMutationIntent,
     context: &MutationContext,
 ) -> Result<loonfs_api::CommitResponse, CoreError> {
-    let candidate = admitted_candidate(store, namespace_id, intent);
+    let candidate = admitted_candidate(store, namespace_id, intent).await;
     NamespaceCommitEngine::new(namespace_id.clone())
-        .publish_batch(store, vec![candidate], context)
+        .publish_batch(
+            store,
+            vec![candidate],
+            context,
+            &PublishTailOptions::default(),
+        )
         .await
         .results
         .pop()
         .expect("one publish result")
 }
 
-fn submit_intent<S: ObjectStore + ?Sized>(
+async fn submit_intent<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     intent: PathMutationIntent,
     context: &MutationContext,
 ) -> Result<loonfs_api::CommitResponse, CoreError> {
-    block_on(submit_intent_async(store, namespace_id, intent, context))
+    submit_intent_async(store, namespace_id, intent, context).await
 }
 
-fn put_file_bytes<S: ObjectStore + ?Sized>(
+async fn put_file_bytes<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
@@ -349,7 +363,7 @@ fn put_file_bytes<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     commit_id: Option<&str>,
 ) -> Result<loonfs_api::CommitResponse, CoreError> {
-    let content = block_on(store_bytes_as_content(store, namespace_id, bytes))?;
+    let content = store_bytes_as_content(store, namespace_id, bytes).await?;
     submit_intent(
         store,
         namespace_id,
@@ -361,9 +375,10 @@ fn put_file_bytes<S: ObjectStore + ?Sized>(
         },
         context,
     )
+    .await
 }
 
-fn write_file_bytes<S: ObjectStore + ?Sized>(
+async fn write_file_bytes<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
@@ -380,9 +395,10 @@ fn write_file_bytes<S: ObjectStore + ?Sized>(
         context,
         commit_id,
     )
+    .await
 }
 
-fn create_directory_path<S: ObjectStore + ?Sized>(
+async fn create_directory_path<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
@@ -399,9 +415,10 @@ fn create_directory_path<S: ObjectStore + ?Sized>(
         },
         context,
     )
+    .await
 }
 
-fn delete_path<S: ObjectStore + ?Sized>(
+async fn delete_path<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
@@ -419,9 +436,10 @@ fn delete_path<S: ObjectStore + ?Sized>(
         },
         context,
     )
+    .await
 }
 
-fn delete_path_non_recursive<S: ObjectStore + ?Sized>(
+async fn delete_path_non_recursive<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
@@ -439,9 +457,10 @@ fn delete_path_non_recursive<S: ObjectStore + ?Sized>(
         },
         context,
     )
+    .await
 }
 
-fn delete_path_non_recursive_expecting<S: ObjectStore + ?Sized>(
+async fn delete_path_non_recursive_expecting<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
@@ -460,9 +479,10 @@ fn delete_path_non_recursive_expecting<S: ObjectStore + ?Sized>(
         },
         context,
     )
+    .await
 }
 
-fn move_path<S: ObjectStore + ?Sized>(
+async fn move_path<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     from_path: &str,
@@ -481,9 +501,10 @@ fn move_path<S: ObjectStore + ?Sized>(
         },
         context,
     )
+    .await
 }
 
-fn copy_file_path<S: ObjectStore + ?Sized>(
+async fn copy_file_path<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     from_path: &str,
@@ -502,9 +523,10 @@ fn copy_file_path<S: ObjectStore + ?Sized>(
         },
         context,
     )
+    .await
 }
 
-fn restore_file_revision<S: ObjectStore + ?Sized>(
+async fn restore_file_revision<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
@@ -522,38 +544,40 @@ fn restore_file_revision<S: ObjectStore + ?Sized>(
         },
         context,
     )
+    .await
 }
 
-fn resolve_path<S: ObjectStore + ?Sized>(
+async fn resolve_path<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
 ) -> Result<loonfs_api::AuthoritativePathEntry, CoreError> {
-    let context = read_context(store, namespace_id);
-    block_on(
-        namespace_engine(store, namespace_id, &mutation_context())
-            .resolve_path_with_runtime_context(absolute_path, &context),
-    )
+    let context = read_context(store, namespace_id).await;
+    namespace_engine(store, namespace_id, &mutation_context())
+        .resolve_path_with_runtime_context(absolute_path, &context)
+        .await
 }
 
-fn list_path<S: ObjectStore + ?Sized>(
+async fn list_path<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
 ) -> Result<Vec<loonfs_api::AuthoritativePathEntry>, CoreError> {
-    let context = read_context(store, namespace_id);
+    let context = read_context(store, namespace_id).await;
     let engine = namespace_engine(store, namespace_id, &mutation_context());
     let mut entries = Vec::new();
     let mut cursor = None;
     loop {
-        let page = block_on(engine.list_path_page_with_runtime_context(
-            absolute_path,
-            PageRequest {
-                limit: page_limit(1_000),
-                cursor,
-            },
-            &context,
-        ))?;
+        let page = engine
+            .list_path_page_with_runtime_context(
+                absolute_path,
+                PageRequest {
+                    limit: page_limit(1_000),
+                    cursor,
+                },
+                &context,
+            )
+            .await?;
         entries.extend(page.items);
         match page.next_cursor {
             Some(next) => cursor = Some(next),
@@ -566,73 +590,68 @@ fn page_limit(value: u32) -> EffectiveLimit {
     EffectiveLimit::new(NonZeroU32::new(value).expect("page limit should be non-zero"))
 }
 
-fn list_path_page<S: ObjectStore + ?Sized>(
+async fn list_path_page<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
     limit: u32,
     cursor: Option<DirectoryPageCursor>,
 ) -> Result<Page<AuthoritativePathEntry, DirectoryPageCursor>, CoreError> {
-    let context = read_context(store, namespace_id);
-    block_on(
-        namespace_engine(store, namespace_id, &mutation_context())
-            .list_path_page_with_runtime_context(
-                absolute_path,
-                PageRequest {
-                    limit: page_limit(limit),
-                    cursor,
-                },
-                &context,
-            ),
-    )
+    let context = read_context(store, namespace_id).await;
+    namespace_engine(store, namespace_id, &mutation_context())
+        .list_path_page_with_runtime_context(
+            absolute_path,
+            PageRequest {
+                limit: page_limit(limit),
+                cursor,
+            },
+            &context,
+        )
+        .await
 }
 
-fn read_file_bytes<S: ObjectStore + ?Sized>(
+async fn read_file_bytes<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
 ) -> Result<loonfs_api::AuthoritativeFileBytes, CoreError> {
-    let context = read_context(store, namespace_id);
-    block_on(
-        namespace_engine(store, namespace_id, &mutation_context()).read_file_with_runtime_context(
-            absolute_path,
-            &context,
-            None,
-        ),
-    )
+    let context = read_context(store, namespace_id).await;
+    namespace_engine(store, namespace_id, &mutation_context())
+        .read_file_with_runtime_context(absolute_path, &context, None)
+        .await
 }
 
 /// Drains the paged revision listing — the only revision-listing operation
 /// the stack exposes — so guards can assert over a file's full history.
-fn list_file_revisions<S: ObjectStore + ?Sized>(
+async fn list_file_revisions<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
 ) -> Result<loonfs_api::ListFileRevisionsResponse, CoreError> {
-    let entry = resolve_path(store, namespace_id, absolute_path)?;
-    list_file_revisions_for_inode(store, namespace_id, entry.inode_id)
+    let entry = resolve_path(store, namespace_id, absolute_path).await?;
+    list_file_revisions_for_inode(store, namespace_id, entry.inode_id).await
 }
 
-fn list_file_revisions_for_inode<S: ObjectStore + ?Sized>(
+async fn list_file_revisions_for_inode<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     inode_id: InodeId,
 ) -> Result<loonfs_api::ListFileRevisionsResponse, CoreError> {
-    let context = read_context(store, namespace_id);
+    let context = read_context(store, namespace_id).await;
     let engine = namespace_engine(store, namespace_id, &mutation_context());
     let mut revisions = Vec::new();
     let mut cursor = None;
     loop {
-        let page = block_on(
-            engine.list_file_revisions_for_inode_page_with_runtime_context(
+        let page = engine
+            .list_file_revisions_for_inode_page_with_runtime_context(
                 inode_id,
                 PageRequest {
                     limit: page_limit(2),
                     cursor: cursor.clone(),
                 },
                 &context,
-            ),
-        )?;
+            )
+            .await?;
         revisions.extend(page.items);
         cursor = page.next_cursor;
         if cursor.is_none() {
@@ -647,43 +666,37 @@ fn list_file_revisions_for_inode<S: ObjectStore + ?Sized>(
     }
 }
 
-fn read_file_revision_bytes<S: ObjectStore + ?Sized>(
+async fn read_file_revision_bytes<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
     revision_no: RevisionNo,
 ) -> Result<loonfs_api::AuthoritativeFileBytes, CoreError> {
-    let context = read_context(store, namespace_id);
-    block_on(
-        namespace_engine(store, namespace_id, &mutation_context())
-            .read_file_revision_with_runtime_context(absolute_path, revision_no, &context, None),
-    )
+    let context = read_context(store, namespace_id).await;
+    namespace_engine(store, namespace_id, &mutation_context())
+        .read_file_revision_with_runtime_context(absolute_path, revision_no, &context, None)
+        .await
 }
 
-fn read_file_revision_bytes_for_inode<S: ObjectStore + ?Sized>(
+async fn read_file_revision_bytes_for_inode<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     inode_id: InodeId,
     revision_no: RevisionNo,
 ) -> Result<Vec<u8>, CoreError> {
-    let context = read_context(store, namespace_id);
-    block_on(
-        namespace_engine(store, namespace_id, &mutation_context())
-            .read_file_revision_for_inode_with_runtime_context(
-                inode_id,
-                revision_no,
-                &context,
-                None,
-            ),
-    )
+    let context = read_context(store, namespace_id).await;
+    namespace_engine(store, namespace_id, &mutation_context())
+        .read_file_revision_for_inode_with_runtime_context(inode_id, revision_no, &context, None)
+        .await
 }
 
-fn latest_binding_for_child_from_change_feed<S: ObjectStore + ?Sized>(
+async fn latest_binding_for_child_from_change_feed<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     target_child_inode_id: InodeId,
 ) -> BindingIdentity {
     list_changes_after(store, namespace_id, ChangeSeq(0))
+        .await
         .expect("change feed")
         .changes
         .into_iter()
@@ -712,20 +725,20 @@ fn latest_binding_for_child_from_change_feed<S: ObjectStore + ?Sized>(
         .expect("binding exists in change feed")
 }
 
-fn resolve_path_latest<S: ObjectStore + ?Sized>(
+async fn resolve_path_latest<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
 ) -> Result<loonfs_api::AuthoritativePathEntry, CoreError> {
-    resolve_path(store, namespace_id, absolute_path)
+    resolve_path(store, namespace_id, absolute_path).await
 }
 
-fn list_path_latest<S: ObjectStore + ?Sized>(
+async fn list_path_latest<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     absolute_path: &str,
 ) -> Result<Vec<loonfs_api::AuthoritativePathEntry>, CoreError> {
-    list_path(store, namespace_id, absolute_path)
+    list_path(store, namespace_id, absolute_path).await
 }
 
 fn wal_create_directory(
@@ -748,7 +761,7 @@ fn wal_create_directory(
                 &display_name,
             ))
             .expect("derived name key"),
-            display_name,
+            display_name: test_display_name(display_name),
             child_inode_id: inode_id,
         },
     ]
@@ -775,7 +788,7 @@ fn wal_create_file(
                 &display_name,
             ))
             .expect("derived name key"),
-            display_name,
+            display_name: test_display_name(display_name),
             child_inode_id: inode_id,
         },
         WalDelta::AppendFileRevision {
@@ -808,7 +821,7 @@ fn wal_tombstone(delta_index: u32, root_inode_id: InodeId) -> Vec<WalDelta> {
     }]
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn stale_revision_precondition_is_rejected() {
     let metadata_state = metadata_state_after(&[
         wal_create_directory(0, InodeId(2), InodeId(1), "docs".to_owned()),
@@ -850,7 +863,7 @@ async fn stale_revision_precondition_is_rejected() {
     ));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn failed_multi_op_plan_uses_preview_without_mutating_base_metadata() {
     let metadata_state = metadata_state_after(&[]);
     let context = validation_context(&metadata_state, ChangeSeq(0), InodeId(2));
@@ -863,11 +876,11 @@ async fn failed_multi_op_plan_uses_preview_without_mutating_base_metadata() {
         ops: vec![
             CommitOp::CreateDirectory {
                 parent_inode_id: InodeId(1),
-                display_name: "docs".to_owned(),
+                display_name: test_display_name("docs"),
             },
             CommitOp::CreateFile {
                 parent_inode_id: InodeId(2),
-                display_name: "readme.txt".to_owned(),
+                display_name: test_display_name("readme.txt"),
                 content_ref: content_ref("content-1"),
             },
             CommitOp::ReplaceFile {
@@ -890,11 +903,15 @@ async fn failed_multi_op_plan_uses_preview_without_mutating_base_metadata() {
         }
     ));
     assert!(metadata_state
-        .visible_child(InodeId(1), "docs", ChangeSeq(1))
+        .visible_child(
+            InodeId(1),
+            &NameKey::parse("docs").expect("valid name key"),
+            ChangeSeq(1),
+        )
         .is_none());
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn create_and_replace_under_ancestor_tombstone_are_rejected() {
     let metadata_state = metadata_state_after(&[
         wal_create_directory(0, InodeId(2), InodeId(1), "docs".to_owned()),
@@ -918,7 +935,7 @@ async fn create_and_replace_under_ancestor_tombstone_are_rejected() {
             writer_epoch: WriterEpoch(1),
             ops: vec![CommitOp::CreateFile {
                 parent_inode_id: InodeId(2),
-                display_name: "new.txt".to_owned(),
+                display_name: test_display_name("new.txt"),
                 content_ref: content_ref("content-2"),
             }],
             preconditions: Vec::new(),
@@ -966,7 +983,7 @@ async fn create_and_replace_under_ancestor_tombstone_are_rejected() {
     ));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn restore_revision_validation_rejects_missing_inode() {
     let metadata_state = metadata_state_after(&[wal_create_directory(
         0,
@@ -1001,7 +1018,7 @@ async fn restore_revision_validation_rejects_missing_inode() {
     ));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn restore_revision_validation_rejects_non_file_target() {
     let metadata_state = metadata_state_after(&[wal_create_directory(
         0,
@@ -1037,7 +1054,7 @@ async fn restore_revision_validation_rejects_non_file_target() {
     ));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn restore_revision_validation_rejects_stale_or_missing_source_revision() {
     let metadata_state = metadata_state_after(&[
         wal_create_directory(0, InodeId(2), InodeId(1), "docs".to_owned()),
@@ -1110,7 +1127,7 @@ async fn restore_revision_validation_rejects_stale_or_missing_source_revision() 
     ));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn restore_revision_can_reference_revision_created_earlier_in_same_request() {
     let metadata_state = metadata_state_after(&[
         wal_create_directory(0, InodeId(2), InodeId(1), "docs".to_owned()),
@@ -1162,7 +1179,7 @@ async fn restore_revision_can_reference_revision_created_earlier_in_same_request
     ));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn restore_revision_can_reference_restore_created_earlier_in_same_request() {
     let metadata_state = metadata_state_after(&[
         wal_create_directory(0, InodeId(2), InodeId(1), "docs".to_owned()),
@@ -1222,7 +1239,7 @@ async fn restore_revision_can_reference_restore_created_earlier_in_same_request(
     ));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn restore_revision_under_tombstoned_ancestor_is_rejected() {
     let metadata_state = metadata_state_after(&[
         wal_create_directory(0, InodeId(2), InodeId(1), "docs".to_owned()),
@@ -1266,7 +1283,7 @@ async fn restore_revision_under_tombstoned_ancestor_is_rejected() {
     ));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn restore_revision_overflow_is_rejected() {
     let mut deltas = wal_create_file(
         0,
@@ -1322,22 +1339,26 @@ async fn restore_revision_overflow_is_rejected() {
     ));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn namespace_creation_writes_descriptors_and_rejects_partial_recreation() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
     let namespace_id = namespace_id();
 
-    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap namespace");
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap namespace");
     let duplicate_error = bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
         .expect_err("complete namespace id reuse should be rejected");
     assert!(matches!(
         duplicate_error,
         loonfs_core::BootstrapNamespaceError::NamespaceAlreadyExists { .. }
     ));
-    let existing =
-        bootstrap_namespace(&store, &namespace_id, &context, true).expect("allow existing");
+    let existing = bootstrap_namespace(&store, &namespace_id, &context, true)
+        .await
+        .expect("allow existing");
     assert_eq!(existing.namespace_id, namespace_id);
 
     let descriptor_key = namespace_config(namespace_id.as_str());
@@ -1357,11 +1378,10 @@ async fn namespace_creation_writes_descriptors_and_rejects_partial_recreation() 
         .await
         .expect("content store descriptor head")
         .is_some());
-    let manifest_root = block_on(loonfs_core::control::load_namespace_metadata_root_control(
-        &store,
-        &namespace_id,
-    ))
-    .expect("metadata root");
+    let manifest_root =
+        loonfs_core::control::load_namespace_metadata_root_control(&store, &namespace_id)
+            .await
+            .expect("metadata root");
     let manifest_bytes = store
         .get(
             &metadata_manifest_object(
@@ -1421,6 +1441,7 @@ async fn namespace_creation_writes_descriptors_and_rejects_partial_recreation() 
         &context,
         false,
     )
+    .await
     .expect_err("partial namespace should be rejected");
     assert!(matches!(
         partial_error,
@@ -1428,7 +1449,7 @@ async fn namespace_creation_writes_descriptors_and_rejects_partial_recreation() 
     ));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn bootstrap_head_lost_ack_stays_partial_until_explicit_repair() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id();
@@ -1443,12 +1464,13 @@ async fn bootstrap_head_lost_ack_stays_partial_until_explicit_repair() {
     );
 
     let error = bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
         .expect_err("target head precondition should re-check partial namespace");
     // The lost ack left the head written and the descriptor absent, so the
     // shared install re-check answers partial — the same policy fork pins.
     assert!(matches!(
         &error,
-        loonfs_core::BootstrapNamespaceError::Core(CoreError::NamespacePartiallyInitialized { .. })
+        loonfs_core::BootstrapNamespaceError::Core(CoreError::NamespacePartial { .. })
     ));
     assert_eq!(error.code(), ErrorCode::NamespacePartial);
     assert!(
@@ -1462,14 +1484,16 @@ async fn bootstrap_head_lost_ack_stays_partial_until_explicit_repair() {
     // The injected failure wrote the head before reporting the lost ack.
     // Normal create retries are classification-only and leave it untouched.
     let retry = bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
         .expect_err("retry preserves the ack-lost partial tree");
     assert_eq!(retry.code(), ErrorCode::NamespacePartial);
-    let report = block_on(repair_namespace(&store, &namespace_id, &context))
+    let report = repair_namespace(&store, &namespace_id, &context)
+        .await
         .expect("explicit repair completes the ack-lost create");
     assert_eq!(report.outcome, RepairNamespaceOutcome::Completed);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn bootstrap_head_conflict_rechecks_complete_namespace() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id();
@@ -1516,43 +1540,50 @@ async fn bootstrap_head_conflict_rechecks_complete_namespace() {
     );
 
     let error = bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
         .expect_err("target head conflict should re-check complete namespace");
     assert!(matches!(
         &error,
-        loonfs_core::BootstrapNamespaceError::Core(CoreError::NamespaceAlreadyExists { .. })
+        loonfs_core::BootstrapNamespaceError::Core(CoreError::NamespaceExists { .. })
     ));
     assert_eq!(error.code(), ErrorCode::NamespaceExists);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn begin_upload_rejects_missing_and_partial_namespace() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
 
-    let missing_error =
-        begin_upload(&store, &namespace_id, &context).expect_err("missing namespace");
+    let missing_error = begin_upload(&store, &namespace_id, &context)
+        .await
+        .expect_err("missing namespace");
     assert_eq!(missing_error.code(), ErrorCode::NamespaceNotFound);
 
-    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
     store
         .delete(&namespace_config(namespace_id.as_str()))
         .await
         .expect("delete descriptor");
 
-    let partial_error =
-        begin_upload(&store, &namespace_id, &context).expect_err("partial namespace");
+    let partial_error = begin_upload(&store, &namespace_id, &context)
+        .await
+        .expect_err("partial namespace");
     assert_eq!(partial_error.code(), ErrorCode::NamespacePartial);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn begin_direct_put_rejects_unsupported_content_ref_without_session() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
 
     let content_ref = ContentRef {
         kind: ContentRefKind::Unsupported("future_kind".to_owned()),
@@ -1560,6 +1591,7 @@ async fn begin_direct_put_rejects_unsupported_content_ref_without_session() {
         size_bytes: 5,
     };
     let error = begin_direct_put_upload_target(&store, &namespace_id, content_ref, &context)
+        .await
         .expect_err("unsupported direct_put content ref");
 
     assert_eq!(error.code(), ErrorCode::InvalidRequest);
@@ -1572,14 +1604,16 @@ async fn begin_direct_put_rejects_unsupported_content_ref_without_session() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn begin_upload_does_not_read_manifest_or_wal_replay_objects() {
     let temp_dir = tempdir().expect("tempdir");
     let setup_store = LocalFsStore::new(temp_dir.path()).expect("setup store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
 
-    bootstrap_namespace(&setup_store, &namespace_id, &context, false).expect("bootstrap");
+    bootstrap_namespace(&setup_store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
     put_file_bytes(
         &setup_store,
         &namespace_id,
@@ -1589,8 +1623,11 @@ async fn begin_upload_does_not_read_manifest_or_wal_replay_objects() {
         &context,
         Some("upload-guard-create"),
     )
+    .await
     .expect("create file");
-    create_checkpoint(&setup_store, &namespace_id, &context).expect("checkpoint");
+    create_checkpoint(&setup_store, &namespace_id, &context)
+        .await
+        .expect("checkpoint");
     put_file_bytes(
         &setup_store,
         &namespace_id,
@@ -1600,24 +1637,32 @@ async fn begin_upload_does_not_read_manifest_or_wal_replay_objects() {
         &context,
         Some("upload-guard-replace"),
     )
+    .await
     .expect("replace file");
 
     let guarded_store = ReplayReadGuardStore::new(temp_dir.path(), namespace_id.as_str());
-    let begin = begin_upload(&guarded_store, &namespace_id, &context).expect("begin upload");
+    let begin = begin_upload(&guarded_store, &namespace_id, &context)
+        .await
+        .expect("begin upload");
     assert_eq!(begin.namespace_id, namespace_id);
     assert_eq!(guarded_store.guarded_get_count(), 0);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn complete_upload_does_not_get_content_blob_after_staging() {
     let temp_dir = tempdir().expect("tempdir");
     let store = ContentBlobGetCountingStore::new(temp_dir.path());
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
 
-    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
-    let begin = begin_upload(&store, &namespace_id, &context).expect("begin upload");
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    let begin = begin_upload(&store, &namespace_id, &context)
+        .await
+        .expect("begin upload");
     let uploaded = upload_content(&store, &namespace_id, &begin.upload_id, b"hello", &context)
+        .await
         .expect("upload content");
 
     store.reset_content_blob_get_count();
@@ -1630,6 +1675,7 @@ async fn complete_upload_does_not_get_content_blob_after_staging() {
         },
         &context,
     )
+    .await
     .expect("complete upload");
     assert_eq!(completed.content_ref, uploaded.content_ref);
     assert_eq!(store.content_blob_get_count(), 0);
@@ -1644,11 +1690,14 @@ async fn complete_upload_does_not_get_content_blob_after_staging() {
         },
         &context,
     )
+    .await
     .expect("complete upload idempotently");
     assert_eq!(completed_again.content_ref, completed.content_ref);
     assert_eq!(store.content_blob_get_count(), 0);
 
-    let mismatch_begin = begin_upload(&store, &namespace_id, &context).expect("begin mismatch");
+    let mismatch_begin = begin_upload(&store, &namespace_id, &context)
+        .await
+        .expect("begin mismatch");
     let mismatch_uploaded = upload_content(
         &store,
         &namespace_id,
@@ -1656,6 +1705,7 @@ async fn complete_upload_does_not_get_content_blob_after_staging() {
         b"staged",
         &context,
     )
+    .await
     .expect("upload mismatch content");
     let wrong_ref = ContentRef::whole_file_v0(b"different");
     assert_ne!(wrong_ref, mismatch_uploaded.content_ref);
@@ -1670,18 +1720,21 @@ async fn complete_upload_does_not_get_content_blob_after_staging() {
         },
         &context,
     )
+    .await
     .expect_err("mismatched content ref");
     assert_eq!(mismatch.code(), ErrorCode::InvalidRequest);
     assert_eq!(store.content_blob_get_count(), 0);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn complete_upload_rejects_direct_put_session_without_bound_target() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
     let stored = store_bytes_as_content(&store, &namespace_id, b"hello")
         .await
         .expect("store content");
@@ -1719,19 +1772,22 @@ async fn complete_upload_rejects_direct_put_session_without_bound_target() {
         },
         &context,
     )
+    .await
     .expect_err("direct_put session without target should fail closed");
 
     assert_eq!(error.code(), ErrorCode::InvalidRequest);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn path_put_file_without_admission_fails_without_reading_content() {
     let temp_dir = tempdir().expect("tempdir");
     let store = ContentBlobGetCountingStore::new(temp_dir.path());
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
 
-    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
     let content = store_bytes_as_content(&store, &namespace_id, b"hello")
         .await
         .expect("stage content");
@@ -1749,7 +1805,8 @@ async fn path_put_file_without_admission_fails_without_reading_content() {
             },
         )],
         &context,
-    );
+    )
+    .await;
 
     assert_eq!(
         responses[0]
@@ -1761,14 +1818,16 @@ async fn path_put_file_without_admission_fails_without_reading_content() {
     assert_eq!(store.content_blob_get_count(), 0);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn path_batch_rejects_repeated_unadmitted_content_without_reading_it() {
     let temp_dir = tempdir().expect("tempdir");
     let store = ContentBlobGetCountingStore::new(temp_dir.path());
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
 
-    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
     let content = store_bytes_as_content(&store, &namespace_id, b"shared")
         .await
         .expect("stage content");
@@ -1792,7 +1851,8 @@ async fn path_batch_rejects_repeated_unadmitted_content_without_reading_it() {
             }),
         ],
         &context,
-    );
+    )
+    .await;
 
     assert!(responses.iter().all(|response| {
         response
@@ -1802,14 +1862,16 @@ async fn path_batch_rejects_repeated_unadmitted_content_without_reading_it() {
     assert_eq!(store.content_blob_get_count(), 0);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn valid_content_admission_skips_durable_content_validation() {
     let temp_dir = tempdir().expect("tempdir");
     let store = ContentBlobGetCountingStore::new(temp_dir.path());
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
 
-    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
     let content = store_bytes_as_content(&store, &namespace_id, b"admitted")
         .await
         .expect("stage content");
@@ -1848,22 +1910,26 @@ async fn valid_content_admission_skips_durable_content_validation() {
             vec![prepared],
         )],
         &context,
-    );
+    )
+    .await;
 
     assert!(responses[0].is_ok());
     // A live admission is the fast path: no content read at all.
     assert_eq!(store.content_blob_get_count(), 0);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn metadata_queries_do_not_get_content_blobs_but_file_reads_do_once() {
     let temp_dir = tempdir().expect("tempdir");
     let store = ContentBlobGetCountingStore::new(temp_dir.path());
     let context = mutation_context();
     let namespace_id = namespace_id();
 
-    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
     create_directory_path(&store, &namespace_id, "/docs", &context, Some("mkdir-docs"))
+        .await
         .expect("create docs");
 
     for index in 0..3 {
@@ -1879,18 +1945,23 @@ async fn metadata_queries_do_not_get_content_blobs_but_file_reads_do_once() {
             &context,
             Some(&commit_id),
         )
+        .await
         .expect("put file");
     }
 
     store.reset_content_blob_get_count();
-    let stat = resolve_path(&store, &namespace_id, "/docs/file-1.txt").expect("stat file");
+    let stat = resolve_path(&store, &namespace_id, "/docs/file-1.txt")
+        .await
+        .expect("stat file");
     assert_eq!(stat.inode_kind, InodeKind::File);
     assert_eq!(stat.size_bytes, Some("file-1-bytes".len() as u64));
     assert!(stat.content_ref.is_some());
     assert_eq!(store.content_blob_get_count(), 0);
 
     store.reset_content_blob_get_count();
-    let entries = list_path(&store, &namespace_id, "/docs").expect("list docs");
+    let entries = list_path(&store, &namespace_id, "/docs")
+        .await
+        .expect("list docs");
     assert_eq!(entries.len(), 3);
     for entry in entries {
         assert_eq!(entry.inode_kind, InodeKind::File);
@@ -1900,19 +1971,23 @@ async fn metadata_queries_do_not_get_content_blobs_but_file_reads_do_once() {
     assert_eq!(store.content_blob_get_count(), 0);
 
     store.reset_content_blob_get_count();
-    let read = read_file_bytes(&store, &namespace_id, "/docs/file-1.txt").expect("read file");
+    let read = read_file_bytes(&store, &namespace_id, "/docs/file-1.txt")
+        .await
+        .expect("read file");
     assert_eq!(read.bytes, b"file-1-bytes");
     assert_eq!(store.content_blob_get_count(), 1);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn query_driven_reads_use_initial_manifest_with_wal_overlay() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
     let namespace_id = namespace_id();
 
-    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
     put_file_bytes(
         &store,
         &namespace_id,
@@ -1922,24 +1997,30 @@ async fn query_driven_reads_use_initial_manifest_with_wal_overlay() {
         &context,
         Some("put-file"),
     )
+    .await
     .expect("put file");
 
-    let stat =
-        resolve_path_latest(&store, &namespace_id, "/docs/file.txt").expect("stat with manifest");
-    let list = list_path_latest(&store, &namespace_id, "/docs").expect("list with manifest");
+    let stat = resolve_path_latest(&store, &namespace_id, "/docs/file.txt")
+        .await
+        .expect("stat with manifest");
+    let list = list_path_latest(&store, &namespace_id, "/docs")
+        .await
+        .expect("list with manifest");
 
     assert_eq!(stat.size_bytes, Some(4));
     assert_eq!(list.len(), 1);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn query_driven_stat_and_list_use_metadata_view_with_l0_run_and_wal_overlay() {
     let temp_dir = tempdir().expect("tempdir");
     let store = ContentBlobGetCountingStore::new(temp_dir.path());
     let context = mutation_context();
     let namespace_id = namespace_id();
 
-    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
     put_file_bytes(
         &store,
         &namespace_id,
@@ -1949,6 +2030,7 @@ async fn query_driven_stat_and_list_use_metadata_view_with_l0_run_and_wal_overla
         &context,
         Some("put-alpha"),
     )
+    .await
     .expect("put alpha");
     put_file_bytes(
         &store,
@@ -1959,6 +2041,7 @@ async fn query_driven_stat_and_list_use_metadata_view_with_l0_run_and_wal_overla
         &context,
         Some("put-bravo"),
     )
+    .await
     .expect("put bravo");
     put_file_bytes(
         &store,
@@ -1969,8 +2052,11 @@ async fn query_driven_stat_and_list_use_metadata_view_with_l0_run_and_wal_overla
         &context,
         Some("put-dead"),
     )
+    .await
     .expect("put dead");
-    create_checkpoint(&store, &namespace_id, &context).expect("base checkpoint");
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("base checkpoint");
 
     move_path(
         &store,
@@ -1980,6 +2066,7 @@ async fn query_driven_stat_and_list_use_metadata_view_with_l0_run_and_wal_overla
         &context,
         Some("move-alpha"),
     )
+    .await
     .expect("move alpha");
     put_file_bytes(
         &store,
@@ -1990,6 +2077,7 @@ async fn query_driven_stat_and_list_use_metadata_view_with_l0_run_and_wal_overla
         &context,
         Some("replace-bravo"),
     )
+    .await
     .expect("replace bravo");
     delete_path(
         &store,
@@ -1998,8 +2086,11 @@ async fn query_driven_stat_and_list_use_metadata_view_with_l0_run_and_wal_overla
         &context,
         Some("delete-dead"),
     )
+    .await
     .expect("delete dead");
-    create_checkpoint(&store, &namespace_id, &context).expect("l0 checkpoint");
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("l0 checkpoint");
 
     put_file_bytes(
         &store,
@@ -2010,20 +2101,31 @@ async fn query_driven_stat_and_list_use_metadata_view_with_l0_run_and_wal_overla
         &context,
         Some("put-wal"),
     )
+    .await
     .expect("put wal tail");
 
-    let expected_stat = resolve_path(&store, &namespace_id, "/docs/moved.txt").expect("stat");
-    let expected_list = list_path(&store, &namespace_id, "/docs").expect("list");
-    let expected_file_list =
-        list_path(&store, &namespace_id, "/docs/moved.txt").expect("file list");
+    let expected_stat = resolve_path(&store, &namespace_id, "/docs/moved.txt")
+        .await
+        .expect("stat");
+    let expected_list = list_path(&store, &namespace_id, "/docs")
+        .await
+        .expect("list");
+    let expected_file_list = list_path(&store, &namespace_id, "/docs/moved.txt")
+        .await
+        .expect("file list");
 
     store.reset_content_blob_get_count();
-    let actual_stat =
-        resolve_path_latest(&store, &namespace_id, "/docs/moved.txt").expect("materialized stat");
-    let actual_list = list_path_latest(&store, &namespace_id, "/docs").expect("materialized list");
-    let actual_file_list =
-        list_path_latest(&store, &namespace_id, "/docs/moved.txt").expect("materialized file list");
+    let actual_stat = resolve_path_latest(&store, &namespace_id, "/docs/moved.txt")
+        .await
+        .expect("materialized stat");
+    let actual_list = list_path_latest(&store, &namespace_id, "/docs")
+        .await
+        .expect("materialized list");
+    let actual_file_list = list_path_latest(&store, &namespace_id, "/docs/moved.txt")
+        .await
+        .expect("materialized file list");
     let actual_casefold_stat = resolve_path_latest(&store, &namespace_id, "/DOCS/MOVED.TXT")
+        .await
         .expect("materialized casefold stat");
 
     assert_eq!(actual_stat, expected_stat);
@@ -2032,18 +2134,24 @@ async fn query_driven_stat_and_list_use_metadata_view_with_l0_run_and_wal_overla
     assert_eq!(actual_file_list, expected_file_list);
     assert_eq!(store.content_blob_get_count(), 0);
 
-    assert!(resolve_path_latest(&store, &namespace_id, "/docs/a.txt").is_err());
-    assert!(resolve_path_latest(&store, &namespace_id, "/dead/leaf.txt").is_err());
+    assert!(resolve_path_latest(&store, &namespace_id, "/docs/a.txt")
+        .await
+        .is_err());
+    assert!(resolve_path_latest(&store, &namespace_id, "/dead/leaf.txt")
+        .await
+        .is_err());
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn query_driven_stat_uses_exact_name_key_for_dash_containing_siblings() {
     let temp_dir = tempdir().expect("tempdir");
     let store = ContentBlobGetCountingStore::new(temp_dir.path());
     let context = mutation_context();
     let namespace_id = namespace_id();
 
-    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
     put_file_bytes(
         &store,
         &namespace_id,
@@ -2053,6 +2161,7 @@ async fn query_driven_stat_uses_exact_name_key_for_dash_containing_siblings() {
         &context,
         Some("put-report"),
     )
+    .await
     .expect("put report");
     put_file_bytes(
         &store,
@@ -2063,26 +2172,34 @@ async fn query_driven_stat_uses_exact_name_key_for_dash_containing_siblings() {
         &context,
         Some("put-report-2024"),
     )
+    .await
     .expect("put report-2024");
-    create_checkpoint(&store, &namespace_id, &context).expect("checkpoint");
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("checkpoint");
 
-    let expected = resolve_path(&store, &namespace_id, "/docs/report").expect("stat");
-    let actual =
-        resolve_path_latest(&store, &namespace_id, "/docs/report").expect("materialized stat");
+    let expected = resolve_path(&store, &namespace_id, "/docs/report")
+        .await
+        .expect("stat");
+    let actual = resolve_path_latest(&store, &namespace_id, "/docs/report")
+        .await
+        .expect("materialized stat");
 
     assert_eq!(actual, expected);
     assert_eq!(actual.absolute_path, "/docs/report");
     assert_eq!(actual.size_bytes, Some(5));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn batch_delete_then_recreate_of_a_durable_file_layers_over_cached_state() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
     let namespace_id = namespace_id();
 
-    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
     put_file_bytes(
         &store,
         &namespace_id,
@@ -2092,21 +2209,21 @@ async fn batch_delete_then_recreate_of_a_durable_file_layers_over_cached_state()
         &context,
         Some("put-durable"),
     )
+    .await
     .expect("put durable file");
-    create_checkpoint(&store, &namespace_id, &context).expect("checkpoint durable state");
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("checkpoint durable state");
 
     // One batch: delete the checkpointed file, then recreate the same name
     // with NoReplace. The recreate must observe the batch-local unbind over
     // the durable binding, and the delete must observe the durable binding
     // at all — both through the batch's cached durable layer.
-    let staged = block_on(loonfs_core::content::store_bytes_as_content(
-        &store,
-        &namespace_id,
-        b"recreated",
-    ))
-    .expect("stage recreated content");
-    let results = block_on(
-        namespace_engine(&store, &namespace_id, &context).publish_namespace_mutations_batch(vec![
+    let staged = loonfs_core::content::store_bytes_as_content(&store, &namespace_id, b"recreated")
+        .await
+        .expect("stage recreated content");
+    let results = namespace_engine(&store, &namespace_id, &context)
+        .publish_namespace_mutations_batch(vec![
             NamespaceMutationCandidate::path(PathMutationIntent::DeletePath {
                 commit_id: CommitId::parse("delete-cycled").expect("valid commit id"),
                 absolute_path: AbsolutePath::parse("/docs/cycled.txt").expect("path"),
@@ -2122,9 +2239,10 @@ async fn batch_delete_then_recreate_of_a_durable_file_layers_over_cached_state()
                     content_ref: staged.content_ref,
                     behavior: DestinationBehavior::NoReplace,
                 },
-            ),
-        ]),
-    );
+            )
+            .await,
+        ])
+        .await;
     results[0]
         .as_ref()
         .expect("delete of durable file succeeds");
@@ -2132,20 +2250,24 @@ async fn batch_delete_then_recreate_of_a_durable_file_layers_over_cached_state()
         .as_ref()
         .expect("no-replace recreate sees the in-batch unbind over the durable binding");
 
-    let recreated =
-        read_file_bytes(&store, &namespace_id, "/docs/cycled.txt").expect("read recreated file");
+    let recreated = read_file_bytes(&store, &namespace_id, "/docs/cycled.txt")
+        .await
+        .expect("read recreated file");
     assert_eq!(recreated.bytes, b"recreated");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn wide_directory_listing_resolves_tail_unbinds_cross_directory_renames_and_rebinds() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
     let namespace_id = namespace_id();
 
-    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
     create_directory_path(&store, &namespace_id, "/wide", &context, Some("mkdir-wide"))
+        .await
         .expect("create wide");
     create_directory_path(
         &store,
@@ -2154,6 +2276,7 @@ async fn wide_directory_listing_resolves_tail_unbinds_cross_directory_renames_an
         &context,
         Some("mkdir-other"),
     )
+    .await
     .expect("create other");
 
     // More names than one raw scan chunk, so group boundaries cross
@@ -2170,6 +2293,7 @@ async fn wide_directory_listing_resolves_tail_unbinds_cross_directory_renames_an
             &context,
             Some(&format!("put-{index:03}")),
         )
+        .await
         .expect("put file");
     }
     for index in [3u32, 35, 68] {
@@ -2183,9 +2307,12 @@ async fn wide_directory_listing_resolves_tail_unbinds_cross_directory_renames_an
             &context,
             Some(&format!("rebind-{index:03}")),
         )
+        .await
         .expect("rebind file");
     }
-    create_checkpoint(&store, &namespace_id, &context).expect("checkpoint wide dir");
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("checkpoint wide dir");
 
     // Tail-only mutations over checkpointed state: a delete whose unbind
     // lives only in the WAL tail, and a rename into another directory whose
@@ -2197,6 +2324,7 @@ async fn wide_directory_listing_resolves_tail_unbinds_cross_directory_renames_an
         &context,
         Some("delete-tail-unbind"),
     )
+    .await
     .expect("delete over checkpointed bind");
     move_path(
         &store,
@@ -2206,6 +2334,7 @@ async fn wide_directory_listing_resolves_tail_unbinds_cross_directory_renames_an
         &context,
         Some("move-cross-directory"),
     )
+    .await
     .expect("move into other directory");
     put_file_bytes(
         &store,
@@ -2216,14 +2345,20 @@ async fn wide_directory_listing_resolves_tail_unbinds_cross_directory_renames_an
         &context,
         Some("tail-rebind-005"),
     )
+    .await
     .expect("tail rebind over checkpointed bind");
 
     let mut listed = Vec::new();
     let mut cursor = None;
     loop {
-        let page =
-            list_path_page(&store, &namespace_id, "/wide", 16, cursor.clone()).expect("list page");
-        listed.extend(page.items.iter().map(|entry| entry.display_name.clone()));
+        let page = list_path_page(&store, &namespace_id, "/wide", 16, cursor.clone())
+            .await
+            .expect("list page");
+        listed.extend(
+            page.items
+                .iter()
+                .map(|entry| entry.display_name.as_str().to_owned()),
+        );
         cursor = page.next_cursor;
         if cursor.is_none() {
             break;
@@ -2238,23 +2373,28 @@ async fn wide_directory_listing_resolves_tail_unbinds_cross_directory_renames_an
 
     // The tail rebind is the visible revision, not the checkpointed one.
     let rebound = read_file_bytes(&store, &namespace_id, "/wide/file-005.txt")
+        .await
         .expect("read tail-rebound file");
     assert_eq!(rebound.bytes, b"tail-rebound");
     // The moved child is visible under its new parent only.
-    let moved =
-        read_file_bytes(&store, &namespace_id, "/other/moved-away.txt").expect("read moved file");
+    let moved = read_file_bytes(&store, &namespace_id, "/other/moved-away.txt")
+        .await
+        .expect("read moved file");
     assert_eq!(moved.bytes, b"first");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn query_driven_directory_page_merges_manifest_and_tail_visible_children() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
     let namespace_id = namespace_id();
 
-    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
     create_directory_path(&store, &namespace_id, "/docs", &context, Some("mkdir-docs"))
+        .await
         .expect("create docs");
     create_directory_path(
         &store,
@@ -2263,6 +2403,7 @@ async fn query_driven_directory_page_merges_manifest_and_tail_visible_children()
         &context,
         Some("mkdir-a-dir"),
     )
+    .await
     .expect("create a-dir");
     put_file_bytes(
         &store,
@@ -2273,6 +2414,7 @@ async fn query_driven_directory_page_merges_manifest_and_tail_visible_children()
         &context,
         Some("put-c-file"),
     )
+    .await
     .expect("put c-file");
     put_file_bytes(
         &store,
@@ -2283,6 +2425,7 @@ async fn query_driven_directory_page_merges_manifest_and_tail_visible_children()
         &context,
         Some("put-stale"),
     )
+    .await
     .expect("put stale");
     move_path(
         &store,
@@ -2292,6 +2435,7 @@ async fn query_driven_directory_page_merges_manifest_and_tail_visible_children()
         &context,
         Some("move-stale"),
     )
+    .await
     .expect("move stale");
     put_file_bytes(
         &store,
@@ -2302,6 +2446,7 @@ async fn query_driven_directory_page_merges_manifest_and_tail_visible_children()
         &context,
         Some("put-dead"),
     )
+    .await
     .expect("put dead");
     delete_path(
         &store,
@@ -2310,8 +2455,11 @@ async fn query_driven_directory_page_merges_manifest_and_tail_visible_children()
         &context,
         Some("delete-dead"),
     )
+    .await
     .expect("delete dead");
-    create_checkpoint(&store, &namespace_id, &context).expect("checkpoint manifest children");
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("checkpoint manifest children");
 
     put_file_bytes(
         &store,
@@ -2322,6 +2470,7 @@ async fn query_driven_directory_page_merges_manifest_and_tail_visible_children()
         &context,
         Some("put-d-tail"),
     )
+    .await
     .expect("put d-tail");
     create_directory_path(
         &store,
@@ -2330,6 +2479,7 @@ async fn query_driven_directory_page_merges_manifest_and_tail_visible_children()
         &context,
         Some("mkdir-e-tail-dir"),
     )
+    .await
     .expect("create tail dir");
     put_file_bytes(
         &store,
@@ -2340,6 +2490,7 @@ async fn query_driven_directory_page_merges_manifest_and_tail_visible_children()
         &context,
         Some("put-tail-dead"),
     )
+    .await
     .expect("put tail dead");
     delete_path(
         &store,
@@ -2348,9 +2499,12 @@ async fn query_driven_directory_page_merges_manifest_and_tail_visible_children()
         &context,
         Some("delete-tail-dead"),
     )
+    .await
     .expect("delete tail dead");
 
-    let first = list_path_page(&store, &namespace_id, "/docs", 2, None).expect("first page");
+    let first = list_path_page(&store, &namespace_id, "/docs", 2, None)
+        .await
+        .expect("first page");
     assert_eq!(
         first
             .items
@@ -2360,6 +2514,7 @@ async fn query_driven_directory_page_merges_manifest_and_tail_visible_children()
         vec!["a-dir", "b-renamed.txt"]
     );
     let second = list_path_page(&store, &namespace_id, "/docs", 2, first.next_cursor.clone())
+        .await
         .expect("second page");
     assert_eq!(
         second
@@ -2376,6 +2531,7 @@ async fn query_driven_directory_page_merges_manifest_and_tail_visible_children()
         2,
         second.next_cursor.clone(),
     )
+    .await
     .expect("third page");
     assert!(third.next_cursor.is_none());
     assert_eq!(
@@ -2414,7 +2570,7 @@ async fn query_driven_directory_page_merges_manifest_and_tail_visible_children()
     for directory_name in ["a-dir", "e-tail-dir"] {
         let entry = entries
             .iter()
-            .find(|entry| entry.display_name == directory_name)
+            .find(|entry| entry.display_name.as_str() == directory_name)
             .expect("directory entry");
         assert_eq!(entry.inode_kind, InodeKind::Directory);
         assert_eq!(entry.revision_no, None);
@@ -2429,7 +2585,7 @@ async fn query_driven_directory_page_merges_manifest_and_tail_visible_children()
     ] {
         let entry = entries
             .iter()
-            .find(|entry| entry.display_name == file_name)
+            .find(|entry| entry.display_name.as_str() == file_name)
             .expect("file entry");
         assert_eq!(entry.inode_kind, InodeKind::File);
         assert_eq!(entry.revision_no, Some(RevisionNo(1)));
@@ -2438,18 +2594,19 @@ async fn query_driven_directory_page_merges_manifest_and_tail_visible_children()
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn upload_content_rejects_invalid_upload_id_before_key_construction() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
 
     let invalid_upload_id = ["upl", "123"].join("-");
     let error = UploadId::parse(&invalid_upload_id)
         .map_err(CoreError::InvalidUploadId)
-        .map(|upload_id| upload_content(&store, &namespace_id, &upload_id, b"hello", &context))
         .expect_err("invalid upload_id should be rejected");
 
     assert_eq!(error.code(), ErrorCode::InvalidRequest);
@@ -2462,13 +2619,15 @@ async fn upload_content_rejects_invalid_upload_id_before_key_construction() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn revision_queries_read_historical_bytes_and_path_restore_appends_revision() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
 
     put_file_bytes(
         &store,
@@ -2479,6 +2638,7 @@ async fn revision_queries_read_historical_bytes_and_path_restore_appends_revisio
         &context,
         Some("rev-create"),
     )
+    .await
     .expect("create file");
     write_file_bytes(
         &store,
@@ -2488,12 +2648,16 @@ async fn revision_queries_read_historical_bytes_and_path_restore_appends_revisio
         &context,
         Some("rev-replace"),
     )
+    .await
     .expect("replace file");
 
-    let entry = resolve_path(&store, &namespace_id, "/docs/rev.txt").expect("stat file");
+    let entry = resolve_path(&store, &namespace_id, "/docs/rev.txt")
+        .await
+        .expect("stat file");
     let inode_id = entry.inode_id;
-    let path_revisions =
-        list_file_revisions(&store, &namespace_id, "/docs/rev.txt").expect("path revisions");
+    let path_revisions = list_file_revisions(&store, &namespace_id, "/docs/rev.txt")
+        .await
+        .expect("path revisions");
     assert_eq!(path_revisions.inode_id, inode_id);
     assert_eq!(
         path_revisions
@@ -2506,10 +2670,12 @@ async fn revision_queries_read_historical_bytes_and_path_restore_appends_revisio
 
     let historical =
         read_file_revision_bytes(&store, &namespace_id, "/docs/rev.txt", RevisionNo(1))
+            .await
             .expect("read first revision");
     assert_eq!(historical.bytes, b"one");
     let inode_historical =
         read_file_revision_bytes_for_inode(&store, &namespace_id, inode_id, RevisionNo(2))
+            .await
             .expect("read inode revision");
     assert_eq!(inode_historical, b"two");
 
@@ -2521,15 +2687,18 @@ async fn revision_queries_read_historical_bytes_and_path_restore_appends_revisio
         &context,
         Some("rev-move"),
     )
+    .await
     .expect("move file");
     assert_eq!(
         list_file_revisions(&store, &namespace_id, "/docs/rev.txt")
+            .await
             .expect_err("old path no longer resolves")
             .code(),
         ErrorCode::PathNotFound
     );
-    let inode_revisions =
-        list_file_revisions_for_inode(&store, &namespace_id, inode_id).expect("inode revisions");
+    let inode_revisions = list_file_revisions_for_inode(&store, &namespace_id, inode_id)
+        .await
+        .expect("inode revisions");
     assert_eq!(inode_revisions.revisions.len(), 2);
 
     restore_file_revision(
@@ -2540,12 +2709,15 @@ async fn revision_queries_read_historical_bytes_and_path_restore_appends_revisio
         &context,
         Some("rev-restore"),
     )
+    .await
     .expect("restore first revision");
-    let restored =
-        read_file_bytes(&store, &namespace_id, "/docs/moved.txt").expect("read restored");
+    let restored = read_file_bytes(&store, &namespace_id, "/docs/moved.txt")
+        .await
+        .expect("read restored");
     assert_eq!(restored.bytes, b"one");
-    let restored_revisions =
-        list_file_revisions_for_inode(&store, &namespace_id, inode_id).expect("restored revisions");
+    let restored_revisions = list_file_revisions_for_inode(&store, &namespace_id, inode_id)
+        .await
+        .expect("restored revisions");
     assert_eq!(
         restored_revisions
             .revisions
@@ -2556,13 +2728,15 @@ async fn revision_queries_read_historical_bytes_and_path_restore_appends_revisio
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn batch_commit_writes_one_segment_and_expands_change_feed() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
 
     let responses = commit_operations_batch(
         &store,
@@ -2573,7 +2747,7 @@ async fn batch_commit_writes_one_segment_and_expands_change_feed() {
                 preconditions: Vec::new(),
                 ops: vec![ApiCommitOp::CreateDirectory {
                     parent_inode_id: InodeId(1),
-                    display_name: "alpha".to_owned(),
+                    display_name: test_display_name("alpha"),
                 }],
                 message: None,
             },
@@ -2582,13 +2756,14 @@ async fn batch_commit_writes_one_segment_and_expands_change_feed() {
                 preconditions: Vec::new(),
                 ops: vec![ApiCommitOp::CreateDirectory {
                     parent_inode_id: InodeId(1),
-                    display_name: "beta".to_owned(),
+                    display_name: test_display_name("beta"),
                 }],
                 message: None,
             },
         ],
         &context,
-    );
+    )
+    .await;
     let first = responses[0].as_ref().expect("first commit");
     let second = responses[1].as_ref().expect("second commit");
     assert_eq!(first.committed_seq, ChangeSeq(1));
@@ -2618,7 +2793,7 @@ async fn batch_commit_writes_one_segment_and_expands_change_feed() {
             ..
         } => {
             assert_eq!(name_key.as_str(), "alpha");
-            assert_eq!(display_name, "alpha");
+            assert_eq!(display_name.as_str(), "alpha");
         }
         delta => panic!("expected bind delta, got {delta:?}"),
     }
@@ -2630,7 +2805,9 @@ async fn batch_commit_writes_one_segment_and_expands_change_feed() {
         .await
         .expect("write unreachable orphan");
 
-    let changes = list_changes_after(&store, &namespace_id, ChangeSeq(0)).expect("changes");
+    let changes = list_changes_after(&store, &namespace_id, ChangeSeq(0))
+        .await
+        .expect("changes");
     assert_eq!(changes.changes.len(), 2);
     assert_eq!(
         changes.changes[0].commit_id,
@@ -2658,17 +2835,19 @@ async fn batch_commit_writes_one_segment_and_expands_change_feed() {
             name_key,
             display_name,
             ..
-        } if name_key.as_str() == "alpha" && display_name == "alpha"
+        } if name_key.as_str() == "alpha" && display_name.as_str() == "alpha"
     ));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn wire_name_key_stays_typed_through_planning_and_fingerprint() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
     let request: ApiCommitRequest = serde_json::from_slice(
         br#"{
             "commit_id":"typed-name-key",
@@ -2695,7 +2874,9 @@ async fn wire_name_key_stays_typed_through_planning_and_fingerprint() {
     let expected_fingerprint = core_commit_fingerprint_for_v0_request(&namespace_id, &request)
         .expect("fingerprint wire request");
 
-    commit_operations(&store, &namespace_id, request, &context).expect("commit typed name key");
+    commit_operations(&store, &namespace_id, request, &context)
+        .await
+        .expect("commit typed name key");
 
     let wal_keys = store
         .list_prefix("namespaces/demo/wal/segments/")
@@ -2722,15 +2903,21 @@ async fn wire_name_key_stays_typed_through_planning_and_fingerprint() {
         )));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn change_feed_validates_wal_chain_before_current_manifest() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
-    create_directory_path(&store, &namespace_id, "/docs", &context, None).expect("create docs");
-    create_checkpoint(&store, &namespace_id, &context).expect("checkpoint");
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    create_directory_path(&store, &namespace_id, "/docs", &context, None)
+        .await
+        .expect("create docs");
+    create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("checkpoint");
 
     let wal_keys = store
         .list_prefix("namespaces/demo/wal/segments/")
@@ -2743,19 +2930,23 @@ async fn change_feed_validates_wal_chain_before_current_manifest() {
         .expect("corrupt wal");
 
     resolve_path(&store, &namespace_id, "/docs")
+        .await
         .expect("checkpoint-backed read should not read pre-checkpoint wal");
-    let error =
-        list_changes_after(&store, &namespace_id, ChangeSeq(0)).expect_err("corrupt wal chain");
+    let error = list_changes_after(&store, &namespace_id, ChangeSeq(0))
+        .await
+        .expect_err("corrupt wal chain");
     assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn binding_is_precondition_observes_earlier_batch_candidate() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
     write_file_bytes(
         &store,
         &namespace_id,
@@ -2764,15 +2955,18 @@ async fn binding_is_precondition_observes_earlier_batch_candidate() {
         &context,
         Some("seed-child-name-is"),
     )
+    .await
     .expect("seed file");
     let docs_inode = resolve_path(&store, &namespace_id, "/docs")
+        .await
         .expect("resolve docs")
         .inode_id;
     let file_inode = resolve_path(&store, &namespace_id, "/docs/readme.txt")
+        .await
         .expect("resolve file")
         .inode_id;
     let original_binding =
-        latest_binding_for_child_from_change_feed(&store, &namespace_id, file_inode);
+        latest_binding_for_child_from_change_feed(&store, &namespace_id, file_inode).await;
 
     let responses = commit_operations_batch(
         &store,
@@ -2785,7 +2979,7 @@ async fn binding_is_precondition_observes_earlier_batch_candidate() {
                 ops: vec![ApiCommitOp::Rename {
                     inode_id: file_inode,
                     new_parent_inode_id: docs_inode,
-                    new_display_name: "moved.txt".to_owned(),
+                    new_display_name: test_display_name("moved.txt"),
                 }],
                 message: None,
             },
@@ -2805,7 +2999,8 @@ async fn binding_is_precondition_observes_earlier_batch_candidate() {
             },
         ],
         &context,
-    );
+    )
+    .await;
 
     assert_eq!(
         responses[0].as_ref().expect("rename").committed_seq,
@@ -2817,13 +3012,15 @@ async fn binding_is_precondition_observes_earlier_batch_candidate() {
     assert_eq!(error.code(), ErrorCode::PathConflict);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn directory_empty_precondition_observes_earlier_batch_candidate() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
     commit_operations(
         &store,
         &namespace_id,
@@ -2832,14 +3029,16 @@ async fn directory_empty_precondition_observes_earlier_batch_candidate() {
             preconditions: Vec::new(),
             ops: vec![ApiCommitOp::CreateDirectory {
                 parent_inode_id: InodeId(1),
-                display_name: "docs".to_owned(),
+                display_name: test_display_name("docs"),
             }],
             message: None,
         },
         &context,
     )
+    .await
     .expect("seed docs");
     let docs_inode = resolve_path(&store, &namespace_id, "/docs")
+        .await
         .expect("resolve seeded directory")
         .inode_id;
     let content = store_bytes_as_content(&store, &namespace_id, b"child")
@@ -2856,7 +3055,7 @@ async fn directory_empty_precondition_observes_earlier_batch_candidate() {
                 preconditions: Vec::new(),
                 ops: vec![ApiCommitOp::CreateFile {
                     parent_inode_id: docs_inode,
-                    display_name: "child.txt".to_owned(),
+                    display_name: test_display_name("child.txt"),
                     content_ref: content.content_ref,
                 }],
                 message: None,
@@ -2874,7 +3073,8 @@ async fn directory_empty_precondition_observes_earlier_batch_candidate() {
             },
         ],
         &context,
-    );
+    )
+    .await;
 
     assert_eq!(
         responses[0].as_ref().expect("create child").committed_seq,
@@ -2886,13 +3086,15 @@ async fn directory_empty_precondition_observes_earlier_batch_candidate() {
     assert_eq!(error.code(), ErrorCode::DirectoryNotEmpty);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn namespace_delete_is_terminal_for_reads_writes_creation_and_forks() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
     let content = store_bytes_as_content(&store, &namespace_id, b"will vanish")
         .await
         .expect("stage content");
@@ -2928,7 +3130,9 @@ async fn namespace_delete_is_terminal_for_reads_writes_creation_and_forks() {
 
     // Terminal: reads, commits, status, repeat deletes, re-creation, and forks
     // all observe the deleted head.
-    let read = resolve_path(&store, &namespace_id, "/").expect_err("read after delete");
+    let read = resolve_path(&store, &namespace_id, "/")
+        .await
+        .expect_err("read after delete");
     assert_eq!(read.code(), ErrorCode::NamespaceDeleted);
     let commit = submit_intent_async(
         &store,
@@ -2949,27 +3153,29 @@ async fn namespace_delete_is_terminal_for_reads_writes_creation_and_forks() {
         .await
         .expect_err("repeat delete");
     assert_eq!(again.code(), ErrorCode::NamespaceDeleted);
-    let recreate = bootstrap_namespace(&store, &namespace_id, &context, false);
+    let recreate = bootstrap_namespace(&store, &namespace_id, &context, false).await;
     assert!(matches!(
         recreate,
         Err(loonfs_core::BootstrapNamespaceError::NamespaceDeleted { .. })
     ));
     let fork_target = NamespaceId::parse("fork-of-deleted").expect("valid namespace id");
-    let fork = fork_namespace(&store, &namespace_id, &fork_target, &context);
+    let fork = fork_namespace(&store, &namespace_id, &fork_target, &context).await;
     assert_eq!(
         fork.expect_err("fork of deleted source").code(),
         ErrorCode::NamespaceDeleted
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn fork_clone_survives_source_delete() {
     let temp_dir = tempdir().expect("tempdir");
     let source = NamespaceId::parse("source").expect("valid namespace id");
     let clone = NamespaceId::parse("clone").expect("valid namespace id");
     let context = mutation_context();
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    bootstrap_namespace(&store, &source, &context, false).expect("bootstrap");
+    bootstrap_namespace(&store, &source, &context, false)
+        .await
+        .expect("bootstrap");
     let content = store_bytes_as_content(&store, &source, b"shared bytes")
         .await
         .expect("stage content");
@@ -2986,7 +3192,9 @@ async fn fork_clone_survives_source_delete() {
     )
     .await
     .expect("seed source");
-    fork_namespace(&store, &source, &clone, &context).expect("fork");
+    fork_namespace(&store, &source, &clone, &context)
+        .await
+        .expect("fork");
 
     namespace_engine(&store, &source, &context)
         .delete_namespace(loonfs_core::DeleteNamespaceOptions::default())
@@ -2995,19 +3203,24 @@ async fn fork_clone_survives_source_delete() {
 
     // The spec promise: the clone keeps reading through the source-owned
     // immutable metadata its manifest pins.
-    let clone_head = block_on(load_namespace_head_control(&store, &clone))
+    let clone_head = load_namespace_head_control(&store, &clone)
+        .await
         .expect("clone head survives source delete");
     assert_eq!(clone_head.state.seq, ChangeSeq(1));
-    resolve_path(&store, &clone, "/shared.txt").expect("clone reads forked file");
+    resolve_path(&store, &clone, "/shared.txt")
+        .await
+        .expect("clone reads forked file");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn ack_lost_head_cas_reports_unknown_outcome_and_replays_idempotently() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
     let store = AckLostHeadCasStore::new(temp_dir.path(), &namespace_id);
-    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
     let content = store_bytes_as_content(&store, &namespace_id, b"ack lost")
         .await
         .expect("stage content");
@@ -3033,17 +3246,21 @@ async fn ack_lost_head_cas_reports_unknown_outcome_and_replays_idempotently() {
         .expect("same-commit-id retry replays the committed mutation");
     assert_eq!(result.committed_seq, ChangeSeq(1));
 
-    let head = block_on(load_namespace_head_control(&store, &namespace_id)).expect("load head");
+    let head = load_namespace_head_control(&store, &namespace_id)
+        .await
+        .expect("load head");
     assert_eq!(head.state.seq, ChangeSeq(1));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn retry_succeeds_after_wal_orphaned_by_stale_head_cas() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
     let store = StaleHeadAfterWalWriteStore::new(temp_dir.path(), &namespace_id);
-    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
     let content = store_bytes_as_content(&store, &namespace_id, b"retry")
         .await
         .expect("stage content");
@@ -3072,7 +3289,9 @@ async fn retry_succeeds_after_wal_orphaned_by_stale_head_cas() {
         .expect("list wal");
     assert_eq!(wal_keys.len(), 2);
 
-    let head = block_on(load_namespace_head_control(&store, &namespace_id)).expect("load head");
+    let head = load_namespace_head_control(&store, &namespace_id)
+        .await
+        .expect("load head");
     assert_eq!(head.state.seq, ChangeSeq(1));
     let visible_tip = head
         .state
@@ -3101,7 +3320,9 @@ async fn retry_succeeds_after_wal_orphaned_by_stale_head_cas() {
         CommitId::parse("retry-after-orphan").expect("valid commit id")
     );
 
-    let changes = list_changes_after(&store, &namespace_id, ChangeSeq(0)).expect("changes");
+    let changes = list_changes_after(&store, &namespace_id, ChangeSeq(0))
+        .await
+        .expect("changes");
     assert_eq!(changes.changes.len(), 1);
     assert_eq!(
         changes.changes[0].commit_id,
@@ -3116,7 +3337,7 @@ async fn retry_succeeds_after_wal_orphaned_by_stale_head_cas() {
 /// derived from a create that never became durable, so its client gave up
 /// instead of retrying. Rejections decided against the durable materialization alone
 /// stand regardless of the batch outcome.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -3128,12 +3349,14 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
             message: "injected wal write failure",
         },
     );
-    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
     let content = store_bytes_as_content(&store, &namespace_id, b"batch bytes")
         .await
         .expect("stage content");
 
-    let batch = || {
+    let batch = || async {
         vec![
             // Rejected against the durable materialization: nothing was accepted yet.
             NamespaceMutationCandidate::path(PathMutationIntent::DeletePath {
@@ -3152,7 +3375,8 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
                     content_ref: content.content_ref.clone(),
                     behavior: DestinationBehavior::NoReplace,
                 },
-            ),
+            )
+            .await,
             // Rejected only because of the accepted candidate's speculative
             // in-batch create.
             admitted_candidate(
@@ -3164,7 +3388,8 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
                     content_ref: content.content_ref.clone(),
                     behavior: DestinationBehavior::NoReplace,
                 },
-            ),
+            )
+            .await,
             // Alias of the materialization-decided rejection.
             NamespaceMutationCandidate::path(PathMutationIntent::DeletePath {
                 commit_id: CommitId::parse("reject-materialization").expect("valid commit id"),
@@ -3175,7 +3400,8 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
         ]
     };
 
-    let failed = publish_namespace_mutations_batch(&store, &namespace_id, batch(), &context);
+    let failed =
+        publish_namespace_mutations_batch(&store, &namespace_id, batch().await, &context).await;
 
     let materialization_rejection = failed[0]
         .as_ref()
@@ -3194,10 +3420,13 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
 
     // Nothing became durable, so the retry the batch error asks for derives
     // every verdict from durable state.
-    let head = block_on(load_namespace_head_control(&store, &namespace_id)).expect("load head");
+    let head = load_namespace_head_control(&store, &namespace_id)
+        .await
+        .expect("load head");
     assert_eq!(head.state.seq, ChangeSeq(0));
 
-    let retried = publish_namespace_mutations_batch(&store, &namespace_id, batch(), &context);
+    let retried =
+        publish_namespace_mutations_batch(&store, &namespace_id, batch().await, &context).await;
     assert_eq!(
         retried[0].as_ref().expect_err("still missing").code(),
         ErrorCode::PathNotFound
@@ -3221,18 +3450,20 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
 /// write: the stale-head error replaces the rejection decided against the
 /// accepted candidate's speculative state, while the materialization-decided rejection
 /// stands.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn stale_head_cas_fails_rejections_decided_against_in_batch_state() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
     let store = StaleHeadAfterWalWriteStore::new(temp_dir.path(), &namespace_id);
-    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
     let content = store_bytes_as_content(&store, &namespace_id, b"batch bytes")
         .await
         .expect("stage content");
 
-    let batch = || {
+    let batch = || async {
         vec![
             NamespaceMutationCandidate::path(PathMutationIntent::DeletePath {
                 commit_id: CommitId::parse("reject-materialization").expect("valid commit id"),
@@ -3249,7 +3480,8 @@ async fn stale_head_cas_fails_rejections_decided_against_in_batch_state() {
                     content_ref: content.content_ref.clone(),
                     behavior: DestinationBehavior::NoReplace,
                 },
-            ),
+            )
+            .await,
             admitted_candidate(
                 &store,
                 &namespace_id,
@@ -3259,11 +3491,13 @@ async fn stale_head_cas_fails_rejections_decided_against_in_batch_state() {
                     content_ref: content.content_ref.clone(),
                     behavior: DestinationBehavior::NoReplace,
                 },
-            ),
+            )
+            .await,
         ]
     };
 
-    let failed = publish_namespace_mutations_batch(&store, &namespace_id, batch(), &context);
+    let failed =
+        publish_namespace_mutations_batch(&store, &namespace_id, batch().await, &context).await;
     assert!(store.injected_stale_head());
 
     assert_eq!(
@@ -3288,7 +3522,8 @@ async fn stale_head_cas_fails_rejections_decided_against_in_batch_state() {
          batch error, got {speculative:?}"
     );
 
-    let retried = publish_namespace_mutations_batch(&store, &namespace_id, batch(), &context);
+    let retried =
+        publish_namespace_mutations_batch(&store, &namespace_id, batch().await, &context).await;
     assert_eq!(
         retried[0].as_ref().expect_err("still missing").code(),
         ErrorCode::PathNotFound
@@ -3309,13 +3544,15 @@ async fn stale_head_cas_fails_rejections_decided_against_in_batch_state() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn retry_succeeds_after_stale_head_get_during_publish_view_load() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
     let store = StaleHeadGetStore::new(temp_dir.path(), &namespace_id);
-    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
 
     create_directory_path(
         &store,
@@ -3324,6 +3561,7 @@ async fn retry_succeeds_after_stale_head_get_during_publish_view_load() {
         &context,
         Some("mkdir-parent"),
     )
+    .await
     .expect("create parent");
     put_file_bytes(
         &store,
@@ -3334,6 +3572,7 @@ async fn retry_succeeds_after_stale_head_get_during_publish_view_load() {
         &context,
         Some("write-first"),
     )
+    .await
     .expect("write first revision");
     put_file_bytes(
         &store,
@@ -3344,9 +3583,11 @@ async fn retry_succeeds_after_stale_head_get_during_publish_view_load() {
         &context,
         Some("write-second"),
     )
+    .await
     .expect("write second revision");
     assert_eq!(
         read_file_bytes(&store, &namespace_id, "/file.txt")
+            .await
             .expect("read before stale get")
             .bytes,
         b"second contents win"
@@ -3360,6 +3601,7 @@ async fn retry_succeeds_after_stale_head_get_during_publish_view_load() {
         &context,
         Some("mkdir-child"),
     )
+    .await
     .expect_err("injected stale head read surfaces to the caller");
     assert_eq!(error.code(), ErrorCode::StaleHead);
     assert!(store.injected_stale_head_get());
@@ -3372,34 +3614,42 @@ async fn retry_succeeds_after_stale_head_get_during_publish_view_load() {
         &context,
         Some("mkdir-child"),
     )
+    .await
     .expect("retry after the stale head read");
     assert_eq!(result.committed_seq, ChangeSeq(4));
     assert_eq!(
         read_file_bytes(&store, &namespace_id, "/file.txt")
+            .await
             .expect("read after stale get")
             .bytes,
         b"second contents win"
     );
-    resolve_path(&store, &namespace_id, "/parent/child").expect("child directory remains visible");
+    resolve_path(&store, &namespace_id, "/parent/child")
+        .await
+        .expect("child directory remains visible");
 
-    let head = block_on(load_namespace_head_control(&store, &namespace_id)).expect("load head");
+    let head = load_namespace_head_control(&store, &namespace_id)
+        .await
+        .expect("load head");
     assert_eq!(head.state.seq, ChangeSeq(4));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn batch_commit_aliases_duplicate_commit_id_with_same_fingerprint() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
 
     let request = ApiCommitRequest {
         commit_id: CommitId::parse("req-duplicate").expect("valid commit id"),
         preconditions: Vec::new(),
         ops: vec![ApiCommitOp::CreateDirectory {
             parent_inode_id: InodeId(1),
-            display_name: "alpha".to_owned(),
+            display_name: test_display_name("alpha"),
         }],
         message: None,
     };
@@ -3409,7 +3659,8 @@ async fn batch_commit_aliases_duplicate_commit_id_with_same_fingerprint() {
         &namespace_id,
         vec![request.clone(), request],
         &context,
-    );
+    )
+    .await;
     let first = responses[0].as_ref().expect("primary commit");
     let duplicate = responses[1].as_ref().expect("duplicate commit");
     assert_eq!(first, duplicate);
@@ -3427,7 +3678,9 @@ async fn batch_commit_aliases_duplicate_commit_id_with_same_fingerprint() {
     let segment = decode_wal_segment_envelope_zstd(&wal_bytes).expect("decode segment");
     assert_eq!(segment.payload.records.len(), 1);
 
-    let changes = list_changes_after(&store, &namespace_id, ChangeSeq(0)).expect("changes");
+    let changes = list_changes_after(&store, &namespace_id, ChangeSeq(0))
+        .await
+        .expect("changes");
     assert_eq!(changes.changes.len(), 1);
     assert_eq!(
         changes.changes[0].commit_id,
@@ -3435,13 +3688,15 @@ async fn batch_commit_aliases_duplicate_commit_id_with_same_fingerprint() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn oversized_prepared_proof_candidate_replays_receipt_but_new_request_is_rejected() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
     let stored = store_bytes_as_content(&store, &namespace_id, b"proof replay")
         .await
         .expect("store content");
@@ -3456,7 +3711,7 @@ async fn oversized_prepared_proof_candidate_replays_receipt_but_new_request_is_r
         preconditions: Vec::new(),
         ops: vec![ApiCommitOp::CreateFile {
             parent_inode_id: InodeId(1),
-            display_name: "proof-replay.txt".to_owned(),
+            display_name: test_display_name("proof-replay.txt"),
             content_ref: stored.content_ref,
         }],
         message: None,
@@ -3471,6 +3726,7 @@ async fn oversized_prepared_proof_candidate_replays_receipt_but_new_request_is_r
         )],
         &context,
     )
+    .await
     .remove(0)
     .expect("land original commit");
     let oversized_proofs = vec![prepared; loonfs_core::limits::MAX_COMMIT_CONTENT_TOKENS + 1];
@@ -3484,6 +3740,7 @@ async fn oversized_prepared_proof_candidate_replays_receipt_but_new_request_is_r
         )],
         &context,
     )
+    .await
     .remove(0)
     .expect("durable receipt must win over current proof limit");
     assert_eq!(replay, original);
@@ -3499,18 +3756,21 @@ async fn oversized_prepared_proof_candidate_replays_receipt_but_new_request_is_r
         )],
         &context,
     )
+    .await
     .remove(0)
     .expect_err("new over-proof request must be rejected after receipt miss");
     assert_eq!(error.code(), ErrorCode::InvalidRequest);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn same_batch_over_limit_proof_duplicate_joins_its_primary() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
     let stored = store_bytes_as_content(&store, &namespace_id, b"batch proof")
         .await
         .expect("store content");
@@ -3525,7 +3785,7 @@ async fn same_batch_over_limit_proof_duplicate_joins_its_primary() {
         preconditions: Vec::new(),
         ops: vec![ApiCommitOp::CreateFile {
             parent_inode_id: InodeId(1),
-            display_name: "batch-proof.txt".to_owned(),
+            display_name: test_display_name("batch-proof.txt"),
             content_ref: stored.content_ref,
         }],
         message: None,
@@ -3542,7 +3802,8 @@ async fn same_batch_over_limit_proof_duplicate_joins_its_primary() {
             ),
         ],
         &context,
-    );
+    )
+    .await;
 
     let primary = responses[0].as_ref().expect("primary commit");
     let duplicate = responses[1]
@@ -3551,20 +3812,22 @@ async fn same_batch_over_limit_proof_duplicate_joins_its_primary() {
     assert_eq!(duplicate, primary);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn new_candidate_with_4097_operations_is_rejected_after_identity_computation() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
     let candidate = NamespaceMutationCandidate::commit(ApiCommitRequest {
         commit_id: CommitId::parse("over-operation-new").expect("valid commit id"),
         preconditions: Vec::new(),
         ops: (0..=loonfs_core::limits::MAX_COMMIT_OPERATIONS)
             .map(|index| ApiCommitOp::CreateDirectory {
                 parent_inode_id: InodeId(1),
-                display_name: format!("over-operation-{index}"),
+                display_name: test_display_name(format!("over-operation-{index}")),
             })
             .collect(),
         message: None,
@@ -3576,30 +3839,34 @@ async fn new_candidate_with_4097_operations_is_rejected_after_identity_computati
         .semantic_identity(&namespace_id)
         .expect("current request limits must not affect identity");
     let error = publish_namespace_mutations_batch(&store, &namespace_id, vec![candidate], &context)
+        .await
         .remove(0)
         .expect_err("new over-operation request must be rejected");
     assert_eq!(error.code(), ErrorCode::InvalidRequest);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn visible_commit_id_retry_aliases_across_writer_takeover() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let writer_a = mutation_context();
-    bootstrap_namespace(&store, &namespace_id, &writer_a, false).expect("bootstrap");
+    bootstrap_namespace(&store, &namespace_id, &writer_a, false)
+        .await
+        .expect("bootstrap");
 
     let request = ApiCommitRequest {
         commit_id: CommitId::parse("retry-across-writer").expect("valid commit id"),
         preconditions: Vec::new(),
         ops: vec![ApiCommitOp::CreateDirectory {
             parent_inode_id: InodeId(1),
-            display_name: "alpha".to_owned(),
+            display_name: test_display_name("alpha"),
         }],
         message: None,
     };
 
     let first = commit_operations(&store, &namespace_id, request.clone(), &writer_a)
+        .await
         .expect("writer a commit");
     let writer_b = MutationContext {
         writer_id: "writer-b".to_owned(),
@@ -3608,19 +3875,22 @@ async fn visible_commit_id_retry_aliases_across_writer_takeover() {
         now_ms: writer_a.now_ms.saturating_add(1),
     };
 
-    let retry =
-        commit_operations(&store, &namespace_id, request, &writer_b).expect("writer b retry");
+    let retry = commit_operations(&store, &namespace_id, request, &writer_b)
+        .await
+        .expect("writer b retry");
 
     assert_eq!(first, retry);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn batch_commit_rejects_duplicate_commit_id_with_different_fingerprint() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
 
     let responses = commit_operations_batch(
         &store,
@@ -3631,7 +3901,7 @@ async fn batch_commit_rejects_duplicate_commit_id_with_different_fingerprint() {
                 preconditions: Vec::new(),
                 ops: vec![ApiCommitOp::CreateDirectory {
                     parent_inode_id: InodeId(1),
-                    display_name: "alpha".to_owned(),
+                    display_name: test_display_name("alpha"),
                 }],
                 message: None,
             },
@@ -3640,13 +3910,14 @@ async fn batch_commit_rejects_duplicate_commit_id_with_different_fingerprint() {
                 preconditions: Vec::new(),
                 ops: vec![ApiCommitOp::CreateDirectory {
                     parent_inode_id: InodeId(1),
-                    display_name: "beta".to_owned(),
+                    display_name: test_display_name("beta"),
                 }],
                 message: None,
             },
         ],
         &context,
-    );
+    )
+    .await;
 
     responses[0].as_ref().expect("primary commit");
     let error = responses[1].as_ref().expect_err("duplicate conflict");
@@ -3668,7 +3939,9 @@ async fn batch_commit_rejects_duplicate_commit_id_with_different_fingerprint() {
     let segment = decode_wal_segment_envelope_zstd(&wal_bytes).expect("decode segment");
     assert_eq!(segment.payload.records.len(), 1);
 
-    let changes = list_changes_after(&store, &namespace_id, ChangeSeq(0)).expect("changes");
+    let changes = list_changes_after(&store, &namespace_id, ChangeSeq(0))
+        .await
+        .expect("changes");
     assert_eq!(changes.changes.len(), 1);
     assert_eq!(
         changes.changes[0].commit_id,
@@ -3676,80 +3949,21 @@ async fn batch_commit_rejects_duplicate_commit_id_with_different_fingerprint() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn explicit_commit_rejects_invalid_display_names() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
-
-    let create_error = commit_operations(
-        &store,
-        &namespace_id,
-        ApiCommitRequest {
-            commit_id: CommitId::parse("invalid-create-name").expect("valid commit id"),
-            preconditions: Vec::new(),
-            ops: vec![ApiCommitOp::CreateDirectory {
-                parent_inode_id: InodeId(1),
-                display_name: "a/b".to_owned(),
-            }],
-            message: None,
-        },
-        &context,
-    )
-    .expect_err("invalid create display name");
-    assert_eq!(create_error.code(), ErrorCode::InvalidRequest);
-    assert!(matches!(
-        create_error,
-        CoreError::CommitValidation(CommitValidationError::InvalidDisplayName {
-            display_name, ..
-        }) if display_name == "a/b"
-    ));
-
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/file.txt",
-        b"hello",
-        &context,
-        Some("seed-for-invalid-rename"),
-    )
-    .expect("seed file");
-    let file = resolve_path(&store, &namespace_id, "/file.txt").expect("resolve file");
-
-    let rename_error = commit_operations(
-        &store,
-        &namespace_id,
-        ApiCommitRequest {
-            commit_id: CommitId::parse("invalid-rename-name").expect("valid commit id"),
-            preconditions: Vec::new(),
-            ops: vec![ApiCommitOp::Rename {
-                inode_id: file.inode_id,
-                new_parent_inode_id: InodeId(1),
-                new_display_name: ".".to_owned(),
-            }],
-            message: None,
-        },
-        &context,
-    )
-    .expect_err("invalid rename display name");
-    assert_eq!(rename_error.code(), ErrorCode::InvalidRequest);
-    assert!(matches!(
-        rename_error,
-        CoreError::CommitValidation(CommitValidationError::InvalidDisplayName {
-            display_name, ..
-        }) if display_name == "."
-    ));
+    assert!(DisplayName::parse("a/b").is_err());
+    assert!(DisplayName::parse(".").is_err());
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn path_intents_cover_basic_mutations() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
 
     let content = store_bytes_as_content(&store, &namespace_id, b"hello")
         .await
@@ -3814,18 +4028,21 @@ async fn path_intents_cover_basic_mutations() {
     .expect("delete path");
     assert_eq!(deleted.committed_seq, ChangeSeq(4));
 
-    let copied_bytes =
-        read_file_bytes(&store, &namespace_id, "/docs/c.txt").expect("read copied file");
+    let copied_bytes = read_file_bytes(&store, &namespace_id, "/docs/c.txt")
+        .await
+        .expect("read copied file");
     assert_eq!(copied_bytes.bytes, b"hello");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn path_publishes_use_durable_path_commit_receipt_index() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
     let content = store_bytes_as_content(&store, &namespace_id, b"hello")
         .await
         .expect("stage content");
@@ -3879,13 +4096,15 @@ async fn path_publishes_use_durable_path_commit_receipt_index() {
     assert_eq!(wal_keys.len(), 1);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn delete_path_commit_id_reuse_includes_expected_inode_id() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
 
     let seeded_paths = [
         ("/same-guard.txt", "seed-same-guard"),
@@ -3902,10 +4121,12 @@ async fn delete_path_commit_id_reuse_includes_expected_inode_id() {
             &context,
             Some(commit_id),
         )
+        .await
         .expect("seed guarded delete target");
     }
 
     let same_inode = resolve_path(&store, &namespace_id, "/same-guard.txt")
+        .await
         .expect("resolve same-guard target")
         .inode_id;
     let first = delete_path_non_recursive_expecting(
@@ -3916,6 +4137,7 @@ async fn delete_path_commit_id_reuse_includes_expected_inode_id() {
         &context,
         "delete-same-guard",
     )
+    .await
     .expect("first guarded delete");
     let retry = delete_path_non_recursive_expecting(
         &store,
@@ -3925,16 +4147,20 @@ async fn delete_path_commit_id_reuse_includes_expected_inode_id() {
         &context,
         "delete-same-guard",
     )
+    .await
     .expect("identical guarded delete retry");
     assert_eq!(retry, first);
 
     let changed_inode = resolve_path(&store, &namespace_id, "/changed-guard.txt")
+        .await
         .expect("resolve changed-guard target")
         .inode_id;
     let removed_inode = resolve_path(&store, &namespace_id, "/removed-guard.txt")
+        .await
         .expect("resolve removed-guard target")
         .inode_id;
     let added_inode = resolve_path(&store, &namespace_id, "/added-guard.txt")
+        .await
         .expect("resolve added-guard target")
         .inode_id;
     let conflicts = [
@@ -3966,6 +4192,7 @@ async fn delete_path_commit_id_reuse_includes_expected_inode_id() {
             &context,
             commit_id,
         )
+        .await
         .expect("first delete");
 
         let error = delete_path_non_recursive_expecting(
@@ -3976,6 +4203,7 @@ async fn delete_path_commit_id_reuse_includes_expected_inode_id() {
             &context,
             commit_id,
         )
+        .await
         .expect_err("changed guard must conflict");
         assert!(matches!(
             error,
@@ -3989,13 +4217,15 @@ async fn delete_path_commit_id_reuse_includes_expected_inode_id() {
     assert_eq!(head.state.seq, ChangeSeq(8));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn fresh_delete_path_expected_inode_guard_still_matches_or_rejects() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
     write_file_bytes(
         &store,
         &namespace_id,
@@ -4004,6 +4234,7 @@ async fn fresh_delete_path_expected_inode_guard_still_matches_or_rejects() {
         &context,
         Some("seed-matching-guard"),
     )
+    .await
     .expect("seed matching target");
     write_file_bytes(
         &store,
@@ -4013,11 +4244,14 @@ async fn fresh_delete_path_expected_inode_guard_still_matches_or_rejects() {
         &context,
         Some("seed-mismatching-guard"),
     )
+    .await
     .expect("seed mismatching target");
     let matching_inode = resolve_path(&store, &namespace_id, "/matching-guard.txt")
+        .await
         .expect("resolve matching target")
         .inode_id;
     let mismatching_inode = resolve_path(&store, &namespace_id, "/mismatching-guard.txt")
+        .await
         .expect("resolve mismatching target")
         .inode_id;
 
@@ -4029,8 +4263,10 @@ async fn fresh_delete_path_expected_inode_guard_still_matches_or_rejects() {
         &context,
         "delete-matching-guard",
     )
+    .await
     .expect("matching guard deletes");
     let missing = resolve_path(&store, &namespace_id, "/matching-guard.txt")
+        .await
         .expect_err("matching target is deleted");
     assert_eq!(missing.code(), ErrorCode::PathNotFound);
 
@@ -4042,30 +4278,34 @@ async fn fresh_delete_path_expected_inode_guard_still_matches_or_rejects() {
         &context,
         "delete-mismatching-guard",
     )
+    .await
     .expect_err("mismatching guard must fail planning");
     assert!(matches!(
         error,
         CoreError::CommitValidation(CommitValidationError::BindingPreconditionMismatch {
             expected_child_inode_id: InodeId(1),
-            actual_child_inode_id: Some(actual),
+            actual_child_inode_id: actual,
             ..
         }) if actual == mismatching_inode
     ));
     assert_eq!(
         resolve_path(&store, &namespace_id, "/mismatching-guard.txt")
+            .await
             .expect("mismatching target remains")
             .inode_id,
         mismatching_inode
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn path_intents_in_one_batch_see_tentative_state() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
     let content = store_bytes_as_content(&store, &namespace_id, b"hello")
         .await
         .expect("stage content");
@@ -4083,7 +4323,8 @@ async fn path_intents_in_one_batch_see_tentative_state() {
                     content_ref: content.content_ref,
                     behavior: DestinationBehavior::NoReplace,
                 },
-            ),
+            )
+            .await,
             NamespaceMutationCandidate::path(PathMutationIntent::MovePath {
                 commit_id: CommitId::parse("move-batched-path").expect("valid commit id"),
                 from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
@@ -4092,7 +4333,8 @@ async fn path_intents_in_one_batch_see_tentative_state() {
             }),
         ],
         &context,
-    );
+    )
+    .await;
 
     assert_eq!(
         responses[0].as_ref().expect("put").committed_seq,
@@ -4102,8 +4344,9 @@ async fn path_intents_in_one_batch_see_tentative_state() {
         responses[1].as_ref().expect("move").committed_seq,
         ChangeSeq(2)
     );
-    let moved_bytes =
-        read_file_bytes(&store, &namespace_id, "/docs/b.txt").expect("read moved file");
+    let moved_bytes = read_file_bytes(&store, &namespace_id, "/docs/b.txt")
+        .await
+        .expect("read moved file");
     assert_eq!(moved_bytes.bytes, b"hello");
 
     let wal_keys = store
@@ -4120,14 +4363,16 @@ async fn path_intents_in_one_batch_see_tentative_state() {
     assert_eq!(segment.payload.records.len(), 2);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn namespace_descriptor_checksum_is_validated() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
     let namespace_id = namespace_id();
 
-    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap namespace");
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap namespace");
 
     let descriptor_key = namespace_config(namespace_id.as_str());
     let descriptor_bytes = store
@@ -4151,14 +4396,16 @@ async fn namespace_descriptor_checksum_is_validated() {
         .await
         .expect("overwrite descriptor");
 
-    let error = resolve_path(&store, &namespace_id, "/").expect_err("descriptor checksum");
+    let error = resolve_path(&store, &namespace_id, "/")
+        .await
+        .expect_err("descriptor checksum");
     assert!(
         error.to_string().contains("checksum mismatch"),
         "unexpected error: {error}"
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     let temp_dir = tempdir().expect("tempdir");
     let store = MetadataSstGetCountingStore::new(temp_dir.path());
@@ -4167,6 +4414,7 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     let clone_namespace_id = NamespaceId::parse("clone").expect("valid namespace id");
 
     bootstrap_namespace(&store, &source_namespace_id, &context, false)
+        .await
         .expect("bootstrap source namespace");
     write_file_bytes(
         &store,
@@ -4176,18 +4424,20 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
         &context,
         Some("seed-shared"),
     )
+    .await
     .expect("seed shared file");
-    block_on(
-        namespace_engine(&store, &source_namespace_id, &context)
-            .create_checkpoint("test-pin".to_owned(), None),
-    )
-    .expect("create source checkpoint before fork");
+    namespace_engine(&store, &source_namespace_id, &context)
+        .create_checkpoint("test-pin".to_owned(), None)
+        .await
+        .expect("create source checkpoint before fork");
 
-    let source_head =
-        block_on(load_namespace_head_control(&store, &source_namespace_id)).expect("source head");
+    let source_head = load_namespace_head_control(&store, &source_namespace_id)
+        .await
+        .expect("source head");
     assert_eq!(source_head.state.seq, ChangeSeq(1));
-    let content_store_id =
-        load_namespace_descriptor_state(&store, &source_namespace_id).content_store_id;
+    let content_store_id = load_namespace_descriptor_state(&store, &source_namespace_id)
+        .await
+        .content_store_id;
     let blobs_before = store
         .list_prefix(&format!(
             "content-stores/{}/blobs/",
@@ -4198,6 +4448,7 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
 
     store.reset_metadata_sst_get_count();
     fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
+        .await
         .expect("fork namespace");
     assert_eq!(
         store.metadata_sst_get_count(),
@@ -4214,22 +4465,21 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
         .expect("list blobs after fork");
     assert_eq!(blobs_after, blobs_before, "fork must not copy content");
 
-    let clone_descriptor = load_namespace_descriptor_state(&store, &clone_namespace_id);
+    let clone_descriptor = load_namespace_descriptor_state(&store, &clone_namespace_id).await;
     assert_eq!(clone_descriptor.content_store_id, content_store_id);
-    let clone_head =
-        block_on(load_namespace_head_control(&store, &clone_namespace_id)).expect("clone head");
+    let clone_head = load_namespace_head_control(&store, &clone_namespace_id)
+        .await
+        .expect("clone head");
     assert_eq!(clone_head.state.seq, ChangeSeq(1));
-    let clone_root = block_on(loonfs_core::control::load_namespace_metadata_root_control(
-        &store,
-        &clone_namespace_id,
-    ))
-    .expect("clone metadata root");
+    let clone_root =
+        loonfs_core::control::load_namespace_metadata_root_control(&store, &clone_namespace_id)
+            .await
+            .expect("clone metadata root");
     assert_eq!(clone_root.state.manifest_id, ManifestId(1));
-    let clone_floor = block_on(loonfs_core::control::load_namespace_wal_floor_control(
-        &store,
-        &clone_namespace_id,
-    ))
-    .expect("clone wal floor");
+    let clone_floor =
+        loonfs_core::control::load_namespace_wal_floor_control(&store, &clone_namespace_id)
+            .await
+            .expect("clone wal floor");
     assert_eq!(clone_floor.state.floor_seq, ChangeSeq(1));
 
     let target_manifest_key = metadata_manifest_object(
@@ -4256,13 +4506,12 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
         .starts_with("chk_"));
     assert_eq!(fork_provenance.source_manifest_id, ManifestId(1));
     assert_eq!(fork_provenance.source_head_seq, ChangeSeq(1));
-    let source_record = block_on(
-        loonfs_core::control::load_namespace_checkpoint_record_control(
-            &store,
-            &source_namespace_id,
-            &fork_provenance.source_checkpoint_id,
-        ),
+    let source_record = loonfs_core::control::load_namespace_checkpoint_record_control(
+        &store,
+        &source_namespace_id,
+        &fork_provenance.source_checkpoint_id,
     )
+    .await
     .expect("read source checkpoint record")
     .expect("source checkpoint record exists");
     assert_eq!(source_record.manifest_head_seq, ChangeSeq(1));
@@ -4304,25 +4553,31 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
 
     let duplicate_error =
         fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
+            .await
             .expect_err("duplicate fork target");
     assert_eq!(duplicate_error.code(), ErrorCode::NamespaceExists);
 
-    let source_entry =
-        resolve_path(&store, &source_namespace_id, "/docs/shared.txt").expect("source stat");
-    let clone_entry =
-        resolve_path(&store, &clone_namespace_id, "/docs/shared.txt").expect("clone stat");
+    let source_entry = resolve_path(&store, &source_namespace_id, "/docs/shared.txt")
+        .await
+        .expect("source stat");
+    let clone_entry = resolve_path(&store, &clone_namespace_id, "/docs/shared.txt")
+        .await
+        .expect("clone stat");
     assert_eq!(source_entry.content_ref, clone_entry.content_ref);
     assert_eq!(
         read_file_bytes(&store, &clone_namespace_id, "/docs/shared.txt")
+            .await
             .expect("read clone")
             .bytes,
         b"base"
     );
-    let stale_clone_changes =
-        list_changes_after(&store, &clone_namespace_id, ChangeSeq(0)).expect_err("old cursor");
+    let stale_clone_changes = list_changes_after(&store, &clone_namespace_id, ChangeSeq(0))
+        .await
+        .expect_err("old cursor");
     assert_eq!(stale_clone_changes.code(), ErrorCode::RebootstrapRequired);
-    let empty_clone_changes =
-        list_changes_after(&store, &clone_namespace_id, ChangeSeq(1)).expect("empty changes");
+    let empty_clone_changes = list_changes_after(&store, &clone_namespace_id, ChangeSeq(1))
+        .await
+        .expect("empty changes");
     assert!(empty_clone_changes.changes.is_empty());
 
     write_file_bytes(
@@ -4333,9 +4588,11 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
         &context,
         Some("source-after-fork"),
     )
+    .await
     .expect("source replace");
     assert_eq!(
         read_file_bytes(&store, &clone_namespace_id, "/docs/shared.txt")
+            .await
             .expect("read clone after source write")
             .bytes,
         b"base"
@@ -4349,23 +4606,27 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
         &context,
         Some("clone-after-fork"),
     )
+    .await
     .expect("clone replace");
     assert_eq!(clone_write.committed_seq, ChangeSeq(2));
     assert_eq!(
         read_file_bytes(&store, &source_namespace_id, "/docs/shared.txt")
+            .await
             .expect("read source")
             .bytes,
         b"source-after-fork"
     );
     assert_eq!(
         read_file_bytes(&store, &clone_namespace_id, "/docs/shared.txt")
+            .await
             .expect("read clone")
             .bytes,
         b"clone-after-fork"
     );
 
-    let clone_changes =
-        list_changes_after(&store, &clone_namespace_id, ChangeSeq(1)).expect("clone changes");
+    let clone_changes = list_changes_after(&store, &clone_namespace_id, ChangeSeq(1))
+        .await
+        .expect("clone changes");
     assert_eq!(clone_changes.changes.len(), 1);
     assert_eq!(clone_changes.changes[0].seq, ChangeSeq(2));
 
@@ -4387,6 +4648,7 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     }
     assert_eq!(
         read_file_bytes(&store, &clone_namespace_id, "/docs/shared.txt")
+            .await
             .expect("clone remains readable")
             .bytes,
         b"clone-after-fork"
@@ -4401,11 +4663,12 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
         .await
         .expect("delete referenced source metadata SST");
     let corrupt_target = read_file_bytes(&store, &clone_namespace_id, "/docs/shared.txt")
+        .await
         .expect_err("target should fail when referenced source SST is missing");
     assert_eq!(corrupt_target.code(), ErrorCode::NamespaceCorrupt);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn fork_namespace_rejects_corrupt_source_manifest_descriptors() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -4414,6 +4677,7 @@ async fn fork_namespace_rejects_corrupt_source_manifest_descriptors() {
     let clone_namespace_id = NamespaceId::parse("clone").expect("valid namespace id");
 
     bootstrap_namespace(&store, &source_namespace_id, &context, false)
+        .await
         .expect("bootstrap source namespace");
     write_file_bytes(
         &store,
@@ -4423,20 +4687,19 @@ async fn fork_namespace_rejects_corrupt_source_manifest_descriptors() {
         &context,
         Some("seed-shared"),
     )
+    .await
     .expect("seed shared file");
-    let checkpoint = block_on(
-        namespace_engine(&store, &source_namespace_id, &context)
-            .create_checkpoint("test-pin".to_owned(), None),
-    )
-    .expect("create source checkpoint");
+    let checkpoint = namespace_engine(&store, &source_namespace_id, &context)
+        .create_checkpoint("test-pin".to_owned(), None)
+        .await
+        .expect("create source checkpoint");
 
-    let source_record = block_on(
-        loonfs_core::control::load_namespace_checkpoint_record_control(
-            &store,
-            &source_namespace_id,
-            &checkpoint.checkpoint_id,
-        ),
+    let source_record = loonfs_core::control::load_namespace_checkpoint_record_control(
+        &store,
+        &source_namespace_id,
+        &checkpoint.checkpoint_id,
     )
+    .await
     .expect("read source checkpoint record")
     .expect("source checkpoint record exists");
     let manifest_key = metadata_manifest_object(
@@ -4464,6 +4727,7 @@ async fn fork_namespace_rejects_corrupt_source_manifest_descriptors() {
         .expect("overwrite source manifest");
 
     let error = fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
+        .await
         .expect_err("corrupt source manifest should block fork");
 
     assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
@@ -4477,7 +4741,7 @@ async fn fork_namespace_rejects_corrupt_source_manifest_descriptors() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn fork_target_head_reservation_failure_keeps_descriptor_unpublished() {
     let temp_dir = tempdir().expect("tempdir");
     let source_namespace_id = namespace_id();
@@ -4491,9 +4755,10 @@ async fn fork_target_head_reservation_failure_keeps_descriptor_unpublished() {
             additional_writes: Vec::new(),
         },
     );
-    seed_source_namespace_for_fork(&store, &source_namespace_id, &context);
+    seed_source_namespace_for_fork(&store, &source_namespace_id, &context).await;
 
     let error = fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
+        .await
         .expect_err("target head precondition should re-check partial namespace");
     assert_eq!(error.code(), ErrorCode::NamespacePartial);
     assert!(
@@ -4515,16 +4780,18 @@ async fn fork_target_head_reservation_failure_keeps_descriptor_unpublished() {
             .is_none(),
         "descriptor must remain unpublished"
     );
-    assert_namespace_partial(&store, &clone_namespace_id, &context);
+    assert_namespace_partial(&store, &clone_namespace_id, &context).await;
     let retry = fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
+        .await
         .expect_err("normal fork retry preserves the raced partial target");
     assert_eq!(retry.code(), ErrorCode::NamespacePartial);
-    let report = block_on(repair_namespace(&store, &clone_namespace_id, &context))
+    let report = repair_namespace(&store, &clone_namespace_id, &context)
+        .await
         .expect("explicit repair completes the raced fork target");
     assert_eq!(report.outcome, RepairNamespaceOutcome::Completed);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn fork_source_checkpoint_failure_leaves_target_namespace_absent() {
     let temp_dir = tempdir().expect("tempdir");
     let source_namespace_id = namespace_id();
@@ -4540,9 +4807,10 @@ async fn fork_source_checkpoint_failure_leaves_target_namespace_absent() {
             message: "injected source checkpoint failure",
         },
     );
-    seed_source_namespace_for_fork(&store, &source_namespace_id, &context);
+    seed_source_namespace_for_fork(&store, &source_namespace_id, &context).await;
 
     let error = fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
+        .await
         .expect_err("source checkpoint failure should abort fork before target publication");
     assert_eq!(error.code(), ErrorCode::ServerError);
     assert!(
@@ -4582,7 +4850,7 @@ async fn fork_source_checkpoint_failure_leaves_target_namespace_absent() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn fork_target_manifest_failure_leaves_target_namespace_absent() {
     let temp_dir = tempdir().expect("tempdir");
     let source_namespace_id = namespace_id();
@@ -4598,9 +4866,10 @@ async fn fork_target_manifest_failure_leaves_target_namespace_absent() {
             message: "injected target manifest failure",
         },
     );
-    seed_source_namespace_for_fork(&store, &source_namespace_id, &context);
+    seed_source_namespace_for_fork(&store, &source_namespace_id, &context).await;
 
     let error = fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
+        .await
         .expect_err("target manifest write should fail");
     assert_eq!(error.code(), ErrorCode::ServerError);
     assert!(
@@ -4640,7 +4909,7 @@ async fn fork_target_manifest_failure_leaves_target_namespace_absent() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn fork_failure_after_target_head_before_descriptor_remains_partial() {
     let temp_dir = tempdir().expect("tempdir");
     let source_namespace_id = namespace_id();
@@ -4653,9 +4922,10 @@ async fn fork_failure_after_target_head_before_descriptor_remains_partial() {
             message: "injected target descriptor failure",
         },
     );
-    seed_source_namespace_for_fork(&store, &source_namespace_id, &context);
+    seed_source_namespace_for_fork(&store, &source_namespace_id, &context).await;
 
     let error = fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
+        .await
         .expect_err("target descriptor write should fail");
     assert_eq!(error.code(), ErrorCode::ServerError);
     assert!(
@@ -4685,19 +4955,20 @@ async fn fork_failure_after_target_head_before_descriptor_remains_partial() {
         !target_manifest_keys.is_empty(),
         "target manifest should have been written before descriptor failure"
     );
-    assert_namespace_partial(&store, &clone_namespace_id, &context);
+    assert_namespace_partial(&store, &clone_namespace_id, &context).await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn fork_target_control_conflict_rechecks_complete_namespace() {
     let temp_dir = tempdir().expect("tempdir");
     let source_namespace_id = namespace_id();
     let clone_namespace_id = NamespaceId::parse("clone").expect("valid namespace id");
     let context = mutation_context();
     let inner = LocalFsStore::new(temp_dir.path()).expect("store");
-    seed_source_namespace_for_fork(&inner, &source_namespace_id, &context);
-    let content_store_id =
-        load_namespace_descriptor_state(&inner, &source_namespace_id).content_store_id;
+    seed_source_namespace_for_fork(&inner, &source_namespace_id, &context).await;
+    let content_store_id = load_namespace_descriptor_state(&inner, &source_namespace_id)
+        .await
+        .content_store_id;
     let descriptor = NamespaceConfigEnvelope::from_state(
         ControlObjectKind::NamespaceConfig,
         &context.writer_version,
@@ -4722,6 +4993,7 @@ async fn fork_target_control_conflict_rechecks_complete_namespace() {
     );
 
     let error = fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
+        .await
         .expect_err("target head conflict should re-check complete namespace");
     assert_eq!(error.code(), ErrorCode::NamespaceExists);
     assert!(
@@ -4742,12 +5014,14 @@ async fn fork_target_control_conflict_rechecks_complete_namespace() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn restore_revision_does_not_revalidate_retained_content_before_publish() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id(), &context, false).expect("bootstrap namespace");
+    bootstrap_namespace(&store, &namespace_id(), &context, false)
+        .await
+        .expect("bootstrap namespace");
 
     let first = store_bytes_as_content(&store, &namespace_id(), b"first")
         .await
@@ -4760,15 +5034,17 @@ async fn restore_revision_does_not_revalidate_retained_content_before_publish() 
             preconditions: Vec::new(),
             ops: vec![ApiCommitOp::CreateFile {
                 parent_inode_id: InodeId(1),
-                display_name: "restore.txt".to_owned(),
+                display_name: test_display_name("restore.txt"),
                 content_ref: first.content_ref.clone(),
             }],
             message: None,
         },
         &context,
     )
+    .await
     .expect("create file");
     let inode_id = resolve_path(&store, &namespace_id(), "/restore.txt")
+        .await
         .expect("resolve created file")
         .inode_id;
 
@@ -4790,6 +5066,7 @@ async fn restore_revision_does_not_revalidate_retained_content_before_publish() 
         },
         &context,
     )
+    .await
     .expect("replace file");
 
     store
@@ -4815,16 +5092,19 @@ async fn restore_revision_does_not_revalidate_retained_content_before_publish() 
         },
         &context,
     )
+    .await
     .expect("restore trusts retained content metadata");
     assert_eq!(response.committed_seq, ChangeSeq(3));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn metadata_only_commit_does_not_validate_content_store_refs() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id(), &context, false).expect("bootstrap namespace");
+    bootstrap_namespace(&store, &namespace_id(), &context, false)
+        .await
+        .expect("bootstrap namespace");
     write_file_bytes(
         &store,
         &namespace_id(),
@@ -4833,8 +5113,10 @@ async fn metadata_only_commit_does_not_validate_content_store_refs() {
         &context,
         Some("seed-metadata-only-delete"),
     )
+    .await
     .expect("seed file");
     let inode_id = resolve_path(&store, &namespace_id(), "/docs/delete-me.txt")
+        .await
         .expect("resolve seeded file")
         .inode_id;
 
@@ -4850,6 +5132,7 @@ async fn metadata_only_commit_does_not_validate_content_store_refs() {
         },
         &context,
     )
+    .await
     .expect("metadata-only delete should not perform content validation");
 
     assert_eq!(response.committed_seq, ChangeSeq(2));
@@ -4860,12 +5143,14 @@ async fn metadata_only_commit_does_not_validate_content_store_refs() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn explicit_create_file_fails_unprepared_before_parent_validation_without_content_reads() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id(), &context, false).expect("bootstrap namespace");
+    bootstrap_namespace(&store, &namespace_id(), &context, false)
+        .await
+        .expect("bootstrap namespace");
 
     let guarded_store = ContentStoreAccessLimitStore::new(temp_dir.path(), 1);
     let missing_content = content_ref("missing-content");
@@ -4878,13 +5163,14 @@ async fn explicit_create_file_fails_unprepared_before_parent_validation_without_
             preconditions: Vec::new(),
             ops: vec![ApiCommitOp::CreateFile {
                 parent_inode_id: InodeId(99),
-                display_name: "missing.txt".to_owned(),
+                display_name: test_display_name("missing.txt"),
                 content_ref: missing_content.clone(),
             }],
             message: None,
         })],
         &context,
     )
+    .await
     .into_iter()
     .next()
     .expect("one result")
@@ -4900,12 +5186,14 @@ async fn explicit_create_file_fails_unprepared_before_parent_validation_without_
     assert_eq!(guarded_store.content_store_access_count(), 1);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn explicit_replace_file_fails_unprepared_before_revision_validation_without_content_reads() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id(), &context, false).expect("bootstrap namespace");
+    bootstrap_namespace(&store, &namespace_id(), &context, false)
+        .await
+        .expect("bootstrap namespace");
     write_file_bytes(
         &store,
         &namespace_id(),
@@ -4914,8 +5202,10 @@ async fn explicit_replace_file_fails_unprepared_before_revision_validation_witho
         &context,
         Some("seed-replace"),
     )
+    .await
     .expect("seed replace target");
     let inode_id = resolve_path(&store, &namespace_id(), "/docs/replace.txt")
+        .await
         .expect("resolve path")
         .inode_id;
 
@@ -4936,6 +5226,7 @@ async fn explicit_replace_file_fails_unprepared_before_revision_validation_witho
         })],
         &context,
     )
+    .await
     .into_iter()
     .next()
     .expect("one result")
@@ -4951,12 +5242,14 @@ async fn explicit_replace_file_fails_unprepared_before_revision_validation_witho
     assert_eq!(guarded_store.content_store_access_count(), 1);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn restore_revision_missing_source_is_revision_not_found() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id(), &context, false).expect("bootstrap namespace");
+    bootstrap_namespace(&store, &namespace_id(), &context, false)
+        .await
+        .expect("bootstrap namespace");
     write_file_bytes(
         &store,
         &namespace_id(),
@@ -4965,8 +5258,10 @@ async fn restore_revision_missing_source_is_revision_not_found() {
         &context,
         Some("seed-restore"),
     )
+    .await
     .expect("seed restore target");
     let inode_id = resolve_path(&store, &namespace_id(), "/docs/restore.txt")
+        .await
         .expect("resolve path")
         .inode_id;
 
@@ -4985,16 +5280,19 @@ async fn restore_revision_missing_source_is_revision_not_found() {
         },
         &context,
     )
+    .await
     .expect_err("missing restore source should fail");
     assert_eq!(error.code(), ErrorCode::RevisionNotFound);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn idempotent_path_retry_returns_receipt_before_content_validation() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id(), &context, false).expect("bootstrap namespace");
+    bootstrap_namespace(&store, &namespace_id(), &context, false)
+        .await
+        .expect("bootstrap namespace");
 
     let content = store_bytes_as_content(&store, &namespace_id(), b"idempotent")
         .await
@@ -5003,18 +5301,22 @@ async fn idempotent_path_retry_returns_receipt_before_content_validation() {
     let first = publish_namespace_mutations_batch(
         &store,
         &namespace_id(),
-        vec![admitted_candidate(
-            &store,
-            &namespace_id(),
-            PathMutationIntent::PutFile {
-                commit_id: commit_id.clone(),
-                absolute_path: AbsolutePath::parse("/docs/idempotent.txt").expect("path"),
-                content_ref: content.content_ref.clone(),
-                behavior: DestinationBehavior::NoReplace,
-            },
-        )],
+        vec![
+            admitted_candidate(
+                &store,
+                &namespace_id(),
+                PathMutationIntent::PutFile {
+                    commit_id: commit_id.clone(),
+                    absolute_path: AbsolutePath::parse("/docs/idempotent.txt").expect("path"),
+                    content_ref: content.content_ref.clone(),
+                    behavior: DestinationBehavior::NoReplace,
+                },
+            )
+            .await,
+        ],
         &context,
     )
+    .await
     .into_iter()
     .next()
     .expect("single response")
@@ -5037,6 +5339,7 @@ async fn idempotent_path_retry_returns_receipt_before_content_validation() {
         )],
         &context,
     )
+    .await
     .into_iter()
     .next()
     .expect("single response")
@@ -5045,12 +5348,14 @@ async fn idempotent_path_retry_returns_receipt_before_content_validation() {
     assert_eq!(retry.committed_seq, first.committed_seq);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn move_path_into_occupied_target_is_path_conflict() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id(), &context, false).expect("bootstrap namespace");
+    bootstrap_namespace(&store, &namespace_id(), &context, false)
+        .await
+        .expect("bootstrap namespace");
     write_file_bytes(
         &store,
         &namespace_id(),
@@ -5059,6 +5364,7 @@ async fn move_path_into_occupied_target_is_path_conflict() {
         &context,
         Some("seed-docs"),
     )
+    .await
     .expect("seed docs");
     write_file_bytes(
         &store,
@@ -5068,6 +5374,7 @@ async fn move_path_into_occupied_target_is_path_conflict() {
         &context,
         Some("seed-tmp"),
     )
+    .await
     .expect("seed tmp");
 
     let error = move_path(
@@ -5078,16 +5385,19 @@ async fn move_path_into_occupied_target_is_path_conflict() {
         &context,
         Some("move-conflict"),
     )
+    .await
     .expect_err("move conflict");
     assert_eq!(error.code(), ErrorCode::PathConflict);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn move_path_directory_cycle_is_would_cycle() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id(), &context, false).expect("bootstrap namespace");
+    bootstrap_namespace(&store, &namespace_id(), &context, false)
+        .await
+        .expect("bootstrap namespace");
     write_file_bytes(
         &store,
         &namespace_id(),
@@ -5096,6 +5406,7 @@ async fn move_path_directory_cycle_is_would_cycle() {
         &context,
         Some("seed-cycle"),
     )
+    .await
     .expect("seed cycle dirs");
 
     let error = move_path(
@@ -5106,16 +5417,19 @@ async fn move_path_directory_cycle_is_would_cycle() {
         &context,
         Some("cycle"),
     )
+    .await
     .expect_err("cycle");
     assert_eq!(error.code(), ErrorCode::WouldCycle);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn write_and_move_under_deleted_ancestor_start_fresh_subtrees() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id(), &context, false).expect("bootstrap namespace");
+    bootstrap_namespace(&store, &namespace_id(), &context, false)
+        .await
+        .expect("bootstrap namespace");
     write_file_bytes(
         &store,
         &namespace_id(),
@@ -5124,6 +5438,7 @@ async fn write_and_move_under_deleted_ancestor_start_fresh_subtrees() {
         &context,
         Some("seed-docs"),
     )
+    .await
     .expect("seed docs");
     write_file_bytes(
         &store,
@@ -5133,6 +5448,7 @@ async fn write_and_move_under_deleted_ancestor_start_fresh_subtrees() {
         &context,
         Some("seed-source"),
     )
+    .await
     .expect("seed source");
     delete_path(
         &store,
@@ -5141,6 +5457,7 @@ async fn write_and_move_under_deleted_ancestor_start_fresh_subtrees() {
         &context,
         Some("delete-docs"),
     )
+    .await
     .expect("delete docs");
 
     // Deleting `/docs` unbinds the name: it is reusable immediately, and
@@ -5155,8 +5472,9 @@ async fn write_and_move_under_deleted_ancestor_start_fresh_subtrees() {
         &context,
         Some("put-under-recreated"),
     )
+    .await
     .expect("put recreates the subtree");
-    let old_child = resolve_path(&store, &namespace_id(), "/docs/old.txt");
+    let old_child = resolve_path(&store, &namespace_id(), "/docs/old.txt").await;
     assert!(old_child.is_err(), "dead subtree child must stay invisible");
 
     move_path(
@@ -5167,15 +5485,18 @@ async fn write_and_move_under_deleted_ancestor_start_fresh_subtrees() {
         &context,
         Some("move-under-recreated"),
     )
+    .await
     .expect("move lands in the recreated subtree");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn create_directory_path_creates_directory_without_auto_parents() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id(), &context, false).expect("bootstrap namespace");
+    bootstrap_namespace(&store, &namespace_id(), &context, false)
+        .await
+        .expect("bootstrap namespace");
 
     let created = create_directory_path(
         &store,
@@ -5184,9 +5505,12 @@ async fn create_directory_path_creates_directory_without_auto_parents() {
         &context,
         Some("mkdir-docs"),
     )
+    .await
     .expect("create dir");
     assert_eq!(created.committed_seq, ChangeSeq(1));
-    let docs = resolve_path(&store, &namespace_id(), "/docs").expect("resolve docs");
+    let docs = resolve_path(&store, &namespace_id(), "/docs")
+        .await
+        .expect("resolve docs");
     assert_eq!(docs.inode_kind, InodeKind::Directory);
 
     let missing_parent = create_directory_path(
@@ -5196,16 +5520,19 @@ async fn create_directory_path_creates_directory_without_auto_parents() {
         &context,
         Some("mkdir-missing-parent"),
     )
+    .await
     .expect_err("mkdir does not auto-create parents");
     assert_eq!(missing_parent.code(), ErrorCode::PathNotFound);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn path_move_writes_unbind_and_stale_binding_is_fails() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id(), &context, false).expect("bootstrap namespace");
+    bootstrap_namespace(&store, &namespace_id(), &context, false)
+        .await
+        .expect("bootstrap namespace");
     write_file_bytes(
         &store,
         &namespace_id(),
@@ -5214,10 +5541,13 @@ async fn path_move_writes_unbind_and_stale_binding_is_fails() {
         &context,
         Some("seed-a"),
     )
+    .await
     .expect("seed file");
-    let file = resolve_path(&store, &namespace_id(), "/docs/a.txt").expect("resolve file");
+    let file = resolve_path(&store, &namespace_id(), "/docs/a.txt")
+        .await
+        .expect("resolve file");
     let old_binding =
-        latest_binding_for_child_from_change_feed(&store, &namespace_id(), file.inode_id);
+        latest_binding_for_child_from_change_feed(&store, &namespace_id(), file.inode_id).await;
 
     move_path(
         &store,
@@ -5227,8 +5557,10 @@ async fn path_move_writes_unbind_and_stale_binding_is_fails() {
         &context,
         Some("move-a-to-b"),
     )
+    .await
     .expect("move file");
     let unbind_count = list_changes_after(&store, &namespace_id(), ChangeSeq(0))
+        .await
         .expect("change feed")
         .changes
         .iter()
@@ -5236,8 +5568,12 @@ async fn path_move_writes_unbind_and_stale_binding_is_fails() {
         .filter(|delta| matches!(delta, CommitDelta::UnbindDirentry { .. }))
         .count();
     assert_eq!(unbind_count, 1);
-    assert!(resolve_path(&store, &namespace_id(), "/docs/a.txt").is_err());
-    resolve_path(&store, &namespace_id(), "/docs/b.txt").expect("new path visible");
+    assert!(resolve_path(&store, &namespace_id(), "/docs/a.txt")
+        .await
+        .is_err());
+    resolve_path(&store, &namespace_id(), "/docs/b.txt")
+        .await
+        .expect("new path visible");
 
     let stale_binding = commit_operations(
         &store,
@@ -5258,16 +5594,19 @@ async fn path_move_writes_unbind_and_stale_binding_is_fails() {
         },
         &context,
     )
+    .await
     .expect_err("stale binding should fail");
     assert_eq!(stale_binding.code(), ErrorCode::PathConflict);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn put_file_no_replace_rejects_existing_target_without_force() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id(), &context, false).expect("bootstrap namespace");
+    bootstrap_namespace(&store, &namespace_id(), &context, false)
+        .await
+        .expect("bootstrap namespace");
     write_file_bytes(
         &store,
         &namespace_id(),
@@ -5276,6 +5615,7 @@ async fn put_file_no_replace_rejects_existing_target_without_force() {
         &context,
         Some("seed-hello"),
     )
+    .await
     .expect("seed file");
 
     let error = put_file_bytes(
@@ -5287,16 +5627,19 @@ async fn put_file_no_replace_rejects_existing_target_without_force() {
         &context,
         Some("put-no-force"),
     )
+    .await
     .expect_err("put without force");
     assert_eq!(error.code(), ErrorCode::PathConflict);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn delete_path_non_recursive_rejects_non_empty_directory() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id(), &context, false).expect("bootstrap namespace");
+    bootstrap_namespace(&store, &namespace_id(), &context, false)
+        .await
+        .expect("bootstrap namespace");
     write_file_bytes(
         &store,
         &namespace_id(),
@@ -5305,6 +5648,7 @@ async fn delete_path_non_recursive_rejects_non_empty_directory() {
         &context,
         Some("seed-docs"),
     )
+    .await
     .expect("seed file");
 
     let error = delete_path_non_recursive(
@@ -5314,16 +5658,19 @@ async fn delete_path_non_recursive_rejects_non_empty_directory() {
         &context,
         Some("delete-docs"),
     )
+    .await
     .expect_err("non-recursive delete should reject non-empty dir");
     assert!(matches!(error, CoreError::DirectoryNotEmpty(path) if path == "/docs"));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn copy_file_path_creates_new_inode_and_reuses_content_blob() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id(), &context, false).expect("bootstrap namespace");
+    bootstrap_namespace(&store, &namespace_id(), &context, false)
+        .await
+        .expect("bootstrap namespace");
     write_file_bytes(
         &store,
         &namespace_id(),
@@ -5332,6 +5679,7 @@ async fn copy_file_path_creates_new_inode_and_reuses_content_blob() {
         &context,
         Some("seed-source"),
     )
+    .await
     .expect("seed source");
 
     copy_file_path(
@@ -5342,10 +5690,15 @@ async fn copy_file_path_creates_new_inode_and_reuses_content_blob() {
         &context,
         Some("copy-file"),
     )
+    .await
     .expect("copy file");
 
-    let source = resolve_path(&store, &namespace_id(), "/docs/source.txt").expect("source stat");
-    let copy = resolve_path(&store, &namespace_id(), "/docs/copy.txt").expect("copy stat");
+    let source = resolve_path(&store, &namespace_id(), "/docs/source.txt")
+        .await
+        .expect("source stat");
+    let copy = resolve_path(&store, &namespace_id(), "/docs/copy.txt")
+        .await
+        .expect("copy stat");
     assert_ne!(source.inode_id, copy.inode_id);
     assert_eq!(
         source.content_ref, copy.content_ref,
@@ -5353,14 +5706,16 @@ async fn copy_file_path_creates_new_inode_and_reuses_content_blob() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn resolve_path_uses_nfc_casefold_name_policy() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
     let stored_path = "/Cafe\u{0301}.txt";
     let lookup_path = "/CAF\u{00c9}.TXT";
-    bootstrap_namespace(&store, &namespace_id(), &context, false).expect("bootstrap namespace");
+    bootstrap_namespace(&store, &namespace_id(), &context, false)
+        .await
+        .expect("bootstrap namespace");
     write_file_bytes(
         &store,
         &namespace_id(),
@@ -5369,19 +5724,24 @@ async fn resolve_path_uses_nfc_casefold_name_policy() {
         &context,
         Some("seed-unicode-name"),
     )
+    .await
     .expect("seed unicode name");
 
-    let resolved = resolve_path(&store, &namespace_id(), lookup_path).expect("resolve path");
+    let resolved = resolve_path(&store, &namespace_id(), lookup_path)
+        .await
+        .expect("resolve path");
     assert_eq!(resolved.absolute_path, stored_path);
-    assert_eq!(resolved.display_name, "Cafe\u{0301}.txt");
+    assert_eq!(resolved.display_name.as_str(), "Cafe\u{0301}.txt");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn no_replace_put_rejects_casefold_and_normalization_equivalent_name() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id(), &context, false).expect("bootstrap namespace");
+    bootstrap_namespace(&store, &namespace_id(), &context, false)
+        .await
+        .expect("bootstrap namespace");
     write_file_bytes(
         &store,
         &namespace_id(),
@@ -5390,6 +5750,7 @@ async fn no_replace_put_rejects_casefold_and_normalization_equivalent_name() {
         &context,
         Some("seed-unicode-name"),
     )
+    .await
     .expect("seed unicode name");
 
     let error = put_file_bytes(
@@ -5401,16 +5762,18 @@ async fn no_replace_put_rejects_casefold_and_normalization_equivalent_name() {
         &context,
         Some("create-only-conflict"),
     )
+    .await
     .expect_err("create-only conflict");
     assert_eq!(error.code(), ErrorCode::PathConflict);
 }
 
-fn seed_source_namespace_for_fork<S: ObjectStore + ?Sized>(
+async fn seed_source_namespace_for_fork<S: ObjectStore + ?Sized>(
     store: &S,
     source_namespace_id: &NamespaceId,
     context: &MutationContext,
 ) {
     bootstrap_namespace(store, source_namespace_id, context, false)
+        .await
         .expect("bootstrap source namespace");
     write_file_bytes(
         store,
@@ -5420,16 +5783,18 @@ fn seed_source_namespace_for_fork<S: ObjectStore + ?Sized>(
         context,
         Some("seed-shared"),
     )
+    .await
     .expect("seed shared file");
 }
 
-fn assert_namespace_partial<S: ObjectStore + ?Sized>(
+async fn assert_namespace_partial<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     context: &MutationContext,
 ) {
-    let partial_error =
-        bootstrap_namespace(store, namespace_id, context, false).expect_err("partial namespace");
+    let partial_error = bootstrap_namespace(store, namespace_id, context, false)
+        .await
+        .expect_err("partial namespace");
     assert!(matches!(
         partial_error,
         loonfs_core::BootstrapNamespaceError::NamespacePartiallyInitialized { .. }
@@ -6298,16 +6663,20 @@ async fn head_cas_advances_seq(
 /// contract: a recursively deleted subtree stays out of listings and
 /// resolution entirely, while entries the enumeration does admit still
 /// surface their real revision data (revision_no, size, content ref).
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn tombstoned_children_stay_unlisted_and_live_entries_keep_revision_data() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id(), &context, false).expect("bootstrap namespace");
+    bootstrap_namespace(&store, &namespace_id(), &context, false)
+        .await
+        .expect("bootstrap namespace");
 
     create_directory_path(&store, &namespace_id(), "/live", &context, None)
+        .await
         .expect("create live dir");
     create_directory_path(&store, &namespace_id(), "/dead", &context, None)
+        .await
         .expect("create dead dir");
     put_file_bytes(
         &store,
@@ -6318,6 +6687,7 @@ async fn tombstoned_children_stay_unlisted_and_live_entries_keep_revision_data()
         &context,
         None,
     )
+    .await
     .expect("put live file");
     put_file_bytes(
         &store,
@@ -6328,10 +6698,15 @@ async fn tombstoned_children_stay_unlisted_and_live_entries_keep_revision_data()
         &context,
         None,
     )
+    .await
     .expect("put doomed file");
-    delete_path(&store, &namespace_id(), "/dead", &context, None).expect("delete dead subtree");
+    delete_path(&store, &namespace_id(), "/dead", &context, None)
+        .await
+        .expect("delete dead subtree");
 
-    let root_entries = list_path(&store, &namespace_id(), "/").expect("list root");
+    let root_entries = list_path(&store, &namespace_id(), "/")
+        .await
+        .expect("list root");
     let root_names: Vec<&str> = root_entries
         .iter()
         .map(|entry| entry.absolute_path.as_str())
@@ -6345,7 +6720,9 @@ async fn tombstoned_children_stay_unlisted_and_live_entries_keep_revision_data()
         "tombstoned directory must not list, got {root_names:?}"
     );
 
-    let live_entries = list_path(&store, &namespace_id(), "/live").expect("list live dir");
+    let live_entries = list_path(&store, &namespace_id(), "/live")
+        .await
+        .expect("list live dir");
     assert_eq!(live_entries.len(), 1, "one live child");
     let kept = &live_entries[0];
     assert_eq!(kept.absolute_path, "/live/kept.txt");
@@ -6364,19 +6741,23 @@ async fn tombstoned_children_stay_unlisted_and_live_entries_keep_revision_data()
     );
 
     resolve_path(&store, &namespace_id(), "/dead/gone.txt")
+        .await
         .expect_err("file under tombstoned subtree must not resolve");
     resolve_path(&store, &namespace_id(), "/dead")
+        .await
         .expect_err("tombstoned directory must not resolve");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn move_replace_atomically_replaces_a_file_destination() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
     let namespace_id = namespace_id();
 
-    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
     put_file_bytes(
         &store,
         &namespace_id,
@@ -6386,6 +6767,7 @@ async fn move_replace_atomically_replaces_a_file_destination() {
         &context,
         Some("put-a"),
     )
+    .await
     .expect("put a");
     put_file_bytes(
         &store,
@@ -6396,6 +6778,7 @@ async fn move_replace_atomically_replaces_a_file_destination() {
         &context,
         Some("put-b"),
     )
+    .await
     .expect("put b");
 
     // The default stays create-only: an occupied destination is a conflict.
@@ -6410,6 +6793,7 @@ async fn move_replace_atomically_replaces_a_file_destination() {
         },
         &context,
     )
+    .await
     .expect_err("no-replace move onto an occupied name fails");
     assert!(matches!(error, CoreError::DestinationExists(_)));
 
@@ -6426,21 +6810,28 @@ async fn move_replace_atomically_replaces_a_file_destination() {
         },
         &context,
     )
+    .await
     .expect("replace move");
 
-    let read = read_file_bytes(&store, &namespace_id, "/docs/b.txt").expect("read destination");
+    let read = read_file_bytes(&store, &namespace_id, "/docs/b.txt")
+        .await
+        .expect("read destination");
     assert_eq!(read.bytes, b"alpha");
-    read_file_bytes(&store, &namespace_id, "/docs/a.txt").expect_err("source path is gone");
+    read_file_bytes(&store, &namespace_id, "/docs/a.txt")
+        .await
+        .expect_err("source path is gone");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn move_replace_rejects_directory_destinations_and_self_moves() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
     let namespace_id = namespace_id();
 
-    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
     put_file_bytes(
         &store,
         &namespace_id,
@@ -6450,8 +6841,10 @@ async fn move_replace_rejects_directory_destinations_and_self_moves() {
         &context,
         Some("put-a"),
     )
+    .await
     .expect("put a");
     create_directory_path(&store, &namespace_id, "/docs/dir", &context, Some("mkdir"))
+        .await
         .expect("mkdir");
 
     // Mirrors put: only a file destination can be replaced.
@@ -6466,6 +6859,7 @@ async fn move_replace_rejects_directory_destinations_and_self_moves() {
         },
         &context,
     )
+    .await
     .expect_err("replace move onto a directory fails");
     assert!(matches!(error, CoreError::ExpectedFile { .. }));
 
@@ -6481,18 +6875,21 @@ async fn move_replace_rejects_directory_destinations_and_self_moves() {
         },
         &context,
     )
+    .await
     .expect_err("replace move onto itself fails");
     assert!(matches!(error, CoreError::DestinationExists(_)));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn copy_replace_appends_a_revision_to_the_destination_inode() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
     let namespace_id = namespace_id();
 
-    bootstrap_namespace(&store, &namespace_id, &context, false).expect("bootstrap");
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
     put_file_bytes(
         &store,
         &namespace_id,
@@ -6502,6 +6899,7 @@ async fn copy_replace_appends_a_revision_to_the_destination_inode() {
         &context,
         Some("put-a"),
     )
+    .await
     .expect("put a");
     put_file_bytes(
         &store,
@@ -6512,8 +6910,10 @@ async fn copy_replace_appends_a_revision_to_the_destination_inode() {
         &context,
         Some("put-b"),
     )
+    .await
     .expect("put b");
     let before = list_file_revisions(&store, &namespace_id, "/docs/b.txt")
+        .await
         .expect("destination revisions before");
 
     submit_intent(
@@ -6527,16 +6927,22 @@ async fn copy_replace_appends_a_revision_to_the_destination_inode() {
         },
         &context,
     )
+    .await
     .expect("replace copy");
 
     // Mirrors put onto an existing file: the destination keeps its inode and
     // revision history, gaining one revision with the source's content.
-    let read = read_file_bytes(&store, &namespace_id, "/docs/b.txt").expect("read destination");
+    let read = read_file_bytes(&store, &namespace_id, "/docs/b.txt")
+        .await
+        .expect("read destination");
     assert_eq!(read.bytes, b"alpha");
     let after = list_file_revisions(&store, &namespace_id, "/docs/b.txt")
+        .await
         .expect("destination revisions after");
     assert_eq!(after.inode_id, before.inode_id);
     assert_eq!(after.revisions.len(), before.revisions.len() + 1);
-    let source = read_file_bytes(&store, &namespace_id, "/docs/a.txt").expect("source still read");
+    let source = read_file_bytes(&store, &namespace_id, "/docs/a.txt")
+        .await
+        .expect("source still read");
     assert_eq!(source.bytes, b"alpha");
 }

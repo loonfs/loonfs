@@ -147,7 +147,7 @@ mod tests {
         ResolvedBinding {
             parent_inode_id: InodeId(parent),
             name_key: NameKey::parse(name_key).expect("valid name key"),
-            display_name: display_name.to_owned(),
+            display_name: loonfs_api::DisplayName::parse(display_name).expect("valid display name"),
             child_inode_id: InodeId(child),
             bind_seq: ChangeSeq(bind_seq),
             bind_delta_index,
@@ -161,7 +161,7 @@ mod tests {
             &[ValidatedOp::CreateDir {
                 op_index: 0,
                 parent_inode_id: InodeId(1),
-                display_name: "Docs".to_owned(),
+                display_name: loonfs_api::DisplayName::parse("Docs").expect("valid display name"),
                 name_key: NameKey::parse("docs").expect("valid name key"),
                 child_inode_id: InodeId(2),
                 create_inode_delta_index: 0,
@@ -177,7 +177,8 @@ mod tests {
             &[ValidatedOp::CreateFile {
                 op_index: 0,
                 parent_inode_id: InodeId(1),
-                display_name: "Note.TXT".to_owned(),
+                display_name: loonfs_api::DisplayName::parse("Note.TXT")
+                    .expect("valid display name"),
                 name_key: NameKey::parse("note.txt").expect("valid name key"),
                 child_inode_id: InodeId(2),
                 content_ref: content_ref(1),
@@ -240,7 +241,8 @@ mod tests {
                 inode_id: InodeId(4),
                 source_binding: binding(2, "old.txt", "Old.TXT", 4, 11, 2),
                 new_parent_inode_id: InodeId(3),
-                new_display_name: "New.TXT".to_owned(),
+                new_display_name: loonfs_api::DisplayName::parse("New.TXT")
+                    .expect("valid display name"),
                 new_name_key: NameKey::parse("new.txt").expect("valid name key"),
                 unbind_delta_index: 0,
                 bind_delta_index: 1,
@@ -260,7 +262,8 @@ mod tests {
                 ValidatedOp::CreateFile {
                     op_index: 0,
                     parent_inode_id: InodeId(1),
-                    display_name: "Draft.md".to_owned(),
+                    display_name: loonfs_api::DisplayName::parse("Draft.md")
+                        .expect("valid display name"),
                     name_key: NameKey::parse("draft.md").expect("valid name key"),
                     child_inode_id: InodeId(2),
                     content_ref: content_ref(4),
@@ -273,7 +276,8 @@ mod tests {
                     inode_id: InodeId(2),
                     source_binding: binding(1, "draft.md", "Draft.md", 2, committed_seq.0, 1),
                     new_parent_inode_id: InodeId(1),
-                    new_display_name: "Final.md".to_owned(),
+                    new_display_name: loonfs_api::DisplayName::parse("Final.md")
+                        .expect("valid display name"),
                     new_name_key: NameKey::parse("final.md").expect("valid name key"),
                     unbind_delta_index: 3,
                     bind_delta_index: 4,
@@ -310,7 +314,8 @@ mod tests {
                 ValidatedOp::CreateDir {
                     op_index: 0,
                     parent_inode_id: InodeId(1),
-                    display_name: "Docs".to_owned(),
+                    display_name: loonfs_api::DisplayName::parse("Docs")
+                        .expect("valid display name"),
                     name_key: NameKey::parse("docs").expect("valid name key"),
                     child_inode_id: InodeId(2),
                     create_inode_delta_index: 0,
@@ -319,7 +324,8 @@ mod tests {
                 ValidatedOp::CreateFile {
                     op_index: 1,
                     parent_inode_id: InodeId(2),
-                    display_name: "Note.txt".to_owned(),
+                    display_name: loonfs_api::DisplayName::parse("Note.txt")
+                        .expect("valid display name"),
                     name_key: NameKey::parse("note.txt").expect("valid name key"),
                     child_inode_id: InodeId(3),
                     content_ref: content_ref(5),
@@ -339,7 +345,8 @@ mod tests {
                     inode_id: InodeId(3),
                     source_binding: binding(2, "note.txt", "Note.txt", 3, committed_seq.0, 3),
                     new_parent_inode_id: InodeId(2),
-                    new_display_name: "Renamed.txt".to_owned(),
+                    new_display_name: loonfs_api::DisplayName::parse("Renamed.txt")
+                        .expect("valid display name"),
                     new_name_key: NameKey::parse("renamed.txt").expect("valid name key"),
                     unbind_delta_index: 6,
                     bind_delta_index: 7,
@@ -381,7 +388,7 @@ mod tests {
             ValidatedOp::CreateDir {
                 op_index: 0,
                 parent_inode_id: InodeId(1),
-                display_name: "a".to_owned(),
+                display_name: loonfs_api::DisplayName::parse("a").expect("valid display name"),
                 name_key: NameKey::parse("a").expect("valid name key"),
                 child_inode_id: InodeId(2),
                 create_inode_delta_index: 0,
@@ -390,7 +397,7 @@ mod tests {
             ValidatedOp::CreateFile {
                 op_index: 1,
                 parent_inode_id: InodeId(2),
-                display_name: "f".to_owned(),
+                display_name: loonfs_api::DisplayName::parse("f").expect("valid display name"),
                 name_key: NameKey::parse("f").expect("valid name key"),
                 child_inode_id: InodeId(3),
                 content_ref: content_ref(7),
@@ -412,7 +419,7 @@ mod tests {
                 inode_id: InodeId(3),
                 source_binding: binding(2, "f", "f", 3, first_seq.0, 3),
                 new_parent_inode_id: InodeId(1),
-                new_display_name: "f2".to_owned(),
+                new_display_name: loonfs_api::DisplayName::parse("f2").expect("valid display name"),
                 new_name_key: NameKey::parse("f2").expect("valid name key"),
                 unbind_delta_index: 1,
                 bind_delta_index: 2,

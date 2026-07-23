@@ -30,7 +30,7 @@ use super::{
     DirentryBindRecord, DirentryUnbindRecord, InodeRecord, MetadataState, SubtreeTombstoneRecord,
 };
 use futures::FutureExt;
-use loonfs_api::{AbsolutePath, ChangeSeq, InodeId, InodeKind, NameKey, NamePolicy};
+use loonfs_api::{AbsolutePath, ChangeSeq, InodeId, InodeKind, NameKey, NamePolicy, ROOT_INODE_ID};
 use std::collections::BTreeSet;
 use std::future::Future;
 
@@ -43,7 +43,7 @@ use std::future::Future;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct BindingIdentity<'a> {
     pub(crate) parent_inode_id: InodeId,
-    pub(crate) name_key: &'a str,
+    pub(crate) name_key: &'a NameKey,
     pub(crate) child_inode_id: InodeId,
     pub(crate) bind_seq: ChangeSeq,
     pub(crate) bind_delta_index: u32,
@@ -53,7 +53,7 @@ impl<'a> From<&'a DirentryBindRecord> for BindingIdentity<'a> {
     fn from(record: &'a DirentryBindRecord) -> Self {
         Self {
             parent_inode_id: record.parent_inode_id,
-            name_key: record.name_key.as_str(),
+            name_key: &record.name_key,
             child_inode_id: record.child_inode_id,
             bind_seq: record.bind_seq,
             bind_delta_index: record.bind_delta_index,
@@ -65,7 +65,7 @@ impl<'a> From<&'a DirentryUnbindRecord> for BindingIdentity<'a> {
     fn from(record: &'a DirentryUnbindRecord) -> Self {
         Self {
             parent_inode_id: record.parent_inode_id,
-            name_key: record.name_key.as_str(),
+            name_key: &record.name_key,
             child_inode_id: record.child_inode_id,
             bind_seq: record.bind_seq,
             bind_delta_index: record.bind_delta_index,
@@ -109,7 +109,7 @@ pub(crate) trait MetadataVisibilityReads {
     async fn find_latest_bound_child(
         &mut self,
         parent_inode_id: InodeId,
-        name_key: &str,
+        name_key: &NameKey,
     ) -> Result<Option<DirentryBindRecord>, Self::Error>;
 
     /// Latest bind whose child is `child_inode_id` at the read seq,
@@ -147,7 +147,7 @@ pub(crate) trait MetadataVisibilityReads {
     async fn active_child_binding(
         &mut self,
         parent_inode_id: InodeId,
-        name_key: &str,
+        name_key: &NameKey,
     ) -> Result<Option<DirentryBindRecord>, Self::Error>
     where
         Self: Sized,
@@ -178,7 +178,7 @@ pub(crate) trait MetadataVisibilityReads {
     async fn visible_child(
         &mut self,
         parent_inode_id: InodeId,
-        name_key: &str,
+        name_key: &NameKey,
     ) -> Result<Option<DirentryBindRecord>, Self::Error>
     where
         Self: Sized,
@@ -218,7 +218,7 @@ pub(crate) async fn current_parent_binding_for_child<R: MetadataVisibilityReads>
 pub(crate) async fn active_child_binding<R: MetadataVisibilityReads>(
     reads: &mut R,
     parent_inode_id: InodeId,
-    name_key: &str,
+    name_key: &NameKey,
 ) -> Result<Option<DirentryBindRecord>, R::Error> {
     let Some(direntry) = reads
         .find_latest_bound_child(parent_inode_id, name_key)
@@ -320,7 +320,7 @@ pub(crate) async fn visible_inode<R: MetadataVisibilityReads>(
 pub(crate) async fn visible_child<R: MetadataVisibilityReads>(
     reads: &mut R,
     parent_inode_id: InodeId,
-    name_key: &str,
+    name_key: &NameKey,
 ) -> Result<Option<DirentryBindRecord>, R::Error> {
     let Some(parent) = reads.visible_inode(parent_inode_id).await? else {
         return Ok(None);
@@ -345,11 +345,6 @@ pub(crate) async fn visible_child<R: MetadataVisibilityReads>(
     Ok(Some(direntry))
 }
 
-/// The visible-children enumeration filter: a candidate bind row is a
-/// visible child iff it IS the active binding for its `(parent, name_key)`
-/// and its child inode is visible. Enumerating candidate rows is storage
-/// specific; deciding them is not. Callers must already have checked that
-/// the parent is a visible directory.
 /// Resolves `absolute_path` component by component through visible
 /// directories and visible child bindings, starting at the canonical root
 /// inode.
@@ -362,7 +357,7 @@ where
     R: MetadataVisibilityReads,
     R::Error: From<VisiblePathError>,
 {
-    let root_inode_id = InodeId(1);
+    let root_inode_id = ROOT_INODE_ID;
     let root = reads
         .visible_inode(root_inode_id)
         .await?
@@ -402,7 +397,7 @@ where
         let display_name = component.to_display_name();
         let name_key = NameKey::for_display_name(name_policy, &display_name);
         let direntry = reads
-            .visible_child(current_inode_id, name_key.as_str())
+            .visible_child(current_inode_id, &name_key)
             .await?
             .ok_or(VisiblePathError::PathNotFound {
                 absolute_path: requested_absolute_path,
@@ -410,8 +405,9 @@ where
 
         current_inode_id = direntry.child_inode_id;
         current_parent_inode_id = Some(direntry.parent_inode_id);
-        current_absolute_path = join_display_path(&current_absolute_path, &direntry.display_name);
-        current_display_name = direntry.display_name;
+        current_absolute_path =
+            join_display_path(&current_absolute_path, direntry.display_name.as_str());
+        current_display_name = direntry.display_name.to_string();
     }
 
     let inode = reads
@@ -447,7 +443,7 @@ fn join_display_path(base: &str, component: &str) -> String {
 pub(crate) fn resolve_in_memory_read<T>(future: impl Future<Output = T>) -> T {
     future
         .now_or_never()
-        .expect("in-memory metadata visibility reads never await")
+        .expect("in-memory metadata visibility reads should never await")
 }
 
 /// [`MetadataState`] reads scoped to `base_seq`: each lookup scans rows at
@@ -496,7 +492,7 @@ impl MetadataVisibilityReads for MetadataStateAtSeqReads<'_> {
     async fn find_latest_bound_child(
         &mut self,
         parent_inode_id: InodeId,
-        name_key: &str,
+        name_key: &NameKey,
     ) -> Result<Option<DirentryBindRecord>, Self::Error> {
         Ok(self
             .state
@@ -558,7 +554,7 @@ impl MetadataVisibilityReads for MetadataStateAtSeqReads<'_> {
     async fn visible_child(
         &mut self,
         parent_inode_id: InodeId,
-        name_key: &str,
+        name_key: &NameKey,
     ) -> Result<Option<DirentryBindRecord>, Self::Error> {
         Ok(self
             .state
@@ -576,7 +572,7 @@ impl MetadataVisibilityReads for MetadataStateAtHeadReads<'_> {
     async fn find_latest_bound_child(
         &mut self,
         parent_inode_id: InodeId,
-        name_key: &str,
+        name_key: &NameKey,
     ) -> Result<Option<DirentryBindRecord>, Self::Error> {
         Ok(self.state.indexes.latest_bind(parent_inode_id, name_key))
     }
@@ -618,7 +614,7 @@ impl MetadataVisibilityReads for MetadataStateAtHeadReads<'_> {
     async fn active_child_binding(
         &mut self,
         parent_inode_id: InodeId,
-        name_key: &str,
+        name_key: &NameKey,
     ) -> Result<Option<DirentryBindRecord>, Self::Error> {
         Ok(self.state.indexes.active_child(parent_inode_id, name_key))
     }
@@ -633,7 +629,7 @@ impl MetadataVisibilityReads for MetadataStateAtHeadReads<'_> {
     async fn visible_child(
         &mut self,
         parent_inode_id: InodeId,
-        name_key: &str,
+        name_key: &NameKey,
     ) -> Result<Option<DirentryBindRecord>, Self::Error> {
         Ok(self.state.visible_child_at_head(parent_inode_id, name_key))
     }

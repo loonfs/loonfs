@@ -29,9 +29,6 @@ mod uploads;
 pub(crate) use self::batch::{
     publish_namespace_mutations_batch_against_publish_view, PublishBatchAgainstViewResult,
 };
-// Consumed only by publisher-crate tests that drive the publish budget.
-#[cfg(test)]
-pub(crate) use self::batch::PUBLISH_BUDGET_MS;
 pub(crate) use self::changes::list_changes_after;
 pub use self::publish_view::PublishTailOptions;
 pub(crate) use self::publish_view::{load_publish_metadata_view, PublishTailProjection};

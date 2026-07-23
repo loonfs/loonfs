@@ -162,7 +162,8 @@ fn base64_url(bytes: &[u8]) -> String {
 
 fn hmac_sha256(key: &[u8], value: &[u8]) -> Vec<u8> {
     use hmac::{Hmac, Mac};
-    let mut mac = <Hmac<Sha256>>::new_from_slice(key).expect("HMAC accepts keys of any length");
+    let mut mac =
+        <Hmac<Sha256>>::new_from_slice(key).expect("HMAC should accept keys of any length");
     mac.update(value);
     mac.finalize().into_bytes().to_vec()
 }
@@ -270,7 +271,8 @@ mod tests {
         let other_namespace = NamespaceId::parse("other").expect("namespace");
         let content = ContentRef::whole_file_v0(b"hello");
         let other_content = ContentRef::whole_file_v0(b"other");
-        let token = mint_content_token("secret", &namespace, &content, 1_000).expect("mint");
+        let issued_at_ms = 1_000;
+        let token = mint_content_token("secret", &namespace, &content, issued_at_ms).expect("mint");
         let token = ValidatedContentToken {
             content_ref: content.clone(),
             token,
@@ -294,8 +296,12 @@ mod tests {
             1_000,
         )
         .is_err());
-        assert!(
-            verify_content_token("secret", &catalog, &token, 1_000 + 60 * 60 * 1000 + 1).is_err()
-        );
+        assert!(verify_content_token(
+            "secret",
+            &catalog,
+            &token,
+            issued_at_ms + DEFAULT_TOKEN_TTL_MS + 1
+        )
+        .is_err());
     }
 }

@@ -158,7 +158,7 @@ fn sample_wal_envelope() -> WalSegmentEnvelope {
                 delta_index: 1,
                 parent_inode_id: InodeId(1),
                 name_key: NameKey::parse("docs").expect("valid name key"),
-                display_name: "Docs".to_owned(),
+                display_name: loonfs_api::DisplayName::parse("Docs").expect("valid display name"),
                 child_inode_id: InodeId(7),
             },
         },
@@ -696,7 +696,7 @@ fn wal_delta_decode_rejects_invalid_name_key() {
         delta_index: 0,
         parent_inode_id: InodeId(1),
         name_key: name_key("docs"),
-        display_name: "Docs".to_owned(),
+        display_name: loonfs_api::DisplayName::parse("Docs").expect("valid display name"),
         child_inode_id: InodeId(2),
     };
     let mut encoded = Vec::new();
@@ -915,7 +915,7 @@ fn wal_delta_wire_tags_match_spec_names() {
                 delta_index: 0,
                 parent_inode_id: InodeId(1),
                 name_key: NameKey::parse("a").expect("valid name key"),
-                display_name: "a".to_owned(),
+                display_name: loonfs_api::DisplayName::parse("a").expect("valid display name"),
                 child_inode_id: InodeId(2),
             }),
             "bind_direntry",
@@ -985,7 +985,7 @@ fn sample_segment_blocks() -> loonfs_api::wire::sst_blocks::BuiltSegmentBlocks {
         MetadataRow::DirentryBind {
             parent_inode_id: InodeId(1),
             name_key: name_key("docs"),
-            display_name: "docs".to_owned(),
+            display_name: loonfs_api::DisplayName::parse("docs").expect("valid display name"),
             child_inode_id: InodeId(2),
             bind_seq: ChangeSeq(3),
             bind_delta_index: 0,
@@ -993,7 +993,8 @@ fn sample_segment_blocks() -> loonfs_api::wire::sst_blocks::BuiltSegmentBlocks {
         MetadataRow::DirentryBind {
             parent_inode_id: InodeId(1),
             name_key: name_key("docs-archive"),
-            display_name: "docs-archive".to_owned(),
+            display_name: loonfs_api::DisplayName::parse("docs-archive")
+                .expect("valid display name"),
             child_inode_id: InodeId(5),
             bind_seq: ChangeSeq(6),
             bind_delta_index: 0,

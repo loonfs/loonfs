@@ -20,7 +20,7 @@ use loonfs_api::{
     GrepRequest, GrepResponse, InodeId, NamespaceId, RevisionNo,
 };
 use loonfs_core::content::read_durable_content_bytes;
-use loonfs_core::grep::{LoadedMetadataView, MetadataViewSession};
+use loonfs_core::grep::{LeafRevisionPrefetch, LoadedMetadataView, MetadataViewSession};
 use loonfs_core::metadata::RevisionRecord;
 use loonfs_core::{Error as CoreError, MetadataViewError};
 use loonfs_objectstore::ObjectStore;
@@ -592,7 +592,10 @@ async fn derive_visible_path<S: ObjectStore + ?Sized>(
         // path result; the file is unreachable by path and skipped.
         Err(_) => return Ok(None),
     };
-    match session.resolve_visible_path(&parsed, false).await {
+    match session
+        .resolve_visible_path(&parsed, LeafRevisionPrefetch::Skip)
+        .await
+    {
         Ok(resolved) if resolved.inode_id == inode_id => {
             Ok(Some(VisiblePathChain { path, ancestors }))
         }
@@ -731,7 +734,10 @@ impl GrepService {
                 let parsed = AbsolutePath::parse(prefix).map_err(|error| {
                     CoreError::InvalidPath(error.invalid_path_input().to_owned())
                 })?;
-                match session.resolve_visible_path(&parsed, false).await {
+                match session
+                    .resolve_visible_path(&parsed, LeafRevisionPrefetch::Skip)
+                    .await
+                {
                     Ok(resolved) => Some(resolved.inode_id),
                     Err(error) if error.code() == loonfs_api::ErrorCode::PathNotFound => {
                         return Ok(GrepResponse {

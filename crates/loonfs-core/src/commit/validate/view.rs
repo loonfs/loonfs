@@ -24,7 +24,7 @@ use crate::metadata::{
     DirentryBindRecord, InMemoryMetadataView, InodeRecord, MetadataState, MetadataView,
     RevisionRecord, SubtreeTombstoneRecord,
 };
-use loonfs_api::{ChangeSeq, InodeId, NamePolicy, RevisionNo};
+use loonfs_api::{ChangeSeq, InodeId, NameKey, NamePolicy, RevisionNo};
 use loonfs_objectstore::ObjectStore;
 
 /// Seq-scoped metadata lookups the commit validator performs, implemented by
@@ -44,7 +44,7 @@ pub(super) trait CommitValidationView {
     async fn visible_child(
         &self,
         parent_inode_id: InodeId,
-        name_key: &str,
+        name_key: &NameKey,
     ) -> Result<Option<DirentryBindRecord>, Self::Error>;
 
     /// Whether the directory has at least one visible child — the
@@ -160,7 +160,7 @@ impl CommitValidationView for InMemoryValidationView<'_> {
     async fn visible_child(
         &self,
         parent_inode_id: InodeId,
-        name_key: &str,
+        name_key: &NameKey,
     ) -> Result<Option<DirentryBindRecord>, Self::Error> {
         self.view()
             .visible_child(parent_inode_id, name_key)
@@ -291,7 +291,7 @@ impl<S: ObjectStore + ?Sized> CommitValidationView for PublishValidationView<'_,
     async fn visible_child(
         &self,
         parent_inode_id: InodeId,
-        name_key: &str,
+        name_key: &NameKey,
     ) -> Result<Option<DirentryBindRecord>, Self::Error> {
         self.view().visible_child(parent_inode_id, name_key).await
     }

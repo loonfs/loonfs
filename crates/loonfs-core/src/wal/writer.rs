@@ -28,9 +28,9 @@ pub(crate) fn prepare_wal_segment(
     let mut payload_records: Vec<WalCommitPayload> = Vec::with_capacity(records.len());
     for record in records {
         if record.prepared.plan.namespace_id != namespace_id {
-            return Err(WalBuildError::NamespaceMismatch {
-                request: record.prepared.plan.namespace_id.clone(),
-                plan: namespace_id.clone(),
+            return Err(WalBuildError::SegmentNamespaceMismatch {
+                record: record.prepared.plan.namespace_id.clone(),
+                segment: namespace_id.clone(),
             });
         }
         let payload_record = wal_payload_from_materialized_commit(record)?;
@@ -40,7 +40,7 @@ pub(crate) fn prepare_wal_segment(
                 .0
                 .checked_add(1)
                 .map(ChangeSeq)
-                .ok_or_else(|| WalBuildError::Codec("seq overflow".to_owned()))?;
+                .ok_or(WalBuildError::SeqOverflow)?;
             if payload_record.seq != expected {
                 return Err(WalBuildError::NonContiguousSeq {
                     expected,
@@ -63,7 +63,7 @@ pub(crate) fn prepare_wal_segment(
         .0
         .checked_sub(1)
         .map(ChangeSeq)
-        .ok_or_else(|| WalBuildError::Codec("start seq underflow".to_owned()))?;
+        .ok_or(WalBuildError::SeqOverflow)?;
     // WAL segments are proposals: racing writers may both write one for the
     // same position before the head chooses. The id's ordered prefix makes
     // listings and reclamation scans sort by history position; its random

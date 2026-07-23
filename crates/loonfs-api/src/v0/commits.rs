@@ -5,7 +5,8 @@
 
 use super::ValidatedContentToken;
 use crate::{
-    ChangeSeq, CommitId, ContentRef, InodeId, InodeKind, NameKey, NamespaceId, RevisionNo,
+    ChangeSeq, CommitId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, NamespaceId,
+    RevisionNo,
 };
 use serde::{Deserialize, Serialize};
 
@@ -71,13 +72,13 @@ pub enum CommitOp {
     #[cfg_attr(feature = "openapi", schema(title = "CommitOpCreateDirectory"))]
     CreateDirectory {
         parent_inode_id: InodeId,
-        display_name: String,
+        display_name: DisplayName,
     },
     /// Create a file under a parent inode.
     #[cfg_attr(feature = "openapi", schema(title = "CommitOpCreateFile"))]
     CreateFile {
         parent_inode_id: InodeId,
-        display_name: String,
+        display_name: DisplayName,
         content_ref: ContentRef,
     },
     /// Append a new revision to an existing file.
@@ -102,7 +103,7 @@ pub enum CommitOp {
     Rename {
         inode_id: InodeId,
         new_parent_inode_id: InodeId,
-        new_display_name: String,
+        new_display_name: DisplayName,
     },
     /// Delete a directory subtree.
     #[cfg_attr(feature = "openapi", schema(title = "CommitOpDeleteSubtree"))]
@@ -117,7 +118,7 @@ pub enum CommitOp {
         inode_id: InodeId,
         deleted_at_seq: ChangeSeq,
         parent_inode_id: InodeId,
-        display_name: String,
+        display_name: DisplayName,
     },
 }
 
@@ -187,7 +188,7 @@ pub enum CommitDelta {
         delta_index: u32,
         parent_inode_id: InodeId,
         name_key: NameKey,
-        display_name: String,
+        display_name: DisplayName,
         child_inode_id: InodeId,
     },
     #[cfg_attr(feature = "openapi", schema(title = "CommitDeltaUnbindDirentry"))]
@@ -318,7 +319,7 @@ mod tests {
             delta_index: 1,
             parent_inode_id: InodeId(1),
             name_key: NameKey::parse("report.txt").expect("valid name key"),
-            display_name: "Report.txt".to_owned(),
+            display_name: crate::DisplayName::parse("Report.txt").expect("valid display name"),
             child_inode_id: InodeId(2),
         };
 
@@ -371,7 +372,8 @@ mod tests {
             CommitOp::Rename {
                 inode_id: InodeId(2),
                 new_parent_inode_id: InodeId(1),
-                new_display_name: "renamed.txt".to_owned(),
+                new_display_name: crate::DisplayName::parse("renamed.txt")
+                    .expect("valid display name"),
             }
         );
     }
@@ -380,7 +382,7 @@ mod tests {
     fn commit_create_directory_uses_directory_wire_name() {
         let op = CommitOp::CreateDirectory {
             parent_inode_id: InodeId(1),
-            display_name: "docs".to_owned(),
+            display_name: crate::DisplayName::parse("docs").expect("valid display name"),
         };
 
         assert_eq!(

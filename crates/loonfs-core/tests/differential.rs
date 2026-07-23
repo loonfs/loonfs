@@ -1,6 +1,9 @@
+//! Differential checks between core metadata and the `loonfs-model` oracle.
+
 use loonfs_api::wire::wal::WalDelta;
 use loonfs_api::{
-    sha256_digest, ChangeSeq, ContentRef, ContentRefKind, InodeId, InodeKind, NameKey, RevisionNo,
+    sha256_digest, ChangeSeq, ContentRef, ContentRefKind, DisplayName, InodeId, InodeKind, NameKey,
+    RevisionNo,
 };
 use loonfs_core::metadata::MetadataState as CoreMetadataState;
 use loonfs_model::metadata::MetadataState as ModelMetadataState;
@@ -44,7 +47,7 @@ fn create_directory(
                 display_name,
             ))
             .expect("derived name key"),
-            display_name: display_name.to_owned(),
+            display_name: DisplayName::parse(display_name).expect("valid display name"),
             child_inode_id: inode_id,
         },
     ]
@@ -71,7 +74,7 @@ fn create_file(
                 display_name,
             ))
             .expect("derived name key"),
-            display_name: display_name.to_owned(),
+            display_name: DisplayName::parse(display_name).expect("valid display name"),
             child_inode_id: inode_id,
         },
         WalDelta::AppendFileRevision {
@@ -111,7 +114,7 @@ fn bind(
             display_name,
         ))
         .expect("derived name key"),
-        display_name: display_name.to_owned(),
+        display_name: DisplayName::parse(display_name).expect("valid display name"),
         child_inode_id: inode_id,
     }]
 }
@@ -125,36 +128,17 @@ fn tombstone(delta_index: u32, root_inode_id: InodeId) -> Vec<WalDelta> {
 
 #[test]
 fn metadata_apply_matches_model_for_basic_commit_sequence() {
-    let core_state = core_bootstrap_state();
-    let model_state = model_bootstrap_state();
-
-    let create_directory = create_directory(0, InodeId(2), InodeId(1), "docs");
-    let create_file = create_file(
-        0,
-        InodeId(3),
-        InodeId(2),
-        "readme.txt",
-        content_ref("content-1"),
-    );
-    let replace_file = append_revision(0, InodeId(3), RevisionNo(2), content_ref("content-2"));
-
-    let core_state = core_state
-        .apply_committed_wal_deltas(ChangeSeq(1), 4_200, &create_directory)
-        .metadata_state
-        .apply_committed_wal_deltas(ChangeSeq(2), 4_200, &create_file)
-        .metadata_state
-        .apply_committed_wal_deltas(ChangeSeq(3), 4_200, &replace_file)
-        .metadata_state;
-
-    let model_state = model_state
-        .apply_committed_wal_deltas(ChangeSeq(1), &create_directory)
-        .metadata_state
-        .apply_committed_wal_deltas(ChangeSeq(2), &create_file)
-        .metadata_state
-        .apply_committed_wal_deltas(ChangeSeq(3), &replace_file)
-        .metadata_state;
-
-    assert_eq!(normalize_core(&core_state), normalize_model(&model_state));
+    assert_states_match(&[
+        create_directory(0, InodeId(2), InodeId(1), "docs"),
+        create_file(
+            0,
+            InodeId(3),
+            InodeId(2),
+            "readme.txt",
+            content_ref("content-1"),
+        ),
+        append_revision(0, InodeId(3), RevisionNo(2), content_ref("content-2")),
+    ]);
 }
 
 #[test]
@@ -275,7 +259,7 @@ fn normalize_core(state: &CoreMetadataState) -> NormalizedMetadata {
             .map(|direntry| {
                 (
                     direntry.parent_inode_id.0,
-                    direntry.display_name.clone(),
+                    direntry.display_name.as_str().to_owned(),
                     direntry.child_inode_id.0,
                     direntry.bind_seq.0,
                     direntry.bind_delta_index,

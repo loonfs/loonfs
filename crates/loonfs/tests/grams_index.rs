@@ -448,7 +448,8 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
             .expect("prepare atomic-commit content");
         ops.push(CommitOp::CreateFile {
             parent_inode_id: InodeId(1),
-            display_name: format!("bounded-{index:04}.txt"),
+            display_name: loonfs_api::DisplayName::parse(format!("bounded-{index:04}.txt"))
+                .expect("valid display name"),
             content_ref: content.content_ref().clone(),
         });
         prepared.push(content);

@@ -67,7 +67,7 @@ impl DurableVisibilityCache {
     fn lock(&self) -> std::sync::MutexGuard<'_, DurableVisibilityCacheInner> {
         self.inner
             .lock()
-            .expect("durable visibility cache lock poisoned")
+            .expect("durable visibility cache lock should not be poisoned")
     }
 
     pub(super) fn get<K: std::hash::Hash + Eq, V: Clone>(
@@ -99,7 +99,7 @@ impl DurableVisibilityCache {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) struct ParentNameCacheKey {
     pub(super) parent_inode_id: InodeId,
-    pub(super) name_key: String,
+    pub(super) name_key: NameKey,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

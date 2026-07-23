@@ -1408,7 +1408,7 @@ async fn ensure_live_namespace<S: ObjectStore + ?Sized>(
         .into());
     }
     if head.state.state != NamespaceState::Active {
-        return Err(CoreError::NamespacePartiallyInitialized {
+        return Err(CoreError::NamespacePartial {
             namespace_id: namespace_id.clone(),
         }
         .into());

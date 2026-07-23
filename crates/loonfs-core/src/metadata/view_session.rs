@@ -18,7 +18,7 @@ use super::{
 };
 use crate::error::CoreError;
 use loonfs_api::wire::manifest::{MetadataRow, MetadataTableFamily};
-use loonfs_api::{AbsolutePath, InodeId, InodeKind, NameKey};
+use loonfs_api::{AbsolutePath, InodeId, InodeKind, NameKey, ROOT_INODE_ID};
 use loonfs_objectstore::ObjectStore;
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -57,6 +57,12 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
 pub(crate) struct VisibleChildEntry {
     pub(crate) binding: DirentryBindRecord,
     pub(crate) inode: InodeRecord,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeafRevisionPrefetch {
+    Prefetch,
+    Skip,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -244,7 +250,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
             };
 
             match groups.last_mut() {
-                Some(group) if group.name_key == candidate.record.name_key.as_str() => {
+                Some(group) if group.name_key == candidate.record.name_key => {
                     group.rows.push(candidate.record);
                 }
                 _ => {
@@ -255,7 +261,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
                         break;
                     }
                     groups.push(DirentryBindNameGroup {
-                        name_key: candidate.record.name_key.as_str().to_owned(),
+                        name_key: candidate.record.name_key.clone(),
                         rows: vec![candidate.record],
                     });
                 }
@@ -386,8 +392,8 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         Ok(())
     }
 
-    /// Resolves `absolute_path` with the canonical visibility rules, after
-    /// a pipelined preload of the walk's storage lookups.
+    /// Resolves `absolute_path` with the canonical visibility rules after a
+    /// pipelined preload of the walk's storage lookups.
     ///
     /// For each path component, the preload issues the independent probes
     /// (inode, tombstone, child-keyed binding, the previous binding's
@@ -397,13 +403,11 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
     /// have fetched. The canonical rules then decide over cache hits, so a
     /// cold resolution costs one round-trip wave per path component instead
     /// of five-plus sequential lookups each.
-    /// Resolves a path under the loaded view's visibility rules.
-    ///
     /// This is part of the read surface consumed by `loonfs-grep`.
     pub async fn resolve_visible_path(
         &mut self,
         absolute_path: &AbsolutePath,
-        prefetch_leaf_revision: bool,
+        prefetch_leaf_revision: LeafRevisionPrefetch,
     ) -> Result<ResolvedVisiblePath, CoreError> {
         self.preload_path_walk(absolute_path, prefetch_leaf_revision)
             .await?;
@@ -420,21 +424,17 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
     async fn preload_path_walk(
         &mut self,
         absolute_path: &AbsolutePath,
-        prefetch_leaf_revision: bool,
+        prefetch_leaf_revision: LeafRevisionPrefetch,
     ) -> Result<(), CoreError> {
         let visible_seq = self.base.visible_seq();
         let name_policy = self.base.name_policy();
-        let component_name_keys: Vec<String> = absolute_path
+        let component_name_keys: Vec<NameKey> = absolute_path
             .components()
             .iter()
-            .map(|component| {
-                NameKey::for_display_name(name_policy, &component.to_display_name())
-                    .as_str()
-                    .to_owned()
-            })
+            .map(|component| NameKey::for_display_name(name_policy, &component.to_display_name()))
             .collect();
 
-        let mut current_inode_id = InodeId(1);
+        let mut current_inode_id = ROOT_INODE_ID;
         let mut pending_binding: Option<DirentryBindRecord> = None;
         for wave in 0..=component_name_keys.len() {
             let lookup_name_key = component_name_keys.get(wave);
@@ -463,7 +463,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
                 })
                 .cloned();
             let want_revision = is_leaf_wave
-                && prefetch_leaf_revision
+                && prefetch_leaf_revision == LeafRevisionPrefetch::Prefetch
                 && !self
                     .latest_revision_head_cache
                     .contains_key(&current_inode_id);
@@ -597,7 +597,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
     pub(crate) async fn visible_child(
         &mut self,
         parent_inode_id: InodeId,
-        name_key: &str,
+        name_key: &NameKey,
     ) -> Result<Option<DirentryBindRecord>, CoreError> {
         self.counters.visible_child_calls = self.counters.visible_child_calls.saturating_add(1);
         visibility::visible_child(self, parent_inode_id, name_key).await
@@ -632,14 +632,12 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         Ok(inode)
     }
 
-    /// The head revision of an inode the caller has already established as
-    /// visible at this session's seq — path resolution and child enumeration
-    /// both have. Unlike [`MetadataView::latest_revision_head`], this skips
-    /// re-deriving the inode's visibility: the re-check costs a full
-    /// child-binds scan and tombstone probe per entry on a wide listing,
-    /// and it can never disagree with the enumeration that just admitted
-    /// the entry at the same seq.
-    /// Returns the latest revision for an inode already proven visible.
+    /// Returns the latest revision for an inode already proven visible at
+    /// this session's seq. Unlike [`MetadataView::latest_revision_head`],
+    /// this skips re-deriving the inode's visibility: the re-check costs a
+    /// full child-binds scan and tombstone probe per entry on a wide listing,
+    /// and it cannot disagree with the enumeration that admitted the entry
+    /// at the same seq.
     ///
     /// This is part of the read surface consumed by `loonfs-grep`.
     pub async fn latest_revision_head_of_visible(
@@ -757,11 +755,11 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
     async fn bound_child(
         &mut self,
         parent_inode_id: InodeId,
-        name_key: &str,
+        name_key: &NameKey,
     ) -> Result<Option<DirentryBindRecord>, CoreError> {
         let cache_key = ParentNameCacheKey {
             parent_inode_id,
-            name_key: name_key.to_owned(),
+            name_key: name_key.clone(),
         };
         if let Some(cached) = self.bound_child_cache.get(&cache_key).cloned() {
             return Ok(cached);
@@ -814,7 +812,7 @@ impl<S: ObjectStore + ?Sized> MetadataVisibilityReads for MetadataViewSession<'_
     async fn find_latest_bound_child(
         &mut self,
         parent_inode_id: InodeId,
-        name_key: &str,
+        name_key: &NameKey,
     ) -> Result<Option<DirentryBindRecord>, Self::Error> {
         self.bound_child(parent_inode_id, name_key).await
     }
@@ -888,7 +886,7 @@ impl DirentryBindNameGroupStream {
 
 /// Every bind row the stream carried for one name key, in row-key order.
 struct DirentryBindNameGroup {
-    name_key: String,
+    name_key: NameKey,
     rows: Vec<DirentryBindRecord>,
 }
 

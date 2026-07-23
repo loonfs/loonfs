@@ -3,7 +3,9 @@
 //! its append-only rows.
 
 use super::indexes::MetadataIndexes;
-use loonfs_api::{ChangeSeq, CommitId, ContentRef, InodeId, InodeKind, NameKey, RevisionNo};
+use loonfs_api::{
+    ChangeSeq, CommitId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, RevisionNo,
+};
 use serde::{Deserialize, Serialize};
 use std::mem::{size_of, size_of_val};
 
@@ -86,7 +88,7 @@ pub struct InodeRecord {
 pub struct DirentryBindRecord {
     pub parent_inode_id: InodeId,
     pub name_key: NameKey,
-    pub display_name: String,
+    pub display_name: DisplayName,
     pub child_inode_id: InodeId,
     pub bind_seq: ChangeSeq,
     pub bind_delta_index: u32,
@@ -406,7 +408,9 @@ fn metadata_decoded_bytes(
 }
 
 fn direntry_bind_decoded_bytes(record: &DirentryBindRecord) -> usize {
-    size_of::<DirentryBindRecord>() + record.name_key.as_str().len() + record.display_name.len()
+    size_of::<DirentryBindRecord>()
+        + record.name_key.as_str().len()
+        + record.display_name.as_str().len()
 }
 
 fn direntry_unbind_decoded_bytes(record: &DirentryUnbindRecord) -> usize {
