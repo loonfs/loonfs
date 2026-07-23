@@ -139,7 +139,7 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     let previous = tables.manifest();
 
     let l0_runs = l0_run_count(&previous.payload);
-    if l0_runs < policy.max_l0_runs.max(1) {
+    if l0_runs < policy.max_l0_runs.get() {
         return Ok(MetadataReorganizeReport {
             namespace_id: namespace_id.clone(),
             outcome: MetadataReorganizeOutcome::NotNeeded { l0_runs },

@@ -5,6 +5,7 @@ use loonfs_api::wire::manifest::{MetadataFileRef, MetadataTableFamily, Namespace
 use loonfs_api::ChangeSeq;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::num::NonZeroUsize;
 
 pub(super) const DEFAULT_MAX_CHECKPOINT_L0_RUNS: usize = 8;
 /// With block-granular reads the segment is no longer the read unit, so
@@ -41,15 +42,17 @@ pub(super) struct MetadataRunManifest {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct MetadataLsmPolicy {
-    pub max_l0_runs: usize,
-    pub max_rows_per_segment: usize,
+    pub max_l0_runs: NonZeroUsize,
+    pub max_rows_per_segment: NonZeroUsize,
 }
 
 impl Default for MetadataLsmPolicy {
     fn default() -> Self {
         Self {
-            max_l0_runs: DEFAULT_MAX_CHECKPOINT_L0_RUNS,
-            max_rows_per_segment: DEFAULT_MAX_CHECKPOINT_ROWS_PER_SEGMENT,
+            max_l0_runs: NonZeroUsize::new(DEFAULT_MAX_CHECKPOINT_L0_RUNS)
+                .expect("default L0 run limit should be nonzero"),
+            max_rows_per_segment: NonZeroUsize::new(DEFAULT_MAX_CHECKPOINT_ROWS_PER_SEGMENT)
+                .expect("default segment row budget should be nonzero"),
         }
     }
 }

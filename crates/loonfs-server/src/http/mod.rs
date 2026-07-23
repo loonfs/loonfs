@@ -224,13 +224,21 @@ async fn app_with_store_and_transfer_issuer(
         )
     });
     let grep_drivers = if config.grep.mode.runs_worker() {
+        let worker_config = config.grep.worker_config();
+        let grep_config_error =
+            |error: loonfs_grep::GrepWorkerConfigError| ServerConfigError::InvalidField {
+                field: "grep",
+                reason: error.to_string(),
+            };
         Some(GrepDrivers::new(
             grep_worker
                 .as_ref()
                 .expect("driver-running grep mode should serve grep")
                 .clone(),
-            config.grep.worker_config().build_policy(),
-            config.grep.max_concurrent_steps,
+            worker_config.build_policy().map_err(grep_config_error)?,
+            worker_config
+                .concurrent_step_limit()
+                .map_err(grep_config_error)?,
         )?)
     } else {
         None

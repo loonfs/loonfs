@@ -21,6 +21,7 @@ use loonfs_grep::{
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::SharedObjectStore;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::tempdir;
@@ -217,7 +218,7 @@ fn spawn_driver(
         worker,
         namespace_id,
         GramIndexBuildPolicy::default(),
-        GrepStepLimiter::new(1),
+        GrepStepLimiter::new(NonZeroUsize::MIN),
     )
     .spawn_on(&tokio::runtime::Handle::current())
 }

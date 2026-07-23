@@ -1159,8 +1159,12 @@ root = "/tmp/loonfs-server"
         assert_eq!(config.grep, super::GrepConfig::default());
         assert_eq!(config.grep.mode, super::GrepMode::Embedded);
         assert_eq!(
-            config.grep.worker_config().build_policy(),
-            loonfs_grep::GramIndexBuildPolicy::default()
+            config
+                .grep
+                .worker_config()
+                .build_policy()
+                .expect("valid default grep policy"),
+            loonfs_grep::GramIndexBuildPolicy::default(),
         );
     }
 
@@ -1192,13 +1196,16 @@ root = "/tmp/loonfs-server"
         let grep = load_server_config(&path).expect("load config").grep;
         assert_eq!(grep.mode, super::GrepMode::ServeOnly);
         assert_eq!(grep.max_concurrent_steps, 7);
-        let policy = grep.worker_config().build_policy();
-        assert_eq!(policy.max_files_per_step, 4096);
-        assert_eq!(policy.max_content_bytes_per_step, 536_870_912);
-        assert_eq!(policy.max_rows_per_segment, 131_072);
-        assert_eq!(policy.max_l0_runs, 4);
-        assert_eq!(policy.max_mid_runs, 6);
-        assert_eq!(policy.max_fold_rows_per_step, 262_144);
+        let policy = grep
+            .worker_config()
+            .build_policy()
+            .expect("valid configured grep policy");
+        assert_eq!(policy.max_files_per_step.get(), 4096);
+        assert_eq!(policy.max_content_bytes_per_step.get(), 536_870_912);
+        assert_eq!(policy.max_rows_per_segment.get(), 131_072);
+        assert_eq!(policy.max_l0_runs.get(), 4);
+        assert_eq!(policy.max_mid_runs.get(), 6);
+        assert_eq!(policy.max_fold_rows_per_step.get(), 262_144);
     }
 
     #[test]
@@ -1226,9 +1233,10 @@ root = "/tmp/loonfs-server"
             .expect("load config")
             .grep
             .worker_config()
-            .build_policy();
-        assert_eq!(policy.max_files_per_step, 1024);
-        assert_eq!(policy.max_l0_runs, 3);
+            .build_policy()
+            .expect("valid configured grep policy");
+        assert_eq!(policy.max_files_per_step.get(), 1024);
+        assert_eq!(policy.max_l0_runs.get(), 3);
         assert_eq!(
             policy.max_mid_runs,
             loonfs_grep::GramIndexBuildPolicy::default().max_mid_runs,

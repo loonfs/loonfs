@@ -16,6 +16,7 @@ use crate::{
     RuntimeCacheStats, RuntimeError, SharedObjectStore, StoreConfig, TraceMode, TraceStoreKind,
     UndeleteOptions, UploadContentResponse, UploadId,
 };
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 /// Write-capable handle for normal application and server use.
@@ -529,8 +530,9 @@ impl FsWriterBuilder {
     /// at most one tick at a time; this bounds the fan-out when many
     /// namespaces cross their thresholds together. Skipped ticks are
     /// rescheduled by the next over-threshold publish. Defaults to
-    /// [`crate::DEFAULT_MAX_CONCURRENT_MAINTENANCE`]; zero is normalized up
-    /// to one (use [`FsBackgroundWork::ManualOnly`] to disable scheduling).
+    /// [`crate::DEFAULT_MAX_CONCURRENT_MAINTENANCE`]. The limit must be
+    /// greater than zero; [`FsBackgroundWork::ManualOnly`] is the only way
+    /// to disable scheduling.
     pub fn max_concurrent_maintenance(mut self, max_concurrent_maintenance: usize) -> Self {
         self.max_concurrent_maintenance = max_concurrent_maintenance;
         self
@@ -610,10 +612,18 @@ impl FsWriterBuilder {
         let writer_id = self
             .writer_id
             .ok_or_else(|| RuntimeError::Config("writer_id is required".to_owned()))?;
+        let max_concurrent_maintenance = NonZeroUsize::new(self.max_concurrent_maintenance)
+            .ok_or_else(|| {
+                RuntimeError::Config(
+                    "`max_concurrent_maintenance` must be greater than zero; \
+                     `FsBackgroundWork::ManualOnly` disables scheduling"
+                        .to_owned(),
+                )
+            })?;
         let background = BackgroundWork::new(
             self.background_work,
             Some(owning_runtime()?),
-            self.max_concurrent_maintenance,
+            max_concurrent_maintenance,
         );
         Ok(FsWriter {
             core: self.core.open(writer_id, self.writer_version, background)?,

@@ -6,6 +6,7 @@ use loonfs_grep::{
     GrepStepLimiter, GrepWorker,
 };
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
@@ -26,7 +27,7 @@ impl GrepDrivers {
     pub(crate) fn new(
         worker: GrepWorker<SharedObjectStore>,
         policy: GramIndexBuildPolicy,
-        max_concurrent_steps: usize,
+        max_concurrent_steps: NonZeroUsize,
     ) -> Result<Self, crate::ServerConfigError> {
         let runtime = tokio::runtime::Handle::try_current().map_err(|error| {
             crate::ServerConfigError::InvalidField {

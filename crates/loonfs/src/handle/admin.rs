@@ -12,6 +12,7 @@ use crate::{
     ReleaseCheckpointResponse, RepairNamespaceResponse, Result, RuntimeCacheConfig,
     RuntimeCacheStats, RuntimeError, SharedObjectStore, StoreConfig, TraceMode, TraceStoreKind,
 };
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 /// Administrative and maintenance handle.
@@ -256,7 +257,8 @@ impl FsAdminBuilder {
         let background = BackgroundWork::new(
             FsBackgroundWork::ManualOnly,
             None,
-            crate::config::DEFAULT_MAX_CONCURRENT_MAINTENANCE,
+            NonZeroUsize::new(crate::config::DEFAULT_MAX_CONCURRENT_MAINTENANCE)
+                .expect("default maintenance concurrency should be nonzero"),
         );
         Ok(FsAdmin {
             core: self.core.open(actor_id, self.actor_version, background)?,

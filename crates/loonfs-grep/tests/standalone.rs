@@ -116,27 +116,6 @@ async fn standalone_once_after_external_enable_indexes_in_one_sweep_and_is_idemp
         String::from_utf8_lossy(&gc.stderr)
     );
 
-    let bad_config_path = temp_dir.path().join("bad-worker.toml");
-    write_config(&bad_config_path, &store_root, "poll_interval_ms = 0\n", "");
-    let bad = run_once(&bad_config_path, &[&namespace_id]);
-    assert!(!bad.status.success(), "bad config must exit nonzero");
-    let stderr = String::from_utf8_lossy(&bad.stderr);
-    assert!(stderr.contains("poll_interval_ms"), "{stderr}");
-    assert!(stderr.contains("greater than zero"), "{stderr}");
-
-    let bad_grep_config_path = temp_dir.path().join("bad-grep-worker.toml");
-    write_config(
-        &bad_grep_config_path,
-        &store_root,
-        "",
-        "max_concurrent_steps = 0\n",
-    );
-    let bad = run_once(&bad_grep_config_path, &[&namespace_id]);
-    assert!(!bad.status.success(), "zero step cap must exit nonzero");
-    let stderr = String::from_utf8_lossy(&bad.stderr);
-    assert!(stderr.contains("max_concurrent_steps"), "{stderr}");
-    assert!(stderr.contains("greater than zero"), "{stderr}");
-
     let missing_namespace = Command::new(env!("CARGO_BIN_EXE_loonfs-grep"))
         .arg("--config")
         .arg(&config_path)
@@ -147,6 +126,45 @@ async fn standalone_once_after_external_enable_indexes_in_one_sweep_and_is_idemp
     let stderr = String::from_utf8_lossy(&missing_namespace.stderr);
     assert!(stderr.contains("--namespace"), "{stderr}");
     assert!(stderr.contains("Usage:"), "{stderr}");
+}
+
+#[test]
+fn standalone_config_rejects_zero_work_limits() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store_root = temp_dir.path().join("store");
+    let namespace_id = NamespaceId::parse("zero-config").expect("namespace id");
+
+    for (filename, root_fields, grep_fields, rejected_field) in [
+        (
+            "poll.toml",
+            "poll_interval_ms = 0\n",
+            "",
+            "poll_interval_ms",
+        ),
+        (
+            "concurrency.toml",
+            "",
+            "max_concurrent_steps = 0\n",
+            "max_concurrent_steps",
+        ),
+        (
+            "budget.toml",
+            "",
+            "max_files_per_step = 0\n",
+            "max_files_per_step",
+        ),
+    ] {
+        let path = temp_dir.path().join(filename);
+        write_config(&path, &store_root, root_fields, grep_fields);
+        let output = run_once(&path, &[&namespace_id]);
+        assert!(
+            !output.status.success(),
+            "zero `{rejected_field}` must exit nonzero"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(rejected_field), "{stderr}");
+        assert!(stderr.contains("greater than zero"), "{stderr}");
+    }
 }
 
 #[tokio::test]

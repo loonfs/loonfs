@@ -13,6 +13,7 @@ use loonfs_api::wire::manifest::{MetadataRow, MetadataTableFamily};
 use loonfs_api::wire::wal::WalCommitPayload;
 use loonfs_api::{ChangeSeq, CheckpointId, NamespaceId};
 use loonfs_objectstore::ObjectStore;
+use std::num::NonZeroUsize;
 
 /// Validated incremental commits after a grep watermark, or an explicit
 /// signal that retention has removed part of the required history.
@@ -107,7 +108,7 @@ pub async fn load_grep_checkpoint_revision_page<S: ObjectStore + ?Sized>(
     checkpoint_id: &CheckpointId,
     now_ms: u64,
     cursor: &str,
-    limit: usize,
+    limit: NonZeroUsize,
 ) -> Result<Option<GrepCheckpointRevisionPage>> {
     let Some(record) = read_checkpoint_record(store, namespace_id, checkpoint_id)
         .await?
@@ -146,7 +147,7 @@ pub async fn load_grep_checkpoint_revision_page<S: ObjectStore + ?Sized>(
             "checkpoint `{checkpoint_id}` basis does not match its manifest"
         )));
     }
-    let limit = limit.max(1);
+    let limit = limit.get();
     let rows = scan_checkpoint_revisions(&tables, cursor, limit).await?;
     let exhausted = rows.len() < limit;
     let mut revisions = Vec::with_capacity(rows.len());

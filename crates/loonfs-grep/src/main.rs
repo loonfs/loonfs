@@ -125,6 +125,8 @@ async fn run() -> Result<(), StandaloneError> {
     init_tracing()?;
     let args = Args::parse();
     let config = load_config(&args.config)?;
+    let step_limit = config.grep.concurrent_step_limit()?;
+    let build_policy = config.grep.build_policy()?;
     let store = Arc::new(config.store.configured_object_store()?) as SharedObjectStore;
     let worker = GrepWorker::new(
         store.clone(),
@@ -139,13 +141,13 @@ async fn run() -> Result<(), StandaloneError> {
     }
 
     let runtime = tokio::runtime::Handle::current();
-    let step_limiter = GrepStepLimiter::new(config.grep.max_concurrent_steps);
+    let step_limiter = GrepStepLimiter::new(step_limit);
     let mut drivers = Vec::with_capacity(namespace_ids.len());
     for namespace_id in &namespace_ids {
         let task = GrepDriver::new(
             worker.clone(),
             namespace_id.clone(),
-            config.grep.build_policy(),
+            build_policy,
             step_limiter.clone(),
         )
         .spawn_on(&runtime);

@@ -139,10 +139,8 @@ fn sample_backfilling_root() -> GrepRootState {
         namespace_id("docs"),
         GrepLifecycle::Backfilling {
             backfill_cursor: "revision-00000000000000000007".to_owned(),
-            checkpoint_id: Some(
-                CheckpointId::parse("chk_00000000000000000000000000000009")
-                    .expect("valid checkpoint id"),
-            ),
+            checkpoint_id: CheckpointId::parse("chk_00000000000000000000000000000009")
+                .expect("valid checkpoint id"),
         },
         GrepIndexState::new(ChangeSeq(7), 0, Some(fold), 4),
         vec![

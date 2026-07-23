@@ -18,6 +18,7 @@ use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
 };
 use std::future::Future;
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -55,7 +56,7 @@ async fn poisoned_driver_backs_off_while_sibling_catches_up_and_gc_stays_explici
         .expect("poison root");
 
     let runtime = tokio::runtime::Handle::current();
-    let step_limiter = GrepStepLimiter::new(2);
+    let step_limiter = GrepStepLimiter::new(nonzero_usize(2));
     let poisoned_task = GrepDriver::new(
         worker.clone(),
         poisoned,
@@ -124,7 +125,7 @@ async fn tombstoned_namespace_driver_parks_as_not_enabled() {
         worker,
         namespace_id,
         GramIndexBuildPolicy::default(),
-        GrepStepLimiter::new(1),
+        GrepStepLimiter::new(NonZeroUsize::MIN),
     )
     .spawn_on(&tokio::runtime::Handle::current());
     assert_eq!(
@@ -167,7 +168,7 @@ async fn shared_step_limiter_caps_many_namespaces_and_every_driver_converges() {
     }
 
     store.pause_content_reads();
-    let limiter = GrepStepLimiter::new(MAX_CONCURRENT_STEPS);
+    let limiter = GrepStepLimiter::new(nonzero_usize(MAX_CONCURRENT_STEPS));
     let runtime = tokio::runtime::Handle::current();
     let mut tasks = Vec::new();
     for namespace_id in namespace_ids {
@@ -212,6 +213,10 @@ async fn shared_step_limiter_caps_many_namespaces_and_every_driver_converges() {
     for task in tasks {
         task.shutdown().await.expect("stop concurrency driver");
     }
+}
+
+fn nonzero_usize(value: usize) -> NonZeroUsize {
+    NonZeroUsize::new(value).expect("test value should be nonzero")
 }
 
 #[derive(Debug)]

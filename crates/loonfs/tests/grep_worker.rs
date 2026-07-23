@@ -11,7 +11,7 @@ use loonfs::{
     GrepRequest, GrepResponse, NamespaceId, PutFileOptions, SharedObjectStore,
 };
 use loonfs_api::wire::control::CheckpointRecordLifecycle;
-use loonfs_api::{ChangeSeq, IndexSegmentId};
+use loonfs_api::{sha256_digest, ChangeSeq, IndexSegmentId};
 use loonfs_core::cache::{
     MetadataTableCache, MetadataTableCacheConfig, WalTailProjectionCache,
     WalTailProjectionCacheConfig, DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES,
@@ -40,6 +40,7 @@ use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
 };
 use std::collections::BTreeSet;
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -56,6 +57,10 @@ fn request(pattern: &str) -> GrepRequest {
         allow_stale: false,
         allow_scan: false,
     }
+}
+
+fn nonzero_usize(value: usize) -> NonZeroUsize {
+    NonZeroUsize::new(value).expect("test value should be nonzero")
 }
 
 fn worker(store: &SharedObjectStore) -> GrepWorker<SharedObjectStore> {
@@ -260,11 +265,7 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
         .await
         .expect("load root")
         .expect("root exists");
-    let GrepLifecycle::Backfilling {
-        checkpoint_id: Some(checkpoint_id),
-        ..
-    } = root.state().lifecycle()
-    else {
+    let GrepLifecycle::Backfilling { checkpoint_id, .. } = root.state().lifecycle() else {
         panic!(
             "enable must publish checkpointed backfill: {:?}",
             root.state()
@@ -273,7 +274,7 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
     let checkpoint_id = checkpoint_id.clone();
 
     let policy = GramIndexBuildPolicy {
-        max_files_per_step: 1,
+        max_files_per_step: NonZeroUsize::MIN,
         ..GramIndexBuildPolicy::default()
     };
     let first = worker
@@ -413,11 +414,7 @@ async fn retention_gap_and_vanished_checkpoint_restart_fresh_backfill() {
         .await
         .expect("load restarted root")
         .expect("root exists");
-    let GrepLifecycle::Backfilling {
-        checkpoint_id: Some(checkpoint_id),
-        ..
-    } = root.state().lifecycle()
-    else {
+    let GrepLifecycle::Backfilling { checkpoint_id, .. } = root.state().lifecycle() else {
         panic!("gap must restart checkpointed backfill");
     };
     admin
@@ -512,6 +509,79 @@ async fn grep_root_lifecycle_pins_not_materialized_error_surface() {
     writer.shutdown_background().await.expect("shutdown");
 }
 
+#[tokio::test]
+async fn backfilling_root_without_checkpoint_id_is_index_corrupt() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store: SharedObjectStore =
+        Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
+    let namespace_id = NamespaceId::parse("missing-backfill-checkpoint").expect("namespace id");
+    let writer = FsWriter::builder_with_store(store.clone())
+        .writer_id("missing-checkpoint-writer")
+        .build()
+        .await
+        .expect("writer");
+    let reader = writer.reader();
+    writer
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
+    let worker = worker(&store);
+    worker.enable(&namespace_id).await.expect("enable grep");
+    let root = load_grep_root(&*store, &namespace_id)
+        .await
+        .expect("load backfilling root")
+        .expect("backfilling root exists");
+    let manifest_bytes = store
+        .get(
+            &manifest_key(&namespace_id, root.manifest_envelope().manifest_id()),
+            None,
+        )
+        .await
+        .expect("read backfilling manifest")
+        .expect("backfilling manifest exists");
+    let corrupt_manifest_id =
+        write_manifest_without_checkpoint_id(&*store, &namespace_id, &manifest_bytes).await;
+    write_pointer(&*store, &namespace_id, corrupt_manifest_id).await;
+
+    assert_corrupt_index_error(
+        "backfilling manifest missing checkpoint id",
+        reader.grep(&namespace_id, &request("needle")).await,
+    );
+    writer.shutdown_background().await.expect("shutdown");
+}
+
+async fn write_manifest_without_checkpoint_id(
+    store: &dyn ObjectStore,
+    namespace_id: &NamespaceId,
+    manifest_bytes: &[u8],
+) -> GrepManifestId {
+    let mut document: serde_json::Value =
+        serde_json::from_slice(manifest_bytes).expect("decode valid manifest document");
+    document["payload"]["lifecycle"]
+        .as_object_mut()
+        .expect("backfilling lifecycle is an object")
+        .remove("checkpoint_id")
+        .expect("valid backfilling manifest carries checkpoint id");
+    let payload_bytes =
+        serde_json::to_vec(&document["payload"]).expect("encode corrupt manifest payload");
+    let payload_checksum = sha256_digest(&payload_bytes);
+    document["payload_checksum"] = serde_json::Value::String(payload_checksum.clone());
+    let manifest_id = GrepManifestId::parse(
+        payload_checksum
+            .strip_prefix("sha256:")
+            .expect("sha256 digest should carry its algorithm prefix"),
+    )
+    .expect("checksum is a valid manifest id");
+    store
+        .put_overwrite(
+            &manifest_key(namespace_id, &manifest_id),
+            Bytes::from(serde_json::to_vec(&document).expect("encode corrupt manifest document")),
+        )
+        .await
+        .expect("write manifest missing checkpoint id");
+    manifest_id
+}
+
 async fn write_pointer(
     store: &dyn ObjectStore,
     namespace_id: &NamespaceId,
@@ -592,8 +662,8 @@ async fn grep_worker_pins_fold_tail_and_pagination_results() {
         .expect("create namespace");
     let worker = worker(&store);
     let policy = GramIndexBuildPolicy {
-        max_l0_runs: 2,
-        max_mid_runs: 2,
+        max_l0_runs: nonzero_usize(2),
+        max_mid_runs: nonzero_usize(2),
         ..GramIndexBuildPolicy::default()
     };
     worker.enable(&namespace_id).await.expect("enable");
@@ -849,7 +919,7 @@ async fn checkpoint_backfill_matches_incremental_worker_results() {
         &worker,
         &backfill_namespace,
         GramIndexBuildPolicy {
-            max_files_per_step: 2,
+            max_files_per_step: nonzero_usize(2),
             ..GramIndexBuildPolicy::default()
         },
     )
