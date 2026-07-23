@@ -137,7 +137,7 @@ fn root(namespace_id: NamespaceId, built_through_seq: ChangeSeq) -> GrepRootStat
     GrepRootState::new(
         namespace_id,
         GrepLifecycle::Steady,
-        GrepIndexState::new(built_through_seq, None, 0),
+        GrepIndexState::new(built_through_seq, 0, None, 0),
         Vec::new(),
     )
     .expect("valid root")

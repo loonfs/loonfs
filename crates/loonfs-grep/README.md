@@ -20,7 +20,7 @@ explicitly collects each named namespace's grep-owned keyspace once before
 maintenance starts, including reaping aged extension state for an absent or tombstoned namespace.
 
 The strict config keeps the provider under `[store]`, puts the one detached-deployment timer at the
-top level, and uses `[grep]` only for bounded step budgets:
+top level, and uses `[grep]` for bounded step budgets and the deployment-wide step cap:
 
 ```toml
 poll_interval_ms = 1000
@@ -30,6 +30,7 @@ kind = "local-fs"
 root = "./.loonfs-store"
 
 [grep]
+max_concurrent_steps = 2
 max_files_per_step = 256
 max_content_bytes_per_step = 67108864
 max_rows_per_segment = 65536
@@ -38,5 +39,5 @@ max_mid_runs = 8
 max_fold_rows_per_step = 131072
 ```
 
-`poll_interval_ms` defaults to 1000 and must be greater than zero. Every step budget must also be
-greater than zero.
+`poll_interval_ms` defaults to 1000 and must be greater than zero. Every step budget and
+`max_concurrent_steps` must also be greater than zero.

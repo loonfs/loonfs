@@ -179,6 +179,8 @@ impl GrepMode {
 #[serde(default, deny_unknown_fields)]
 pub struct GrepConfig {
     pub mode: GrepMode,
+    /// Build or fold steps allowed to execute concurrently across namespaces.
+    pub max_concurrent_steps: usize,
     pub max_files_per_step: usize,
     pub max_content_bytes_per_step: u64,
     pub max_rows_per_segment: usize,
@@ -191,6 +193,7 @@ impl GrepConfig {
     /// Returns the shared bounded-step configuration represented by this table.
     pub fn worker_config(self) -> GrepWorkerConfig {
         GrepWorkerConfig {
+            max_concurrent_steps: self.max_concurrent_steps,
             max_files_per_step: self.max_files_per_step,
             max_content_bytes_per_step: self.max_content_bytes_per_step,
             max_rows_per_segment: self.max_rows_per_segment,
@@ -206,6 +209,7 @@ impl Default for GrepConfig {
         let worker = GrepWorkerConfig::default();
         Self {
             mode: GrepMode::Embedded,
+            max_concurrent_steps: worker.max_concurrent_steps,
             max_files_per_step: worker.max_files_per_step,
             max_content_bytes_per_step: worker.max_content_bytes_per_step,
             max_rows_per_segment: worker.max_rows_per_segment,
@@ -857,6 +861,7 @@ writer_id = "loonfs-server"
 writer_version = "loonfs-server/0.1.0"
 
 [grep]
+max_concurrent_steps = 0
 max_fold_rows_per_step = 0
 
 [store]
@@ -864,7 +869,7 @@ kind = "local-fs"
 root = "/tmp/loonfs-server"
 "#,
         );
-        let error = load_server_config(&path).expect_err("zero gram budget must be rejected");
+        let error = load_server_config(&path).expect_err("zero grep bound must be rejected");
         assert_invalid_field(error, "grep");
     }
 
@@ -1170,6 +1175,7 @@ writer_version = "loonfs-server/0.1.0"
 
 [grep]
 mode = "serve_only"
+max_concurrent_steps = 7
 max_files_per_step = 4096
 max_content_bytes_per_step = 536870912
 max_rows_per_segment = 131072
@@ -1185,6 +1191,7 @@ root = "/tmp/loonfs-server"
 
         let grep = load_server_config(&path).expect("load config").grep;
         assert_eq!(grep.mode, super::GrepMode::ServeOnly);
+        assert_eq!(grep.max_concurrent_steps, 7);
         let policy = grep.worker_config().build_policy();
         assert_eq!(policy.max_files_per_step, 4096);
         assert_eq!(policy.max_content_bytes_per_step, 536_870_912);

@@ -183,8 +183,15 @@ pub struct GrepFoldState {
 pub struct GrepIndexState {
     /// Version of this nested index-state schema.
     pub format_version: u32,
-    /// Changes at or below this sequence are represented by `segments`.
+    /// Sequence of the commit at the index cursor.
     pub built_through_seq: ChangeSeq,
+    /// Offset of the next delta within `built_through_seq`, or zero when the
+    /// cursor is at the commit boundary and the whole commit is represented.
+    ///
+    /// WAL commit deltas retain their durable vector order; incremental
+    /// indexing relies on that stable order when it resumes within a commit.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub next_delta_index: u32,
     /// One in-progress partitioned fold, if present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fold: Option<GrepFoldState>,
@@ -196,16 +203,22 @@ impl GrepIndexState {
     /// Creates index bookkeeping in the current grep-owned format.
     pub fn new(
         built_through_seq: ChangeSeq,
+        next_delta_index: u32,
         fold: Option<GrepFoldState>,
         next_run_ordinal: u64,
     ) -> Self {
         Self {
             format_version: GREP_INDEX_FORMAT_VERSION,
             built_through_seq,
+            next_delta_index,
             fold,
             next_run_ordinal,
         }
     }
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 /// Query-visible descriptor for one immutable grep segment.

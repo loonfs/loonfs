@@ -17,7 +17,7 @@ use loonfs_core::{BootstrapOptions, NamespaceEngine, RuntimeReadContext};
 use loonfs_grep::root::{load_grep_root, GrepLifecycle};
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepDriver, GrepDriverParked, GrepDriverState, GrepDriverTask,
-    GrepIndexSnapshot, GrepService, GrepWorker,
+    GrepIndexSnapshot, GrepService, GrepStepLimiter, GrepWorker,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::SharedObjectStore;
@@ -213,8 +213,13 @@ fn spawn_driver(
     worker: GrepWorker<SharedObjectStore>,
     namespace_id: NamespaceId,
 ) -> GrepDriverTask {
-    GrepDriver::new(worker, namespace_id, GramIndexBuildPolicy::default())
-        .spawn_on(&tokio::runtime::Handle::current())
+    GrepDriver::new(
+        worker,
+        namespace_id,
+        GramIndexBuildPolicy::default(),
+        GrepStepLimiter::new(1),
+    )
+    .spawn_on(&tokio::runtime::Handle::current())
 }
 
 fn spawn_poll(
