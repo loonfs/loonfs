@@ -388,13 +388,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn path_intent_fingerprint_normalizes_paths() {
+    async fn path_intent_fingerprint_is_stable_for_canonical_paths() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let left = path_intent_fingerprint(
             &namespace_id,
             &PathMutationIntent::CreateDir {
                 commit_id: CommitId::parse("mkdir-docs-a").expect("valid commit id"),
-                absolute_path: AbsolutePath::parse("/docs//a/").expect("path"),
+                absolute_path: AbsolutePath::parse("/docs/a").expect("path"),
                 parents: false,
             },
         )

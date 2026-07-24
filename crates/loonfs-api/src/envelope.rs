@@ -176,6 +176,28 @@ struct JsonEnvelopeDocument {
     payload: Box<RawValue>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StrictJsonEnvelopeDocument {
+    kind: String,
+    format_version: u32,
+    writer_version: String,
+    payload_checksum: String,
+    payload: Box<RawValue>,
+}
+
+impl From<StrictJsonEnvelopeDocument> for JsonEnvelopeDocument {
+    fn from(document: StrictJsonEnvelopeDocument) -> Self {
+        Self {
+            kind: document.kind,
+            format_version: document.format_version,
+            writer_version: document.writer_version,
+            payload_checksum: document.payload_checksum,
+            payload: document.payload,
+        }
+    }
+}
+
 /// The `sha256:<hex>` checksum a JSON payload will carry, computed over its
 /// canonical serialization.
 pub(crate) fn json_payload_checksum<T: Serialize>(
@@ -232,13 +254,41 @@ pub(crate) fn decode_json_envelope<T: DeserializeOwned>(
     supported_version: u32,
     classify_kind: impl FnOnce(&str) -> Result<(), EnvelopeCodecError>,
 ) -> Result<DecodedJsonEnvelope<T>, EnvelopeCodecError> {
+    decode_json_envelope_probe(bytes, supported_version, classify_kind)?;
+    let document: JsonEnvelopeDocument = serde_json::from_slice(bytes)
+        .map_err(|err| EnvelopeCodecError::EnvelopeDecode(err.to_string()))?;
+    decode_json_envelope_payload(document)
+}
+
+/// Immutable envelope families tolerate unknown fields, while mutable control-object envelopes
+/// reject them. A tolerant read followed by rewrite would erase fields the current binary does
+/// not understand.
+pub(crate) fn decode_strict_json_envelope<T: DeserializeOwned>(
+    bytes: &[u8],
+    supported_version: u32,
+    classify_kind: impl FnOnce(&str) -> Result<(), EnvelopeCodecError>,
+) -> Result<DecodedJsonEnvelope<T>, EnvelopeCodecError> {
+    decode_json_envelope_probe(bytes, supported_version, classify_kind)?;
+    let document: StrictJsonEnvelopeDocument = serde_json::from_slice(bytes)
+        .map_err(|err| EnvelopeCodecError::EnvelopeDecode(err.to_string()))?;
+    decode_json_envelope_payload(document.into())
+}
+
+fn decode_json_envelope_probe(
+    bytes: &[u8],
+    supported_version: u32,
+    classify_kind: impl FnOnce(&str) -> Result<(), EnvelopeCodecError>,
+) -> Result<(), EnvelopeCodecError> {
     let probe: EnvelopeProbe = serde_json::from_slice(bytes)
         .map_err(|err| EnvelopeCodecError::EnvelopeDecode(err.to_string()))?;
     classify_kind(&probe.kind)?;
     verify_version(&probe.kind, probe.format_version, supported_version)?;
+    Ok(())
+}
 
-    let document: JsonEnvelopeDocument = serde_json::from_slice(bytes)
-        .map_err(|err| EnvelopeCodecError::EnvelopeDecode(err.to_string()))?;
+fn decode_json_envelope_payload<T: DeserializeOwned>(
+    document: JsonEnvelopeDocument,
+) -> Result<DecodedJsonEnvelope<T>, EnvelopeCodecError> {
     verify_payload_checksum(
         &document.payload_checksum,
         document.payload.get().as_bytes(),

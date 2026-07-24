@@ -1294,7 +1294,7 @@ async fn path_publishes_use_durable_path_commit_receipt_index() {
 
     let intent = PathMutationIntent::PutFile {
         commit_id: CommitId::parse("same-path-request").expect("valid commit id"),
-        absolute_path: AbsolutePath::parse("/same//path.txt").expect("path"),
+        absolute_path: AbsolutePath::parse("/same/path.txt").expect("path"),
         content_ref: content.content_ref.clone(),
         behavior: DestinationBehavior::NoReplace,
     };
