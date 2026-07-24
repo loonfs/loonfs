@@ -42,6 +42,57 @@ fn assert_manifest_rows_have_unique_keys(metadata_state: &MetadataState) {
     }
 }
 
+type TableRunShape = (ApiMetadataTableFamily, u64, usize);
+type ManifestRunShape = (ChangeSeq, u32, Vec<TableRunShape>);
+
+fn manifest_run_shape(manifest: &NamespaceManifestEnvelope) -> Vec<ManifestRunShape> {
+    runs_from_metadata_files(&manifest.payload)
+        .into_iter()
+        .map(|run| {
+            let tables = run
+                .tables
+                .into_iter()
+                .map(|table| {
+                    let row_count = table
+                        .segments
+                        .iter()
+                        .map(|descriptor| descriptor.row_count)
+                        .sum();
+                    (table.family, row_count, table.segments.len())
+                })
+                .collect();
+            (run.run_seq, run.level, tables)
+        })
+        .collect()
+}
+
+async fn drain_reorganization_with_count<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    context: &MutationContext,
+    policy: MetadataLsmPolicy,
+) -> (ManifestId, usize) {
+    let mut published = 0usize;
+    for _ in 0..128 {
+        let report = super::reorganize_metadata_step(store, namespace_id, context, policy)
+            .await
+            .expect("reorganization step");
+        match report.outcome {
+            super::MetadataReorganizeOutcome::UnitPublished { .. } => published += 1,
+            super::MetadataReorganizeOutcome::Superseded => {
+                panic!("single-writer test must not be superseded")
+            }
+            super::MetadataReorganizeOutcome::BudgetExhausted { .. } => {
+                panic!("test budget must admit a progress-making subset")
+            }
+            super::MetadataReorganizeOutcome::NotNeeded { .. } => {
+                return (current_manifest_id(store, namespace_id).await, published);
+            }
+        }
+    }
+    panic!("reorganization did not converge")
+}
+
 /// Deterministic timer advancing a fixed step per reading, so publication
 /// budgets are consumed by observations instead of wall time.
 #[derive(Debug)]
@@ -486,6 +537,9 @@ async fn checkpoints_append_past_the_threshold_and_reorganization_drains() {
                 panic!("no concurrent publisher exists in this test")
             }
             super::MetadataReorganizeOutcome::NotNeeded { .. } => break,
+            super::MetadataReorganizeOutcome::BudgetExhausted { .. } => {
+                panic!("test reorganization budget should admit a progress-making subset")
+            }
         }
     }
     assert!(units >= 2, "several family groups should fold, got {units}");
@@ -509,6 +563,213 @@ async fn checkpoints_append_past_the_threshold_and_reorganization_drains() {
 }
 
 #[tokio::test]
+async fn reorganization_step_honors_run_row_and_decoded_byte_budgets() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = CountingStore::metadata_tables(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    for index in 1..=5 {
+        write_file_bytes(
+            &store,
+            &namespace_id,
+            &format!("/docs/file-{index}.txt"),
+            b"body\n",
+            &context,
+            None,
+        )
+        .await
+        .expect("write file");
+        create_checkpoint(&store, &namespace_id, &context)
+            .await
+            .expect("create checkpoint");
+    }
+
+    let root_before = current_manifest_id(&store, &namespace_id).await;
+    let tiny_byte_policy = MetadataLsmPolicy {
+        max_l0_runs: NonZeroUsize::MIN,
+        max_input_runs_per_step: NonZeroUsize::new(2).expect("test run budget should be nonzero"),
+        max_decoded_input_bytes_per_step: NonZeroUsize::MIN,
+        ..MetadataLsmPolicy::default()
+    };
+    store.reset();
+    let blocked =
+        super::reorganize_metadata_step(&store, &namespace_id, &context, tiny_byte_policy)
+            .await
+            .expect("budgeted step");
+    let super::MetadataReorganizeOutcome::BudgetExhausted { families, .. } = blocked.outcome else {
+        panic!("one byte must not admit an SST run");
+    };
+    assert_eq!(
+        current_manifest_id(&store, &namespace_id).await,
+        root_before,
+        "a budget-blocked step must not publish"
+    );
+    assert_eq!(store.count(OperationClass::Put), 0);
+    assert!(
+        store.count(OperationClass::Read) <= families.len(),
+        "byte preflight should read only the oldest candidate's index sections"
+    );
+
+    let policy = MetadataLsmPolicy {
+        max_l0_runs: NonZeroUsize::MIN,
+        max_input_runs_per_step: NonZeroUsize::new(2).expect("test run budget should be nonzero"),
+        max_decoded_input_rows_per_step: NonZeroUsize::new(6)
+            .expect("test row budget should be nonzero"),
+        ..MetadataLsmPolicy::default()
+    };
+    store.reset();
+    let published = super::reorganize_metadata_step(&store, &namespace_id, &context, policy)
+        .await
+        .expect("bounded step");
+    let super::MetadataReorganizeOutcome::UnitPublished {
+        families,
+        input_runs,
+        decoded_input_rows,
+        decoded_input_bytes,
+        ..
+    } = published.outcome
+    else {
+        panic!("two oldest runs should fit the test budgets");
+    };
+    assert_eq!(input_runs, 2);
+    assert!(input_runs <= policy.max_input_runs_per_step.get());
+    assert!(decoded_input_rows <= policy.max_decoded_input_rows_per_step.get() as u64);
+    assert!(decoded_input_bytes <= policy.max_decoded_input_bytes_per_step.get() as u64);
+    assert!(
+        store.count(OperationClass::Read) <= input_runs * families.len() * 2,
+        "the step should read index and data sections only for selected-run family segments"
+    );
+}
+
+#[tokio::test]
+async fn bounded_reorganization_converges_to_unbounded_shape_and_preserves_intermediate_reads() {
+    let bounded_dir = tempdir().expect("bounded tempdir");
+    let unbounded_dir = tempdir().expect("unbounded tempdir");
+    let bounded_store = LocalFsStore::new(bounded_dir.path()).expect("bounded store");
+    let unbounded_store = LocalFsStore::new(unbounded_dir.path()).expect("unbounded store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    for store in [&bounded_store, &unbounded_store] {
+        bootstrap_namespace(store, &namespace_id, &context, false)
+            .await
+            .expect("bootstrap");
+        for index in 1..=6 {
+            let commit_id =
+                CommitId::parse(format!("bounded-convergence-{index}")).expect("commit id");
+            write_file_bytes(
+                store,
+                &namespace_id,
+                &format!("/docs/file-{index}.txt"),
+                format!("file {index}\n").as_bytes(),
+                &context,
+                Some(&commit_id),
+            )
+            .await
+            .expect("write file");
+            create_checkpoint(store, &namespace_id, &context)
+                .await
+                .expect("create checkpoint");
+        }
+    }
+
+    let visible_before = load_current_projection(&bounded_store, &namespace_id)
+        .await
+        .expect("visible state before bounded reorganization");
+    let unlimited = NonZeroUsize::new(usize::MAX).expect("usize max should be nonzero");
+    let bounded_policy = MetadataLsmPolicy {
+        max_l0_runs: NonZeroUsize::new(4).expect("test trigger should be nonzero"),
+        max_input_runs_per_step: NonZeroUsize::new(2).expect("test run budget should be nonzero"),
+        max_decoded_input_rows_per_step: unlimited,
+        max_decoded_input_bytes_per_step: unlimited,
+        ..MetadataLsmPolicy::default()
+    };
+    let first =
+        super::reorganize_metadata_step(&bounded_store, &namespace_id, &context, bounded_policy)
+            .await
+            .expect("first bounded step");
+    assert!(matches!(
+        first.outcome,
+        super::MetadataReorganizeOutcome::UnitPublished { input_runs: 2, .. }
+    ));
+    let visible_between = load_current_projection(&bounded_store, &namespace_id)
+        .await
+        .expect("visible state between bounded steps");
+    assert!(metadata_states_equivalent(
+        &visible_before.metadata_state,
+        &visible_between.metadata_state
+    ));
+
+    let (bounded_manifest_id, bounded_steps_after_first) =
+        drain_reorganization_with_count(&bounded_store, &namespace_id, &context, bounded_policy)
+            .await;
+    let unbounded_policy = MetadataLsmPolicy {
+        max_l0_runs: NonZeroUsize::new(4).expect("test trigger should be nonzero"),
+        max_input_runs_per_step: unlimited,
+        max_decoded_input_rows_per_step: unlimited,
+        max_decoded_input_bytes_per_step: unlimited,
+        ..MetadataLsmPolicy::default()
+    };
+    let (unbounded_manifest_id, unbounded_steps) = drain_reorganization_with_count(
+        &unbounded_store,
+        &namespace_id,
+        &context,
+        unbounded_policy,
+    )
+    .await;
+    assert!(bounded_steps_after_first + 1 > unbounded_steps);
+
+    let bounded = load_manifest_materialization_for_inspection(
+        &bounded_store,
+        &namespace_id,
+        bounded_manifest_id,
+    )
+    .await
+    .expect("load bounded result");
+    let unbounded = load_manifest_materialization_for_inspection(
+        &unbounded_store,
+        &namespace_id,
+        unbounded_manifest_id,
+    )
+    .await
+    .expect("load unbounded result");
+    assert!(metadata_states_equivalent(
+        &bounded.metadata_state,
+        &unbounded.metadata_state
+    ));
+    assert_eq!(
+        manifest_run_shape(&bounded.manifest),
+        manifest_run_shape(&unbounded.manifest)
+    );
+    assert!(l0_runs(&bounded.manifest).is_empty());
+
+    let later_commit = CommitId::parse("bounded-convergence-later").expect("commit id");
+    write_file_bytes(
+        &bounded_store,
+        &namespace_id,
+        "/docs/later.txt",
+        b"later\n",
+        &context,
+        Some(&later_commit),
+    )
+    .await
+    .expect("write later file");
+    create_checkpoint(&bounded_store, &namespace_id, &context)
+        .await
+        .expect("checkpoint later file");
+    let below_trigger =
+        super::reorganize_metadata_step(&bounded_store, &namespace_id, &context, bounded_policy)
+            .await
+            .expect("below-trigger step");
+    assert!(matches!(
+        below_trigger.outcome,
+        super::MetadataReorganizeOutcome::NotNeeded { l0_runs: 1 }
+    ));
+}
+
+#[tokio::test]
 async fn whole_run_compaction_rewrites_base_segments() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -518,6 +779,7 @@ async fn whole_run_compaction_rewrites_base_segments() {
         max_l0_runs: NonZeroUsize::MIN,
         max_rows_per_segment: NonZeroUsize::new(2)
             .expect("test segment row budget should be nonzero"),
+        ..MetadataLsmPolicy::default()
     };
     bootstrap_namespace(&store, &namespace_id, &context, false)
         .await
@@ -619,6 +881,7 @@ async fn whole_run_compaction_resegments_row_key_range_families_with_l0_runs() {
         max_l0_runs: NonZeroUsize::MIN,
         max_rows_per_segment: NonZeroUsize::new(2)
             .expect("test segment row budget should be nonzero"),
+        ..MetadataLsmPolicy::default()
     };
     bootstrap_namespace(&store, &namespace_id, &context, false)
         .await
@@ -745,6 +1008,9 @@ async fn reorganization_resumes_from_the_manifest_after_interruption() {
                 panic!("no concurrent publisher exists in this test")
             }
             super::MetadataReorganizeOutcome::NotNeeded { .. } => break,
+            super::MetadataReorganizeOutcome::BudgetExhausted { .. } => {
+                panic!("test reorganization budget should admit a progress-making subset")
+            }
         }
     }
     assert!(folded_groups.len() >= 2);

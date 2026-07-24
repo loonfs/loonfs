@@ -4,13 +4,13 @@
 //! Checkpoint publication only ever appends an L0 delta run, so its cost
 //! follows the WAL delta, never the namespace. Folding those L0 runs into
 //! the base happens here instead, one **family group** at a time: the
-//! group's rows are merged from every run it appears in, rows below the
-//! retention floor are dropped, new base segments are written, and a
-//! manifest publishes that swaps just that group's references. Families
-//! whose retention rules read each other compact together — bind, child
-//! bind, and unbind rows form one group; revisions and their descending
-//! index another — so index parity and the drop invariants hold within
-//! every unit.
+//! group's rows are merged from an oldest-first, budgeted subset of complete
+//! runs, rows below the retention floor are dropped, new base segments are
+//! written, and a manifest publishes that swaps just those references.
+//! Families whose retention rules read each other compact together — bind,
+//! child bind, and unbind rows form one group; revisions and their descending
+//! index another — so index parity and the drop invariants hold within every
+//! unit.
 //!
 //! There is no progress record: each unit ends in a durable manifest, so a
 //! crashed or interrupted reorganization resumes by reading the live
@@ -20,6 +20,7 @@
 //! the unit's segments are left unreferenced for garbage collection and the
 //! next step retries against the fresh manifest.
 
+use super::block_fetch::load_segment_index_for_reorganization;
 use super::build::{
     build_manifest_tables_from_rows, debug_assert_manifest_table_segments_do_not_overlap,
     MetadataTableSegmentation,
@@ -32,9 +33,10 @@ use super::load::{
 };
 use super::publish::{publish_metadata_root, write_namespace_manifest, ManifestPublicationOutcome};
 use super::runs::{
-    flatten_manifest_tables, l0_run_count, MetadataLsmPolicy, CHECKPOINT_BASE_RUN_LEVEL,
-    CHECKPOINT_L0_RUN_LEVEL,
+    flatten_manifest_tables, l0_run_count, MetadataLsmPolicy, MetadataRunManifest,
+    CHECKPOINT_BASE_RUN_LEVEL, CHECKPOINT_L0_RUN_LEVEL,
 };
+use super::scan::VerifiedMetadataTables;
 use crate::context::MutationContext;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::limits::CONTENTION_RETRY_LIMIT;
@@ -74,12 +76,21 @@ pub enum MetadataReorganizeOutcome {
     /// The manifest's L0 run count is below the policy trigger; nothing to
     /// fold yet.
     NotNeeded { l0_runs: usize },
-    /// One family group folded into new base segments and the manifest
-    /// advanced.
+    /// One bounded complete-run subset for a family group folded into new
+    /// base segments and the manifest advanced.
     UnitPublished {
         families: Vec<MetadataTableFamily>,
         folded_l0_rows: u64,
+        input_runs: usize,
+        decoded_input_rows: u64,
+        decoded_input_bytes: u64,
         manifest_id: ManifestId,
+    },
+    /// The trigger fired, but no oldest-first subset that would make
+    /// progress fit the hard per-step input budgets.
+    BudgetExhausted {
+        families: Vec<MetadataTableFamily>,
+        l0_runs: usize,
     },
     /// A concurrent publication moved the root while this unit ran; its
     /// output is unreferenced (garbage collection reclaims it) and the next
@@ -138,7 +149,9 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     let previous = tables.manifest();
 
     let l0_runs = l0_run_count(&previous.payload);
-    if l0_runs < policy.max_l0_runs.get() {
+    if l0_runs < policy.max_l0_runs.get()
+        && !manifest_has_partial_reorganization(tables.scan_runs.as_ref())
+    {
         return Ok(MetadataReorganizeReport {
             namespace_id: namespace_id.clone(),
             outcome: MetadataReorganizeOutcome::NotNeeded { l0_runs },
@@ -151,31 +164,45 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
             outcome: MetadataReorganizeOutcome::NotNeeded { l0_runs },
         });
     };
-    let folded_l0_rows = group_l0_rows(&previous.payload, group);
+    let Some(input) = select_reorganization_input(&tables, group, policy)
+        .await
+        .map_err(|error| {
+            CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
+        })?
+    else {
+        return Ok(MetadataReorganizeReport {
+            namespace_id: namespace_id.clone(),
+            outcome: MetadataReorganizeOutcome::BudgetExhausted {
+                families: group.to_vec(),
+                l0_runs,
+            },
+        });
+    };
 
-    // Merge the group's rows from every run it appears in. The scan reads
-    // exactly the manifest's tables — never the WAL tail — so the unit's
-    // output represents the same head the manifest already describes.
+    // Merge only the selected complete runs. The scan reads exactly the
+    // manifest's tables — never the WAL tail — and the unselected
+    // descriptors remain in the replacement manifest unchanged.
     let mut rows_by_family = BTreeMap::<MetadataTableFamily, Vec<MetadataRow>>::new();
     for family in group {
-        let rows = tables.scan_prefix(*family, "").await.map_err(|error| {
-            CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
-        })?;
+        let rows = tables
+            .scan_prefix_in_runs(&input.runs, *family, "")
+            .await
+            .map_err(|error| {
+                CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
+            })?;
         rows_by_family.insert(*family, rows);
     }
     // The paired groups exist to preserve index parity; verify it on the
-    // merged rows before writing anything.
+    // selected complete runs before writing anything.
     if group.contains(&MetadataTableFamily::DirentryBinds) {
         validate_direntry_child_bind_index(
             root.manifest_object_id.as_ref(),
             rows_by_family
                 .get(&MetadataTableFamily::DirentryBinds)
-                .cloned()
-                .unwrap_or_default(),
+                .map_or(&[], Vec::as_slice),
             rows_by_family
                 .get(&MetadataTableFamily::DirentryChildBinds)
-                .cloned()
-                .unwrap_or_default(),
+                .map_or(&[], Vec::as_slice),
         )
         .map_err(|error| {
             CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
@@ -186,12 +213,10 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
             root.manifest_object_id.as_ref(),
             rows_by_family
                 .get(&MetadataTableFamily::Revisions)
-                .cloned()
-                .unwrap_or_default(),
+                .map_or(&[], Vec::as_slice),
             rows_by_family
                 .get(&MetadataTableFamily::RevisionsByInodeDesc)
-                .cloned()
-                .unwrap_or_default(),
+                .map_or(&[], Vec::as_slice),
         )
         .map_err(|error| {
             CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
@@ -219,7 +244,12 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
         .payload
         .metadata_files
         .iter()
-        .filter(|descriptor| !group.contains(&descriptor.family))
+        .filter(|descriptor| {
+            !group.contains(&descriptor.family)
+                || !input
+                    .run_ids
+                    .contains(&(descriptor.run_seq, descriptor.level))
+        })
         .cloned()
         .collect();
     metadata_files.extend(flatten_manifest_tables(run_tables));
@@ -264,7 +294,10 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
             namespace_id: namespace_id.clone(),
             outcome: MetadataReorganizeOutcome::UnitPublished {
                 families: group.to_vec(),
-                folded_l0_rows,
+                folded_l0_rows: input.folded_l0_rows,
+                input_runs: input.runs.len(),
+                decoded_input_rows: input.decoded_rows,
+                decoded_input_bytes: input.decoded_bytes,
                 manifest_id: manifest.payload.manifest_id,
             },
         }),
@@ -275,6 +308,136 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
             })
         }
     }
+}
+
+struct ReorganizationInput {
+    runs: Vec<MetadataRunManifest>,
+    run_ids: BTreeSet<(ChangeSeq, u32)>,
+    folded_l0_rows: u64,
+    decoded_rows: u64,
+    decoded_bytes: u64,
+}
+
+/// Selects the existing compacted accumulator followed by L0 runs
+/// oldest-first. Index sections are read before row payloads so the
+/// decoded-byte budget is known exactly from each data block's durable
+/// `decoded_len`; a run that would cross a budget is not decoded or
+/// partially included.
+async fn select_reorganization_input<S: ObjectStore + ?Sized>(
+    tables: &VerifiedMetadataTables<'_, S>,
+    group: &[MetadataTableFamily],
+    policy: MetadataLsmPolicy,
+) -> std::result::Result<Option<ReorganizationInput>, ManifestLoadError> {
+    let mut candidates = tables
+        .scan_runs
+        .iter()
+        .filter(|run| run_has_group_rows(run, group))
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        let left_is_l0 = left.level == CHECKPOINT_L0_RUN_LEVEL;
+        let right_is_l0 = right.level == CHECKPOINT_L0_RUN_LEVEL;
+        left_is_l0
+            .cmp(&right_is_l0)
+            .then(left.run_seq.cmp(&right.run_seq))
+            .then(right.level.cmp(&left.level))
+    });
+    let candidate_count = candidates.len();
+    let row_budget =
+        u64::try_from(policy.max_decoded_input_rows_per_step.get()).unwrap_or(u64::MAX);
+    let byte_budget =
+        u64::try_from(policy.max_decoded_input_bytes_per_step.get()).unwrap_or(u64::MAX);
+
+    let mut runs = Vec::new();
+    let mut decoded_rows = 0u64;
+    let mut decoded_bytes = 0u64;
+    let mut folded_l0_rows = 0u64;
+    for run in candidates
+        .into_iter()
+        .take(policy.max_input_runs_per_step.get())
+    {
+        let run_rows = group_run_descriptors(run, group)
+            .map(|descriptor| descriptor.row_count)
+            .sum::<u64>();
+        if decoded_rows.saturating_add(run_rows) > row_budget {
+            break;
+        }
+        let run_bytes = decoded_group_run_bytes(tables, run, group).await?;
+        if decoded_bytes.saturating_add(run_bytes) > byte_budget {
+            break;
+        }
+        if run.level == CHECKPOINT_L0_RUN_LEVEL {
+            folded_l0_rows = folded_l0_rows.saturating_add(run_rows);
+        }
+        decoded_rows = decoded_rows.saturating_add(run_rows);
+        decoded_bytes = decoded_bytes.saturating_add(run_bytes);
+        runs.push(run.clone());
+    }
+
+    let selected_l0 = runs.iter().any(|run| run.level == CHECKPOINT_L0_RUN_LEVEL);
+    let makes_progress = selected_l0 && (runs.len() > 1 || candidate_count == 1);
+    if !makes_progress {
+        return Ok(None);
+    }
+    let run_ids = runs.iter().map(|run| (run.run_seq, run.level)).collect();
+    Ok(Some(ReorganizationInput {
+        runs,
+        run_ids,
+        folded_l0_rows,
+        decoded_rows,
+        decoded_bytes,
+    }))
+}
+
+/// A bounded fold stamps its output at the manifest head. If older or
+/// same-seq L0 runs remain, that ordering is the durable resume marker. A
+/// fresh L0 appended after a completed fold is strictly newer than every
+/// base-tier run and therefore does not bypass the normal trigger.
+fn manifest_has_partial_reorganization(runs: &[MetadataRunManifest]) -> bool {
+    let Some(oldest_l0_seq) = runs
+        .iter()
+        .filter(|run| run.level == CHECKPOINT_L0_RUN_LEVEL)
+        .map(|run| run.run_seq)
+        .min()
+    else {
+        return false;
+    };
+    runs.iter()
+        .any(|run| run.level != CHECKPOINT_L0_RUN_LEVEL && run.run_seq >= oldest_l0_seq)
+}
+
+fn run_has_group_rows(run: &MetadataRunManifest, group: &[MetadataTableFamily]) -> bool {
+    group_run_descriptors(run, group).next().is_some()
+}
+
+fn group_run_descriptors<'a>(
+    run: &'a MetadataRunManifest,
+    group: &'a [MetadataTableFamily],
+) -> impl Iterator<Item = &'a MetadataFileRef> {
+    run.tables
+        .iter()
+        .filter(|table| group.contains(&table.family))
+        .flat_map(|table| &table.segments)
+}
+
+async fn decoded_group_run_bytes<S: ObjectStore + ?Sized>(
+    tables: &VerifiedMetadataTables<'_, S>,
+    run: &MetadataRunManifest,
+    group: &[MetadataTableFamily],
+) -> std::result::Result<u64, ManifestLoadError> {
+    let mut decoded_bytes = 0u64;
+    for descriptor in group_run_descriptors(run, group) {
+        let index = load_segment_index_for_reorganization(
+            tables.store,
+            tables.table_cache,
+            &tables.block_memo,
+            descriptor,
+        )
+        .await?;
+        for entry in index.iter() {
+            decoded_bytes = decoded_bytes.saturating_add(u64::from(entry.block.decoded_len));
+        }
+    }
+    Ok(decoded_bytes)
 }
 
 /// The family group with the most L0 rows to fold; ties resolve in group

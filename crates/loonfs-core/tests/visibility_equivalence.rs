@@ -896,6 +896,9 @@ async fn drain_reorganization(
             MetadataReorganizeOutcome::Superseded => {
                 panic!("single-writer test must not supersede reorganization")
             }
+            MetadataReorganizeOutcome::BudgetExhausted { .. } => {
+                panic!("default budget must admit the visibility scenario")
+            }
         }
     }
     panic!("reorganization did not drain within the family-group bound");

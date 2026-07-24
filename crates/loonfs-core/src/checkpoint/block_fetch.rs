@@ -228,6 +228,28 @@ pub(super) async fn load_segment_index<S: ObjectStore + ?Sized>(
     memo: &SessionBlockMemo,
     descriptor: &MetadataFileRef,
 ) -> Result<Arc<Vec<SegmentIndexEntry>>, ManifestLoadError> {
+    load_segment_index_inner(store, table_cache, memo, descriptor, true).await
+}
+
+/// Loads only the index section even for a small segment. Reorganization
+/// uses this to account data-block decoded bytes before any row payload is
+/// decoded; the normal lookup path keeps its whole-small-segment shortcut.
+pub(super) async fn load_segment_index_for_reorganization<S: ObjectStore + ?Sized>(
+    store: &S,
+    table_cache: Option<&MetadataTableCache>,
+    memo: &SessionBlockMemo,
+    descriptor: &MetadataFileRef,
+) -> Result<Arc<Vec<SegmentIndexEntry>>, ManifestLoadError> {
+    load_segment_index_inner(store, table_cache, memo, descriptor, false).await
+}
+
+async fn load_segment_index_inner<S: ObjectStore + ?Sized>(
+    store: &S,
+    table_cache: Option<&MetadataTableCache>,
+    memo: &SessionBlockMemo,
+    descriptor: &MetadataFileRef,
+    load_small_segment_whole: bool,
+) -> Result<Arc<Vec<SegmentIndexEntry>>, ManifestLoadError> {
     let handle = descriptor.index_block;
     let cache_key =
         segment_block_cache_key(descriptor, MetadataTableBlockKind::Index, handle.offset);
@@ -235,14 +257,30 @@ pub(super) async fn load_segment_index<S: ObjectStore + ?Sized>(
         return Ok(entries);
     }
     let fetch = || async {
-        load_and_publish_segment_sections(
-            store,
-            table_cache,
-            memo,
-            descriptor,
-            MetadataTableBlockKind::Index,
-        )
-        .await
+        if load_small_segment_whole {
+            load_and_publish_segment_sections(
+                store,
+                table_cache,
+                memo,
+                descriptor,
+                MetadataTableBlockKind::Index,
+            )
+            .await
+        } else {
+            let stored = load_section_bytes(
+                store,
+                &descriptor.object_key,
+                handle.offset,
+                u64::from(handle.stored_len),
+            )
+            .await?;
+            let entries = decode_index_block(&stored, &handle)
+                .map_err(|err| segment_codec_error(&descriptor.object_key, err))?;
+            Ok(DecodedMetadataTableBlock::Index {
+                decoded_byte_len: handle.decoded_len as usize,
+                entries: Arc::new(entries),
+            })
+        }
     };
     let block = match table_cache {
         Some(cache) => cache.get_or_load(&cache_key, fetch).await?,

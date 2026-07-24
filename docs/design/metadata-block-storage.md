@@ -81,19 +81,20 @@ delta run and publishes a manifest referencing every prior run
 unchanged. Its cost is proportional to what changed since the last
 checkpoint, never to namespace size.
 
-**Reorganization folds.** As delta runs accumulate, maintenance merges
-them into the base run — one family group per step, each fold ending in
-its own manifest publish. Rows that no retained history can observe are
-dropped during the merge; runs no longer referenced by any retained
-manifest become garbage.
+**Reorganization folds.** As delta runs accumulate, maintenance merges an
+oldest-first subset of complete runs for one family group, each fold ending
+in its own manifest publish. The subset is capped by logical-run count,
+decoded row count, and decoded SST data-block bytes. Rows that no retained
+history can observe are dropped during the merge; runs no longer referenced
+by any retained manifest become garbage.
 
 ```
 checkpoints append:          reorganization folds, one group per step:
 
-  delta run 3 (newest)         bindings:  base + deltas -> new base
-  delta run 2                  revisions: base + deltas -> new base
-  delta run 1                  inodes:    base + deltas -> new base
-  base run    (oldest)         ...until no delta rows remain
+  delta run 3 (newest)         bindings:  oldest bounded subset -> base
+  delta run 2                  revisions: oldest bounded subset -> base
+  delta run 1                  inodes:    oldest bounded subset -> base
+  base run    (oldest)         ...repeated until no delta rows remain
 ```
 
 Because every fold publishes a manifest, the manifest doubles as the
@@ -103,10 +104,18 @@ separate progress record to maintain, repair, or mistrust. Readers
 never observe an intermediate state — every step lands through the
 normal manifest publication path.
 
-The two secondary-index families fold together with their canonical
-family ({bindings, child bindings} and {revisions, revisions-by-inode})
-so row-count parity between table and index is validated on every
-rewrite.
+A bounded output carries the manifest head sequence. While an older or
+same-sequence delta run remains, that base/delta ordering tells the next step
+that a triggered reorganization is still in progress even if the remaining
+delta count fell below the normal trigger. Once the batch is drained, later
+delta runs are strictly newer than the base and the ordinary trigger applies
+again.
+
+The two secondary-index families fold together with their canonical family
+({bindings, child bindings} and {revisions, revisions-by-inode}). Every
+selected input is a complete logical run, so row-level parity is validated
+over exactly the subset being replaced without materializing or cloning the
+unselected family.
 
 ## Constants and tunables
 
@@ -121,3 +130,7 @@ Two kinds of numbers appear above, with different contracts:
   compression and base segments target 65,536 rows; readers take
   whatever the descriptor and index describe, so both can be retuned
   without a format change.
+- **Reorganization budgets are writer-side defaults.** One step inspects at
+  most 8 complete runs and decodes at most 131,072 row payloads or 64 MiB of
+  SST data blocks. A manifest publish is the only progress record, so later
+  steps continue with the runs the prior publish left referenced.
