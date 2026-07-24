@@ -121,6 +121,28 @@ struct EnvelopeDocument {
     payload: Box<RawValue>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StrictEnvelopeDocument {
+    kind: String,
+    format_version: String,
+    writer_version: String,
+    payload_checksum: String,
+    payload: Box<RawValue>,
+}
+
+impl From<StrictEnvelopeDocument> for EnvelopeDocument {
+    fn from(document: StrictEnvelopeDocument) -> Self {
+        Self {
+            kind: document.kind,
+            format_version: document.format_version,
+            writer_version: document.writer_version,
+            payload_checksum: document.payload_checksum,
+            payload: document.payload,
+        }
+    }
+}
+
 /// Encodes a root pointer after rechecking its version and checksum.
 pub fn encode_grep_root(envelope: &GrepRootEnvelope) -> Result<Vec<u8>, GrepRootCodecError> {
     encode_envelope(
@@ -135,7 +157,7 @@ pub fn encode_grep_root(envelope: &GrepRootEnvelope) -> Result<Vec<u8>, GrepRoot
 
 /// Decodes only the current root-pointer format and verifies exact payload bytes.
 pub fn decode_grep_root(bytes: &[u8]) -> Result<GrepRootEnvelope, GrepRootCodecError> {
-    let document = decode_document(bytes, GREP_ROOT_KIND, GREP_ROOT_FORMAT_VERSION)?;
+    let document = decode_strict_document(bytes, GREP_ROOT_KIND, GREP_ROOT_FORMAT_VERSION)?;
     let pointer: GrepRootPointer = decode_payload(&document)?;
     Ok(GrepRootEnvelope {
         format_version: document.format_version,
@@ -231,6 +253,35 @@ fn decode_document(
     expected_kind: &str,
     supported_version: &str,
 ) -> Result<EnvelopeDocument, GrepRootCodecError> {
+    decode_probe(bytes, expected_kind, supported_version)?;
+    let document: EnvelopeDocument =
+        serde_json::from_slice(bytes).map_err(|error| GrepRootCodecError::EnvelopeDecode {
+            message: error.to_string(),
+        })?;
+    verify_document_checksum(&document)?;
+    Ok(document)
+}
+
+fn decode_strict_document(
+    bytes: &[u8],
+    expected_kind: &str,
+    supported_version: &str,
+) -> Result<EnvelopeDocument, GrepRootCodecError> {
+    decode_probe(bytes, expected_kind, supported_version)?;
+    let document: StrictEnvelopeDocument =
+        serde_json::from_slice(bytes).map_err(|error| GrepRootCodecError::EnvelopeDecode {
+            message: error.to_string(),
+        })?;
+    let document = EnvelopeDocument::from(document);
+    verify_document_checksum(&document)?;
+    Ok(document)
+}
+
+fn decode_probe(
+    bytes: &[u8],
+    expected_kind: &str,
+    supported_version: &str,
+) -> Result<(), GrepRootCodecError> {
     let probe: EnvelopeProbe =
         serde_json::from_slice(bytes).map_err(|error| GrepRootCodecError::EnvelopeDecode {
             message: error.to_string(),
@@ -242,19 +293,18 @@ fn decode_document(
         });
     }
     verify_version(&probe.format_version, supported_version)?;
+    Ok(())
+}
 
-    let document: EnvelopeDocument =
-        serde_json::from_slice(bytes).map_err(|error| GrepRootCodecError::EnvelopeDecode {
-            message: error.to_string(),
-        })?;
+fn verify_document_checksum(document: &EnvelopeDocument) -> Result<(), GrepRootCodecError> {
     let actual = sha256_digest(document.payload.get().as_bytes());
     if actual != document.payload_checksum {
         return Err(GrepRootCodecError::ChecksumMismatch {
-            expected: document.payload_checksum,
+            expected: document.payload_checksum.clone(),
             actual,
         });
     }
-    Ok(document)
+    Ok(())
 }
 
 fn decode_payload<T: DeserializeOwned>(

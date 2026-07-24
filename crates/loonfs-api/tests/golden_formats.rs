@@ -14,10 +14,9 @@
 //! - If a fixture stops decoding, the current reader can no longer read bytes
 //!   another implementation of the same format version wrote — a
 //!   compatibility break once that format is deployed.
-//! - Additive payload fields must keep decoding (`*_tolerates_additive_*`):
-//!   that is the format's only same-version evolution mechanism, made
-//!   possible by checksumming the stored payload bytes rather than a
-//!   re-encoding.
+//! - Additive payload fields in immutable families must keep decoding
+//!   (`*_tolerates_additive_*`). Mutable control objects reject unknown
+//!   fields so an older reader cannot erase them during a guarded rewrite.
 
 use loonfs_api::wire::control::{
     decode_control_object, encode_control_object, CheckpointOwner, CheckpointRecordLifecycle,
@@ -354,6 +353,42 @@ where
     assert_eq!(decoded, envelope);
 }
 
+fn control_document_with_payload_edit(
+    fixture: &str,
+    edit: impl FnOnce(&mut serde_json::Value),
+) -> Vec<u8> {
+    let mut document: serde_json::Value =
+        serde_json::from_slice(&read_golden(fixture)).expect("decode control fixture");
+    edit(&mut document["payload"]);
+    let payload = serde_json::to_string(&document["payload"]).expect("encode edited payload");
+    document["payload_checksum"] = serde_json::Value::from(sha256_digest(payload.as_bytes()));
+    format!(
+        "{{\"kind\":{},\"format_version\":{},\"writer_version\":{},\"payload_checksum\":{},\"payload\":{}}}",
+        document["kind"],
+        document["format_version"],
+        document["writer_version"],
+        document["payload_checksum"],
+        payload,
+    )
+    .into_bytes()
+}
+
+fn assert_control_payload_edit_is_corrupt<T>(
+    fixture: &str,
+    kind: ControlObjectKind,
+    edit: impl FnOnce(&mut serde_json::Value),
+) where
+    T: DeserializeOwned + Debug,
+{
+    let edited = control_document_with_payload_edit(fixture, edit);
+    let error = decode_control_object::<T>(&edited, kind)
+        .expect_err("unknown mutable payload field must be rejected");
+    assert!(
+        matches!(error, EnvelopeCodecError::PayloadDecode(_)),
+        "unexpected error for {kind:?}: {error}"
+    );
+}
+
 #[test]
 fn head_state_reading_is_fail_closed_on_unknown_lifecycle_states() {
     // An active head encodes without the field at all: the golden fixture
@@ -566,6 +601,113 @@ fn control_objects_match_golden_bytes() {
             created_at_ms: 1_000,
             state: UploadSessionLifecycle::Condemned,
         },
+    );
+}
+
+#[test]
+fn every_mutable_control_payload_rejects_unknown_fields_as_corruption() {
+    let add_unknown = |payload: &mut serde_json::Value| {
+        payload["field_from_the_future"] = serde_json::Value::from(true);
+    };
+    assert_control_payload_edit_is_corrupt::<HeadState>(
+        "control_wal_head.v1.json",
+        ControlObjectKind::WalHead,
+        add_unknown,
+    );
+    assert_control_payload_edit_is_corrupt::<WalFloorState>(
+        "control_wal_floor.v1.json",
+        ControlObjectKind::WalFloor,
+        add_unknown,
+    );
+    assert_control_payload_edit_is_corrupt::<MetadataRootState>(
+        "control_metadata_root.v1.json",
+        ControlObjectKind::MetadataRoot,
+        add_unknown,
+    );
+    assert_control_payload_edit_is_corrupt::<CheckpointRecordState>(
+        "control_checkpoint_record.v1.json",
+        ControlObjectKind::CheckpointRecord,
+        add_unknown,
+    );
+    assert_control_payload_edit_is_corrupt::<UploadSessionState>(
+        "control_upload_session.v1.json",
+        ControlObjectKind::UploadSession,
+        add_unknown,
+    );
+    assert_control_payload_edit_is_corrupt::<NamespaceConfigState>(
+        "control_namespace_config.v1.json",
+        ControlObjectKind::NamespaceConfig,
+        add_unknown,
+    );
+    assert_control_payload_edit_is_corrupt::<ContentStoreDescriptorState>(
+        "control_content_store_descriptor.v1.json",
+        ControlObjectKind::ContentStoreDescriptor,
+        add_unknown,
+    );
+}
+
+#[test]
+fn mutable_control_nested_structs_reject_unknown_fields_as_corruption() {
+    assert_control_payload_edit_is_corrupt::<HeadState>(
+        "control_wal_head.v1.json",
+        ControlObjectKind::WalHead,
+        |payload| payload["writer"]["field_from_the_future"] = serde_json::Value::from(true),
+    );
+    assert_control_payload_edit_is_corrupt::<HeadState>(
+        "control_wal_head.v1.json",
+        ControlObjectKind::WalHead,
+        |payload| {
+            payload["visible_wal_tip"]["field_from_the_future"] = serde_json::Value::from(true);
+        },
+    );
+    assert_control_payload_edit_is_corrupt::<CheckpointRecordState>(
+        "control_checkpoint_record.v1.json",
+        ControlObjectKind::CheckpointRecord,
+        |payload| payload["owner"]["field_from_the_future"] = serde_json::Value::from(true),
+    );
+    assert_control_payload_edit_is_corrupt::<UploadSessionState>(
+        "control_upload_session.v1.json",
+        ControlObjectKind::UploadSession,
+        |payload| payload["completed"]["field_from_the_future"] = serde_json::Value::from(true),
+    );
+    assert_control_payload_edit_is_corrupt::<UploadSessionState>(
+        "control_upload_session.v1.json",
+        ControlObjectKind::UploadSession,
+        |payload| {
+            payload["staged_content_ref"]["field_from_the_future"] = serde_json::Value::from(true);
+        },
+    );
+}
+
+#[test]
+fn mutable_control_enums_fail_closed_on_unknown_variants() {
+    assert_control_payload_edit_is_corrupt::<HeadState>(
+        "control_wal_head.v1.json",
+        ControlObjectKind::WalHead,
+        |payload| payload["state"] = serde_json::Value::from("future_state"),
+    );
+    assert_control_payload_edit_is_corrupt::<UploadSessionState>(
+        "control_upload_session.v1.json",
+        ControlObjectKind::UploadSession,
+        |payload| {
+            payload["staged_content_ref"]["kind"] = serde_json::Value::from("future_content_kind");
+        },
+    );
+}
+
+#[test]
+fn mutable_control_envelope_rejects_unknown_fields_as_corruption() {
+    let mut document: serde_json::Value =
+        serde_json::from_slice(&read_golden("control_wal_head.v1.json"))
+            .expect("decode control fixture");
+    document["field_from_the_future"] = serde_json::Value::from(true);
+    let edited = serde_json::to_vec(&document).expect("encode edited envelope");
+
+    let error = decode_control_object::<HeadState>(&edited, ControlObjectKind::WalHead)
+        .expect_err("unknown mutable envelope field must be rejected");
+    assert!(
+        matches!(error, EnvelopeCodecError::EnvelopeDecode(_)),
+        "unexpected error: {error}"
     );
 }
 

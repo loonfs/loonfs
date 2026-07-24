@@ -6,11 +6,11 @@ use crate::envelope::EnvelopeCodecError;
 use crate::v0::UploadMode;
 use crate::WriterEpoch;
 use crate::{
-    ChangeSeq, CheckpointId, CommitId, ContentRef, ContentStoreId, InodeId, ManifestId,
-    ManifestObjectId, NamePolicy, NamespaceId, UploadId, WalSegmentId, ROOT_INODE_ID,
+    ChangeSeq, CheckpointId, CommitId, ContentRef, ContentRefKind, ContentStoreId, InodeId,
+    ManifestId, ManifestObjectId, NamePolicy, NamespaceId, UploadId, WalSegmentId, ROOT_INODE_ID,
 };
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// Selects one independently versioned mutable control-object family.
 ///
@@ -87,6 +87,7 @@ impl ControlObjectKind {
 ///
 /// See [namespaces and identity](../../../docs/specs/format.md#21-namespaces-and-identity).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NamespaceConfigState {
     /// Namespace whose durable tree owns this configuration object.
     pub namespace_id: NamespaceId,
@@ -108,6 +109,7 @@ pub struct NamespaceConfigState {
 /// and actual deletion additionally requires delete-time re-verification
 /// (format spec, "Garbage collection").
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WalFloorState {
     /// Namespace whose retained history this floor bounds.
     pub namespace_id: NamespaceId,
@@ -127,6 +129,7 @@ pub struct WalFloorState {
 /// manifest (pure compaction), and a lower-seq replacement no-ops. This
 /// object never defines live visibility.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MetadataRootState {
     /// Namespace whose materialized file set this root selects.
     pub namespace_id: NamespaceId,
@@ -146,6 +149,7 @@ pub struct MetadataRootState {
 ///
 /// See [immutable content rules](../../../docs/specs/format.md#16-immutable-content-rules).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ContentStoreDescriptorState {
     /// Content-store identity that must agree with the descriptor's durable key.
     pub content_store_id: ContentStoreId,
@@ -184,7 +188,7 @@ impl std::fmt::Display for CheckpointRecordLifecycle {
 /// Durable owner of a checkpoint record: the party whose lifecycle decides
 /// when the pin is released.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CheckpointOwner {
     /// An operator-created pin, released explicitly by checkpoint id or by
     /// its declared expiry. The name is a label, not a key: several records
@@ -211,6 +215,7 @@ pub enum CheckpointOwner {
 /// against the floor, and a failed verification flips the record to
 /// `released`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CheckpointRecordState {
     /// Deterministic record identity derived from basis and owner identity.
     pub checkpoint_id: CheckpointId,
@@ -262,6 +267,7 @@ pub struct WalSegmentPointer {
 /// commit validity, takeover permission, or expiry, and no wall-clock
 /// comparison may gate a publish.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WriterBlock {
     /// Stable writer label supplied by the embedding process for diagnostics.
     pub writer_id: String,
@@ -321,7 +327,7 @@ impl NamespaceState {
 /// Carries the authoritative visibility, allocation, and fencing state of a namespace.
 ///
 /// See [head update authority](../../../docs/specs/format.md#14-head-update-authority).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct HeadState {
     /// Namespace whose live history this head governs.
     pub namespace_id: NamespaceId,
@@ -351,6 +357,66 @@ pub struct HeadState {
     pub state: NamespaceState,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StrictHeadState {
+    namespace_id: NamespaceId,
+    seq: ChangeSeq,
+    head_commit_id: CommitId,
+    writer_epoch: WriterEpoch,
+    #[serde(default)]
+    writer: Option<WriterBlock>,
+    next_inode_id: InodeId,
+    #[serde(default)]
+    visible_wal_tip: Option<StrictWalSegmentPointer>,
+    #[serde(default)]
+    recent_segments: Vec<StrictWalSegmentPointer>,
+    #[serde(default)]
+    state: NamespaceState,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StrictWalSegmentPointer {
+    object_key: String,
+    segment_id: WalSegmentId,
+    start_seq: ChangeSeq,
+    end_seq: ChangeSeq,
+    payload_checksum: String,
+}
+
+impl From<StrictWalSegmentPointer> for WalSegmentPointer {
+    fn from(pointer: StrictWalSegmentPointer) -> Self {
+        Self {
+            object_key: pointer.object_key,
+            segment_id: pointer.segment_id,
+            start_seq: pointer.start_seq,
+            end_seq: pointer.end_seq,
+            payload_checksum: pointer.payload_checksum,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for HeadState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let state = StrictHeadState::deserialize(deserializer)?;
+        Ok(Self {
+            namespace_id: state.namespace_id,
+            seq: state.seq,
+            head_commit_id: state.head_commit_id,
+            writer_epoch: state.writer_epoch,
+            writer: state.writer,
+            next_inode_id: state.next_inode_id,
+            visible_wal_tip: state.visible_wal_tip.map(Into::into),
+            recent_segments: state.recent_segments.into_iter().map(Into::into).collect(),
+            state: state.state,
+        })
+    }
+}
+
 const GENESIS_COMMIT_ID: &str = "c_00000000000000000000000000000000";
 
 impl HeadState {
@@ -373,6 +439,7 @@ impl HeadState {
 
 /// Records the immutable content selected when an upload session completed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CompletedUpload {
     /// Verified content reference returned by every idempotent completion retry.
     pub content_ref: ContentRef,
@@ -396,7 +463,7 @@ pub enum UploadSessionLifecycle {
 /// Tracks one durable content-upload workflow independently of commit publication.
 ///
 /// See [upload before publish](../../../docs/specs/format.md#242-upload-before-publish).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct UploadSessionState {
     /// Namespace authorized to consume the staged content.
     pub namespace_id: NamespaceId,
@@ -419,6 +486,77 @@ pub struct UploadSessionState {
     pub created_at_ms: u64,
     /// Guarded lifecycle that prevents upload operations racing with cleanup.
     pub state: UploadSessionLifecycle,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StrictUploadSessionState {
+    namespace_id: NamespaceId,
+    upload_id: UploadId,
+    #[serde(default)]
+    mode: UploadMode,
+    #[serde(default)]
+    direct_put_content_ref: Option<StrictContentRef>,
+    #[serde(default)]
+    staged_content_ref: Option<StrictContentRef>,
+    #[serde(default)]
+    completed: Option<StrictCompletedUpload>,
+    created_at_ms: u64,
+    state: UploadSessionLifecycle,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StrictCompletedUpload {
+    content_ref: StrictContentRef,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StrictContentRef {
+    kind: MutableContentRefKind,
+    digest: String,
+    size_bytes: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum MutableContentRefKind {
+    WholeFileV0,
+}
+
+impl From<StrictContentRef> for ContentRef {
+    fn from(content_ref: StrictContentRef) -> Self {
+        let kind = match content_ref.kind {
+            MutableContentRefKind::WholeFileV0 => ContentRefKind::WholeFileV0,
+        };
+        Self {
+            kind,
+            digest: content_ref.digest,
+            size_bytes: content_ref.size_bytes,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for UploadSessionState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let state = StrictUploadSessionState::deserialize(deserializer)?;
+        Ok(Self {
+            namespace_id: state.namespace_id,
+            upload_id: state.upload_id,
+            mode: state.mode,
+            direct_put_content_ref: state.direct_put_content_ref.map(Into::into),
+            staged_content_ref: state.staged_content_ref.map(Into::into),
+            completed: state.completed.map(|completed| CompletedUpload {
+                content_ref: completed.content_ref.into(),
+            }),
+            created_at_ms: state.created_at_ms,
+            state: state.state,
+        })
+    }
 }
 
 /// In-memory view of a control object envelope.
@@ -520,7 +658,7 @@ pub fn decode_control_object<T>(
 where
     T: DeserializeOwned,
 {
-    let decoded = crate::envelope::decode_json_envelope(
+    let decoded = crate::envelope::decode_strict_json_envelope(
         bytes,
         expected_kind.format_version(),
         // The kind registry reports unknown kinds distinctly from
@@ -549,7 +687,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::digest::sha256_digest;
 
     #[test]
     fn control_object_kind_strings_round_trip_and_match_serde() {
@@ -594,37 +731,5 @@ mod tests {
         )
         .expect_err("kind mismatch");
         assert!(matches!(mismatch, EnvelopeCodecError::KindMismatch { .. }));
-    }
-
-    #[test]
-    fn control_object_decode_tolerates_unknown_payload_fields() {
-        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let envelope = HeadStateEnvelope::from_state(
-            ControlObjectKind::WalHead,
-            "test-writer",
-            HeadState::initial(namespace_id),
-        )
-        .expect("envelope");
-        let encoded = encode_control_object(&envelope).expect("encode");
-
-        // Simulate a newer writer adding a payload field: splice it into the
-        // raw payload fragment and re-checksum, the way a v-next writer would.
-        let text = String::from_utf8(encoded).expect("utf8");
-        let future_payload = serde_json::to_string(&envelope.state)
-            .expect("payload json")
-            .replacen('{', "{\"field_from_the_future\":true,", 1);
-        let future_checksum = sha256_digest(future_payload.as_bytes());
-        let future_text = text
-            .replace(
-                &serde_json::to_string(&envelope.state).expect("payload json"),
-                &future_payload,
-            )
-            .replace(&envelope.payload_checksum, &future_checksum);
-
-        let decoded: HeadStateEnvelope =
-            decode_control_object(future_text.as_bytes(), ControlObjectKind::WalHead)
-                .expect("additive payload fields must remain readable");
-        assert_eq!(decoded.state, envelope.state);
-        assert_eq!(decoded.payload_checksum, future_checksum);
     }
 }

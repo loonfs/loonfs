@@ -123,6 +123,7 @@ impl<'de> Deserialize<'de> for GrepManifestId {
 
 /// Small mutable control payload installed at `extensions/grep/root.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GrepRootPointer {
     namespace_id: NamespaceId,
     manifest_id: GrepManifestId,
