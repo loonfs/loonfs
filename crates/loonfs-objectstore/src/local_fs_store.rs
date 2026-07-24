@@ -1,9 +1,11 @@
 //! [`LocalFsStore`]: the local-filesystem [`ObjectStore`] provider.
 //!
-//! This is the dev and test provider. Its correctness contract is identical
-//! to the cloud providers'; its performance shapes are deliberately relaxed
-//! (content-hash etags, whole-file reads, whole-tree listings) and are not
-//! optimization targets.
+//! This is the dev and test provider. On Unix-family platforms, sibling
+//! staging files and atomic rename-replace give it the same replacement
+//! visibility contract as the cloud providers. Construction fails on other
+//! platforms rather than exposing a weaker contract. Its performance shapes
+//! are deliberately relaxed (content-hash etags, whole-file reads,
+//! whole-tree listings) and are not optimization targets.
 
 use crate::keyspace::validate_segments;
 use crate::object_store::Result;
@@ -23,7 +25,11 @@ use tokio::sync::Mutex;
 /// holding process dies. Never listed as an object (see `is_scratch_name`).
 const STORE_LOCK_FILE_NAME: &str = ".loonfs-store.lock";
 
-/// Implements the object-store contract on a local directory for development and tests.
+/// Implements the object-store contract on a Unix-family local directory.
+///
+/// Replacements are atomic: a concurrent reader observes either the complete
+/// prior object or the complete replacement, never a missing or partial
+/// object.
 #[derive(Debug)]
 pub struct LocalFsStore {
     root: PathBuf,
@@ -33,8 +39,11 @@ pub struct LocalFsStore {
 impl LocalFsStore {
     /// Opens a local store, creating its root directory when necessary.
     ///
-    /// Construction fails when the root cannot be created.
+    /// Construction fails outside Unix-family platforms, where the provider
+    /// does not claim atomic rename-replace support, or when the root cannot
+    /// be created.
     pub fn new(root: impl Into<PathBuf>) -> Result<Self> {
+        require_atomic_rename_replace()?;
         let root = root.into();
         std::fs::create_dir_all(&root).map_err(|err| {
             ObjectStoreError::Configuration(format!(
@@ -184,25 +193,9 @@ impl LocalFsStore {
                 .map_err(|err| io_error(key, err))?;
             file.sync_all().await.map_err(|err| io_error(key, err))?;
 
-            match fs::rename(&temp_path, path).await {
-                Ok(()) => Ok(()),
-                Err(rename_error)
-                    if fs::try_exists(path).await.unwrap_or(false)
-                        && matches!(
-                            rename_error.kind(),
-                            std::io::ErrorKind::AlreadyExists
-                                | std::io::ErrorKind::PermissionDenied
-                        ) =>
-                {
-                    fs::remove_file(path)
-                        .await
-                        .map_err(|err| io_error(key, err))?;
-                    fs::rename(&temp_path, path)
-                        .await
-                        .map_err(|err| io_error(key, err))
-                }
-                Err(rename_error) => Err(io_error(key, rename_error)),
-            }
+            fs::rename(&temp_path, path)
+                .await
+                .map_err(|err| io_error(key, err))
         }
         .await;
 
@@ -363,6 +356,20 @@ impl ObjectStore for LocalFsStore {
             ),
         )
     }
+}
+
+#[cfg(unix)]
+fn require_atomic_rename_replace() -> Result<()> {
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn require_atomic_rename_replace() -> Result<()> {
+    Err(ObjectStoreError::Configuration(
+        "local filesystem provider requires atomic rename-replace and is supported only on \
+         Unix-family platforms"
+            .to_owned(),
+    ))
 }
 
 async fn list_prefix_for_root(root: PathBuf, prefix: String) -> Result<Vec<String>> {
@@ -590,7 +597,26 @@ mod tests {
     use bytes::Bytes;
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
+    use tokio::sync::Barrier;
+
+    #[test]
+    fn construction_requires_atomic_rename_replace_support() {
+        let temp_dir = TestDir::new("construction-gate");
+        let result = LocalFsStore::new(temp_dir.path());
+
+        #[cfg(unix)]
+        assert!(result.is_ok());
+
+        #[cfg(not(unix))]
+        assert!(matches!(
+            result,
+            Err(ObjectStoreError::Configuration(message))
+                if message.contains("requires atomic rename-replace")
+                    && message.contains("Unix-family")
+        ));
+    }
 
     #[tokio::test]
     async fn overwrite_refreshes_head_and_visible_bytes() {
@@ -627,6 +653,66 @@ mod tests {
         assert_eq!(head.etag, second.etag);
         assert_eq!(head.size_bytes, second.size_bytes);
         assert_ne!(first, second);
+    }
+
+    /// Readers race each overwrite rename to exercise replacement visibility across runtime workers.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_readers_observe_complete_replacement_generations() {
+        const PAYLOAD_BYTES: usize = 16 * 1024;
+        const READER_COUNT: usize = 4;
+        const REPLACEMENT_COUNT: u8 = 32;
+
+        let temp_dir = TestDir::new("atomic-replacement");
+        let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("create local fs store"));
+        let key = wal_head("ns-atomic-replacement");
+        store
+            .put(
+                &key,
+                Bytes::from(vec![0; PAYLOAD_BYTES]),
+                PutMode::Overwrite,
+            )
+            .await
+            .expect("seed replacement object");
+
+        let round_barrier = Arc::new(Barrier::new(READER_COUNT + 1));
+        let mut readers = Vec::new();
+        for _ in 0..READER_COUNT {
+            let reader = Arc::clone(&store);
+            let reader_key = key.clone();
+            let reader_barrier = Arc::clone(&round_barrier);
+            readers.push(tokio::spawn(async move {
+                for _ in 0..REPLACEMENT_COUNT {
+                    reader_barrier.wait().await;
+                    let bytes = reader
+                        .get(&reader_key, None)
+                        .await
+                        .expect("read during replacement")
+                        .expect("replacement key remains present");
+                    assert_eq!(bytes.len(), PAYLOAD_BYTES);
+                    let generation = bytes[0];
+                    assert!(generation <= REPLACEMENT_COUNT);
+                    assert!(bytes.iter().all(|byte| *byte == generation));
+                    reader_barrier.wait().await;
+                }
+            }));
+        }
+
+        for generation in 1..=REPLACEMENT_COUNT {
+            round_barrier.wait().await;
+            store
+                .put(
+                    &key,
+                    Bytes::from(vec![generation; PAYLOAD_BYTES]),
+                    PutMode::Overwrite,
+                )
+                .await
+                .expect("replace object");
+            round_barrier.wait().await;
+        }
+
+        for reader in readers {
+            reader.await.expect("reader task");
+        }
     }
 
     #[tokio::test]

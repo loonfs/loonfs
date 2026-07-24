@@ -24,7 +24,7 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum StoreConfig {
-    /// Stores objects beneath a directory using filesystem-backed compare-and-swap.
+    /// Stores objects beneath a Unix-family directory using atomic filesystem replacement.
     LocalFs {
         /// Directory created or opened as the physical store root.
         root: String,

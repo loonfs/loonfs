@@ -21,7 +21,7 @@ use std::sync::Arc;
 /// Identifies the concrete provider backing a [`ConfiguredObjectStore`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfiguredObjectStoreKind {
-    /// Stores objects beneath a local filesystem root.
+    /// Stores objects beneath a Unix-family local filesystem root.
     LocalFs,
     /// Uses AWS S3 through its SigV4 API.
     AwsS3,
@@ -70,7 +70,8 @@ enum ConfiguredObjectStoreInner {
 impl ConfiguredObjectStore {
     /// Opens a local-filesystem provider with optional logical key scoping.
     ///
-    /// Construction fails when the root cannot be created or `key_prefix` is invalid.
+    /// Construction fails outside Unix-family platforms, when the root cannot
+    /// be created, or when `key_prefix` is invalid.
     pub fn local_fs(root: impl Into<PathBuf>, key_prefix: Option<&str>) -> Result<Self> {
         Ok(Self {
             kind: ConfiguredObjectStoreKind::LocalFs,
