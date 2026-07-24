@@ -1,11 +1,11 @@
 //! Release rules for fork-owned and missing-basis checkpoint records.
 
 use super::config::GcConfig;
-use super::reap::list_prefix;
 use crate::checkpoint::record::{encode_checkpoint_record, set_checkpoint_record_state};
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
 use crate::namespace::control::{read_head_object, ControlObjectLoadError};
+use futures::StreamExt;
 use loonfs_api::wire::control::{
     decode_control_object, CheckpointOwner, CheckpointRecordLifecycle, CheckpointRecordState,
     ControlObjectKind, NamespaceState,
@@ -174,8 +174,9 @@ pub(super) async fn fork_target_proven_gone<S: ObjectStore + ?Sized>(
         Ok(loaded) => Ok(loaded.envelope.state.state == NamespaceState::Deleted),
         Err(ControlObjectLoadError::MissingObject { .. }) => {
             let target_prefix = namespace_prefix(target_namespace_id);
-            let tree = list_prefix(store, &target_prefix).await?;
-            if !tree.is_empty() {
+            let mut tree = store.list_prefix_stream(&target_prefix);
+            if let Some(item) = tree.next().await {
+                item.map_err(|error| CoreError::store(&target_prefix, &error))?;
                 // Either a bootstrap is in progress or rule 10 has not
                 // reaped the partial tree yet; ambiguity retains.
                 return Ok(false);

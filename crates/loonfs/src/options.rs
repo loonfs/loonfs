@@ -14,13 +14,14 @@ use loonfs_api::v0::{
 use loonfs_core::publish::WalTailPolicy;
 
 /// Options for one maintenance step.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MaintenanceStepOptions {
     /// Flush the visible WAL tail into metadata tables when it reaches this many
     /// segments.
     pub max_wal_tail_segments: u64,
-    /// Run the mark-and-sweep garbage collector after the step's
-    /// flush work. Nothing sweeps unless this is set.
+    /// Run the mark-and-sweep garbage collector after the step's flush work.
+    /// Nothing sweeps unless this is set; an absent `max_objects` inside the
+    /// config resolves to the per-step default.
     pub gc: Option<GcConfig>,
 }
 
@@ -41,7 +42,13 @@ impl MaintenanceStepOptions {
             max_wal_tail_segments: request
                 .max_wal_tail_segments
                 .unwrap_or(defaults.max_wal_tail_segments),
-            gc: request.gc.map(gc_config_from_request),
+            gc: request.gc.map(|request| {
+                let mut config = gc_config_from_request(request);
+                if config.max_objects.is_none() {
+                    config.max_objects = Some(loonfs_core::limits::DEFAULT_GC_MAX_OBJECTS);
+                }
+                config
+            }),
         }
     }
 }
@@ -52,6 +59,8 @@ pub fn gc_config_from_request(request: GcRequest) -> GcConfig {
     GcConfig {
         grace_window_ms: request.grace_window_ms.unwrap_or(defaults.grace_window_ms),
         reap_window_ms: request.reap_window_ms.unwrap_or(defaults.reap_window_ms),
+        max_objects: request.max_objects,
+        cursor: request.cursor,
     }
 }
 
@@ -69,6 +78,7 @@ pub fn gc_response_from_report(namespace_id: NamespaceId, report: GcReport) -> G
         retained_candidates: report.retained_candidates,
         degraded_retention: report.degraded_retention,
         incomplete_namespace_ignored: report.incomplete_namespace_ignored,
+        next_cursor: report.next_cursor,
     }
 }
 
@@ -258,4 +268,40 @@ pub struct UndeleteOptions {
 pub struct ListChangesOptions {
     /// Page limit; `None` resolves the default pagination policy.
     pub limit: Option<EffectiveLimit>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_gc_stays_unbounded_while_step_gc_gets_the_default_budget() {
+        let explicit = gc_config_from_request(GcRequest::default());
+        assert_eq!(explicit.max_objects, None);
+        assert_eq!(explicit.cursor, None);
+
+        let step = MaintenanceStepOptions::from_request(MaintenanceStepRequest {
+            max_wal_tail_segments: None,
+            gc: Some(GcRequest::default()),
+        });
+        assert_eq!(
+            step.gc.expect("GC opted in").max_objects,
+            Some(loonfs_core::limits::DEFAULT_GC_MAX_OBJECTS)
+        );
+    }
+
+    #[test]
+    fn step_gc_preserves_explicit_budget_and_cursor() {
+        let step = MaintenanceStepOptions::from_request(MaintenanceStepRequest {
+            max_wal_tail_segments: None,
+            gc: Some(GcRequest {
+                max_objects: Some(7),
+                cursor: Some("opaque".to_owned()),
+                ..GcRequest::default()
+            }),
+        });
+        let gc = step.gc.expect("GC opted in");
+        assert_eq!(gc.max_objects, Some(7));
+        assert_eq!(gc.cursor.as_deref(), Some("opaque"));
+    }
 }

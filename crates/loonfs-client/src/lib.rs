@@ -567,6 +567,8 @@ impl Client {
     }
 
     /// Runs one mark-and-sweep garbage-collection pass (admin plane).
+    /// `GcRequest::max_objects` bounds one invocation; pass a returned
+    /// `GcResponse::next_cursor` back as `GcRequest::cursor` to resume.
     /// Nothing sweeps without this explicit call or a maintenance-step
     /// opt-in.
     pub fn gc_namespace(

@@ -242,7 +242,7 @@
           "admin"
         ],
         "summary": "Collect garbage",
-        "description": "Runs one mark-and-sweep garbage-collection pass under the format's safety rules (grace window, delete-time re-verification, retention wins). Incomplete namespaces are ignored without listing or deletion. Nothing sweeps without this explicit call or a maintenance-step opt-in.",
+        "description": "Runs one mark-and-sweep garbage-collection pass under the format's safety rules (grace window, delete-time re-verification, retention wins). max_objects bounds candidate decisions and cursor resumes enumeration; every resumed invocation rebuilds safety roots. Incomplete namespaces are ignored without listing or deletion. Nothing sweeps without this explicit call or a maintenance-step opt-in.",
         "operationId": "gc_namespace",
         "parameters": [
           {
@@ -256,7 +256,7 @@
           }
         ],
         "requestBody": {
-          "description": "Optional window overrides",
+          "description": "Optional window, budget, and resume overrides",
           "content": {
             "application/json": {
               "schema": {
@@ -575,7 +575,7 @@
           "admin"
         ],
         "summary": "Run maintenance step",
-        "description": "Runs one bounded maintenance step: flushes the WAL tail once it reaches the threshold, and optionally runs a garbage-collection pass afterwards. Losing the root race is an outcome, not an error.",
+        "description": "Runs one bounded maintenance step: flushes the WAL tail once it reaches the threshold, and optionally runs a garbage-collection pass afterwards. Step-driven GC defaults to 1024 candidates and returns its cursor for a later step rather than looping internally. Losing the root race is an outcome, not an error.",
         "operationId": "maintenance_step",
         "parameters": [
           {
@@ -4517,6 +4517,13 @@
         "type": "object",
         "description": "Optional overrides for one garbage-collection pass. Absent fields use\nthe server's conservative defaults.",
         "properties": {
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Opaque resume token returned as `next_cursor` by an earlier pass\nagainst the same namespace."
+          },
           "grace_window_ms": {
             "type": [
               "integer",
@@ -4524,6 +4531,15 @@
             ],
             "format": "int64",
             "description": "Objects younger than this are never deleted, reachable or not. The\nwindow has a derived safety floor (publication budgets plus provider\ndeadlines); a smaller value is rejected as `invalid_request`.",
+            "minimum": 0
+          },
+          "max_objects": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Maximum candidates examined by this invocation. Omit to retain the\nrun-to-completion behavior.",
             "minimum": 0
           },
           "reap_window_ms": {
@@ -4593,6 +4609,13 @@
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
             "description": "Namespace the pass ran against."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Opaque resume token when more candidates remain. Resuming rebuilds\nevery safety proof; the token carries enumeration position only and\nis valid only against the same namespace."
           },
           "released_fork_checkpoints": {
             "type": "integer",

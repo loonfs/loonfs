@@ -61,6 +61,7 @@ pub use loonfs_api::{
     PROFILE_QUERY_V0, PROTOCOL_VERSION,
 };
 pub use loonfs_core::cache::MetadataTableCacheConfig;
+pub use loonfs_core::limits::DEFAULT_GC_MAX_OBJECTS;
 pub use loonfs_core::{
     BootstrapNamespaceError, DeleteNamespaceOptions, Error as CoreError, ErrorCode, ErrorKind,
     GcConfig, GcReport, WriterFence,

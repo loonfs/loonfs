@@ -599,6 +599,10 @@ pub(crate) struct AdminGcArgs {
     /// (server default when omitted).
     #[arg(long)]
     pub reap_window_ms: Option<u64>,
+    /// Examine at most this many candidates and return after one bounded
+    /// pass. Omit to loop bounded passes through completion.
+    #[arg(long)]
+    pub max_objects: Option<u64>,
 }
 
 #[derive(Debug, Subcommand)]

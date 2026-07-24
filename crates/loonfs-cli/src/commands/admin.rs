@@ -79,16 +79,32 @@ async fn run_admin_gc(
     args: AdminGcArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, &args.target).await?;
-    let request = GcRequest {
+    let single_pass = args.max_objects.is_some();
+    let mut request = GcRequest {
         grace_window_ms: args.grace_window_ms,
         reap_window_ms: args.reap_window_ms,
+        max_objects: Some(args.max_objects.unwrap_or(loonfs::DEFAULT_GC_MAX_OBJECTS)),
+        cursor: None,
     };
-    let response = context
-        .target
-        .backend()
-        .gc_namespace(&context.namespace, request)
-        .await
-        .map_err(|error| context.fail(kind, error))?;
+    let mut response = None;
+    loop {
+        let pass = context
+            .target
+            .backend()
+            .gc_namespace(&context.namespace, request.clone())
+            .await
+            .map_err(|error| context.fail(kind, error))?;
+        let next_cursor = pass.next_cursor.clone();
+        match &mut response {
+            Some(total) => accumulate_gc_response(total, pass),
+            None => response = Some(pass),
+        }
+        if single_pass || next_cursor.is_none() {
+            break;
+        }
+        request.cursor = next_cursor;
+    }
+    let response = response.expect("GC loop should run at least once");
 
     Ok(CommandOutput {
         kind,
@@ -96,6 +112,20 @@ async fn run_admin_gc(
         mode: Some(context.mode),
         data: CommandData::GarbageCollected(response),
     })
+}
+
+fn accumulate_gc_response(total: &mut loonfs_api::GcResponse, pass: loonfs_api::GcResponse) {
+    total.deleted_wal_segments += pass.deleted_wal_segments;
+    total.deleted_metadata_tables += pass.deleted_metadata_tables;
+    total.deleted_manifests += pass.deleted_manifests;
+    total.deleted_checkpoint_records += pass.deleted_checkpoint_records;
+    total.released_fork_checkpoints += pass.released_fork_checkpoints;
+    total.deleted_upload_sessions += pass.deleted_upload_sessions;
+    total.released_missing_basis_checkpoints += pass.released_missing_basis_checkpoints;
+    total.retained_candidates += pass.retained_candidates;
+    total.degraded_retention |= pass.degraded_retention;
+    total.incomplete_namespace_ignored |= pass.incomplete_namespace_ignored;
+    total.next_cursor = pass.next_cursor;
 }
 
 async fn run_admin_checkpoint(

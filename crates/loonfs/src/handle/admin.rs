@@ -149,8 +149,10 @@ impl FsAdmin {
 
     /// Runs the v1 mark-and-sweep garbage collector for one namespace.
     ///
-    /// Never runs implicitly: callers opt in here or through
-    /// [`MaintenanceStepOptions::gc`].
+    /// `GcConfig::max_objects` bounds one invocation; return
+    /// `GcReport::next_cursor` as `GcConfig::cursor` to resume. Every resume
+    /// rebuilds the live roots. Never runs implicitly: callers opt in here or
+    /// through [`MaintenanceStepOptions::gc`].
     pub async fn gc_namespace(
         &self,
         namespace_id: &NamespaceId,

@@ -35,6 +35,12 @@ impl FsCore {
     ) -> Result<MaintenanceStepResult> {
         let span = tracing::Span::current();
         self.record_trace_context(&span);
+        let mut options = options;
+        if let Some(gc) = &mut options.gc {
+            if gc.max_objects.is_none() {
+                gc.max_objects = Some(loonfs_core::limits::DEFAULT_GC_MAX_OBJECTS);
+            }
+        }
         if options.max_wal_tail_segments == 0 {
             return Err(RuntimeError::Config(
                 "max_wal_tail_segments must be greater than zero".to_owned(),
@@ -241,8 +247,9 @@ impl FsCore {
 
     /// Runs the v1 mark-and-sweep garbage collector for one namespace.
     ///
-    /// Never runs implicitly: callers opt in here or through
-    /// [`MaintenanceStepOptions::gc`].
+    /// Bounded calls return an enumeration cursor; every resume rebuilds the
+    /// current live roots. Never runs implicitly: callers opt in here or
+    /// through [`MaintenanceStepOptions::gc`].
     pub(crate) async fn gc_namespace(
         &self,
         namespace_id: &NamespaceId,

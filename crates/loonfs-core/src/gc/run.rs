@@ -1,14 +1,14 @@
 //! The GC entry point: orchestrates root collection, verification,
-//! and the sweep.
+//! and the bounded, resumable sweep.
 
 use super::config::{GcConfig, GcReport};
+use super::cursor::{CandidateFamily, GcCursor};
 use super::fork_checkpoints::{
     maybe_release_fork_checkpoint, release_missing_basis_checkpoint, ForkCheckpointSweep,
 };
-use super::live_set::{collect_live_set, SweepVerifier};
+use super::live_set::{collect_live_set, LiveSet, SweepVerifier};
 use super::reap::{
-    condemn_checkpoint_if_aged, delete_if_aged, list_prefix, manifest_object_id_of,
-    CheckpointCondemn,
+    condemn_checkpoint_if_aged, delete_if_aged, manifest_object_id_of, CheckpointCondemn,
 };
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
@@ -17,12 +17,11 @@ use crate::namespace::catalog::{
     NamespaceInitializationState,
 };
 use crate::protocol::{condemn_upload_session_if_aged, UploadSessionSweep};
+use futures::StreamExt;
 use loonfs_api::{NamespaceId, UploadId};
-use loonfs_objectstore::keys::{
-    checkpoint_prefix, metadata_manifest_prefix, metadata_table_prefix, upload_session_prefix,
-    wal_segment_prefix,
-};
 use loonfs_objectstore::ObjectStore;
+use std::sync::Arc;
+
 pub async fn gc_namespace<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -35,9 +34,7 @@ pub async fn gc_namespace<S: ObjectStore + ?Sized>(
 
 /// How many sweep candidates may be decided against one live set before the
 /// set is re-collected (rule 3: candidate selection may be stale, deletion
-/// may not). On a large sweep, deciding every candidate against a single
-/// snapshot would leave the last deletions working from an arbitrarily old
-/// view; re-collecting every chunk bounds that staleness.
+/// may not).
 const SWEEP_REVERIFY_CHUNK: usize = 1024;
 
 pub(super) async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
@@ -58,189 +55,222 @@ pub(super) async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
         });
     }
 
-    // Mark: select sweep candidates against one live-set snapshot. The
-    // selection may be stale (rule 3); the delete-time checks below decide.
-    let mark = collect_live_set(store, namespace_id, config, context).await?;
+    let resume = match config.cursor.as_deref() {
+        Some(token) => GcCursor::decode(token, namespace_id)?,
+        None => GcCursor::initial(namespace_id),
+    };
+
+    // Every invocation rebuilds all roots before interpreting the cursor.
+    // The cursor can skip enumeration only; it never carries safety state.
+    let mark = Arc::new(collect_live_set(store, namespace_id, config, context).await?);
+    let mut sweep = SweepVerifier::seeded(Arc::clone(&mark), reverify_chunk);
     let mut report = GcReport::default();
+    let mut examined = 0_u64;
+    let mut position = resume.clone();
 
-    let candidate_segments = list_prefix(store, &wal_segment_prefix(namespace_id.as_str())).await?;
-    let candidate_tables =
-        list_prefix(store, &metadata_table_prefix(namespace_id.as_str())).await?;
-    let candidate_manifests =
-        list_prefix(store, &metadata_manifest_prefix(namespace_id.as_str())).await?;
-    let candidate_checkpoints =
-        list_prefix(store, &checkpoint_prefix(namespace_id.as_str())).await?;
-    let candidate_upload_sessions =
-        list_prefix(store, &upload_session_prefix(namespace_id.as_str())).await?;
-
-    let segment_candidates: Vec<String> = candidate_segments
-        .into_iter()
-        .filter(|key| !mark.wal_segments.contains(key))
-        .collect();
-    let table_candidates: Vec<String> = candidate_tables
-        .into_iter()
-        .filter(|key| !mark.tables.contains(key))
-        .collect();
-    let manifest_candidates: Vec<String> = candidate_manifests
-        .into_iter()
-        .filter(|key| manifest_object_id_of(key).is_none_or(|id| !mark.manifests.contains(&id)))
-        .collect();
-    let checkpoint_candidates: Vec<String> = candidate_checkpoints
-        .into_iter()
-        .filter(|key| !mark.checkpoint_keys.contains(key))
-        .collect();
-
-    // Sweep: every deletion is decided against a fresh live set (rule 3:
-    // candidate selection may be stale, deletion may not). Zero decisions
-    // separate the mark from the first sweep step, so the mark set seeds
-    // the verifier directly; it is re-collected every `reverify_chunk`
-    // candidates so a large sweep never runs far ahead of its snapshot.
-    let mut sweep = SweepVerifier::seeded(mark, reverify_chunk);
-
-    // Delete data before records. Every readable checkpoint record roots
-    // its basis in the live set, so the pass that deletes a record can
-    // never also delete the data that record was protecting. A crash
-    // mid-sweep leaves orphaned data for the next pass — never a record
-    // whose data vanished underneath it.
-    // WAL segments, metadata tables, and namespace manifests are immutable:
-    // one key can only ever be recreated with identical bytes under their
-    // create-if-absent protocols. Deleting an unreferenced, grace-aged key is
-    // therefore safe without condemnation; a zombie retry can only restore
-    // the same unreferenced bytes for a later pass.
-    for key in segment_candidates {
-        sweep
-            .refresh_if_due(store, namespace_id, config, context)
-            .await?;
-        if sweep.live.wal_segments.contains(&key) {
-            report.retained_candidates += 1;
-            continue;
-        }
-        if delete_if_aged(store, &key, config.grace_window_ms, context, &mut report).await? {
-            report.deleted_wal_segments += 1;
-        }
-    }
-    for key in table_candidates {
-        sweep
-            .refresh_if_due(store, namespace_id, config, context)
-            .await?;
-        // Rule 5: ambiguous roots suppress manifest and table deletion for
-        // the whole pass; degradation seen by any re-collection is sticky.
-        if sweep.degraded {
-            report.retained_candidates += 1;
-            continue;
-        }
-        if sweep.live.tables.contains(&key) {
-            report.retained_candidates += 1;
-            continue;
-        }
-        if delete_if_aged(store, &key, config.grace_window_ms, context, &mut report).await? {
-            report.deleted_metadata_tables += 1;
-        }
-    }
-    for key in manifest_candidates {
-        sweep
-            .refresh_if_due(store, namespace_id, config, context)
-            .await?;
-        if sweep.degraded {
-            report.retained_candidates += 1;
-            continue;
-        }
-        if manifest_object_id_of(&key).is_some_and(|id| sweep.live.manifests.contains(&id)) {
-            report.retained_candidates += 1;
-            continue;
-        }
-        if delete_if_aged(store, &key, config.grace_window_ms, context, &mut report).await? {
-            report.deleted_manifests += 1;
-        }
-    }
-    for key in checkpoint_candidates {
-        sweep
-            .refresh_if_due(store, namespace_id, config, context)
-            .await?;
-        if sweep.live.checkpoint_keys.contains(&key) {
-            report.retained_candidates += 1;
-            continue;
-        }
-        // Active fork-owned records are released by compare-and-swap. Every
-        // collectable mutable record is then condemned under the exact etag
-        // inspected with its age before physical deletion.
-        match maybe_release_fork_checkpoint(store, &key, config, context).await? {
-            ForkCheckpointSweep::Released => {
-                report.released_fork_checkpoints += 1;
+    // Data precedes mutable records. A crash or bounded return can therefore
+    // leave data protected for an extra pass, never a readable record whose
+    // basis was removed underneath it.
+    for &family in &CandidateFamily::ALL[resume.family.index()..] {
+        let prefix = family.prefix(namespace_id);
+        let mut stream = store.list_prefix_stream(&prefix);
+        while let Some(item) = stream.next().await {
+            let key = item.map_err(|error| CoreError::store(&prefix, &error))?;
+            if family == resume.family
+                && resume
+                    .last_key
+                    .as_ref()
+                    .is_some_and(|last_key| key <= *last_key)
+            {
                 continue;
             }
-            ForkCheckpointSweep::Retained => {
-                report.retained_candidates += 1;
-                continue;
+            if config
+                .max_objects
+                .is_some_and(|max_objects| examined >= max_objects)
+            {
+                // This one-key lookahead proves work remains. It performs no
+                // candidate reads or mutations; the key is reconsidered from
+                // the exclusive last-examined position on resume.
+                report.next_cursor = Some(position.encode()?);
+                report.degraded_retention = sweep.degraded;
+                return Ok(report);
             }
-            ForkCheckpointSweep::NotAnActiveFork => {}
-        }
-        match condemn_checkpoint_if_aged(
-            store,
-            namespace_id,
-            &key,
-            config.grace_window_ms,
-            sweep.live.namespace_deleted,
-            context,
-        )
-        .await?
-        {
-            CheckpointCondemn::Delete => {
-                store
-                    .delete(&key)
-                    .await
-                    .map_err(|error| CoreError::store(&key, &error))?;
-                report.deleted_checkpoint_records += 1;
-            }
-            CheckpointCondemn::Retain => report.retained_candidates += 1,
+
+            process_candidate(
+                store,
+                namespace_id,
+                config,
+                context,
+                family,
+                &key,
+                &mark,
+                &mut sweep,
+                &mut report,
+            )
+            .await?;
+            examined = examined.saturating_add(1);
+            position = GcCursor::after(namespace_id, family, key);
         }
     }
-    // Zombie release: an active record whose basis manifest is verifiably
-    // gone can never serve a read — the crash window between the record
-    // write and its verification skipped the release the creator would
-    // have performed. The release is the same compare-and-swap create runs
-    // on verification failure, decided against fresh reads and gated by
-    // the grace window so an in-flight create is never raced.
-    for key in sweep.live.missing_basis_records.clone() {
-        if release_missing_basis_checkpoint(store, namespace_id, &key, config, context).await? {
+
+    report.degraded_retention = sweep.degraded;
+    Ok(report)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn process_candidate<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    config: &GcConfig,
+    context: &MutationContext,
+    family: CandidateFamily,
+    key: &str,
+    mark: &LiveSet,
+    sweep: &mut SweepVerifier,
+    report: &mut GcReport,
+) -> Result<()> {
+    if family == CandidateFamily::UploadSessions {
+        return process_upload_session(store, namespace_id, config, context, key, report).await;
+    }
+
+    if family == CandidateFamily::Checkpoints && mark.missing_basis_records.contains(key) {
+        if release_missing_basis_checkpoint(store, namespace_id, key, config, context).await? {
             report.released_missing_basis_checkpoints += 1;
         } else {
             report.retained_candidates += 1;
         }
+        return Ok(());
     }
 
-    // Upload sessions root nothing and nothing durable references them. An
-    // aged active session is first condemned by one exact-etag CAS; completed
-    // and condemned sessions are already absorbing. A completion that loses
-    // to condemnation observes `upload_not_found`, while a condemn CAS that
-    // loses is retained for a later pass. Writer clocks are never consulted.
-    for key in candidate_upload_sessions {
-        let Some(upload_id) = upload_id_of(&key) else {
-            report.retained_candidates += 1;
-            continue;
-        };
-        match condemn_upload_session_if_aged(
-            store,
-            namespace_id,
-            &upload_id,
-            config.reap_window_ms,
-            context,
-        )
-        .await?
-        {
-            UploadSessionSweep::Delete => {
-                store
-                    .delete(&key)
-                    .await
-                    .map_err(|error| CoreError::store(&key, &error))?;
-                report.deleted_upload_sessions += 1;
-            }
-            UploadSessionSweep::Retain => report.retained_candidates += 1,
+    // Preserve the existing mark selection exactly: objects reachable from
+    // the invocation's root snapshot are skipped, while every selected
+    // candidate is re-verified immediately before its decision.
+    let selected = match family {
+        CandidateFamily::WalSegments => !mark.wal_segments.contains(key),
+        CandidateFamily::MetadataTables => !mark.tables.contains(key),
+        CandidateFamily::Manifests => {
+            manifest_object_id_of(key).is_none_or(|id| !mark.manifests.contains(&id))
         }
+        CandidateFamily::Checkpoints => !mark.checkpoint_keys.contains(key),
+        CandidateFamily::UploadSessions => false,
+    };
+    if !selected {
+        return Ok(());
     }
-    report.degraded_retention = sweep.degraded;
 
-    Ok(report)
+    sweep
+        .refresh_if_due(store, namespace_id, config, context)
+        .await?;
+    match family {
+        CandidateFamily::WalSegments => {
+            if sweep.live.wal_segments.contains(key) {
+                report.retained_candidates += 1;
+            } else if delete_if_aged(store, key, config.grace_window_ms, context, report).await? {
+                report.deleted_wal_segments += 1;
+            }
+        }
+        CandidateFamily::MetadataTables => {
+            // Rule 5 is sticky across every re-collection in this pass.
+            if sweep.degraded || sweep.live.tables.contains(key) {
+                report.retained_candidates += 1;
+            } else if delete_if_aged(store, key, config.grace_window_ms, context, report).await? {
+                report.deleted_metadata_tables += 1;
+            }
+        }
+        CandidateFamily::Manifests => {
+            let live =
+                manifest_object_id_of(key).is_some_and(|id| sweep.live.manifests.contains(&id));
+            if sweep.degraded || live {
+                report.retained_candidates += 1;
+            } else if delete_if_aged(store, key, config.grace_window_ms, context, report).await? {
+                report.deleted_manifests += 1;
+            }
+        }
+        CandidateFamily::Checkpoints => {
+            process_checkpoint(store, namespace_id, config, context, key, sweep, report).await?;
+        }
+        CandidateFamily::UploadSessions => {}
+    }
+    Ok(())
+}
+
+async fn process_checkpoint<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    config: &GcConfig,
+    context: &MutationContext,
+    key: &str,
+    sweep: &SweepVerifier,
+    report: &mut GcReport,
+) -> Result<()> {
+    if sweep.live.checkpoint_keys.contains(key) {
+        report.retained_candidates += 1;
+        return Ok(());
+    }
+    match maybe_release_fork_checkpoint(store, key, config, context).await? {
+        ForkCheckpointSweep::Released => {
+            report.released_fork_checkpoints += 1;
+            return Ok(());
+        }
+        ForkCheckpointSweep::Retained => {
+            report.retained_candidates += 1;
+            return Ok(());
+        }
+        ForkCheckpointSweep::NotAnActiveFork => {}
+    }
+    match condemn_checkpoint_if_aged(
+        store,
+        namespace_id,
+        key,
+        config.grace_window_ms,
+        sweep.live.namespace_deleted,
+        context,
+    )
+    .await?
+    {
+        CheckpointCondemn::Delete => {
+            store
+                .delete(key)
+                .await
+                .map_err(|error| CoreError::store(key, &error))?;
+            report.deleted_checkpoint_records += 1;
+        }
+        CheckpointCondemn::Retain => report.retained_candidates += 1,
+    }
+    Ok(())
+}
+
+async fn process_upload_session<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    config: &GcConfig,
+    context: &MutationContext,
+    key: &str,
+    report: &mut GcReport,
+) -> Result<()> {
+    let Some(upload_id) = upload_id_of(key) else {
+        report.retained_candidates += 1;
+        return Ok(());
+    };
+    match condemn_upload_session_if_aged(
+        store,
+        namespace_id,
+        &upload_id,
+        config.reap_window_ms,
+        context,
+    )
+    .await?
+    {
+        UploadSessionSweep::Delete => {
+            store
+                .delete(key)
+                .await
+                .map_err(|error| CoreError::store(key, &error))?;
+            report.deleted_upload_sessions += 1;
+        }
+        UploadSessionSweep::Retain => report.retained_candidates += 1,
+    }
+    Ok(())
 }
 
 fn upload_id_of(key: &str) -> Option<UploadId> {

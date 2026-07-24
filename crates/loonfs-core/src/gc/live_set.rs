@@ -3,7 +3,6 @@
 
 use super::config::GcConfig;
 use super::fork_checkpoints::fork_target_proven_gone;
-use super::reap::list_prefix;
 use crate::checkpoint::load_namespace_manifest_envelope_if_present;
 use crate::context::MutationContext;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
@@ -11,6 +10,7 @@ use crate::namespace::control::{
     read_head_object, read_metadata_root_object, read_wal_floor_object, ControlObjectLoadError,
 };
 use crate::wal::{load_validated_wal_chain, WalChainLoadRequest};
+use futures::StreamExt;
 use loonfs_api::wire::control::{
     decode_control_object, CheckpointOwner, CheckpointRecordLifecycle, CheckpointRecordState,
     ControlObjectKind, NamespaceState,
@@ -19,6 +19,7 @@ use loonfs_api::{ChangeSeq, ManifestObjectId, NamespaceId};
 use loonfs_objectstore::keys::{checkpoint_prefix, metadata_manifest_object};
 use loonfs_objectstore::ObjectStore;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 /// Everything reachable from the fresh root set (rule 4).
 pub(super) struct LiveSet {
@@ -29,7 +30,7 @@ pub(super) struct LiveSet {
     /// Still-active records whose basis manifest is verifiably absent —
     /// the crash window between record write and verification. The pass
     /// releases them; they never degrade sweeping.
-    pub(super) missing_basis_records: Vec<String>,
+    pub(super) missing_basis_records: BTreeSet<String>,
     /// Record resolution failed somewhere: manifest/table deletion must not
     /// proceed on this pass.
     pub(super) degraded: bool,
@@ -41,14 +42,14 @@ pub(super) struct LiveSet {
 /// live set no staler than `reverify_chunk` candidates. Rule 5 degradation
 /// is sticky for the pass once any collection observes it.
 pub(super) struct SweepVerifier {
-    pub(super) live: LiveSet,
+    pub(super) live: Arc<LiveSet>,
     pub(super) degraded: bool,
     pub(super) reverify_chunk: usize,
     pub(super) decided_since_collect: usize,
 }
 
 impl SweepVerifier {
-    pub(super) fn seeded(live: LiveSet, reverify_chunk: usize) -> Self {
+    pub(super) fn seeded(live: Arc<LiveSet>, reverify_chunk: usize) -> Self {
         Self {
             degraded: live.degraded,
             live,
@@ -65,7 +66,7 @@ impl SweepVerifier {
         context: &MutationContext,
     ) -> Result<()> {
         if self.decided_since_collect >= self.reverify_chunk {
-            self.live = collect_live_set(store, namespace_id, config, context).await?;
+            self.live = Arc::new(collect_live_set(store, namespace_id, config, context).await?);
             self.degraded |= self.live.degraded;
             self.decided_since_collect = 0;
         }
@@ -103,7 +104,7 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
         tables: BTreeSet::new(),
         wal_segments: BTreeSet::new(),
         checkpoint_keys: BTreeSet::new(),
-        missing_basis_records: Vec::new(),
+        missing_basis_records: BTreeSet::new(),
         degraded: false,
         namespace_deleted,
     };
@@ -126,7 +127,10 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
     // revival to protect. The basis becomes collectable after condemnation,
     // while records-last ordering keeps a newly condemned record's basis
     // alive through the pass that performed the CAS.
-    for key in list_prefix(store, &checkpoint_prefix(namespace_id.as_str())).await? {
+    let checkpoints_prefix = checkpoint_prefix(namespace_id.as_str());
+    let mut checkpoint_keys = store.list_prefix_stream(&checkpoints_prefix);
+    while let Some(item) = checkpoint_keys.next().await {
+        let key = item.map_err(|error| CoreError::store(&checkpoints_prefix, &error))?;
         let Some(body) = store
             .get_with_metadata(&key)
             .await

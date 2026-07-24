@@ -1,7 +1,8 @@
 //! Behavior tests for namespace GC.
 
-use super::config::GcConfig;
-use super::reap::{condemn_checkpoint_if_aged, list_prefix, CheckpointCondemn};
+use super::config::{GcConfig, GcReport};
+use super::live_set::collect_live_set;
+use super::reap::{condemn_checkpoint_if_aged, CheckpointCondemn};
 use super::run::{gc_namespace, gc_namespace_with_reverify_chunk};
 use crate::checkpoint::advance_retention_floor;
 use crate::checkpoint::record::set_checkpoint_record_state;
@@ -15,10 +16,11 @@ use loonfs_api::wire::control::{
 };
 use loonfs_api::{ContentRef, ContentStoreId, NamespaceId, UploadId};
 use loonfs_objectstore::keys::{
-    checkpoint_prefix, metadata_manifest_object, metadata_manifest_prefix, metadata_table_prefix,
-    namespace_config, wal_head, wal_segment_prefix,
+    checkpoint_prefix, metadata_manifest_object, metadata_manifest_prefix, metadata_table,
+    metadata_table_prefix, namespace_config, wal_head, wal_segment, wal_segment_prefix,
 };
 use loonfs_objectstore::ObjectStore;
+use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 
 use crate::namespace::bootstrap::bootstrap_namespace;
@@ -31,7 +33,7 @@ use futures::stream::BoxStream;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{ByteRange, ObjectBody, ObjectMetadata, ObjectStoreError, PutMode};
 use loonfs_test_support::stores::{
-    BlockingStore, KeyPredicate, MetadataMapStore, OperationContext, OperationKind,
+    BlockingStore, CountingStore, KeyPredicate, MetadataMapStore, OperationContext, OperationKind,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tempfile::tempdir;
@@ -43,6 +45,8 @@ fn config() -> GcConfig {
     GcConfig {
         grace_window_ms: GRACE_MS,
         reap_window_ms: REAP_MS,
+        max_objects: None,
+        cursor: None,
     }
 }
 
@@ -208,6 +212,7 @@ async fn gc_rejects_grace_windows_below_the_derived_minimum() {
     let too_small = GcConfig {
         grace_window_ms: GC_MIN_GRACE_WINDOW_MS - 1,
         reap_window_ms: REAP_MS,
+        ..GcConfig::default()
     };
     let error = gc_namespace(&store, &namespace_id, &too_small, &context(1_000))
         .await
@@ -226,10 +231,20 @@ async fn gc_rejects_grace_windows_below_the_derived_minimum() {
     let inverted = GcConfig {
         grace_window_ms: GRACE_MS,
         reap_window_ms: GRACE_MS - 1,
+        ..GcConfig::default()
     };
     let error = gc_namespace(&store, &namespace_id, &inverted, &context(1_000))
         .await
         .expect_err("reap below grace must be rejected");
+    assert!(matches!(error, CoreError::InvalidGcConfig(_)));
+
+    let zero_budget = GcConfig {
+        max_objects: Some(0),
+        ..config()
+    };
+    let error = gc_namespace(&store, &namespace_id, &zero_budget, &context(1_000))
+        .await
+        .expect_err("zero budget must be rejected");
     assert!(matches!(error, CoreError::InvalidGcConfig(_)));
 }
 
@@ -879,7 +894,8 @@ async fn gc_reclaims_manifests_superseded_by_wal_flushes() {
     // are all still referenced (a flush only appends L0 runs).
     assert_eq!(report.deleted_manifests, 3);
     assert!(!report.degraded_retention);
-    let manifests_left = list_prefix(&store, &metadata_manifest_prefix(namespace_id.as_str()))
+    let manifests_left = store
+        .list_prefix(&metadata_manifest_prefix(namespace_id.as_str()))
         .await
         .expect("list manifests");
     assert_eq!(manifests_left.len(), 1, "only the live root manifest stays");
@@ -1815,4 +1831,318 @@ async fn gc_degrades_to_retention_when_a_pin_checkpoint_is_unreadable() {
     assert!(report.degraded_retention);
     assert_eq!(report.deleted_manifests, 0);
     assert_eq!(report.deleted_metadata_tables, 0);
+}
+
+async fn add_bounded_gc_fixture(
+    store: &LocalFsStore,
+    namespace_id: &NamespaceId,
+    setup: &MutationContext,
+) {
+    bootstrap_namespace(store, namespace_id, setup, false)
+        .await
+        .expect("bootstrap");
+    let mut checkpoints = Vec::new();
+    for index in 0..6 {
+        write_test_file(
+            store,
+            namespace_id,
+            &format!("/docs/{index}.txt"),
+            &format!("bounded-gc-{index}"),
+            setup,
+        )
+        .await;
+        checkpoints.push(
+            create_checkpoint(store, namespace_id, setup)
+                .await
+                .expect("checkpoint"),
+        );
+    }
+    for checkpoint in &checkpoints[..checkpoints.len() - 1] {
+        set_checkpoint_record_state(
+            store,
+            namespace_id,
+            &checkpoint.checkpoint_id,
+            CheckpointRecordLifecycle::Released,
+            &setup.writer_version,
+        )
+        .await
+        .expect("release checkpoint");
+    }
+    advance_retention_floor(store, namespace_id, setup)
+        .await
+        .expect("advance floor");
+
+    for index in 0..6 {
+        for key in [
+            wal_segment(
+                namespace_id.as_str(),
+                &format!("00000000000000000000-orphan-{index:02}"),
+            ),
+            metadata_table(namespace_id.as_str(), &format!("000-orphan-{index:02}")),
+            format!(
+                "{}000-orphan-{index:02}.manifest.json",
+                metadata_manifest_prefix(namespace_id.as_str())
+            ),
+        ] {
+            store
+                .put_if_absent(&key, Bytes::from_static(b"orphan"))
+                .await
+                .expect("write orphan");
+        }
+    }
+    write_upload_session(store, namespace_id).await;
+}
+
+fn copy_tree(source: &std::path::Path, target: &std::path::Path) {
+    std::fs::create_dir_all(target).expect("create copied store directory");
+    for entry in std::fs::read_dir(source).expect("read source store") {
+        let entry = entry.expect("read source entry");
+        let source_path = entry.path();
+        let target_path = target.join(entry.file_name());
+        if entry.file_type().expect("read source file type").is_dir() {
+            copy_tree(&source_path, &target_path);
+        } else {
+            std::fs::copy(&source_path, &target_path).expect("copy store object");
+        }
+    }
+}
+
+async fn namespace_keys(store: &LocalFsStore, namespace_id: &NamespaceId) -> BTreeSet<String> {
+    store
+        .list_prefix(&loonfs_objectstore::keys::namespace_prefix(namespace_id))
+        .await
+        .expect("list namespace")
+        .into_iter()
+        .collect()
+}
+
+fn accumulate_report(total: &mut GcReport, pass: &GcReport) {
+    total.deleted_wal_segments += pass.deleted_wal_segments;
+    total.deleted_metadata_tables += pass.deleted_metadata_tables;
+    total.deleted_manifests += pass.deleted_manifests;
+    total.deleted_checkpoint_records += pass.deleted_checkpoint_records;
+    total.released_fork_checkpoints += pass.released_fork_checkpoints;
+    total.deleted_upload_sessions += pass.deleted_upload_sessions;
+    total.released_missing_basis_checkpoints += pass.released_missing_basis_checkpoints;
+    total.retained_candidates += pass.retained_candidates;
+    total.degraded_retention |= pass.degraded_retention;
+    total.incomplete_namespace_ignored |= pass.incomplete_namespace_ignored;
+}
+
+#[tokio::test]
+async fn bounded_passes_delete_exactly_the_unbounded_pass_set() {
+    let temp_dir = tempdir().expect("tempdir");
+    let unbounded_root = temp_dir.path().join("unbounded");
+    let bounded_root = temp_dir.path().join("bounded");
+    let unbounded_store = LocalFsStore::new(&unbounded_root).expect("unbounded store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = context(1_000);
+    add_bounded_gc_fixture(&unbounded_store, &namespace_id, &setup).await;
+    copy_tree(&unbounded_root, &bounded_root);
+    let bounded_store = LocalFsStore::new(&bounded_root).expect("bounded store");
+
+    let unbounded_now = now_after_newest_object(&unbounded_store, &namespace_id, REAP_MS + 1).await;
+    let unbounded_report = gc_namespace(
+        &unbounded_store,
+        &namespace_id,
+        &config(),
+        &context(unbounded_now),
+    )
+    .await
+    .expect("unbounded pass");
+
+    let bounded_now = now_after_newest_object(&bounded_store, &namespace_id, REAP_MS + 1).await;
+    let mut bounded_config = config();
+    bounded_config.max_objects = Some(3);
+    let mut bounded_report = GcReport::default();
+    let mut passes = 0;
+    loop {
+        let pass = gc_namespace(
+            &bounded_store,
+            &namespace_id,
+            &bounded_config,
+            &context(bounded_now),
+        )
+        .await
+        .expect("bounded pass");
+        passes += 1;
+        accumulate_report(&mut bounded_report, &pass);
+        let Some(cursor) = pass.next_cursor else {
+            break;
+        };
+        bounded_config.cursor = Some(cursor);
+    }
+
+    assert!(passes > 5, "fixture should require substantial resumption");
+    assert_eq!(
+        namespace_keys(&bounded_store, &namespace_id).await,
+        namespace_keys(&unbounded_store, &namespace_id).await
+    );
+    assert_eq!(
+        (
+            bounded_report.deleted_wal_segments,
+            bounded_report.deleted_metadata_tables,
+            bounded_report.deleted_manifests,
+            bounded_report.deleted_checkpoint_records,
+            bounded_report.deleted_upload_sessions,
+        ),
+        (
+            unbounded_report.deleted_wal_segments,
+            unbounded_report.deleted_metadata_tables,
+            unbounded_report.deleted_manifests,
+            unbounded_report.deleted_checkpoint_records,
+            unbounded_report.deleted_upload_sessions,
+        )
+    );
+}
+
+#[tokio::test]
+async fn budget_caps_candidate_operations_and_cursor_resumes_mid_family() {
+    let temp_dir = tempdir().expect("tempdir");
+    let inner = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = context(1_000);
+    bootstrap_namespace(&inner, &namespace_id, &setup, false)
+        .await
+        .expect("bootstrap");
+    let orphan_keys: Vec<String> = (0..5)
+        .map(|index| {
+            wal_segment(
+                namespace_id.as_str(),
+                &format!("00000000000000000000-orphan-{index:02}"),
+            )
+        })
+        .collect();
+    for key in &orphan_keys {
+        inner
+            .put_if_absent(key, Bytes::from_static(b"orphan"))
+            .await
+            .expect("write orphan");
+    }
+    let aged = context(now_after_newest_object(&inner, &namespace_id, GRACE_MS + 1).await);
+    let wal_prefix = wal_segment_prefix(namespace_id.as_str());
+    let store = CountingStore::new(inner, KeyPredicate::prefix(wal_prefix));
+    let mut bounded = config();
+    bounded.max_objects = Some(2);
+
+    let first = gc_namespace(&store, &namespace_id, &bounded, &aged)
+        .await
+        .expect("first bounded pass");
+    assert_eq!(first.deleted_wal_segments, 2);
+    assert!(first.next_cursor.is_some());
+    assert_eq!(store.snapshot().heads, 2);
+    assert_eq!(store.snapshot().deletes, 2);
+    for key in &orphan_keys[..2] {
+        assert!(store.head(key).await.expect("head orphan").is_none());
+    }
+    assert!(store
+        .head(&orphan_keys[2])
+        .await
+        .expect("head next orphan")
+        .is_some());
+
+    bounded.cursor = first.next_cursor;
+    store.reset();
+    let second = gc_namespace(&store, &namespace_id, &bounded, &aged)
+        .await
+        .expect("second bounded pass");
+    assert_eq!(second.deleted_wal_segments, 2);
+    assert!(second.next_cursor.is_some());
+    assert_eq!(store.snapshot().heads, 2);
+    assert_eq!(store.snapshot().deletes, 2);
+    for key in &orphan_keys[..4] {
+        assert!(store.head(key).await.expect("head orphan").is_none());
+    }
+
+    bounded.cursor = second.next_cursor;
+    loop {
+        store.reset();
+        let pass = gc_namespace(&store, &namespace_id, &bounded, &aged)
+            .await
+            .expect("remaining bounded pass");
+        assert!(store.snapshot().heads <= 2);
+        assert!(store.snapshot().deletes <= 2);
+        let Some(cursor) = pass.next_cursor else {
+            break;
+        };
+        bounded.cursor = Some(cursor);
+    }
+    for key in &orphan_keys {
+        assert!(store.head(key).await.expect("head orphan").is_none());
+    }
+}
+
+#[tokio::test]
+async fn stale_cursor_rebuilds_roots_before_resuming() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = context(1_000);
+    bootstrap_namespace(&store, &namespace_id, &setup, false)
+        .await
+        .expect("bootstrap");
+    for index in 0..2 {
+        let key = wal_segment(
+            namespace_id.as_str(),
+            &format!("00000000000000000000-orphan-{index:02}"),
+        );
+        store
+            .put_if_absent(&key, Bytes::from_static(b"orphan"))
+            .await
+            .expect("write orphan");
+    }
+    let first_now = now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await;
+    let mut bounded = config();
+    bounded.max_objects = Some(1);
+    let first = gc_namespace(&store, &namespace_id, &bounded, &context(first_now))
+        .await
+        .expect("first bounded pass");
+    let cursor = first.next_cursor.expect("work remains");
+
+    write_test_file(
+        &store,
+        &namespace_id,
+        "/docs/new.txt",
+        "stale-cursor-new-wal",
+        &setup,
+    )
+    .await;
+    create_checkpoint(&store, &namespace_id, &setup)
+        .await
+        .expect("new checkpoint");
+    let resume_now = now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await;
+    let resume_context = context(resume_now);
+    let live = collect_live_set(&store, &namespace_id, &config(), &resume_context)
+        .await
+        .expect("collect advanced live set");
+
+    let mut resume = config();
+    resume.cursor = Some(cursor);
+    gc_namespace(&store, &namespace_id, &resume, &resume_context)
+        .await
+        .expect("resume stale cursor");
+
+    for key in live
+        .wal_segments
+        .iter()
+        .chain(live.tables.iter())
+        .chain(live.checkpoint_keys.iter())
+    {
+        assert!(
+            store.head(key).await.expect("head live object").is_some(),
+            "live object `{key}` must survive stale-cursor resumption"
+        );
+    }
+    for manifest_object_id in live.manifests {
+        let key = metadata_manifest_object(namespace_id.as_str(), &manifest_object_id);
+        assert!(
+            store
+                .head(&key)
+                .await
+                .expect("head live manifest")
+                .is_some(),
+            "live manifest `{key}` must survive stale-cursor resumption"
+        );
+    }
+    stat_root(&store, &namespace_id).await;
 }

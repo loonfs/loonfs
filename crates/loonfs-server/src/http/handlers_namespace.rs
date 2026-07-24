@@ -424,9 +424,9 @@ pub(super) async fn advance_retention_floor(
         path = "/v0/admin/namespaces/{namespace}/gc",
         tag = "admin",
         summary = "Collect garbage",
-        description = "Runs one mark-and-sweep garbage-collection pass under the format's safety rules (grace window, delete-time re-verification, retention wins). Incomplete namespaces are ignored without listing or deletion. Nothing sweeps without this explicit call or a maintenance-step opt-in.",
+        description = "Runs one mark-and-sweep garbage-collection pass under the format's safety rules (grace window, delete-time re-verification, retention wins). max_objects bounds candidate decisions and cursor resumes enumeration; every resumed invocation rebuilds safety roots. Incomplete namespaces are ignored without listing or deletion. Nothing sweeps without this explicit call or a maintenance-step opt-in.",
         params(("namespace" = String, Path, description = "Namespace id")),
-        request_body(content = GcRequest, description = "Optional window overrides"),
+        request_body(content = GcRequest, description = "Optional window, budget, and resume overrides"),
         responses(
             (status = 200, description = "Garbage collection pass completed", body = GcResponse),
             (status = 400, description = "Invalid namespace id or windows", body = ApiError),
@@ -457,7 +457,7 @@ pub(super) async fn gc_namespace(
         path = "/v0/admin/namespaces/{namespace}/maintenance/step",
         tag = "admin",
         summary = "Run maintenance step",
-        description = "Runs one bounded maintenance step: flushes the WAL tail once it reaches the threshold, and optionally runs a garbage-collection pass afterwards. Losing the root race is an outcome, not an error.",
+        description = "Runs one bounded maintenance step: flushes the WAL tail once it reaches the threshold, and optionally runs a garbage-collection pass afterwards. Step-driven GC defaults to 1024 candidates and returns its cursor for a later step rather than looping internally. Losing the root race is an outcome, not an error.",
         params(("namespace" = String, Path, description = "Namespace id")),
         request_body(content = MaintenanceStepRequest, description = "Optional threshold and GC overrides"),
         responses(

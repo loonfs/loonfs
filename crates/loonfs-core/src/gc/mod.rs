@@ -9,6 +9,7 @@
 //! in doubt, this module retains.
 
 mod config;
+mod cursor;
 mod fork_checkpoints;
 mod live_set;
 mod reap;

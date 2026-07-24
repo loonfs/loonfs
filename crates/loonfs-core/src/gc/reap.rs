@@ -7,6 +7,7 @@ use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
 use crate::limits::GC_MIN_GRACE_WINDOW_MS;
 use bytes::Bytes;
+use futures::StreamExt;
 use loonfs_api::wire::control::{
     decode_control_object, encode_control_object, CheckpointRecordLifecycle, CheckpointRecordState,
     ControlObjectKind, HeadState, HeadStateEnvelope, NamespaceState,
@@ -104,10 +105,11 @@ pub(crate) async fn reap_abandoned_bootstrap<S: ObjectStore + ?Sized>(
     context: &MutationContext,
 ) -> Result<AbandonedBootstrapReap> {
     let namespace_prefix = namespace_prefix(namespace_id);
-    let keys = list_prefix(store, &namespace_prefix).await?;
-    if keys.is_empty() {
+    let mut initial_keys = store.list_prefix_stream(&namespace_prefix);
+    let Some(first_key) = initial_keys.next().await else {
         return Ok(AbandonedBootstrapReap::Reaped);
-    }
+    };
+    let first_key = first_key.map_err(|error| CoreError::store(&namespace_prefix, &error))?;
 
     let descriptor_key = namespace_config(namespace_id.as_str());
     let head_key = wal_head(namespace_id.as_str());
@@ -146,18 +148,14 @@ pub(crate) async fn reap_abandoned_bootstrap<S: ObjectStore + ?Sized>(
         // The newest object bounds the tree's age; a missing timestamp reads
         // as "young" and blocks the reap. An already-condemned gate bypasses
         // age on retry because no installer may legally leave that state.
-        for key in keys.iter().filter(|key| *key != &head_key) {
-            let Some(metadata) = store
-                .head(key)
-                .await
-                .map_err(|error| CoreError::store(key, &error))?
-            else {
-                continue;
-            };
-            let Some(last_modified_ms) = metadata.last_modified_ms else {
-                return Ok(AbandonedBootstrapReap::InFlight);
-            };
-            if context.now_ms.saturating_sub(last_modified_ms) < GC_MIN_GRACE_WINDOW_MS {
+        if first_key != head_key
+            && !old_enough_for_bootstrap_reap(store, &first_key, context).await?
+        {
+            return Ok(AbandonedBootstrapReap::InFlight);
+        }
+        while let Some(item) = initial_keys.next().await {
+            let key = item.map_err(|error| CoreError::store(&namespace_prefix, &error))?;
+            if key != head_key && !old_enough_for_bootstrap_reap(store, &key, context).await? {
                 return Ok(AbandonedBootstrapReap::InFlight);
             }
         }
@@ -220,18 +218,40 @@ pub(crate) async fn reap_abandoned_bootstrap<S: ObjectStore + ?Sized>(
     // Re-list after winning the gate so pre-head debris, including an
     // immutable manifest written by the losing installer before its admission
     // attempt, is included. A loser performs no later fixed-key writes.
-    let keys = list_prefix(store, &namespace_prefix).await?;
-    for key in keys.iter().filter(|key| *key != &head_key) {
+    let mut keys = store.list_prefix_stream(&namespace_prefix);
+    while let Some(item) = keys.next().await {
+        let key = item.map_err(|error| CoreError::store(&namespace_prefix, &error))?;
+        if key == head_key {
+            continue;
+        }
         store
-            .delete(key)
+            .delete(&key)
             .await
-            .map_err(|error| CoreError::store(key, &error))?;
+            .map_err(|error| CoreError::store(&key, &error))?;
     }
     store
         .delete(&head_key)
         .await
         .map_err(|error| CoreError::store(&head_key, &error))?;
     Ok(AbandonedBootstrapReap::Reaped)
+}
+
+async fn old_enough_for_bootstrap_reap<S: ObjectStore + ?Sized>(
+    store: &S,
+    key: &str,
+    context: &MutationContext,
+) -> Result<bool> {
+    let Some(metadata) = store
+        .head(key)
+        .await
+        .map_err(|error| CoreError::store(key, &error))?
+    else {
+        return Ok(true);
+    };
+    let Some(last_modified_ms) = metadata.last_modified_ms else {
+        return Ok(false);
+    };
+    Ok(context.now_ms.saturating_sub(last_modified_ms) >= GC_MIN_GRACE_WINDOW_MS)
 }
 
 pub(super) async fn delete_if_aged<S: ObjectStore + ?Sized>(
@@ -263,16 +283,6 @@ pub(super) async fn delete_if_aged<S: ObjectStore + ?Sized>(
         .await
         .map_err(|error| CoreError::store(key, &error))?;
     Ok(true)
-}
-
-pub(super) async fn list_prefix<S: ObjectStore + ?Sized>(
-    store: &S,
-    prefix: &str,
-) -> Result<Vec<String>> {
-    store
-        .list_prefix(prefix)
-        .await
-        .map_err(|error| CoreError::store(prefix, &error))
 }
 
 pub(super) fn manifest_object_id_of(key: &str) -> Option<ManifestObjectId> {
