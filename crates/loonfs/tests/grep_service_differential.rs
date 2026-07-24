@@ -19,7 +19,9 @@ use loonfs_core::publish::{NamespaceMutationCandidate, PathMutationIntent};
 use loonfs_core::{NamespaceEngine, RuntimeReadContext};
 use loonfs_grep::root::load_grep_root;
 use loonfs_grep::GramIndexBuildPolicy;
-use loonfs_grep::{GrepBuildOutcome, GrepFoldOutcome, GrepIndexSnapshot, GrepService, GrepWorker};
+use loonfs_grep::{
+    GrepBuildOutcome, GrepIndexSnapshot, GrepReorganizeOutcome, GrepService, GrepWorker,
+};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::nonzero_usize;
 use std::collections::BTreeSet;
@@ -166,7 +168,7 @@ async fn drive_worker_step(
         .await
         .expect("grep build step");
     worker
-        .fold_step(namespace_id, policy)
+        .reorganize_step(namespace_id, policy)
         .await
         .expect("grep fold step");
 }
@@ -182,11 +184,11 @@ async fn drive_worker_to_current(
             .await
             .expect("grep build step");
         let fold = worker
-            .fold_step(namespace_id, policy)
+            .reorganize_step(namespace_id, policy)
             .await
             .expect("grep fold step");
         if matches!(build.outcome, GrepBuildOutcome::UpToDate { .. })
-            && matches!(fold.outcome, GrepFoldOutcome::NotNeeded { .. })
+            && matches!(fold.outcome, GrepReorganizeOutcome::NotNeeded { .. })
         {
             return;
         }

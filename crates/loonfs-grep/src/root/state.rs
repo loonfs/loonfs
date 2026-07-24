@@ -163,18 +163,18 @@ pub enum GrepLifecycle {
     Disabled,
 }
 
-/// Resumable state for one partitioned segment fold.
+/// Resumable state for one partitioned segment reorganize.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GrepFoldState {
+pub struct GrepReorganizeState {
     /// Fixed input snapshot retained until the completing root swap.
     pub snapshot_segment_ids: Vec<IndexSegmentId>,
-    /// Outputs written by completed fold steps and retained until the swap.
+    /// Outputs written by completed reorganize steps and retained until the swap.
     pub output_segment_ids: Vec<IndexSegmentId>,
-    /// Inclusive row key at which the next fold step resumes.
+    /// Inclusive row key at which the next reorganize step resumes.
     pub row_key_cursor: String,
-    /// Level stamped on every output segment of this fold.
+    /// Level stamped on every output segment of this reorganize.
     pub output_level: u32,
-    /// Logical run identity stamped on every output segment of this fold.
+    /// Logical run identity stamped on every output segment of this reorganize.
     pub run_ordinal: u64,
 }
 
@@ -192,9 +192,9 @@ pub struct GrepIndexState {
     /// indexing relies on that stable order when it resumes within a commit.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub next_delta_index: u32,
-    /// One in-progress partitioned fold, if present.
+    /// One in-progress partitioned reorganize, if present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fold: Option<GrepFoldState>,
+    pub reorganize: Option<GrepReorganizeState>,
     /// Next logical run ordinal to allocate atomically with a root update.
     pub next_run_ordinal: u64,
 }
@@ -248,14 +248,14 @@ impl GrepIndexState {
     pub fn new(
         built_through_seq: ChangeSeq,
         next_delta_index: u32,
-        fold: Option<GrepFoldState>,
+        reorganize: Option<GrepReorganizeState>,
         next_run_ordinal: u64,
     ) -> Self {
         Self {
             format_version: GREP_INDEX_FORMAT_VERSION,
             built_through_seq,
             next_delta_index,
-            fold,
+            reorganize,
             next_run_ordinal,
         }
     }
@@ -289,7 +289,7 @@ pub struct GrepSegmentRef {
 /// One namespace's complete immutable grep manifest state.
 ///
 /// Fields stay private so every constructed or decoded manifest passes the
-/// inexpensive fold/segment and run-allocation checks in [`Self::new`].
+/// inexpensive reorganize/segment and run-allocation checks in [`Self::new`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GrepRootState {
     namespace_id: NamespaceId,
@@ -343,8 +343,8 @@ impl GrepRootState {
             if !self.segments.is_empty() {
                 return Err(GrepRootStateError::DisabledHasSegments);
             }
-            if self.index.fold.is_some() {
-                return Err(GrepRootStateError::DisabledHasFold);
+            if self.index.reorganize.is_some() {
+                return Err(GrepRootStateError::DisabledHasReorganize);
             }
         }
 
@@ -369,53 +369,54 @@ impl GrepRootState {
             }
         }
 
-        if let Some(fold) = &self.index.fold {
-            validate_fold(fold, self.index.next_run_ordinal, &by_id)?;
+        if let Some(reorganize) = &self.index.reorganize {
+            validate_reorganize(reorganize, self.index.next_run_ordinal, &by_id)?;
         }
         Ok(())
     }
 }
 
-fn validate_fold(
-    fold: &GrepFoldState,
+fn validate_reorganize(
+    reorganize: &GrepReorganizeState,
     next_run_ordinal: u64,
     segments: &BTreeMap<&IndexSegmentId, &GrepSegmentRef>,
 ) -> Result<(), GrepRootStateError> {
-    if fold.run_ordinal >= next_run_ordinal {
-        return Err(GrepRootStateError::UnallocatedFoldRunOrdinal {
-            run_ordinal: fold.run_ordinal,
+    if reorganize.run_ordinal >= next_run_ordinal {
+        return Err(GrepRootStateError::UnallocatedReorganizeRunOrdinal {
+            run_ordinal: reorganize.run_ordinal,
             next_run_ordinal,
         });
     }
 
     let mut snapshot_ids = BTreeSet::new();
-    for segment_id in &fold.snapshot_segment_ids {
+    for segment_id in &reorganize.snapshot_segment_ids {
         if !snapshot_ids.insert(segment_id) {
-            return Err(GrepRootStateError::DuplicateFoldSegmentId {
+            return Err(GrepRootStateError::DuplicateReorganizeSegmentId {
                 segment_id: segment_id.clone(),
             });
         }
         if !segments.contains_key(segment_id) {
-            return Err(GrepRootStateError::MissingFoldSnapshotSegment {
+            return Err(GrepRootStateError::MissingReorganizeSnapshotSegment {
                 segment_id: segment_id.clone(),
             });
         }
     }
 
     let mut output_ids = BTreeSet::new();
-    for segment_id in &fold.output_segment_ids {
+    for segment_id in &reorganize.output_segment_ids {
         if snapshot_ids.contains(segment_id) || !output_ids.insert(segment_id) {
-            return Err(GrepRootStateError::DuplicateFoldSegmentId {
+            return Err(GrepRootStateError::DuplicateReorganizeSegmentId {
                 segment_id: segment_id.clone(),
             });
         }
         let Some(segment) = segments.get(segment_id) else {
-            return Err(GrepRootStateError::MissingFoldOutputSegment {
+            return Err(GrepRootStateError::MissingReorganizeOutputSegment {
                 segment_id: segment_id.clone(),
             });
         };
-        if segment.level != fold.output_level || segment.run_ordinal != fold.run_ordinal {
-            return Err(GrepRootStateError::FoldOutputDescriptorMismatch {
+        if segment.level != reorganize.output_level || segment.run_ordinal != reorganize.run_ordinal
+        {
+            return Err(GrepRootStateError::ReorganizeOutputDescriptorMismatch {
                 segment_id: segment_id.clone(),
             });
         }

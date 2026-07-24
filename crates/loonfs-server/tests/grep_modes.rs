@@ -405,11 +405,14 @@ async fn drive_worker_to_current(
             .await
             .expect("build step");
         let fold = worker
-            .fold_step(namespace_id, policy)
+            .reorganize_step(namespace_id, policy)
             .await
             .expect("fold step");
         if matches!(build.outcome, GrepBuildOutcome::UpToDate { .. })
-            && matches!(fold.outcome, loonfs_grep::GrepFoldOutcome::NotNeeded { .. })
+            && matches!(
+                fold.outcome,
+                loonfs_grep::GrepReorganizeOutcome::NotNeeded { .. }
+            )
         {
             return;
         }

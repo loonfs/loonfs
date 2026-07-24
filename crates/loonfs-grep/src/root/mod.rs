@@ -2,7 +2,7 @@
 //!
 //! One immutable manifest pairs the query-visible segment set with its
 //! `(built_through_seq, next_delta_index)` cursor, lifecycle, in-progress
-//! fold, and run ordinal allocation. Publication writes that manifest
+//! reorganization, and run ordinal allocation. Publication writes that manifest
 //! create-if-absent, then installs a tiny pointer in one object-store
 //! compare-and-swap, so a reader never observes a cursor without the segments
 //! that implement it.
@@ -25,8 +25,8 @@ pub use codec::{
 pub use error::{GrepManifestIdError, GrepRootCodecError, GrepRootError, GrepRootStateError};
 pub(crate) use state::ChangeFeedResume;
 pub use state::{
-    GrepFoldState, GrepIndexState, GrepLifecycle, GrepManifestId, GrepRootPointer, GrepRootState,
-    GrepSegmentRef, GREP_INDEX_FORMAT_VERSION,
+    GrepIndexState, GrepLifecycle, GrepManifestId, GrepReorganizeState, GrepRootPointer,
+    GrepRootState, GrepSegmentRef, GREP_INDEX_FORMAT_VERSION,
 };
 pub use store::{
     advance_grep_root, load_grep_manifest, load_grep_root, load_grep_root_pointer, seed_grep_root,

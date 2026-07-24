@@ -2,7 +2,7 @@
 
 LoonFS can answer grep-style regular-expression queries over file
 content from a derived index that event-driven per-namespace maintenance
-builds and folds independently of metadata. This document describes what
+builds and reorganizes independently of metadata. This document describes what
 the index stores, how it is built and reclaimed, how a query runs,
 and why the pieces are shaped that way. The index is derived work
 in the sense of `docs/specs/format.md` section 6.6: rebuildable
@@ -115,7 +115,7 @@ Segments live under
 manifest under `extensions/grep/manifests/`; that manifest records the
 query-visible segments, the incremental
 `(built_through_seq, next_delta_index)` cursor, lifecycle, run-ordinal
-allocation, and any in-progress fold snapshot, outputs, and cursor. A zero
+allocation, and any in-progress reorganization snapshot, outputs, and cursor. A zero
 or absent `next_delta_index` is the commit boundary; a nonzero value resumes
 at that offset in the watermark commit's durably ordered delta vector. The
 pointer and manifests are independent of the namespace manifest, so core
@@ -147,7 +147,7 @@ releases the checkpoint.
 One per-namespace driver owns those steps. Starting a driver immediately
 runs backfill and incremental catch-up continuously, yielding between bounded
 steps. Drivers share one FIFO semaphore, configured by
-`max_concurrent_steps` (default 2), and acquire it only while a build or fold
+`max_concurrent_steps` (default 2), and acquire it only while a build or reorganize
 step executes; parked drivers hold no permit. Once the root is steady and its
 watermark reaches the namespace head, the driver parks without a timer. A
 nudge received while active coalesces into one more catch-up run; a nudge
@@ -179,7 +179,7 @@ segment set that implements it.
 Two rules keep the cycle honest:
 
 - **Index building never rides core maintenance.** Metadata steps flush and
-  reorganize core state only. Grep build and fold steps are scheduled by the
+  reorganize core state only. Grep build and reorganize steps are scheduled by the
   grep worker, and freshness between worker steps is the query path's job.
 - **Retention may outrun the index.** The independent worker does not hold
   the core WAL floor behind `built_through_seq`. If the change feed reports
@@ -187,12 +187,14 @@ Two rules keep the cycle honest:
   checkpointed backfill instead of guessing across the gap.
 
 When delta runs accumulate past the same threshold shape the
-metadata families use, a fold consumes them. A gram base can grow
-far past what any metadata family reaches, so index folds differ
-from reorganization in two ways.
+metadata families use, a reorganization consumes them. This is the same
+operation the metadata store runs under the same name, and it differs in
+two ways, both because a gram base can grow far past what any metadata
+family reaches.
 
-They are tiered: delta runs fold into a mid run, and only
-accumulated mid runs fold — together with the base — into a
+It is tiered. The metadata store has two levels, delta and base; the
+index has three. Delta runs reorganize into a mid run, and only
+accumulated mid runs reorganize — together with the base — into a
 fresh base, so the whole-index rewrite happens once per
 `max_l0_runs x max_mid_runs` build runs (about 64 with the
 defaults) instead of once per delta threshold. That is a
@@ -205,29 +207,29 @@ says otherwise, the documented next step is dynamic (size-tiered)
 leveling, where levels are added as the corpus grows (see
 "Deferred, with intent").
 
-Fold triggers count logical runs, never physical segments. Every
+Reorganize triggers count logical runs, never physical segments. Every
 publish that creates gram segments — a WAL or backfill build
-unit, a delta fold's outputs, a base fold's outputs — stamps one
+unit, a delta reorganization's outputs, a base reorganization's outputs — stamps one
 run ordinal on the whole batch, allocated from a counter in the
 grep manifest and incremented in the same pointer publication,
 so allocation is atomic with the root swap. The per-segment row
 cap can therefore split a run into any number of segments without
-changing fold cadence, and backfill units — which all carry the
+changing reorganization cadence, and backfill units — which all carry the
 unchanged enable-time watermark as their `run_seq` — still count
 as distinct runs.
 
-And they are partitioned rather than whole-family: a fold
+And they are partitioned rather than whole-family: a reorganization
 snapshots the segment set it will consume, then walks the gram
 keyspace in bounded row-count steps, each step merging one key
-range from the snapshot into fresh segments at the fold's output
+range from the snapshot into fresh segments at the reorganization's output
 tier and CAS-publishing a root that records the outputs and resume
 cursor.
 Until the walk completes, snapshot inputs and outputs are
 both referenced and both served — postings are add-only, so
 readers that union them see duplicates, never gaps — and segments
-that arrive during the fold stay out of the snapshot and survive
+that arrive during the reorganization stay out of the snapshot and survive
 it. The completing step swaps the snapshot out for the outputs; a
-fold interrupted anywhere resumes from the cursor the last
+reorganization interrupted anywhere resumes from the cursor the last
 published manifest carries. The step's row budget is soft: rows
 with equal keys are consumed as one atomic group, because the
 resume cursor is the last merged key plus a terminator and
@@ -237,16 +239,16 @@ The tiering and run identity are durable writer-side bookkeeping,
 invisible to reads:
 
 - Descriptor `level` in the grep manifest's segment list: `0` for the
-  delta segments build units write, `1` for a delta fold's mid
+  delta segments build units write, `1` for a delta reorganization's mid
   runs, and `2` for the base.
 - Descriptor `run_ordinal`: the batch-wide run identity described
   above.
 - Root index-state `next_run_ordinal`: the allocation counter.
-- Fold-state `output_level`: the tier the in-flight fold's outputs
+- Reorganize-state `output_level`: the tier the in-flight reorganization's outputs
   are stamped with (`1` or `2`).
-- Fold-state `run_ordinal`: the ordinal stamped on every output
-  segment of the fold, fixed when the fold starts so a resumed
-  fold keeps its identity.
+- Reorganize-state `run_ordinal`: the ordinal stamped on every output
+  segment of the reorganization, fixed when it starts so a resumed
+  reorganization keeps its identity.
 
 Enabling the index on a namespace that already has data starts a
 backfill: the worker creates an expiring user checkpoint and a root cursor
@@ -368,7 +370,7 @@ default-on decision:
   published systems sit near the low end of that range.
 - **Build cost.** Each eligible revision is read once, linearly
   tokenized, and sorted; the object reads dominate. Budgets make
-  this a per-step constant, and tiered folds amortize the
+  this a per-step constant, and tiered reorganizations amortize the
   whole-index rewrite by a constant factor — about 64x rarer
   than the delta threshold with the defaults (see "Building").
 - **Query cost.** Posting reads touch a handful of blocks per
@@ -388,8 +390,8 @@ Following the segment-format convention, two different contracts:
   any of them requires a new format version and a rebuild — cheap by
   construction, since the index is derived work.
 - **Writer-side defaults.** The per-step build budgets (256
-  files or 64 MiB), the fold run thresholds (eight delta runs,
-  eight mid runs), the fold step's row budget, the posting
+  files or 64 MiB), the reorganize run thresholds (eight delta
+  runs, eight mid runs), the reorganize step's row budget, the posting
   batch target (about 256), page limits, the verified-candidate
   budget, and the query tail budget are writer- or server-side
   tunables; readers take what the grep manifest and descriptors

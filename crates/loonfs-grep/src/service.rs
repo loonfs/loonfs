@@ -53,7 +53,7 @@ pub(crate) const MAX_GREP_VERIFIED_FILES_PER_PAGE: usize = 256;
 /// derivation, scope — before returning with a resume cursor: the metadata
 /// twin of [`MAX_GREP_VERIFIED_FILES_PER_PAGE`], for pages where a scope
 /// filter rejects nearly every candidate. Rejected candidates move the
-/// cursor with them (see `fold_rejected_frontier`), so the next page
+/// cursor with them (see `reorganize_rejected_frontier`), so the next page
 /// continues past them instead of re-examining the same run.
 pub(crate) const MAX_GREP_EXAMINED_CANDIDATES_PER_PAGE: usize = 4096;
 /// Concurrent gram posting probes one grep query issues at a time: the
@@ -597,7 +597,7 @@ async fn derive_visible_path<S: ObjectStore + ?Sized>(
 /// budget exits guarantee. Never sound on a mid-file page fill: there,
 /// later batch members were examined but their fetched contents discarded,
 /// and the cursor must stay at the last emitted match.
-fn fold_rejected_frontier(
+fn reorganize_rejected_frontier(
     resume_cursor: &mut Option<(InodeId, u64)>,
     rejected_frontier: Option<InodeId>,
 ) {
@@ -888,7 +888,7 @@ impl GrepService {
             if batch.is_empty() {
                 if budget_exhausted {
                     has_more = true;
-                    fold_rejected_frontier(&mut resume_cursor, rejected_frontier);
+                    reorganize_rejected_frontier(&mut resume_cursor, rejected_frontier);
                 }
                 break 'page;
             }
@@ -965,7 +965,7 @@ impl GrepService {
                 // The whole final batch was scanned, so every examined
                 // candidate is resolved; rejections past the last scanned
                 // file move the cursor with them.
-                fold_rejected_frontier(&mut resume_cursor, rejected_frontier);
+                reorganize_rejected_frontier(&mut resume_cursor, rejected_frontier);
                 break 'page;
             }
         }
@@ -1080,10 +1080,10 @@ mod tests {
     #[test]
     fn rejected_frontier_folds_forward_only() {
         let mut cursor = None;
-        fold_rejected_frontier(&mut cursor, Some(InodeId(9)));
+        reorganize_rejected_frontier(&mut cursor, Some(InodeId(9)));
         assert_eq!(cursor, Some((InodeId(9), u64::MAX)));
         cursor = Some((InodeId(12), 40));
-        fold_rejected_frontier(&mut cursor, Some(InodeId(9)));
+        reorganize_rejected_frontier(&mut cursor, Some(InodeId(9)));
         assert_eq!(cursor, Some((InodeId(12), 40)));
     }
 }

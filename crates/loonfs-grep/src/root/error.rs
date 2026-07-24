@@ -18,8 +18,8 @@ pub enum GrepRootStateError {
     UnsupportedIndexFormatVersion { found: u32, supported: u32 },
     #[error("disabled grep root carries query-visible segments")]
     DisabledHasSegments,
-    #[error("disabled grep root carries an in-progress fold")]
-    DisabledHasFold,
+    #[error("disabled grep root carries an in-progress reorganization")]
+    DisabledHasReorganize,
     #[error("duplicate grep segment id `{segment_id}`")]
     DuplicateSegmentId { segment_id: IndexSegmentId },
     #[error("grep segment `{segment_id}` has a minimum row key after its maximum")]
@@ -34,20 +34,22 @@ pub enum GrepRootStateError {
         next_run_ordinal: u64,
     },
     #[error(
-        "grep fold uses run ordinal `{run_ordinal}` but the next ordinal is `{next_run_ordinal}`"
+        "grep reorganization uses run ordinal `{run_ordinal}` but the next ordinal is `{next_run_ordinal}`"
     )]
-    UnallocatedFoldRunOrdinal {
+    UnallocatedReorganizeRunOrdinal {
         run_ordinal: u64,
         next_run_ordinal: u64,
     },
-    #[error("grep fold repeats segment id `{segment_id}`")]
-    DuplicateFoldSegmentId { segment_id: IndexSegmentId },
-    #[error("grep fold snapshot references missing segment `{segment_id}`")]
-    MissingFoldSnapshotSegment { segment_id: IndexSegmentId },
-    #[error("grep fold output references missing segment `{segment_id}`")]
-    MissingFoldOutputSegment { segment_id: IndexSegmentId },
-    #[error("grep fold output `{segment_id}` does not carry the fold's level and run ordinal")]
-    FoldOutputDescriptorMismatch { segment_id: IndexSegmentId },
+    #[error("grep reorganization repeats segment id `{segment_id}`")]
+    DuplicateReorganizeSegmentId { segment_id: IndexSegmentId },
+    #[error("grep reorganization snapshot references missing segment `{segment_id}`")]
+    MissingReorganizeSnapshotSegment { segment_id: IndexSegmentId },
+    #[error("grep reorganization output references missing segment `{segment_id}`")]
+    MissingReorganizeOutputSegment { segment_id: IndexSegmentId },
+    #[error(
+        "grep reorganization output `{segment_id}` does not carry the reorganization's level and run ordinal"
+    )]
+    ReorganizeOutputDescriptorMismatch { segment_id: IndexSegmentId },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]

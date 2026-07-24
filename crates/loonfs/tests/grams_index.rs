@@ -68,7 +68,7 @@ async fn drive_worker_step(
         .await
         .expect("grep build step");
     worker
-        .fold_step(namespace_id, policy)
+        .reorganize_step(namespace_id, policy)
         .await
         .expect("grep fold step");
 }

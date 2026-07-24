@@ -35,6 +35,6 @@ pub use service::{
 };
 pub use worker::{
     GramIndexBuildPolicy, GrepBuildOutcome, GrepBuildReport, GrepDisableOutcome, GrepEnableOutcome,
-    GrepFoldOutcome, GrepFoldReport, GrepGcReport, GrepWorker, GREP_BACKFILL_CHECKPOINT_TTL_MS,
-    GREP_GC_GRACE_WINDOW_MS,
+    GrepGcReport, GrepReorganizeOutcome, GrepReorganizeReport, GrepWorker,
+    GREP_BACKFILL_CHECKPOINT_TTL_MS, GREP_GC_GRACE_WINDOW_MS,
 };

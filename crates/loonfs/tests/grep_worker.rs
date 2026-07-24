@@ -28,7 +28,7 @@ use loonfs_grep::root::{
     GrepRootState,
 };
 use loonfs_grep::{
-    GramIndexBuildPolicy, GrepBuildOutcome, GrepFoldOutcome, GrepIndexSnapshot, GrepService,
+    GramIndexBuildPolicy, GrepBuildOutcome, GrepIndexSnapshot, GrepReorganizeOutcome, GrepService,
     GrepWorker, GREP_GC_GRACE_WINDOW_MS,
 };
 use loonfs_objectstore::keys::{
@@ -102,11 +102,11 @@ async fn drive_worker_to_current(
             .await
             .expect("worker build step");
         let fold = worker
-            .fold_step(namespace_id, policy)
+            .reorganize_step(namespace_id, policy)
             .await
             .expect("worker fold step");
         if matches!(build.outcome, GrepBuildOutcome::UpToDate { .. })
-            && matches!(fold.outcome, GrepFoldOutcome::NotNeeded { .. })
+            && matches!(fold.outcome, GrepReorganizeOutcome::NotNeeded { .. })
         {
             return;
         }
@@ -751,7 +751,7 @@ async fn grep_worker_pins_fold_tail_and_pagination_results() {
             .await
             .expect("new build");
         worker
-            .fold_step(&namespace_id, policy)
+            .reorganize_step(&namespace_id, policy)
             .await
             .expect("new fold");
     }
@@ -1051,7 +1051,7 @@ async fn pointer_advance_heals_a_manifest_deleted_after_already_exists() {
         GrepIndexState::new(
             current_state.index().built_through_seq,
             current_state.index().next_delta_index,
-            current_state.index().fold.clone(),
+            current_state.index().reorganize.clone(),
             current_state.index().next_run_ordinal + 1,
         ),
         current_state.segments().to_vec(),

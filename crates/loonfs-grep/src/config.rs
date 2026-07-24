@@ -5,7 +5,7 @@ use serde::Deserialize;
 use std::num::{NonZeroU64, NonZeroUsize};
 use thiserror::Error;
 
-/// Default cap on concurrently executing grep build or fold steps.
+/// Default cap on concurrently executing grep build or reorganize steps.
 ///
 /// Mirrors `loonfs::DEFAULT_MAX_CONCURRENT_MAINTENANCE`; both background
 /// maintenance families default to two expensive namespace steps at once.
@@ -19,7 +19,7 @@ pub const DEFAULT_MAX_CONCURRENT_STEPS: usize = 2;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GrepWorkerConfig {
-    /// Build or fold steps allowed to execute concurrently across namespaces.
+    /// Build or reorganize steps allowed to execute concurrently across namespaces.
     pub max_concurrent_steps: usize,
     /// Revisions examined per build step.
     pub max_files_per_step: usize,
@@ -27,16 +27,16 @@ pub struct GrepWorkerConfig {
     pub max_content_bytes_per_step: u64,
     /// Rows per written grep segment.
     pub max_rows_per_segment: usize,
-    /// Delta-level runs that trigger a fold.
+    /// Delta-level runs that trigger a reorganization into a mid run.
     pub max_l0_runs: usize,
-    /// Mid-level runs that trigger a base fold.
+    /// Mid-level runs that trigger a reorganization into the base run.
     pub max_mid_runs: usize,
-    /// Rows merged by one fold step.
-    pub max_fold_rows_per_step: usize,
+    /// Rows merged by one reorganize step.
+    pub max_decoded_input_rows_per_step: usize,
 }
 
 impl GrepWorkerConfig {
-    /// Returns the bounded build/fold policy represented by this config.
+    /// Returns the bounded build/reorganize policy represented by this config.
     pub fn build_policy(self) -> Result<GramIndexBuildPolicy, GrepWorkerConfigError> {
         Ok(GramIndexBuildPolicy {
             max_files_per_step: nonzero_usize("max_files_per_step", self.max_files_per_step)?,
@@ -47,9 +47,9 @@ impl GrepWorkerConfig {
             max_rows_per_segment: nonzero_usize("max_rows_per_segment", self.max_rows_per_segment)?,
             max_l0_runs: nonzero_usize("max_l0_runs", self.max_l0_runs)?,
             max_mid_runs: nonzero_usize("max_mid_runs", self.max_mid_runs)?,
-            max_fold_rows_per_step: nonzero_usize(
-                "max_fold_rows_per_step",
-                self.max_fold_rows_per_step,
+            max_decoded_input_rows_per_step: nonzero_usize(
+                "max_decoded_input_rows_per_step",
+                self.max_decoded_input_rows_per_step,
             )?,
         })
     }
@@ -77,7 +77,7 @@ impl Default for GrepWorkerConfig {
             max_rows_per_segment: policy.max_rows_per_segment.get(),
             max_l0_runs: policy.max_l0_runs.get(),
             max_mid_runs: policy.max_mid_runs.get(),
-            max_fold_rows_per_step: policy.max_fold_rows_per_step.get(),
+            max_decoded_input_rows_per_step: policy.max_decoded_input_rows_per_step.get(),
         }
     }
 }
@@ -168,9 +168,9 @@ mod tests {
                 },
             ),
             (
-                "max_fold_rows_per_step",
+                "max_decoded_input_rows_per_step",
                 GrepWorkerConfig {
-                    max_fold_rows_per_step: 0,
+                    max_decoded_input_rows_per_step: 0,
                     ..GrepWorkerConfig::default()
                 },
             ),
@@ -224,9 +224,9 @@ mod tests {
                 },
             ),
             (
-                "max_fold_rows_per_step",
+                "max_decoded_input_rows_per_step",
                 GrepWorkerConfig {
-                    max_fold_rows_per_step: 0,
+                    max_decoded_input_rows_per_step: 0,
                     ..GrepWorkerConfig::default()
                 },
             ),
