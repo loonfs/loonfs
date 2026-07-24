@@ -6,6 +6,7 @@
 mod cache;
 mod cas_recovery;
 mod index_parity;
+pub(crate) mod inspection_materialization;
 mod manifest_round_trips;
 mod retention;
 

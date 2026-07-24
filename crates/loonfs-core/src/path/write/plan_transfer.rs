@@ -1,0 +1,168 @@
+//! Publish plans that move or copy visible paths.
+
+use super::planning_helpers::{
+    publish_binding_is_precondition, publish_child_name_absent_precondition,
+    publish_reject_tombstoned_path_ancestor, publish_resolve_parent_directory,
+    publish_resolve_replace_destination, PublishPathPlanningView,
+};
+use crate::error::{CoreError, Result};
+use crate::path::helpers::{ensure_mutation_path, final_component};
+use loonfs_api::{
+    v0::{
+        CommitOp as ApiCommitOp, CommitPrecondition as ApiCommitPrecondition,
+        CommitRequest as ApiCommitRequest,
+    },
+    AbsolutePath, CommitId, DestinationBehavior, InodeKind,
+};
+use loonfs_objectstore::ObjectStore;
+
+pub(super) async fn plan_publish_move_path<S: ObjectStore + ?Sized>(
+    from_path: &AbsolutePath,
+    to_path: &AbsolutePath,
+    behavior: DestinationBehavior,
+    commit_id: &CommitId,
+    view: &PublishPathPlanningView<'_, '_, '_, S>,
+) -> Result<ApiCommitRequest> {
+    ensure_mutation_path(from_path)?;
+    ensure_mutation_path(to_path)?;
+    publish_reject_tombstoned_path_ancestor(view, from_path).await?;
+    publish_reject_tombstoned_path_ancestor(view, to_path).await?;
+    let source = view.metadata_state.resolve_visible_path(from_path).await?;
+    let target_parent = publish_resolve_parent_directory(view, to_path).await?;
+    let target_name = final_component(to_path)?;
+    // Replace compiles to an atomic delete-plus-rename: the destination
+    // file's delete and the source's rebind land in one commit, and the
+    // rename's target-name check observes the in-commit unbind. Mirrors
+    // put: only a file destination can be replaced, and a path never
+    // replaces itself.
+    let replaced =
+        publish_resolve_replace_destination(view, to_path, behavior, source.inode_id).await?;
+    let mut ops = Vec::new();
+    let mut preconditions = vec![publish_binding_is_precondition(view, &source).await?];
+    match &replaced {
+        Some(existing) => {
+            ops.push(ApiCommitOp::DeleteFile {
+                inode_id: existing.inode_id,
+            });
+            preconditions.push(publish_binding_is_precondition(view, existing).await?);
+            preconditions.push(ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
+                inode_id: existing.inode_id,
+            });
+        }
+        None => {
+            preconditions.push(publish_child_name_absent_precondition(
+                view,
+                target_parent,
+                &target_name,
+            ));
+        }
+    }
+    ops.push(ApiCommitOp::Rename {
+        inode_id: source.inode_id,
+        new_parent_inode_id: target_parent,
+        new_display_name: target_name.clone(),
+    });
+    preconditions.push(ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
+        inode_id: source.inode_id,
+    });
+    preconditions.push(ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
+        inode_id: target_parent,
+    });
+    Ok(ApiCommitRequest {
+        commit_id: commit_id.to_owned(),
+        ops,
+        preconditions,
+        message: None,
+    })
+}
+
+pub(super) async fn plan_publish_copy_file_path<S: ObjectStore + ?Sized>(
+    from_path: &AbsolutePath,
+    to_path: &AbsolutePath,
+    behavior: DestinationBehavior,
+    commit_id: &CommitId,
+    view: &PublishPathPlanningView<'_, '_, '_, S>,
+) -> Result<ApiCommitRequest> {
+    ensure_mutation_path(from_path)?;
+    ensure_mutation_path(to_path)?;
+    publish_reject_tombstoned_path_ancestor(view, from_path).await?;
+    publish_reject_tombstoned_path_ancestor(view, to_path).await?;
+
+    let source = view.metadata_state.resolve_visible_path(from_path).await?;
+    if source.inode_kind != InodeKind::File {
+        return Err(CoreError::ExpectedFile {
+            path: from_path.as_str().to_owned(),
+            kind: source.inode_kind,
+        });
+    }
+
+    // Replace mirrors put onto an existing file: the copy appends a new
+    // revision to the destination inode, keeping its identity and revision
+    // history. Only a file destination can be replaced, and a path never
+    // replaces itself.
+    let replaced =
+        publish_resolve_replace_destination(view, to_path, behavior, source.inode_id).await?;
+
+    let revision = view
+        .metadata_state
+        .latest_revision_head(source.inode_id)
+        .await?
+        .ok_or_else(|| CoreError::PathNotFound(from_path.as_str().to_owned()))?;
+
+    let target_parent = publish_resolve_parent_directory(view, to_path).await?;
+    let target_name = final_component(to_path)?;
+    let mut ops = Vec::new();
+    let mut preconditions = vec![
+        publish_binding_is_precondition(view, &source).await?,
+        ApiCommitPrecondition::InodeRevisionIs {
+            inode_id: source.inode_id,
+            revision_no: revision.revision_no,
+        },
+        ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
+            inode_id: source.inode_id,
+        },
+    ];
+    match &replaced {
+        Some(existing) => {
+            let existing_revision = view
+                .metadata_state
+                .latest_revision_head(existing.inode_id)
+                .await?
+                .ok_or_else(|| CoreError::PathNotFound(to_path.as_str().to_owned()))?;
+            ops.push(ApiCommitOp::ReplaceFile {
+                inode_id: existing.inode_id,
+                base_revision_no: existing_revision.revision_no,
+                content_ref: revision.content_ref,
+            });
+            preconditions.push(publish_binding_is_precondition(view, existing).await?);
+            preconditions.push(ApiCommitPrecondition::InodeRevisionIs {
+                inode_id: existing.inode_id,
+                revision_no: existing_revision.revision_no,
+            });
+            preconditions.push(ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
+                inode_id: existing.inode_id,
+            });
+        }
+        None => {
+            ops.push(ApiCommitOp::CreateFile {
+                parent_inode_id: target_parent,
+                display_name: target_name.clone(),
+                content_ref: revision.content_ref,
+            });
+            preconditions.push(publish_child_name_absent_precondition(
+                view,
+                target_parent,
+                &target_name,
+            ));
+        }
+    }
+    preconditions.push(ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
+        inode_id: target_parent,
+    });
+    Ok(ApiCommitRequest {
+        commit_id: commit_id.to_owned(),
+        ops,
+        preconditions,
+        message: None,
+    })
+}

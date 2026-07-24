@@ -25,9 +25,12 @@
 //! - [`runs`] models the LSM run layout shared by all of the above, and
 //!   [`cache`] holds decoded SST blocks keyed by content digest.
 
+mod block_fetch;
+mod block_load;
 mod build;
 mod cache;
 mod create;
+mod data_block_load;
 mod error;
 mod flush;
 mod grep_read;
