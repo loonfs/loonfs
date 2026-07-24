@@ -1,6 +1,7 @@
 //! The absolute-path grammar: parsing, components, and display names.
 
 use crate::ids::string_id;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use thiserror::Error;
 
@@ -203,9 +204,57 @@ impl AsRef<str> for AbsolutePath {
     }
 }
 
+impl std::ops::Deref for AbsolutePath {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+impl PartialEq<&str> for AbsolutePath {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
 impl fmt::Display for AbsolutePath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.normalized)
+    }
+}
+
+#[cfg(feature = "openapi")]
+impl utoipa::PartialSchema for AbsolutePath {
+    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+        utoipa::openapi::schema::Object::builder()
+            .schema_type(utoipa::openapi::schema::Type::String)
+            .description(Some(
+                "Validated complete absolute namespace path, serialized as a plain string.",
+            ))
+            .into()
+    }
+}
+
+#[cfg(feature = "openapi")]
+impl utoipa::ToSchema for AbsolutePath {}
+
+impl Serialize for AbsolutePath {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.normalized)
+    }
+}
+
+impl<'de> Deserialize<'de> for AbsolutePath {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(value).map_err(serde::de::Error::custom)
     }
 }
 
@@ -354,6 +403,22 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["docs", "A.txt"]
         );
+    }
+
+    #[test]
+    fn absolute_path_serde_is_a_validated_plain_string() {
+        let path = AbsolutePath::parse("/Docs/ReadMe.TXT").expect("path should parse");
+
+        assert_eq!(
+            serde_json::to_string(&path).expect("serialize path"),
+            r#""/Docs/ReadMe.TXT""#
+        );
+        assert_eq!(
+            serde_json::from_str::<AbsolutePath>(r#""/Docs/ReadMe.TXT""#)
+                .expect("deserialize path"),
+            path
+        );
+        assert!(serde_json::from_str::<AbsolutePath>(r#""relative/path""#).is_err());
     }
 
     #[test]

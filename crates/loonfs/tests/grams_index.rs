@@ -619,7 +619,7 @@ async fn collect_grep_paths(
             response
                 .matches
                 .into_iter()
-                .map(|found| found.absolute_path),
+                .map(|found| found.absolute_path.to_string()),
         );
         let Some(cursor) = response.next_cursor else {
             return paths;
@@ -692,7 +692,7 @@ async fn grep_answers_identically_across_tiered_folds() {
         let mut matched: Vec<String> = response
             .matches
             .iter()
-            .map(|found| found.absolute_path.clone())
+            .map(|found| found.absolute_path.to_string())
             .collect();
         matched.sort();
         assert_eq!(

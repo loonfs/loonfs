@@ -285,7 +285,7 @@ async fn assert_searchable(store: &SharedObjectStore, namespace_id: &NamespaceId
         .await
         .expect("query caught-up index");
     assert_eq!(response.matches.len(), 1);
-    assert_eq!(response.matches[0].absolute_path, "/note.txt");
+    assert_eq!(response.matches[0].absolute_path.as_str(), "/note.txt");
 }
 
 async fn stop_poll_and_driver(

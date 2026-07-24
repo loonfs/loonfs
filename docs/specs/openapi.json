@@ -2716,6 +2716,10 @@
   },
   "components": {
     "schemas": {
+      "AbsolutePath": {
+        "type": "string",
+        "description": "Validated complete absolute namespace path, serialized as a plain string."
+      },
       "AdvanceRetentionResponse": {
         "type": "object",
         "description": "Result of advancing the retention floor.",
@@ -2785,12 +2789,11 @@
           "absolute_path",
           "inode_id",
           "inode_kind",
-          "head_seq",
-          "display_name"
+          "head_seq"
         ],
         "properties": {
           "absolute_path": {
-            "type": "string",
+            "$ref": "#/components/schemas/AbsolutePath",
             "description": "Absolute path as rendered from stored display names."
           },
           "committed_at_ms": {
@@ -2814,8 +2817,15 @@
             ]
           },
           "display_name": {
-            "type": "string",
-            "description": "Stored display name for this path component. The root directory has\nno name and serializes as the empty string, which the validating\n[`DisplayName`](crate::DisplayName) newtype cannot represent — this\nfield stays a raw `String` until the wire decides how to spell\n\"nameless\"."
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/DisplayName",
+                "description": "Stored display name for this path component, absent for the nameless root."
+              }
+            ]
           },
           "head_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
@@ -4232,7 +4242,7 @@
                 "description": "Also create missing ancestor directories (the same auto-create\n`put_file` performs). The final component must still be new."
               },
               "path": {
-                "type": "string",
+                "$ref": "#/components/schemas/AbsolutePath",
                 "description": "Absolute destination path, rejected when invalid or already bound."
               }
             }
@@ -4262,7 +4272,7 @@
                 ]
               },
               "path": {
-                "type": "string",
+                "$ref": "#/components/schemas/AbsolutePath",
                 "description": "Absolute destination path; missing ancestors are created automatically."
               }
             }
@@ -4298,7 +4308,7 @@
                 ]
               },
               "path": {
-                "type": "string",
+                "$ref": "#/components/schemas/AbsolutePath",
                 "description": "Absolute path that must resolve to a visible inode."
               }
             }
@@ -4318,7 +4328,7 @@
                 "description": "Whether an existing destination file may be replaced."
               },
               "from_path": {
-                "type": "string",
+                "$ref": "#/components/schemas/AbsolutePath",
                 "description": "Absolute source path that must resolve to a visible inode."
               },
               "kind": {
@@ -4328,7 +4338,7 @@
                 ]
               },
               "to_path": {
-                "type": "string",
+                "$ref": "#/components/schemas/AbsolutePath",
                 "description": "Absolute destination whose parent must be visible and writable."
               }
             }
@@ -4348,7 +4358,7 @@
                 "description": "Whether an existing destination file may receive a copied revision."
               },
               "from_path": {
-                "type": "string",
+                "$ref": "#/components/schemas/AbsolutePath",
                 "description": "Absolute source path that must resolve to a visible file."
               },
               "kind": {
@@ -4358,7 +4368,7 @@
                 ]
               },
               "to_path": {
-                "type": "string",
+                "$ref": "#/components/schemas/AbsolutePath",
                 "description": "Absolute destination whose parent must be visible and writable."
               }
             }
@@ -4389,7 +4399,7 @@
                 ]
               },
               "path": {
-                "type": "string",
+                "$ref": "#/components/schemas/AbsolutePath",
                 "description": "Absolute destination path whose parent must be visible and whose name must be absent."
               }
             }
@@ -4411,7 +4421,7 @@
                 ]
               },
               "path": {
-                "type": "string",
+                "$ref": "#/components/schemas/AbsolutePath",
                 "description": "Absolute path that must resolve to a visible file."
               },
               "source_revision_no": {
@@ -4661,7 +4671,7 @@
         ],
         "properties": {
           "absolute_path": {
-            "type": "string",
+            "$ref": "#/components/schemas/AbsolutePath",
             "description": "The file's absolute path, derived at the snapshot."
           },
           "byte_offset": {
@@ -4730,11 +4740,15 @@
             "minimum": 0
           },
           "path_prefix": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Restrict matches to files under this absolute path prefix."
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/AbsolutePath",
+                "description": "Restrict matches to files under this complete absolute path, resolved\nto a directory inode before candidates are filtered."
+              }
+            ]
           },
           "pattern": {
             "type": "string",
@@ -4848,7 +4862,7 @@
         ],
         "properties": {
           "absolute_path": {
-            "type": "string",
+            "$ref": "#/components/schemas/AbsolutePath",
             "description": "Absolute path of the listed directory."
           },
           "entries": {

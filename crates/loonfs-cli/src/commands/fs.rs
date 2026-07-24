@@ -91,7 +91,7 @@ pub(crate) async fn run_filesystem_stat(
     args: FilesystemPathArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, &args.target).await?;
-    let allow_root = false;
+    let allow_root = true;
     let spec = namespace_path(&context.namespace, &args.path, allow_root)
         .map_err(|error| context.fail(kind, error))?;
     let entry = context
@@ -114,10 +114,16 @@ pub(crate) async fn run_filesystem_grep(
     args: FilesystemGrepArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, &args.target).await?;
+    let path_prefix = args
+        .path_prefix
+        .as_deref()
+        .map(|path| normalize_absolute_path(path, true))
+        .transpose()
+        .map_err(|error| context.fail(kind, error))?;
     let mut request = loonfs_api::GrepRequest {
         pattern: args.pattern.clone(),
         case_insensitive: args.ignore_case,
-        path_prefix: args.path_prefix.clone(),
+        path_prefix,
         cursor: None,
         limit: args.limit,
         allow_stale: args.allow_stale,

@@ -9,8 +9,56 @@ use loonfs_api::{
     CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeId,
 };
 use loonfs_client::{ClientError, DeleteOptions, MutationOptions, NamespacePath, PutFileOptions};
+use loonfs_test_support::http::raw_agent;
 use loonfs_test_support::ids::namespace_id;
 use tempfile::tempdir;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_stat_omits_the_root_name_and_carries_named_child_names() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loonfs-server-root-name",
+        "http-root-name",
+    ))
+    .await;
+
+    tokio::task::spawn_blocking(move || {
+        harness
+            .client
+            .create_namespace(&namespace_id("demo"))
+            .expect("create namespace");
+        harness
+            .client
+            .create_directory(
+                &NamespacePath::parse("demo", "/docs").expect("directory path"),
+                &loonfs_client::CreateDirectoryOptions::default(),
+            )
+            .expect("create directory");
+
+        let stat_json = |encoded_path: &str| {
+            let response = raw_agent()
+                .get(&format!(
+                    "{}/v0/namespaces/demo/filesystem/stat?path={encoded_path}",
+                    harness.server_url
+                ))
+                .set("authorization", "Bearer test-token")
+                .call()
+                .expect("stat request");
+            serde_json::from_reader::<_, serde_json::Value>(response.into_reader())
+                .expect("stat JSON")
+        };
+
+        let root = stat_json("%2F");
+        assert!(root.get("display_name").is_none());
+        let child = stat_json("%2Fdocs");
+        assert_eq!(child["display_name"], "docs");
+    })
+    .await
+    .expect("join blocking task");
+
+    harness.server.abort();
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_put_no_replace_and_copy_preserve_cli_semantics() {

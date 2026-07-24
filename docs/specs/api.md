@@ -637,6 +637,11 @@ created the current revision, in Unix milliseconds. It is observational —
 sequences are the order, and no validity rule reads it. Directory entries
 carry no modification time in v0.
 
+The namespace root is nameless: its entry has `parent_inode_id: null` and
+omits `display_name` entirely. Every non-root entry carries a validated
+`display_name`; the empty string is not a spelling for the root or for any
+named path component.
+
 ### 6.5 `GET /filesystem/list`
 
 The envelope names the listed path and the head the listing was read from, so
@@ -1106,9 +1111,10 @@ rejected with `index_lagging` unless `allow_stale` accepts indexed-only
 results (reported via `tail_scanned: false`); stale results are a
 consistent cut at the index watermark — files whose newest revision
 postdates it are omitted entirely rather than mixed in. The `path_prefix`
-scope resolves to an inode under the namespace's name policy and filters
-by ancestry, so it follows the same normalization as every other path
-read. A missing data half answers `not_supported` with the `feature`
+value is a complete absolute path, not a partial textual segment prefix. Its
+scope resolves to an inode under the namespace's name policy and filters by
+ancestry, so it follows the same validation and normalization as every other
+path read. A missing data half answers `not_supported` with the `feature`
 field naming `index.grams`.
 
 ## 7. Conformance requirements

@@ -338,12 +338,15 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             lines.join("\n")
         }
         CommandData::PathEntry(entry) => {
-            let mut lines = vec![
-                format!("path: {}", entry.absolute_path),
+            let mut lines = vec![format!("path: {}", entry.absolute_path)];
+            if let Some(display_name) = &entry.display_name {
+                lines.push(format!("name: {display_name}"));
+            }
+            lines.extend([
                 format!("inode: {}", entry.inode_id),
                 format!("kind: {}", entry.inode_kind),
                 format!("seq: {}", entry.head_seq.0),
-            ];
+            ]);
             if let Some(size) = entry.size_bytes {
                 lines.push(format!("size: {size}"));
             }
@@ -435,13 +438,65 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{human_success, json_error};
+    use super::{human_success, json_error, json_success};
     use crate::args::CommandKind;
     use crate::commands::{CommandData, CommandFailure, CommandOutput};
     use crate::config::{ProfileConfig, StoreConfig};
     use crate::error::CliError;
     use crate::profiles::ProfileSummary;
     use insta::{assert_json_snapshot, assert_snapshot};
+    use loonfs_api::{
+        AbsolutePath, AuthoritativePathEntry, ChangeSeq, DisplayName, InodeId, InodeKind,
+        NamespaceId,
+    };
+
+    fn path_entry(path: &str, display_name: Option<&str>) -> AuthoritativePathEntry {
+        AuthoritativePathEntry {
+            namespace_id: NamespaceId::parse("demo").expect("namespace id"),
+            absolute_path: AbsolutePath::parse(path).expect("absolute path"),
+            inode_id: InodeId(if display_name.is_some() { 2 } else { 1 }),
+            inode_kind: InodeKind::Directory,
+            head_seq: ChangeSeq(3),
+            parent_inode_id: display_name.map(|_| InodeId(1)),
+            display_name: display_name.map(|name| DisplayName::parse(name).expect("display name")),
+            revision_no: None,
+            size_bytes: None,
+            content_ref: None,
+            committed_at_ms: None,
+        }
+    }
+
+    fn stat_output(entry: AuthoritativePathEntry) -> CommandOutput {
+        CommandOutput {
+            kind: CommandKind::FilesystemStat,
+            profile: Some("default".to_owned()),
+            mode: Some("embedded".to_owned()),
+            data: CommandData::PathEntry(entry),
+        }
+    }
+
+    #[test]
+    fn human_stat_omits_the_absent_root_name() {
+        let root = stat_output(path_entry("/", None));
+        assert_eq!(human_success(&root), "path: /\ninode: 1\nkind: dir\nseq: 3");
+
+        let named = stat_output(path_entry("/docs", Some("docs")));
+        assert_eq!(
+            human_success(&named),
+            "path: /docs\nname: docs\ninode: 2\nkind: dir\nseq: 3"
+        );
+    }
+
+    #[test]
+    fn json_stat_preserves_the_absent_root_name() {
+        let root = stat_output(path_entry("/", None));
+        let json: serde_json::Value =
+            serde_json::from_str(&json_success(&root).expect("JSON stat should render"))
+                .expect("rendered stat is JSON");
+
+        assert!(json["data"].get("display_name").is_none());
+    }
+
     #[test]
     fn human_profile_list_renders_default_marker() {
         let output = CommandOutput {

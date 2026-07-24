@@ -585,9 +585,10 @@ async fn derive_visible_path<S: ObjectStore + ?Sized>(
         .resolve_visible_path(&parsed, LeafRevisionPrefetch::Skip)
         .await
     {
-        Ok(resolved) if resolved.inode_id == inode_id => {
-            Ok(Some(VisiblePathChain { path, ancestors }))
-        }
+        Ok(resolved) if resolved.inode_id == inode_id => Ok(Some(VisiblePathChain {
+            path: parsed,
+            ancestors,
+        })),
         Ok(_) => Ok(None),
         Err(error) if error.code() == ErrorCode::PathNotFound => Ok(None),
         Err(error) => Err(error.into()),
@@ -616,7 +617,7 @@ fn fold_rejected_frontier(
 /// A derived visible path plus the inode chain that produced it, root
 /// included.
 struct VisiblePathChain {
-    path: String,
+    path: AbsolutePath,
     ancestors: Vec<InodeId>,
 }
 
@@ -626,7 +627,7 @@ struct VisiblePathChain {
 struct GrepContentCandidate {
     inode_id: InodeId,
     revision: RevisionRecord,
-    path: String,
+    path: AbsolutePath,
     /// The declared content size exceeds the index eligibility cap, so no
     /// read is scheduled: the file could never pass the post-read text
     /// check, and the walk skips it as fully scanned.
@@ -720,11 +721,8 @@ impl GrepService {
         // has no matches.
         let scope_root = match &request.path_prefix {
             Some(prefix) => {
-                let parsed = AbsolutePath::parse(prefix).map_err(|error| {
-                    CoreError::InvalidPath(error.invalid_path_input().to_owned())
-                })?;
                 match session
-                    .resolve_visible_path(&parsed, LeafRevisionPrefetch::Skip)
+                    .resolve_visible_path(prefix, LeafRevisionPrefetch::Skip)
                     .await
                 {
                     Ok(resolved) => Some(resolved.inode_id),

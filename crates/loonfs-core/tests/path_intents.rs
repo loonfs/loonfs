@@ -26,6 +26,14 @@ use loonfs_test_support::ids::{namespace_id, page_limit};
 use loonfs_test_support::stores::OperationClass;
 use tempfile::tempdir;
 
+fn named_entry(entry: &AuthoritativePathEntry) -> &str {
+    entry
+        .display_name
+        .as_ref()
+        .expect("non-root entry should carry a display name")
+        .as_str()
+}
+
 async fn delete_path<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -534,7 +542,7 @@ async fn query_driven_stat_uses_exact_name_key_for_dash_containing_siblings() {
         .expect("materialized stat");
 
     assert_eq!(actual, expected);
-    assert_eq!(actual.absolute_path, "/docs/report");
+    assert_eq!(actual.absolute_path.as_str(), "/docs/report");
     assert_eq!(actual.size_bytes, Some(5));
 }
 
@@ -636,11 +644,7 @@ async fn wide_directory_listing_resolves_tail_unbinds_cross_directory_renames_an
         let page = list_path_page(&store, &namespace_id, "/wide", 16, cursor.clone())
             .await
             .expect("list page");
-        listed.extend(
-            page.items
-                .iter()
-                .map(|entry| entry.display_name.as_str().to_owned()),
-        );
+        listed.extend(page.items.iter().map(|entry| named_entry(entry).to_owned()));
         cursor = page.next_cursor;
         if cursor.is_none() {
             break;
@@ -788,22 +792,14 @@ async fn query_driven_directory_page_merges_manifest_and_tail_visible_children()
         .await
         .expect("first page");
     assert_eq!(
-        first
-            .items
-            .iter()
-            .map(|entry| entry.display_name.as_str())
-            .collect::<Vec<_>>(),
+        first.items.iter().map(named_entry).collect::<Vec<_>>(),
         vec!["a-dir", "b-renamed.txt"]
     );
     let second = list_path_page(&store, &namespace_id, "/docs", 2, first.next_cursor.clone())
         .await
         .expect("second page");
     assert_eq!(
-        second
-            .items
-            .iter()
-            .map(|entry| entry.display_name.as_str())
-            .collect::<Vec<_>>(),
+        second.items.iter().map(named_entry).collect::<Vec<_>>(),
         vec!["c-file.txt", "d-tail.txt"]
     );
     let third = list_path_page(
@@ -817,11 +813,7 @@ async fn query_driven_directory_page_merges_manifest_and_tail_visible_children()
     .expect("third page");
     assert!(third.next_cursor.is_none());
     assert_eq!(
-        third
-            .items
-            .iter()
-            .map(|entry| entry.display_name.as_str())
-            .collect::<Vec<_>>(),
+        third.items.iter().map(named_entry).collect::<Vec<_>>(),
         vec!["e-tail-dir"]
     );
 
@@ -832,10 +824,7 @@ async fn query_driven_directory_page_merges_manifest_and_tail_visible_children()
         .chain(third.items)
         .collect::<Vec<_>>();
     assert_eq!(
-        entries
-            .iter()
-            .map(|entry| entry.display_name.as_str())
-            .collect::<Vec<_>>(),
+        entries.iter().map(named_entry).collect::<Vec<_>>(),
         vec![
             "a-dir",
             "b-renamed.txt",
@@ -844,15 +833,14 @@ async fn query_driven_directory_page_merges_manifest_and_tail_visible_children()
             "e-tail-dir"
         ]
     );
-    assert!(entries.iter().all(|entry| !matches!(
-        entry.display_name.as_str(),
-        "stale.txt" | "dead" | "tail-dead"
-    )));
+    assert!(entries
+        .iter()
+        .all(|entry| !matches!(named_entry(entry), "stale.txt" | "dead" | "tail-dead")));
 
     for directory_name in ["a-dir", "e-tail-dir"] {
         let entry = entries
             .iter()
-            .find(|entry| entry.display_name.as_str() == directory_name)
+            .find(|entry| named_entry(entry) == directory_name)
             .expect("directory entry");
         assert_eq!(entry.inode_kind, InodeKind::Directory);
         assert_eq!(entry.revision_no, None);
@@ -867,7 +855,7 @@ async fn query_driven_directory_page_merges_manifest_and_tail_visible_children()
     ] {
         let entry = entries
             .iter()
-            .find(|entry| entry.display_name.as_str() == file_name)
+            .find(|entry| named_entry(entry) == file_name)
             .expect("file entry");
         assert_eq!(entry.inode_kind, InodeKind::File);
         assert_eq!(entry.revision_no, Some(RevisionNo(1)));
@@ -1577,8 +1565,8 @@ async fn resolve_path_uses_nfc_casefold_name_policy() {
     let resolved = resolve_path(&store, &namespace_id("demo"), lookup_path)
         .await
         .expect("resolve path");
-    assert_eq!(resolved.absolute_path, stored_path);
-    assert_eq!(resolved.display_name.as_str(), "Cafe\u{0301}.txt");
+    assert_eq!(resolved.absolute_path.as_str(), stored_path);
+    assert_eq!(named_entry(&resolved), "Cafe\u{0301}.txt");
 }
 
 #[tokio::test]
@@ -1681,7 +1669,7 @@ async fn tombstoned_children_stay_unlisted_and_live_entries_keep_revision_data()
         .expect("list live dir");
     assert_eq!(live_entries.len(), 1, "one live child");
     let kept = &live_entries[0];
-    assert_eq!(kept.absolute_path, "/live/kept.txt");
+    assert_eq!(kept.absolute_path.as_str(), "/live/kept.txt");
     assert_eq!(
         kept.size_bytes,
         Some(b"alive".len() as u64),
