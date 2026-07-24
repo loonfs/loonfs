@@ -44,6 +44,8 @@ pub struct ActiveContractProfile {
     pub sorted_list_prefix: Expectation,
     /// Expectation that large overwrites use a provider-native multipart surface.
     pub multipart_upload: Expectation,
+    /// Expectation that direct PUTs enforce signed checksum and create-only preconditions.
+    pub direct_put_preconditions: Expectation,
 }
 
 /// Names one provider and the contract expectations its conformance run applies.
@@ -73,6 +75,7 @@ pub const LOCAL_FS: ProviderProfile = ProviderProfile {
         traversal_rejection: Expectation::VerifyByConformance,
         sorted_list_prefix: Expectation::VerifyByConformance,
         multipart_upload: Expectation::ExpectedNo,
+        direct_put_preconditions: Expectation::ExpectedNo,
     },
 };
 
@@ -94,6 +97,29 @@ pub const AWS_S3: ProviderProfile = ProviderProfile {
         traversal_rejection: Expectation::ExpectedYes,
         sorted_list_prefix: Expectation::ExpectedYes,
         multipart_upload: Expectation::ExpectedYes,
+        direct_put_preconditions: Expectation::ExpectedYes,
+    },
+};
+
+/// Describes an arbitrary S3-compatible endpoint's conformance expectations.
+pub const S3_COMPATIBLE: ProviderProfile = ProviderProfile {
+    name: "s3-compatible",
+    active_contract: ActiveContractProfile {
+        create_if_absent: Expectation::VerifyByConformance,
+        compare_and_swap_small_object: Expectation::VerifyByConformance,
+        opaque_compare_token_for_cas: Expectation::VerifyByConformance,
+        full_object_read_identity: Expectation::VerifyByConformance,
+        overwrite: Expectation::VerifyByConformance,
+        delete_idempotent: Expectation::VerifyByConformance,
+        head_reflects_latest_write_and_delete: Expectation::VerifyByConformance,
+        strong_list_after_write: Expectation::VerifyByConformance,
+        strong_list_after_delete: Expectation::VerifyByConformance,
+        range_read: Expectation::VerifyByConformance,
+        scoped_key_prefixing: Expectation::ExpectedYes,
+        traversal_rejection: Expectation::ExpectedYes,
+        sorted_list_prefix: Expectation::VerifyByConformance,
+        multipart_upload: Expectation::VerifyByConformance,
+        direct_put_preconditions: Expectation::VerifyByConformance,
     },
 };
 
@@ -115,6 +141,7 @@ pub const CLOUDFLARE_R2: ProviderProfile = ProviderProfile {
         traversal_rejection: Expectation::ExpectedYes,
         sorted_list_prefix: Expectation::ExpectedYes,
         multipart_upload: Expectation::ExpectedYes,
+        direct_put_preconditions: Expectation::ExpectedYes,
     },
 };
 
@@ -136,6 +163,7 @@ pub const GCP_GCS: ProviderProfile = ProviderProfile {
         traversal_rejection: Expectation::ExpectedYes,
         sorted_list_prefix: Expectation::ExpectedYes,
         multipart_upload: Expectation::ExpectedYes,
+        direct_put_preconditions: Expectation::ExpectedYes,
     },
 };
 
@@ -157,5 +185,6 @@ pub const AZURE_ABS: ProviderProfile = ProviderProfile {
         traversal_rejection: Expectation::ExpectedYes,
         sorted_list_prefix: Expectation::ExpectedYes,
         multipart_upload: Expectation::ExpectedYes,
+        direct_put_preconditions: Expectation::ExpectedYes,
     },
 };

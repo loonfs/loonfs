@@ -40,6 +40,13 @@ writer_version = "loonfs-server/0.1.0"
 # namespaces (each namespace already runs at most one). Defaults to 2.
 #max_concurrent_maintenance = 2
 
+# Direct-put is enabled by default only for first-party provider endpoints
+# whose capability profile proves checksum and create-only precondition
+# enforcement. Setting this true explicitly accepts that risk for a custom,
+# unproven S3-compatible endpoint. Defaults to false.
+#[direct_put]
+#allow_unproven = false
+
 # Optional runtime cache overrides; omitted fields keep the runtime defaults.
 #[runtime_cache]
 #max_cached_namespaces = 64

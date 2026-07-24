@@ -11,7 +11,7 @@ use loonfs_objectstore::keys::{
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::provider::{
-    Expectation, AWS_S3, AZURE_ABS, CLOUDFLARE_R2, GCP_GCS, LOCAL_FS,
+    Expectation, AWS_S3, AZURE_ABS, CLOUDFLARE_R2, GCP_GCS, LOCAL_FS, S3_COMPATIBLE,
 };
 use loonfs_objectstore::r2::{CloudflareR2Store, CloudflareR2StoreConfig};
 use loonfs_objectstore::s3::{AwsS3Store, AwsS3StoreConfig};
@@ -35,6 +35,7 @@ fn provider_profiles_exist() {
     assert_eq!(CLOUDFLARE_R2.name, "cloudflare-r2");
     assert_eq!(GCP_GCS.name, "gcp-gcs");
     assert_eq!(AZURE_ABS.name, "azure-abs");
+    assert_eq!(S3_COMPATIBLE.name, "s3-compatible");
     assert_eq!(
         LOCAL_FS.active_contract.opaque_compare_token_for_cas,
         Expectation::VerifyByConformance
@@ -193,6 +194,16 @@ fn provider_profiles_exist() {
     assert_eq!(
         AZURE_ABS.active_contract.multipart_upload,
         Expectation::ExpectedYes
+    );
+    for profile in [AWS_S3, CLOUDFLARE_R2, GCP_GCS, AZURE_ABS] {
+        assert_eq!(
+            profile.active_contract.direct_put_preconditions,
+            Expectation::ExpectedYes
+        );
+    }
+    assert_eq!(
+        S3_COMPATIBLE.active_contract.direct_put_preconditions,
+        Expectation::VerifyByConformance
     );
 }
 

@@ -16,7 +16,8 @@ use loonfs_grep::{GramIndexBuildPolicy, GrepBuildOutcome, GrepDriverParked, Grep
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::SharedObjectStore;
 use loonfs_server::{
-    app, GrepConfig, GrepMode, RuntimeCacheConfigOverrides, ServerConfig, StoreConfig,
+    app, DirectPutConfig, GrepConfig, GrepMode, RuntimeCacheConfigOverrides, ServerConfig,
+    StoreConfig,
 };
 use serde::de::DeserializeOwned;
 use std::num::NonZeroUsize;
@@ -330,6 +331,7 @@ fn test_config(store_root: &Path, mode: GrepMode) -> ServerConfig {
             mode,
             ..GrepConfig::default()
         },
+        direct_put: DirectPutConfig::default(),
         background_maintenance: true,
         min_publish_interval_ms: 0,
         max_upload_bytes: 1024 * 1024,

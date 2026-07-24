@@ -291,14 +291,14 @@ impl FromRequest<AppState> for UploadBodyBytes {
 }
 
 /// 413 for over-limit upload bodies: the guidance names the upload byte cap
-/// and the `direct_put` path that bypasses proxied buffering entirely.
+/// and the optional `direct_put` path that bypasses proxied buffering.
 fn upload_body_too_large_error() -> ApiResponseError {
     ApiResponseError::new(
         StatusCode::PAYLOAD_TOO_LARGE,
         ErrorCode::ContentTooLarge,
         "request body exceeds this deployment's limit; check the \
-         `upload.max_content_bytes` capability limit, and prefer `direct_put` \
-         uploads for large content",
+         `upload.max_content_bytes` capability limit, and use `direct_put` \
+         for large content when `core.uploads.direct_put` is advertised",
     )
 }
 
