@@ -12,7 +12,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use loonfs::publish::{
-    validate_mutation_path, ContentPreparationError, NamespaceMutation, NamespaceMutationCandidate,
+    ensure_mutation_path, ContentPreparationError, NamespaceMutation, NamespaceMutationCandidate,
     PathMutationIntent, PreparedContent,
 };
 use loonfs::{
@@ -494,7 +494,7 @@ pub(super) async fn apply_filesystem_operation(
     // Absolute-path grammar was validated while decoding the wire body. The
     // root remains a valid read path but is not a legal mutation target.
     let validate_path = |path: AbsolutePath| {
-        validate_mutation_path(&path).map_err(|error| {
+        ensure_mutation_path(&path).map_err(|error| {
             ApiResponseError::core_for_namespace(&namespace_id, error)
                 .with_commit_id(&commit_id_for_errors)
         })?;

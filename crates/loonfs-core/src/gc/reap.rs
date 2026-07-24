@@ -222,9 +222,7 @@ pub(crate) async fn reap_abandoned_bootstrap<S: ObjectStore + ?Sized>(
         };
         match condemn {
             Ok(_) => {}
-            Err(
-                ObjectStoreError::PreconditionFailed { .. },
-            ) => {
+            Err(ObjectStoreError::PreconditionFailed { .. }) => {
                 tracing::debug!(
                     namespace_id = %namespace_id,
                     object_key = head_key,

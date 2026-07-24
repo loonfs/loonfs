@@ -3,16 +3,6 @@
 use crate::error::{CoreError, Result};
 use loonfs_api::{AbsolutePath, DisplayName, PathError};
 
-/// Checks the mutation-path invariant without keeping the parsed path: the
-/// path must parse as an absolute path and must not be the root.
-///
-/// Callers that only stage content before planning call this directly;
-/// surfaces that go on to build an intent use [`parse_mutation_path`] and
-/// keep the parsed path.
-pub fn validate_path_for_mutation(absolute_path: &str) -> Result<()> {
-    parse_mutation_path(absolute_path).map(|_| ())
-}
-
 pub(crate) fn parse_absolute_path_for_core(absolute_path: &str) -> Result<AbsolutePath> {
     AbsolutePath::parse(absolute_path).map_err(map_path_error_to_core)
 }
@@ -26,21 +16,16 @@ pub(crate) fn parse_absolute_path_for_core(absolute_path: &str) -> Result<Absolu
 /// only the root guard ([`ensure_mutation_path`]) and never re-parses.
 pub fn parse_mutation_path(absolute_path: &str) -> Result<AbsolutePath> {
     let path = parse_absolute_path_for_core(absolute_path)?;
-    validate_mutation_path(&path)?;
+    ensure_mutation_path(&path)?;
     Ok(path)
 }
 
-/// Checks that an already-validated path is a legal mutation target.
+/// The root-mutation guard on an already-parsed path.
 ///
-/// The absolute-path grammar is carried by the type; this guard rejects the
-/// root, which is readable but cannot be mutated.
-pub fn validate_mutation_path(path: &AbsolutePath) -> Result<()> {
-    ensure_mutation_path(path)
-}
-
-/// The root-mutation guard on an already-parsed path. Intents can be built
-/// from parsed paths directly, so planning re-asserts this invariant.
-pub(crate) fn ensure_mutation_path(path: &AbsolutePath) -> Result<()> {
+/// The absolute-path grammar is carried by the type; this rejects the root,
+/// which is readable but cannot be mutated. Intents can be built from parsed
+/// paths directly, so planning re-asserts this invariant.
+pub fn ensure_mutation_path(path: &AbsolutePath) -> Result<()> {
     if path.is_root() {
         return Err(CoreError::RootMutationForbidden);
     }

@@ -112,9 +112,7 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
             }
             // The head moved (a commit, fence takeover, or another deleter
             // landed first). Reload and re-evaluate.
-            Err(
-                ObjectStoreError::PreconditionFailed { .. },
-            ) => continue,
+            Err(ObjectStoreError::PreconditionFailed { .. }) => continue,
             // Outcome unobserved; the reload at the top of the loop resolves
             // it, because the target state is terminal.
             Err(ObjectStoreError::Transport { .. }) => {

@@ -368,10 +368,7 @@ pub(crate) async fn put_completion_descriptor<S: ObjectStore + ?Sized>(
         .put_if_absent(&descriptor_key, Bytes::copy_from_slice(bytes))
         .await
     {
-        Ok(_)
-        | Err(ObjectStoreError::PreconditionFailed { .. }) => {
-            Ok(())
-        }
+        Ok(_) | Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(()),
         Err(err) => Err(CoreError::store(&descriptor_key, &err)),
     }
 }

@@ -16,8 +16,7 @@ use loonfs_grep::{GramIndexBuildPolicy, GrepBuildOutcome, GrepDriverParked, Grep
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::SharedObjectStore;
 use loonfs_server::{
-    app, GrepConfig, GrepMode, RuntimeCacheConfigOverrides, ServerConfig,
-    StoreConfig,
+    app, GrepConfig, GrepMode, RuntimeCacheConfigOverrides, ServerConfig, StoreConfig,
 };
 use serde::de::DeserializeOwned;
 use std::num::NonZeroUsize;

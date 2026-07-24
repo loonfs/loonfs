@@ -3,9 +3,7 @@
 #![allow(dead_code)]
 
 use loonfs_client::{Client, ClientConfig};
-use loonfs_server::{
-    app, GrepConfig, RuntimeCacheConfigOverrides, ServerConfig, StoreConfig,
-};
+use loonfs_server::{app, GrepConfig, RuntimeCacheConfigOverrides, ServerConfig, StoreConfig};
 use std::path::PathBuf;
 
 pub(crate) struct TestServer {

@@ -169,9 +169,7 @@ pub(super) async fn publish_metadata_root<S: ObjectStore + ?Sized>(
             .await
         {
             Ok(_) => return Ok(ManifestPublicationOutcome::Published(next)),
-            Err(
-                ObjectStoreError::PreconditionFailed { .. },
-            ) => continue,
+            Err(ObjectStoreError::PreconditionFailed { .. }) => continue,
             Err(error) => {
                 let recovered = read_metadata_root_object(store, namespace_id)
                     .await

@@ -122,9 +122,7 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
                     retention_floor_seq: target_floor,
                 })
             }
-            Err(
-                ObjectStoreError::PreconditionFailed { .. },
-            ) => continue,
+            Err(ObjectStoreError::PreconditionFailed { .. }) => continue,
             Err(error) => return Err(CoreError::store(&loaded.object_key, &error)),
         }
     }
