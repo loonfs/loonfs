@@ -601,6 +601,73 @@ async fn write_pointer(
         .expect("write pointer");
 }
 
+#[tokio::test]
+async fn planless_scan_covers_wal_revisions_at_or_below_index_watermark() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store: SharedObjectStore =
+        Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
+    let namespace_id = NamespaceId::parse("scan-gap").expect("namespace id");
+    let writer = FsWriter::builder_with_store(store.clone())
+        .writer_id("scan-gap-writer")
+        .min_publish_interval_ms(0)
+        .build()
+        .await
+        .expect("writer");
+    writer
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
+
+    let worker = worker(&store);
+    worker.enable(&namespace_id).await.expect("enable");
+    drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
+
+    writer
+        .put_file_bytes(
+            &namespace_id,
+            "/only-in-wal.txt",
+            b"x\n",
+            PutFileOptions::default(),
+        )
+        .await
+        .expect("write WAL-only file");
+    drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
+
+    let (head, metadata_root) = load_namespace_read_anchor(&*store, &namespace_id)
+        .await
+        .expect("read anchor");
+    assert!(
+        metadata_root.state.manifest_head_seq < head.state.seq,
+        "the WAL-only revision must sit past metadata materialization"
+    );
+    let grep_root = loonfs_grep::root::load_grep_root(&*store, &namespace_id)
+        .await
+        .expect("load grep root")
+        .expect("grep root exists");
+    assert_eq!(
+        grep_root.state().index().built_through_seq,
+        head.state.seq,
+        "the independent worker can advance past metadata materialization"
+    );
+
+    let mut scan = request("x");
+    scan.allow_scan = true;
+    let response = new_query(&store, &namespace_id, &scan)
+        .await
+        .expect("plan-less scan");
+    assert_eq!(
+        response.matches.len(),
+        1,
+        "scan must cover the WAL-only revision"
+    );
+    assert_eq!(
+        response.matches[0].absolute_path.as_str(),
+        "/only-in-wal.txt"
+    );
+
+    writer.shutdown_background().await.expect("shutdown");
+}
+
 fn assert_not_enabled_error(case: &str, result: loonfs::Result<GrepResponse>) {
     match result {
         Err(loonfs::Error::Grep(error @ loonfs::GrepError::NotEnabled)) => {

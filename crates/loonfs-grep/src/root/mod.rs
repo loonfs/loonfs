@@ -23,6 +23,7 @@ pub use codec::{
     GREP_ROOT_FORMAT_VERSION, GREP_ROOT_KIND,
 };
 pub use error::{GrepManifestIdError, GrepRootCodecError, GrepRootError, GrepRootStateError};
+pub(crate) use state::ChangeFeedResume;
 pub use state::{
     GrepFoldState, GrepIndexState, GrepLifecycle, GrepManifestId, GrepRootPointer, GrepRootState,
     GrepSegmentRef, GREP_INDEX_FORMAT_VERSION,

@@ -198,6 +198,50 @@ pub struct GrepIndexState {
     pub next_run_ordinal: u64,
 }
 
+/// Change-feed resume point derived from the grep watermark pair.
+///
+/// A commit-boundary cursor (`next_delta_index == 0`) resumes strictly after
+/// `built_through_seq`. An in-commit cursor reloads that commit and skips the
+/// already represented delta prefix, keeping feed selection and delta
+/// selection complementary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ChangeFeedResume {
+    built_through_seq: ChangeSeq,
+    next_delta_index: u32,
+}
+
+impl ChangeFeedResume {
+    pub(crate) fn new(built_through_seq: ChangeSeq, next_delta_index: u32) -> Self {
+        Self {
+            built_through_seq,
+            next_delta_index,
+        }
+    }
+
+    pub(crate) fn after_seq(self) -> ChangeSeq {
+        if self.next_delta_index == 0 {
+            self.built_through_seq
+        } else {
+            ChangeSeq(self.built_through_seq.0.saturating_sub(1))
+        }
+    }
+
+    pub(crate) fn start_delta_index(
+        self,
+        record_seq: ChangeSeq,
+    ) -> std::result::Result<usize, std::num::TryFromIntError> {
+        if record_seq == self.built_through_seq {
+            usize::try_from(self.next_delta_index)
+        } else {
+            Ok(0)
+        }
+    }
+
+    pub(crate) fn next_delta_index(self) -> u32 {
+        self.next_delta_index
+    }
+}
+
 impl GrepIndexState {
     /// Creates index bookkeeping in the current grep-owned format.
     pub fn new(
