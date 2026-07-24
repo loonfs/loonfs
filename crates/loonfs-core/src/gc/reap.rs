@@ -6,15 +6,24 @@ use crate::checkpoint::record::encode_checkpoint_record;
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
 use crate::limits::GC_MIN_GRACE_WINDOW_MS;
+use crate::namespace::control::{map_control_codec_error, ControlObjectLoadError};
 use bytes::Bytes;
 use futures::StreamExt;
 use loonfs_api::wire::control::{
     decode_control_object, encode_control_object, CheckpointRecordLifecycle, CheckpointRecordState,
     ControlObjectKind, HeadState, HeadStateEnvelope, NamespaceState,
 };
-use loonfs_api::{ManifestObjectId, NamespaceId};
+use loonfs_api::{GeneratedIdValidationError, ManifestObjectId, NamespaceId};
 use loonfs_objectstore::keys::{namespace_config, namespace_prefix, wal_head};
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
+
+// Decode failure may only ever bias toward retaining bytes, never toward
+// deleting or fabricating them.
+enum HeadObservation {
+    Missing,
+    Valid(HeadState),
+    Unreadable(ControlObjectLoadError),
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AbandonedBootstrapReap {
@@ -122,11 +131,22 @@ pub(crate) async fn reap_abandoned_bootstrap<S: ObjectStore + ?Sized>(
         .get_with_metadata(&head_key)
         .await
         .map_err(|error| CoreError::store(&head_key, &error))?;
-    let decoded_head = head_body.as_ref().and_then(|body| {
-        decode_control_object::<HeadState>(&body.bytes, ControlObjectKind::WalHead)
-            .ok()
-            .map(|envelope| envelope.state)
-    });
+    let observed_head = match &head_body {
+        None => HeadObservation::Missing,
+        Some(body) => {
+            match decode_control_object::<HeadState>(&body.bytes, ControlObjectKind::WalHead) {
+                Ok(envelope) => HeadObservation::Valid(envelope.state),
+                Err(error) => {
+                    HeadObservation::Unreadable(map_control_codec_error(&head_key, error))
+                }
+            }
+        }
+    };
+    let decoded_head = match observed_head {
+        HeadObservation::Missing => None,
+        HeadObservation::Valid(state) => Some(state),
+        HeadObservation::Unreadable(error) => return Err(CoreError::load_head(error)),
+    };
     if let Some(head) = &decoded_head {
         if head.namespace_id != *namespace_id {
             return Ok(AbandonedBootstrapReap::InFlight);
@@ -171,9 +191,10 @@ pub(crate) async fn reap_abandoned_bootstrap<S: ObjectStore + ?Sized>(
             }
         }
 
-        let mut condemned_head = decoded_head
-            .clone()
-            .unwrap_or_else(|| HeadState::initial(namespace_id.clone()));
+        let mut condemned_head = match decoded_head.clone() {
+            Some(head) => head,
+            None => HeadState::initial(namespace_id.clone()),
+        };
         condemned_head.state = NamespaceState::Condemned;
         let envelope = HeadStateEnvelope::from_state(
             ControlObjectKind::WalHead,
@@ -285,8 +306,10 @@ pub(super) async fn delete_if_aged<S: ObjectStore + ?Sized>(
     Ok(true)
 }
 
-pub(super) fn manifest_object_id_of(key: &str) -> Option<ManifestObjectId> {
+pub(super) fn manifest_object_id_of(
+    key: &str,
+) -> Option<std::result::Result<ManifestObjectId, GeneratedIdValidationError>> {
     let name = key.rsplit('/').next()?;
     let object_id = name.strip_suffix(".manifest.json")?;
-    ManifestObjectId::parse(object_id).ok()
+    Some(ManifestObjectId::parse(object_id))
 }

@@ -848,6 +848,52 @@ async fn gc_reaps_dead_checkpoints_before_their_basis_across_passes() {
     stat_root(&store, &namespace_id).await;
 }
 
+/// Objects whose keys do not name a valid manifest are not proven GC
+/// candidates, so the pass retains their exact bytes.
+#[tokio::test]
+async fn gc_retains_unrecognized_manifest_keys() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = context(1_000);
+    bootstrap_namespace(&store, &namespace_id, &setup, false)
+        .await
+        .expect("bootstrap");
+
+    let manifest_prefix = metadata_manifest_prefix(namespace_id.as_str());
+    let foreign_objects = [
+        (
+            format!("{manifest_prefix}notes.txt"),
+            b"foreign key".as_slice(),
+        ),
+        (
+            format!("{manifest_prefix}invalid.manifest.json"),
+            b"invalid manifest id".as_slice(),
+        ),
+    ];
+    for (key, bytes) in &foreign_objects {
+        store
+            .put_if_absent(key, Bytes::copy_from_slice(bytes))
+            .await
+            .expect("write foreign manifest-prefix object");
+    }
+
+    let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
+    let report = gc_namespace(&store, &namespace_id, &config(), &aged)
+        .await
+        .expect("gc pass");
+
+    assert_eq!(report.deleted_manifests, 0);
+    for (key, expected) in foreign_objects {
+        let actual = store
+            .get(&key, None)
+            .await
+            .expect("get foreign manifest-prefix object")
+            .expect("unrecognized object is retained");
+        assert_eq!(actual.as_ref(), expected);
+    }
+}
+
 /// Repeated WAL flushes leave superseded manifests unpinned, so GC
 /// reclaims them once aged. This is what keeps retained metadata
 /// bounded when maintenance runs continuously.
