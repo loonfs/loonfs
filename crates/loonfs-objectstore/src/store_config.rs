@@ -8,6 +8,9 @@
 
 use crate::abs::AzureAbsStoreConfig;
 use crate::gcs::GcpGcsStoreConfig;
+use crate::provider::{
+    ProviderProfile, AWS_S3, AZURE_ABS, CLOUDFLARE_R2, GCP_GCS, LOCAL_FS, S3_COMPATIBLE,
+};
 use crate::r2::CloudflareR2StoreConfig;
 use crate::s3::AwsS3StoreConfig;
 use crate::secret::SecretString;
@@ -139,6 +142,38 @@ impl StoreConfig {
             StoreConfig::CloudflareR2 { .. } => ConfiguredObjectStoreKind::CloudflareR2,
             StoreConfig::GcpGcs { .. } => ConfiguredObjectStoreKind::GcpGcs,
             StoreConfig::AzureAbs { .. } => ConfiguredObjectStoreKind::AzureAbs,
+        }
+    }
+
+    /// Returns the provider contract profile selected by this configuration.
+    ///
+    /// First-party AWS S3 and Cloudflare R2 endpoints retain their provider
+    /// profiles. Endpoint overrides outside the provider's domain family use
+    /// the generic S3-compatible profile, whose provider-enforced behaviors
+    /// require conformance proof.
+    pub fn provider_profile(&self) -> &'static ProviderProfile {
+        match self {
+            StoreConfig::LocalFs { .. } => &LOCAL_FS,
+            StoreConfig::AwsS3 { endpoint_url, .. } => match endpoint_url {
+                None => &AWS_S3,
+                Some(endpoint_url)
+                    if endpoint_in_domain_families(
+                        endpoint_url,
+                        &["amazonaws.com", "amazonaws.com.cn"],
+                    ) =>
+                {
+                    &AWS_S3
+                }
+                Some(_) => &S3_COMPATIBLE,
+            },
+            StoreConfig::CloudflareR2 { endpoint_url, .. }
+                if endpoint_in_domain_families(endpoint_url, &["r2.cloudflarestorage.com"]) =>
+            {
+                &CLOUDFLARE_R2
+            }
+            StoreConfig::CloudflareR2 { .. } => &S3_COMPATIBLE,
+            StoreConfig::GcpGcs { .. } => &GCP_GCS,
+            StoreConfig::AzureAbs { .. } => &AZURE_ABS,
         }
     }
 
@@ -350,12 +385,29 @@ fn validate_absolute_http_url(field: &'static str, value: &str) -> Result<(), St
     Ok(())
 }
 
+fn endpoint_in_domain_families(endpoint_url: &str, domain_families: &[&str]) -> bool {
+    let Ok(uri) = endpoint_url.parse::<Uri>() else {
+        return false;
+    };
+    let Some(host) = uri.host() else {
+        return false;
+    };
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    domain_families.iter().any(|domain| {
+        host == *domain
+            || host
+                .strip_suffix(domain)
+                .is_some_and(|prefix| prefix.ends_with('.'))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::panic)]
     // Config tests use panic in unexpected match arms for precise diagnostics.
 
     use super::{StoreConfig, StoreConfigError};
+    use crate::provider::{AWS_S3, CLOUDFLARE_R2, GCP_GCS, S3_COMPATIBLE};
     use crate::ConfiguredObjectStoreKind;
     use std::path::{Path, PathBuf};
 
@@ -415,6 +467,73 @@ access_key = "key"
             assert_eq!(config.kind(), kind);
             config.validate().expect("valid config");
         }
+    }
+
+    #[test]
+    fn provider_profiles_distinguish_first_party_and_custom_s3_endpoints() {
+        let aws_default = parse(
+            r#"
+kind = "aws-s3"
+bucket = "bucket"
+region = "us-east-1"
+access_key_id = "access"
+secret_access_key = "secret"
+"#,
+        );
+        let aws_first_party = parse(
+            r#"
+kind = "aws-s3"
+bucket = "bucket"
+region = "cn-north-1"
+endpoint_url = "https://bucket.s3.cn-north-1.amazonaws.com.cn"
+access_key_id = "access"
+secret_access_key = "secret"
+"#,
+        );
+        let aws_custom = parse(
+            r#"
+kind = "aws-s3"
+bucket = "bucket"
+region = "us-east-1"
+endpoint_url = "https://gateway.example"
+access_key_id = "access"
+secret_access_key = "secret"
+"#,
+        );
+        let r2_first_party = parse(
+            r#"
+kind = "cloudflare-r2"
+bucket = "bucket"
+account_id = "account"
+endpoint_url = "https://account.r2.cloudflarestorage.com"
+access_key_id = "access"
+secret_access_key = "secret"
+"#,
+        );
+        let r2_custom = parse(
+            r#"
+kind = "cloudflare-r2"
+bucket = "bucket"
+account_id = "account"
+endpoint_url = "https://gateway.example"
+access_key_id = "access"
+secret_access_key = "secret"
+"#,
+        );
+        let gcs = parse(
+            r#"
+kind = "gcp-gcs"
+bucket = "bucket"
+service_account_key_path = "/tmp/service-account.json"
+"#,
+        );
+
+        assert_eq!(aws_default.provider_profile().name, AWS_S3.name);
+        assert_eq!(aws_first_party.provider_profile().name, AWS_S3.name);
+        assert_eq!(aws_custom.provider_profile().name, S3_COMPATIBLE.name);
+        assert_eq!(r2_first_party.provider_profile().name, CLOUDFLARE_R2.name);
+        assert_eq!(r2_custom.provider_profile().name, S3_COMPATIBLE.name);
+        assert_eq!(gcs.provider_profile().name, GCP_GCS.name);
     }
 
     #[test]

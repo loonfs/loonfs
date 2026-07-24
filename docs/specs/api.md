@@ -114,7 +114,7 @@ Registered limit keys:
 | --- | --- |
 | `pagination.default_limit` | Default page size applied when a paged request omits `limit`. |
 | `pagination.max_limit` | Largest accepted page size for paged requests. |
-| `upload.max_content_bytes` | Largest request body accepted for service-proxied upload content (`PUT .../uploads/{upload_id}/content`). Larger content should use `direct_put` uploads. |
+| `upload.max_content_bytes` | Largest request body accepted for service-proxied upload content (`PUT .../uploads/{upload_id}/content`). Clients may use `direct_put` for larger content only when `core.uploads.direct_put` is advertised; otherwise they must stay within this limit. |
 | `download.max_content_bytes` | Largest file content a service-proxied read (`GET .../filesystem/content`, inode revision content) will buffer and return in one response. Over-limit reads answer `content_too_large`; v0 has no proxied streaming or range reads. |
 | `upload.max_concurrent` | How many service-proxied upload bodies the deployment buffers at once; requests past the cap answer `server_busy`. |
 | `download.max_concurrent` | How many service-proxied content reads the deployment materializes at once; requests past the cap answer `server_busy`. |
@@ -137,7 +137,7 @@ hoc.
 | `core.namespaces.create` | Creating namespaces (`POST /v0/namespaces`). | |
 | `core.namespaces.fork` | Forking namespaces (`POST /v0/namespaces/{ns}/forks`). | |
 | `core.namespaces.delete` | Deleting namespaces (`DELETE /v0/namespaces/{ns}`). | Terminal, and the id is permanently retired. Deletion does not reclaim storage in v0. A deployment may still advertise `false` and answer `not_supported`. |
-| `core.uploads.direct_put` | Starting presigned `direct_put` upload sessions (`POST /v0/namespaces/{ns}/uploads`). | The server returns a short-lived presigned PUT capability for the exact content object. Raw object keys and caller-managed object-store writes are not part of this feature. |
+| `core.uploads.direct_put` | Starting presigned `direct_put` upload sessions (`POST /v0/namespaces/{ns}/uploads`). | The server returns a short-lived presigned PUT capability for the exact content object. The key is present only when the selected provider profile proves the signed preconditions or the deployment explicitly opts into an unproven endpoint. Raw object keys and caller-managed object-store writes are not part of this feature. |
 | `query.grep` | Content search (`POST /v0/namespaces/{ns}/query/grep`). | The serving half of a data-dependent capability: the request also requires a materialized steady-state grep root, and a namespace without one answers `not_supported` whatever this key advertises. |
 
 `admin/v0` currently has required ops only and no feature keys. `acl.*` keys
@@ -218,7 +218,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `invalid_request` | 400 | The request is malformed: a path, id, cursor, parameter, staged content reference, configuration value, or commit request limit fails validation. The message names the offending field or limit. |
 | `unauthorized` | 401 | Missing or wrong credentials. |
 | `permission_denied` | 403 | The backing object store rejected the deployment's storage credentials for this operation. Fix the storage credentials or bucket policy; retrying unchanged will not succeed. |
-| `content_too_large` | 413 | The request body exceeds the deployment's limit: `upload.max_content_bytes` for proxied uploads, `commit.max_body_bytes` for commit bodies. Served file content past `download.max_content_bytes` reports it too. For uploads, send a smaller payload or use `direct_put`; for commits, split the batch; for reads, the deployment limit must be raised. |
+| `content_too_large` | 413 | The request body exceeds the deployment's limit: `upload.max_content_bytes` for proxied uploads, `commit.max_body_bytes` for commit bodies. Served file content past `download.max_content_bytes` reports it too. For uploads, send a smaller payload or use `direct_put` when that feature is advertised; for commits, split the batch; for reads, the deployment limit must be raised. |
 | `route_not_found` | 404 | No route matches the request path. |
 | `method_not_allowed` | 405 | The path exists but does not serve this HTTP method. |
 | `namespace_not_found` | 404 | The namespace does not exist. |
@@ -493,8 +493,21 @@ example, `if-none-match: *` keeps the immutable object create-only, and
 `x-amz-checksum-sha256` binds the object-store write to the SHA-256 digest in
 `content_ref`. Because both requirements ride the signature, the provider —
 not the server — proves digest integrity at write time; a deployment only
-advertises `core.uploads.direct_put` when its provider can enforce this, and
-otherwise reports the mode as unsupported. Other providers may use different
+advertises `core.uploads.direct_put` when its provider profile proves this or
+the operator explicitly accepts an unproven endpoint. Arbitrary
+S3-compatible gateways are unproven because HMAC interoperability does not
+prove that the gateway enforces signed checksum and create-only
+preconditions; gateways have been observed silently ignoring preconditions.
+Without an explicit opt-in, the feature key is absent and beginning
+`direct_put` answers `not_supported` with
+`feature = "core.uploads.direct_put"`. The server-mediated upload path remains
+available and is the default.
+
+The reference server derives this decision from the provider capability
+profile's direct-put-precondition expectation. First-party provider domain
+families are enabled by default; an S3-compatible custom endpoint requires
+the strict configuration opt-in
+`[direct_put] allow_unproven = true`. Other providers may use different
 headers or decline `direct_put` support.
 
 After the client uploads bytes to the presigned URL, it calls complete with the

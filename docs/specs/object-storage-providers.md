@@ -21,17 +21,55 @@ This document is a non-normative reference: provider limits and performance data
 | **Request scale, partitions, throughput** | At least 3,500 write-class requests/s and 5,500 GET/HEAD requests/s per partitioned prefix; unlimited prefixes; scaling is gradual and may return 503 Slow Down. AWS also cites up to 100 Gb/s from a single EC2 instance and aggregate multi-Tb/s workloads.[^9] | Initial bucket scale is about 1,000 writes/s and 5,000 reads/s, then auto-scales. Ramp no faster than roughly doubling every 20 minutes. Sequential names can hotspot; random prefixes improve initial fanout. Internet egress default quota is commonly 200 Gbps per region, subject to account history and quotas.[^19][^20] | Public r2.dev buckets are test-only and may throttle at hundreds of req/s; production should use custom domains or direct APIs. Cloudflare REST management API is not for high-throughput object I/O; use S3-compatible or Workers APIs.[^32] | Standard GPv2/blob accounts: default max request rate 40,000 req/s in many listed regions, 20,000 elsewhere; ingress commonly 60/25 Gbps and egress 200/50 Gbps by region, increaseable by request. Partition hot spots can cause 503/500; use distribution and backoff.[^44][^45] | Vendor-specific. Run compatibility and load tests before relying on any numbers. |
 | **Published GET/HEAD latency** | AWS publishes rough general S3 small-object / first-byte latencies of about 100-200 ms.[^10] | No provider-published average GET/HEAD latency found. Need to benchmark. | No provider-published average GET/HEAD latency found. Need to benchmark. | No provider-published average GET/HEAD latency found. Need to benchmark. | Need to benchmark to verify. |
 
-## 3. Local Filesystem Provider
+## 3. Proven providers and direct-put
+
+Direct-put hands a presigned PUT to the client, then trusts the object-store
+provider to enforce every signed checksum and create-only precondition. Those
+preconditions are the safety argument: the checksum binds the stored bytes to
+the requested content reference, and create-only behavior prevents a client
+from replacing an immutable content object. A provider that accepts the HMAC
+signature but silently ignores either precondition breaks that argument.
+HMAC-compatible gateways have been observed doing exactly that.
+
+The provider profiles in
+`crates/loonfs-objectstore/src/provider.rs` are the source of truth.
+`ActiveContractProfile::direct_put_preconditions` is `ExpectedYes` for the
+known first-party AWS S3, Cloudflare R2, Google Cloud Storage, and Azure Blob
+Storage profiles. An AWS S3 endpoint with no override, an override in the
+`amazonaws.com` or `amazonaws.com.cn` domain family, and an R2 endpoint in the
+`r2.cloudflarestorage.com` family retain their first-party profile. Other
+S3-compatible endpoint URLs select the generic `s3-compatible` profile, whose
+expectation is `VerifyByConformance`; they are unproven for the launch gate.
+Direct-put availability also requires an adapter that can issue the matching
+provider capability; at launch the server issues these capabilities for AWS
+S3 and R2.
+
+The server advertises and accepts direct-put by default only when the selected
+profile proves the preconditions. For an unproven S3-compatible endpoint,
+`core.uploads.direct_put` is absent and beginning that mode answers
+`not_supported` with that feature key. An operator may explicitly accept the
+provider risk with:
+
+```toml
+[direct_put]
+allow_unproven = true
+```
+
+This setting does not weaken ordinary uploads. The server-mediated upload path
+remains available on every supported store and is the default on unproven
+endpoints.
+
+## 4. Local Filesystem Provider
 
 The local provider is a development and test provider supported on Unix-family platforms. It stages each replacement in the destination directory, makes the staged bytes durable, and atomically renames the staged file over the destination. A concurrent reader therefore observes either the complete prior object or the complete replacement, never a missing or partial object. Construction fails on other platforms rather than claiming a weaker replacement contract.
 
-## 4. LoonFS Design Implications
+## 5. LoonFS Design Implications
 
 1. **WAL/head flush cadence:** one update per second is the same-key CAS ceiling for GCS and R2. For more throughput, write immutable segment objects and update multiple sharded heads or a batched manifest.
 2. **Immutable content path:** content-addressed or monotonic keys can scale through multipart upload and distributed prefixes. 
 3. **Checksums:** LoonFS should own end-to-end integrity. Provider checksums help validate transport/storage, but ETag/checksum semantics diverge sharply across providers and multipart modes.
 
-## 5. Sources
+## 6. Sources
 
 [^1]: Google Cloud Storage, "Quotas & limits": [https://cloud.google.com/storage/quotas](https://cloud.google.com/storage/quotas)
 
