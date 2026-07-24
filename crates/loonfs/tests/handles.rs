@@ -7,9 +7,9 @@
 //! the handles document.
 
 use loonfs::{
-    CommitId, CreateCheckpointOptions, CreateNamespaceOptions, FsAdmin, FsBackgroundWork, FsReader,
-    FsWriter, MaintenanceStepOptions, ManifestId, NamespaceId, PutFileOptions, RuntimeCacheConfig,
-    RuntimeError, SharedObjectStore, StoreConfig,
+    CommitId, CreateCheckpointOptions, CreateNamespaceOptions, ErrorCode, FsAdmin,
+    FsBackgroundWork, FsReader, FsWriter, MaintenanceStepOptions, ManifestId, NamespaceId,
+    PutFileOptions, RuntimeCacheConfig, RuntimeError, SharedObjectStore, StoreConfig,
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
 use loonfs_core::control::load_namespace_metadata_root_control;
@@ -22,6 +22,7 @@ use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationClass};
 use std::path::Path;
 use std::sync::Arc;
 use tempfile::tempdir;
+use tokio::time::{timeout, Duration};
 
 fn store_config(root: &Path) -> StoreConfig {
     StoreConfig::LocalFs {
@@ -63,6 +64,23 @@ async fn fill_wal_tail_past_threshold(writer: &FsWriter, namespace_id: &Namespac
             )
             .await
             .expect("put file");
+    }
+}
+
+async fn fill_wal_tail_through_write_stop(writer: &FsWriter, namespace_id: &NamespaceId) {
+    let writes =
+        u32::try_from(loonfs_core::publish::WalTailPolicy::DEFAULT.reject_writes_at_segments + 1)
+            .expect("WAL write-stop limit plus one should fit in u32");
+    for round in 0..writes {
+        writer
+            .put_file_bytes(
+                namespace_id,
+                &format!("/write-stop/file-{round}.txt"),
+                b"body",
+                PutFileOptions::default(),
+            )
+            .await
+            .expect("put file through the write-stop boundary");
     }
 }
 
@@ -136,6 +154,221 @@ fn a_threshold_crossing_during_an_active_step_still_bounds_the_tail() {
             .shutdown_background()
             .await
             .expect("shut down writer background work");
+    });
+}
+
+#[test]
+fn a_step_queued_at_the_global_cap_runs_without_another_publish() {
+    let temp_dir = tempdir().expect("tempdir");
+    let active_namespace = namespace_id("active");
+    let queued_namespace = namespace_id("queued");
+    block_on(async {
+        let blocking = Arc::new(BlockingStore::new(
+            LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
+            KeyPredicate::metadata_root(active_namespace.as_str()),
+            OperationClass::CompareAndSwap,
+        ));
+        let store: SharedObjectStore = blocking.clone();
+        let writer = FsWriter::builder_with_store(store)
+            .writer_id("handle-test-writer")
+            .background_work(FsBackgroundWork::Enabled)
+            .max_concurrent_maintenance(1)
+            .build()
+            .await
+            .expect("build writer");
+        for namespace_id in [&active_namespace, &queued_namespace] {
+            writer
+                .create_namespace(namespace_id, CreateNamespaceOptions::default())
+                .await
+                .expect("create namespace");
+        }
+
+        blocking.block_next();
+        fill_wal_tail_past_threshold(&writer, &active_namespace).await;
+        blocking.wait_until_blocked().await;
+        fill_wal_tail_past_threshold(&writer, &queued_namespace).await;
+
+        blocking.release();
+        writer
+            .wait_for_background_work()
+            .await
+            .expect("queued maintenance quiesces");
+
+        let admin = FsAdmin::builder_with_store(blocking.clone() as SharedObjectStore)
+            .actor_id("handle-test-admin")
+            .build()
+            .await
+            .expect("build admin");
+        let status = admin
+            .namespace_status(&queued_namespace)
+            .await
+            .expect("queued namespace status");
+        assert!(
+            status.wal_tail_segments < wal_tail_segment_threshold(),
+            "the queued step must run without another publish: {status:?}"
+        );
+        writer
+            .shutdown_background()
+            .await
+            .expect("shut down writer background work");
+    });
+}
+
+#[test]
+fn a_write_stopped_namespace_queued_at_the_global_cap_unblocks_itself() {
+    let temp_dir = tempdir().expect("tempdir");
+    let active_namespace = namespace_id("active");
+    let write_stopped_namespace = namespace_id("write-stopped");
+    block_on(async {
+        let blocking = Arc::new(BlockingStore::new(
+            LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
+            KeyPredicate::metadata_root(active_namespace.as_str()),
+            OperationClass::CompareAndSwap,
+        ));
+        let store: SharedObjectStore = blocking.clone();
+        let writer = FsWriter::builder_with_store(store)
+            .writer_id("handle-test-writer")
+            .background_work(FsBackgroundWork::Enabled)
+            .max_concurrent_maintenance(1)
+            .build()
+            .await
+            .expect("build writer");
+        for namespace_id in [&active_namespace, &write_stopped_namespace] {
+            writer
+                .create_namespace(namespace_id, CreateNamespaceOptions::default())
+                .await
+                .expect("create namespace");
+        }
+
+        blocking.block_next();
+        fill_wal_tail_past_threshold(&writer, &active_namespace).await;
+        blocking.wait_until_blocked().await;
+        fill_wal_tail_through_write_stop(&writer, &write_stopped_namespace).await;
+        let error = writer
+            .put_file_bytes(
+                &write_stopped_namespace,
+                "/write-stop/rejected.txt",
+                b"body",
+                PutFileOptions::default(),
+            )
+            .await
+            .expect_err("writes past the hard limit must reject");
+        assert_eq!(error.code(), ErrorCode::MaintenanceRequired);
+
+        blocking.release();
+        writer
+            .wait_for_background_work()
+            .await
+            .expect("queued maintenance quiesces");
+
+        writer
+            .put_file_bytes(
+                &write_stopped_namespace,
+                "/write-stop/rejected.txt",
+                b"body",
+                PutFileOptions::default(),
+            )
+            .await
+            .expect("the queued step must unblock writes without another publish");
+        let admin = FsAdmin::builder_with_store(blocking.clone() as SharedObjectStore)
+            .actor_id("handle-test-admin")
+            .build()
+            .await
+            .expect("build admin");
+        let status = admin
+            .namespace_status(&write_stopped_namespace)
+            .await
+            .expect("write-stopped namespace status");
+        assert!(
+            status.wal_tail_segments < wal_tail_segment_threshold(),
+            "the queued step must flush the write-stopped tail before the retry: {status:?}"
+        );
+        writer
+            .shutdown_background()
+            .await
+            .expect("shut down writer background work");
+    });
+}
+
+#[test]
+fn shutdown_clears_a_non_empty_maintenance_queue_without_spawning_it() {
+    let temp_dir = tempdir().expect("tempdir");
+    let active_namespace = namespace_id("active");
+    let queued_namespace = namespace_id("queued");
+    block_on(async {
+        let blocking = Arc::new(BlockingStore::new(
+            LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
+            KeyPredicate::metadata_root(active_namespace.as_str()),
+            OperationClass::CompareAndSwap,
+        ));
+        let store: SharedObjectStore = blocking.clone();
+        let writer = FsWriter::builder_with_store(store)
+            .writer_id("handle-test-writer")
+            .background_work(FsBackgroundWork::Enabled)
+            .max_concurrent_maintenance(1)
+            .build()
+            .await
+            .expect("build writer");
+        for namespace_id in [&active_namespace, &queued_namespace] {
+            writer
+                .create_namespace(namespace_id, CreateNamespaceOptions::default())
+                .await
+                .expect("create namespace");
+        }
+
+        blocking.block_next();
+        fill_wal_tail_past_threshold(&writer, &active_namespace).await;
+        blocking.wait_until_blocked().await;
+        fill_wal_tail_past_threshold(&writer, &queued_namespace).await;
+
+        let mut shutdown = Box::pin(writer.shutdown_background());
+        assert!(
+            futures::poll!(shutdown.as_mut()).is_pending(),
+            "shutdown must wait for the parked active step"
+        );
+        blocking.release();
+        timeout(Duration::from_secs(10), shutdown)
+            .await
+            .expect("shutdown must not hang with a non-empty queue")
+            .expect("shut down writer background work");
+
+        let admin = FsAdmin::builder_with_store(blocking.clone() as SharedObjectStore)
+            .actor_id("handle-test-admin")
+            .build()
+            .await
+            .expect("build admin");
+        let status = admin
+            .namespace_status(&queued_namespace)
+            .await
+            .expect("queued namespace status after shutdown");
+        assert_eq!(
+            status.current_manifest_id,
+            Some(ManifestId(0)),
+            "shutdown must clear queued work before the active step releases its permit"
+        );
+
+        writer
+            .put_file_bytes(
+                &queued_namespace,
+                "/after-close.txt",
+                b"body",
+                PutFileOptions::default(),
+            )
+            .await
+            .expect("foreground writes remain available after background shutdown");
+        writer
+            .wait_for_background_work()
+            .await
+            .expect("nothing may spawn after background shutdown");
+        let status = admin
+            .namespace_status(&queued_namespace)
+            .await
+            .expect("queued namespace status after post-close write");
+        assert_eq!(
+            status.current_manifest_id,
+            Some(ManifestId(0)),
+            "post-close threshold crossings must not spawn maintenance"
+        );
     });
 }
 

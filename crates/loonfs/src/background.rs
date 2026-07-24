@@ -52,10 +52,10 @@ pub(crate) struct BackgroundWork {
 struct BackgroundState {
     closed: bool,
     inflight: BTreeSet<NamespaceId>,
-    /// Namespaces whose over-threshold publish arrived while their step was
-    /// already running. The running step consumes this through
-    /// [`BackgroundWork::finish_or_rerun`] and runs again, so the last write
-    /// before an idle period cannot leave the tail unbounded.
+    /// Distinct dirty namespaces whose step request arrived while their own
+    /// step was running or while the global concurrency cap was full. The
+    /// set coalesces repeated requests and is bounded by the number of
+    /// distinct dirty namespaces.
     pending: BTreeSet<NamespaceId>,
     tasks: Vec<JoinHandle<()>>,
 }
@@ -110,14 +110,15 @@ impl BackgroundWork {
             return false;
         }
         if state.inflight.len() >= self.max_concurrent.get() {
+            state.pending.insert(namespace_id.clone());
             tracing::debug!(
                 namespace_id = %namespace_id,
                 max_concurrent = self.max_concurrent.get(),
-                "maintenance step skipped at the concurrency cap; \
-                 the next over-threshold publish reschedules it"
+                "maintenance step deferred at the concurrency cap"
             );
             return false;
         }
+        state.pending.remove(namespace_id);
         state.inflight.insert(namespace_id.clone())
     }
 
@@ -127,25 +128,39 @@ impl BackgroundWork {
         state.inflight.remove(namespace_id);
     }
 
-    /// Ends one step run for the namespace. When another over-threshold
-    /// publish deferred a request during the run, that request is consumed,
-    /// the singleflight slot stays held, and the caller must run again; only
-    /// a quiet finish releases the slot. Checking and releasing under the
-    /// one state lock closes the window where a request could land between
-    /// a final pending check and the release.
-    pub(crate) fn finish_or_rerun(&self, namespace_id: &NamespaceId) -> bool {
+    /// Ends one step run and returns the namespace the caller must run next.
+    ///
+    /// The finishing namespace's own deferred request wins first and keeps
+    /// its slot. Otherwise the slot transfers to the first pending namespace
+    /// that is not already running. The pending check, release, dequeue, and
+    /// new claim share the one state lock, so no request can be lost between
+    /// freeing the slot and choosing its successor.
+    pub(crate) fn finish_or_rerun(&self, namespace_id: &NamespaceId) -> Option<NamespaceId> {
         let mut state = self.lock_state();
         if !state.closed && state.pending.remove(namespace_id) {
-            return true;
+            return Some(namespace_id.clone());
         }
         state.pending.remove(namespace_id);
         state.inflight.remove(namespace_id);
-        false
+        if state.closed {
+            return None;
+        }
+        let next_namespace_id = state
+            .pending
+            .iter()
+            .find(|candidate| !state.inflight.contains(*candidate))
+            .cloned()?;
+        state.pending.remove(&next_namespace_id);
+        state.inflight.insert(next_namespace_id.clone());
+        Some(next_namespace_id)
     }
 
-    /// Rejects any further background scheduling.
+    /// Rejects further scheduling and discards work still waiting for a
+    /// concurrency slot. Already registered tasks remain visible to drain.
     pub(crate) fn shut_down(&self) {
-        self.lock_state().closed = true;
+        let mut state = self.lock_state();
+        state.closed = true;
+        state.pending.clear();
     }
 
     /// Spawns claimed work on the owning runtime and registers it for
@@ -176,7 +191,8 @@ impl BackgroundWork {
 
     /// Waits for every scheduled task to finish, surfacing panics. Loops
     /// because an in-flight write may schedule more work while an open
-    /// handle waits.
+    /// handle waits, and because a finishing task registers the next queued
+    /// namespace before it exits.
     pub(crate) async fn drain(&self) -> Result<()> {
         let mut panicked = 0usize;
         loop {
@@ -236,12 +252,13 @@ mod tests {
             !background.try_claim(&namespace_id),
             "a request during the active step defers instead of claiming"
         );
-        assert!(
+        assert_eq!(
             background.finish_or_rerun(&namespace_id),
+            Some(namespace_id.clone()),
             "the deferred request keeps the slot held and reruns the step"
         );
         assert!(
-            !background.finish_or_rerun(&namespace_id),
+            background.finish_or_rerun(&namespace_id).is_none(),
             "a quiet finish releases the slot"
         );
         assert!(
@@ -260,7 +277,7 @@ mod tests {
         assert!(!background.try_claim(&namespace_id), "defers while active");
         background.shut_down();
         assert!(
-            !background.finish_or_rerun(&namespace_id),
+            background.finish_or_rerun(&namespace_id).is_none(),
             "a deferred request must not rerun after shutdown closed admission"
         );
     }
@@ -360,7 +377,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn claims_stop_at_the_global_concurrency_cap() {
+    async fn a_freed_slot_claims_the_next_namespace_at_the_global_cap() {
         let background = BackgroundWork::new(FsBackgroundWork::Enabled, None, concurrency_cap(2));
         let first = NamespaceId::parse("first").expect("valid namespace id");
         let second = NamespaceId::parse("second").expect("valid namespace id");
@@ -373,10 +390,52 @@ mod tests {
             "a third namespace must wait for a slot"
         );
 
-        background.release(&first);
+        assert_eq!(
+            background.finish_or_rerun(&first),
+            Some(third.clone()),
+            "the finishing path transfers its slot to the queued namespace"
+        );
+        background.release(&second);
+        background.release(&third);
+    }
+
+    #[test]
+    fn repeated_requests_for_one_queued_namespace_coalesce_to_one_run() {
+        let background = BackgroundWork::new(FsBackgroundWork::Enabled, None, concurrency_cap(1));
+        let active = namespace_id("active");
+        let queued = namespace_id("queued");
+
+        assert!(background.try_claim(&active));
+        for _ in 0..8 {
+            assert!(
+                !background.try_claim(&queued),
+                "the queued namespace cannot claim the occupied slot"
+            );
+        }
+        assert_eq!(
+            background.finish_or_rerun(&active),
+            Some(queued.clone()),
+            "one queued run consumes all coalesced requests"
+        );
         assert!(
-            background.try_claim(&third),
-            "a released slot admits the waiting namespace"
+            background.finish_or_rerun(&queued).is_none(),
+            "coalesced requests must not create a second run"
+        );
+    }
+
+    #[test]
+    fn shutdown_clears_namespaces_waiting_at_the_global_cap() {
+        let background = BackgroundWork::new(FsBackgroundWork::Enabled, None, concurrency_cap(1));
+        let active = namespace_id("active");
+        let queued = namespace_id("queued");
+
+        assert!(background.try_claim(&active));
+        assert!(!background.try_claim(&queued));
+        background.shut_down();
+        assert!(background.finish_or_rerun(&active).is_none());
+        assert!(
+            !background.try_claim(&queued),
+            "closed admission must not revive the cleared queue"
         );
     }
 }

@@ -528,8 +528,8 @@ impl FsWriterBuilder {
     /// Caps how many writer-scheduled maintenance steps may run at once
     /// across all namespaces this writer serves. Each namespace already runs
     /// at most one step at a time; this bounds the fan-out when many
-    /// namespaces cross their thresholds together. Skipped steps are
-    /// rescheduled by the next over-threshold publish. Defaults to
+    /// namespaces cross their thresholds together. Requests beyond the cap
+    /// are coalesced by namespace and run as permits become available. Defaults to
     /// [`crate::DEFAULT_MAX_CONCURRENT_MAINTENANCE`]. The limit must be
     /// greater than zero; [`FsBackgroundWork::ManualOnly`] is the only way
     /// to disable scheduling.

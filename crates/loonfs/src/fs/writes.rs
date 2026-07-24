@@ -641,34 +641,52 @@ impl FsCore {
             fs: self.clone(),
             namespace_id: namespace_id.clone(),
         };
-        self.inner.background.spawn(async move {
-            loop {
-                if let Err(error) = claim
-                    .fs
-                    .run_auto_maintenance(&claim.namespace_id, options.clone())
-                    .await
-                {
-                    tracing::info!(
-                        phase = "auto_maintenance_step",
-                        result = "error",
-                        error = %error,
-                        "post-publish maintenance step failed"
-                    );
+        self.spawn_claimed_auto_maintenance(claim, options);
+    }
+
+    fn spawn_claimed_auto_maintenance(
+        &self,
+        claim: BackgroundStepClaim,
+        options: MaintenanceStepOptions,
+    ) {
+        // Type erasure lets a finishing task transfer its claim and spawn the
+        // next queued namespace without forming a recursive future type.
+        let future: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
+            Box::pin(async move {
+                let mut claim = claim;
+                loop {
+                    if let Err(error) = claim
+                        .fs
+                        .run_auto_maintenance(&claim.namespace_id, options.clone())
+                        .await
+                    {
+                        tracing::info!(
+                            phase = "auto_maintenance_step",
+                            result = "error",
+                            error = %error,
+                            "post-publish maintenance step failed"
+                        );
+                    }
+                    let Some(next_namespace_id) = claim
+                        .fs
+                        .inner
+                        .background
+                        .finish_or_rerun(&claim.namespace_id)
+                    else {
+                        break;
+                    };
+                    if next_namespace_id == claim.namespace_id {
+                        // Preserve the existing own-namespace rerun in this
+                        // task before handing its slot to global queued work.
+                        continue;
+                    }
+                    claim.namespace_id = next_namespace_id;
+                    let fs = claim.fs.clone();
+                    fs.spawn_claimed_auto_maintenance(claim, options);
+                    return;
                 }
-                // A publish that crossed the threshold while this step ran
-                // deferred its request rather than dropping it; consume it
-                // and run again, so the last write before an idle period
-                // cannot leave the tail unbounded.
-                if !claim
-                    .fs
-                    .inner
-                    .background
-                    .finish_or_rerun(&claim.namespace_id)
-                {
-                    break;
-                }
-            }
-        });
+            });
+        self.inner.background.spawn(future);
     }
 
     async fn run_auto_maintenance(
