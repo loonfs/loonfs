@@ -148,9 +148,10 @@ async fn process_candidate<S: ObjectStore + ?Sized>(
     let selected = match family {
         CandidateFamily::WalSegments => !mark.wal_segments.contains(key),
         CandidateFamily::MetadataTables => !mark.tables.contains(key),
-        CandidateFamily::Manifests => {
-            manifest_object_id_of(key).is_none_or(|id| !mark.manifests.contains(&id))
-        }
+        CandidateFamily::Manifests => match manifest_object_id_of(key) {
+            Some(Ok(id)) => !mark.manifests.contains(&id),
+            None | Some(Err(_)) => false,
+        },
         CandidateFamily::Checkpoints => !mark.checkpoint_keys.contains(key),
         CandidateFamily::UploadSessions => false,
     };
@@ -178,9 +179,11 @@ async fn process_candidate<S: ObjectStore + ?Sized>(
             }
         }
         CandidateFamily::Manifests => {
-            let live =
-                manifest_object_id_of(key).is_some_and(|id| sweep.live.manifests.contains(&id));
-            if sweep.degraded || live {
+            let live_or_unrecognized = match manifest_object_id_of(key) {
+                Some(Ok(id)) => sweep.live.manifests.contains(&id),
+                None | Some(Err(_)) => true,
+            };
+            if sweep.degraded || live_or_unrecognized {
                 report.retained_candidates += 1;
             } else if delete_if_aged(store, key, config.grace_window_ms, context, report).await? {
                 report.deleted_manifests += 1;

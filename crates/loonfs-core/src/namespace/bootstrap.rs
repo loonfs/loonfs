@@ -388,6 +388,7 @@ mod tests {
     use loonfs_test_support::stores::{
         BlockingStore, KeyPredicate, OperationClass, OperationContext, OperationKind,
     };
+    use std::collections::BTreeMap;
     use std::sync::Arc;
     use tempfile::tempdir;
 
@@ -481,6 +482,100 @@ mod tests {
             .expect("list namespace")
     }
 
+    async fn namespace_objects(
+        store: &LocalFsStore,
+        namespace_id: &NamespaceId,
+    ) -> BTreeMap<String, Vec<u8>> {
+        let mut objects = BTreeMap::new();
+        for key in namespace_keys(store, namespace_id).await {
+            let bytes = store
+                .get(&key, None)
+                .await
+                .expect("get namespace object")
+                .expect("listed namespace object exists");
+            objects.insert(key, bytes.to_vec());
+        }
+        objects
+    }
+
+    fn flip_head_checksum(bytes: &[u8]) -> Vec<u8> {
+        let mut document: serde_json::Value =
+            serde_json::from_slice(bytes).expect("decode head json");
+        let checksum = document["payload_checksum"]
+            .as_str()
+            .expect("head checksum")
+            .to_owned();
+        let replacement = if checksum.as_bytes()[7] == b'0' {
+            "1"
+        } else {
+            "0"
+        };
+        let mut corrupted = checksum;
+        corrupted.replace_range(7..8, replacement);
+        document["payload_checksum"] = serde_json::Value::String(corrupted);
+        serde_json::to_vec(&document).expect("encode corrupt head")
+    }
+
+    fn replace_head_marker(bytes: &[u8], marker: &str, value: serde_json::Value) -> Vec<u8> {
+        let mut document: serde_json::Value =
+            serde_json::from_slice(bytes).expect("decode head json");
+        document[marker] = value;
+        serde_json::to_vec(&document).expect("encode head with foreign marker")
+    }
+
+    async fn assert_repair_retains_unreadable_head(
+        namespace: &str,
+        damage: impl FnOnce(&[u8]) -> Vec<u8>,
+    ) {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::parse(namespace).expect("namespace id");
+        bootstrap_namespace(&store, &namespace_id, &context(1_000), false)
+            .await
+            .expect("bootstrap");
+        store
+            .delete(&namespace_config(namespace_id.as_str()))
+            .await
+            .expect("simulate crash before the completion marker");
+
+        let head_key = wal_head(namespace_id.as_str());
+        let head = store
+            .get(&head_key, None)
+            .await
+            .expect("get head")
+            .expect("head exists");
+        store
+            .put_overwrite(&head_key, Bytes::from(damage(&head)))
+            .await
+            .expect("damage head");
+        let before = namespace_objects(&store, &namespace_id).await;
+        let aged = context(
+            now_after_newest_object(&store, &namespace_id, GC_MIN_GRACE_WINDOW_MS + 1).await,
+        );
+
+        let error = repair_namespace(&store, &namespace_id, &aged)
+            .await
+            .expect_err("unreadable head is corruption");
+        assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
+        let error_key = match &error {
+            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(
+                ControlObjectLoadError::ChecksumMismatch { object_key, .. }
+                | ControlObjectLoadError::Codec { object_key, .. },
+            )) => Some(object_key.as_str()),
+            _ => None,
+        };
+        assert_eq!(
+            error_key,
+            Some(head_key.as_str()),
+            "repair must return typed head corruption"
+        );
+        assert_eq!(
+            namespace_objects(&store, &namespace_id).await,
+            before,
+            "repair must preserve every namespace byte"
+        );
+    }
+
     async fn commit_directory(store: &LocalFsStore, namespace_id: &NamespaceId, name: &str) {
         let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
         engine
@@ -504,6 +599,36 @@ mod tests {
             .pop()
             .expect("one commit result")
             .expect("commit lands");
+    }
+
+    #[tokio::test]
+    async fn repair_reports_corrupt_head_and_preserves_every_namespace_byte() {
+        assert_repair_retains_unreadable_head("checksumcase", flip_head_checksum).await;
+        assert_repair_retains_unreadable_head("truncatedcase", |bytes| {
+            bytes[..bytes.len() / 2].to_vec()
+        })
+        .await;
+        assert_repair_retains_unreadable_head("junkcase", |_| b"not json".to_vec()).await;
+    }
+
+    #[tokio::test]
+    async fn repair_reports_foreign_head_markers_and_preserves_every_namespace_byte() {
+        assert_repair_retains_unreadable_head("kindcase", |bytes| {
+            replace_head_marker(
+                bytes,
+                "kind",
+                serde_json::Value::String("metadata_root".to_owned()),
+            )
+        })
+        .await;
+        assert_repair_retains_unreadable_head("versioncase", |bytes| {
+            replace_head_marker(
+                bytes,
+                "format_version",
+                serde_json::Value::Number(37_u64.into()),
+            )
+        })
+        .await;
     }
 
     #[tokio::test]
