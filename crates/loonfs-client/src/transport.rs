@@ -1,84 +1,113 @@
-//! The HTTP transport: request sending, the bounded transient retry, and
+//! The HTTP transport: request building, the bounded transient retry, and
 //! response-to-error mapping.
 
 use crate::{Client, ClientError, Result};
 use loonfs_api::{ApiError, ErrorCode};
+use reqwest::Method;
+use std::time::Duration;
 
 /// Cap on attempts for transient-error retry: one initial try plus three
 /// retries, sleeping with doubling backoff in between.
 pub(crate) const MAX_TRANSIENT_ATTEMPTS: u32 = 4;
 /// First transient-retry sleep; doubles per retry up to
 /// [`MAX_TRANSIENT_RETRY_DELAY`].
-pub(crate) const INITIAL_TRANSIENT_RETRY_DELAY: std::time::Duration =
-    std::time::Duration::from_millis(250);
+pub(crate) const INITIAL_TRANSIENT_RETRY_DELAY: Duration = Duration::from_millis(250);
 /// Ceiling for one transient-retry sleep.
-pub(crate) const MAX_TRANSIENT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+pub(crate) const MAX_TRANSIENT_RETRY_DELAY: Duration = Duration::from_secs(2);
 
 /// Socket read/write inactivity timeout applied to every request. A
 /// connection that makes no progress for this long fails instead of hanging
 /// the caller forever.
-pub(crate) const IO_INACTIVITY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+pub(crate) const IO_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// The retry policy for one failed attempt: `transport` is whether the
-/// network layer itself reported the failure (classified before the error
-/// is flattened by `map_error`), and served envelopes retry only on the
-/// retryable-unavailability codes.
-pub(crate) fn transient_failure(transport: bool, error: &ClientError) -> bool {
-    transport
-        || matches!(
-            error,
-            ClientError::Api { code, .. }
-                if code == ErrorCode::ServerBusy.as_str()
-                    || code == ErrorCode::CommitQueueFull.as_str()
-                    || code == ErrorCode::ShuttingDown.as_str()
-        )
-}
-
-/// Deterministic doubling, the same shape as the object-store transport
-/// retry: workspace policy avoids ambient randomness, and a bounded
-/// per-request retry does not need jitter.
-fn transient_retry_backoff(attempt: u32) -> std::time::Duration {
-    let doublings = attempt.saturating_sub(1).min(16);
-    INITIAL_TRANSIENT_RETRY_DELAY
-        .saturating_mul(1u32 << doublings)
-        .min(MAX_TRANSIENT_RETRY_DELAY)
-}
-
-/// The blocking client waits an isolated OS timer between attempts; there
-/// is no async runtime on this call path to time against.
-#[allow(clippy::disallowed_methods)]
-fn transient_retry_pause(backoff: std::time::Duration) {
-    std::thread::sleep(backoff);
+/// One outbound request, described rather than built.
+///
+/// A retry must resend byte-identical content, and a `reqwest::RequestBuilder`
+/// is consumed by sending. Keeping the description lets every attempt build a
+/// fresh builder from the same parts.
+pub(crate) struct WireRequest {
+    method: Method,
+    url: String,
+    /// Extra headers beyond authorization, in insertion order.
+    headers: Vec<(String, String)>,
+    /// Whether the configured bearer token is attached. False only for
+    /// presigned provider URLs, which carry their own signature.
+    authenticate: bool,
 }
 
 impl Client {
-    pub(crate) fn request_json<Req, Resp>(
+    pub(crate) fn get(&self, url: &str) -> WireRequest {
+        WireRequest::to_server(Method::GET, url)
+    }
+
+    pub(crate) fn post(&self, url: &str) -> WireRequest {
+        WireRequest::to_server(Method::POST, url)
+    }
+
+    pub(crate) fn put(&self, url: &str) -> WireRequest {
+        WireRequest::to_server(Method::PUT, url)
+    }
+
+    pub(crate) fn delete(&self, url: &str) -> WireRequest {
+        WireRequest::to_server(Method::DELETE, url)
+    }
+}
+
+impl WireRequest {
+    fn to_server(method: Method, url: &str) -> Self {
+        Self {
+            method,
+            url: url.to_owned(),
+            headers: Vec::new(),
+            authenticate: true,
+        }
+    }
+
+    /// A presigned provider URL: the signature authorizes it, so the
+    /// deployment's bearer token must not be attached.
+    pub(crate) fn presigned(method: Method, url: &str) -> Self {
+        Self {
+            method,
+            url: url.to_owned(),
+            headers: Vec::new(),
+            authenticate: false,
+        }
+    }
+
+    pub(crate) fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.push((name.into(), value.into()));
+        self
+    }
+}
+
+impl Client {
+    pub(crate) async fn request_json<Req, Resp>(
         &self,
-        request: ureq::Request,
+        request: WireRequest,
         body: Option<&Req>,
     ) -> Result<Resp>
     where
         Req: serde::Serialize,
         Resp: serde::de::DeserializeOwned,
     {
-        self.request_json_inner(request, body, true)
+        self.request_json_inner(request, body, true).await
     }
 
-    pub(crate) fn request_json_once<Req, Resp>(
+    pub(crate) async fn request_json_once<Req, Resp>(
         &self,
-        request: ureq::Request,
+        request: WireRequest,
         body: Option<&Req>,
     ) -> Result<Resp>
     where
         Req: serde::Serialize,
         Resp: serde::de::DeserializeOwned,
     {
-        self.request_json_inner(request, body, false)
+        self.request_json_inner(request, body, false).await
     }
 
-    fn request_json_inner<Req, Resp>(
+    async fn request_json_inner<Req, Resp>(
         &self,
-        request: ureq::Request,
+        request: WireRequest,
         body: Option<&Req>,
         retry: bool,
     ) -> Result<Resp>
@@ -86,7 +115,6 @@ impl Client {
         Req: serde::Serialize,
         Resp: serde::de::DeserializeOwned,
     {
-        let request = self.authenticated(request);
         let body = match body {
             Some(body) => {
                 // Serialized once: every retry attempt resends identical
@@ -95,38 +123,34 @@ impl Client {
             }
             None => None,
         };
-        let request = if body.is_some() {
-            request.set("content-type", "application/json")
-        } else {
-            request
+        let request = match body {
+            Some(_) => request.header("content-type", "application/json"),
+            None => request,
         };
-        let response = if retry {
-            self.call_with_transient_retry(&request, body.as_deref())?
+        let bytes = if retry {
+            self.call_with_transient_retry(&request, body.as_deref())
+                .await?
         } else {
-            self.call_once(&request, body.as_deref())?
+            self.call_once(&request, body.as_deref()).await?
         };
-        serde_json::from_reader(response.into_reader())
-            .map_err(|err| ClientError::Json(err.to_string()))
+        serde_json::from_slice(&bytes).map_err(|err| ClientError::Json(err.to_string()))
     }
 
-    pub(crate) fn request_bytes(&self, url: &str) -> Result<Vec<u8>> {
-        let request = self.authenticated(self.agent.get(url));
-        let response = self.call_with_transient_retry(&request, None)?;
-        let mut reader = response.into_reader();
-        let mut bytes = Vec::new();
-        std::io::Read::read_to_end(&mut reader, &mut bytes)
-            .map_err(|err| ClientError::Io(err.to_string()))?;
-        Ok(bytes)
+    pub(crate) async fn request_bytes(&self, url: &str) -> Result<Vec<u8>> {
+        let request = self.get(url);
+        self.call_with_transient_retry(&request, None).await
     }
 
     /// Sends one request without retrying. Callers use this path when an
     /// ambiguous success cannot be reconciled through durable replay state.
-    pub(crate) fn call_once(
+    pub(crate) async fn call_once(
         &self,
-        request: &ureq::Request,
+        request: &WireRequest,
         body: Option<&[u8]>,
-    ) -> Result<ureq::Response> {
-        send_request(request, body).map_err(|error| self.map_error(*error))
+    ) -> Result<Vec<u8>> {
+        self.send(request, body)
+            .await
+            .map_err(|attempt| attempt.error)
     }
 
     /// Sends one request, resending on quick-clearing transient failures —
@@ -142,82 +166,137 @@ impl Client {
     /// maintenance step, not on a resend — and a served status with a
     /// non-envelope body is not retried: only failures the network layer
     /// itself reported count as transport.
-    pub(crate) fn call_with_transient_retry(
+    pub(crate) async fn call_with_transient_retry(
         &self,
-        request: &ureq::Request,
+        request: &WireRequest,
         body: Option<&[u8]>,
-    ) -> Result<ureq::Response> {
+    ) -> Result<Vec<u8>> {
         let mut attempts = 0;
         loop {
-            let outcome = send_request(request, body);
-            let error = match outcome {
-                Ok(response) => return Ok(response),
-                Err(error) => error,
+            let attempt = match self.send(request, body).await {
+                Ok(bytes) => return Ok(bytes),
+                Err(attempt) => attempt,
             };
-            // Classified before `map_error` flattens it: only a true
-            // network-level failure retries — a served status with a
-            // non-envelope body (a load balancer's HTML 502) does not.
-            let transport = matches!(error.as_ref(), ureq::Error::Transport(_));
-            let error = self.map_error(*error);
             attempts += 1;
-            let transient = transient_failure(transport, &error);
+            let transient = transient_failure(attempt.transport, &attempt.error);
             if !self.transient_retry || !transient || attempts >= MAX_TRANSIENT_ATTEMPTS {
-                return Err(error);
+                return Err(attempt.error);
             }
-            transient_retry_pause(transient_retry_backoff(attempts));
+            transient_retry_pause(transient_retry_backoff(attempts)).await;
         }
     }
 
-    pub(crate) fn authenticated(&self, request: ureq::Request) -> ureq::Request {
-        match &self.auth_token {
-            Some(token) => request.set("authorization", &format!("Bearer {token}")),
-            None => request,
+    /// One attempt: build, send, and read the body. A served non-success
+    /// status is an error but not a transport failure — that distinction is
+    /// what the retry policy keys on.
+    async fn send(
+        &self,
+        request: &WireRequest,
+        body: Option<&[u8]>,
+    ) -> std::result::Result<Vec<u8>, FailedAttempt> {
+        #[cfg(test)]
+        if let Some(outcome) = test_transport::next() {
+            return outcome;
         }
-    }
-
-    pub(crate) fn map_error(&self, error: ureq::Error) -> ClientError {
-        match error {
-            ureq::Error::Status(status, response) => {
-                let parsed = serde_json::from_reader::<_, ApiError>(response.into_reader());
-                match parsed {
-                    Ok(body) => ClientError::Api {
-                        status,
-                        code: body.code,
-                        feature: body.feature,
-                        message: body.message,
-                        request_id: body.request_id,
-                        details: body.details,
-                    },
-                    // A status with a non-envelope body is most commonly an
-                    // intermediary answering for the server (a load
-                    // balancer's HTML 502): keep the status — it is the only
-                    // signal the response carried.
-                    Err(err) => ClientError::Http(format!(
-                        "http status {status} with a non-envelope body: {err}"
-                    )),
-                }
+        let mut builder = self.http.request(request.method.clone(), &request.url);
+        if request.authenticate {
+            if let Some(token) = &self.auth_token {
+                builder = builder.bearer_auth(token);
             }
-            ureq::Error::Transport(err) => ClientError::Http(err.to_string()),
         }
+        for (name, value) in &request.headers {
+            builder = builder.header(name.as_str(), value.as_str());
+        }
+        if let Some(bytes) = body {
+            builder = builder.body(bytes.to_vec());
+        }
+
+        let response = builder.send().await.map_err(|err| FailedAttempt {
+            transport: true,
+            error: ClientError::Http(err.to_string()),
+        })?;
+        let status = response.status();
+        let bytes = response.bytes().await.map_err(|err| FailedAttempt {
+            // The status arrived but the body did not: the connection failed
+            // mid-response, which is a transport failure like any other.
+            transport: true,
+            error: ClientError::Http(err.to_string()),
+        })?;
+        if status.is_success() {
+            return Ok(bytes.to_vec());
+        }
+        Err(FailedAttempt {
+            transport: false,
+            error: map_status_error(status.as_u16(), &bytes),
+        })
     }
 }
 
-fn send_request(
-    request: &ureq::Request,
-    body: Option<&[u8]>,
-) -> std::result::Result<ureq::Response, Box<ureq::Error>> {
-    #[cfg(test)]
-    if let Some(outcome) = test_transport::next() {
-        return outcome;
+/// One failed attempt, carrying whether the network layer itself reported it.
+pub(crate) struct FailedAttempt {
+    /// True when no complete response was served. Classified here, before the
+    /// error is flattened, because the retry policy keys on it: a served
+    /// status with a non-envelope body (a load balancer's HTML 502) is not a
+    /// transport failure.
+    pub(crate) transport: bool,
+    pub(crate) error: ClientError,
+}
+
+pub(crate) fn map_status_error(status: u16, body: &[u8]) -> ClientError {
+    match serde_json::from_slice::<ApiError>(body) {
+        Ok(body) => ClientError::Api {
+            status,
+            code: body.code,
+            feature: body.feature,
+            message: body.message,
+            request_id: body.request_id,
+            details: body.details,
+        },
+        // A status with a non-envelope body is most commonly an intermediary
+        // answering for the server (a load balancer's HTML 502): keep the
+        // status — it is the only signal the response carried.
+        Err(err) => ClientError::Http(format!(
+            "http status {status} with a non-envelope body: {err}"
+        )),
     }
-    match body {
-        Some(bytes) => request.clone().send_bytes(bytes).map_err(Box::new),
-        None => request.clone().call().map_err(Box::new),
-    }
+}
+
+/// The retry policy for one failed attempt: `transport` is whether the
+/// network layer itself reported the failure (classified before the error
+/// is flattened by `map_status_error`), and served envelopes retry only on
+/// the retryable-unavailability codes.
+pub(crate) fn transient_failure(transport: bool, error: &ClientError) -> bool {
+    transport
+        || matches!(
+            error,
+            ClientError::Api { code, .. }
+                if code == ErrorCode::ServerBusy.as_str()
+                    || code == ErrorCode::CommitQueueFull.as_str()
+                    || code == ErrorCode::ShuttingDown.as_str()
+        )
+}
+
+/// Deterministic doubling, the same shape as the object-store transport
+/// retry: workspace policy avoids ambient randomness, and a bounded
+/// per-request retry does not need jitter.
+fn transient_retry_backoff(attempt: u32) -> Duration {
+    let doublings = attempt.saturating_sub(1).min(16);
+    INITIAL_TRANSIENT_RETRY_DELAY
+        .saturating_mul(1u32 << doublings)
+        .min(MAX_TRANSIENT_RETRY_DELAY)
+}
+
+#[allow(clippy::disallowed_methods)]
+// The client's own retry pacing between bounded attempts of one request; no
+// protocol time depends on it and replay never observes it.
+async fn transient_retry_pause(backoff: Duration) {
+    tokio::time::sleep(backoff).await;
 }
 
 #[cfg(test)]
 pub(crate) mod test_transport {
+    use super::FailedAttempt;
+    use crate::ClientError;
     use std::cell::RefCell;
     use std::collections::VecDeque;
 
@@ -231,6 +310,9 @@ pub(crate) mod test_transport {
         attempts: usize,
     }
 
+    // A thread-local is sound here because client tests run on the default
+    // current-thread runtime: the future is polled only on the thread that
+    // installed the seam, so no attempt can observe another test's script.
     thread_local! {
         static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
     }
@@ -274,7 +356,7 @@ pub(crate) mod test_transport {
         Guard
     }
 
-    pub(super) fn next() -> Option<Result<ureq::Response, Box<ureq::Error>>> {
+    pub(super) fn next() -> Option<Result<Vec<u8>, FailedAttempt>> {
         STATE.with(|state| {
             let mut state = state.borrow_mut();
             let state = state.as_mut()?;
@@ -284,15 +366,11 @@ pub(crate) mod test_transport {
                 .pop_front()
                 .expect("test transport exhausted before client stopped sending");
             Some(match outcome {
-                Outcome::TransportFailure => {
-                    Err(Box::new(ureq::get("broken/url").call().expect_err(
-                        "relative URL should produce a transport error",
-                    )))
-                }
-                Outcome::Success(body) => {
-                    let body = String::from_utf8(body).expect("test response should be UTF-8");
-                    ureq::Response::new(200, "OK", &body).map_err(Box::new)
-                }
+                Outcome::TransportFailure => Err(FailedAttempt {
+                    transport: true,
+                    error: ClientError::Http("injected transport failure".to_owned()),
+                }),
+                Outcome::Success(body) => Ok(body),
             })
         })
     }

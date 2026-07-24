@@ -29,8 +29,8 @@ tokio.workspace = true
 toml.workspace = true
 
 [dev-dependencies]
-insta = { version = "1.39", features = ["json"] }
 ureq.workspace = true
+insta = { version = "1.39", features = ["json"] }
 
 [lints]
 workspace = true

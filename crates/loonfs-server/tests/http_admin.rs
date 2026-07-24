@@ -12,7 +12,6 @@ use loonfs_api::{
 use loonfs_client::{ClientError, NamespacePath};
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::{ConfiguredObjectStore, ObjectStore};
-use loonfs_test_support::block_on::block_on;
 use loonfs_test_support::http::raw_agent;
 use loonfs_test_support::ids::namespace_id;
 use tempfile::tempdir;
@@ -132,80 +131,79 @@ async fn http_admin_checkpoint_and_retention_are_idempotent_and_soft() {
     let client = harness.client.clone();
     let server_url = harness.server_url.clone();
 
-    tokio::task::spawn_blocking(move || {
-        let namespace = namespace_id("demo");
-        let target = NamespacePath::parse("demo", "/docs/hello.txt").expect("target");
-        client
-            .create_namespace(&namespace)
-            .expect("create namespace");
-        client
-            .put_file_bytes(&target, b"hello admin\n", &replace_file_options())
-            .expect("write file");
+    let namespace = namespace_id("demo");
+    let target = NamespacePath::parse("demo", "/docs/hello.txt").expect("target");
+    client
+        .create_namespace(&namespace)
+        .await
+        .expect("create namespace");
+    client
+        .put_file_bytes(&target, b"hello admin\n", &replace_file_options())
+        .await
+        .expect("write file");
 
-        let first = post_checkpoint(&server_url, namespace.as_str()).expect("first checkpoint");
-        assert!(CheckpointId::parse(first.checkpoint_id.as_str()).is_ok());
-        assert_eq!(first.checkpoint_seq, ChangeSeq(1));
-        assert_eq!(first.manifest_id, ManifestId(1));
-        assert_eq!(first.current_manifest_id, Some(first.manifest_id));
+    let first = post_checkpoint(&server_url, namespace.as_str()).expect("first checkpoint");
+    assert!(CheckpointId::parse(first.checkpoint_id.as_str()).is_ok());
+    assert_eq!(first.checkpoint_seq, ChangeSeq(1));
+    assert_eq!(first.manifest_id, ManifestId(1));
+    assert_eq!(first.current_manifest_id, Some(first.manifest_id));
 
-        let repeated = post_checkpoint(&server_url, namespace.as_str()).expect("repeat checkpoint");
-        assert_eq!(repeated, first);
+    let repeated = post_checkpoint(&server_url, namespace.as_str()).expect("repeat checkpoint");
+    assert_eq!(repeated, first);
 
-        // Release is idempotent the same way: the first call flips the
-        // record, the repeat observes the settled end state.
-        let released = post_checkpoint_release(
-            &server_url,
-            namespace.as_str(),
-            first.checkpoint_id.as_str(),
-        )
-        .expect("release checkpoint");
-        assert!(released.was_active);
-        let released_again = post_checkpoint_release(
-            &server_url,
-            namespace.as_str(),
-            first.checkpoint_id.as_str(),
-        )
-        .expect("repeat release");
-        assert!(!released_again.was_active);
-        let bogus_release =
-            post_checkpoint_release(&server_url, namespace.as_str(), "not-a-checkpoint-id")
-                .expect_err("malformed checkpoint id");
-        assert_eq!(bogus_release.code, "invalid_request");
+    // Release is idempotent the same way: the first call flips the
+    // record, the repeat observes the settled end state.
+    let released = post_checkpoint_release(
+        &server_url,
+        namespace.as_str(),
+        first.checkpoint_id.as_str(),
+    )
+    .expect("release checkpoint");
+    assert!(released.was_active);
+    let released_again = post_checkpoint_release(
+        &server_url,
+        namespace.as_str(),
+        first.checkpoint_id.as_str(),
+    )
+    .expect("repeat release");
+    assert!(!released_again.was_active);
+    let bogus_release =
+        post_checkpoint_release(&server_url, namespace.as_str(), "not-a-checkpoint-id")
+            .expect_err("malformed checkpoint id");
+    assert_eq!(bogus_release.code, "invalid_request");
 
-        // The GC grace window's derived safety floor is enforced at the API:
-        // a sub-minimum override is rejected, not honored.
-        let unsafe_gc: Result<loonfs_api::GcResponse, ApiError> = post_admin_json_body(
-            &format!("{server_url}/v0/admin/namespaces/{namespace}/gc"),
-            "test-token",
-            serde_json::json!({ "grace_window_ms": 1 }),
-        );
-        let unsafe_gc = unsafe_gc.expect_err("sub-minimum grace window is rejected");
-        assert_eq!(unsafe_gc.code, "invalid_request");
-        assert!(unsafe_gc.message.contains("derived safety minimum"));
+    // The GC grace window's derived safety floor is enforced at the API:
+    // a sub-minimum override is rejected, not honored.
+    let unsafe_gc: Result<loonfs_api::GcResponse, ApiError> = post_admin_json_body(
+        &format!("{server_url}/v0/admin/namespaces/{namespace}/gc"),
+        "test-token",
+        serde_json::json!({ "grace_window_ms": 1 }),
+    );
+    let unsafe_gc = unsafe_gc.expect_err("sub-minimum grace window is rejected");
+    assert_eq!(unsafe_gc.code, "invalid_request");
+    assert!(unsafe_gc.message.contains("derived safety minimum"));
 
-        let advanced =
-            post_retention_advance(&server_url, namespace.as_str()).expect("advance retention");
-        assert_eq!(advanced.retention_floor_seq, ChangeSeq(1));
+    let advanced =
+        post_retention_advance(&server_url, namespace.as_str()).expect("advance retention");
+    assert_eq!(advanced.retention_floor_seq, ChangeSeq(1));
 
-        let repeated_advance =
-            post_retention_advance(&server_url, namespace.as_str()).expect("repeat retention");
-        assert_eq!(repeated_advance, advanced);
+    let repeated_advance =
+        post_retention_advance(&server_url, namespace.as_str()).expect("repeat retention");
+    assert_eq!(repeated_advance, advanced);
 
-        let bytes = client.get_file_bytes(&target).expect("read file");
-        assert_eq!(bytes, b"hello admin\n");
+    let bytes = client.get_file_bytes(&target).await.expect("read file");
+    assert_eq!(bytes, b"hello admin\n");
 
-        match client.list_changes(&namespace, ChangeSeq(0), None) {
-            Err(ClientError::Api { code, .. }) => assert_eq!(code, "rebootstrap_required"),
-            other => unreachable!("expected rebootstrap_required, got {other:?}"),
-        }
+    match client.list_changes(&namespace, ChangeSeq(0), None).await {
+        Err(ClientError::Api { code, .. }) => assert_eq!(code, "rebootstrap_required"),
+        other => unreachable!("expected rebootstrap_required, got {other:?}"),
+    }
 
-        let empty = client
-            .list_changes(&namespace, ChangeSeq(1), None)
-            .expect("changes after floor");
-        assert_eq!(empty.changes, Vec::new());
-    })
-    .await
-    .expect("join blocking task");
+    let empty = client
+        .list_changes(&namespace, ChangeSeq(1), None)
+        .await
+        .expect("changes after floor");
+    assert_eq!(empty.changes, Vec::new());
 
     harness.server.abort();
 }
@@ -222,50 +220,48 @@ async fn http_admin_gc_is_explicit_and_retains_young_namespaces() {
     let client = harness.client.clone();
     let server_url = harness.server_url.clone();
 
-    tokio::task::spawn_blocking(move || {
-        let namespace = namespace_id("demo");
-        client
-            .create_namespace(&namespace)
-            .expect("create namespace");
-        let target = NamespacePath::parse("demo", "/docs/hello.txt").expect("target");
-        client
-            .put_file_bytes(&target, b"hello gc\n", &replace_file_options())
-            .expect("write file");
-        post_checkpoint(&server_url, namespace.as_str()).expect("checkpoint");
+    let namespace = namespace_id("demo");
+    client
+        .create_namespace(&namespace)
+        .await
+        .expect("create namespace");
+    let target = NamespacePath::parse("demo", "/docs/hello.txt").expect("target");
+    client
+        .put_file_bytes(&target, b"hello gc\n", &replace_file_options())
+        .await
+        .expect("write file");
+    post_checkpoint(&server_url, namespace.as_str()).expect("checkpoint");
 
-        // A bounded pass returns an opaque cursor, and the route accepts it
-        // on the next invocation without carrying any safety state.
-        let bounded: loonfs_api::GcResponse = post_admin_json_body(
-            &format!("{server_url}/v0/admin/namespaces/{namespace}/gc"),
-            "test-token",
-            serde_json::json!({ "max_objects": 1 }),
-        )
-        .expect("bounded gc pass");
-        let cursor = bounded.next_cursor.expect("more candidate families remain");
-        let resumed: loonfs_api::GcResponse = post_admin_json_body(
-            &format!("{server_url}/v0/admin/namespaces/{namespace}/gc"),
-            "test-token",
-            serde_json::json!({ "max_objects": 1, "cursor": cursor }),
-        )
-        .expect("resumed gc pass");
-        assert!(resumed.next_cursor.is_some());
+    // A bounded pass returns an opaque cursor, and the route accepts it
+    // on the next invocation without carrying any safety state.
+    let bounded: loonfs_api::GcResponse = post_admin_json_body(
+        &format!("{server_url}/v0/admin/namespaces/{namespace}/gc"),
+        "test-token",
+        serde_json::json!({ "max_objects": 1 }),
+    )
+    .expect("bounded gc pass");
+    let cursor = bounded.next_cursor.expect("more candidate families remain");
+    let resumed: loonfs_api::GcResponse = post_admin_json_body(
+        &format!("{server_url}/v0/admin/namespaces/{namespace}/gc"),
+        "test-token",
+        serde_json::json!({ "max_objects": 1, "cursor": cursor }),
+    )
+    .expect("resumed gc pass");
+    assert!(resumed.next_cursor.is_some());
 
-        // A freshly written namespace sits entirely inside the grace
-        // window: the unbounded pass completes, deletes nothing, and reads
-        // keep working.
-        let report = post_gc(&server_url, namespace.as_str()).expect("gc pass");
-        assert_eq!(report.deleted_wal_segments, 0);
-        assert_eq!(report.deleted_metadata_tables, 0);
-        assert_eq!(report.deleted_manifests, 0);
-        assert_eq!(report.deleted_checkpoint_records, 0);
-        assert!(!report.degraded_retention);
-        assert!(report.next_cursor.is_none());
+    // A freshly written namespace sits entirely inside the grace
+    // window: the unbounded pass completes, deletes nothing, and reads
+    // keep working.
+    let report = post_gc(&server_url, namespace.as_str()).expect("gc pass");
+    assert_eq!(report.deleted_wal_segments, 0);
+    assert_eq!(report.deleted_metadata_tables, 0);
+    assert_eq!(report.deleted_manifests, 0);
+    assert_eq!(report.deleted_checkpoint_records, 0);
+    assert!(!report.degraded_retention);
+    assert!(report.next_cursor.is_none());
 
-        let bytes = client.get_file_bytes(&target).expect("read file");
-        assert_eq!(bytes, b"hello gc\n");
-    })
-    .await
-    .expect("join blocking task");
+    let bytes = client.get_file_bytes(&target).await.expect("read file");
+    assert_eq!(bytes, b"hello gc\n");
 
     harness.server.abort();
 }
@@ -282,49 +278,48 @@ async fn http_admin_maintenance_step_reports_outcomes_not_errors() {
     let client = harness.client.clone();
     let server_url = harness.server_url.clone();
 
-    tokio::task::spawn_blocking(move || {
-        let namespace = namespace_id("demo");
-        client
-            .create_namespace(&namespace)
-            .expect("create namespace");
-        let target = NamespacePath::parse("demo", "/docs/hello.txt").expect("target");
-        client
-            .put_file_bytes(&target, b"hello step\n", &replace_file_options())
-            .expect("write file");
+    let namespace = namespace_id("demo");
+    client
+        .create_namespace(&namespace)
+        .await
+        .expect("create namespace");
+    let target = NamespacePath::parse("demo", "/docs/hello.txt").expect("target");
+    client
+        .put_file_bytes(&target, b"hello step\n", &replace_file_options())
+        .await
+        .expect("write file");
 
-        // One WAL segment sits far below the default threshold.
-        let idle = post_maintenance_step(&server_url, namespace.as_str()).expect("idle step");
-        assert_eq!(idle.namespace_id, namespace);
-        assert_eq!(idle.status_before.wal_tail_segments, 1);
-        assert_eq!(idle.outcome, loonfs_api::MaintenanceStepOutcome::NotNeeded);
-        assert!(idle.gc.is_none());
+    // One WAL segment sits far below the default threshold.
+    let idle = post_maintenance_step(&server_url, namespace.as_str()).expect("idle step");
+    assert_eq!(idle.namespace_id, namespace);
+    assert_eq!(idle.status_before.wal_tail_segments, 1);
+    assert_eq!(idle.outcome, loonfs_api::MaintenanceStepOutcome::NotNeeded);
+    assert!(idle.gc.is_none());
 
-        // Forcing the threshold to one segment flushes the WAL tail
-        // and runs the opted-in GC pass.
-        let forced: loonfs_api::MaintenanceStepResponse = client
-            .maintenance_step(
-                &namespace,
-                &loonfs_api::MaintenanceStepRequest {
-                    max_wal_tail_segments: Some(1),
-                    gc: Some(loonfs_api::GcRequest::default()),
-                },
-            )
-            .expect("forced step");
-        assert_eq!(
-            forced.outcome,
-            loonfs_api::MaintenanceStepOutcome::WalFlushed {
-                manifest_head_seq: ChangeSeq(1),
-            }
-        );
-        let gc = forced.gc.expect("gc report present when opted in");
-        assert_eq!(gc.deleted_wal_segments, 0);
-        assert!(!gc.degraded_retention);
+    // Forcing the threshold to one segment flushes the WAL tail
+    // and runs the opted-in GC pass.
+    let forced: loonfs_api::MaintenanceStepResponse = client
+        .maintenance_step(
+            &namespace,
+            &loonfs_api::MaintenanceStepRequest {
+                max_wal_tail_segments: Some(1),
+                gc: Some(loonfs_api::GcRequest::default()),
+            },
+        )
+        .await
+        .expect("forced step");
+    assert_eq!(
+        forced.outcome,
+        loonfs_api::MaintenanceStepOutcome::WalFlushed {
+            manifest_head_seq: ChangeSeq(1),
+        }
+    );
+    let gc = forced.gc.expect("gc report present when opted in");
+    assert_eq!(gc.deleted_wal_segments, 0);
+    assert!(!gc.degraded_retention);
 
-        let bytes = client.get_file_bytes(&target).expect("read file");
-        assert_eq!(bytes, b"hello step\n");
-    })
-    .await
-    .expect("join blocking task");
+    let bytes = client.get_file_bytes(&target).await.expect("read file");
+    assert_eq!(bytes, b"hello step\n");
 
     harness.server.abort();
 }
@@ -341,18 +336,15 @@ async fn http_admin_retention_advance_uses_initial_manifest_after_create() {
     let client = harness.client.clone();
     let server_url = harness.server_url.clone();
 
-    tokio::task::spawn_blocking(move || {
-        let namespace = namespace_id("demo");
-        client
-            .create_namespace(&namespace)
-            .expect("create namespace");
+    let namespace = namespace_id("demo");
+    client
+        .create_namespace(&namespace)
+        .await
+        .expect("create namespace");
 
-        let advanced =
-            post_retention_advance(&server_url, namespace.as_str()).expect("advance retention");
-        assert_eq!(advanced.retention_floor_seq, ChangeSeq(0));
-    })
-    .await
-    .expect("join blocking task");
+    let advanced =
+        post_retention_advance(&server_url, namespace.as_str()).expect("advance retention");
+    assert_eq!(advanced.retention_floor_seq, ChangeSeq(0));
 
     harness.server.abort();
 }
@@ -386,41 +378,41 @@ async fn http_checkpoint_manifest_consumption_is_strict_when_manifest_is_corrupt
         .expect("local test server has a store root");
     let store_key_prefix = harness.store_key_prefix.clone();
 
-    tokio::task::spawn_blocking(move || {
-        let namespace = namespace_id("demo");
-        let target = NamespacePath::parse("demo", "/docs/hello.txt").expect("target");
-        client
-            .create_namespace(&namespace)
-            .expect("create namespace");
-        client
-            .put_file_bytes(&target, b"hello\n", &replace_file_options())
-            .expect("write file");
-        post_checkpoint(&server_url, namespace.as_str()).expect("checkpoint");
+    let namespace = namespace_id("demo");
+    let target = NamespacePath::parse("demo", "/docs/hello.txt").expect("target");
+    client
+        .create_namespace(&namespace)
+        .await
+        .expect("create namespace");
+    client
+        .put_file_bytes(&target, b"hello\n", &replace_file_options())
+        .await
+        .expect("write file");
+    post_checkpoint(&server_url, namespace.as_str()).expect("checkpoint");
 
-        let store = ConfiguredObjectStore::local_fs(&store_root, store_key_prefix.as_deref())
-            .expect("construct store");
-        let root = block_on(loonfs_core::control::load_namespace_metadata_root_control(
-            &store, &namespace,
-        ))
+    let store = ConfiguredObjectStore::local_fs(&store_root, store_key_prefix.as_deref())
+        .expect("construct store");
+    let root = loonfs_core::control::load_namespace_metadata_root_control(&store, &namespace)
+        .await
         .expect("metadata root");
-        block_on(store.put_overwrite(
+    store
+        .put_overwrite(
             &metadata_manifest_object(namespace.as_str(), &root.state.manifest_object_id),
             Bytes::from_static(br#"{"bad":"json"}"#),
-        ))
+        )
+        .await
         .expect("corrupt manifest");
 
-        match cold_client.stat_path(&target) {
-            Err(ClientError::Api { code, .. }) => assert_eq!(code, "namespace_corrupt"),
-            other => unreachable!("expected namespace_corrupt, got {other:?}"),
-        }
-        // The warm server keeps serving its pinned pair; the corruption is
-        // surfaced by whoever actually consumes the manifest.
-        client
-            .stat_path(&target)
-            .expect("warm server reads from its pinned head-plus-manifest pair");
-    })
-    .await
-    .expect("join blocking task");
+    match cold_client.stat_path(&target).await {
+        Err(ClientError::Api { code, .. }) => assert_eq!(code, "namespace_corrupt"),
+        other => unreachable!("expected namespace_corrupt, got {other:?}"),
+    }
+    // The warm server keeps serving its pinned pair; the corruption is
+    // surfaced by whoever actually consumes the manifest.
+    client
+        .stat_path(&target)
+        .await
+        .expect("warm server reads from its pinned head-plus-manifest pair");
 
     harness.server.abort();
     cold.server.abort();

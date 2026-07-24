@@ -63,109 +63,126 @@ async fn cloudflare_r2_direct_put_real_provider_round_trip() {
 async fn direct_put_round_trip(config: ServerConfig) {
     let harness = start_server(config).await;
 
-    tokio::task::spawn_blocking(move || {
-        let namespace = "direct-put-e2e";
-        let namespace_id = NamespaceId::parse(namespace).expect("valid namespace id");
-        let target =
-            NamespacePath::parse(namespace, "/direct-put.txt").expect("parse direct-put target");
-        let bytes = b"direct put through a real provider\n";
-        let content_ref = ContentRef::whole_file_v0(bytes);
+    let namespace = "direct-put-e2e";
+    let namespace_id = NamespaceId::parse(namespace).expect("valid namespace id");
+    let target =
+        NamespacePath::parse(namespace, "/direct-put.txt").expect("parse direct-put target");
+    let bytes = b"direct put through a real provider\n";
+    let content_ref = ContentRef::whole_file_v0(bytes);
 
-        let capabilities = harness.client.capabilities().expect("fetch capabilities");
-        assert!(capabilities.supports("core.uploads.direct_put"));
+    let capabilities = harness
+        .client
+        .capabilities()
+        .await
+        .expect("fetch capabilities");
+    assert!(capabilities.supports("core.uploads.direct_put"));
 
-        harness
-            .client
-            .create_namespace(&namespace_id)
-            .expect("create namespace");
+    harness
+        .client
+        .create_namespace(&namespace_id)
+        .await
+        .expect("create namespace");
 
-        assert_wrong_direct_put_bytes_rejected(&harness.client, &namespace_id);
-        assert_direct_put_requires_signed_checksum_header(&harness.client, &namespace_id);
-        assert_direct_put_is_no_replace(&harness.client, &namespace_id);
+    assert_wrong_direct_put_bytes_rejected(&harness.client, &namespace_id).await;
+    assert_direct_put_requires_signed_checksum_header(&harness.client, &namespace_id).await;
+    assert_direct_put_is_no_replace(&harness.client, &namespace_id).await;
 
-        let begin = harness
-            .client
-            .begin_direct_put(&namespace_id, content_ref.clone())
-            .expect("begin direct put");
-        let direct_put = begin.direct_put.expect("direct-put access");
-        assert_eq!(direct_put.content_ref, content_ref);
+    let begin = harness
+        .client
+        .begin_direct_put(&namespace_id, content_ref.clone())
+        .await
+        .expect("begin direct put");
+    let direct_put = begin.direct_put.expect("direct-put access");
+    assert_eq!(direct_put.content_ref, content_ref);
 
-        harness
-            .client
-            .upload_via_presigned_url(&direct_put.access, bytes)
-            .expect("upload bytes through presigned provider URL");
+    harness
+        .client
+        .upload_via_presigned_url(&direct_put.access, bytes)
+        .await
+        .expect("upload bytes through presigned provider URL");
 
-        let complete = harness
-            .client
-            .complete_upload(
-                &namespace_id,
-                &begin.upload_id,
-                &CompleteUploadRequest {
-                    content_ref: content_ref.clone(),
-                },
-            )
-            .expect("complete direct-put upload");
-        assert_eq!(complete.content_ref, content_ref);
-        let validated_content_token = complete
-            .validated_content_token
-            .expect("completion returns content token");
-
-        let response = post_filesystem_operation(
-            &harness.server_url,
-            namespace,
-            &FilesystemOperationRequest {
-                commit_id: CommitId::parse("direct-put-e2e").expect("valid commit id"),
-                content_tokens: vec![ValidatedContentToken {
-                    content_ref: content_ref.clone(),
-                    token: validated_content_token,
-                }],
-                operation: FilesystemOperation::PutFile {
-                    path: target.absolute_path().clone(),
-                    content_ref,
-                    behavior: DestinationBehavior::NoReplace,
-                },
+    let complete = harness
+        .client
+        .complete_upload(
+            &namespace_id,
+            &begin.upload_id,
+            &CompleteUploadRequest {
+                content_ref: content_ref.clone(),
             },
-        );
-        assert_eq!(response.committed_seq, ChangeSeq(1));
+        )
+        .await
+        .expect("complete direct-put upload");
+    assert_eq!(complete.content_ref, content_ref);
+    let validated_content_token = complete
+        .validated_content_token
+        .expect("completion returns content token");
 
-        let loaded = harness.client.get_file_bytes(&target).expect("read file");
-        assert_eq!(loaded, bytes);
-    })
-    .await
-    .expect("join blocking task");
+    let response = post_filesystem_operation(
+        &harness.server_url,
+        namespace,
+        &FilesystemOperationRequest {
+            commit_id: CommitId::parse("direct-put-e2e").expect("valid commit id"),
+            content_tokens: vec![ValidatedContentToken {
+                content_ref: content_ref.clone(),
+                token: validated_content_token,
+            }],
+            operation: FilesystemOperation::PutFile {
+                path: target.absolute_path().clone(),
+                content_ref,
+                behavior: DestinationBehavior::NoReplace,
+            },
+        },
+    );
+    assert_eq!(response.committed_seq, ChangeSeq(1));
+
+    let loaded = harness
+        .client
+        .get_file_bytes(&target)
+        .await
+        .expect("read file");
+    assert_eq!(loaded, bytes);
 
     harness.server.abort();
 }
 
-fn assert_wrong_direct_put_bytes_rejected(client: &Client, namespace_id: &NamespaceId) {
+async fn assert_wrong_direct_put_bytes_rejected(client: &Client, namespace_id: &NamespaceId) {
     let bytes = b"expected direct put bytes\n";
     let wrong_bytes = b"wrong direct put bytes\n";
     let content_ref = ContentRef::whole_file_v0(bytes);
     let begin = client
         .begin_direct_put(namespace_id, content_ref.clone())
+        .await
         .expect("begin wrong-bytes direct put");
     let direct_put = begin.direct_put.expect("wrong-bytes direct-put access");
     assert_eq!(direct_put.content_ref, content_ref);
 
     expect_client_rejection(
-        client.upload_via_presigned_url(&direct_put.access, wrong_bytes),
+        client
+            .upload_via_presigned_url(&direct_put.access, wrong_bytes)
+            .await,
         "wrong-bytes direct put",
     );
     expect_client_rejection(
-        client.complete_upload(
-            namespace_id,
-            &begin.upload_id,
-            &CompleteUploadRequest { content_ref },
-        ),
+        client
+            .complete_upload(
+                namespace_id,
+                &begin.upload_id,
+                &CompleteUploadRequest { content_ref },
+            )
+            .await,
         "complete wrong-bytes direct put",
     );
 }
 
-fn assert_direct_put_requires_signed_checksum_header(client: &Client, namespace_id: &NamespaceId) {
+async fn assert_direct_put_requires_signed_checksum_header(
+    client: &Client,
+    namespace_id: &NamespaceId,
+) {
     let bytes = b"direct put bytes without checksum header\n";
     let content_ref = ContentRef::whole_file_v0(bytes);
     let begin = client
         .begin_direct_put(namespace_id, content_ref.clone())
+        .await
         .expect("begin missing-checksum direct put");
     let direct_put = begin
         .direct_put
@@ -175,33 +192,41 @@ fn assert_direct_put_requires_signed_checksum_header(client: &Client, namespace_
         presigned_access_without_header(&direct_put.access, SIGNED_CHECKSUM_HEADER);
 
     expect_client_rejection(
-        client.upload_via_presigned_url(&access_without_checksum, bytes),
+        client
+            .upload_via_presigned_url(&access_without_checksum, bytes)
+            .await,
         "missing-checksum direct put",
     );
     expect_client_rejection(
-        client.complete_upload(
-            namespace_id,
-            &begin.upload_id,
-            &CompleteUploadRequest { content_ref },
-        ),
+        client
+            .complete_upload(
+                namespace_id,
+                &begin.upload_id,
+                &CompleteUploadRequest { content_ref },
+            )
+            .await,
         "complete missing-checksum direct put",
     );
 }
 
-fn assert_direct_put_is_no_replace(client: &Client, namespace_id: &NamespaceId) {
+async fn assert_direct_put_is_no_replace(client: &Client, namespace_id: &NamespaceId) {
     let bytes = b"duplicate direct put bytes\n";
     let content_ref = ContentRef::whole_file_v0(bytes);
     let begin = client
         .begin_direct_put(namespace_id, content_ref.clone())
+        .await
         .expect("begin duplicate direct put");
     let direct_put = begin.direct_put.expect("duplicate direct-put access");
     assert_eq!(direct_put.content_ref, content_ref);
 
     client
         .upload_via_presigned_url(&direct_put.access, bytes)
+        .await
         .expect("first direct put succeeds");
     expect_client_rejection(
-        client.upload_via_presigned_url(&direct_put.access, bytes),
+        client
+            .upload_via_presigned_url(&direct_put.access, bytes)
+            .await,
         "duplicate direct put",
     );
 
@@ -211,6 +236,7 @@ fn assert_direct_put_is_no_replace(client: &Client, namespace_id: &NamespaceId) 
             &begin.upload_id,
             &CompleteUploadRequest { content_ref },
         )
+        .await
         .expect("complete first direct put");
     assert!(complete.validated_content_token.is_some());
 }

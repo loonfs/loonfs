@@ -144,25 +144,29 @@ pub(crate) mod http_split_support {
             .map_err(Box::new)
     }
 
-    pub(crate) fn stage_uploaded_content(
+    pub(crate) async fn stage_uploaded_content(
         client: &Client,
         namespace_id: &NamespaceId,
         file_bytes: &[u8],
     ) -> CompleteUploadResponse {
         let begin = client
             .begin_upload(namespace_id, &BeginUploadRequest::default())
+            .await
             .expect("begin upload");
         let staged = client
             .upload_content(namespace_id, &begin.upload_id, file_bytes)
+            .await
             .expect("upload content");
         let complete_request = CompleteUploadRequest {
             content_ref: staged.content_ref,
         };
         let complete = client
             .complete_upload(namespace_id, &begin.upload_id, &complete_request)
+            .await
             .expect("complete upload");
         let repeated = client
             .complete_upload(namespace_id, &begin.upload_id, &complete_request)
+            .await
             .expect("repeat complete upload");
         assert_eq!(repeated.namespace_id, complete.namespace_id);
         assert_eq!(repeated.upload_id, complete.upload_id);
