@@ -208,13 +208,13 @@ where
 
     validate_direntry_child_bind_index(
         manifest_object_key,
-        direntry_bind_rows,
-        direntry_child_bind_rows,
+        &direntry_bind_rows,
+        &direntry_child_bind_rows,
     )?;
     validate_revision_by_inode_desc_index(
         manifest_object_key,
-        revision_rows,
-        revision_by_inode_desc_rows,
+        &revision_rows,
+        &revision_by_inode_desc_rows,
     )
 }
 

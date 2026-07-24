@@ -1473,8 +1473,8 @@ inode revision scans. Readers treat a missing, extra, duplicate, or changed
 revision index row as namespace corruption. Segment reads enforce per-segment
 checksums and key ranges; manifest-table loads enforce per-run row-count
 equality between canonical and index families; full row-level index equality
-is enforced at every base rebuild, the production point that materializes all
-rows.
+is enforced by every reorganization rewrite over the complete input runs that
+the rewrite selected.
 
 ### 6.2 Compaction
 

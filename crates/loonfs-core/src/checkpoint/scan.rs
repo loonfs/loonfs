@@ -72,6 +72,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
             .map(|(_, row)| row))
     }
 
+    #[cfg(test)]
     pub(crate) async fn scan_prefix(
         &self,
         family: MetadataTableFamily,
@@ -79,6 +80,20 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
     ) -> Result<Vec<MetadataRow>, ManifestLoadError> {
         Ok(strip_row_keys(
             self.scan_prefix_rows(family, prefix, None, Readahead::Enabled)
+                .await?,
+        ))
+    }
+
+    /// Scans only `runs`, for a reorganization unit that is replacing that
+    /// complete run subset while leaving every other descriptor untouched.
+    pub(super) async fn scan_prefix_in_runs(
+        &self,
+        runs: &[MetadataRunManifest],
+        family: MetadataTableFamily,
+        prefix: &str,
+    ) -> Result<Vec<MetadataRow>, ManifestLoadError> {
+        Ok(strip_row_keys(
+            self.scan_prefix_rows_in_runs(runs, family, prefix, None, Readahead::Disabled)
                 .await?,
         ))
     }
@@ -128,6 +143,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
             return Ok(Vec::new());
         }
         self.scan_range_page_rows(
+            self.scan_runs.as_ref(),
             family,
             lower_bound,
             upper_bound,
@@ -153,6 +169,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         }
         Ok(strip_row_keys(
             self.scan_range_page_rows(
+                self.scan_runs.as_ref(),
                 family,
                 lower_bound,
                 upper_bound,
@@ -173,8 +190,27 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         filter_probe: Option<&str>,
         readahead: Readahead,
     ) -> Result<Vec<(String, MetadataRow)>, ManifestLoadError> {
+        self.scan_prefix_rows_in_runs(
+            self.scan_runs.as_ref(),
+            family,
+            prefix,
+            filter_probe,
+            readahead,
+        )
+        .await
+    }
+
+    async fn scan_prefix_rows_in_runs(
+        &self,
+        runs: &[MetadataRunManifest],
+        family: MetadataTableFamily,
+        prefix: &str,
+        filter_probe: Option<&str>,
+        readahead: Readahead,
+    ) -> Result<Vec<(String, MetadataRow)>, ManifestLoadError> {
         let upper_bound = string_prefix_upper_bound(prefix);
         self.scan_range_page_rows(
+            runs,
             family,
             prefix,
             upper_bound.as_deref(),
@@ -218,6 +254,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
     #[allow(clippy::too_many_arguments)]
     async fn scan_range_page_rows(
         &self,
+        runs: &[MetadataRunManifest],
         family: MetadataTableFamily,
         lower_bound: &str,
         upper_bound: Option<&str>,
@@ -226,7 +263,7 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
         readahead: Readahead,
     ) -> Result<Vec<(String, MetadataRow)>, ManifestLoadError> {
         let mut candidates = Vec::new();
-        for run in self.scan_runs.iter() {
+        for run in runs {
             let table = manifest_table_for_family(&self.manifest_object_key, &run.tables, family)?;
             candidates.extend(table.segments.iter().filter(|descriptor| {
                 descriptor_may_intersect_range(descriptor, lower_bound, upper_bound)

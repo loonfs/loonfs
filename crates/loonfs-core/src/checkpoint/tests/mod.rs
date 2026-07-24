@@ -208,6 +208,9 @@ async fn drain_reorganization<S: ObjectStore + ?Sized>(
             super::MetadataReorganizeOutcome::UnitPublished { .. }
             | super::MetadataReorganizeOutcome::Superseded => continue,
             super::MetadataReorganizeOutcome::NotNeeded { .. } => break,
+            super::MetadataReorganizeOutcome::BudgetExhausted { .. } => {
+                panic!("test reorganization budget should admit a progress-making subset")
+            }
         }
     }
     read_metadata_root_object(store, namespace_id)

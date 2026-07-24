@@ -127,13 +127,25 @@ impl FsCore {
             loonfs_core::MetadataReorganizeOutcome::UnitPublished {
                 families,
                 folded_l0_rows,
+                input_runs,
+                decoded_input_rows,
+                decoded_input_bytes,
                 ..
             } => {
                 self.invalidate_namespace_cache(namespace_id);
                 tracing::info!(
                     families = ?families,
                     folded_l0_rows,
+                    input_runs,
+                    decoded_input_rows,
+                    decoded_input_bytes,
                     "metadata reorganization unit published"
+                );
+            }
+            loonfs_core::MetadataReorganizeOutcome::BudgetExhausted { families, .. } => {
+                tracing::warn!(
+                    families = ?families,
+                    "metadata reorganization input does not fit the per-step budget"
                 );
             }
             loonfs_core::MetadataReorganizeOutcome::Superseded => {
@@ -160,6 +172,7 @@ impl FsCore {
             match self.run_step_reorganization(namespace_id).await? {
                 loonfs_core::MetadataReorganizeOutcome::UnitPublished { .. } => {}
                 loonfs_core::MetadataReorganizeOutcome::NotNeeded { .. }
+                | loonfs_core::MetadataReorganizeOutcome::BudgetExhausted { .. }
                 | loonfs_core::MetadataReorganizeOutcome::Superseded => break,
             }
         }

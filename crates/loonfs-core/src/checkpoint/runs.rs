@@ -12,6 +12,9 @@ pub(super) const DEFAULT_MAX_CHECKPOINT_L0_RUNS: usize = 8;
 /// base segments are sized large to amortize their index and filter
 /// sections across many lookups (design doc, "Sizing").
 pub(super) const DEFAULT_MAX_CHECKPOINT_ROWS_PER_SEGMENT: usize = 65_536;
+pub(super) const DEFAULT_MAX_REORGANIZATION_INPUT_RUNS: usize = 8;
+pub(super) const DEFAULT_MAX_REORGANIZATION_INPUT_ROWS: usize = 131_072;
+pub(super) const DEFAULT_MAX_REORGANIZATION_INPUT_BYTES: usize = 64 * 1024 * 1024;
 
 pub(super) const MAX_MAINTENANCE_TABLE_IO: usize = 8;
 pub(super) const CHECKPOINT_L0_RUN_LEVEL: u32 = 0;
@@ -44,6 +47,12 @@ pub(super) struct MetadataRunManifest {
 pub(crate) struct MetadataLsmPolicy {
     pub max_l0_runs: NonZeroUsize,
     pub max_rows_per_segment: NonZeroUsize,
+    /// Complete logical runs one reorganization step may inspect and merge.
+    pub max_input_runs_per_step: NonZeroUsize,
+    /// Row payloads one reorganization step may decode across its selected runs.
+    pub max_decoded_input_rows_per_step: NonZeroUsize,
+    /// Decoded SST data-block bytes one reorganization step may materialize.
+    pub max_decoded_input_bytes_per_step: NonZeroUsize,
 }
 
 impl Default for MetadataLsmPolicy {
@@ -53,6 +62,16 @@ impl Default for MetadataLsmPolicy {
                 .expect("default L0 run limit should be nonzero"),
             max_rows_per_segment: NonZeroUsize::new(DEFAULT_MAX_CHECKPOINT_ROWS_PER_SEGMENT)
                 .expect("default segment row budget should be nonzero"),
+            max_input_runs_per_step: NonZeroUsize::new(DEFAULT_MAX_REORGANIZATION_INPUT_RUNS)
+                .expect("default reorganization run budget should be nonzero"),
+            max_decoded_input_rows_per_step: NonZeroUsize::new(
+                DEFAULT_MAX_REORGANIZATION_INPUT_ROWS,
+            )
+            .expect("default reorganization row budget should be nonzero"),
+            max_decoded_input_bytes_per_step: NonZeroUsize::new(
+                DEFAULT_MAX_REORGANIZATION_INPUT_BYTES,
+            )
+            .expect("default reorganization byte budget should be nonzero"),
         }
     }
 }

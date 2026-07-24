@@ -146,13 +146,15 @@ pub(super) fn validate_manifest_row_seq_range<'a>(
 
 pub(super) fn validate_direntry_child_bind_index(
     object_key: &str,
-    mut direntry_bind_rows: Vec<MetadataRow>,
-    mut direntry_child_bind_rows: Vec<MetadataRow>,
+    direntry_bind_rows: &[MetadataRow],
+    direntry_child_bind_rows: &[MetadataRow],
 ) -> Result<(), ManifestLoadError> {
+    let mut direntry_bind_rows = direntry_bind_rows.iter().collect::<Vec<_>>();
+    let mut direntry_child_bind_rows = direntry_child_bind_rows.iter().collect::<Vec<_>>();
     direntry_bind_rows
-        .sort_by_key(|row| row.row_key_for_family(MetadataTableFamily::DirentryChildBinds));
+        .sort_by_cached_key(|row| row.row_key_for_family(MetadataTableFamily::DirentryChildBinds));
     direntry_child_bind_rows
-        .sort_by_key(|row| row.row_key_for_family(MetadataTableFamily::DirentryChildBinds));
+        .sort_by_cached_key(|row| row.row_key_for_family(MetadataTableFamily::DirentryChildBinds));
 
     if direntry_bind_rows != direntry_child_bind_rows {
         return Err(ManifestLoadError::SegmentDescriptorMismatch {
@@ -167,22 +169,24 @@ pub(super) fn validate_direntry_child_bind_index(
 
 pub(super) fn validate_revision_by_inode_desc_index(
     object_key: &str,
-    mut revision_rows: Vec<MetadataRow>,
-    mut revision_by_inode_desc_rows: Vec<MetadataRow>,
+    revision_rows: &[MetadataRow],
+    revision_by_inode_desc_rows: &[MetadataRow],
 ) -> Result<(), ManifestLoadError> {
     validate_revision_rows_have_unique_keys(
         object_key,
         MetadataTableFamily::Revisions,
-        &revision_rows,
+        revision_rows,
     )?;
     validate_revision_rows_have_unique_keys(
         object_key,
         MetadataTableFamily::RevisionsByInodeDesc,
-        &revision_by_inode_desc_rows,
+        revision_by_inode_desc_rows,
     )?;
 
-    revision_rows.sort_by_key(revision_logical_key);
-    revision_by_inode_desc_rows.sort_by_key(revision_logical_key);
+    let mut revision_rows = revision_rows.iter().collect::<Vec<_>>();
+    let mut revision_by_inode_desc_rows = revision_by_inode_desc_rows.iter().collect::<Vec<_>>();
+    revision_rows.sort_by_cached_key(|row| revision_logical_key(row));
+    revision_by_inode_desc_rows.sort_by_cached_key(|row| revision_logical_key(row));
 
     if revision_rows != revision_by_inode_desc_rows {
         return Err(ManifestLoadError::RevisionIndexMismatch {

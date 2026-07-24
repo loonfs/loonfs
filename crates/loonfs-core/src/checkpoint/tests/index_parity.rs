@@ -600,7 +600,7 @@ async fn base_rebuild_drops_bindings_unbound_below_floor() {
 }
 
 #[tokio::test]
-async fn base_rebuild_rejects_divergent_revision_index() {
+async fn bounded_subset_rebuild_rejects_divergent_revision_index() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -634,21 +634,24 @@ async fn base_rebuild_rejects_divergent_revision_index() {
     // L0 appends never re-read the base run; the reorganization merge that
     // folds every run back together is the production point that must
     // reject it.
-    write_file_bytes(
-        &store,
-        &namespace_id,
-        "/docs/another.txt",
-        b"body\n",
-        &context,
-        None,
-    )
-    .await
-    .expect("write");
-    create_checkpoint(&store, &namespace_id, &context)
+    for index in 0..3 {
+        write_file_bytes(
+            &store,
+            &namespace_id,
+            &format!("/docs/another-{index}.txt"),
+            b"body\n",
+            &context,
+            None,
+        )
         .await
-        .expect("l0 checkpoint");
+        .expect("write");
+        create_checkpoint(&store, &namespace_id, &context)
+            .await
+            .expect("l0 checkpoint");
+    }
     let fold_policy = MetadataLsmPolicy {
         max_l0_runs: NonZeroUsize::MIN,
+        max_input_runs_per_step: NonZeroUsize::new(2).expect("test run budget should be nonzero"),
         ..MetadataLsmPolicy::default()
     };
     let mut rebuild_error = None;
