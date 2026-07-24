@@ -6,8 +6,8 @@
 
 use super::ValidatedContentToken;
 use crate::{
-    ChangeSeq, CheckpointId, CommitId, ContentRef, InodeId, ManifestId, NamespaceId, RevisionNo,
-    WriterEpoch,
+    AbsolutePath, ChangeSeq, CheckpointId, CommitId, ContentRef, InodeId, ManifestId, NamespaceId,
+    RevisionNo, WriterEpoch,
 };
 use serde::{Deserialize, Serialize};
 
@@ -200,7 +200,7 @@ pub enum FilesystemOperation {
     #[cfg_attr(feature = "openapi", schema(title = "FsOpCreateDirectory"))]
     CreateDirectory {
         /// Absolute destination path, rejected when invalid or already bound.
-        path: String,
+        path: AbsolutePath,
         /// Also create missing ancestor directories (the same auto-create
         /// `put_file` performs). The final component must still be new.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -210,7 +210,7 @@ pub enum FilesystemOperation {
     #[cfg_attr(feature = "openapi", schema(title = "FsOpPutFile"))]
     PutFile {
         /// Absolute destination path; missing ancestors are created automatically.
-        path: String,
+        path: AbsolutePath,
         /// Immutable bytes that must be covered by a valid preparation proof.
         content_ref: ContentRef,
         /// Whether an existing file may receive a new revision instead of causing a conflict.
@@ -221,7 +221,7 @@ pub enum FilesystemOperation {
     #[cfg_attr(feature = "openapi", schema(title = "FsOpDeletePath"))]
     DeletePath {
         /// Absolute path that must resolve to a visible inode.
-        path: String,
+        path: AbsolutePath,
         /// Whether a non-empty directory may be tombstoned recursively.
         #[serde(default)]
         behavior: DeleteDirectoryBehavior,
@@ -235,9 +235,9 @@ pub enum FilesystemOperation {
     #[cfg_attr(feature = "openapi", schema(title = "FsOpMovePath"))]
     MovePath {
         /// Absolute source path that must resolve to a visible inode.
-        from_path: String,
+        from_path: AbsolutePath,
         /// Absolute destination whose parent must be visible and writable.
-        to_path: String,
+        to_path: AbsolutePath,
         /// Whether an existing destination file may be replaced.
         #[serde(default)]
         behavior: DestinationBehavior,
@@ -246,9 +246,9 @@ pub enum FilesystemOperation {
     #[cfg_attr(feature = "openapi", schema(title = "FsOpCopyPath"))]
     CopyPath {
         /// Absolute source path that must resolve to a visible file.
-        from_path: String,
+        from_path: AbsolutePath,
         /// Absolute destination whose parent must be visible and writable.
-        to_path: String,
+        to_path: AbsolutePath,
         /// Whether an existing destination file may receive a copied revision.
         #[serde(default)]
         behavior: DestinationBehavior,
@@ -265,13 +265,13 @@ pub enum FilesystemOperation {
         /// Observed deletion sequence, which prevents cancelling a newer tombstone generation.
         deleted_at_seq: ChangeSeq,
         /// Absolute destination path whose parent must be visible and whose name must be absent.
-        path: String,
+        path: AbsolutePath,
     },
     /// Restore an older revision as the current revision for a path.
     #[cfg_attr(feature = "openapi", schema(title = "FsOpRestoreRevision"))]
     RestoreRevision {
         /// Absolute path that must resolve to a visible file.
-        path: String,
+        path: AbsolutePath,
         /// Existing historical revision whose content will be copied into a new current revision.
         source_revision_no: RevisionNo,
     },
@@ -532,6 +532,10 @@ pub struct MaintenanceTickResponse {
 mod tests {
     use super::*;
 
+    fn path(value: &str) -> AbsolutePath {
+        AbsolutePath::parse(value).expect("valid test path")
+    }
+
     #[test]
     fn behavior_enums_use_snake_case_wire_values() {
         assert_eq!(
@@ -565,7 +569,7 @@ mod tests {
     #[test]
     fn filesystem_delete_and_move_operations_use_behavior_field() {
         let create_directory = FilesystemOperation::CreateDirectory {
-            path: "/docs".to_owned(),
+            path: path("/docs"),
             parents: false,
         };
         assert_eq!(
@@ -577,7 +581,7 @@ mod tests {
         );
 
         let create_directory_with_parents = FilesystemOperation::CreateDirectory {
-            path: "/docs/notes".to_owned(),
+            path: path("/docs/notes"),
             parents: true,
         };
         assert_eq!(
@@ -591,7 +595,7 @@ mod tests {
         );
 
         let delete = FilesystemOperation::DeletePath {
-            path: "/docs".to_owned(),
+            path: path("/docs"),
             behavior: DeleteDirectoryBehavior::Recursive,
             expected_inode_id: None,
         };
@@ -605,8 +609,8 @@ mod tests {
         );
 
         let move_path = FilesystemOperation::MovePath {
-            from_path: "/docs/a.txt".to_owned(),
-            to_path: "/docs/b.txt".to_owned(),
+            from_path: path("/docs/a.txt"),
+            to_path: path("/docs/b.txt"),
             behavior: DestinationBehavior::Replace,
         };
         assert_eq!(
@@ -620,8 +624,8 @@ mod tests {
         );
 
         let copy_path = FilesystemOperation::CopyPath {
-            from_path: "/docs/a.txt".to_owned(),
-            to_path: "/docs/b.txt".to_owned(),
+            from_path: path("/docs/a.txt"),
+            to_path: path("/docs/b.txt"),
             behavior: DestinationBehavior::Replace,
         };
         assert_eq!(
@@ -663,7 +667,7 @@ mod tests {
         assert_eq!(
             delete,
             FilesystemOperation::DeletePath {
-                path: "/docs".to_owned(),
+                path: path("/docs"),
                 behavior: DeleteDirectoryBehavior::NonRecursive,
                 expected_inode_id: None,
             }
@@ -678,8 +682,8 @@ mod tests {
         assert_eq!(
             move_path,
             FilesystemOperation::MovePath {
-                from_path: "/docs/a.txt".to_owned(),
-                to_path: "/docs/b.txt".to_owned(),
+                from_path: path("/docs/a.txt"),
+                to_path: path("/docs/b.txt"),
                 behavior: DestinationBehavior::NoReplace,
             }
         );
@@ -693,10 +697,97 @@ mod tests {
         assert_eq!(
             copy_path,
             FilesystemOperation::CopyPath {
-                from_path: "/docs/a.txt".to_owned(),
-                to_path: "/docs/b.txt".to_owned(),
+                from_path: path("/docs/a.txt"),
+                to_path: path("/docs/b.txt"),
                 behavior: DestinationBehavior::NoReplace,
             }
         );
+    }
+
+    #[test]
+    fn filesystem_operation_paths_keep_the_plain_string_wire_shape() {
+        let content_ref = ContentRef::whole_file_v0(b"hello");
+        let cases = [
+            (
+                FilesystemOperation::PutFile {
+                    path: path("/docs/a.txt"),
+                    content_ref: content_ref.clone(),
+                    behavior: DestinationBehavior::NoReplace,
+                },
+                serde_json::json!({
+                    "kind": "put_file",
+                    "path": "/docs/a.txt",
+                    "content_ref": content_ref,
+                    "behavior": "no_replace"
+                }),
+            ),
+            (
+                FilesystemOperation::Undelete {
+                    inode_id: InodeId(7),
+                    deleted_at_seq: ChangeSeq(8),
+                    path: path("/docs/restored"),
+                },
+                serde_json::json!({
+                    "kind": "undelete",
+                    "inode_id": 7,
+                    "deleted_at_seq": 8,
+                    "path": "/docs/restored"
+                }),
+            ),
+            (
+                FilesystemOperation::RestoreRevision {
+                    path: path("/docs/a.txt"),
+                    source_revision_no: RevisionNo(2),
+                },
+                serde_json::json!({
+                    "kind": "restore_revision",
+                    "path": "/docs/a.txt",
+                    "source_revision_no": 2
+                }),
+            ),
+        ];
+
+        for (operation, string_shaped_json) in cases {
+            assert_eq!(
+                serde_json::to_value(operation).expect("serialize filesystem operation"),
+                string_shaped_json
+            );
+        }
+    }
+
+    #[test]
+    fn filesystem_operation_paths_validate_during_deserialization() {
+        for encoded in [
+            serde_json::json!({"kind": "create_directory", "path": "relative", "parents": false}),
+            serde_json::json!({
+                "kind": "put_file",
+                "path": "relative",
+                "content_ref": ContentRef::whole_file_v0(b"hello")
+            }),
+            serde_json::json!({"kind": "delete_path", "path": "relative"}),
+            serde_json::json!({
+                "kind": "move_path",
+                "from_path": "relative",
+                "to_path": "/target"
+            }),
+            serde_json::json!({
+                "kind": "copy_path",
+                "from_path": "/source",
+                "to_path": "relative"
+            }),
+            serde_json::json!({
+                "kind": "undelete",
+                "inode_id": 7,
+                "deleted_at_seq": 8,
+                "path": "relative"
+            }),
+            serde_json::json!({
+                "kind": "restore_revision",
+                "path": "relative",
+                "source_revision_no": 2
+            }),
+        ] {
+            assert!(serde_json::from_value::<FilesystemOperation>(encoded).is_err());
+        }
     }
 }

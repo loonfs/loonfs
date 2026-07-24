@@ -10,8 +10,8 @@ use loonfs_api::{
     v0::{
         CommitOp, CommitRequest as ApiCommitRequest, CommitSubmissionRequest, ValidatedContentToken,
     },
-    ApiError, ChangeSeq, CommitId, CommitResponse, ContentRef, DestinationBehavior, ErrorCode,
-    FilesystemOperation, FilesystemOperationRequest, InodeId, NamespaceId,
+    AbsolutePath, ApiError, ChangeSeq, CommitId, CommitResponse, ContentRef, DestinationBehavior,
+    ErrorCode, FilesystemOperation, FilesystemOperationRequest, InodeId, NamespaceId,
 };
 use loonfs_client::NamespacePath;
 use loonfs_test_support::http::raw_agent;
@@ -126,7 +126,7 @@ async fn path_put_with_bad_content_token_fails_content_not_prepared() {
                 token: "not.a.valid.token".to_owned(),
             }],
             operation: FilesystemOperation::PutFile {
-                path: "/bad-token.txt".to_owned(),
+                path: AbsolutePath::parse("/bad-token.txt").expect("path"),
                 content_ref: completed.content_ref,
                 behavior: DestinationBehavior::NoReplace,
             },
@@ -164,7 +164,7 @@ async fn path_put_without_content_token_fails_content_not_prepared() {
             commit_id: CommitId::parse("missing-token-put").expect("valid commit id"),
             content_tokens: Vec::new(),
             operation: FilesystemOperation::PutFile {
-                path: "/missing-token.txt".to_owned(),
+                path: AbsolutePath::parse("/missing-token.txt").expect("path"),
                 content_ref: completed.content_ref,
                 behavior: DestinationBehavior::NoReplace,
             },
@@ -209,7 +209,7 @@ async fn path_put_with_valid_content_token_succeeds() {
                     .expect("completed upload carries token"),
             }],
             operation: FilesystemOperation::PutFile {
-                path: "/valid-token.txt".to_owned(),
+                path: AbsolutePath::parse("/valid-token.txt").expect("path"),
                 content_ref: completed.content_ref,
                 behavior: DestinationBehavior::NoReplace,
             },
@@ -259,7 +259,7 @@ async fn landed_path_put_replays_after_content_token_is_absent_expired_or_garbag
                     .expect("completed upload carries token"),
             }],
             operation: FilesystemOperation::PutFile {
-                path: "/token-replay.txt".to_owned(),
+                path: AbsolutePath::parse("/token-replay.txt").expect("path"),
                 content_ref: completed.content_ref,
                 behavior: DestinationBehavior::NoReplace,
             },
@@ -321,7 +321,7 @@ async fn path_put_with_only_an_irrelevant_token_reports_the_missing_put_proof() 
                     .expect("completed upload carries token"),
             }],
             operation: FilesystemOperation::PutFile {
-                path: "/irrelevant-token.txt".to_owned(),
+                path: AbsolutePath::parse("/irrelevant-token.txt").expect("path"),
                 content_ref: target.content_ref,
                 behavior: DestinationBehavior::NoReplace,
             },

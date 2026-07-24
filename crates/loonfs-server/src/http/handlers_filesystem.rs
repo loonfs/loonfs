@@ -12,7 +12,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use loonfs::publish::{
-    parse_mutation_path, ContentPreparationError, NamespaceMutation, NamespaceMutationCandidate,
+    validate_mutation_path, ContentPreparationError, NamespaceMutation, NamespaceMutationCandidate,
     PathMutationIntent, PreparedContent,
 };
 use loonfs::{
@@ -26,7 +26,7 @@ use loonfs_api::{
         ChangesResponse, CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse,
         CommitSubmissionRequest, ValidatedContentToken,
     },
-    ContentRef, DirectoryPageCursor, FileRevisionsPageCursor, FilesystemOperation,
+    AbsolutePath, ContentRef, DirectoryPageCursor, FileRevisionsPageCursor, FilesystemOperation,
     FilesystemOperationRequest, InodeId, LimitError, ListFileRevisionsResponse, PageCursorError,
     PageRequest, PaginationPolicy, RestoreFileRevisionRequest, RevisionNo,
 };
@@ -491,18 +491,19 @@ pub(super) async fn filesystem_operation(
         ),
         _ => None,
     };
-    // Wire paths are raw strings; the intent carries validated paths, so
-    // this is the convert-once point for the whole remote mutation path.
-    let parse_path = |path: &str| {
-        parse_mutation_path(path).map_err(|error| {
+    // Absolute-path grammar was validated while decoding the wire body. The
+    // root remains a valid read path but is not a legal mutation target.
+    let validate_path = |path: AbsolutePath| {
+        validate_mutation_path(&path).map_err(|error| {
             ApiResponseError::core_for_namespace(&namespace_id, error)
                 .with_commit_id(&commit_id_for_errors)
-        })
+        })?;
+        Ok(path)
     };
     let intent = match operation {
         FilesystemOperation::CreateDirectory { path, parents } => PathMutationIntent::CreateDir {
             commit_id,
-            absolute_path: parse_path(&path)?,
+            absolute_path: validate_path(path)?,
             parents,
         },
         FilesystemOperation::PutFile {
@@ -511,7 +512,7 @@ pub(super) async fn filesystem_operation(
             behavior,
         } => PathMutationIntent::PutFile {
             commit_id,
-            absolute_path: parse_path(&path)?,
+            absolute_path: validate_path(path)?,
             content_ref,
             behavior,
         },
@@ -521,7 +522,7 @@ pub(super) async fn filesystem_operation(
             expected_inode_id,
         } => PathMutationIntent::DeletePath {
             commit_id,
-            absolute_path: parse_path(&path)?,
+            absolute_path: validate_path(path)?,
             behavior,
             expected_inode_id,
         },
@@ -531,8 +532,8 @@ pub(super) async fn filesystem_operation(
             behavior,
         } => PathMutationIntent::MovePath {
             commit_id,
-            from_path: parse_path(&from_path)?,
-            to_path: parse_path(&to_path)?,
+            from_path: validate_path(from_path)?,
+            to_path: validate_path(to_path)?,
             behavior,
         },
         FilesystemOperation::CopyPath {
@@ -541,8 +542,8 @@ pub(super) async fn filesystem_operation(
             behavior,
         } => PathMutationIntent::CopyFilePath {
             commit_id,
-            from_path: parse_path(&from_path)?,
-            to_path: parse_path(&to_path)?,
+            from_path: validate_path(from_path)?,
+            to_path: validate_path(to_path)?,
             behavior,
         },
         FilesystemOperation::RestoreRevision {
@@ -550,7 +551,7 @@ pub(super) async fn filesystem_operation(
             source_revision_no,
         } => PathMutationIntent::RestoreRevision {
             commit_id,
-            absolute_path: parse_path(&path)?,
+            absolute_path: validate_path(path)?,
             source_revision_no,
         },
         FilesystemOperation::Undelete {
@@ -561,7 +562,7 @@ pub(super) async fn filesystem_operation(
             commit_id,
             inode_id,
             deleted_at_seq,
-            absolute_path: parse_path(&path)?,
+            absolute_path: validate_path(path)?,
         },
     };
     let response_result = if let Some(payload_class) = put_payload_class {

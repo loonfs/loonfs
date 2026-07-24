@@ -24,8 +24,8 @@ use loonfs_api::wire::wal::WalCommitPayload;
 use loonfs_api::ManifestObjectId;
 use loonfs_api::{
     AbsolutePath, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq, ContentStoreId,
-    DirectoryPageCursor, FileRevision, FileRevisionsPageCursor, InodeId, InodeKind, ManifestId,
-    NamePolicy, NamespaceId, Page, PageRequest, RevisionNo,
+    DirectoryPageCursor, DisplayName, FileRevision, FileRevisionsPageCursor, InodeId, InodeKind,
+    ManifestId, NamePolicy, NamespaceId, Page, PageRequest, RevisionNo,
 };
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
@@ -377,7 +377,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         let entry = self.resolve_path(absolute_path).await?;
         if entry.inode_kind != InodeKind::File {
             return Err(CoreError::ExpectedFile {
-                path: entry.absolute_path,
+                path: entry.absolute_path.to_string(),
                 kind: entry.inode_kind,
             });
         }
@@ -401,7 +401,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         let entry = self.resolve_path(absolute_path).await?;
         if entry.inode_kind != InodeKind::File {
             return Err(CoreError::ExpectedFile {
-                path: entry.absolute_path,
+                path: entry.absolute_path.to_string(),
                 kind: entry.inode_kind,
             });
         }
@@ -486,7 +486,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         let mut entry = self.resolve_path(absolute_path).await?;
         if entry.inode_kind != InodeKind::File {
             return Err(CoreError::ExpectedFile {
-                path: entry.absolute_path,
+                path: entry.absolute_path.to_string(),
                 kind: entry.inode_kind,
             });
         }
@@ -695,14 +695,31 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         let size_bytes = content_ref
             .as_ref()
             .map(|content_ref| content_ref.size_bytes);
+        let absolute_path = AbsolutePath::parse(&resolved.absolute_path).map_err(|error| {
+            CoreError::NamespaceCorrupt(format!(
+                "resolved visible path `{}` is not a valid absolute path: {error}",
+                resolved.absolute_path
+            ))
+        })?;
+        let display_name = resolved
+            .parent_inode_id
+            .map(|_| {
+                DisplayName::parse(&resolved.display_name).map_err(|error| {
+                    CoreError::NamespaceCorrupt(format!(
+                        "stored display name for inode `{}` is invalid: {error}",
+                        resolved.inode_id
+                    ))
+                })
+            })
+            .transpose()?;
         Ok(AuthoritativePathEntry {
             namespace_id: self.namespace_id.clone(),
-            absolute_path: resolved.absolute_path.clone(),
+            absolute_path,
             inode_id: resolved.inode_id,
             inode_kind: resolved.inode_kind,
             head_seq: self.head.seq,
             parent_inode_id: resolved.parent_inode_id,
-            display_name: resolved.display_name.clone(),
+            display_name,
             revision_no: revision.as_ref().map(|revision| revision.revision_no),
             size_bytes,
             content_ref,

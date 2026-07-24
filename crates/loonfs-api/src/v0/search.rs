@@ -1,7 +1,7 @@
 //! Content search (grep) request and response shapes: the `query/v0`
 //! plane's first operation (API spec, "Content search").
 
-use crate::{ChangeSeq, InodeId, NamespaceId, RevisionNo};
+use crate::{AbsolutePath, ChangeSeq, InodeId, NamespaceId, RevisionNo};
 use serde::{Deserialize, Serialize};
 use xxhash_rust::xxh64::xxh64;
 
@@ -17,9 +17,10 @@ pub struct GrepRequest {
     /// consulted through its case-folded grams.
     #[serde(default)]
     pub case_insensitive: bool,
-    /// Restrict matches to files under this absolute path prefix.
+    /// Restrict matches to files under this complete absolute path, resolved
+    /// to a directory inode before candidates are filtered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path_prefix: Option<String>,
+    pub path_prefix: Option<AbsolutePath>,
     /// Resume cursor from a previous page. The cursor resumes strictly
     /// after the last candidate the issuing page finished scanning and is
     /// bound to that page's request; each page is evaluated against the
@@ -46,7 +47,14 @@ impl GrepRequest {
     /// opaque and short-lived, so this may change between builds.
     pub fn fingerprint(&self) -> u64 {
         let mut seed = xxh64(self.pattern.as_bytes(), 0);
-        seed = xxh64(self.path_prefix.as_deref().unwrap_or("").as_bytes(), seed);
+        seed = xxh64(
+            self.path_prefix
+                .as_ref()
+                .map(AbsolutePath::as_str)
+                .unwrap_or("")
+                .as_bytes(),
+            seed,
+        );
         let flags = [
             u8::from(self.case_insensitive),
             u8::from(self.allow_stale),
@@ -61,7 +69,7 @@ impl GrepRequest {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct GrepMatch {
     /// The file's absolute path, derived at the snapshot.
-    pub absolute_path: String,
+    pub absolute_path: AbsolutePath,
     /// Durable identity of the matched file.
     pub inode_id: InodeId,
     /// The matched revision (the newest visible one at the snapshot).
@@ -141,4 +149,64 @@ pub struct GrepGcResponse {
     pub retained_candidates: u64,
     /// Whether unreadable namespace or grep state forced conservative retention.
     pub namespace_degraded: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grep_paths_keep_the_plain_string_wire_shape() {
+        let request = GrepRequest {
+            pattern: "needle".to_owned(),
+            case_insensitive: false,
+            path_prefix: Some(AbsolutePath::parse("/docs").expect("path prefix")),
+            cursor: None,
+            limit: None,
+            allow_stale: false,
+            allow_scan: false,
+        };
+        assert_eq!(
+            serde_json::to_value(request).expect("serialize grep request"),
+            serde_json::json!({
+                "pattern": "needle",
+                "case_insensitive": false,
+                "path_prefix": "/docs",
+                "allow_stale": false,
+                "allow_scan": false
+            })
+        );
+
+        let found = GrepMatch {
+            absolute_path: AbsolutePath::parse("/docs/a.txt").expect("match path"),
+            inode_id: InodeId(2),
+            revision_no: RevisionNo(3),
+            line_number: 4,
+            byte_offset: 5,
+            line: "needle".to_owned(),
+            line_truncated: false,
+        };
+        assert_eq!(
+            serde_json::to_value(found).expect("serialize grep match"),
+            serde_json::json!({
+                "absolute_path": "/docs/a.txt",
+                "inode_id": 2,
+                "revision_no": 3,
+                "line_number": 4,
+                "byte_offset": 5,
+                "line": "needle",
+                "line_truncated": false
+            })
+        );
+    }
+
+    #[test]
+    fn grep_path_prefix_validates_during_deserialization() {
+        let encoded = serde_json::json!({
+            "pattern": "needle",
+            "path_prefix": "relative/path"
+        });
+
+        assert!(serde_json::from_value::<GrepRequest>(encoded).is_err());
+    }
 }

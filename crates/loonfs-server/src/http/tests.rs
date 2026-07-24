@@ -1192,6 +1192,46 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
             .send_string("{not json")
             .expect_err("unauthorized malformed body should answer 401");
         expect_enveloped(error, 401, "unauthorized");
+
+        // Filesystem-operation paths now validate while the authorized JSON
+        // body is decoded. The served code stays the same invalid_request
+        // classification the former handler-boundary validation used.
+        let operation_url = format!("http://{addr}/v0/namespaces/demo/filesystem/operations");
+        let invalid_operation = r#"{
+            "commit_id":"invalid-path",
+            "operation":{"kind":"create_directory","path":"relative"}
+        }"#;
+        let error = raw_agent()
+            .post(&operation_url)
+            .set("authorization", "Bearer test-token")
+            .set("content-type", "application/json")
+            .send_string(invalid_operation)
+            .expect_err("invalid operation path should answer 400");
+        expect_enveloped(error, 400, "invalid_request");
+        let error = raw_agent()
+            .post(&operation_url)
+            .set("content-type", "application/json")
+            .send_string(invalid_operation)
+            .expect_err("authorization should precede operation path decoding");
+        expect_enveloped(error, 401, "unauthorized");
+
+        // Grep scope paths make the same boundary move and retain the same
+        // invalid_request code.
+        let grep_url = format!("http://{addr}/v0/namespaces/demo/query/grep");
+        let invalid_grep = r#"{"pattern":"needle","path_prefix":"relative"}"#;
+        let error = raw_agent()
+            .post(&grep_url)
+            .set("authorization", "Bearer test-token")
+            .set("content-type", "application/json")
+            .send_string(invalid_grep)
+            .expect_err("invalid grep path should answer 400");
+        expect_enveloped(error, 400, "invalid_request");
+        let error = raw_agent()
+            .post(&grep_url)
+            .set("content-type", "application/json")
+            .send_string(invalid_grep)
+            .expect_err("authorization should precede grep path decoding");
+        expect_enveloped(error, 401, "unauthorized");
     })
     .await
     .expect("join blocking task");

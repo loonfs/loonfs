@@ -687,7 +687,7 @@ impl Client {
                 commit_id,
                 content_tokens: staged.validated_content_token.into_iter().collect(),
                 operation: FilesystemOperation::PutFile {
-                    path: spec.absolute_path().as_str().to_owned(),
+                    path: spec.absolute_path().clone(),
                     content_ref: staged.content_ref,
                     behavior: options.behavior,
                 },
@@ -708,7 +708,7 @@ impl Client {
                 commit_id,
                 content_tokens: Vec::new(),
                 operation: FilesystemOperation::CreateDirectory {
-                    path: spec.absolute_path().as_str().to_owned(),
+                    path: spec.absolute_path().clone(),
                     parents: options.parents,
                 },
             },
@@ -728,7 +728,7 @@ impl Client {
                 commit_id,
                 content_tokens: Vec::new(),
                 operation: FilesystemOperation::DeletePath {
-                    path: spec.absolute_path().as_str().to_owned(),
+                    path: spec.absolute_path().clone(),
                     behavior: options.behavior,
                     expected_inode_id: options.expected_inode_id,
                 },
@@ -758,8 +758,8 @@ impl Client {
                 commit_id,
                 content_tokens: Vec::new(),
                 operation: FilesystemOperation::MovePath {
-                    from_path: from.absolute_path().as_str().to_owned(),
-                    to_path: to.absolute_path().as_str().to_owned(),
+                    from_path: from.absolute_path().clone(),
+                    to_path: to.absolute_path().clone(),
                     behavior,
                 },
             },
@@ -788,8 +788,8 @@ impl Client {
                 commit_id,
                 content_tokens: Vec::new(),
                 operation: FilesystemOperation::CopyPath {
-                    from_path: from.absolute_path().as_str().to_owned(),
-                    to_path: to.absolute_path().as_str().to_owned(),
+                    from_path: from.absolute_path().clone(),
+                    to_path: to.absolute_path().clone(),
                     behavior,
                 },
             },
@@ -816,7 +816,7 @@ impl Client {
                 operation: FilesystemOperation::Undelete {
                     inode_id,
                     deleted_at_seq,
-                    path: spec.absolute_path().as_str().to_owned(),
+                    path: spec.absolute_path().clone(),
                 },
             },
         )?;
@@ -836,7 +836,7 @@ impl Client {
                 commit_id,
                 content_tokens: Vec::new(),
                 operation: FilesystemOperation::RestoreRevision {
-                    path: spec.absolute_path().as_str().to_owned(),
+                    path: spec.absolute_path().clone(),
                     source_revision_no,
                 },
             },

@@ -120,7 +120,7 @@ async fn direct_put_round_trip(config: ServerConfig) {
                     token: validated_content_token,
                 }],
                 operation: FilesystemOperation::PutFile {
-                    path: target.absolute_path().as_str().to_owned(),
+                    path: target.absolute_path().clone(),
                     content_ref,
                     behavior: DestinationBehavior::NoReplace,
                 },

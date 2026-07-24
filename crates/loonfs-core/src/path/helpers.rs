@@ -26,8 +26,16 @@ pub(crate) fn parse_absolute_path_for_core(absolute_path: &str) -> Result<Absolu
 /// only the root guard ([`ensure_mutation_path`]) and never re-parses.
 pub fn parse_mutation_path(absolute_path: &str) -> Result<AbsolutePath> {
     let path = parse_absolute_path_for_core(absolute_path)?;
-    ensure_mutation_path(&path)?;
+    validate_mutation_path(&path)?;
     Ok(path)
+}
+
+/// Checks that an already-validated path is a legal mutation target.
+///
+/// The absolute-path grammar is carried by the type; this guard rejects the
+/// root, which is readable but cannot be mutated.
+pub fn validate_mutation_path(path: &AbsolutePath) -> Result<()> {
+    ensure_mutation_path(path)
 }
 
 /// The root-mutation guard on an already-parsed path. Intents can be built

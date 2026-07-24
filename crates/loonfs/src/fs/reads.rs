@@ -125,7 +125,7 @@ impl FsCore {
         let next_cursor = page.next_cursor;
         let response = ListPathEntriesResponse {
             namespace_id: namespace_id.clone(),
-            absolute_path: listed_path.as_str().to_owned(),
+            absolute_path: listed_path,
             head_seq,
             entries: page.items,
             next_cursor: None,

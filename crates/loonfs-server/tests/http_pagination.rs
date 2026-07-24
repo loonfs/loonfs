@@ -20,7 +20,13 @@ fn entry_names(response: &ListPathEntriesResponse) -> Vec<&str> {
     response
         .entries
         .iter()
-        .map(|entry| entry.display_name.as_str())
+        .map(|entry| {
+            entry
+                .display_name
+                .as_ref()
+                .expect("listed entry should carry a display name")
+                .as_str()
+        })
         .collect()
 }
 
