@@ -17,13 +17,18 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::block_on::block_on;
 use loonfs_test_support::ids::namespace_id;
+use loonfs_test_support::stores::{CountingStore, KeyPredicate, OperationClass};
 use std::sync::Arc;
 use tempfile::tempdir;
 
 #[test]
 fn namespace_status_reports_wal_tail_segments() {
     let temp_dir = tempdir().expect("tempdir");
-    let fs = runtime(temp_dir.path(), "status-test");
+    let store = Arc::new(CountingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
+        KeyPredicate::any(),
+    ));
+    let fs = open_runtime(store.clone(), "status-test");
     let namespace_id = namespace_id("demo");
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
@@ -45,6 +50,7 @@ fn namespace_status_reports_wal_tail_segments() {
     )
     .expect("put file");
 
+    store.reset();
     let status = fs
         .namespace_status_blocking(&namespace_id)
         .expect("status after commit");
@@ -52,6 +58,7 @@ fn namespace_status_reports_wal_tail_segments() {
     assert_eq!(status.current_manifest_id, Some(ManifestId(0)));
     assert_eq!(status.wal_tail_segments, 1);
     assert_eq!(status.retention_floor_seq, ChangeSeq(0));
+    assert_eq!(store.count(OperationClass::List), 0);
 }
 
 #[test]

@@ -41,6 +41,7 @@ use crate::namespace::catalog::load_namespace_catalog_entry;
 use crate::namespace::control::{
     read_head_object, read_metadata_root_object, read_wal_floor_object,
 };
+use crate::namespace::status::load_namespace_head_summary;
 use crate::namespace::writer_epoch::acquire_writer_epoch;
 use crate::path::write::ops::{
     delete_path, move_path, put_file_bytes, restore_file_revision, write_file_bytes,
