@@ -6,10 +6,7 @@ use crate::config::default_writer_version;
 use crate::fs::FsCore;
 use crate::metrics::ObjectStoreMetricsRecorder;
 use crate::{
-    AuthoritativeFileBytes, AuthoritativePathEntry, CapabilityDocument, ChangeSeq, ChangesResponse,
-    DirectoryPageCursor, FileRevisionsPageCursor, GrepRequest, GrepResponse, InodeId,
-    ListChangesOptions, ListFileRevisionsResponse, ListPathEntriesResponse, NamespaceId,
-    PageRequest, Result, RevisionNo, RuntimeCacheConfig, RuntimeCacheStats, SharedObjectStore,
+    CapabilityDocument, Result, RuntimeCacheConfig, RuntimeCacheStats, SharedObjectStore,
     StoreConfig, TraceMode, TraceStoreKind,
 };
 use std::sync::Arc;
@@ -27,7 +24,7 @@ use std::sync::Arc;
 /// Tokio runtime that will drive its reads. `FsReader` is cheap to clone.
 #[derive(Clone)]
 pub struct FsReader {
-    core: FsCore,
+    pub(crate) core: FsCore,
 }
 
 impl FsReader {
@@ -62,125 +59,7 @@ impl FsReader {
         self.core.runtime_cache_stats()
     }
 
-    /// Resolves an absolute path to its authoritative entry at the current
-    /// head.
-    pub async fn stat_path(
-        &self,
-        namespace_id: &NamespaceId,
-        absolute_path: &str,
-    ) -> Result<AuthoritativePathEntry> {
-        self.core.stat_path(namespace_id, absolute_path).await
-    }
-
-    /// Lists a directory by aggregating every page into one response.
-    ///
-    /// The envelope and every entry come from one consistent head, so an
-    /// empty directory still reports which state answered the question.
-    /// Entries are returned in canonical name-key order, matching paged
-    /// listings. Use [`Self::list_path_entries_page`] for page-level
-    /// control.
-    pub async fn list_path_entries_all(
-        &self,
-        namespace_id: &NamespaceId,
-        absolute_path: &str,
-    ) -> Result<ListPathEntriesResponse> {
-        self.core
-            .list_path_entries_all(namespace_id, absolute_path)
-            .await
-    }
-
-    /// Lists one page of a directory together with the head the page was
-    /// read from.
-    pub async fn list_path_entries_page(
-        &self,
-        namespace_id: &NamespaceId,
-        absolute_path: &str,
-        request: PageRequest<DirectoryPageCursor>,
-    ) -> Result<ListPathEntriesResponse> {
-        self.core
-            .list_path_entries_page(namespace_id, absolute_path, request)
-            .await
-    }
-
-    /// Reads a file's current content plus the metadata entry it came from.
-    pub async fn get_file_bytes(
-        &self,
-        namespace_id: &NamespaceId,
-        absolute_path: &str,
-    ) -> Result<AuthoritativeFileBytes> {
-        self.core.get_file_bytes(namespace_id, absolute_path).await
-    }
-
-    /// Content search over the namespace's grep index: index-accelerated
-    /// candidates plus an exhaustive scan of the unindexed tail, every
-    /// candidate verified against the real pattern.
-    pub async fn grep(
-        &self,
-        namespace_id: &NamespaceId,
-        request: &GrepRequest,
-    ) -> Result<GrepResponse> {
-        self.core.grep(namespace_id, request).await
-    }
-
-    /// Lists one page of a file path's revision history.
-    pub async fn list_file_revisions_page(
-        &self,
-        namespace_id: &NamespaceId,
-        absolute_path: &str,
-        request: PageRequest<FileRevisionsPageCursor>,
-    ) -> Result<ListFileRevisionsResponse> {
-        self.core
-            .list_file_revisions_page(namespace_id, absolute_path, request)
-            .await
-    }
-
-    /// Lists one page of a file inode's revision history.
-    pub async fn list_file_revisions_by_inode_page(
-        &self,
-        namespace_id: &NamespaceId,
-        inode_id: InodeId,
-        request: PageRequest<FileRevisionsPageCursor>,
-    ) -> Result<ListFileRevisionsResponse> {
-        self.core
-            .list_file_revisions_by_inode_page(namespace_id, inode_id, request)
-            .await
-    }
-
-    /// Reads the content of one historical file revision by path.
-    pub async fn get_file_revision_bytes(
-        &self,
-        namespace_id: &NamespaceId,
-        absolute_path: &str,
-        revision_no: RevisionNo,
-    ) -> Result<AuthoritativeFileBytes> {
-        self.core
-            .get_file_revision_bytes(namespace_id, absolute_path, revision_no)
-            .await
-    }
-
-    /// Reads the content of one historical file revision by inode id.
-    pub async fn get_file_revision_bytes_by_inode(
-        &self,
-        namespace_id: &NamespaceId,
-        inode_id: InodeId,
-        revision_no: RevisionNo,
-    ) -> Result<Vec<u8>> {
-        self.core
-            .get_file_revision_bytes_by_inode(namespace_id, inode_id, revision_no)
-            .await
-    }
-
-    /// Reads the ordered change feed after the `after_seq` cursor.
-    pub async fn list_changes(
-        &self,
-        namespace_id: &NamespaceId,
-        after_seq: ChangeSeq,
-        options: ListChangesOptions,
-    ) -> Result<ChangesResponse> {
-        self.core
-            .list_changes(namespace_id, after_seq, options)
-            .await
-    }
+    // Read operations live in `fs/reads.rs`.
 
     /// Shuts down handle-owned background work. Readers own none, so this
     /// settles immediately; it exists so every handle shares one shutdown

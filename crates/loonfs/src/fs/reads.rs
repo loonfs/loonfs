@@ -1,18 +1,21 @@
-//! Read operations: stat, list, content, grep, and revision reads.
+//! [`FsReader`]'s read operations: stat, list, content, grep, revision
+//! reads, and the change feed.
 
-use super::core::{default_page_limit, file_revisions_page_response, FsCore};
+use super::core::{default_page_limit, file_revisions_page_response};
+use crate::FsReader;
 use crate::Result;
 use crate::{
-    AuthoritativeFileBytes, AuthoritativePathEntry, CoreError, InodeId, ListFileRevisionsResponse,
-    ListPathEntriesResponse, NamespaceId, RevisionNo,
+    AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq, ChangesResponse, CoreError, InodeId,
+    ListChangesOptions, ListFileRevisionsResponse, ListPathEntriesResponse, NamespaceId,
+    RevisionNo, RuntimeError,
 };
 use loonfs_api::{
     encode_directory_cursor, AbsolutePath, DirectoryPageCursor, FileRevisionsPageCursor,
-    GrepRequest, GrepResponse, PageRequest,
+    GrepRequest, GrepResponse, PageRequest, PaginationPolicy,
 };
 use loonfs_grep::GrepIndexSnapshot;
 
-impl FsCore {
+impl FsReader {
     /// Resolves an absolute path to its authoritative entry at the current
     /// head.
     #[tracing::instrument(
@@ -27,14 +30,14 @@ impl FsCore {
             cache_path = tracing::field::Empty,
         )
     )]
-    pub(crate) async fn stat_path(
+    pub async fn stat_path(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
     ) -> Result<AuthoritativePathEntry> {
         let span = tracing::Span::current();
-        self.record_trace_context(&span);
-        let (engine, read_context) = self.pinned_read(namespace_id).await?;
+        self.core.record_trace_context(&span);
+        let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
         let entry = engine
             .resolve_path_with_runtime_context(absolute_path, &read_context)
             .await?;
@@ -42,7 +45,10 @@ impl FsCore {
             "cache_path",
             crate::trace::CachePath::MaterializedTables.as_str(),
         );
-        self.inner.cache_stats.record_latest_metadata_view_read();
+        self.core
+            .inner
+            .cache_stats
+            .record_latest_metadata_view_read();
         Ok(entry)
     }
 
@@ -51,7 +57,7 @@ impl FsCore {
     /// The envelope and every entry come from one consistent head, so an
     /// empty directory still reports which state answered the question. Entries
     /// are returned in canonical name-key order, matching paged listings.
-    pub(crate) async fn list_path_entries_all(
+    pub async fn list_path_entries_all(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
@@ -85,7 +91,7 @@ impl FsCore {
     }
 
     /// Lists one page of a directory together with the head the page was read from.
-    pub(crate) async fn list_path_entries_page(
+    pub async fn list_path_entries_page(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
@@ -110,12 +116,15 @@ impl FsCore {
     ) -> Result<(ListPathEntriesResponse, Option<DirectoryPageCursor>)> {
         let listed_path = AbsolutePath::parse(absolute_path)
             .map_err(|error| CoreError::InvalidPath(error.to_string()))?;
-        let (engine, read_context) = self.pinned_read(namespace_id).await?;
+        let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
         let request_head_seq = request.cursor.as_ref().map(|cursor| cursor.head_seq);
         let page = engine
             .list_path_page_with_runtime_context(listed_path.as_str(), request, &read_context)
             .await?;
-        self.inner.cache_stats.record_latest_metadata_view_read();
+        self.core
+            .inner
+            .cache_stats
+            .record_latest_metadata_view_read();
         let head_seq = page
             .items
             .first()
@@ -134,58 +143,71 @@ impl FsCore {
     }
 
     /// Reads a file's current content plus the metadata entry it came from.
-    pub(crate) async fn get_file_bytes(
+    pub async fn get_file_bytes(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
     ) -> Result<AuthoritativeFileBytes> {
-        let (engine, read_context) = self.pinned_read(namespace_id).await?;
+        let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
         let read = engine
             .read_file_with_runtime_context(
                 absolute_path,
                 &read_context,
-                self.inner.config.max_read_content_bytes,
+                self.core.inner.config.max_read_content_bytes,
             )
             .await?;
-        self.inner.cache_stats.record_latest_metadata_view_read();
+        self.core
+            .inner
+            .cache_stats
+            .record_latest_metadata_view_read();
         Ok(read)
     }
 
     /// Content search over the namespace's grep index.
-    pub(crate) async fn grep(
+    pub async fn grep(
         &self,
         namespace_id: &NamespaceId,
         request: &GrepRequest,
     ) -> Result<GrepResponse> {
-        let (engine, read_context) = self.pinned_read(namespace_id).await?;
+        let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
         let view = engine
             .load_grep_view_with_runtime_context(&read_context)
             .await?;
-        let snapshot =
-            GrepIndexSnapshot::from_grep_root(self.store(), namespace_id, &self.inner.grep_service)
-                .await;
+        let snapshot = GrepIndexSnapshot::from_grep_root(
+            self.core.store(),
+            namespace_id,
+            &self.core.inner.grep_service,
+        )
+        .await;
         let response = self
+            .core
             .inner
             .grep_service
-            .query(request, &snapshot, &view, &self.inner.store)
+            .query(request, &snapshot, &view, &self.core.inner.store)
             .await?;
-        self.inner.cache_stats.record_latest_metadata_view_read();
+        self.core
+            .inner
+            .cache_stats
+            .record_latest_metadata_view_read();
         Ok(response)
     }
 
     /// Lists one page of a file path's revision history.
-    pub(crate) async fn list_file_revisions_page(
+    pub async fn list_file_revisions_page(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
         request: PageRequest<FileRevisionsPageCursor>,
     ) -> Result<ListFileRevisionsResponse> {
-        let (engine, read_context) = self.pinned_read(namespace_id).await?;
+        let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
         let fallback_inode_id = request.cursor.as_ref().map(|cursor| cursor.inode_id);
         let page = engine
             .list_file_revisions_page_with_runtime_context(absolute_path, request, &read_context)
             .await?;
-        self.inner.cache_stats.record_latest_metadata_view_read();
+        self.core
+            .inner
+            .cache_stats
+            .record_latest_metadata_view_read();
         Ok(file_revisions_page_response(
             namespace_id.clone(),
             read_context.head.seq,
@@ -195,13 +217,13 @@ impl FsCore {
     }
 
     /// Lists one page of a file inode's revision history.
-    pub(crate) async fn list_file_revisions_by_inode_page(
+    pub async fn list_file_revisions_by_inode_page(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
         request: PageRequest<FileRevisionsPageCursor>,
     ) -> Result<ListFileRevisionsResponse> {
-        let (engine, read_context) = self.pinned_read(namespace_id).await?;
+        let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
         let page = engine
             .list_file_revisions_for_inode_page_with_runtime_context(
                 inode_id,
@@ -209,7 +231,10 @@ impl FsCore {
                 &read_context,
             )
             .await?;
-        self.inner.cache_stats.record_latest_metadata_view_read();
+        self.core
+            .inner
+            .cache_stats
+            .record_latest_metadata_view_read();
         Ok(file_revisions_page_response(
             namespace_id.clone(),
             read_context.head.seq,
@@ -219,42 +244,68 @@ impl FsCore {
     }
 
     /// Reads the content of one historical file revision by path.
-    pub(crate) async fn get_file_revision_bytes(
+    pub async fn get_file_revision_bytes(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
         revision_no: RevisionNo,
     ) -> Result<AuthoritativeFileBytes> {
-        let (engine, read_context) = self.pinned_read(namespace_id).await?;
+        let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
         let read = engine
             .read_file_revision_with_runtime_context(
                 absolute_path,
                 revision_no,
                 &read_context,
-                self.inner.config.max_read_content_bytes,
+                self.core.inner.config.max_read_content_bytes,
             )
             .await?;
-        self.inner.cache_stats.record_latest_metadata_view_read();
+        self.core
+            .inner
+            .cache_stats
+            .record_latest_metadata_view_read();
         Ok(read)
     }
 
     /// Reads the content of one historical file revision by inode id.
-    pub(crate) async fn get_file_revision_bytes_by_inode(
+    pub async fn get_file_revision_bytes_by_inode(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
         revision_no: RevisionNo,
     ) -> Result<Vec<u8>> {
-        let (engine, read_context) = self.pinned_read(namespace_id).await?;
+        let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
         let read = engine
             .read_file_revision_for_inode_with_runtime_context(
                 inode_id,
                 revision_no,
                 &read_context,
-                self.inner.config.max_read_content_bytes,
+                self.core.inner.config.max_read_content_bytes,
             )
             .await?;
-        self.inner.cache_stats.record_latest_metadata_view_read();
+        self.core
+            .inner
+            .cache_stats
+            .record_latest_metadata_view_read();
         Ok(read)
+    }
+
+    /// Reads the ordered change feed after the `after_seq` cursor.
+    pub async fn list_changes(
+        &self,
+        namespace_id: &NamespaceId,
+        after_seq: ChangeSeq,
+        options: ListChangesOptions,
+    ) -> Result<ChangesResponse> {
+        let limit = match options.limit {
+            Some(limit) => limit,
+            None => PaginationPolicy::default()
+                .resolve_limit(None)
+                .map_err(|error| RuntimeError::Config(error.to_string()))?,
+        };
+        Ok(self
+            .core
+            .namespace_engine(namespace_id)
+            .list_changes_after(after_seq, limit)
+            .await?)
     }
 }

@@ -1,15 +1,11 @@
-//! Namespace lifecycle and status: create, fork, delete, status, and
-//! the change feed.
+//! Namespace lifecycle: create, fork, and delete.
 
 use super::core::{should_invalidate_after_result, FsCore};
 use crate::{
-    ChangeSeq, ChangesResponse, CreateNamespaceOptions, DeleteNamespaceOptions,
-    DeleteNamespaceResponse, ListChangesOptions, NamespaceId, NamespaceStatusResponse,
+    CreateNamespaceOptions, DeleteNamespaceOptions, DeleteNamespaceResponse, NamespaceId,
     NamespaceSummary,
 };
 use crate::{Result, RuntimeError};
-use loonfs_api::PaginationPolicy;
-use loonfs_core::cache::load_namespace_head_summary;
 
 impl FsCore {
     /// Creates a namespace, bootstrapping its durable state.
@@ -100,40 +96,5 @@ impl FsCore {
         }
         self.invalidate_namespace_cache_for_delete(namespace_id);
         result
-    }
-
-    /// Summarizes a namespace's current head: manifest, latest checkpoint,
-    /// WAL tail, and retention floor.
-    pub(crate) async fn namespace_status(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<NamespaceStatusResponse> {
-        let summary = load_namespace_head_summary(self.store(), namespace_id).await?;
-        Ok(NamespaceStatusResponse {
-            namespace_id: summary.namespace_id,
-            head_seq: summary.head_seq,
-            current_manifest_id: summary.current_manifest_id,
-            wal_tail_segments: summary.wal_tail_segments,
-            retention_floor_seq: summary.retention_floor_seq,
-        })
-    }
-
-    /// Reads the ordered change feed after the `after_seq` cursor.
-    pub(crate) async fn list_changes(
-        &self,
-        namespace_id: &NamespaceId,
-        after_seq: ChangeSeq,
-        options: ListChangesOptions,
-    ) -> Result<ChangesResponse> {
-        let limit = match options.limit {
-            Some(limit) => limit,
-            None => PaginationPolicy::default()
-                .resolve_limit(None)
-                .map_err(|error| RuntimeError::Config(error.to_string()))?,
-        };
-        Ok(self
-            .namespace_engine(namespace_id)
-            .list_changes_after(after_seq, limit)
-            .await?)
     }
 }

@@ -706,7 +706,7 @@ impl NamespacePublisher {
                         .collect();
                     break;
                 };
-                results = core
+                results = crate::FsWriter::from_core(core)
                     .publish_namespace_mutations_batch(&self.namespace_id, batch_candidates)
                     .await
                     .into_iter()
