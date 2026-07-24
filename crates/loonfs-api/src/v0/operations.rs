@@ -470,30 +470,30 @@ pub struct AdvanceRetentionResponse {
     pub retention_floor_seq: ChangeSeq,
 }
 
-/// Options for one explicit maintenance tick. Absent fields use the
+/// Options for one explicit maintenance step. Absent fields use the
 /// server's defaults; garbage collection runs only when `gc` is present.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct MaintenanceTickRequest {
+pub struct MaintenanceStepRequest {
     /// Flush the visible WAL tail into metadata tables when it reaches this
     /// many segments. Values above the write-rejection threshold are
     /// rejected as `invalid_request`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_wal_tail_segments: Option<u64>,
-    /// Run the mark-and-sweep garbage collector after the tick's
+    /// Run the mark-and-sweep garbage collector after the step's
     /// flush work. Nothing sweeps unless this is present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gc: Option<GcRequest>,
 }
 
-/// What one maintenance tick did.
+/// What one maintenance step did.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum MaintenanceTickOutcome {
+pub enum MaintenanceStepOutcome {
     /// The WAL tail was below the threshold; the root was left alone.
     NotNeeded,
-    /// The tick flushed the WAL tail and advanced the metadata root.
+    /// The step flushed the WAL tail and advanced the metadata root.
     WalFlushed {
         /// Sequence covered by the published manifest.
         manifest_head_seq: ChangeSeq,
@@ -501,7 +501,7 @@ pub enum MaintenanceTickOutcome {
     /// The root already covered the attempted sequence — another publisher
     /// got there first.
     WalFlushSuperseded {
-        /// Sequence this tick attempted to flush through.
+        /// Sequence this step attempted to flush through.
         attempted_seq: ChangeSeq,
         /// Manifest the root currently references.
         current_manifest_id: ManifestId,
@@ -513,17 +513,17 @@ pub enum MaintenanceTickOutcome {
     },
 }
 
-/// Result of one explicit maintenance tick.
+/// Result of one explicit maintenance step.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct MaintenanceTickResponse {
-    /// Namespace the tick ran against.
+pub struct MaintenanceStepResponse {
+    /// Namespace the step ran against.
     pub namespace_id: NamespaceId,
-    /// Namespace status observed before the tick acted.
+    /// Namespace status observed before the step acted.
     pub status_before: NamespaceStatusResponse,
-    /// What the tick did.
-    pub outcome: MaintenanceTickOutcome,
-    /// Garbage-collection report when the tick opted into sweeping.
+    /// What the step did.
+    pub outcome: MaintenanceStepOutcome,
+    /// Garbage-collection report when the step opted into sweeping.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gc: Option<GcResponse>,
 }

@@ -1,4 +1,4 @@
-//! Namespace status, maintenance ticks, checkpointing, and retention hooks.
+//! Namespace status, maintenance steps, checkpointing, and retention hooks.
 
 #![allow(clippy::panic)]
 // Runtime integration tests use panic in helper assertions for precise diagnostics.
@@ -8,7 +8,7 @@ mod common;
 use common::*;
 use loonfs::{
     ChangeSeq, CommitId, CommitOp, CommitRequest, CreateNamespaceOptions, ErrorCode, InodeId,
-    MaintenanceTickOptions, MaintenanceTickOutcome, ManifestId, PutFileOptions, RuntimeError,
+    MaintenanceStepOptions, MaintenanceStepOutcome, ManifestId, PutFileOptions, RuntimeError,
     SharedObjectStore,
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
@@ -62,7 +62,7 @@ fn namespace_status_reports_wal_tail_segments() {
 }
 
 #[test]
-fn namespace_status_and_tick_reject_missing_namespace() {
+fn namespace_status_and_step_reject_missing_namespace() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "missing-status-test");
     let namespace_id = namespace_id("demo");
@@ -72,13 +72,13 @@ fn namespace_status_and_tick_reject_missing_namespace() {
         ErrorCode::NamespaceNotFound,
     );
     assert_core_error_kind(
-        fs.maintenance_tick_namespace_blocking(&namespace_id, MaintenanceTickOptions::default()),
+        fs.maintenance_step_namespace_blocking(&namespace_id, MaintenanceStepOptions::default()),
         ErrorCode::NamespaceNotFound,
     );
 }
 
 #[test]
-fn namespace_status_and_tick_reject_partial_namespace() {
+fn namespace_status_and_step_reject_partial_namespace() {
     let temp_dir = tempdir().expect("tempdir");
     let raw_store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("create local-fs store"));
     let object_store: SharedObjectStore = raw_store.clone();
@@ -95,15 +95,15 @@ fn namespace_status_and_tick_reject_partial_namespace() {
         ErrorCode::NamespacePartial,
     );
     assert_core_error_kind(
-        fs.maintenance_tick_namespace_blocking(&namespace_id, MaintenanceTickOptions::default()),
+        fs.maintenance_step_namespace_blocking(&namespace_id, MaintenanceStepOptions::default()),
         ErrorCode::NamespacePartial,
     );
 }
 
 #[test]
-fn maintenance_tick_below_threshold_is_not_needed() {
+fn maintenance_step_below_threshold_is_not_needed() {
     let temp_dir = tempdir().expect("tempdir");
-    let fs = runtime(temp_dir.path(), "tick-not-needed-test");
+    let fs = runtime(temp_dir.path(), "step-not-needed-test");
     let namespace_id = namespace_id("demo");
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
@@ -116,24 +116,24 @@ fn maintenance_tick_below_threshold_is_not_needed() {
     )
     .expect("put file");
 
-    let tick = fs
-        .maintenance_tick_namespace_blocking(
+    let step = fs
+        .maintenance_step_namespace_blocking(
             &namespace_id,
-            MaintenanceTickOptions {
+            MaintenanceStepOptions {
                 max_wal_tail_segments: 2,
                 gc: None,
             },
         )
-        .expect("maintenance tick");
-    assert_eq!(tick.namespace_id, namespace_id);
-    assert_eq!(tick.status_before.wal_tail_segments, 1);
-    assert_eq!(tick.outcome, MaintenanceTickOutcome::NotNeeded);
+        .expect("maintenance step");
+    assert_eq!(step.namespace_id, namespace_id);
+    assert_eq!(step.status_before.wal_tail_segments, 1);
+    assert_eq!(step.outcome, MaintenanceStepOutcome::NotNeeded);
 }
 
 #[test]
-fn maintenance_tick_at_segment_threshold_flushes_the_wal() {
+fn maintenance_step_at_segment_threshold_flushes_the_wal() {
     let temp_dir = tempdir().expect("tempdir");
-    let fs = runtime(temp_dir.path(), "tick-publish-test");
+    let fs = runtime(temp_dir.path(), "step-publish-test");
     let namespace_id = namespace_id("demo");
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
@@ -146,19 +146,19 @@ fn maintenance_tick_at_segment_threshold_flushes_the_wal() {
     )
     .expect("put file");
 
-    let tick = fs
-        .maintenance_tick_namespace_blocking(
+    let step = fs
+        .maintenance_step_namespace_blocking(
             &namespace_id,
-            MaintenanceTickOptions {
+            MaintenanceStepOptions {
                 max_wal_tail_segments: 1,
                 gc: None,
             },
         )
-        .expect("maintenance tick");
-    assert_eq!(tick.status_before.head_seq, ChangeSeq(1));
+        .expect("maintenance step");
+    assert_eq!(step.status_before.head_seq, ChangeSeq(1));
     assert_eq!(
-        tick.outcome,
-        MaintenanceTickOutcome::WalFlushed {
+        step.outcome,
+        MaintenanceStepOutcome::WalFlushed {
             manifest_head_seq: ChangeSeq(1)
         }
     );
@@ -180,14 +180,14 @@ fn maintenance_tick_at_segment_threshold_flushes_the_wal() {
     .expect("list checkpoint records");
     assert!(
         records.is_empty(),
-        "maintenance tick created checkpoint records: {records:?}"
+        "maintenance step created checkpoint records: {records:?}"
     );
 }
 
 #[test]
-fn maintenance_tick_after_existing_manifest_writes_l0_manifest() {
+fn maintenance_step_after_existing_manifest_writes_l0_manifest() {
     let temp_dir = tempdir().expect("tempdir");
-    let fs = runtime(temp_dir.path(), "tick-l0-run-publish-test");
+    let fs = runtime(temp_dir.path(), "step-l0-run-publish-test");
     let namespace_id = namespace_id("demo");
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
@@ -199,14 +199,14 @@ fn maintenance_tick_after_existing_manifest_writes_l0_manifest() {
         PutFileOptions::default(),
     )
     .expect("put first file");
-    fs.maintenance_tick_namespace_blocking(
+    fs.maintenance_step_namespace_blocking(
         &namespace_id,
-        MaintenanceTickOptions {
+        MaintenanceStepOptions {
             max_wal_tail_segments: 1,
             gc: None,
         },
     )
-    .expect("first maintenance tick");
+    .expect("first maintenance step");
 
     fs.put_file_bytes_blocking(
         &namespace_id,
@@ -215,18 +215,18 @@ fn maintenance_tick_after_existing_manifest_writes_l0_manifest() {
         PutFileOptions::default(),
     )
     .expect("put second file");
-    let tick = fs
-        .maintenance_tick_namespace_blocking(
+    let step = fs
+        .maintenance_step_namespace_blocking(
             &namespace_id,
-            MaintenanceTickOptions {
+            MaintenanceStepOptions {
                 max_wal_tail_segments: 1,
                 gc: None,
             },
         )
-        .expect("second maintenance tick");
+        .expect("second maintenance step");
     assert_eq!(
-        tick.outcome,
-        MaintenanceTickOutcome::WalFlushed {
+        step.outcome,
+        MaintenanceStepOutcome::WalFlushed {
             manifest_head_seq: ChangeSeq(2)
         }
     );
@@ -265,9 +265,9 @@ fn maintenance_tick_after_existing_manifest_writes_l0_manifest() {
 }
 
 #[test]
-fn maintenance_tick_counts_segments_not_commits() {
+fn maintenance_step_counts_segments_not_commits() {
     let temp_dir = tempdir().expect("tempdir");
-    let fs = runtime(temp_dir.path(), "tick-segment-count-test");
+    let fs = runtime(temp_dir.path(), "step-segment-count-test");
     let namespace_id = namespace_id("demo");
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
@@ -303,16 +303,16 @@ fn maintenance_tick_counts_segments_not_commits() {
     assert_eq!(status.head_seq, ChangeSeq(2));
     assert_eq!(status.wal_tail_segments, 1);
 
-    let tick = fs
-        .maintenance_tick_namespace_blocking(
+    let step = fs
+        .maintenance_step_namespace_blocking(
             &namespace_id,
-            MaintenanceTickOptions {
+            MaintenanceStepOptions {
                 max_wal_tail_segments: 2,
                 gc: None,
             },
         )
-        .expect("maintenance tick");
-    assert_eq!(tick.outcome, MaintenanceTickOutcome::NotNeeded);
+        .expect("maintenance step");
+    assert_eq!(step.outcome, MaintenanceStepOutcome::NotNeeded);
 
     fs.commit_operations_blocking(
         &namespace_id,
@@ -328,37 +328,37 @@ fn maintenance_tick_counts_segments_not_commits() {
     )
     .expect("second segment commit");
 
-    let tick = fs
-        .maintenance_tick_namespace_blocking(
+    let step = fs
+        .maintenance_step_namespace_blocking(
             &namespace_id,
-            MaintenanceTickOptions {
+            MaintenanceStepOptions {
                 max_wal_tail_segments: 2,
                 gc: None,
             },
         )
-        .expect("maintenance tick at segment threshold");
-    assert_eq!(tick.status_before.head_seq, ChangeSeq(3));
-    assert_eq!(tick.status_before.wal_tail_segments, 2);
+        .expect("maintenance step at segment threshold");
+    assert_eq!(step.status_before.head_seq, ChangeSeq(3));
+    assert_eq!(step.status_before.wal_tail_segments, 2);
     assert_eq!(
-        tick.outcome,
-        MaintenanceTickOutcome::WalFlushed {
+        step.outcome,
+        MaintenanceStepOutcome::WalFlushed {
             manifest_head_seq: ChangeSeq(3)
         }
     );
 }
 
 #[test]
-fn maintenance_tick_rejects_zero_threshold() {
+fn maintenance_step_rejects_zero_threshold() {
     let temp_dir = tempdir().expect("tempdir");
-    let fs = runtime(temp_dir.path(), "tick-config-test");
+    let fs = runtime(temp_dir.path(), "step-config-test");
     let namespace_id = namespace_id("demo");
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
     let error = fs
-        .maintenance_tick_namespace_blocking(
+        .maintenance_step_namespace_blocking(
             &namespace_id,
-            MaintenanceTickOptions {
+            MaintenanceStepOptions {
                 max_wal_tail_segments: 0,
                 gc: None,
             },
@@ -371,19 +371,19 @@ fn maintenance_tick_rejects_zero_threshold() {
 }
 
 #[test]
-fn maintenance_tick_rejects_thresholds_above_the_write_rejection_cap() {
-    // A threshold above the cap would make the tick report `not needed`
+fn maintenance_step_rejects_thresholds_above_the_write_rejection_cap() {
+    // A threshold above the cap would make the step report `not needed`
     // while every publish is rejected with `maintenance_required`.
     let temp_dir = tempdir().expect("tempdir");
-    let fs = runtime(temp_dir.path(), "tick-config-test");
+    let fs = runtime(temp_dir.path(), "step-config-test");
     let namespace_id = namespace_id("demo");
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
     let error = fs
-        .maintenance_tick_namespace_blocking(
+        .maintenance_step_namespace_blocking(
             &namespace_id,
-            MaintenanceTickOptions {
+            MaintenanceStepOptions {
                 max_wal_tail_segments: 129,
                 gc: None,
             },
@@ -399,7 +399,7 @@ fn maintenance_tick_rejects_thresholds_above_the_write_rejection_cap() {
 }
 
 #[test]
-fn maintenance_tick_treats_metadata_root_cas_loss_as_benign_race() {
+fn maintenance_step_treats_metadata_root_cas_loss_as_benign_race() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     let raw_store = Arc::new(RuntimeStoreProbe::new(
@@ -407,7 +407,7 @@ fn maintenance_tick_treats_metadata_root_cas_loss_as_benign_race() {
         namespace_id.as_str(),
     ));
     let object_store = raw_store.store();
-    let fs = open_runtime(object_store, "tick-race-test");
+    let fs = open_runtime(object_store, "step-race-test");
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
@@ -420,19 +420,19 @@ fn maintenance_tick_treats_metadata_root_cas_loss_as_benign_race() {
     .expect("put file");
 
     raw_store.fail_root_cas();
-    let tick = fs
-        .maintenance_tick_namespace_blocking(
+    let step = fs
+        .maintenance_step_namespace_blocking(
             &namespace_id,
-            MaintenanceTickOptions {
+            MaintenanceStepOptions {
                 max_wal_tail_segments: 1,
                 gc: None,
             },
         )
-        .expect("maintenance tick should not fail on metadata root publish race");
+        .expect("maintenance step should not fail on metadata root publish race");
 
     assert_eq!(
-        tick.outcome,
-        MaintenanceTickOutcome::WalFlushRaceLost {
+        step.outcome,
+        MaintenanceStepOutcome::WalFlushRaceLost {
             observed_head_seq: ChangeSeq(1)
         }
     );

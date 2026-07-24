@@ -115,7 +115,7 @@ fn direct_put_upload_flow_validates_durable_object_on_complete() {
     ))
     .expect("publish direct put content");
     assert_eq!(
-        fs.read_file_bytes_blocking(&namespace_id, "/docs/direct.txt")
+        fs.get_file_bytes_blocking(&namespace_id, "/docs/direct.txt")
             .expect("read direct put file")
             .bytes,
         bytes
@@ -265,7 +265,7 @@ fn put_file_bytes_retries_a_transient_content_write_failure() {
     )
     .expect("immutable write retries the transient failure");
     let read = fs
-        .read_file_bytes_blocking(&namespace_id, "/docs/report.txt")
+        .get_file_bytes_blocking(&namespace_id, "/docs/report.txt")
         .expect("read file");
     assert_eq!(read.bytes, b"overlap survives");
 }
@@ -446,7 +446,7 @@ fn concurrent_puts_coalesce_into_one_wal_segment() {
         ] {
             let read = fs
                 .reader
-                .read_file_bytes(&namespace_id, path)
+                .get_file_bytes(&namespace_id, path)
                 .await
                 .expect("read coalesced file");
             assert_eq!(read.bytes, bytes);
@@ -525,7 +525,7 @@ fn concurrent_puts_both_commit_after_one_transient_content_failure() {
             result.expect("both puts survive the transient content failure");
             let read = fs
                 .reader
-                .read_file_bytes(&namespace_id, path)
+                .get_file_bytes(&namespace_id, path)
                 .await
                 .expect("read committed file");
             assert_eq!(read.bytes, bytes);
@@ -691,7 +691,7 @@ fn explicit_commit_appears_in_change_feed() {
         .expect("commit operation");
 
     let changes = fs
-        .list_changes_after_blocking(&namespace_id, ChangeSeq(0))
+        .list_changes_blocking(&namespace_id, ChangeSeq(0))
         .expect("list changes");
     assert_eq!(changes.through_seq, response.committed_seq);
     assert_eq!(changes.changes.len(), 1);

@@ -1151,12 +1151,12 @@ fn index_enable_leaves_core_maintenance_decoupled() {
 
     let enabled = harness.run(&["--json", "admin", "index-enable"]);
     assert_success(&enabled);
-    assert!(json_data(&enabled).get("backfill_tick").is_none());
+    assert!(json_data(&enabled).get("backfill_step").is_none());
 
     let retried = harness.run(&["--json", "admin", "index-enable"]);
     assert_success(&retried);
     assert_eq!(json_data(&retried)["already_enabled"], true);
-    assert!(json_data(&retried).get("backfill_tick").is_none());
+    assert!(json_data(&retried).get("backfill_step").is_none());
 }
 
 #[test]
@@ -1215,7 +1215,7 @@ fn every_advertised_capability_maps_to_a_cli_command_path() {
                 &["admin", "checkpoint-release"],
                 &["admin", "flush"],
                 &["admin", "retention-advance"],
-                &["admin", "tick"],
+                &["admin", "step"],
                 &["admin", "gc"],
                 &["admin", "repair"],
                 &["admin", "index-enable"],
@@ -1418,16 +1418,16 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
         assert_eq!(retention_data["namespace_id"], "demo");
         assert_eq!(retention_data["retention_floor_seq"], 2);
 
-        // The checkpoint above already covers the head, so a tick reports
+        // The checkpoint above already covers the head, so a step reports
         // not-needed identically in both modes.
-        let tick = harness.run(&["--json", "admin", "tick", "--profile", profile]);
-        assert_success(&tick);
-        let tick_data = json_data(&tick);
-        assert_eq!(tick_data["kind"], "maintenance_ticked");
-        assert_eq!(tick_data["namespace_id"], "demo");
-        assert_eq!(tick_data["outcome"]["kind"], "not_needed");
-        assert_eq!(tick_data["status_before"]["namespace_id"], "demo");
-        assert!(tick_data.get("gc").is_none());
+        let step = harness.run(&["--json", "admin", "step", "--profile", profile]);
+        assert_success(&step);
+        let step_data = json_data(&step);
+        assert_eq!(step_data["kind"], "maintenance_stepped");
+        assert_eq!(step_data["namespace_id"], "demo");
+        assert_eq!(step_data["outcome"]["kind"], "not_needed");
+        assert_eq!(step_data["status_before"]["namespace_id"], "demo");
+        assert!(step_data.get("gc").is_none());
 
         // A fresh namespace has nothing eligible to sweep.
         let gc = harness.run(&["--json", "admin", "gc", "--profile", profile]);
@@ -1466,7 +1466,7 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
             sorted_object_keys(&changes_data),
             sorted_object_keys(&checkpoint_data),
             sorted_object_keys(&retention_data),
-            sorted_object_keys(&tick_data),
+            sorted_object_keys(&step_data),
             sorted_object_keys(&gc_data),
             sorted_object_keys(&repair_data),
         ));
@@ -1564,7 +1564,7 @@ key_prefix = "{key_prefix}"
                 .spawn()
                 .expect("spawn loonfs-server");
             let server_url = server_url_from_config(&server_config_path);
-            if wait_for_health_ready(&server_url) {
+            if wait_for_readiness(&server_url) {
                 return ExternalServer { child, server_url };
             }
 
@@ -1650,7 +1650,7 @@ fn server_url_from_config(path: &Path) -> String {
 // point, so the timer methods the workspace otherwise disallows are scoped
 // to this helper.
 #[allow(clippy::disallowed_methods)]
-fn wait_for_health_ready(server_url: &str) -> bool {
+fn wait_for_readiness(server_url: &str) -> bool {
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
         if ureq::get(&format!("{server_url}/health")).call().is_ok() {

@@ -103,7 +103,7 @@ pub(super) struct InodeRestorePathParams {
         )
     )
 )]
-pub(super) async fn list_entries(
+pub(super) async fn list_path_entries(
     State(state): State<AppState>,
     namespace: NamespaceIdPath,
     headers: HeaderMap,
@@ -149,7 +149,7 @@ pub(super) async fn list_entries(
         )
     )
 )]
-pub(super) async fn stat_entry(
+pub(super) async fn stat_path(
     State(state): State<AppState>,
     namespace: NamespaceIdPath,
     headers: HeaderMap,
@@ -191,7 +191,7 @@ pub(super) async fn stat_entry(
         )
     )
 )]
-pub(super) async fn get_content(
+pub(super) async fn get_file_bytes(
     State(state): State<AppState>,
     namespace: NamespaceIdPath,
     headers: HeaderMap,
@@ -217,10 +217,10 @@ pub(super) async fn get_content(
         Some(revision_no) => {
             state
                 .reader
-                .read_file_revision_bytes(&namespace_id, &path, revision_no)
+                .get_file_revision_bytes(&namespace_id, &path, revision_no)
                 .await
         }
-        None => state.reader.read_file_bytes(&namespace_id, &path).await,
+        None => state.reader.get_file_bytes(&namespace_id, &path).await,
     }
     .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok((StatusCode::OK, file.bytes).into_response())
@@ -249,7 +249,7 @@ pub(super) async fn get_content(
         )
     )
 )]
-pub(super) async fn list_path_revisions(
+pub(super) async fn list_file_revisions(
     State(state): State<AppState>,
     namespace: NamespaceIdPath,
     headers: HeaderMap,
@@ -280,7 +280,7 @@ pub(super) async fn list_path_revisions(
         get,
         path = "/v0/namespaces/{namespace}/inodes/{inode_id}/revisions",
         tag = "inodes",
-        summary = "List inode revisions",
+        summary = "List file revisions by inode",
         description = "Returns revisions for a file inode, independent of the file's current path or later renames.",
         params(
             ("namespace" = String, Path, description = "Namespace id"),
@@ -297,7 +297,7 @@ pub(super) async fn list_path_revisions(
         )
     )
 )]
-pub(super) async fn list_inode_revisions(
+pub(super) async fn list_file_revisions_by_inode(
     State(state): State<AppState>,
     namespace: NamespaceIdPath,
     path: AppPath<InodePathParams>,
@@ -311,7 +311,7 @@ pub(super) async fn list_inode_revisions(
     let inode_id = parse_inode_id(&inode_id)?;
     let response = state
         .reader
-        .list_file_revisions_for_inode_page(
+        .list_file_revisions_by_inode_page(
             &namespace_id,
             inode_id,
             PageRequest {
@@ -330,7 +330,7 @@ pub(super) async fn list_inode_revisions(
         get,
         path = "/v0/namespaces/{namespace}/inodes/{inode_id}/revisions/{revision_no}/content",
         tag = "inodes",
-        summary = "Read inode revision",
+        summary = "Read file revision by inode",
         description = "Returns bytes for one retained file revision by inode id and revision number.",
         params(
             ("namespace" = String, Path, description = "Namespace id"),
@@ -348,7 +348,7 @@ pub(super) async fn list_inode_revisions(
         )
     )
 )]
-pub(super) async fn get_inode_revision_content(
+pub(super) async fn get_file_revision_bytes_by_inode(
     State(state): State<AppState>,
     namespace: NamespaceIdPath,
     path: AppPath<InodeRevisionPathParams>,
@@ -369,7 +369,7 @@ pub(super) async fn get_inode_revision_content(
     let revision_no = parse_revision_no(&revision_no)?;
     let bytes = state
         .reader
-        .read_file_revision_bytes_for_inode(&namespace_id, inode_id, revision_no)
+        .get_file_revision_bytes_by_inode(&namespace_id, inode_id, revision_no)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok((StatusCode::OK, bytes).into_response())
@@ -381,7 +381,7 @@ pub(super) async fn get_inode_revision_content(
         post,
         path = "/v0/namespaces/{namespace}/inodes/{inode_id}/revisions/{source_revision_no}/restore",
         tag = "inodes",
-        summary = "Restore inode revision",
+        summary = "Restore file revision by inode",
         description = "Appends a new current revision to a file inode using bytes from an older retained revision. The request includes the caller's expected current revision for race safety.",
         params(
             ("namespace" = String, Path, description = "Namespace id"),
@@ -399,7 +399,7 @@ pub(super) async fn get_inode_revision_content(
         )
     )
 )]
-pub(super) async fn restore_inode_revision(
+pub(super) async fn restore_file_revision_by_inode(
     State(state): State<AppState>,
     namespace: NamespaceIdPath,
     path: AppPath<InodeRestorePathParams>,
@@ -457,7 +457,7 @@ pub(super) async fn restore_inode_revision(
         )
     )
 )]
-pub(super) async fn filesystem_operation(
+pub(super) async fn apply_filesystem_operation(
     State(state): State<AppState>,
     namespace: NamespaceIdPath,
     AppJson(request): AppJson<FilesystemOperationRequest>,
@@ -753,7 +753,7 @@ async fn prepare_commit_content(
         get,
         path = "/v0/namespaces/{namespace}/changes",
         tag = "commits",
-        summary = "List changes",
+        summary = "List changes after a sequence",
         description = "Returns committed changes from the write-ahead log. Callers can use this feed to keep another projection synchronized with WAL history.",
         params(
             ("namespace" = String, Path, description = "Namespace id"),
@@ -782,7 +782,7 @@ pub(super) async fn list_changes(
     let limit = resolve_page_limit(query.limit)?;
     let response = state
         .reader
-        .list_changes_after(
+        .list_changes(
             &namespace_id,
             after_seq,
             ListChangesOptions { limit: Some(limit) },

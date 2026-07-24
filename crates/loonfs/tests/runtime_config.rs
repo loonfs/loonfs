@@ -107,7 +107,7 @@ fn filesystem_operations_match_core_semantics() {
     assert_eq!(entries[0].absolute_path, "/docs/hello.txt");
 
     let read = fs
-        .read_file_bytes_blocking(&namespace_id, "/docs/hello.txt")
+        .get_file_bytes_blocking(&namespace_id, "/docs/hello.txt")
         .expect("read file");
     assert_eq!(read.bytes, b"hello");
 
@@ -122,7 +122,7 @@ fn filesystem_operations_match_core_semantics() {
     )
     .expect("replace file");
     let read = fs
-        .read_file_bytes_blocking(&namespace_id, "/docs/hello.txt")
+        .get_file_bytes_blocking(&namespace_id, "/docs/hello.txt")
         .expect("read replaced file");
     assert_eq!(read.bytes, b"updated");
 
@@ -141,7 +141,7 @@ fn filesystem_operations_match_core_semantics() {
     )
     .expect("move file");
     assert_eq!(
-        fs.read_file_bytes_blocking(&namespace_id, "/docs/moved.txt")
+        fs.get_file_bytes_blocking(&namespace_id, "/docs/moved.txt")
             .expect("read moved copy")
             .bytes,
         b"updated"
@@ -214,13 +214,13 @@ fn forked_namespace_shares_content_then_diverges() {
     .expect("replace clone file");
 
     assert_eq!(
-        fs.read_file_bytes_blocking(&source, "/docs/shared.txt")
+        fs.get_file_bytes_blocking(&source, "/docs/shared.txt")
             .expect("read source")
             .bytes,
         b"source"
     );
     assert_eq!(
-        fs.read_file_bytes_blocking(&clone, "/docs/shared.txt")
+        fs.get_file_bytes_blocking(&clone, "/docs/shared.txt")
             .expect("read clone")
             .bytes,
         b"clone"

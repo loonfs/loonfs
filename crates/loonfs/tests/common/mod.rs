@@ -8,8 +8,8 @@ use loonfs::{
     CompleteUploadRequest, CompleteUploadResponse, ContentRef, CopyOptions,
     CreateCheckpointOptions, CreateCheckpointResponse, CreateDirectoryOptions,
     CreateNamespaceOptions, DeleteOptions, DirectoryPageCursor, ErrorCode, FsAdmin, FsReader,
-    FsWriter, FsWriterBuilder, InodeId, ListChangesOptions, MaintenanceTickOptions,
-    MaintenanceTickResult, MoveOptions, NamespaceId, NamespaceStatusResponse, PageRequest,
+    FsWriter, FsWriterBuilder, InodeId, ListChangesOptions, MaintenanceStepOptions,
+    MaintenanceStepResult, MoveOptions, NamespaceId, NamespaceStatusResponse, PageRequest,
     PutFileOptions, RuntimeError, SharedObjectStore, UploadContentResponse, UploadId,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -163,14 +163,14 @@ impl TestRuntime {
             .await
     }
 
-    pub(crate) async fn list_file_revisions_for_inode_page(
+    pub(crate) async fn list_file_revisions_by_inode_page(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
         request: PageRequest<loonfs::FileRevisionsPageCursor>,
     ) -> loonfs::Result<loonfs::ListFileRevisionsResponse> {
         self.reader
-            .list_file_revisions_for_inode_page(namespace_id, inode_id, request)
+            .list_file_revisions_by_inode_page(namespace_id, inode_id, request)
             .await
     }
 
@@ -227,11 +227,11 @@ pub(crate) trait RuntimeTestExt {
         &self,
         namespace_id: &NamespaceId,
     ) -> loonfs::Result<NamespaceStatusResponse>;
-    fn maintenance_tick_namespace_blocking(
+    fn maintenance_step_namespace_blocking(
         &self,
         namespace_id: &NamespaceId,
-        options: MaintenanceTickOptions,
-    ) -> loonfs::Result<MaintenanceTickResult>;
+        options: MaintenanceStepOptions,
+    ) -> loonfs::Result<MaintenanceStepResult>;
     fn stat_path_blocking(
         &self,
         namespace_id: &NamespaceId,
@@ -242,7 +242,7 @@ pub(crate) trait RuntimeTestExt {
         namespace_id: &NamespaceId,
         absolute_path: &str,
     ) -> loonfs::Result<Vec<AuthoritativePathEntry>>;
-    fn read_file_bytes_blocking(
+    fn get_file_bytes_blocking(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
@@ -306,7 +306,7 @@ pub(crate) trait RuntimeTestExt {
         namespace_id: &NamespaceId,
         requests: Vec<CommitRequest>,
     ) -> Vec<loonfs::Result<CommitResponse>>;
-    fn list_changes_after_blocking(
+    fn list_changes_blocking(
         &self,
         namespace_id: &NamespaceId,
         after_seq: ChangeSeq,
@@ -345,12 +345,12 @@ impl RuntimeTestExt for TestRuntime {
         block_on(self.admin.namespace_status(namespace_id))
     }
 
-    fn maintenance_tick_namespace_blocking(
+    fn maintenance_step_namespace_blocking(
         &self,
         namespace_id: &NamespaceId,
-        options: MaintenanceTickOptions,
-    ) -> loonfs::Result<MaintenanceTickResult> {
-        block_on(self.admin.maintenance_tick_namespace(namespace_id, options))
+        options: MaintenanceStepOptions,
+    ) -> loonfs::Result<MaintenanceStepResult> {
+        block_on(self.admin.maintenance_step_namespace(namespace_id, options))
     }
 
     fn stat_path_blocking(
@@ -373,12 +373,12 @@ impl RuntimeTestExt for TestRuntime {
         .map(|response| response.entries)
     }
 
-    fn read_file_bytes_blocking(
+    fn get_file_bytes_blocking(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
     ) -> loonfs::Result<AuthoritativeFileBytes> {
-        block_on(self.reader.read_file_bytes(namespace_id, absolute_path))
+        block_on(self.reader.get_file_bytes(namespace_id, absolute_path))
     }
 
     fn put_file_bytes_blocking(
@@ -491,16 +491,15 @@ impl RuntimeTestExt for TestRuntime {
         block_on(self.writer.commit_operations_batch(namespace_id, requests))
     }
 
-    fn list_changes_after_blocking(
+    fn list_changes_blocking(
         &self,
         namespace_id: &NamespaceId,
         after_seq: ChangeSeq,
     ) -> loonfs::Result<ChangesResponse> {
-        block_on(self.reader.list_changes_after(
-            namespace_id,
-            after_seq,
-            ListChangesOptions::default(),
-        ))
+        block_on(
+            self.reader
+                .list_changes(namespace_id, after_seq, ListChangesOptions::default()),
+        )
     }
 
     fn create_checkpoint_blocking(

@@ -14,7 +14,7 @@ use loonfs_api::ChangeSeq;
 use loonfs_api::{
     AdvanceRetentionResponse, CheckpointId, CreateCheckpointRequest, CreateCheckpointResponse,
     CreateNamespaceRequest, ErrorCode, FlushWalResponse, ForkNamespaceRequest, GcRequest,
-    GcResponse, MaintenanceTickRequest, MaintenanceTickResponse, ReleaseCheckpointResponse,
+    GcResponse, MaintenanceStepRequest, MaintenanceStepResponse, ReleaseCheckpointResponse,
     FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_PUT, LIMIT_COMMIT_MAX_BODY_BYTES,
     LIMIT_DOWNLOAD_MAX_CONCURRENT, LIMIT_DOWNLOAD_MAX_CONTENT_BYTES, LIMIT_QUERY_GREP_DEFAULT,
     LIMIT_QUERY_GREP_MAX, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES, LIMIT_QUERY_GREP_TAIL_BUDGET_FILES,
@@ -32,9 +32,9 @@ pub(super) struct DeleteNamespaceQuery {
     feature = "openapi",
     utoipa::path(
         get,
-        path = "/v0/config",
-        tag = "config",
-        summary = "Get config",
+        path = "/v0/capabilities",
+        tag = "capabilities",
+        summary = "Get capabilities",
         description = "Returns a summary of supported features and limits.",
         responses(
             (status = 200, description = "Capability document", body = loonfs_api::CapabilityDocument),
@@ -42,7 +42,7 @@ pub(super) struct DeleteNamespaceQuery {
         )
     )
 )]
-pub(super) async fn config(
+pub(super) async fn capabilities(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<loonfs_api::CapabilityDocument>, ApiResponseError> {
@@ -391,7 +391,7 @@ pub(super) async fn flush_wal(
         post,
         path = "/v0/admin/namespaces/{namespace}/retention/advance",
         tag = "admin",
-        summary = "Advance retention",
+        summary = "Advance retention floor",
         description = "Advances the namespace retention floor after checkpoint state makes older WAL history unnecessary for normal replay.",
         params(("namespace" = String, Path, description = "Namespace id")),
         responses(
@@ -403,7 +403,7 @@ pub(super) async fn flush_wal(
         )
     )
 )]
-pub(super) async fn advance_retention(
+pub(super) async fn advance_retention_floor(
     State(state): State<AppState>,
     namespace: NamespaceIdPath,
     headers: HeaderMap,
@@ -425,7 +425,7 @@ pub(super) async fn advance_retention(
         path = "/v0/admin/namespaces/{namespace}/gc",
         tag = "admin",
         summary = "Collect garbage",
-        description = "Runs one mark-and-sweep garbage-collection pass under the format's safety rules (grace window, delete-time re-verification, retention wins). Incomplete namespaces are ignored without listing or deletion. Nothing sweeps without this explicit call or a maintenance-tick opt-in.",
+        description = "Runs one mark-and-sweep garbage-collection pass under the format's safety rules (grace window, delete-time re-verification, retention wins). Incomplete namespaces are ignored without listing or deletion. Nothing sweeps without this explicit call or a maintenance-step opt-in.",
         params(("namespace" = String, Path, description = "Namespace id")),
         request_body(content = GcRequest, description = "Optional window overrides"),
         responses(
@@ -455,14 +455,14 @@ pub(super) async fn gc_namespace(
     feature = "openapi",
     utoipa::path(
         post,
-        path = "/v0/admin/namespaces/{namespace}/maintenance/tick",
+        path = "/v0/admin/namespaces/{namespace}/maintenance/step",
         tag = "admin",
-        summary = "Run maintenance tick",
+        summary = "Run maintenance step",
         description = "Runs one bounded maintenance step: flushes the WAL tail once it reaches the threshold, and optionally runs a garbage-collection pass afterwards. Losing the root race is an outcome, not an error.",
         params(("namespace" = String, Path, description = "Namespace id")),
-        request_body(content = MaintenanceTickRequest, description = "Optional threshold and GC overrides"),
+        request_body(content = MaintenanceStepRequest, description = "Optional threshold and GC overrides"),
         responses(
-            (status = 200, description = "Maintenance tick completed", body = MaintenanceTickResponse),
+            (status = 200, description = "Maintenance step completed", body = MaintenanceStepResponse),
             (status = 400, description = "Invalid namespace id or options", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
@@ -470,16 +470,16 @@ pub(super) async fn gc_namespace(
         )
     )
 )]
-pub(super) async fn maintenance_tick(
+pub(super) async fn maintenance_step(
     State(state): State<AppState>,
     namespace: NamespaceIdPath,
-    OptionalAppJson(request): OptionalAppJson<MaintenanceTickRequest>,
-) -> Result<Json<MaintenanceTickResponse>, ApiResponseError> {
+    OptionalAppJson(request): OptionalAppJson<MaintenanceStepRequest>,
+) -> Result<Json<MaintenanceStepResponse>, ApiResponseError> {
     let namespace_id = namespace.into_id()?;
-    let options = loonfs::MaintenanceTickOptions::from_request(request.unwrap_or_default());
+    let options = loonfs::MaintenanceStepOptions::from_request(request.unwrap_or_default());
     let result = state
         .admin
-        .maintenance_tick_namespace(&namespace_id, options)
+        .maintenance_step_namespace(&namespace_id, options)
         .await
         .map_err(ApiResponseError::runtime)?;
     Ok(Json(result.into_response()))

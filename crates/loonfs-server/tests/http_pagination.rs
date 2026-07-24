@@ -297,13 +297,13 @@ async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
         assert_eq!(entry.content_ref.as_ref(), Some(&first_content_ref));
         let bytes = harness
             .client
-            .read_file_bytes(&target)
+            .get_file_bytes(&target)
             .expect("read restored file");
         assert_eq!(bytes, b"first bytes\n");
 
         let changes = harness
             .client
-            .list_changes_after(&namespace, ChangeSeq(0), None)
+            .list_changes(&namespace, ChangeSeq(0), None)
             .expect("list changes");
         assert_eq!(changes.changes.len(), 3);
         assert_eq!(
@@ -325,7 +325,7 @@ async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
 
         let first_page = harness
             .client
-            .list_changes_after(&namespace, ChangeSeq(0), Some(2))
+            .list_changes(&namespace, ChangeSeq(0), Some(2))
             .expect("list first changes page");
         assert_eq!(first_page.after_seq, ChangeSeq(0));
         assert_eq!(first_page.through_seq, ChangeSeq(2));
@@ -334,7 +334,7 @@ async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
 
         let second_page = harness
             .client
-            .list_changes_after(
+            .list_changes(
                 &namespace,
                 first_page.next_after_seq.expect("next page"),
                 Some(2),
@@ -394,7 +394,7 @@ async fn http_revision_routes_list_read_and_restore_by_path_and_inode() {
         assert_eq!(
             harness
                 .client
-                .read_file_revision_bytes(&target, RevisionNo(1))
+                .get_file_revision_bytes(&target, RevisionNo(1))
                 .expect("read path revision"),
             b"one"
         );
@@ -415,13 +415,13 @@ async fn http_revision_routes_list_read_and_restore_by_path_and_inode() {
         ));
         let inode_revisions = harness
             .client
-            .list_file_revisions_for_inode_page(&namespace, entry.inode_id, None, None)
+            .list_file_revisions_by_inode_page(&namespace, entry.inode_id, None, None)
             .expect("inode revisions");
         assert_eq!(inode_revisions.revisions.len(), 2);
         assert_eq!(
             harness
                 .client
-                .read_file_revision_bytes_for_inode(&namespace, entry.inode_id, RevisionNo(2))
+                .get_file_revision_bytes_by_inode(&namespace, entry.inode_id, RevisionNo(2))
                 .expect("read inode revision"),
             b"two"
         );
@@ -433,24 +433,24 @@ async fn http_revision_routes_list_read_and_restore_by_path_and_inode() {
         assert_eq!(
             harness
                 .client
-                .read_file_bytes(&moved)
+                .get_file_bytes(&moved)
                 .expect("read restored file"),
             b"one"
         );
         harness
             .client
-            .restore_file_revision_for_inode(
+            .restore_file_revision_by_inode(
                 &namespace,
                 entry.inode_id,
                 RevisionNo(2),
                 RevisionNo(3),
-                &CommitId::parse("c_restore_inode_revision_0001").expect("valid commit id"),
+                &CommitId::parse("c_restore_file_revision_0001").expect("valid commit id"),
             )
             .expect("inode restore");
         assert_eq!(
             harness
                 .client
-                .read_file_bytes(&moved)
+                .get_file_bytes(&moved)
                 .expect("read inode-restored file"),
             b"two"
         );

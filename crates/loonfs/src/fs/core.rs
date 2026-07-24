@@ -1,5 +1,5 @@
 //! [`FsCore`]: the shared runtime state behind the handles, its
-//! constructor, and the background-tick bookkeeping.
+//! constructor, and the background-step bookkeeping.
 
 use crate::background::BackgroundWork;
 use crate::cache::{RuntimeCacheStatsInner, RuntimeControlCache};
@@ -243,15 +243,15 @@ impl FsCore {
     }
 }
 
-/// Holds a background singleflight claim across a spawned tick. Dropping —
+/// Holds a background singleflight claim across a spawned step. Dropping —
 /// on completion, panic, or a task discarded with its runtime — releases the
 /// namespace for the next scheduling decision.
-pub(super) struct BackgroundTickClaim {
+pub(super) struct BackgroundStepClaim {
     pub(super) fs: FsCore,
     pub(super) namespace_id: NamespaceId,
 }
 
-impl Drop for BackgroundTickClaim {
+impl Drop for BackgroundStepClaim {
     fn drop(&mut self) {
         self.fs.inner.background.release(&self.namespace_id);
     }

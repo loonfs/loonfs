@@ -162,7 +162,7 @@ impl EmbeddedTarget {
             .writer_id(writer_id.clone())
             .writer_version(writer_version.clone())
             // The server's policy: publishes past the WAL threshold schedule
-            // their own tick. The backend settles scheduled work after each
+            // their own step. The backend settles scheduled work after each
             // mutation, so a one-shot command exits with maintenance done
             // rather than stalling at the WAL backpressure cap.
             .background_work(FsBackgroundWork::Enabled)

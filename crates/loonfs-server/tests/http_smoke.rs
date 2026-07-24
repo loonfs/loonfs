@@ -74,7 +74,7 @@ async fn delete_namespace_is_terminal_and_retires_the_id() {
         }
         let read = harness
             .client
-            .read_file_bytes(&target)
+            .get_file_bytes(&target)
             .expect_err("reads observe the deleted namespace");
         match read {
             ClientError::Api { code, .. } => assert_eq!(code, "namespace_deleted"),
@@ -108,7 +108,7 @@ async fn delete_namespace_is_terminal_and_retires_the_id() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn config_endpoint_advertises_capabilities() {
+async fn capabilities_endpoint_advertises_capabilities() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
@@ -189,7 +189,7 @@ async fn http_round_trip_supports_namespace_create_and_file_read_write() {
         let entry = harness.client.stat_path(&target).expect("stat path");
         assert_eq!(entry.size_bytes, Some(16));
 
-        let bytes = harness.client.read_file_bytes(&target).expect("read file");
+        let bytes = harness.client.get_file_bytes(&target).expect("read file");
         assert_eq!(bytes, b"hello over http\n");
 
         let status = harness
@@ -288,7 +288,7 @@ async fn http_namespace_fork_shares_content_and_diverges() {
         assert_eq!(
             harness
                 .client
-                .read_file_bytes(&clone_path)
+                .get_file_bytes(&clone_path)
                 .expect("read clone"),
             b"base\n"
         );
@@ -304,7 +304,7 @@ async fn http_namespace_fork_shares_content_and_diverges() {
         assert_eq!(
             harness
                 .client
-                .read_file_bytes(&clone_path)
+                .get_file_bytes(&clone_path)
                 .expect("read clone after source write"),
             b"base\n"
         );
@@ -317,28 +317,28 @@ async fn http_namespace_fork_shares_content_and_diverges() {
         assert_eq!(
             harness
                 .client
-                .read_file_bytes(&source_path)
+                .get_file_bytes(&source_path)
                 .expect("read source"),
             b"source-after-fork\n"
         );
         assert_eq!(
             harness
                 .client
-                .read_file_bytes(&clone_path)
+                .get_file_bytes(&clone_path)
                 .expect("read clone"),
             b"clone-after-fork\n"
         );
 
         match harness
             .client
-            .list_changes_after(&namespace_id("clone"), ChangeSeq(0), None)
+            .list_changes(&namespace_id("clone"), ChangeSeq(0), None)
         {
             Err(ClientError::Api { code, .. }) => assert_eq!(code, "rebootstrap_required"),
             other => unreachable!("expected rebootstrap_required, got {other:?}"),
         }
         let clone_changes = harness
             .client
-            .list_changes_after(&namespace_id("clone"), ChangeSeq(1), None)
+            .list_changes(&namespace_id("clone"), ChangeSeq(1), None)
             .expect("clone changes");
         assert_eq!(clone_changes.changes.len(), 1);
         assert_eq!(clone_changes.changes[0].seq, ChangeSeq(2));

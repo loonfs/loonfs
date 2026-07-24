@@ -7,15 +7,15 @@ use loonfs::{
     gc_config_from_request, gc_response_from_report, ChangesResponse, CopyOptions,
     CreateCheckpointOptions, CreateDirectoryOptions, CreateNamespaceOptions,
     DeleteNamespaceOptions, DeleteNamespaceResponse, DeleteOptions, FsAdmin, FsReader, FsWriter,
-    ListChangesOptions, MaintenanceTickOptions, MaintenanceTickResult, MoveOptions, PutFileOptions,
+    ListChangesOptions, MaintenanceStepOptions, MaintenanceStepResult, MoveOptions, PutFileOptions,
     RestoreRevisionOptions, RuntimeError, UndeleteOptions,
 };
 use loonfs_api::{
-    v0::{DisableGramsIndexResponse, EnableGramsIndexResponse, RepairNamespaceResponse},
+    v0::{DisableGrepIndexResponse, EnableGrepIndexResponse, RepairNamespaceResponse},
     AdvanceRetentionResponse, AuthoritativePathEntry, ChangeSeq, CheckpointId, CommitId,
     CommitResponse, CreateCheckpointRequest, CreateCheckpointResponse, DestinationBehavior,
     EffectiveLimit, ErrorCode, FlushWalResponse, GcRequest, GcResponse, GrepRequest, GrepResponse,
-    InodeId, ListFileRevisionsResponse, MaintenanceTickRequest, MaintenanceTickResponse,
+    InodeId, ListFileRevisionsResponse, MaintenanceStepRequest, MaintenanceStepResponse,
     NamespaceId, NamespaceStatusResponse, NamespaceSummary, PaginationPolicy,
     ReleaseCheckpointResponse, RevisionNo,
 };
@@ -33,12 +33,12 @@ pub(crate) use loonfs_client::backend::{Backend, BackendError, RemoteBackend};
 /// the reader, mutations through the writer, and maintenance through the
 /// admin handle. The embedded writer runs `FsBackgroundWork::Enabled` — the
 /// same policy as the reference server — so a publish that crosses the WAL
-/// threshold schedules its own maintenance tick, and every mutation settles
+/// threshold schedules its own maintenance step, and every mutation settles
 /// scheduled work before the one-shot process exits. A publish gated on
-/// `maintenance_required` waits for the tick that same gated publish
+/// `maintenance_required` waits for the step that same gated publish
 /// scheduled, then resubmits, so embedded writes recover from WAL debt
 /// instead of hard-stopping. `loon admin` commands remain the explicit path
-/// for everything else (GC, retention, forced ticks).
+/// for everything else (GC, retention, forced steps).
 pub(crate) struct EmbeddedBackend {
     pub(super) writer: FsWriter,
     pub(super) reader: FsReader,
@@ -46,13 +46,13 @@ pub(crate) struct EmbeddedBackend {
 }
 
 /// How many times a gated publish resubmits after settling the maintenance
-/// tick it scheduled. One recovery is the normal case; the second covers a
-/// tick that raced another writer's debt. Past that the error surfaces.
+/// step it scheduled. One recovery is the normal case; the second covers a
+/// step that raced another writer's debt. Past that the error surfaces.
 const MAX_MAINTENANCE_RECOVERIES: usize = 2;
 
 impl EmbeddedBackend {
     /// Waits out writer-scheduled maintenance so a one-shot command never
-    /// exits (tearing down the runtime) while a tick is mid-flight. A settle
+    /// exits (tearing down the runtime) while a step is mid-flight. A settle
     /// failure after a committed mutation is reported as a warning on
     /// stderr, never as the mutation's outcome — the commit landed.
     async fn settle_background_work_after<T>(
@@ -73,7 +73,7 @@ impl EmbeddedBackend {
 
     /// Runs one mutation with `maintenance_required` recovery: a gated
     /// publish observes the oversized WAL tail and schedules its own
-    /// recovery tick (the writer policy is `Enabled`), so settle that tick
+    /// recovery step (the writer policy is `Enabled`), so settle that step
     /// and resubmit. A gated attempt commits nothing, so the resubmission
     /// cannot double-apply.
     async fn publish_with_maintenance_recovery<T, F, Fut>(
@@ -180,10 +180,10 @@ impl Backend for EmbeddedBackend {
             .map_err(|error| map_namespace_scoped_runtime_error(spec.namespace(), error))
     }
 
-    async fn read_file_bytes(&self, spec: &NamespacePath) -> Result<Vec<u8>, BackendError> {
+    async fn get_file_bytes(&self, spec: &NamespacePath) -> Result<Vec<u8>, BackendError> {
         let result = self
             .reader
-            .read_file_bytes(spec.namespace(), spec.absolute_path().as_str())
+            .get_file_bytes(spec.namespace(), spec.absolute_path().as_str())
             .await
             .map_err(|error| map_namespace_scoped_runtime_error(spec.namespace(), error))?;
         Ok(result.bytes)
@@ -200,34 +200,34 @@ impl Backend for EmbeddedBackend {
             .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
     }
 
-    async fn enable_grams_index(
+    async fn enable_grep_index(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<EnableGramsIndexResponse, BackendError> {
+    ) -> Result<EnableGrepIndexResponse, BackendError> {
         self.admin
-            .enable_grams_index(namespace_id)
+            .enable_grep_index(namespace_id)
             .await
             .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
     }
 
-    async fn disable_grams_index(
+    async fn disable_grep_index(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<DisableGramsIndexResponse, BackendError> {
+    ) -> Result<DisableGrepIndexResponse, BackendError> {
         self.admin
-            .disable_grams_index(namespace_id)
+            .disable_grep_index(namespace_id)
             .await
             .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
     }
 
-    async fn read_file_revision_bytes(
+    async fn get_file_revision_bytes(
         &self,
         spec: &NamespacePath,
         revision_no: RevisionNo,
     ) -> Result<Vec<u8>, BackendError> {
         let result = self
             .reader
-            .read_file_revision_bytes(spec.namespace(), spec.absolute_path().as_str(), revision_no)
+            .get_file_revision_bytes(spec.namespace(), spec.absolute_path().as_str(), revision_no)
             .await
             .map_err(|error| map_namespace_scoped_runtime_error(spec.namespace(), error))?;
         Ok(result.bytes)
@@ -439,16 +439,16 @@ impl Backend for EmbeddedBackend {
             .map_err(map_runtime_error)
     }
 
-    async fn maintenance_tick(
+    async fn maintenance_step(
         &self,
         namespace_id: &NamespaceId,
-        request: MaintenanceTickRequest,
-    ) -> Result<MaintenanceTickResponse, BackendError> {
-        let options = MaintenanceTickOptions::from_request(request);
+        request: MaintenanceStepRequest,
+    ) -> Result<MaintenanceStepResponse, BackendError> {
+        let options = MaintenanceStepOptions::from_request(request);
         self.admin
-            .maintenance_tick_namespace(namespace_id, options)
+            .maintenance_step_namespace(namespace_id, options)
             .await
-            .map(MaintenanceTickResult::into_response)
+            .map(MaintenanceStepResult::into_response)
             .map_err(map_runtime_error)
     }
 
@@ -475,7 +475,7 @@ impl Backend for EmbeddedBackend {
             .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
     }
 
-    async fn list_changes_after(
+    async fn list_changes(
         &self,
         namespace_id: &NamespaceId,
         after_seq: ChangeSeq,
@@ -483,7 +483,7 @@ impl Backend for EmbeddedBackend {
     ) -> Result<ChangesResponse, BackendError> {
         let limit = resolve_cli_page_limit(limit)?;
         self.reader
-            .list_changes_after(
+            .list_changes(
                 namespace_id,
                 after_seq,
                 ListChangesOptions { limit: Some(limit) },
@@ -625,7 +625,7 @@ mod tests {
 
         let changes = target
             .backend
-            .list_changes_after(&namespace_id("demo"), ChangeSeq(0), None)
+            .list_changes(&namespace_id("demo"), ChangeSeq(0), None)
             .await
             .expect("list changes");
         assert_eq!(changes.changes.len(), 1);
@@ -658,7 +658,7 @@ mod tests {
 
         let changes = target
             .backend
-            .list_changes_after(&namespace_id("missing"), ChangeSeq(0), None)
+            .list_changes(&namespace_id("missing"), ChangeSeq(0), None)
             .await
             .expect_err("changes on missing namespace");
         assert_eq!(changes.code, ErrorCode::NamespaceNotFound.as_str());
@@ -682,9 +682,9 @@ mod tests {
             .expect("create namespace");
 
         // More publishes than the WAL backpressure cap: the Enabled policy
-        // must keep ticking the tail down so no write ever stalls on
+        // must keep stepping the tail down so no write ever stalls on
         // `maintenance_required` (each stall used to require a manual
-        // `loon admin tick`).
+        // `loon admin step`).
         for index in 0..140 {
             target
                 .backend
@@ -757,7 +757,7 @@ mod tests {
         assert!(stalled, "ManualOnly writer never hit the backpressure cap");
 
         // The embedded backend digs itself out: the gated publish schedules
-        // its own tick, the backend settles it and resubmits.
+        // its own step, the backend settles it and resubmits.
         let target = EmbeddedTarget::new(&store_config, None, None)
             .await
             .expect("build embedded target");

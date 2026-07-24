@@ -15,7 +15,7 @@ use tokio::task::JoinHandle;
 /// Writer-initiated background maintenance policy.
 ///
 /// The policy governs only maintenance a write-capable handle schedules for
-/// itself after writes: non-destructive checkpoint ticks that keep read cost
+/// itself after writes: non-destructive checkpoint steps that keep read cost
 /// bounded once the WAL tail crosses its threshold. It never enables
 /// retention advancement or garbage collection; those stay explicit
 /// [`FsAdmin`](crate::FsAdmin) operations.
@@ -37,9 +37,9 @@ pub(crate) struct BackgroundWork {
     /// they were opened on; `None` resolves the runtime driving the
     /// triggering write at spawn time.
     runtime: Option<tokio::runtime::Handle>,
-    /// Cap on concurrently claimed ticks across all namespaces. The
-    /// per-namespace singleflight bounds each namespace to one tick; this
-    /// bounds how many namespaces may tick at once, so a write burst across
+    /// Cap on concurrently claimed steps across all namespaces. The
+    /// per-namespace singleflight bounds each namespace to one step; this
+    /// bounds how many namespaces may step at once, so a write burst across
     /// many namespaces cannot fan out into unbounded maintenance tasks.
     max_concurrent: NonZeroUsize,
     state: Mutex<BackgroundState>,
@@ -52,8 +52,8 @@ pub(crate) struct BackgroundWork {
 struct BackgroundState {
     closed: bool,
     inflight: BTreeSet<NamespaceId>,
-    /// Namespaces whose over-threshold publish arrived while their tick was
-    /// already running. The running tick consumes this through
+    /// Namespaces whose over-threshold publish arrived while their step was
+    /// already running. The running step consumes this through
     /// [`BackgroundWork::finish_or_rerun`] and runs again, so the last write
     /// before an idle period cannot leave the tail unbounded.
     pending: BTreeSet<NamespaceId>,
@@ -104,7 +104,7 @@ impl BackgroundWork {
             return false;
         }
         if state.inflight.contains(namespace_id) {
-            // The running tick re-checks pending before releasing its slot,
+            // The running step re-checks pending before releasing its slot,
             // so this request is deferred, not dropped.
             state.pending.insert(namespace_id.clone());
             return false;
@@ -113,7 +113,7 @@ impl BackgroundWork {
             tracing::debug!(
                 namespace_id = %namespace_id,
                 max_concurrent = self.max_concurrent.get(),
-                "maintenance tick skipped at the concurrency cap; \
+                "maintenance step skipped at the concurrency cap; \
                  the next over-threshold publish reschedules it"
             );
             return false;
@@ -127,7 +127,7 @@ impl BackgroundWork {
         state.inflight.remove(namespace_id);
     }
 
-    /// Ends one tick run for the namespace. When another over-threshold
+    /// Ends one step run for the namespace. When another over-threshold
     /// publish deferred a request during the run, that request is consumed,
     /// the singleflight slot stays held, and the caller must run again; only
     /// a quiet finish releases the slot. Checking and releasing under the
@@ -215,7 +215,7 @@ mod tests {
         nonzero_usize(value)
     }
 
-    /// Sets its flag when dropped, mimicking the claim guard the auto-tick
+    /// Sets its flag when dropped, mimicking the claim guard the auto-step
     /// future carries: a refused spawn must drop the future so the guard
     /// releases the singleflight slot.
     struct DropFlag(Arc<AtomicBool>);
@@ -227,18 +227,18 @@ mod tests {
     }
 
     #[test]
-    fn a_request_during_an_active_tick_defers_and_reruns_exactly_once() {
+    fn a_request_during_an_active_step_defers_and_reruns_exactly_once() {
         let background = BackgroundWork::new(FsBackgroundWork::Enabled, None, concurrency_cap(8));
         let namespace_id = namespace_id("demo");
 
         assert!(background.try_claim(&namespace_id), "first claim spawns");
         assert!(
             !background.try_claim(&namespace_id),
-            "a request during the active tick defers instead of claiming"
+            "a request during the active step defers instead of claiming"
         );
         assert!(
             background.finish_or_rerun(&namespace_id),
-            "the deferred request keeps the slot held and reruns the tick"
+            "the deferred request keeps the slot held and reruns the step"
         );
         assert!(
             !background.finish_or_rerun(&namespace_id),
@@ -337,7 +337,7 @@ mod tests {
         assert!(background.try_claim(&namespace_id));
         assert!(
             !background.try_claim(&namespace_id),
-            "one in-flight tick per namespace"
+            "one in-flight step per namespace"
         );
         background.release(&namespace_id);
         assert!(

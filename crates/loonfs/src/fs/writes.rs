@@ -1,10 +1,10 @@
 //! Path mutations, commits, and the publication pipeline.
 
-use super::core::{BackgroundTickClaim, FsCore};
+use super::core::{BackgroundStepClaim, FsCore};
 use crate::publish::{NamespaceMutationCandidate, PathMutationIntent, PreparedContent};
 use crate::{
     ChangeSeq, CommitId, CommitOp, CommitPrecondition, CommitRequest, CommitResponse, ContentRef,
-    CopyOptions, CoreError, CreateDirectoryOptions, DeleteOptions, InodeId, MaintenanceTickOptions,
+    CopyOptions, CoreError, CreateDirectoryOptions, DeleteOptions, InodeId, MaintenanceStepOptions,
     MoveOptions, NamespaceId, PutFileOptions, RestoreRevisionOptions, RevisionNo, UndeleteOptions,
 };
 use crate::{Result, RuntimeError};
@@ -371,7 +371,7 @@ impl FsCore {
     /// The commit appends a new current revision from `source_revision_no`
     /// and fails if the inode's current revision is no longer
     /// `base_revision_no`.
-    pub(crate) async fn restore_file_revision_for_inode(
+    pub(crate) async fn restore_file_revision_by_inode(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
@@ -564,7 +564,7 @@ impl FsCore {
                 .map(|result| result.map_err(RuntimeError::Core))
                 .collect::<Vec<_>>();
             self.notify_publish_observer(namespace_id, &results);
-            self.maybe_auto_tick_after_publish(namespace_id, wal_tail_segments);
+            self.maybe_auto_step_after_publish(namespace_id, wal_tail_segments);
             return results;
         }
 
@@ -600,7 +600,7 @@ impl FsCore {
             self.invalidate_namespace_cache_after_batch(namespace_id, &results);
         }
         self.notify_publish_observer(namespace_id, &results);
-        self.maybe_auto_tick_after_publish(namespace_id, wal_tail_segments);
+        self.maybe_auto_step_after_publish(namespace_id, wal_tail_segments);
         results
     }
 
@@ -622,22 +622,22 @@ impl FsCore {
         }
     }
 
-    /// Schedules a maintenance tick after a publish that observed the WAL
-    /// tail at or past the checkpoint threshold. Ticks are spawned on the
+    /// Schedules a maintenance step after a publish that observed the WAL
+    /// tail at or past the checkpoint threshold. Steps are spawned on the
     /// handle's owning runtime — never on a hidden LoonFS runtime — so no
     /// writer (and no server batch pipeline) waits behind a checkpoint or
     /// base rebuild. The per-namespace singleflight claim dedupes concurrent
-    /// publishers and is released on every outcome, including tick panics
+    /// publishers and is released on every outcome, including step panics
     /// and dropped tasks.
-    fn maybe_auto_tick_after_publish(&self, namespace_id: &NamespaceId, wal_tail_segments: u64) {
-        let options = MaintenanceTickOptions::default();
+    fn maybe_auto_step_after_publish(&self, namespace_id: &NamespaceId, wal_tail_segments: u64) {
+        let options = MaintenanceStepOptions::default();
         if wal_tail_segments < options.max_wal_tail_segments {
             return;
         }
         if !self.inner.background.try_claim(namespace_id) {
             return;
         }
-        let claim = BackgroundTickClaim {
+        let claim = BackgroundStepClaim {
             fs: self.clone(),
             namespace_id: namespace_id.clone(),
         };
@@ -649,13 +649,13 @@ impl FsCore {
                     .await
                 {
                     tracing::info!(
-                        phase = "auto_maintenance_tick",
+                        phase = "auto_maintenance_step",
                         result = "error",
                         error = %error,
-                        "post-publish maintenance tick failed"
+                        "post-publish maintenance step failed"
                     );
                 }
-                // A publish that crossed the threshold while this tick ran
+                // A publish that crossed the threshold while this step ran
                 // deferred its request rather than dropping it; consume it
                 // and run again, so the last write before an idle period
                 // cannot leave the tail unbounded.
@@ -674,9 +674,9 @@ impl FsCore {
     async fn run_auto_maintenance(
         &self,
         namespace_id: &NamespaceId,
-        options: MaintenanceTickOptions,
+        options: MaintenanceStepOptions,
     ) -> Result<()> {
-        self.maintenance_tick_namespace(namespace_id, options)
+        self.maintenance_step_namespace(namespace_id, options)
             .await?;
         self.drain_reorganization_backlog(namespace_id).await
     }

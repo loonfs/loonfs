@@ -181,10 +181,10 @@ pub(crate) async fn run_filesystem_cat(
             context
                 .target
                 .backend()
-                .read_file_revision_bytes(&spec, revision_no)
+                .get_file_revision_bytes(&spec, revision_no)
                 .await
         }
-        None => context.target.backend().read_file_bytes(&spec).await,
+        None => context.target.backend().get_file_bytes(&spec).await,
     }
     .map_err(|error| context.fail(kind, error))?;
 
@@ -236,10 +236,10 @@ pub(crate) async fn run_filesystem_get(
             context
                 .target
                 .backend()
-                .read_file_revision_bytes(&spec, revision_no)
+                .get_file_revision_bytes(&spec, revision_no)
                 .await
         }
-        None => context.target.backend().read_file_bytes(&spec).await,
+        None => context.target.backend().get_file_bytes(&spec).await,
     }
     .map_err(|error| context.fail(kind, error))?;
     let data = match args.local_destination.as_deref() {

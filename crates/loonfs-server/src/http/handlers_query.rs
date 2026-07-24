@@ -7,7 +7,7 @@ use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::Json;
 use loonfs_api::v0::{
-    DisableGramsIndexResponse, EnableGramsIndexResponse, GrepGcResponse, GrepRequest, GrepResponse,
+    DisableGrepIndexResponse, EnableGrepIndexResponse, GrepGcResponse, GrepRequest, GrepResponse,
 };
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
@@ -15,7 +15,7 @@ use loonfs_api::FEATURE_QUERY_GREP;
 use loonfs_grep::root::{load_grep_root, GrepLifecycle};
 use loonfs_grep::{GrepDisableOutcome, GrepEnableOutcome, GrepError};
 
-const GREP_INDEX_FEATURE: &str = "index.grams";
+const GREP_INDEX_FEATURE: &str = "grep.index";
 
 #[cfg_attr(
     feature = "openapi",
@@ -24,7 +24,7 @@ const GREP_INDEX_FEATURE: &str = "index.grams";
         path = "/v0/namespaces/{namespace}/query/grep",
         tag = "query",
         summary = "Content search",
-        description = "Searches file content with a regular expression, accelerated by the namespace's gram index. Matches are verified against the real pattern and returned in ascending `(inode_id, byte_offset)` order; revisions committed after the index watermark are scanned exhaustively unless `allow_stale` skips them. Requires this deployment to serve grep and the namespace to carry a materialized steady-state grep root.",
+        description = "Searches file content with a regular expression, accelerated by the namespace's grep index. Matches are verified against the real pattern and returned in ascending `(inode_id, byte_offset)` order; revisions committed after the index watermark are scanned exhaustively unless `allow_stale` skips them. Requires this deployment to serve grep and the namespace to carry a materialized steady-state grep root.",
         params(("namespace" = String, Path, description = "Namespace id")),
         request_body = GrepRequest,
         responses(
@@ -34,7 +34,7 @@ const GREP_INDEX_FEATURE: &str = "index.grams";
             (status = 403, description = "The backing store rejected its configured credentials", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
             (status = 410, description = "Namespace deleted", body = ApiError),
-            (status = 501, description = "Grep serving is disabled or the gram index is not materialized on this namespace", body = ApiError),
+            (status = 501, description = "Grep serving is disabled or the grep index is not materialized on this namespace", body = ApiError),
             (status = 503, description = "The index trails the head past the scan budget", body = ApiError),
             (status = 500, description = "The grep index is corrupt or its backing store is unavailable", body = ApiError)
         )
@@ -71,13 +71,13 @@ pub(super) async fn grep_not_supported(
     feature = "openapi",
     utoipa::path(
         post,
-        path = "/v0/admin/namespaces/{namespace}/index/grams/enable",
+        path = "/v0/admin/namespaces/{namespace}/grep/index/enable",
         tag = "admin",
-        summary = "Enable the gram index",
+        summary = "Enable the grep index",
         description = "Enables the namespace's grep root. Embedded mode immediately starts that namespace's event-driven backfill driver; serve-only deployments rely on their explicitly assigned external driver. Idempotent.",
         params(("namespace" = String, Path, description = "Namespace id")),
         responses(
-            (status = 200, description = "Grep root enabled or already enabled", body = EnableGramsIndexResponse),
+            (status = 200, description = "Grep root enabled or already enabled", body = EnableGrepIndexResponse),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 403, description = "The backing store rejected its configured credentials", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
@@ -87,11 +87,11 @@ pub(super) async fn grep_not_supported(
         )
     )
 )]
-pub(super) async fn enable_grams_index(
+pub(super) async fn enable_grep_index(
     State(state): State<AppState>,
     namespace: NamespaceIdPath,
     headers: HeaderMap,
-) -> Result<Json<EnableGramsIndexResponse>, ApiResponseError> {
+) -> Result<Json<EnableGrepIndexResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let namespace_id = namespace.into_id()?;
     let outcome = state
@@ -102,12 +102,12 @@ pub(super) async fn enable_grams_index(
         .await
         .map_err(|error| map_grep_error(&namespace_id, error))?;
     let response = match outcome {
-        GrepEnableOutcome::Enabled { target_seq } => EnableGramsIndexResponse {
+        GrepEnableOutcome::Enabled { target_seq } => EnableGrepIndexResponse {
             namespace_id: namespace_id.clone(),
             built_through_seq: target_seq,
             already_enabled: false,
         },
-        GrepEnableOutcome::AlreadyEnabled { built_through_seq } => EnableGramsIndexResponse {
+        GrepEnableOutcome::AlreadyEnabled { built_through_seq } => EnableGrepIndexResponse {
             namespace_id: namespace_id.clone(),
             built_through_seq,
             already_enabled: true,
@@ -131,13 +131,13 @@ pub(super) async fn enable_grams_index(
     feature = "openapi",
     utoipa::path(
         post,
-        path = "/v0/admin/namespaces/{namespace}/index/grams/disable",
+        path = "/v0/admin/namespaces/{namespace}/grep/index/disable",
         tag = "admin",
-        summary = "Disable the gram index",
+        summary = "Disable the grep index",
         description = "Disables the namespace's grep root, clears its segment references, and stops its embedded driver. Explicit grep garbage collection later reclaims the segments. Idempotent.",
         params(("namespace" = String, Path, description = "Namespace id")),
         responses(
-            (status = 200, description = "Grep root disabled or already disabled", body = DisableGramsIndexResponse),
+            (status = 200, description = "Grep root disabled or already disabled", body = DisableGrepIndexResponse),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 403, description = "The backing store rejected its configured credentials", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
@@ -147,11 +147,11 @@ pub(super) async fn enable_grams_index(
         )
     )
 )]
-pub(super) async fn disable_grams_index(
+pub(super) async fn disable_grep_index(
     State(state): State<AppState>,
     namespace: NamespaceIdPath,
     headers: HeaderMap,
-) -> Result<Json<DisableGramsIndexResponse>, ApiResponseError> {
+) -> Result<Json<DisableGrepIndexResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let namespace_id = namespace.into_id()?;
     if let Some(drivers) = &state.grep_drivers {
@@ -168,11 +168,11 @@ pub(super) async fn disable_grams_index(
         .await
         .map_err(|error| map_grep_error(&namespace_id, error))?;
     let response = match outcome {
-        GrepDisableOutcome::Disabled => DisableGramsIndexResponse {
+        GrepDisableOutcome::Disabled => DisableGrepIndexResponse {
             namespace_id: namespace_id.clone(),
             was_enabled: true,
         },
-        GrepDisableOutcome::NotEnabled => DisableGramsIndexResponse {
+        GrepDisableOutcome::NotEnabled => DisableGrepIndexResponse {
             namespace_id: namespace_id.clone(),
             was_enabled: false,
         },
@@ -192,9 +192,9 @@ pub(super) async fn disable_grams_index(
     feature = "openapi",
     utoipa::path(
         post,
-        path = "/v0/admin/namespaces/{namespace}/index/grams/gc",
+        path = "/v0/admin/namespaces/{namespace}/grep/index/gc",
         tag = "admin",
-        summary = "Collect gram-index garbage",
+        summary = "Collect grep-index garbage",
         description = "Runs one explicit garbage-collection pass over only this namespace's grep-owned extension keyspace. A tombstoned or absent namespace has aged extension state reaped; no grep garbage collection runs implicitly.",
         params(("namespace" = String, Path, description = "Namespace id")),
         responses(
@@ -206,7 +206,7 @@ pub(super) async fn disable_grams_index(
         )
     )
 )]
-pub(super) async fn gc_grams_index(
+pub(super) async fn gc_grep_index(
     State(state): State<AppState>,
     namespace: NamespaceIdPath,
     headers: HeaderMap,

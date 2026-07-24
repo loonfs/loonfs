@@ -46,7 +46,7 @@ pub struct ServerConfig {
     /// Whether the server writer schedules maintenance (checkpoints and
     /// reorganization folds) after writes that cross the WAL-tail
     /// threshold. On by default; set `false` on write-serving nodes when a
-    /// dedicated maintenance process owns ticks for these namespaces.
+    /// dedicated maintenance process owns steps for these namespaces.
     #[serde(default = "default_background_maintenance")]
     pub background_maintenance: bool,
     /// Minimum interval between publication starts per namespace, in
@@ -87,10 +87,10 @@ pub struct ServerConfig {
     /// Worst-case download memory is this times `max_download_bytes`.
     #[serde(default = "default_max_concurrent_downloads")]
     pub max_concurrent_downloads: usize,
-    /// How many writer-scheduled maintenance ticks may run at once across
-    /// all namespaces. Each namespace runs at most one tick at a time; this
+    /// How many writer-scheduled maintenance steps may run at once across
+    /// all namespaces. Each namespace runs at most one step at a time; this
     /// bounds the fan-out when a write burst crosses thresholds in many
-    /// namespaces together. Skipped ticks are rescheduled by the next
+    /// namespaces together. Skipped steps are rescheduled by the next
     /// over-threshold publish.
     #[serde(default = "default_max_concurrent_maintenance")]
     pub max_concurrent_maintenance: usize,

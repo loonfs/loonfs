@@ -10,7 +10,7 @@
 //! wave count.
 
 use loonfs::{
-    CreateNamespaceOptions, FsAdmin, FsReader, FsWriter, MaintenanceTickOptions, NamespaceId,
+    CreateNamespaceOptions, FsAdmin, FsReader, FsWriter, MaintenanceStepOptions, NamespaceId,
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
 use loonfs_api::AbsolutePath;
@@ -95,15 +95,15 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
             outcome.expect("publish batch member");
         }
         admin
-            .maintenance_tick_namespace(
+            .maintenance_step_namespace(
                 &namespace_id,
-                MaintenanceTickOptions {
+                MaintenanceStepOptions {
                     max_wal_tail_segments: 1,
-                    ..MaintenanceTickOptions::default()
+                    ..MaintenanceStepOptions::default()
                 },
             )
             .await
-            .expect("tick");
+            .expect("step");
     }
 
     // Confirm the manifest really carries several straddling L0 direntry

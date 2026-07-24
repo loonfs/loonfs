@@ -8,7 +8,7 @@ mod common;
 use common::*;
 use loonfs::{
     ChangeSeq, CommitId, CommitOp, CommitRequest, CreateNamespaceOptions, DeleteOptions,
-    DestinationBehavior, ErrorCode, InodeId, ListChangesOptions, MaintenanceTickOptions,
+    DestinationBehavior, ErrorCode, InodeId, ListChangesOptions, MaintenanceStepOptions,
     PutFileOptions, RuntimeError,
 };
 use loonfs_test_support::block_on::block_on;
@@ -107,13 +107,13 @@ fn undelete_recovers_a_deleted_file_and_generations_stay_scoped() {
         .expect("stat recovered file");
     assert_eq!(recovered.inode_id, inode_id);
     assert_eq!(
-        fs.read_file_bytes_blocking(&namespace_id, "/docs/recovered.txt")
+        fs.get_file_bytes_blocking(&namespace_id, "/docs/recovered.txt")
             .expect("read recovered content")
             .bytes,
         b"draft two"
     );
     assert_eq!(
-        block_on(fs.reader.read_file_revision_bytes(
+        block_on(fs.reader.get_file_revision_bytes(
             &namespace_id,
             "/docs/recovered.txt",
             loonfs::RevisionNo(1),
@@ -245,7 +245,7 @@ fn undelete_recovers_a_deleted_subtree_and_rejects_covered_children() {
     ))
     .expect("undelete the subtree root");
     assert_eq!(
-        fs.read_file_bytes_blocking(&namespace_id, "/docs/notes/a.txt")
+        fs.get_file_bytes_blocking(&namespace_id, "/docs/notes/a.txt")
             .expect("nested file is visible again")
             .bytes,
         b"alpha"
@@ -309,7 +309,7 @@ fn undelete_of_an_ancestor_keeps_independently_deleted_children_hidden() {
     ))
     .expect("undelete the ancestor");
     assert_eq!(
-        fs.read_file_bytes_blocking(&namespace_id, "/docs/notes/kept.txt")
+        fs.get_file_bytes_blocking(&namespace_id, "/docs/notes/kept.txt")
             .expect("sibling is visible again")
             .bytes,
         b"kept"
@@ -359,10 +359,10 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
         // The default threshold (32 segments) would answer NotNeeded for
         // this short history; force the flush so reopen reads Set and
         // Revoke rows out of durable tables, not WAL replay.
-        let tick = fs
-            .maintenance_tick_namespace_blocking(
+        let step = fs
+            .maintenance_step_namespace_blocking(
                 &namespace_id,
-                MaintenanceTickOptions {
+                MaintenanceStepOptions {
                     max_wal_tail_segments: 1,
                     gc: None,
                 },
@@ -370,18 +370,18 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
             .expect("checkpoint the revoke into durable tables");
         assert!(
             matches!(
-                tick.outcome,
-                loonfs::MaintenanceTickOutcome::WalFlushed { .. }
+                step.outcome,
+                loonfs::MaintenanceStepOutcome::WalFlushed { .. }
             ),
-            "tick must materialize the tail, got {:?}",
-            tick.outcome
+            "step must materialize the tail, got {:?}",
+            step.outcome
         );
         deletion
     };
     {
         let fs = open_runtime(object_store.clone(), "undelete-persist-b");
         assert_eq!(
-            fs.read_file_bytes_blocking(&namespace_id, "/docs/report.txt")
+            fs.get_file_bytes_blocking(&namespace_id, "/docs/report.txt")
                 .expect("recovered file survives checkpoint and reopen")
                 .bytes,
             b"persisted"
@@ -399,10 +399,10 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
             .expect("delete again")
             .committed_seq;
         assert!(second_deletion > deletion);
-        let tick = fs
-            .maintenance_tick_namespace_blocking(
+        let step = fs
+            .maintenance_step_namespace_blocking(
                 &namespace_id,
-                MaintenanceTickOptions {
+                MaintenanceStepOptions {
                     max_wal_tail_segments: 1,
                     gc: None,
                 },
@@ -410,11 +410,11 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
             .expect("checkpoint the deletion");
         assert!(
             matches!(
-                tick.outcome,
-                loonfs::MaintenanceTickOutcome::WalFlushed { .. }
+                step.outcome,
+                loonfs::MaintenanceStepOutcome::WalFlushed { .. }
             ),
-            "tick must materialize the tail, got {:?}",
-            tick.outcome
+            "step must materialize the tail, got {:?}",
+            step.outcome
         );
         let fs = open_runtime(object_store.clone(), "undelete-persist-c");
         block_on(fs.writer.undelete(
@@ -425,10 +425,10 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
             loonfs::UndeleteOptions::default(),
         ))
         .expect("undelete a checkpointed deletion after reopen");
-        let tick = fs
-            .maintenance_tick_namespace_blocking(
+        let step = fs
+            .maintenance_step_namespace_blocking(
                 &namespace_id,
-                MaintenanceTickOptions {
+                MaintenanceStepOptions {
                     max_wal_tail_segments: 1,
                     gc: None,
                 },
@@ -436,16 +436,16 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
             .expect("checkpoint the second revoke");
         assert!(
             matches!(
-                tick.outcome,
-                loonfs::MaintenanceTickOutcome::WalFlushed { .. }
+                step.outcome,
+                loonfs::MaintenanceStepOutcome::WalFlushed { .. }
             ),
-            "tick must materialize the tail, got {:?}",
-            tick.outcome
+            "step must materialize the tail, got {:?}",
+            step.outcome
         );
     }
     let fs = open_runtime(object_store, "undelete-persist-d");
     assert_eq!(
-        fs.read_file_bytes_blocking(&namespace_id, "/docs/report.txt")
+        fs.get_file_bytes_blocking(&namespace_id, "/docs/report.txt")
             .expect("recovered file survives the second cycle")
             .bytes,
         b"persisted"
@@ -483,7 +483,7 @@ fn change_feed_carries_the_exact_revoked_generation() {
     ))
     .expect("undelete");
 
-    let changes = block_on(fs.reader.list_changes_after(
+    let changes = block_on(fs.reader.list_changes(
         &namespace_id,
         ChangeSeq(0),
         ListChangesOptions::default(),
@@ -571,7 +571,7 @@ fn undelete_rejects_deletions_from_the_same_commit() {
     ));
     // The rejected commit changed nothing.
     assert_eq!(
-        fs.read_file_bytes_blocking(&namespace_id, "/docs/report.txt")
+        fs.get_file_bytes_blocking(&namespace_id, "/docs/report.txt")
             .expect("file untouched")
             .bytes,
         b"cycled"
@@ -615,7 +615,7 @@ fn delete_with_expected_inode_refuses_a_raced_rebinding() {
         RuntimeError::Core(error) if error.code() == ErrorCode::PathConflict
     ));
     assert_eq!(
-        fs.read_file_bytes_blocking(&namespace_id, "/docs/report.txt")
+        fs.get_file_bytes_blocking(&namespace_id, "/docs/report.txt")
             .expect("file untouched")
             .bytes,
         b"original"

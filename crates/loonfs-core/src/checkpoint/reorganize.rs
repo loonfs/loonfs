@@ -18,7 +18,7 @@
 //! selection is deterministic (most L0 rows first, then group order). A
 //! concurrent checkpoint racing a unit wins at the root compare-and-swap;
 //! the unit's segments are left unreferenced for garbage collection and the
-//! next tick retries against the fresh manifest.
+//! next step retries against the fresh manifest.
 
 use super::build::{
     build_manifest_tables_from_rows, debug_assert_manifest_table_segments_do_not_overlap,
@@ -94,7 +94,7 @@ pub struct MetadataReorganizeReport {
 }
 
 /// Runs at most one reorganization unit against the namespace's current
-/// manifest. Callers (the maintenance tick) invoke this repeatedly; each
+/// manifest. Callers (the maintenance step) invoke this repeatedly; each
 /// call re-reads durable state, so any two calls compose — including across
 /// process restarts.
 #[tracing::instrument(

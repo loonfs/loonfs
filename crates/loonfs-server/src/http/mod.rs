@@ -25,16 +25,17 @@ use self::extractors::{
     OptionalAppJson, UploadBodyBytes,
 };
 use self::handlers_filesystem::{
-    commit_operations, filesystem_operation, get_content, get_inode_revision_content, list_changes,
-    list_entries, list_inode_revisions, list_path_revisions, restore_inode_revision, stat_entry,
+    apply_filesystem_operation, commit_operations, get_file_bytes,
+    get_file_revision_bytes_by_inode, list_changes, list_file_revisions,
+    list_file_revisions_by_inode, list_path_entries, restore_file_revision_by_inode, stat_path,
 };
 use self::handlers_namespace::{
-    advance_retention, create_checkpoint, create_namespace, delete_namespace, flush_wal,
-    fork_namespace, gc_namespace, maintenance_tick, namespace_status, release_checkpoint,
+    advance_retention_floor, create_checkpoint, create_namespace, delete_namespace, flush_wal,
+    fork_namespace, gc_namespace, maintenance_step, namespace_status, release_checkpoint,
     repair_namespace,
 };
 use self::handlers_query::{
-    disable_grams_index, enable_grams_index, gc_grams_index, grep, grep_not_supported,
+    disable_grep_index, enable_grep_index, gc_grep_index, grep, grep_not_supported,
 };
 use self::handlers_uploads::{begin_upload, complete_upload, upload_content};
 use self::serve::AppState;
@@ -91,26 +92,24 @@ fn router(state: AppState) -> Router {
         post(grep_not_supported)
     };
     let enable_grep_route = if state.config.grep.mode.serves_grep() {
-        post(enable_grams_index)
+        post(enable_grep_index)
     } else {
         post(grep_not_supported)
     };
     let disable_grep_route = if state.config.grep.mode.serves_grep() {
-        post(disable_grams_index)
+        post(disable_grep_index)
     } else {
         post(grep_not_supported)
     };
     let grep_gc_route = if state.config.grep.mode.serves_grep() {
-        post(gc_grams_index)
+        post(gc_grep_index)
     } else {
         post(grep_not_supported)
     };
     Router::new()
         .route("/health", get(health))
-        .route("/health/ready", get(health_ready))
-        // Module-qualified because handler modules also export a bare
-        // `config` name in this scope.
-        .route("/v0/config", get(handlers_namespace::config))
+        .route("/readiness", get(readiness))
+        .route("/v0/capabilities", get(handlers_namespace::capabilities))
         .route("/v0/namespaces", post(create_namespace))
         .route(
             "/v0/namespaces/:namespace",
@@ -119,45 +118,45 @@ fn router(state: AppState) -> Router {
         .route("/v0/namespaces/:namespace/forks", post(fork_namespace))
         .route(
             "/v0/namespaces/:namespace/filesystem/list",
-            get(list_entries),
+            get(list_path_entries),
         )
-        .route("/v0/namespaces/:namespace/filesystem/stat", get(stat_entry))
+        .route("/v0/namespaces/:namespace/filesystem/stat", get(stat_path))
         .route(
             "/v0/namespaces/:namespace/filesystem/content",
-            get(get_content),
+            get(get_file_bytes),
         )
         .route("/v0/namespaces/:namespace/query/grep", grep_route)
         .route(
-            "/v0/admin/namespaces/:namespace/index/grams/enable",
+            "/v0/admin/namespaces/:namespace/grep/index/enable",
             enable_grep_route,
         )
         .route(
-            "/v0/admin/namespaces/:namespace/index/grams/disable",
+            "/v0/admin/namespaces/:namespace/grep/index/disable",
             disable_grep_route,
         )
         .route(
-            "/v0/admin/namespaces/:namespace/index/grams/gc",
+            "/v0/admin/namespaces/:namespace/grep/index/gc",
             grep_gc_route,
         )
         .route(
             "/v0/namespaces/:namespace/filesystem/revisions",
-            get(list_path_revisions),
+            get(list_file_revisions),
         )
         .route(
             "/v0/namespaces/:namespace/filesystem/operations",
-            post(filesystem_operation),
+            post(apply_filesystem_operation),
         )
         .route(
             "/v0/namespaces/:namespace/inodes/:inode_id/revisions",
-            get(list_inode_revisions),
+            get(list_file_revisions_by_inode),
         )
         .route(
             "/v0/namespaces/:namespace/inodes/:inode_id/revisions/:revision_no/content",
-            get(get_inode_revision_content),
+            get(get_file_revision_bytes_by_inode),
         )
         .route(
             "/v0/namespaces/:namespace/inodes/:inode_id/revisions/:source_revision_no/restore",
-            post(restore_inode_revision),
+            post(restore_file_revision_by_inode),
         )
         .route("/v0/namespaces/:namespace/uploads", post(begin_upload))
         .route(
@@ -184,11 +183,11 @@ fn router(state: AppState) -> Router {
         .route("/v0/admin/namespaces/:namespace/wal/flush", post(flush_wal))
         .route(
             "/v0/admin/namespaces/:namespace/retention/advance",
-            post(advance_retention),
+            post(advance_retention_floor),
         )
         .route(
-            "/v0/admin/namespaces/:namespace/maintenance/tick",
-            post(maintenance_tick),
+            "/v0/admin/namespaces/:namespace/maintenance/step",
+            post(maintenance_step),
         )
         .route("/v0/admin/namespaces/:namespace/gc", post(gc_namespace))
         .route(
@@ -251,7 +250,7 @@ async fn health() -> &'static str {
     feature = "openapi",
     utoipa::path(
         get,
-        path = "/health/ready",
+        path = "/readiness",
         tag = "health",
         summary = "Check readiness",
         description = "Returns `ready` while the server admits new work. Once shutdown \
@@ -265,7 +264,7 @@ async fn health() -> &'static str {
         )
     )
 )]
-async fn health_ready(State(state): State<AppState>) -> Result<&'static str, ApiResponseError> {
+async fn readiness(State(state): State<AppState>) -> Result<&'static str, ApiResponseError> {
     if state.publisher.is_admission_closed() {
         return Err(ApiResponseError::new(
             StatusCode::SERVICE_UNAVAILABLE,

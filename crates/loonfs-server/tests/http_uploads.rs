@@ -161,13 +161,13 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
         assert_eq!(stat.content_ref.as_ref(), Some(&content_ref));
         let read_back = harness
             .client
-            .read_file_bytes(&target)
+            .get_file_bytes(&target)
             .expect("read committed file");
         assert_eq!(read_back, file_bytes);
 
         let changes = harness
             .client
-            .list_changes_after(&namespace, ChangeSeq(0), None)
+            .list_changes(&namespace, ChangeSeq(0), None)
             .expect("list changes");
         assert_eq!(changes.namespace_id, namespace);
         assert_eq!(changes.after_seq, ChangeSeq(0));
@@ -192,7 +192,7 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
 
         let empty = harness
             .client
-            .list_changes_after(&namespace, commit.committed_seq, None)
+            .list_changes(&namespace, commit.committed_seq, None)
             .expect("list changes after head");
         assert_eq!(empty.changes, Vec::new());
     })

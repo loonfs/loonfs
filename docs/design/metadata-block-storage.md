@@ -82,13 +82,13 @@ unchanged. Its cost is proportional to what changed since the last
 checkpoint, never to namespace size.
 
 **Reorganization folds.** As delta runs accumulate, maintenance merges
-them into the base run — one family group per tick, each fold ending in
+them into the base run — one family group per step, each fold ending in
 its own manifest publish. Rows that no retained history can observe are
 dropped during the merge; runs no longer referenced by any retained
 manifest become garbage.
 
 ```
-checkpoints append:          reorganization folds, one group per tick:
+checkpoints append:          reorganization folds, one group per step:
 
   delta run 3 (newest)         bindings:  base + deltas -> new base
   delta run 2                  revisions: base + deltas -> new base

@@ -144,7 +144,7 @@ async fn commit_operation_and_prepared_proof_limits_reject_new_requests() {
 
         let changes = harness
             .client
-            .list_changes_after(&namespace, ChangeSeq(0), None)
+            .list_changes(&namespace, ChangeSeq(0), None)
             .expect("list changes");
         assert!(changes.changes.is_empty());
     })

@@ -8,7 +8,7 @@
 //!   operations, file revisions, maintenance, and the `ApiError` body.
 //! - `reads` — authoritative read results (stat/list entries, file bytes).
 //! - `commits` — explicit semantic commits and the change feed.
-//! - `search` — content search and gram-index administration.
+//! - `search` — content search and grep-index administration.
 //! - `uploads` — upload sessions and direct-put access.
 //!
 //! The crate root re-exports the common surface for convenience; see the
@@ -29,13 +29,13 @@ pub use operations::{
     CreateNamespaceRequest, DeleteDirectoryBehavior, DeleteNamespaceResponse, DestinationBehavior,
     ErrorDetails, FileRevision, FilesystemOperation, FilesystemOperationRequest, FlushWalOutcome,
     FlushWalResponse, ForkNamespaceRequest, GcRequest, GcResponse, ListFileRevisionsResponse,
-    MaintenanceTickOutcome, MaintenanceTickRequest, MaintenanceTickResponse,
+    MaintenanceStepOutcome, MaintenanceStepRequest, MaintenanceStepResponse,
     NamespaceStatusResponse, NamespaceSummary, ReleaseCheckpointResponse, RepairNamespaceOutcome,
     RepairNamespaceResponse, RestoreFileRevisionRequest,
 };
 pub use reads::{AuthoritativeFileBytes, AuthoritativePathEntry, ListPathEntriesResponse};
 pub use search::{
-    DisableGramsIndexResponse, EnableGramsIndexResponse, GrepGcResponse, GrepMatch, GrepRequest,
+    DisableGrepIndexResponse, EnableGrepIndexResponse, GrepGcResponse, GrepMatch, GrepRequest,
     GrepResponse,
 };
 pub use uploads::{

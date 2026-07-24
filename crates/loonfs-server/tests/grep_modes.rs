@@ -34,7 +34,7 @@ async fn disabled_mode_returns_not_supported_and_omits_grep_capabilities() {
         .expect("build app");
 
     let capabilities: CapabilityDocument =
-        response_json(send(&router, Method::GET, "/v0/config", None).await).await;
+        response_json(send(&router, Method::GET, "/v0/capabilities", None).await).await;
     assert!(!capabilities.features.contains_key(FEATURE_QUERY_GREP));
     for limit in grep_limits() {
         assert!(!capabilities.limits.contains_key(limit));
@@ -42,9 +42,9 @@ async fn disabled_mode_returns_not_supported_and_omits_grep_capabilities() {
 
     for path in [
         format!("/v0/namespaces/{namespace_id}/query/grep"),
-        format!("/v0/admin/namespaces/{namespace_id}/index/grams/enable"),
-        format!("/v0/admin/namespaces/{namespace_id}/index/grams/disable"),
-        format!("/v0/admin/namespaces/{namespace_id}/index/grams/gc"),
+        format!("/v0/admin/namespaces/{namespace_id}/grep/index/enable"),
+        format!("/v0/admin/namespaces/{namespace_id}/grep/index/disable"),
+        format!("/v0/admin/namespaces/{namespace_id}/grep/index/gc"),
     ] {
         let response = send(&router, Method::POST, &path, None).await;
         assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
@@ -81,7 +81,7 @@ async fn embedded_mode_enable_query_nudge_disable_and_reenable_are_per_namespace
         .expect("write file");
 
     let capabilities: CapabilityDocument =
-        response_json(send(&router, Method::GET, "/v0/config", None).await).await;
+        response_json(send(&router, Method::GET, "/v0/capabilities", None).await).await;
     assert!(capabilities.supports(FEATURE_QUERY_GREP));
     for limit in grep_limits() {
         assert!(capabilities.limits.contains_key(limit));
@@ -113,7 +113,7 @@ async fn embedded_mode_enable_query_nudge_disable_and_reenable_are_per_namespace
         send(
             &router,
             Method::POST,
-            &format!("/v0/admin/namespaces/{namespace_id}/index/grams/gc"),
+            &format!("/v0/admin/namespaces/{namespace_id}/grep/index/gc"),
             None,
         )
         .await,
@@ -350,7 +350,7 @@ async fn enable_grep(router: &Router, namespace_id: &NamespaceId) -> StatusCode 
     send(
         router,
         Method::POST,
-        &format!("/v0/admin/namespaces/{namespace_id}/index/grams/enable"),
+        &format!("/v0/admin/namespaces/{namespace_id}/grep/index/enable"),
         None,
     )
     .await
@@ -361,7 +361,7 @@ async fn disable_grep(router: &Router, namespace_id: &NamespaceId) -> StatusCode
     send(
         router,
         Method::POST,
-        &format!("/v0/admin/namespaces/{namespace_id}/index/grams/disable"),
+        &format!("/v0/admin/namespaces/{namespace_id}/grep/index/disable"),
         None,
     )
     .await

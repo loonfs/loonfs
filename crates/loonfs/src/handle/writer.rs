@@ -315,7 +315,7 @@ impl FsWriter {
     /// The commit appends a new current revision from `source_revision_no`
     /// and fails if the inode's current revision is no longer
     /// `base_revision_no`.
-    pub async fn restore_file_revision_for_inode(
+    pub async fn restore_file_revision_by_inode(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
@@ -324,7 +324,7 @@ impl FsWriter {
         options: RestoreRevisionOptions,
     ) -> Result<CommitResponse> {
         self.core
-            .restore_file_revision_for_inode(
+            .restore_file_revision_by_inode(
                 namespace_id,
                 inode_id,
                 source_revision_no,
@@ -525,10 +525,10 @@ impl FsWriterBuilder {
         self
     }
 
-    /// Caps how many writer-scheduled maintenance ticks may run at once
+    /// Caps how many writer-scheduled maintenance steps may run at once
     /// across all namespaces this writer serves. Each namespace already runs
-    /// at most one tick at a time; this bounds the fan-out when many
-    /// namespaces cross their thresholds together. Skipped ticks are
+    /// at most one step at a time; this bounds the fan-out when many
+    /// namespaces cross their thresholds together. Skipped steps are
     /// rescheduled by the next over-threshold publish. Defaults to
     /// [`crate::DEFAULT_MAX_CONCURRENT_MAINTENANCE`]. The limit must be
     /// greater than zero; [`FsBackgroundWork::ManualOnly`] is the only way

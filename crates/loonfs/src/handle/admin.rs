@@ -7,8 +7,8 @@ use crate::fs::FsCore;
 use crate::metrics::ObjectStoreMetricsRecorder;
 use crate::{
     AdvanceRetentionResponse, CheckpointId, CreateCheckpointOptions, CreateCheckpointResponse,
-    DisableGramsIndexResponse, EnableGramsIndexResponse, FlushWalResponse, GcConfig, GcReport,
-    MaintenanceTickOptions, MaintenanceTickResult, NamespaceId, NamespaceStatusResponse,
+    DisableGrepIndexResponse, EnableGrepIndexResponse, FlushWalResponse, GcConfig, GcReport,
+    MaintenanceStepOptions, MaintenanceStepResult, NamespaceId, NamespaceStatusResponse,
     ReleaseCheckpointResponse, RepairNamespaceResponse, Result, RuntimeCacheConfig,
     RuntimeCacheStats, RuntimeError, SharedObjectStore, StoreConfig, TraceMode, TraceStoreKind,
 };
@@ -19,7 +19,7 @@ use std::sync::Arc;
 /// `FsAdmin` owns the explicit maintenance surface: namespace status and
 /// inspection, checkpoint creation, retention advancement, garbage
 /// collection, incomplete-installation repair, and one-shot maintenance
-/// ticks. Every call runs in the caller's async task — the admin handle starts
+/// steps. Every call runs in the caller's async task — the admin handle starts
 /// no workers of its own.
 ///
 /// Admin operations that mutate durable control state carry the builder's
@@ -66,33 +66,33 @@ impl FsAdmin {
     /// `options.max_wal_tail_segments`. Losing the head race or being
     /// superseded by another checkpoint is reported as an outcome, not an
     /// error.
-    pub async fn maintenance_tick_namespace(
+    pub async fn maintenance_step_namespace(
         &self,
         namespace_id: &NamespaceId,
-        options: MaintenanceTickOptions,
-    ) -> Result<MaintenanceTickResult> {
+        options: MaintenanceStepOptions,
+    ) -> Result<MaintenanceStepResult> {
         self.core
-            .maintenance_tick_namespace(namespace_id, options)
+            .maintenance_step_namespace(namespace_id, options)
             .await
     }
 
     /// Enables the independent grep root for a namespace. Backfill and
     /// incremental upkeep are driven by `loonfs-grep`'s explicit worker.
     /// Idempotent.
-    pub async fn enable_grams_index(
+    pub async fn enable_grep_index(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<EnableGramsIndexResponse> {
-        self.core.enable_grams_index(namespace_id).await
+    ) -> Result<EnableGrepIndexResponse> {
+        self.core.enable_grep_index(namespace_id).await
     }
 
     /// Disables the independent grep root. Grep-owned garbage collection
     /// later reclaims its unreferenced segments. Idempotent.
-    pub async fn disable_grams_index(
+    pub async fn disable_grep_index(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<DisableGramsIndexResponse> {
-        self.core.disable_grams_index(namespace_id).await
+    ) -> Result<DisableGrepIndexResponse> {
+        self.core.disable_grep_index(namespace_id).await
     }
 
     /// Creates or reuses a named checkpoint pinning the current namespace
@@ -150,7 +150,7 @@ impl FsAdmin {
     /// Runs the v1 mark-and-sweep garbage collector for one namespace.
     ///
     /// Never runs implicitly: callers opt in here or through
-    /// [`MaintenanceTickOptions::gc`].
+    /// [`MaintenanceStepOptions::gc`].
     pub async fn gc_namespace(
         &self,
         namespace_id: &NamespaceId,
