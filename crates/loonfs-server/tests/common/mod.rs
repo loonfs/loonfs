@@ -4,7 +4,7 @@
 
 use loonfs_client::{Client, ClientConfig};
 use loonfs_server::{
-    app, DirectPutConfig, GrepConfig, RuntimeCacheConfigOverrides, ServerConfig, StoreConfig,
+    app, GrepConfig, RuntimeCacheConfigOverrides, ServerConfig, StoreConfig,
 };
 use std::path::PathBuf;
 
@@ -70,7 +70,6 @@ pub(crate) fn test_config(
         writer_version: format!("{writer_id}/0.1.0"),
         runtime_cache: RuntimeCacheConfigOverrides::default(),
         grep: GrepConfig::default(),
-        direct_put: DirectPutConfig::default(),
         background_maintenance: true,
         min_publish_interval_ms: 0,
         max_upload_bytes: 256 * 1024 * 1024,

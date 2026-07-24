@@ -21,7 +21,6 @@ pub mod local_fs_store;
 pub mod metrics;
 pub mod object_store;
 pub mod presign;
-pub mod provider;
 mod provider_object_store;
 pub mod r2;
 mod retry;

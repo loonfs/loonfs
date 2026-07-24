@@ -8,9 +8,6 @@
 
 use crate::abs::AzureAbsStoreConfig;
 use crate::gcs::GcpGcsStoreConfig;
-use crate::provider::{
-    ProviderProfile, AWS_S3, AZURE_ABS, CLOUDFLARE_R2, GCP_GCS, LOCAL_FS, S3_COMPATIBLE,
-};
 use crate::r2::CloudflareR2StoreConfig;
 use crate::s3::AwsS3StoreConfig;
 use crate::secret::SecretString;
@@ -145,35 +142,35 @@ impl StoreConfig {
         }
     }
 
-    /// Returns the provider contract profile selected by this configuration.
+    /// Whether this endpoint is one whose direct-put preconditions the live
+    /// conformance suite has actually proven.
     ///
-    /// First-party AWS S3 and Cloudflare R2 endpoints retain their provider
-    /// profiles. Endpoint overrides outside the provider's domain family use
-    /// the generic S3-compatible profile, whose provider-enforced behaviors
-    /// require conformance proof.
-    pub fn provider_profile(&self) -> &'static ProviderProfile {
+    /// `direct_put` hands a client a presigned URL and then trusts the
+    /// provider to have enforced the signed checksum and create-only
+    /// preconditions — completion never reads the bytes back. Only
+    /// first-party AWS S3 and Cloudflare R2 endpoints have been run against
+    /// that suite, so only they earn the trust. An endpoint override outside
+    /// the provider's own domain family is some other implementation of the
+    /// S3 API and is not covered by those runs.
+    ///
+    /// Providers without a presigner at all (local filesystem, GCS, Azure)
+    /// never reach this question: `direct_put` is unavailable for them
+    /// because [`ConfiguredObjectStore::transfer_issuer`] returns `None`.
+    pub fn direct_put_is_proven(&self) -> bool {
         match self {
-            StoreConfig::LocalFs { .. } => &LOCAL_FS,
             StoreConfig::AwsS3 { endpoint_url, .. } => match endpoint_url {
-                None => &AWS_S3,
-                Some(endpoint_url)
-                    if endpoint_in_domain_families(
-                        endpoint_url,
-                        &["amazonaws.com", "amazonaws.com.cn"],
-                    ) =>
-                {
-                    &AWS_S3
-                }
-                Some(_) => &S3_COMPATIBLE,
+                None => true,
+                Some(endpoint_url) => endpoint_in_domain_families(
+                    endpoint_url,
+                    &["amazonaws.com", "amazonaws.com.cn"],
+                ),
             },
-            StoreConfig::CloudflareR2 { endpoint_url, .. }
-                if endpoint_in_domain_families(endpoint_url, &["r2.cloudflarestorage.com"]) =>
-            {
-                &CLOUDFLARE_R2
+            StoreConfig::CloudflareR2 { endpoint_url, .. } => {
+                endpoint_in_domain_families(endpoint_url, &["r2.cloudflarestorage.com"])
             }
-            StoreConfig::CloudflareR2 { .. } => &S3_COMPATIBLE,
-            StoreConfig::GcpGcs { .. } => &GCP_GCS,
-            StoreConfig::AzureAbs { .. } => &AZURE_ABS,
+            StoreConfig::LocalFs { .. }
+            | StoreConfig::GcpGcs { .. }
+            | StoreConfig::AzureAbs { .. } => false,
         }
     }
 
@@ -407,7 +404,6 @@ mod tests {
     // Config tests use panic in unexpected match arms for precise diagnostics.
 
     use super::{StoreConfig, StoreConfigError};
-    use crate::provider::{AWS_S3, CLOUDFLARE_R2, GCP_GCS, S3_COMPATIBLE};
     use crate::ConfiguredObjectStoreKind;
     use std::path::{Path, PathBuf};
 
@@ -470,7 +466,7 @@ access_key = "key"
     }
 
     #[test]
-    fn provider_profiles_distinguish_first_party_and_custom_s3_endpoints() {
+    fn direct_put_is_proven_only_for_first_party_s3_and_r2_endpoints() {
         let aws_default = parse(
             r#"
 kind = "aws-s3"
@@ -528,12 +524,13 @@ service_account_key_path = "/tmp/service-account.json"
 "#,
         );
 
-        assert_eq!(aws_default.provider_profile().name, AWS_S3.name);
-        assert_eq!(aws_first_party.provider_profile().name, AWS_S3.name);
-        assert_eq!(aws_custom.provider_profile().name, S3_COMPATIBLE.name);
-        assert_eq!(r2_first_party.provider_profile().name, CLOUDFLARE_R2.name);
-        assert_eq!(r2_custom.provider_profile().name, S3_COMPATIBLE.name);
-        assert_eq!(gcs.provider_profile().name, GCP_GCS.name);
+        assert!(aws_default.direct_put_is_proven());
+        assert!(aws_first_party.direct_put_is_proven());
+        assert!(!aws_custom.direct_put_is_proven());
+        assert!(r2_first_party.direct_put_is_proven());
+        assert!(!r2_custom.direct_put_is_proven());
+        // GCS has no presigner at all, so it never reaches the question.
+        assert!(!gcs.direct_put_is_proven());
     }
 
     #[test]

@@ -6,7 +6,7 @@ use super::{
     app_with_store, app_with_store_and_state, build_handles_with_metrics_jsonl_path,
     SharedObjectStore,
 };
-use crate::config::{DirectPutConfig, RuntimeCacheConfigOverrides};
+use crate::config::RuntimeCacheConfigOverrides;
 use crate::{ServerConfig, StoreConfig};
 use async_trait::async_trait;
 use axum::body::Bytes;
@@ -2001,7 +2001,6 @@ fn test_config(root: &Path, writer_id: &str) -> ServerConfig {
         writer_version: format!("{writer_id}/0.1.0"),
         runtime_cache: RuntimeCacheConfigOverrides::default(),
         grep: crate::config::GrepConfig::default(),
-        direct_put: DirectPutConfig::default(),
         background_maintenance: true,
         min_publish_interval_ms: 0,
         max_upload_bytes: 256 * 1024 * 1024,

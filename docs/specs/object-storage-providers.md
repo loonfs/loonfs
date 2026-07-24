@@ -31,33 +31,40 @@ from replacing an immutable content object. A provider that accepts the HMAC
 signature but silently ignores either precondition breaks that argument.
 HMAC-compatible gateways have been observed doing exactly that.
 
-The provider profiles in
-`crates/loonfs-objectstore/src/provider.rs` are the source of truth.
-`ActiveContractProfile::direct_put_preconditions` is `ExpectedYes` for the
-known first-party AWS S3, Cloudflare R2, Google Cloud Storage, and Azure Blob
-Storage profiles. An AWS S3 endpoint with no override, an override in the
-`amazonaws.com` or `amazonaws.com.cn` domain family, and an R2 endpoint in the
-`r2.cloudflarestorage.com` family retain their first-party profile. Other
-S3-compatible endpoint URLs select the generic `s3-compatible` profile, whose
-expectation is `VerifyByConformance`; they are unproven for the launch gate.
-Direct-put availability also requires an adapter that can issue the matching
-provider capability; at launch the server issues these capabilities for AWS
-S3 and R2.
+Two things must both hold for direct-put to be available, and
+`StoreConfig::direct_put_is_proven` plus `ConfiguredObjectStore::transfer_issuer`
+are the code that decides:
 
-The server advertises and accepts direct-put by default only when the selected
-profile proves the preconditions. For an unproven S3-compatible endpoint,
-`core.uploads.direct_put` is absent and beginning that mode answers
-`not_supported` with that feature key. An operator may explicitly accept the
-provider risk with:
+1. **The adapter can presign the required request.** Only the S3-compatible
+   adapters (AWS S3 and Cloudflare R2) issue a presigned PUT carrying a signed
+   `x-amz-checksum-sha256` and `if-none-match: *`. The local filesystem, GCS,
+   and Azure Blob adapters issue nothing.
+2. **The endpoint is one the live conformance suite has actually run against.**
+   An AWS S3 endpoint with no override, an override in the `amazonaws.com` or
+   `amazonaws.com.cn` domain family, and an R2 endpoint in the
+   `r2.cloudflarestorage.com` family qualify. Any other endpoint URL is some
+   other implementation of the S3 API, is not covered by those runs, and does
+   not qualify.
 
-```toml
-[direct_put]
-allow_unproven = true
-```
+Where both hold, the server advertises `core.uploads.direct_put` in its
+capability document and accepts the mode. Everywhere else the feature key is
+absent and beginning that mode answers `not_supported`. There is no override:
+an endpoint that has not been proven does not get the capability, because the
+whole point of the gate is that the provider — not LoonFS — is being trusted to
+enforce the preconditions.
 
-This setting does not weaken ordinary uploads. The server-mediated upload path
-remains available on every supported store and is the default on unproven
-endpoints.
+This never weakens ordinary uploads. The server-mediated upload path is
+available on every supported store and is the default wherever direct-put is
+not offered.
+
+| Provider | Presigns direct-put | Proven endpoints |
+| --- | --- | --- |
+| AWS S3 | Yes | Default endpoint, `amazonaws.com`, `amazonaws.com.cn` |
+| Cloudflare R2 | Yes | `r2.cloudflarestorage.com` |
+| Other S3-compatible endpoints | Yes | None — unproven, direct-put unavailable |
+| Google Cloud Storage | No | n/a |
+| Azure Blob Storage | No | n/a |
+| Local filesystem | No | n/a |
 
 ## 4. Local Filesystem Provider
 

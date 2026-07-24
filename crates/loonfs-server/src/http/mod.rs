@@ -3,8 +3,6 @@
 //! Handlers are grouped by API area, request decoding lives in
 //! [`extractors`], and listener/lifecycle ownership lives in [`serve`].
 
-#[cfg(test)]
-mod direct_put_provider_gate_tests;
 mod error;
 mod extractors;
 mod handlers_filesystem;
