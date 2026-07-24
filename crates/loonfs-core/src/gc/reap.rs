@@ -90,7 +90,7 @@ pub(super) async fn condemn_checkpoint_if_aged<S: ObjectStore + ?Sized>(
     let bytes = encode_checkpoint_record(&condemned, &context.writer_version)?;
     match store.compare_and_swap(key, etag, bytes).await {
         Ok(_) => Ok(CheckpointCondemn::Delete),
-        Err(ObjectStoreError::PreconditionFailed { .. } | ObjectStoreError::Conflict { .. }) => {
+        Err(ObjectStoreError::PreconditionFailed { .. }) => {
             tracing::debug!(
                 namespace_id = %namespace_id,
                 object_key = key,
@@ -223,7 +223,7 @@ pub(crate) async fn reap_abandoned_bootstrap<S: ObjectStore + ?Sized>(
         match condemn {
             Ok(_) => {}
             Err(
-                ObjectStoreError::PreconditionFailed { .. } | ObjectStoreError::Conflict { .. },
+                ObjectStoreError::PreconditionFailed { .. },
             ) => {
                 tracing::debug!(
                     namespace_id = %namespace_id,

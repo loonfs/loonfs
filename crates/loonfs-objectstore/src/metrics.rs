@@ -79,8 +79,6 @@ pub enum ObjectStoreResultClass {
     InvalidRange,
     /// Indicates a create-if-absent or compare-and-swap condition did not hold.
     PreconditionFailed,
-    /// Indicates a test-injected concurrency conflict.
-    Conflict,
     /// Indicates the provider rejected identity or authorization.
     PermissionDenied,
     /// Indicates the configured store lacks a required capability.
@@ -567,7 +565,6 @@ fn classify_error(error: &ObjectStoreError) -> ObjectStoreResultClass {
         ObjectStoreError::InvalidContentRef(_) => ObjectStoreResultClass::InvalidContentRef,
         ObjectStoreError::InvalidRange { .. } => ObjectStoreResultClass::InvalidRange,
         ObjectStoreError::PreconditionFailed { .. } => ObjectStoreResultClass::PreconditionFailed,
-        ObjectStoreError::Conflict { .. } => ObjectStoreResultClass::Conflict,
         ObjectStoreError::PermissionDenied { .. } => ObjectStoreResultClass::PermissionDenied,
         ObjectStoreError::Unsupported(_) => ObjectStoreResultClass::Unsupported,
         // Configuration failures happen at store construction, before any

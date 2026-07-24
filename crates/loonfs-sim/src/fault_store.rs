@@ -664,9 +664,6 @@ fn error_result_class(error: &ObjectStoreError) -> SimEventResult {
         ObjectStoreError::PermissionDenied { .. } => SimEventResult::Error {
             class: "permission_denied".to_owned(),
         },
-        ObjectStoreError::Conflict { .. } => SimEventResult::Error {
-            class: "conflict".to_owned(),
-        },
         ObjectStoreError::Unsupported(_) => SimEventResult::Error {
             class: "unsupported".to_owned(),
         },

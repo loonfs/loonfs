@@ -102,15 +102,6 @@ pub enum ObjectStoreError {
         /// Object whose current state disagreed with the requested write mode.
         object_key: String,
     },
-    /// Producible only by test fault injection; no real provider constructs
-    /// it. Core treats it alongside
-    /// [`Self::PreconditionFailed`] so injected conflicts exercise the
-    /// same recovery paths.
-    #[error("conflict for `{object_key}`")]
-    Conflict {
-        /// Object targeted by the injected concurrency conflict.
-        object_key: String,
-    },
     /// The provider rejected the caller's identity or authorization —
     /// wrong, expired, or insufficient credentials. Configuration-shaped
     /// and never transient: retrying cannot help, an operator can.
@@ -155,7 +146,6 @@ impl ObjectStoreError {
             | Self::InvalidKey { object_key, .. }
             | Self::InvalidRange { object_key }
             | Self::PreconditionFailed { object_key }
-            | Self::Conflict { object_key }
             | Self::PermissionDenied { object_key, .. }
             | Self::Transport { object_key, .. } => Some(object_key),
             Self::InvalidContentRef(_) | Self::Unsupported(_) | Self::Configuration(_) => None,
@@ -171,7 +161,6 @@ impl ObjectStoreError {
             Self::InvalidContentRef(message) => format!("invalid content ref: {message}"),
             Self::InvalidRange { .. } => "invalid byte range".to_owned(),
             Self::PreconditionFailed { .. } => "precondition failed".to_owned(),
-            Self::Conflict { .. } => "conflict".to_owned(),
             Self::PermissionDenied { message, .. } => {
                 format!("permission denied: {message}")
             }
@@ -431,7 +420,7 @@ mod tests {
         }
 
         async fn put(&self, key: &str, _bytes: Bytes, _mode: PutMode) -> Result<ObjectMetadata> {
-            Err(ObjectStoreError::Conflict {
+            Err(ObjectStoreError::PreconditionFailed {
                 object_key: key.to_owned(),
             })
         }

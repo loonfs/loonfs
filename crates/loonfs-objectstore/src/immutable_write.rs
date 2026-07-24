@@ -59,10 +59,7 @@ pub(crate) async fn put<S: ObjectStore + ?Sized>(
     loop {
         match store.put(key, bytes.clone(), mode.clone()).await {
             Ok(_) => return Ok(()),
-            Err(
-                error @ (ObjectStoreError::PreconditionFailed { .. }
-                | ObjectStoreError::Conflict { .. }),
-            ) => {
+            Err(error @ ObjectStoreError::PreconditionFailed { .. }) => {
                 return resolve_readback(store, key, &bytes, ambiguous_transport.unwrap_or(error))
                     .await;
             }

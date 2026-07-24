@@ -149,8 +149,7 @@ pub(super) async fn maybe_release_fork_checkpoint<S: ObjectStore + ?Sized>(
         Ok(_) => Ok(ForkCheckpointSweep::Released),
         // A fork freshen (or another pass) won the record; retain and let a
         // later pass re-decide against the fresh state.
-        Err(loonfs_objectstore::ObjectStoreError::PreconditionFailed { .. })
-        | Err(loonfs_objectstore::ObjectStoreError::Conflict { .. }) => {
+        Err(loonfs_objectstore::ObjectStoreError::PreconditionFailed { .. }) => {
             Ok(ForkCheckpointSweep::Retained)
         }
         Err(error) => Err(CoreError::store(key, &error)),

@@ -183,7 +183,7 @@ pub async fn seed_grep_root<S: ObjectStore + ?Sized>(
         .await
     {
         Ok(metadata) => metadata,
-        Err(ObjectStoreError::PreconditionFailed { .. } | ObjectStoreError::Conflict { .. }) => {
+        Err(ObjectStoreError::PreconditionFailed { .. }) => {
             return Err(GrepRootError::Conflict { object_key });
         }
         Err(error) => return Err(store_error(&object_key, &error)),
@@ -254,7 +254,7 @@ pub async fn advance_grep_root<S: ObjectStore + ?Sized>(
         .await
     {
         Ok(metadata) => metadata,
-        Err(ObjectStoreError::PreconditionFailed { .. } | ObjectStoreError::Conflict { .. }) => {
+        Err(ObjectStoreError::PreconditionFailed { .. }) => {
             return Err(GrepRootError::Conflict {
                 object_key: current.pointer.object_key.clone(),
             });

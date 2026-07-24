@@ -18,8 +18,6 @@ type Predicate = dyn for<'a> Fn(&OperationContext<'a>) -> bool + Send + Sync;
 pub enum InjectedError {
     /// A provider precondition failure.
     PreconditionFailed,
-    /// A test-only protocol conflict.
-    Conflict,
     /// A transport failure carrying the supplied message.
     Transport(String),
 }
@@ -28,9 +26,6 @@ impl InjectedError {
     fn for_key(&self, key: &str) -> ObjectStoreError {
         match self {
             Self::PreconditionFailed => ObjectStoreError::PreconditionFailed {
-                object_key: key.to_owned(),
-            },
-            Self::Conflict => ObjectStoreError::Conflict {
                 object_key: key.to_owned(),
             },
             Self::Transport(message) => ObjectStoreError::transport(key, message),

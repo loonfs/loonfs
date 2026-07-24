@@ -346,7 +346,7 @@ async fn create_new_content_store<S: ObjectStore + ?Sized>(
         match store.put_if_absent(&key, Bytes::from(bytes)).await {
             Ok(_) => return Ok(content_store_id),
             Err(
-                ObjectStoreError::PreconditionFailed { .. } | ObjectStoreError::Conflict { .. },
+                ObjectStoreError::PreconditionFailed { .. },
             ) => continue,
             Err(err) => return Err(CoreError::store(&key, &err)),
         }
