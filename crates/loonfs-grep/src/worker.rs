@@ -9,8 +9,8 @@ use crate::keyspace::{
     manifest_key, namespace_prefix, parse_key, root_key, segment_key, GrepKeyKind,
 };
 use crate::root::{
-    advance_grep_root, load_grep_root, seed_grep_root, GrepFoldState, GrepIndexState,
-    GrepLifecycle, GrepRootError, GrepRootState, GrepSegmentRef, LoadedGrepRoot,
+    advance_grep_root, load_grep_root, seed_grep_root, ChangeFeedResume, GrepFoldState,
+    GrepIndexState, GrepLifecycle, GrepRootError, GrepRootState, GrepSegmentRef, LoadedGrepRoot,
 };
 use crate::service::is_indexable_text_content;
 use crate::{GrepError, Result};
@@ -686,12 +686,8 @@ async fn collect_incremental_unit<S: ObjectStore + ?Sized>(
     next_delta_index: u32,
     policy: GramIndexBuildPolicy,
 ) -> Result<IncrementalCollection> {
-    let after_seq = if next_delta_index == 0 {
-        built_through_seq
-    } else {
-        ChangeSeq(built_through_seq.0.saturating_sub(1))
-    };
-    let feed = load_grep_change_feed(store, namespace_id, after_seq).await?;
+    let resume = ChangeFeedResume::new(built_through_seq, next_delta_index);
+    let feed = load_grep_change_feed(store, namespace_id, resume.after_seq()).await?;
     let GrepChangeFeed::Records { records, .. } = feed else {
         return Ok(IncrementalCollection::RebootstrapRequired);
     };
@@ -711,13 +707,9 @@ async fn collect_incremental_unit<S: ObjectStore + ?Sized>(
     let mut planned_content_bytes = 0u64;
     let mut examined_files = 0usize;
     'records: for record in records {
-        let start_delta_index = if record.seq == built_through_seq {
-            usize::try_from(next_delta_index).map_err(|_| {
-                CoreError::Internal("grep delta cursor does not fit in memory".to_owned())
-            })?
-        } else {
-            0
-        };
+        let start_delta_index = resume.start_delta_index(record.seq).map_err(|_| {
+            CoreError::Internal("grep delta cursor does not fit in memory".to_owned())
+        })?;
         if start_delta_index > record.deltas.len() {
             return Ok(IncrementalCollection::RebootstrapRequired);
         }

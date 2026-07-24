@@ -9,7 +9,9 @@ use crate::index_read::{
 };
 use crate::keyspace::{manifest_key, segment_key};
 use crate::query::{plan_pattern, GramPlanOutcome, GramQueryPlan};
-use crate::root::{load_grep_manifest, load_grep_root_pointer, GrepLifecycle, GrepRootState};
+use crate::root::{
+    load_grep_manifest, load_grep_root_pointer, ChangeFeedResume, GrepLifecycle, GrepRootState,
+};
 use crate::{GrepError, Result};
 use futures::future::{join_all, try_join_all};
 use loonfs_api::wire::hex::hex_decode_bytes;
@@ -461,24 +463,18 @@ async fn segment_postings_for_gram<S: ObjectStore + ?Sized>(
 async fn tail_revisions<S: ObjectStore + ?Sized>(
     store: &S,
     view: &LoadedMetadataView<'_, S>,
-    built_through_seq: ChangeSeq,
-    next_delta_index: u32,
+    resume: ChangeFeedResume,
 ) -> Result<BTreeSet<InodeId>> {
     let mut tail = BTreeMap::new();
-    let after_seq = if next_delta_index == 0 {
-        built_through_seq
-    } else {
-        ChangeSeq(built_through_seq.0.saturating_sub(1))
-    };
-    for record in view.grep_wal_records_after(store, after_seq).await? {
-        let start_delta_index = if record.seq == built_through_seq {
-            usize::try_from(next_delta_index).map_err(|_| {
-                CoreError::Internal("grep delta cursor does not fit in memory".to_owned())
-            })?
-        } else {
-            0
-        };
+    for record in view
+        .grep_wal_records_after(store, resume.after_seq())
+        .await?
+    {
+        let start_delta_index = resume.start_delta_index(record.seq).map_err(|_| {
+            CoreError::Internal("grep delta cursor does not fit in memory".to_owned())
+        })?;
         if start_delta_index > record.deltas.len() {
+            let next_delta_index = resume.next_delta_index();
             return Err(GrepError::CorruptIndex {
                 message: format!(
                     "grep delta cursor `{next_delta_index}` exceeds commit `{}` length `{}`",
@@ -743,12 +739,13 @@ impl GrepService {
         };
 
         let mut candidates = GrepCandidates::default();
-        match plan_pattern(&request.pattern, request.case_insensitive)
+        let tail_resume = match plan_pattern(&request.pattern, request.case_insensitive)
             .map_err(CoreError::InvalidQuery)?
         {
             GramPlanOutcome::Indexable(plan) => {
                 candidates.indexed =
                     indexed_candidates(store, &self.block_cache, &snapshot.segments, &plan).await?;
+                ChangeFeedResume::new(snapshot.built_through_seq, snapshot.next_delta_index)
             }
             GramPlanOutcome::Unindexable => {
                 if !request.allow_scan {
@@ -760,16 +757,11 @@ impl GrepService {
                     .into());
                 }
                 candidates.unfiltered = scan_candidate_inodes(view).await?;
+                ChangeFeedResume::new(view.grep_materialized_through_seq(), 0)
             }
-        }
+        };
 
-        let tail = tail_revisions(
-            store,
-            view,
-            snapshot.built_through_seq,
-            snapshot.next_delta_index,
-        )
-        .await?;
+        let tail = tail_revisions(store, view, tail_resume).await?;
         let mut tail_scanned = true;
         if tail.len() > MAX_GREP_TAIL_FILES {
             if request.allow_stale {

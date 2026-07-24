@@ -168,6 +168,15 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         &self.content_store_id
     }
 
+    /// Returns the sequence through which this view's manifest tables are materialized.
+    ///
+    /// This is the plan-less scan boundary consumed by `loonfs-grep`: table
+    /// enumeration covers revisions at or below it, and WAL replay covers
+    /// revisions strictly above it.
+    pub fn grep_materialized_through_seq(&self) -> ChangeSeq {
+        self.tables.manifest().payload.head_seq
+    }
+
     /// Opens the memoized visibility session used by one grep page.
     ///
     /// This is part of the read surface consumed by `loonfs-grep`.
@@ -207,7 +216,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .collect())
     }
 
-    /// Loads the validated WAL commit records after an index watermark.
+    /// Loads the validated WAL commit records after a requested sequence.
     ///
     /// This is the narrow WAL-tail read surface consumed by `loonfs-grep`;
     /// the service owns revision selection and all query policy while core
@@ -215,9 +224,9 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     pub async fn grep_wal_records_after(
         &self,
         store: &S,
-        built_through_seq: ChangeSeq,
+        after_seq: ChangeSeq,
     ) -> Result<Vec<WalCommitPayload>> {
-        if built_through_seq >= self.head.seq {
+        if after_seq >= self.head.seq {
             return Ok(Vec::new());
         }
         let manifest = self.tables.manifest();
@@ -228,7 +237,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 chain_base_seq: manifest.payload.retention_floor_seq,
                 head_seq: self.head.seq,
                 visible_tip: self.head.visible_wal_tip.clone(),
-                stop_after_seq: Some(built_through_seq),
+                stop_after_seq: Some(after_seq),
                 recent_segments: &self.head.recent_segments,
             },
         )
@@ -240,7 +249,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .segments()
             .iter()
             .flat_map(|segment| segment.records())
-            .filter(|record| record.seq > built_through_seq)
+            .filter(|record| record.seq > after_seq)
             .cloned()
             .collect())
     }

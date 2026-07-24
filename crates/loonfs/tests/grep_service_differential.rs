@@ -5,7 +5,7 @@
 
 use loonfs::{
     CommitId, CoreError, CreateDirectoryOptions, CreateNamespaceOptions, DeleteOptions,
-    DestinationBehavior, FsWriter, GrepRequest, GrepResponse, MoveOptions, NamespaceId,
+    DestinationBehavior, FsAdmin, FsWriter, GrepRequest, GrepResponse, MoveOptions, NamespaceId,
     PutFileOptions, SharedObjectStore,
 };
 use loonfs_api::AbsolutePath;
@@ -24,7 +24,7 @@ use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::nonzero_usize;
 use std::collections::BTreeSet;
 use std::sync::Arc;
-use tempfile::tempdir;
+use tempfile::{tempdir, TempDir};
 
 fn request(pattern: &str) -> GrepRequest {
     GrepRequest {
@@ -194,6 +194,46 @@ async fn drive_worker_to_current(
     panic!("grep worker backlog must drain");
 }
 
+struct PlanlessBoundaryFixture {
+    _temp_dir: TempDir,
+    store: SharedObjectStore,
+    namespace_id: NamespaceId,
+    writer: FsWriter,
+    admin: FsAdmin,
+}
+
+async fn planless_boundary_fixture(namespace: &str) -> PlanlessBoundaryFixture {
+    let temp_dir = tempdir().expect("tempdir");
+    let store: SharedObjectStore =
+        Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
+    let namespace_id = NamespaceId::parse(namespace).expect("namespace id");
+    let writer = FsWriter::builder_with_store(store.clone())
+        .writer_id("planless-boundary-writer")
+        .min_publish_interval_ms(0)
+        .build()
+        .await
+        .expect("build writer");
+    let admin = FsAdmin::builder_with_store(store.clone())
+        .actor_id("planless-boundary-admin")
+        .build()
+        .await
+        .expect("build admin");
+    writer
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
+    let worker = worker(&store);
+    worker.enable(&namespace_id).await.expect("enable grep");
+    drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
+    PlanlessBoundaryFixture {
+        _temp_dir: temp_dir,
+        store,
+        namespace_id,
+        writer,
+        admin,
+    }
+}
+
 async fn gram_segment_levels(
     store: &SharedObjectStore,
     namespace_id: &NamespaceId,
@@ -207,6 +247,137 @@ async fn gram_segment_levels(
         .iter()
         .map(|segment| segment.level)
         .collect()
+}
+
+#[tokio::test]
+async fn planless_scan_returns_exact_materialized_and_wal_boundary_revisions_once_each() {
+    let fixture = planless_boundary_fixture("grep-planless-boundary").await;
+    fixture
+        .writer
+        .put_file_bytes(
+            &fixture.namespace_id,
+            "/materialized.txt",
+            b"x materialized\n",
+            PutFileOptions::default(),
+        )
+        .await
+        .expect("write materialized file");
+    let (materialized_head, _) = load_namespace_read_anchor(&*fixture.store, &fixture.namespace_id)
+        .await
+        .expect("load materialized head");
+    fixture
+        .admin
+        .flush_wal(&fixture.namespace_id)
+        .await
+        .expect("flush materialized commit");
+    let (_, materialized_root) = load_namespace_read_anchor(&*fixture.store, &fixture.namespace_id)
+        .await
+        .expect("load materialized root");
+    assert_eq!(
+        materialized_root.state.manifest_head_seq,
+        materialized_head.state.seq
+    );
+
+    fixture
+        .writer
+        .put_file_bytes(
+            &fixture.namespace_id,
+            "/wal-only.txt",
+            b"x wal\n",
+            PutFileOptions::default(),
+        )
+        .await
+        .expect("write WAL-only file");
+    let (head, root) = load_namespace_read_anchor(&*fixture.store, &fixture.namespace_id)
+        .await
+        .expect("load boundary");
+    assert_eq!(root.state.manifest_head_seq, materialized_head.state.seq);
+    assert_eq!(
+        head.state.seq.0,
+        root.state.manifest_head_seq.0 + 1,
+        "the WAL-only file must be committed immediately after the materialized boundary"
+    );
+
+    let harness = ServiceHarness::new(fixture.store.clone(), fixture.namespace_id.clone());
+    let mut scan = request("x");
+    scan.allow_scan = true;
+    let response = harness
+        .success("exact materialization boundary", &scan)
+        .await;
+    let paths = response
+        .matches
+        .iter()
+        .map(|found| found.absolute_path.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(paths.len(), 2);
+    assert_eq!(
+        paths
+            .iter()
+            .filter(|path| **path == "/materialized.txt")
+            .count(),
+        1
+    );
+    assert_eq!(
+        paths
+            .iter()
+            .filter(|path| **path == "/wal-only.txt")
+            .count(),
+        1
+    );
+
+    fixture
+        .writer
+        .shutdown_background()
+        .await
+        .expect("writer shutdown");
+}
+
+#[tokio::test]
+async fn planless_scan_deduplicates_an_inode_revised_across_materialization() {
+    let fixture = planless_boundary_fixture("grep-planless-dedup").await;
+    fixture
+        .writer
+        .put_file_bytes(
+            &fixture.namespace_id,
+            "/overlap.txt",
+            b"x materialized revision\n",
+            PutFileOptions::default(),
+        )
+        .await
+        .expect("write materialized revision");
+    fixture
+        .admin
+        .flush_wal(&fixture.namespace_id)
+        .await
+        .expect("flush materialized revision");
+    fixture
+        .writer
+        .put_file_bytes(
+            &fixture.namespace_id,
+            "/overlap.txt",
+            b"x WAL revision\n",
+            PutFileOptions {
+                behavior: DestinationBehavior::Replace,
+                commit_id: None,
+            },
+        )
+        .await
+        .expect("write WAL revision");
+
+    let harness = ServiceHarness::new(fixture.store.clone(), fixture.namespace_id.clone());
+    let mut scan = request("x");
+    scan.allow_scan = true;
+    let response = harness.success("overlapping inode sources", &scan).await;
+    assert_eq!(response.matches.len(), 1);
+    assert_eq!(response.matches[0].absolute_path, "/overlap.txt");
+    assert_eq!(response.matches[0].revision_no.0, 2);
+    assert_eq!(response.matches[0].line, "x WAL revision");
+
+    fixture
+        .writer
+        .shutdown_background()
+        .await
+        .expect("writer shutdown");
 }
 
 #[tokio::test]
@@ -352,11 +523,33 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
         )
         .await;
     scan_off.allow_scan = true;
-    let scanned = harness
-        .success("allow_scan on and short pattern", &scan_off)
-        .await;
-    assert_eq!(scanned.matches.len(), 1);
-    assert_eq!(scanned.matches[0].absolute_path, "/tail/tail-hit.txt");
+    let mut scanned_paths = BTreeSet::new();
+    let mut scan_pages = 0usize;
+    loop {
+        let scanned = harness
+            .success("allow_scan on and short pattern", &scan_off)
+            .await;
+        scan_pages += 1;
+        assert!(scanned.tail_scanned);
+        scanned_paths.extend(
+            scanned
+                .matches
+                .iter()
+                .map(|found| found.absolute_path.as_str().to_owned()),
+        );
+        let Some(cursor) = scanned.next_cursor else {
+            break;
+        };
+        scan_off.cursor = Some(cursor);
+    }
+    assert!(scan_pages > 1);
+    assert_eq!(
+        scanned_paths,
+        BTreeSet::from(["/docs/short.txt", "/tail/tail-hit.txt"])
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    );
 
     let mut case_folded = request("mixed case token");
     case_folded.case_insensitive = true;
@@ -370,7 +563,7 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
     assert_eq!(visible.matches.len(), 1);
     assert_eq!(visible.matches[0].absolute_path, "/archive/moved.txt");
 
-    let mut binary = request("bi");
+    let mut binary = request("ry");
     binary.allow_scan = true;
     let binary = harness.success("binary eligibility", &binary).await;
     assert!(binary.matches.is_empty());
