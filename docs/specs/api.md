@@ -24,9 +24,9 @@ within a plane is expressed as **named features** (section 2).
 
 | Profile | Plane | Ops | Status |
 | --- | --- | --- | --- |
-| `core/v0` | Data plane | Path reads and mutations (stat, list, content, revisions, path operations), staged uploads, explicit commits, the change feed, namespace status by id, `GET /v0/config`, and the standard error contract. Namespace `list`, `create`, `fork`, and `delete` are **features** within this profile. | **Mandatory** for any conforming deployment |
-| `admin/v0` | Maintenance plane | Trigger WAL flushes; create and release checkpoints; trigger retention-floor advancement; run one-shot maintenance ticks; run garbage collection. Future maintenance triggers (compaction, index builds) arrive as features in this plane. | Optional |
-| `query/v0` | Query plane | Content search over derived indexes (`POST /v0/namespaces/{namespace}/query/grep`). Gram-index search is the `query.grep` **feature** within this profile; using it also requires a materialized steady-state grep root for the namespace. | Optional |
+| `core/v0` | Data plane | Path reads and mutations (stat, list, content, revisions, path operations), staged uploads, explicit commits, the change feed, namespace status by id, `GET /v0/capabilities`, and the standard error contract. Namespace `list`, `create`, `fork`, and `delete` are **features** within this profile. | **Mandatory** for any conforming deployment |
+| `admin/v0` | Maintenance plane | Trigger WAL flushes; create and release checkpoints; trigger retention-floor advancement; run one-shot maintenance steps; run garbage collection. Future maintenance triggers (compaction, index builds) arrive as features in this plane. | Optional |
+| `query/v0` | Query plane | Content search over derived indexes (`POST /v0/namespaces/{namespace}/query/grep`). Grep-index search is the `query.grep` **feature** within this profile; using it also requires a materialized steady-state grep root for the namespace. | Optional |
 | `acl/v0` | Authorization plane | — | **Reserved name only.** Do not specify ops yet. Clients must tolerate unknown error codes, so authorization errors can land with this plane without breaking anyone. |
 
 Notes:
@@ -61,7 +61,7 @@ When new behavior arrives, three questions decide where it belongs:
 ### 2.1 The capability document
 
 Every deployment describes itself with one capability document. A remote
-client fetches it from `GET /v0/config` and caches it for the connection; an
+client fetches it from `GET /v0/capabilities` and caches it for the connection; an
 embedded engine exposes the same document as a constant. SDK gating logic is
 therefore identical for both backends.
 
@@ -249,7 +249,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `shutting_down` | 503 | The serving process closed admission for shutdown; work admitted earlier still settles. Retry against a live instance. |
 | `checkpoint_unavailable` | 503 | Required checkpoint state is unavailable: not yet published, changed during the operation, condemned pending GC deletion, or referenced material is missing. Retry after maintenance. |
 | `maintenance_required` | 503 | Namespace metadata requires maintenance before the request can be served; run maintenance and retry. |
-| `index_lagging` | 503 | The gram index trails the head past the exhaustive-scan budget; let the grep worker catch up (or set `allow_stale`) and retry. |
+| `index_lagging` | 503 | The grep index trails the head past the exhaustive-scan budget; let the grep worker catch up (or set `allow_stale`) and retry. |
 | `index_corrupt` | 500 | The grep index's derived state failed validation. Disable and re-enable grep on the namespace to rebuild it; core filesystem state remains available. |
 | `namespace_corrupt` | 500 | Durable namespace state failed validation. |
 | `server_error` | 500 | Unclassified internal failure. |
@@ -268,7 +268,7 @@ codebase.
   remote client (`loonfs_client::Client`) expose the same operations and the
   same `capabilities()` accessor returning the capability document of
   section 2.1. For the remote client the document is fetched from
-  `GET /v0/config` and cached; for the embedded handles it is a constant.
+  `GET /v0/capabilities` and cached; for the embedded handles it is a constant.
 - Unsupported surface area is typed: individual ops return the
   `not_supported` error with its `feature` name, so gating logic — check the
   capability document, fall back on `not_supported` — is identical against
@@ -407,7 +407,7 @@ A representative v0 binding is shown below.
 
 | Purpose | Representative HTTP shape |
 | --- | --- |
-| Read deployment capabilities | `GET /v0/config` |
+| Read deployment capabilities | `GET /v0/capabilities` |
 | Create a namespace | `POST /v0/namespaces` |
 | Read one namespace's status | `GET /v0/namespaces/{ns}` |
 | Stat a path | `GET /v0/namespaces/{ns}/filesystem/stat?path=/docs/report.txt` |
@@ -429,13 +429,13 @@ A representative v0 binding is shown below.
 | Release a checkpoint | `POST /v0/admin/namespaces/{ns}/checkpoints/{checkpoint_id}/release` (idempotent; fork-owned records are rejected) |
 | Flush the WAL tail | `POST /v0/admin/namespaces/{ns}/wal/flush` (folds the visible WAL tail into metadata tables and advances the metadata root; creates no checkpoint record) |
 | Advance the retention floor | `POST /v0/admin/namespaces/{ns}/retention/advance` |
-| Run a maintenance tick | `POST /v0/admin/namespaces/{ns}/maintenance/tick` (optional body overrides `max_wal_tail_segments` and opts into `gc`; an override above the write-rejection threshold is rejected as `invalid_request`; flush races surface as outcomes, not errors) |
+| Run a maintenance step | `POST /v0/admin/namespaces/{ns}/maintenance/step` (optional body overrides `max_wal_tail_segments` and opts into `gc`; an override above the write-rejection threshold is rejected as `invalid_request`; flush races surface as outcomes, not errors) |
 | Collect garbage | `POST /v0/admin/namespaces/{ns}/gc` (optional body overrides `grace_window_ms`/`reap_window_ms`; a grace window below the derived safety floor is rejected as `invalid_request`; nothing sweeps without an explicit call) |
 | Repair an incomplete namespace | `POST /v0/admin/namespaces/{ns}/repair` (no body or options; reports `already_complete`, `completed`, `reaped`, or `in_flight`; an absent namespace reports `namespace_not_found`) |
 | Content search | `POST /v0/namespaces/{ns}/query/grep` (feature `query.grep`; requires a materialized steady-state grep root) |
-| Enable the gram index | `POST /v0/admin/namespaces/{ns}/index/grams/enable` (CAS-publishes the independent grep root into checkpointed backfill; embedded mode starts that namespace's event-driven driver; idempotent) |
-| Disable the gram index | `POST /v0/admin/namespaces/{ns}/index/grams/disable` (CAS-publishes the grep root as disabled; grep-owned garbage collection later reclaims unreferenced segments; idempotent) |
-| Collect gram-index garbage | `POST /v0/admin/namespaces/{ns}/index/grams/gc` (one explicit pass over only that namespace's grep extension; also reaps aged state for an absent or tombstoned namespace) |
+| Enable the grep index | `POST /v0/admin/namespaces/{ns}/grep/index/enable` (CAS-publishes the independent grep root into checkpointed backfill; embedded mode starts that namespace's event-driven driver; idempotent) |
+| Disable the grep index | `POST /v0/admin/namespaces/{ns}/grep/index/disable` (CAS-publishes the grep root as disabled; grep-owned garbage collection later reclaims unreferenced segments; idempotent) |
+| Collect grep-index garbage | `POST /v0/admin/namespaces/{ns}/grep/index/gc` (one explicit pass over only that namespace's grep extension; also reaps aged state for an absent or tombstoned namespace) |
 
 Routes under `/v0/admin/` belong to the `admin/v0` profile and routes under
 `/v0/namespaces/{ns}/query/` to `query/v0`; everything else shown belongs to
@@ -562,7 +562,7 @@ or emit a namespace `name` alias.
 The examples below are representative, not exhaustive. Responses may gain
 fields within v0; clients must ignore JSON fields they do not recognize.
 
-### 6.1 `GET /v0/config`
+### 6.1 `GET /v0/capabilities`
 
 The capability document of section 2.1.
 
@@ -1079,7 +1079,7 @@ Representative response:
 
 The pattern uses the Rust `regex` crate's dialect (no backreferences or
 lookaround), compiled line-anchored: `^` and `$` match line boundaries. The server plans required grams from the pattern, intersects
-the namespace's gram index (format spec, "Gram index segments"), scans
+the namespace's grep index (format spec, "Gram index segments"), scans
 revisions committed after `built_through_seq` exhaustively, and verifies
 every candidate against the real pattern, so index staleness affects cost,
 never answers. Matches order by `(inode_id, byte_offset)` and one match is
@@ -1115,7 +1115,7 @@ value is a complete absolute path, not a partial textual segment prefix. Its
 scope resolves to an inode under the namespace's name policy and filters by
 ancestry, so it follows the same validation and normalization as every other
 path read. A missing data half answers `not_supported` with the `feature`
-field naming `index.grams`.
+field naming `grep.index`.
 
 ## 7. Conformance requirements
 

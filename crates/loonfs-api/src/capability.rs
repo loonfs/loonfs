@@ -24,7 +24,7 @@ pub const FEATURE_NAMESPACES_FORK: &str = "core.namespaces.fork";
 pub const FEATURE_NAMESPACES_DELETE: &str = "core.namespaces.delete";
 /// Gates direct upload sessions that are authorized with short-lived presigned URLs.
 pub const FEATURE_UPLOADS_DIRECT_PUT: &str = "core.uploads.direct_put";
-/// Gates gram-index content search: the serving half of the capability;
+/// Gates grep-index content search: the serving half of the capability;
 /// the namespace's verified steady-state grep root is the data half.
 pub const FEATURE_QUERY_GREP: &str = "query.grep";
 
@@ -67,7 +67,7 @@ pub const LIMIT_QUERY_GREP_TAIL_BUDGET_FILES: &str = "query.grep.tail_budget_fil
 
 /// A deployment's self-description (API spec, "Capability discovery").
 ///
-/// A remote client fetches this from `GET /v0/config` and caches it; an
+/// A remote client fetches this from `GET /v0/capabilities` and caches it; an
 /// embedded engine exposes the same document as a constant. SDK gating logic
 /// is therefore identical for both backends: check [`supports`] or
 /// [`has_profile`], and treat a `not_supported` error as authoritative when

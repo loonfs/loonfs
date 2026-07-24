@@ -650,7 +650,7 @@ async fn grep_error_publication_conflict_is_stale_head_and_core_reads_survive() 
         let namespace_id = namespace_id.clone();
         let client = harness.client.clone();
         move || {
-            let result = client.enable_grams_index(&namespace_id);
+            let result = client.enable_grep_index(&namespace_id);
             assert_grep_api_error_and_core_read(
                 &client,
                 &namespace_id,
@@ -693,7 +693,7 @@ async fn runtime_created_state_is_readable_through_http() {
         let stat = harness.client.stat_path(&target).expect("stat file");
         assert_eq!(stat.absolute_path, "/notes/hello.txt");
         assert_eq!(stat.size_bytes, Some(18));
-        let bytes = harness.client.read_file_bytes(&target).expect("read file");
+        let bytes = harness.client.get_file_bytes(&target).expect("read file");
         assert_eq!(bytes, b"hello from runtime");
     })
     .await
@@ -725,7 +725,7 @@ async fn http_created_state_is_readable_through_runtime() {
 
     let file = fs
         .reader()
-        .read_file_bytes(
+        .get_file_bytes(
             &NamespaceId::parse("demo").expect("valid namespace id"),
             "/notes/from-http.txt",
         )
@@ -1373,7 +1373,7 @@ async fn http_unknown_routes_and_methods_answer_in_envelope() {
 
         // Served path, unserved method: in-envelope 405.
         let error = raw_agent()
-            .delete(&format!("http://{addr}/v0/config"))
+            .delete(&format!("http://{addr}/v0/capabilities"))
             .call()
             .expect_err("wrong method should answer 405");
         let ureq::Error::Status(status, response) = error else {
@@ -1692,7 +1692,7 @@ async fn http_content_reads_answer_server_busy_at_the_concurrency_cap() {
         let client = Client::new(config_for_busy).expect("valid client config");
         let target = NamespacePath::parse("demo", "/note.txt").expect("target");
         assert_api_error(
-            client.read_file_bytes(&target),
+            client.get_file_bytes(&target),
             503,
             "server_busy",
             Some("the server is at its concurrency limit for proxied content reads; retry shortly"),
@@ -1706,7 +1706,7 @@ async fn http_content_reads_answer_server_busy_at_the_concurrency_cap() {
         let client = Client::new(client_config).expect("valid client config");
         let target = NamespacePath::parse("demo", "/note.txt").expect("target");
         let bytes = client
-            .read_file_bytes(&target)
+            .get_file_bytes(&target)
             .expect("a freed slot admits the read");
         assert_eq!(bytes, b"bounded");
     })
@@ -1757,14 +1757,14 @@ async fn http_content_read_over_the_download_limit_answers_content_too_large() {
         })
         .expect("valid client config");
         assert_api_error(
-            client.read_file_bytes(&NamespacePath::parse("demo", "/big.bin").expect("target")),
+            client.get_file_bytes(&NamespacePath::parse("demo", "/big.bin").expect("target")),
             413,
             "content_too_large",
             None,
         );
         // Content inside the limit still reads through the same route.
         let bytes = client
-            .read_file_bytes(&NamespacePath::parse("demo", "/small.bin").expect("target"))
+            .get_file_bytes(&NamespacePath::parse("demo", "/small.bin").expect("target"))
             .expect("small content fits under the limit");
         assert_eq!(bytes.len(), 8);
     })
@@ -1790,7 +1790,7 @@ async fn readiness_answers_ready_then_shutting_down_once_admission_closes() {
         axum::serve(listener, router).await.expect("serve app");
     });
 
-    let ready_url = format!("http://{addr}/health/ready");
+    let ready_url = format!("http://{addr}/readiness");
     let url = ready_url.clone();
     tokio::task::spawn_blocking(move || {
         let body = raw_agent()
@@ -1937,7 +1937,7 @@ fn assert_grep_api_error_and_core_read<T: std::fmt::Debug>(
                 "expected `{message_fragment}` in `{message}`"
             );
             if code == ErrorCode::NotSupported {
-                assert_eq!(feature.as_deref(), Some("index.grams"));
+                assert_eq!(feature.as_deref(), Some("grep.index"));
             } else {
                 assert_eq!(feature, None);
             }
@@ -1950,7 +1950,7 @@ fn assert_grep_api_error_and_core_read<T: std::fmt::Debug>(
 
     let target = NamespacePath::parse(namespace_id.as_str(), "/core.txt").expect("core target");
     let bytes = client
-        .read_file_bytes(&target)
+        .get_file_bytes(&target)
         .expect("grep failure must not affect core reads");
     assert_eq!(bytes, b"core remains readable");
 }

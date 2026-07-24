@@ -8,7 +8,7 @@
 //!   cargo test -p loonfs --test request_accounting -- --ignored --nocapture
 
 use loonfs::{
-    CreateNamespaceOptions, FsAdmin, FsReader, FsWriter, MaintenanceTickOptions, NamespaceId,
+    CreateNamespaceOptions, FsAdmin, FsReader, FsWriter, MaintenanceStepOptions, NamespaceId,
     PageRequest, PaginationPolicy, PutFileOptions, SharedObjectStore,
 };
 use loonfs_api::AbsolutePath;
@@ -23,7 +23,7 @@ use tempfile::tempdir;
 
 const FILES: usize = 10_000;
 const BATCH: usize = 100;
-const TICK_EVERY_BATCHES: usize = 33;
+const STEP_EVERY_BATCHES: usize = 33;
 
 /// (family, level, index_offset, filter_offset) per table object key.
 type TableMap = BTreeMap<String, (String, u32, u64, u64)>;
@@ -111,7 +111,7 @@ async fn warm_phase_request_accounting() {
     let namespace_id = NamespaceId::parse("acct").expect("valid namespace id");
 
     // Build phase: bench-like shape — one wide hot directory, maintenance
-    // ticks a few times so the manifest ends with a seed base plus a few L0
+    // steps a few times so the manifest ends with a seed base plus a few L0
     // runs and a WAL tail, like the 10k benchmark build.
     let writer = FsWriter::builder_with_store(store.clone())
         .writer_id("acct-writer")
@@ -132,7 +132,7 @@ async fn warm_phase_request_accounting() {
         .await
         .expect("load namespace catalog");
     // The bench publishes 100-mutation batches (one WAL segment each) and
-    // ticks a few times across the build; mirror that shape.
+    // steps a few times across the build; mirror that shape.
     let mut index = 0usize;
     while index < FILES {
         let mut candidates = Vec::with_capacity(BATCH);
@@ -173,17 +173,17 @@ async fn warm_phase_request_accounting() {
         {
             outcome.expect("publish batch member");
         }
-        if (index / BATCH) % TICK_EVERY_BATCHES == 0 {
+        if (index / BATCH) % STEP_EVERY_BATCHES == 0 {
             admin
-                .maintenance_tick_namespace(
+                .maintenance_step_namespace(
                     &namespace_id,
-                    MaintenanceTickOptions {
+                    MaintenanceStepOptions {
                         max_wal_tail_segments: 1,
-                        ..MaintenanceTickOptions::default()
+                        ..MaintenanceStepOptions::default()
                     },
                 )
                 .await
-                .expect("tick");
+                .expect("step");
         }
     }
     let tables = table_map(&store, &namespace_id).await;
@@ -234,7 +234,7 @@ async fn warm_phase_request_accounting() {
     report("warm stat", &log.take_gets(), &tables);
 
     reader
-        .read_file_bytes(&namespace_id, "/hot/file-05000.txt")
+        .get_file_bytes(&namespace_id, "/hot/file-05000.txt")
         .await
         .expect("read");
     report("warm read", &log.take_gets(), &tables);

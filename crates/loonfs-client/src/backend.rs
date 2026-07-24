@@ -23,14 +23,13 @@ use crate::{
 use async_trait::async_trait;
 use loonfs_api::{
     v0::{
-        ChangesResponse, DisableGramsIndexResponse, EnableGramsIndexResponse,
-        RepairNamespaceResponse,
+        ChangesResponse, DisableGrepIndexResponse, EnableGrepIndexResponse, RepairNamespaceResponse,
     },
     AdvanceRetentionResponse, AuthoritativePathEntry, ChangeSeq, CheckpointId, CommitId,
     CommitResponse, CreateCheckpointRequest, CreateCheckpointResponse, DeleteNamespaceResponse,
     DestinationBehavior, ErrorCode, ErrorDetails, FlushWalResponse, GcRequest, GcResponse,
-    GrepRequest, GrepResponse, InodeId, ListFileRevisionsResponse, MaintenanceTickRequest,
-    MaintenanceTickResponse, NamespaceId, NamespaceStatusResponse, NamespaceSummary,
+    GrepRequest, GrepResponse, InodeId, ListFileRevisionsResponse, MaintenanceStepRequest,
+    MaintenanceStepResponse, NamespaceId, NamespaceStatusResponse, NamespaceSummary,
     ReleaseCheckpointResponse, RevisionNo,
 };
 use thiserror::Error;
@@ -177,25 +176,25 @@ pub trait Backend {
     async fn stat_path(&self, spec: &NamespacePath)
         -> Result<AuthoritativePathEntry, BackendError>;
     /// Reads a file's current content.
-    async fn read_file_bytes(&self, spec: &NamespacePath) -> Result<Vec<u8>, BackendError>;
-    /// Content search over a namespace's gram index.
+    async fn get_file_bytes(&self, spec: &NamespacePath) -> Result<Vec<u8>, BackendError>;
+    /// Content search over a namespace's grep index.
     async fn grep(
         &self,
         namespace_id: &NamespaceId,
         request: &GrepRequest,
     ) -> Result<GrepResponse, BackendError>;
-    /// Enables the gram index on a namespace (admin plane).
-    async fn enable_grams_index(
+    /// Enables the grep index on a namespace (admin plane).
+    async fn enable_grep_index(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<EnableGramsIndexResponse, BackendError>;
-    /// Disables the gram index on a namespace (admin plane).
-    async fn disable_grams_index(
+    ) -> Result<EnableGrepIndexResponse, BackendError>;
+    /// Disables the grep index on a namespace (admin plane).
+    async fn disable_grep_index(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<DisableGramsIndexResponse, BackendError>;
+    ) -> Result<DisableGrepIndexResponse, BackendError>;
     /// Reads a retained file revision's content.
-    async fn read_file_revision_bytes(
+    async fn get_file_revision_bytes(
         &self,
         spec: &NamespacePath,
         revision_no: RevisionNo,
@@ -293,13 +292,13 @@ pub trait Backend {
     ) -> Result<AdvanceRetentionResponse, BackendError>;
     /// Runs one bounded maintenance step: a root advancement once the WAL
     /// tail reaches the threshold, optionally followed by a GC pass.
-    async fn maintenance_tick(
+    async fn maintenance_step(
         &self,
         namespace_id: &NamespaceId,
-        request: MaintenanceTickRequest,
-    ) -> Result<MaintenanceTickResponse, BackendError>;
+        request: MaintenanceStepRequest,
+    ) -> Result<MaintenanceStepResponse, BackendError>;
     /// Runs one mark-and-sweep garbage-collection pass. Nothing sweeps
-    /// without this explicit call or a maintenance-tick opt-in.
+    /// without this explicit call or a maintenance-step opt-in.
     async fn gc_namespace(
         &self,
         namespace_id: &NamespaceId,
@@ -311,7 +310,7 @@ pub trait Backend {
         namespace_id: &NamespaceId,
     ) -> Result<RepairNamespaceResponse, BackendError>;
     /// Reads the ordered change feed after the `after_seq` cursor.
-    async fn list_changes_after(
+    async fn list_changes(
         &self,
         namespace_id: &NamespaceId,
         after_seq: ChangeSeq,
@@ -408,9 +407,9 @@ impl Backend for RemoteBackend {
         self.wire(move |client| client.stat_path(&spec)).await
     }
 
-    async fn read_file_bytes(&self, spec: &NamespacePath) -> Result<Vec<u8>, BackendError> {
+    async fn get_file_bytes(&self, spec: &NamespacePath) -> Result<Vec<u8>, BackendError> {
         let spec = spec.clone();
-        self.wire(move |client| client.read_file_bytes(&spec)).await
+        self.wire(move |client| client.get_file_bytes(&spec)).await
     }
 
     async fn grep(
@@ -424,31 +423,31 @@ impl Backend for RemoteBackend {
             .await
     }
 
-    async fn enable_grams_index(
+    async fn enable_grep_index(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<EnableGramsIndexResponse, BackendError> {
+    ) -> Result<EnableGrepIndexResponse, BackendError> {
         let namespace_id = namespace_id.clone();
-        self.wire(move |client| client.enable_grams_index(&namespace_id))
+        self.wire(move |client| client.enable_grep_index(&namespace_id))
             .await
     }
 
-    async fn disable_grams_index(
+    async fn disable_grep_index(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<DisableGramsIndexResponse, BackendError> {
+    ) -> Result<DisableGrepIndexResponse, BackendError> {
         let namespace_id = namespace_id.clone();
-        self.wire(move |client| client.disable_grams_index(&namespace_id))
+        self.wire(move |client| client.disable_grep_index(&namespace_id))
             .await
     }
 
-    async fn read_file_revision_bytes(
+    async fn get_file_revision_bytes(
         &self,
         spec: &NamespacePath,
         revision_no: RevisionNo,
     ) -> Result<Vec<u8>, BackendError> {
         let spec = spec.clone();
-        self.wire(move |client| client.read_file_revision_bytes(&spec, revision_no))
+        self.wire(move |client| client.get_file_revision_bytes(&spec, revision_no))
             .await
     }
 
@@ -591,13 +590,13 @@ impl Backend for RemoteBackend {
             .await
     }
 
-    async fn maintenance_tick(
+    async fn maintenance_step(
         &self,
         namespace_id: &NamespaceId,
-        request: MaintenanceTickRequest,
-    ) -> Result<MaintenanceTickResponse, BackendError> {
+        request: MaintenanceStepRequest,
+    ) -> Result<MaintenanceStepResponse, BackendError> {
         let namespace_id = namespace_id.clone();
-        self.wire(move |client| client.maintenance_tick(&namespace_id, &request))
+        self.wire(move |client| client.maintenance_step(&namespace_id, &request))
             .await
     }
 
@@ -620,14 +619,14 @@ impl Backend for RemoteBackend {
             .await
     }
 
-    async fn list_changes_after(
+    async fn list_changes(
         &self,
         namespace_id: &NamespaceId,
         after_seq: ChangeSeq,
         limit: Option<u32>,
     ) -> Result<ChangesResponse, BackendError> {
         let namespace_id = namespace_id.clone();
-        self.wire(move |client| client.list_changes_after(&namespace_id, after_seq, limit))
+        self.wire(move |client| client.list_changes(&namespace_id, after_seq, limit))
             .await
     }
 }

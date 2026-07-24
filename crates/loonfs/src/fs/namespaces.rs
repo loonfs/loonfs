@@ -119,7 +119,7 @@ impl FsCore {
     }
 
     /// Reads the ordered change feed after the `after_seq` cursor.
-    pub(crate) async fn list_changes_after(
+    pub(crate) async fn list_changes(
         &self,
         namespace_id: &NamespaceId,
         after_seq: ChangeSeq,

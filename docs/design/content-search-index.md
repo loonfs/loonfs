@@ -178,7 +178,7 @@ segment set that implements it.
 
 Two rules keep the cycle honest:
 
-- **Index building never rides core maintenance.** Metadata ticks flush and
+- **Index building never rides core maintenance.** Metadata steps flush and
   reorganize core state only. Grep build and fold steps are scheduled by the
   grep worker, and freshness between worker steps is the query path's job.
 - **Retention may outrun the index.** The independent worker does not hold
@@ -259,7 +259,7 @@ starts again from a fresh checkpoint.
 
 Grep garbage collection is also explicit and per namespace. The standalone
 binary runs it only when passed `--gc`; the server exposes
-`POST /v0/admin/namespaces/{ns}/index/grams/gc`, a sibling of core's explicit
+`POST /v0/admin/namespaces/{ns}/grep/index/gc`, a sibling of core's explicit
 per-namespace GC endpoint. Pointing that operation at an absent or tombstoned
 namespace reaps its aged `extensions/grep/` state. The core namespace head's
 deleted tombstone is already the absorbing gate: enable refuses it, so pointer
@@ -415,4 +415,4 @@ Following the segment-format convention, two different contracts:
 - **Richer text queries.** A tokenized full-text index would be a
   sibling feature, but every seam here — the query profile, the
   extension keyspace, the derived segment family, the WAL-driven build
-  tick — is the seam it would reuse.
+  step — is the seam it would reuse.

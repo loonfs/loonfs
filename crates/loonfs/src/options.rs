@@ -8,23 +8,23 @@ use crate::{
 };
 use loonfs_api::v0::{
     CreateCheckpointRequest, GcRequest, GcResponse,
-    MaintenanceTickOutcome as WireMaintenanceTickOutcome, MaintenanceTickRequest,
-    MaintenanceTickResponse,
+    MaintenanceStepOutcome as WireMaintenanceStepOutcome, MaintenanceStepRequest,
+    MaintenanceStepResponse,
 };
 use loonfs_core::publish::WalTailPolicy;
 
-/// Options for one maintenance tick.
+/// Options for one maintenance step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MaintenanceTickOptions {
+pub struct MaintenanceStepOptions {
     /// Flush the visible WAL tail into metadata tables when it reaches this many
     /// segments.
     pub max_wal_tail_segments: u64,
-    /// Run the mark-and-sweep garbage collector after the tick's
+    /// Run the mark-and-sweep garbage collector after the step's
     /// flush work. Nothing sweeps unless this is set.
     pub gc: Option<GcConfig>,
 }
 
-impl Default for MaintenanceTickOptions {
+impl Default for MaintenanceStepOptions {
     fn default() -> Self {
         Self {
             max_wal_tail_segments: WalTailPolicy::DEFAULT.checkpoint_at_segments,
@@ -33,9 +33,9 @@ impl Default for MaintenanceTickOptions {
     }
 }
 
-impl MaintenanceTickOptions {
-    /// Resolves wire-level tick overrides onto the runtime defaults.
-    pub fn from_request(request: MaintenanceTickRequest) -> Self {
+impl MaintenanceStepOptions {
+    /// Resolves wire-level step overrides onto the runtime defaults.
+    pub fn from_request(request: MaintenanceStepRequest) -> Self {
         let defaults = Self::default();
         Self {
             max_wal_tail_segments: request
@@ -72,12 +72,12 @@ pub fn gc_response_from_report(namespace_id: NamespaceId, report: GcReport) -> G
     }
 }
 
-/// Outcome of one maintenance tick.
+/// Outcome of one maintenance step.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MaintenanceTickOutcome {
+pub enum MaintenanceStepOutcome {
     /// The WAL tail was below the threshold; the root was left alone.
     NotNeeded,
-    /// The tick flushed the WAL tail and advanced the metadata root.
+    /// The step flushed the WAL tail and advanced the metadata root.
     WalFlushed {
         /// Sequence covered by the published manifest.
         manifest_head_seq: ChangeSeq,
@@ -85,7 +85,7 @@ pub enum MaintenanceTickOutcome {
     /// The root already covered the attempted sequence — another publisher
     /// got there first.
     WalFlushSuperseded {
-        /// Sequence this tick attempted to flush through.
+        /// Sequence this step attempted to flush through.
         attempted_seq: ChangeSeq,
         /// Manifest the root currently references.
         current_manifest_id: ManifestId,
@@ -97,43 +97,43 @@ pub enum MaintenanceTickOutcome {
     },
 }
 
-/// Result of one maintenance tick.
+/// Result of one maintenance step.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MaintenanceTickResult {
-    /// Namespace the tick ran against.
+pub struct MaintenanceStepResult {
+    /// Namespace the step ran against.
     pub namespace_id: NamespaceId,
-    /// Namespace status observed before the tick acted.
+    /// Namespace status observed before the step acted.
     pub status_before: NamespaceStatusResponse,
-    /// What the tick did.
-    pub outcome: MaintenanceTickOutcome,
-    /// Garbage-collection report when the tick opted into sweeping.
+    /// What the step did.
+    pub outcome: MaintenanceStepOutcome,
+    /// Garbage-collection report when the step opted into sweeping.
     pub gc: Option<GcReport>,
 }
 
-impl MaintenanceTickResult {
-    /// Wire response for this tick.
-    pub fn into_response(self) -> MaintenanceTickResponse {
+impl MaintenanceStepResult {
+    /// Wire response for this step.
+    pub fn into_response(self) -> MaintenanceStepResponse {
         let namespace_id = self.namespace_id;
-        MaintenanceTickResponse {
+        MaintenanceStepResponse {
             gc: self
                 .gc
                 .map(|report| gc_response_from_report(namespace_id.clone(), report)),
             namespace_id,
             status_before: self.status_before,
             outcome: match self.outcome {
-                MaintenanceTickOutcome::NotNeeded => WireMaintenanceTickOutcome::NotNeeded,
-                MaintenanceTickOutcome::WalFlushed { manifest_head_seq } => {
-                    WireMaintenanceTickOutcome::WalFlushed { manifest_head_seq }
+                MaintenanceStepOutcome::NotNeeded => WireMaintenanceStepOutcome::NotNeeded,
+                MaintenanceStepOutcome::WalFlushed { manifest_head_seq } => {
+                    WireMaintenanceStepOutcome::WalFlushed { manifest_head_seq }
                 }
-                MaintenanceTickOutcome::WalFlushSuperseded {
+                MaintenanceStepOutcome::WalFlushSuperseded {
                     attempted_seq,
                     current_manifest_id,
-                } => WireMaintenanceTickOutcome::WalFlushSuperseded {
+                } => WireMaintenanceStepOutcome::WalFlushSuperseded {
                     attempted_seq,
                     current_manifest_id,
                 },
-                MaintenanceTickOutcome::WalFlushRaceLost { observed_head_seq } => {
-                    WireMaintenanceTickOutcome::WalFlushRaceLost { observed_head_seq }
+                MaintenanceStepOutcome::WalFlushRaceLost { observed_head_seq } => {
+                    WireMaintenanceStepOutcome::WalFlushRaceLost { observed_head_seq }
                 }
             },
         }

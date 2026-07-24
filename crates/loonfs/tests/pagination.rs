@@ -146,7 +146,7 @@ fn file_revision_pages_merge_manifest_and_wal_tail_newest_first() {
     );
     assert!(second.next_cursor.is_none());
 
-    let inode_page = block_on(fs.list_file_revisions_for_inode_page(
+    let inode_page = block_on(fs.list_file_revisions_by_inode_page(
         &namespace_id,
         first.inode_id,
         PageRequest {

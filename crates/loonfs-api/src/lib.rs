@@ -108,8 +108,8 @@ pub use v0::{
     DeleteNamespaceResponse, DestinationBehavior, ErrorDetails, FileRevision, FilesystemOperation,
     FilesystemOperationRequest, FlushWalOutcome, FlushWalResponse, ForkNamespaceRequest, GcRequest,
     GcResponse, GrepMatch, GrepRequest, GrepResponse, ListFileRevisionsResponse,
-    ListPathEntriesResponse, MaintenanceTickOutcome, MaintenanceTickRequest,
-    MaintenanceTickResponse, NamespaceStatusResponse, NamespaceSummary, ReleaseCheckpointResponse,
+    ListPathEntriesResponse, MaintenanceStepOutcome, MaintenanceStepRequest,
+    MaintenanceStepResponse, NamespaceStatusResponse, NamespaceSummary, ReleaseCheckpointResponse,
     RepairNamespaceOutcome, RestoreFileRevisionRequest,
 };
 

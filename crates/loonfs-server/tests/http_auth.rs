@@ -222,7 +222,7 @@ async fn path_put_with_valid_content_token_succeeds() {
 
         let target = NamespacePath::parse("demo", "/valid-token.txt").expect("target");
         assert_eq!(
-            harness.client.read_file_bytes(&target).expect("read file"),
+            harness.client.get_file_bytes(&target).expect("read file"),
             bytes
         );
     })

@@ -128,7 +128,7 @@ async fn direct_put_round_trip(config: ServerConfig) {
         );
         assert_eq!(response.committed_seq, ChangeSeq(1));
 
-        let loaded = harness.client.read_file_bytes(&target).expect("read file");
+        let loaded = harness.client.get_file_bytes(&target).expect("read file");
         assert_eq!(loaded, bytes);
     })
     .await

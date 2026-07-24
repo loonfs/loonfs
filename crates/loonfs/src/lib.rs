@@ -44,7 +44,7 @@ use thiserror::Error;
 pub use loonfs_api::v0::{
     BeginUploadRequest, BeginUploadResponse, ChangesResponse, CommitDelta, CommitOp,
     CommitPrecondition, CommitRequest, CommitResponse, CommittedChange, CompleteUploadRequest,
-    CompleteUploadResponse, DirectPutUpload, DisableGramsIndexResponse, EnableGramsIndexResponse,
+    CompleteUploadResponse, DirectPutUpload, DisableGrepIndexResponse, EnableGrepIndexResponse,
     ObjectTransferAccess, RepairNamespaceResponse, UploadContentResponse, UploadMode,
 };
 pub use loonfs_api::{
@@ -112,7 +112,7 @@ pub use handle::{FsAdmin, FsAdminBuilder, FsReader, FsReaderBuilder, FsWriter, F
 pub use options::{
     gc_config_from_request, gc_response_from_report, CopyOptions, CreateCheckpointOptions,
     CreateDirectoryOptions, CreateNamespaceOptions, DeleteOptions, ListChangesOptions,
-    MaintenanceTickOptions, MaintenanceTickOutcome, MaintenanceTickResult, MoveOptions,
+    MaintenanceStepOptions, MaintenanceStepOutcome, MaintenanceStepResult, MoveOptions,
     PutFileOptions, RestoreRevisionOptions, UndeleteOptions,
 };
 pub use trace::{payload_class, TraceMode, TraceStoreKind};

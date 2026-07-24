@@ -8,7 +8,7 @@
 
 use loonfs::{
     CommitId, CreateCheckpointOptions, CreateNamespaceOptions, FsAdmin, FsBackgroundWork, FsReader,
-    FsWriter, MaintenanceTickOptions, ManifestId, NamespaceId, PutFileOptions, RuntimeCacheConfig,
+    FsWriter, MaintenanceStepOptions, ManifestId, NamespaceId, PutFileOptions, RuntimeCacheConfig,
     RuntimeError, SharedObjectStore, StoreConfig,
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
@@ -31,7 +31,7 @@ fn store_config(root: &Path) -> StoreConfig {
 }
 
 fn wal_tail_segment_threshold() -> u64 {
-    MaintenanceTickOptions::default().max_wal_tail_segments
+    MaintenanceStepOptions::default().max_wal_tail_segments
 }
 
 fn wal_tail_segment_count_past_threshold() -> u64 {
@@ -67,10 +67,10 @@ async fn fill_wal_tail_past_threshold(writer: &FsWriter, namespace_id: &Namespac
 }
 
 #[test]
-fn a_threshold_crossing_during_an_active_tick_still_bounds_the_tail() {
+fn a_threshold_crossing_during_an_active_step_still_bounds_the_tail() {
     // The interleaving behind the CI failures on the extraction stack: the
-    // first crossing's tick is mid-run when more publishes cross the
-    // threshold. Their requests must defer and rerun the tick — dropping
+    // first crossing's step is mid-run when more publishes cross the
+    // threshold. Their requests must defer and rerun the step — dropping
     // them leaves the tail unbounded when those were the last writes before
     // an idle period.
     let temp_dir = tempdir().expect("tempdir");
@@ -93,14 +93,14 @@ fn a_threshold_crossing_during_an_active_tick_still_bounds_the_tail() {
             .await
             .expect("create namespace");
 
-        // The threshold-crossing publish spawns the tick; the armed store
-        // holds that tick at its metadata root CAS.
+        // The threshold-crossing publish spawns the step; the armed store
+        // holds that step at its metadata root CAS.
         blocking.block_next();
         fill_wal_tail_past_threshold(&writer, &namespace_id).await;
         blocking.wait_until_blocked().await;
 
-        // A full second threshold's worth of publishes lands while the tick
-        // is held; every crossing defers to the running tick.
+        // A full second threshold's worth of publishes lands while the step
+        // is held; every crossing defers to the running step.
         for round in 0..writes_past_wal_tail_threshold() {
             writer
                 .put_file_bytes(
@@ -110,7 +110,7 @@ fn a_threshold_crossing_during_an_active_tick_still_bounds_the_tail() {
                     PutFileOptions::default(),
                 )
                 .await
-                .expect("put file during held tick");
+                .expect("put file during held step");
         }
 
         blocking.release();
@@ -130,7 +130,7 @@ fn a_threshold_crossing_during_an_active_tick_still_bounds_the_tail() {
             .expect("status after deferred rerun");
         assert!(
             status.wal_tail_segments < wal_tail_segment_threshold(),
-            "deferred crossings must rerun the tick and bound the tail: {status:?}"
+            "deferred crossings must rerun the step and bound the tail: {status:?}"
         );
         writer
             .shutdown_background()
@@ -162,7 +162,7 @@ fn writer_reader_and_admin_share_a_namespace_through_store_config() {
         // A reader derived from the writer shares its caches.
         let derived = writer.reader();
         let read = derived
-            .read_file_bytes(&namespace_id, "/docs/hello.txt")
+            .get_file_bytes(&namespace_id, "/docs/hello.txt")
             .await
             .expect("read through derived reader");
         assert_eq!(read.bytes, b"hello");
@@ -174,7 +174,7 @@ fn writer_reader_and_admin_share_a_namespace_through_store_config() {
             .await
             .expect("build standalone reader");
         let read = standalone
-            .read_file_bytes(&namespace_id, "/docs/hello.txt")
+            .get_file_bytes(&namespace_id, "/docs/hello.txt")
             .await
             .expect("read through standalone reader");
         assert_eq!(read.bytes, b"hello");
@@ -272,11 +272,11 @@ fn put_file_bytes_and_prepare_then_put_commit_equivalent_state() {
         assert_eq!(simple_stat.content_ref, prepared_stat.content_ref);
 
         let simple_read = reader
-            .read_file_bytes(&simple_namespace, "/file.txt")
+            .get_file_bytes(&simple_namespace, "/file.txt")
             .await
             .expect("read simple put");
         let prepared_read = reader
-            .read_file_bytes(&prepared_namespace, "/file.txt")
+            .get_file_bytes(&prepared_namespace, "/file.txt")
             .await
             .expect("read prepared put");
         assert_eq!(simple_read.bytes, bytes);
@@ -320,26 +320,26 @@ fn manual_only_writer_never_schedules_maintenance() {
         );
 
         // Explicit admin maintenance bounds the tail the writer left.
-        let tick = admin
-            .maintenance_tick_namespace(&namespace_id, MaintenanceTickOptions::default())
+        let step = admin
+            .maintenance_step_namespace(&namespace_id, MaintenanceStepOptions::default())
             .await
-            .expect("explicit maintenance tick");
+            .expect("explicit maintenance step");
         assert_ne!(
-            tick.outcome,
-            loonfs::MaintenanceTickOutcome::NotNeeded,
-            "tick should act on the oversized tail"
+            step.outcome,
+            loonfs::MaintenanceStepOutcome::NotNeeded,
+            "step should act on the oversized tail"
         );
         let status = admin
             .namespace_status(&namespace_id)
             .await
-            .expect("status after explicit tick");
+            .expect("status after explicit step");
         assert!(
             status.current_manifest_id > Some(ManifestId(0)),
-            "explicit tick should publish a manifest: {status:?}"
+            "explicit step should publish a manifest: {status:?}"
         );
         assert!(
             status.wal_tail_segments < wal_tail_segment_threshold(),
-            "explicit tick should bound the tail: {status:?}"
+            "explicit step should bound the tail: {status:?}"
         );
     });
 }
@@ -368,14 +368,14 @@ fn enabled_writer_schedules_maintenance_on_its_owning_runtime() {
         let status = admin
             .namespace_status(&namespace_id)
             .await
-            .expect("status after auto tick");
+            .expect("status after auto step");
         assert!(
             status.current_manifest_id > Some(ManifestId(0)),
-            "auto tick should have published a manifest: {status:?}"
+            "auto step should have published a manifest: {status:?}"
         );
         assert!(
             status.wal_tail_segments < wal_tail_segment_threshold(),
-            "auto tick should have bounded the tail: {status:?}"
+            "auto step should have bounded the tail: {status:?}"
         );
         writer
             .shutdown_background()
@@ -416,10 +416,10 @@ fn enabled_writer_schedules_maintenance_with_caches_disabled() {
         let status = admin
             .namespace_status(&namespace_id)
             .await
-            .expect("status after auto tick");
+            .expect("status after auto step");
         assert!(
             status.wal_tail_segments < wal_tail_segment_threshold(),
-            "auto tick should have bounded the tail: {status:?}"
+            "auto step should have bounded the tail: {status:?}"
         );
         writer
             .shutdown_background()
@@ -571,8 +571,8 @@ fn admin_checkpoint_and_retention_are_explicit_one_shot_calls() {
 /// Eight threshold crossings with background work enabled must both bound
 /// the WAL tail and drain the reorganization backlog: the eighth crossing's
 /// checkpoint reaches the fold trigger (eight L0 runs), and the writer's own
-/// background tick then folds every family group — no admin involvement.
-/// Before the drain, background ticks folded at most one unit per crossing,
+/// background step then folds every family group — no admin involvement.
+/// Before the drain, background steps folded at most one unit per crossing,
 /// so fold debt outlived the burst that created it.
 #[test]
 fn enabled_writer_drains_reorganization_backlog_without_admin() {
@@ -599,7 +599,7 @@ fn enabled_writer_drains_reorganization_backlog_without_admin() {
             writer
                 .wait_for_background_work()
                 .await
-                .expect("background ticks finish");
+                .expect("background steps finish");
         }
 
         let store = LocalFsStore::new(temp_dir.path()).expect("open store for inspection");
@@ -622,7 +622,7 @@ fn enabled_writer_drains_reorganization_backlog_without_admin() {
             .count();
         assert_eq!(
             l0_files, 0,
-            "background ticks drain the fold backlog to zero L0 runs; \
+            "background steps drain the fold backlog to zero L0 runs; \
              a leftover run means the drain stopped early"
         );
     });

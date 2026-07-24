@@ -142,7 +142,7 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
 
         let entry = harness.client.stat_path(&target).expect("stat path");
         assert_eq!(entry.head_seq, first.committed_seq);
-        let bytes = harness.client.read_file_bytes(&target).expect("read file");
+        let bytes = harness.client.get_file_bytes(&target).expect("read file");
         assert_eq!(bytes, b"stable bytes\n");
 
         match harness.client.put_file_bytes(
@@ -348,7 +348,7 @@ async fn two_servers_share_one_store_with_last_writer_wins_fencing() {
             .expect("stat host b file");
         assert_eq!(host_b_entry.head_seq.0, moved.committed_seq.0);
         let host_b_bytes = client_a
-            .read_file_bytes(&host_b_target)
+            .get_file_bytes(&host_b_target)
             .expect("read host b file");
         assert_eq!(host_b_bytes, b"host a\n");
     })

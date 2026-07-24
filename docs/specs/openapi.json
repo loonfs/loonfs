@@ -35,14 +35,14 @@
         ]
       }
     },
-    "/health/ready": {
+    "/readiness": {
       "get": {
         "tags": [
           "health"
         ],
         "summary": "Check readiness",
         "description": "Returns `ready` while the server admits new work. Once shutdown begins and publisher admission closes, answers 503 `shutting_down` so load balancers can drain the instance. `/health` stays the liveness probe: it only reports that the process is up.",
-        "operationId": "health_ready",
+        "operationId": "readiness",
         "responses": {
           "200": {
             "description": "The server admits new work",
@@ -242,7 +242,7 @@
           "admin"
         ],
         "summary": "Collect garbage",
-        "description": "Runs one mark-and-sweep garbage-collection pass under the format's safety rules (grace window, delete-time re-verification, retention wins). Incomplete namespaces are ignored without listing or deletion. Nothing sweeps without this explicit call or a maintenance-tick opt-in.",
+        "description": "Runs one mark-and-sweep garbage-collection pass under the format's safety rules (grace window, delete-time re-verification, retention wins). Incomplete namespaces are ignored without listing or deletion. Nothing sweeps without this explicit call or a maintenance-step opt-in.",
         "operationId": "gc_namespace",
         "parameters": [
           {
@@ -310,14 +310,14 @@
         }
       }
     },
-    "/v0/admin/namespaces/{namespace}/index/grams/disable": {
+    "/v0/admin/namespaces/{namespace}/grep/index/disable": {
       "post": {
         "tags": [
           "admin"
         ],
-        "summary": "Disable the gram index",
+        "summary": "Disable the grep index",
         "description": "Disables the namespace's grep root, clears its segment references, and stops its embedded driver. Explicit grep garbage collection later reclaims the segments. Idempotent.",
-        "operationId": "disable_grams_index",
+        "operationId": "disable_grep_index",
         "parameters": [
           {
             "name": "namespace",
@@ -335,7 +335,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/DisableGramsIndexResponse"
+                  "$ref": "#/components/schemas/DisableGrepIndexResponse"
                 }
               }
             }
@@ -403,14 +403,14 @@
         }
       }
     },
-    "/v0/admin/namespaces/{namespace}/index/grams/enable": {
+    "/v0/admin/namespaces/{namespace}/grep/index/enable": {
       "post": {
         "tags": [
           "admin"
         ],
-        "summary": "Enable the gram index",
+        "summary": "Enable the grep index",
         "description": "Enables the namespace's grep root. Embedded mode immediately starts that namespace's event-driven backfill driver; serve-only deployments rely on their explicitly assigned external driver. Idempotent.",
-        "operationId": "enable_grams_index",
+        "operationId": "enable_grep_index",
         "parameters": [
           {
             "name": "namespace",
@@ -428,7 +428,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/EnableGramsIndexResponse"
+                  "$ref": "#/components/schemas/EnableGrepIndexResponse"
                 }
               }
             }
@@ -496,14 +496,14 @@
         }
       }
     },
-    "/v0/admin/namespaces/{namespace}/index/grams/gc": {
+    "/v0/admin/namespaces/{namespace}/grep/index/gc": {
       "post": {
         "tags": [
           "admin"
         ],
-        "summary": "Collect gram-index garbage",
+        "summary": "Collect grep-index garbage",
         "description": "Runs one explicit garbage-collection pass over only this namespace's grep-owned extension keyspace. A tombstoned or absent namespace has aged extension state reaped; no grep garbage collection runs implicitly.",
-        "operationId": "gc_grams_index",
+        "operationId": "gc_grep_index",
         "parameters": [
           {
             "name": "namespace",
@@ -569,14 +569,14 @@
         }
       }
     },
-    "/v0/admin/namespaces/{namespace}/maintenance/tick": {
+    "/v0/admin/namespaces/{namespace}/maintenance/step": {
       "post": {
         "tags": [
           "admin"
         ],
-        "summary": "Run maintenance tick",
+        "summary": "Run maintenance step",
         "description": "Runs one bounded maintenance step: flushes the WAL tail once it reaches the threshold, and optionally runs a garbage-collection pass afterwards. Losing the root race is an outcome, not an error.",
-        "operationId": "maintenance_tick",
+        "operationId": "maintenance_step",
         "parameters": [
           {
             "name": "namespace",
@@ -593,7 +593,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/MaintenanceTickRequest"
+                "$ref": "#/components/schemas/MaintenanceStepRequest"
               }
             }
           },
@@ -601,11 +601,11 @@
         },
         "responses": {
           "200": {
-            "description": "Maintenance tick completed",
+            "description": "Maintenance step completed",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/MaintenanceTickResponse"
+                  "$ref": "#/components/schemas/MaintenanceStepResponse"
                 }
               }
             }
@@ -721,9 +721,9 @@
         "tags": [
           "admin"
         ],
-        "summary": "Advance retention",
+        "summary": "Advance retention floor",
         "description": "Advances the namespace retention floor after checkpoint state makes older WAL history unnecessary for normal replay.",
-        "operationId": "advance_retention",
+        "operationId": "advance_retention_floor",
         "parameters": [
           {
             "name": "namespace",
@@ -872,14 +872,14 @@
         }
       }
     },
-    "/v0/config": {
+    "/v0/capabilities": {
       "get": {
         "tags": [
-          "config"
+          "capabilities"
         ],
-        "summary": "Get config",
+        "summary": "Get capabilities",
         "description": "Returns a summary of supported features and limits.",
-        "operationId": "config",
+        "operationId": "capabilities",
         "responses": {
           "200": {
             "description": "Capability document",
@@ -1146,7 +1146,7 @@
         "tags": [
           "commits"
         ],
-        "summary": "List changes",
+        "summary": "List changes after a sequence",
         "description": "Returns committed changes from the write-ahead log. Callers can use this feed to keep another projection synchronized with WAL history.",
         "operationId": "list_changes",
         "parameters": [
@@ -1354,7 +1354,7 @@
         ],
         "summary": "Read file",
         "description": "Returns file bytes for the current revision at a path, or for a specific retained revision when `revision_no` is provided.",
-        "operationId": "get_content",
+        "operationId": "get_file_bytes",
         "parameters": [
           {
             "name": "namespace",
@@ -1470,7 +1470,7 @@
         ],
         "summary": "List directory",
         "description": "Lists a directory at the current namespace head.",
-        "operationId": "list_entries",
+        "operationId": "list_path_entries",
         "parameters": [
           {
             "name": "namespace",
@@ -1570,7 +1570,7 @@
         ],
         "summary": "Run filesystem operation",
         "description": "Runs one path-oriented filesystem mutation, such as create directory, put file, move, copy, delete, or restore revision. The commit id makes retries idempotent.",
-        "operationId": "filesystem_operation",
+        "operationId": "apply_filesystem_operation",
         "parameters": [
           {
             "name": "namespace",
@@ -1673,7 +1673,7 @@
         ],
         "summary": "List file revisions",
         "description": "Resolves the current path to a file inode and returns revisions for that file. If the file could be renamed, use the inode revision API for stable identity.",
-        "operationId": "list_path_revisions",
+        "operationId": "list_file_revisions",
         "parameters": [
           {
             "name": "namespace",
@@ -1773,7 +1773,7 @@
         ],
         "summary": "Stat path",
         "description": "Returns the current metadata for a path, including inode identity, kind, display name, and file content metadata.",
-        "operationId": "stat_entry",
+        "operationId": "stat_path",
         "parameters": [
           {
             "name": "namespace",
@@ -1946,9 +1946,9 @@
         "tags": [
           "inodes"
         ],
-        "summary": "List inode revisions",
+        "summary": "List file revisions by inode",
         "description": "Returns revisions for a file inode, independent of the file's current path or later renames.",
-        "operationId": "list_inode_revisions",
+        "operationId": "list_file_revisions_by_inode",
         "parameters": [
           {
             "name": "namespace",
@@ -2046,9 +2046,9 @@
         "tags": [
           "inodes"
         ],
-        "summary": "Read inode revision",
+        "summary": "Read file revision by inode",
         "description": "Returns bytes for one retained file revision by inode id and revision number.",
-        "operationId": "get_inode_revision_content",
+        "operationId": "get_file_revision_bytes_by_inode",
         "parameters": [
           {
             "name": "namespace",
@@ -2162,9 +2162,9 @@
         "tags": [
           "inodes"
         ],
-        "summary": "Restore inode revision",
+        "summary": "Restore file revision by inode",
         "description": "Appends a new current revision to a file inode using bytes from an older retained revision. The request includes the caller's expected current revision for race safety.",
-        "operationId": "restore_inode_revision",
+        "operationId": "restore_file_revision_by_inode",
         "parameters": [
           {
             "name": "namespace",
@@ -2274,7 +2274,7 @@
           "query"
         ],
         "summary": "Content search",
-        "description": "Searches file content with a regular expression, accelerated by the namespace's gram index. Matches are verified against the real pattern and returned in ascending `(inode_id, byte_offset)` order; revisions committed after the index watermark are scanned exhaustively unless `allow_stale` skips them. Requires this deployment to serve grep and the namespace to carry a materialized steady-state grep root.",
+        "description": "Searches file content with a regular expression, accelerated by the namespace's grep index. Matches are verified against the real pattern and returned in ascending `(inode_id, byte_offset)` order; revisions committed after the index watermark are scanned exhaustively unless `allow_stale` skips them. Requires this deployment to serve grep and the namespace to carry a materialized steady-state grep root.",
         "operationId": "grep",
         "parameters": [
           {
@@ -2369,7 +2369,7 @@
             }
           },
           "501": {
-            "description": "Grep serving is disabled or the gram index is not materialized on this namespace",
+            "description": "Grep serving is disabled or the grep index is not materialized on this namespace",
             "content": {
               "application/json": {
                 "schema": {
@@ -2940,7 +2940,7 @@
       },
       "CapabilityDocument": {
         "type": "object",
-        "description": "A deployment's self-description (API spec, \"Capability discovery\").\n\nA remote client fetches this from `GET /v0/config` and caches it; an\nembedded engine exposes the same document as a constant. SDK gating logic\nis therefore identical for both backends: check [`supports`] or\n[`has_profile`], and treat a `not_supported` error as authoritative when\nthe two disagree.\n\n[`supports`]: CapabilityDocument::supports\n[`has_profile`]: CapabilityDocument::has_profile",
+        "description": "A deployment's self-description (API spec, \"Capability discovery\").\n\nA remote client fetches this from `GET /v0/capabilities` and caches it; an\nembedded engine exposes the same document as a constant. SDK gating logic\nis therefore identical for both backends: check [`supports`] or\n[`has_profile`], and treat a `not_supported` error as authoritative when\nthe two disagree.\n\n[`supports`]: CapabilityDocument::supports\n[`has_profile`]: CapabilityDocument::has_profile",
         "required": [
           "protocol_version",
           "profiles"
@@ -4017,9 +4017,9 @@
           }
         }
       },
-      "DisableGramsIndexResponse": {
+      "DisableGrepIndexResponse": {
         "type": "object",
-        "description": "Result of disabling the gram index on a namespace (admin plane).",
+        "description": "Result of disabling the grep index on a namespace (admin plane).",
         "required": [
           "namespace_id",
           "was_enabled"
@@ -4039,9 +4039,9 @@
         "type": "string",
         "description": "User-facing spelling of one path component."
       },
-      "EnableGramsIndexResponse": {
+      "EnableGrepIndexResponse": {
         "type": "object",
-        "description": "Result of enabling the gram index on a namespace (admin plane).",
+        "description": "Result of enabling the grep index on a namespace (admin plane).",
         "required": [
           "namespace_id",
           "built_through_seq",
@@ -4616,7 +4616,7 @@
       },
       "GrepGcResponse": {
         "type": "object",
-        "description": "Result of one explicit gram-index garbage-collection pass (admin plane).",
+        "description": "Result of one explicit grep-index garbage-collection pass (admin plane).",
         "required": [
           "namespace_id",
           "deleted_segments",
@@ -4889,7 +4889,7 @@
           }
         }
       },
-      "MaintenanceTickOutcome": {
+      "MaintenanceStepOutcome": {
         "oneOf": [
           {
             "type": "object",
@@ -4908,7 +4908,7 @@
           },
           {
             "type": "object",
-            "description": "The tick flushed the WAL tail and advanced the metadata root.",
+            "description": "The step flushed the WAL tail and advanced the metadata root.",
             "required": [
               "manifest_head_seq",
               "kind"
@@ -4937,7 +4937,7 @@
             "properties": {
               "attempted_seq": {
                 "$ref": "#/components/schemas/ChangeSeq",
-                "description": "Sequence this tick attempted to flush through."
+                "description": "Sequence this step attempted to flush through."
               },
               "current_manifest_id": {
                 "$ref": "#/components/schemas/ManifestId",
@@ -4972,11 +4972,11 @@
             }
           }
         ],
-        "description": "What one maintenance tick did."
+        "description": "What one maintenance step did."
       },
-      "MaintenanceTickRequest": {
+      "MaintenanceStepRequest": {
         "type": "object",
-        "description": "Options for one explicit maintenance tick. Absent fields use the\nserver's defaults; garbage collection runs only when `gc` is present.",
+        "description": "Options for one explicit maintenance step. Absent fields use the\nserver's defaults; garbage collection runs only when `gc` is present.",
         "properties": {
           "gc": {
             "oneOf": [
@@ -4985,7 +4985,7 @@
               },
               {
                 "$ref": "#/components/schemas/GcRequest",
-                "description": "Run the mark-and-sweep garbage collector after the tick's\nflush work. Nothing sweeps unless this is present."
+                "description": "Run the mark-and-sweep garbage collector after the step's\nflush work. Nothing sweeps unless this is present."
               }
             ]
           },
@@ -5000,9 +5000,9 @@
           }
         }
       },
-      "MaintenanceTickResponse": {
+      "MaintenanceStepResponse": {
         "type": "object",
-        "description": "Result of one explicit maintenance tick.",
+        "description": "Result of one explicit maintenance step.",
         "required": [
           "namespace_id",
           "status_before",
@@ -5016,21 +5016,21 @@
               },
               {
                 "$ref": "#/components/schemas/GcResponse",
-                "description": "Garbage-collection report when the tick opted into sweeping."
+                "description": "Garbage-collection report when the step opted into sweeping."
               }
             ]
           },
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
-            "description": "Namespace the tick ran against."
+            "description": "Namespace the step ran against."
           },
           "outcome": {
-            "$ref": "#/components/schemas/MaintenanceTickOutcome",
-            "description": "What the tick did."
+            "$ref": "#/components/schemas/MaintenanceStepOutcome",
+            "description": "What the step did."
           },
           "status_before": {
             "$ref": "#/components/schemas/NamespaceStatusResponse",
-            "description": "Namespace status observed before the tick acted."
+            "description": "Namespace status observed before the step acted."
           }
         }
       },
@@ -5292,7 +5292,7 @@
       "description": "Server health"
     },
     {
-      "name": "config",
+      "name": "capabilities",
       "description": "Capability discovery"
     },
     {

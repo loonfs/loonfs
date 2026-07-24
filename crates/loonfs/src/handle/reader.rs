@@ -103,15 +103,15 @@ impl FsReader {
     }
 
     /// Reads a file's current content plus the metadata entry it came from.
-    pub async fn read_file_bytes(
+    pub async fn get_file_bytes(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
     ) -> Result<AuthoritativeFileBytes> {
-        self.core.read_file_bytes(namespace_id, absolute_path).await
+        self.core.get_file_bytes(namespace_id, absolute_path).await
     }
 
-    /// Content search over the namespace's gram index: index-accelerated
+    /// Content search over the namespace's grep index: index-accelerated
     /// candidates plus an exhaustive scan of the unindexed tail, every
     /// candidate verified against the real pattern.
     pub async fn grep(
@@ -135,50 +135,50 @@ impl FsReader {
     }
 
     /// Lists one page of a file inode's revision history.
-    pub async fn list_file_revisions_for_inode_page(
+    pub async fn list_file_revisions_by_inode_page(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
         request: PageRequest<FileRevisionsPageCursor>,
     ) -> Result<ListFileRevisionsResponse> {
         self.core
-            .list_file_revisions_for_inode_page(namespace_id, inode_id, request)
+            .list_file_revisions_by_inode_page(namespace_id, inode_id, request)
             .await
     }
 
     /// Reads the content of one historical file revision by path.
-    pub async fn read_file_revision_bytes(
+    pub async fn get_file_revision_bytes(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
         revision_no: RevisionNo,
     ) -> Result<AuthoritativeFileBytes> {
         self.core
-            .read_file_revision_bytes(namespace_id, absolute_path, revision_no)
+            .get_file_revision_bytes(namespace_id, absolute_path, revision_no)
             .await
     }
 
     /// Reads the content of one historical file revision by inode id.
-    pub async fn read_file_revision_bytes_for_inode(
+    pub async fn get_file_revision_bytes_by_inode(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
         revision_no: RevisionNo,
     ) -> Result<Vec<u8>> {
         self.core
-            .read_file_revision_bytes_for_inode(namespace_id, inode_id, revision_no)
+            .get_file_revision_bytes_by_inode(namespace_id, inode_id, revision_no)
             .await
     }
 
     /// Reads the ordered change feed after the `after_seq` cursor.
-    pub async fn list_changes_after(
+    pub async fn list_changes(
         &self,
         namespace_id: &NamespaceId,
         after_seq: ChangeSeq,
         options: ListChangesOptions,
     ) -> Result<ChangesResponse> {
         self.core
-            .list_changes_after(namespace_id, after_seq, options)
+            .list_changes(namespace_id, after_seq, options)
             .await
     }
 

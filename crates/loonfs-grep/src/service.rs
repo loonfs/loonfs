@@ -636,7 +636,7 @@ struct GrepContentCandidate {
 
 impl GrepService {
     /// Content search over the view: index-accelerated candidates through
-    /// the `index.grams` watermark, an exhaustive scan of the unindexed
+    /// the `grep.index` watermark, an exhaustive scan of the unindexed
     /// tail, and real-pattern verification of every candidate. Matches
     /// order by `(inode_id, byte_offset)`. Two budgets bound a page — the
     /// match limit and a verified-candidate budget — and the cursor

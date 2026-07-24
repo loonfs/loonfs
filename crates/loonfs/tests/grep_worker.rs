@@ -607,7 +607,7 @@ fn assert_not_enabled_error(case: &str, result: loonfs::Result<GrepResponse>) {
             assert_eq!(error.code(), ErrorCode::NotSupported, "code for {case}");
             assert_eq!(
                 error.to_string(),
-                "feature `index.grams` is not materialized on this namespace",
+                "feature `grep.index` is not materialized on this namespace",
                 "error text for {case}"
             );
         }
@@ -621,7 +621,7 @@ fn assert_backfilling_error(case: &str, result: loonfs::Result<GrepResponse>) {
             assert_eq!(error.code(), ErrorCode::NotSupported, "code for {case}");
             assert_eq!(
                 error.to_string(),
-                "feature `index.grams` is not materialized on this namespace",
+                "feature `grep.index` is not materialized on this namespace",
                 "error text for {case}"
             );
         }

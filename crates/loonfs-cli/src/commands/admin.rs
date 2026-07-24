@@ -5,10 +5,10 @@ use super::context::resolve_command_context;
 use super::output::{CommandData, CommandFailure, CommandOutput};
 use crate::args::{
     AdminCheckpointArgs, AdminCheckpointReleaseArgs, AdminCommand, AdminGcArgs, AdminNamespaceArgs,
-    AdminTickArgs, ChangesArgs, CommandKind,
+    AdminStepArgs, ChangesArgs, CommandKind,
 };
 use loonfs_api::{
-    ChangeSeq, CheckpointId, CreateCheckpointRequest, ErrorCode, GcRequest, MaintenanceTickRequest,
+    ChangeSeq, CheckpointId, CreateCheckpointRequest, ErrorCode, GcRequest, MaintenanceStepRequest,
 };
 
 // --- maintenance/admin plane ---
@@ -22,7 +22,7 @@ pub(crate) async fn run_admin_command(
         AdminCommand::CheckpointRelease(args) => run_admin_checkpoint_release(kind, args).await,
         AdminCommand::Flush(args) => run_admin_flush(kind, args).await,
         AdminCommand::RetentionAdvance(args) => run_admin_retention_advance(kind, args).await,
-        AdminCommand::Tick(args) => run_admin_tick(kind, args).await,
+        AdminCommand::Step(args) => run_admin_step(kind, args).await,
         AdminCommand::Gc(args) => run_admin_gc(kind, args).await,
         AdminCommand::Repair(args) => run_admin_repair(kind, args).await,
         AdminCommand::IndexEnable(args) => run_admin_index_enable(kind, args).await,
@@ -50,19 +50,19 @@ async fn run_admin_repair(
     })
 }
 
-async fn run_admin_tick(
+async fn run_admin_step(
     kind: CommandKind,
-    args: AdminTickArgs,
+    args: AdminStepArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, &args.target).await?;
-    let request = MaintenanceTickRequest {
+    let request = MaintenanceStepRequest {
         max_wal_tail_segments: args.max_wal_tail_segments,
         gc: args.gc.then(GcRequest::default),
     };
     let response = context
         .target
         .backend()
-        .maintenance_tick(&context.namespace, request)
+        .maintenance_step(&context.namespace, request)
         .await
         .map_err(|error| context.fail(kind, error))?;
 
@@ -70,7 +70,7 @@ async fn run_admin_tick(
         kind,
         profile: Some(context.profile_name),
         mode: Some(context.mode),
-        data: CommandData::MaintenanceTicked(response),
+        data: CommandData::MaintenanceStepped(response),
     })
 }
 
@@ -197,7 +197,7 @@ pub(crate) async fn run_admin_changes(
     let response = context
         .target
         .backend()
-        .list_changes_after(&context.namespace, after_seq, args.limit)
+        .list_changes(&context.namespace, after_seq, args.limit)
         .await
         .map_err(|error| context.fail(kind, error))?;
 
@@ -217,14 +217,14 @@ async fn run_admin_index_enable(
     let response = context
         .target
         .backend()
-        .enable_grams_index(&context.namespace)
+        .enable_grep_index(&context.namespace)
         .await
         .map_err(|error| context.fail(kind, error))?;
     Ok(CommandOutput {
         kind,
         profile: Some(context.profile_name),
         mode: Some(context.mode),
-        data: CommandData::GramsIndexEnabled(response),
+        data: CommandData::GrepIndexEnabled(response),
     })
 }
 
@@ -236,13 +236,13 @@ async fn run_admin_index_disable(
     let response = context
         .target
         .backend()
-        .disable_grams_index(&context.namespace)
+        .disable_grep_index(&context.namespace)
         .await
         .map_err(|error| context.fail(kind, error))?;
     Ok(CommandOutput {
         kind,
         profile: Some(context.profile_name),
         mode: Some(context.mode),
-        data: CommandData::GramsIndexDisabled(response),
+        data: CommandData::GrepIndexDisabled(response),
     })
 }

@@ -134,7 +134,7 @@ impl FsCore {
     }
 
     /// Reads a file's current content plus the metadata entry it came from.
-    pub(crate) async fn read_file_bytes(
+    pub(crate) async fn get_file_bytes(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
@@ -151,7 +151,7 @@ impl FsCore {
         Ok(read)
     }
 
-    /// Content search over the namespace's gram index.
+    /// Content search over the namespace's grep index.
     pub(crate) async fn grep(
         &self,
         namespace_id: &NamespaceId,
@@ -195,7 +195,7 @@ impl FsCore {
     }
 
     /// Lists one page of a file inode's revision history.
-    pub(crate) async fn list_file_revisions_for_inode_page(
+    pub(crate) async fn list_file_revisions_by_inode_page(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
@@ -219,7 +219,7 @@ impl FsCore {
     }
 
     /// Reads the content of one historical file revision by path.
-    pub(crate) async fn read_file_revision_bytes(
+    pub(crate) async fn get_file_revision_bytes(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
@@ -239,7 +239,7 @@ impl FsCore {
     }
 
     /// Reads the content of one historical file revision by inode id.
-    pub(crate) async fn read_file_revision_bytes_for_inode(
+    pub(crate) async fn get_file_revision_bytes_by_inode(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,

@@ -4,7 +4,7 @@
 //! them entirely.
 
 use loonfs::{
-    CreateNamespaceOptions, FsAdmin, FsReader, FsWriter, MaintenanceTickOptions, NamespaceId,
+    CreateNamespaceOptions, FsAdmin, FsReader, FsWriter, MaintenanceStepOptions, NamespaceId,
     PutFileOptions, SharedObjectStore,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -51,15 +51,15 @@ async fn build_namespace(store: &SharedObjectStore, namespace_id: &NamespaceId) 
             .expect("seed file");
     }
     admin
-        .maintenance_tick_namespace(
+        .maintenance_step_namespace(
             namespace_id,
-            MaintenanceTickOptions {
+            MaintenanceStepOptions {
                 max_wal_tail_segments: 1,
-                ..MaintenanceTickOptions::default()
+                ..MaintenanceStepOptions::default()
             },
         )
         .await
-        .expect("tick");
+        .expect("step");
 }
 
 #[tokio::test]

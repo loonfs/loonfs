@@ -5,12 +5,12 @@ use crate::config::{CliConfig, ProfileConfig};
 use crate::error::CliError;
 use crate::profiles::ProfileSummary;
 use loonfs_api::v0::{
-    ChangesResponse, DisableGramsIndexResponse, EnableGramsIndexResponse, RepairNamespaceResponse,
+    ChangesResponse, DisableGrepIndexResponse, EnableGrepIndexResponse, RepairNamespaceResponse,
 };
 use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativePathEntry, ChangeSeq, CommitId,
     CreateCheckpointResponse, DeleteNamespaceResponse, FileRevision, FlushWalResponse, GcResponse,
-    GrepMatch, InodeId, MaintenanceTickResponse, NamespaceId, NamespaceSummary,
+    GrepMatch, InodeId, MaintenanceStepResponse, NamespaceId, NamespaceSummary,
     ReleaseCheckpointResponse,
 };
 use serde::Serialize;
@@ -57,11 +57,11 @@ pub(crate) enum CommandData {
     CheckpointReleased(ReleaseCheckpointResponse),
     WalFlushed(FlushWalResponse),
     RetentionAdvanced(AdvanceRetentionResponse),
-    MaintenanceTicked(MaintenanceTickResponse),
+    MaintenanceStepped(MaintenanceStepResponse),
     GarbageCollected(GcResponse),
     NamespaceRepaired(RepairNamespaceResponse),
-    GramsIndexEnabled(EnableGramsIndexResponse),
-    GramsIndexDisabled(DisableGramsIndexResponse),
+    GrepIndexEnabled(EnableGrepIndexResponse),
+    GrepIndexDisabled(DisableGrepIndexResponse),
     Changes(ChangesResponse),
     PathEntries {
         entries: Vec<AuthoritativePathEntry>,

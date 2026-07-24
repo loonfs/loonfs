@@ -139,7 +139,7 @@ impl Client {
     /// session creation use [`Self::call_once`] so ambiguous success remains
     /// visible to the caller. Other unavailability codes are excluded on
     /// purpose — `maintenance_required` and `index_lagging` clear on a
-    /// maintenance tick, not on a resend — and a served status with a
+    /// maintenance step, not on a resend — and a served status with a
     /// non-envelope body is not retried: only failures the network layer
     /// itself reported count as transport.
     pub(crate) fn call_with_transient_retry(

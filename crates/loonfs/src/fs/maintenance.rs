@@ -1,14 +1,14 @@
-//! Explicit core maintenance: ticks, GC, checkpoints, WAL flushes, and
+//! Explicit core maintenance: steps, GC, checkpoints, WAL flushes, and
 //! retention. Grep building and collection live in `loonfs-grep`.
 
 use super::core::FsCore;
 use crate::{
     AdvanceRetentionResponse, CheckpointId, CreateCheckpointOptions, CreateCheckpointResponse,
-    ErrorCode, FlushWalOutcome, FlushWalResponse, MaintenanceTickOptions, MaintenanceTickOutcome,
-    MaintenanceTickResult, NamespaceId, ReleaseCheckpointResponse,
+    ErrorCode, FlushWalOutcome, FlushWalResponse, MaintenanceStepOptions, MaintenanceStepOutcome,
+    MaintenanceStepResult, NamespaceId, ReleaseCheckpointResponse,
 };
 use crate::{Result, RuntimeError};
-use loonfs_api::v0::{DisableGramsIndexResponse, EnableGramsIndexResponse};
+use loonfs_api::v0::{DisableGrepIndexResponse, EnableGrepIndexResponse};
 
 impl FsCore {
     /// Runs one bounded maintenance step against a namespace.
@@ -28,11 +28,11 @@ impl FsCore {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub(crate) async fn maintenance_tick_namespace(
+    pub(crate) async fn maintenance_step_namespace(
         &self,
         namespace_id: &NamespaceId,
-        options: MaintenanceTickOptions,
-    ) -> Result<MaintenanceTickResult> {
+        options: MaintenanceStepOptions,
+    ) -> Result<MaintenanceStepResult> {
         let span = tracing::Span::current();
         self.record_trace_context(&span);
         if options.max_wal_tail_segments == 0 {
@@ -40,7 +40,7 @@ impl FsCore {
                 "max_wal_tail_segments must be greater than zero".to_owned(),
             ));
         }
-        // A threshold above the write-rejection cap would make the tick
+        // A threshold above the write-rejection cap would make the step
         // answer `not needed` while every publish is being rejected — the
         // one tool that relieves backpressure refusing to act.
         let reject_writes_at_segments =
@@ -55,12 +55,12 @@ impl FsCore {
         let status_before = self.namespace_status(namespace_id).await?;
         let observed_head_seq = status_before.head_seq;
         if status_before.wal_tail_segments < options.max_wal_tail_segments {
-            self.run_tick_reorganization(namespace_id).await?;
-            let gc = self.run_tick_gc(namespace_id, options.gc.as_ref()).await?;
-            return Ok(MaintenanceTickResult {
+            self.run_step_reorganization(namespace_id).await?;
+            let gc = self.run_step_gc(namespace_id, options.gc.as_ref()).await?;
+            return Ok(MaintenanceStepResult {
                 namespace_id: namespace_id.clone(),
                 status_before,
-                outcome: MaintenanceTickOutcome::NotNeeded,
+                outcome: MaintenanceStepOutcome::NotNeeded,
                 gc,
             });
         }
@@ -68,33 +68,33 @@ impl FsCore {
         let flush = match self.flush_wal(namespace_id).await {
             Ok(flush) => flush,
             Err(RuntimeError::Core(error)) if error.code() == ErrorCode::StaleHead => {
-                self.run_tick_reorganization(namespace_id).await?;
-                let gc = self.run_tick_gc(namespace_id, options.gc.as_ref()).await?;
-                return Ok(MaintenanceTickResult {
+                self.run_step_reorganization(namespace_id).await?;
+                let gc = self.run_step_gc(namespace_id, options.gc.as_ref()).await?;
+                return Ok(MaintenanceStepResult {
                     namespace_id: namespace_id.clone(),
                     status_before,
-                    outcome: MaintenanceTickOutcome::WalFlushRaceLost { observed_head_seq },
+                    outcome: MaintenanceStepOutcome::WalFlushRaceLost { observed_head_seq },
                     gc,
                 });
             }
             Err(error) => return Err(error),
         };
-        self.run_tick_reorganization(namespace_id).await?;
+        self.run_step_reorganization(namespace_id).await?;
 
         let outcome = match flush.outcome {
-            FlushWalOutcome::Published => MaintenanceTickOutcome::WalFlushed {
+            FlushWalOutcome::Published => MaintenanceStepOutcome::WalFlushed {
                 manifest_head_seq: flush.manifest_head_seq,
             },
             FlushWalOutcome::AlreadyCurrent | FlushWalOutcome::Superseded => {
-                MaintenanceTickOutcome::WalFlushSuperseded {
+                MaintenanceStepOutcome::WalFlushSuperseded {
                     attempted_seq: flush.target_head_seq,
                     current_manifest_id: flush.manifest_id,
                 }
             }
         };
 
-        let gc = self.run_tick_gc(namespace_id, options.gc.as_ref()).await?;
-        Ok(MaintenanceTickResult {
+        let gc = self.run_step_gc(namespace_id, options.gc.as_ref()).await?;
+        Ok(MaintenanceStepResult {
             namespace_id: namespace_id.clone(),
             status_before,
             outcome,
@@ -102,12 +102,12 @@ impl FsCore {
         })
     }
 
-    /// One bounded reorganization unit per tick: folds one family group of
+    /// One bounded reorganization unit per step: folds one family group of
     /// L0 delta rows into the base when enough L0 runs have piled up (see
-    /// `loonfs-core`'s `reorganize_metadata`). Explicit ticks stay bounded at
+    /// `loonfs-core`'s `reorganize_metadata`). Explicit steps stay bounded at
     /// one unit per call; the returned outcome lets writer-scheduled
     /// background work keep folding until nothing is left.
-    async fn run_tick_reorganization(
+    async fn run_step_reorganization(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<loonfs_core::MetadataReorganizeOutcome> {
@@ -138,10 +138,10 @@ impl FsCore {
     }
 
     /// Folds reorganization units until the trigger reports nothing left to
-    /// do. Only writer-scheduled background ticks drain like this — an
-    /// explicit maintenance tick keeps its one-unit-per-call cost bound —
+    /// do. Only writer-scheduled background steps drain like this — an
+    /// explicit maintenance step keeps its one-unit-per-call cost bound —
     /// so fold debt created by a burst of writes is settled by the burst's
-    /// own background tick instead of waiting for future threshold
+    /// own background step instead of waiting for future threshold
     /// crossings that may never come.
     pub(super) async fn drain_reorganization_backlog(
         &self,
@@ -151,7 +151,7 @@ impl FsCore {
         // not a scheduling policy.
         const MAX_UNITS_PER_DRAIN: usize = 16;
         for _ in 0..MAX_UNITS_PER_DRAIN {
-            match self.run_tick_reorganization(namespace_id).await? {
+            match self.run_step_reorganization(namespace_id).await? {
                 loonfs_core::MetadataReorganizeOutcome::UnitPublished { .. } => {}
                 loonfs_core::MetadataReorganizeOutcome::NotNeeded { .. }
                 | loonfs_core::MetadataReorganizeOutcome::Superseded => break,
@@ -160,7 +160,7 @@ impl FsCore {
         Ok(())
     }
 
-    async fn run_tick_gc(
+    async fn run_step_gc(
         &self,
         namespace_id: &NamespaceId,
         config: Option<&crate::GcConfig>,
@@ -172,25 +172,23 @@ impl FsCore {
     }
 
     /// Enables the independent grep root and starts checkpointed backfill.
-    pub(crate) async fn enable_grams_index(
+    pub(crate) async fn enable_grep_index(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<EnableGramsIndexResponse> {
+    ) -> Result<EnableGrepIndexResponse> {
         let outcome = self
             .grep_worker()
             .enable(namespace_id)
             .await
             .map_err(RuntimeError::Grep)?;
         match outcome {
-            loonfs_grep::GrepEnableOutcome::Enabled { target_seq } => {
-                Ok(EnableGramsIndexResponse {
-                    namespace_id: namespace_id.clone(),
-                    built_through_seq: target_seq,
-                    already_enabled: false,
-                })
-            }
+            loonfs_grep::GrepEnableOutcome::Enabled { target_seq } => Ok(EnableGrepIndexResponse {
+                namespace_id: namespace_id.clone(),
+                built_through_seq: target_seq,
+                already_enabled: false,
+            }),
             loonfs_grep::GrepEnableOutcome::AlreadyEnabled { built_through_seq } => {
-                Ok(EnableGramsIndexResponse {
+                Ok(EnableGrepIndexResponse {
                     namespace_id: namespace_id.clone(),
                     built_through_seq,
                     already_enabled: true,
@@ -206,21 +204,21 @@ impl FsCore {
 
     /// Disables the independent grep root; its segments become grep-GC
     /// candidates.
-    pub(crate) async fn disable_grams_index(
+    pub(crate) async fn disable_grep_index(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<DisableGramsIndexResponse> {
+    ) -> Result<DisableGrepIndexResponse> {
         let outcome = self
             .grep_worker()
             .disable(namespace_id)
             .await
             .map_err(RuntimeError::Grep)?;
         match outcome {
-            loonfs_grep::GrepDisableOutcome::Disabled => Ok(DisableGramsIndexResponse {
+            loonfs_grep::GrepDisableOutcome::Disabled => Ok(DisableGrepIndexResponse {
                 namespace_id: namespace_id.clone(),
                 was_enabled: true,
             }),
-            loonfs_grep::GrepDisableOutcome::NotEnabled => Ok(DisableGramsIndexResponse {
+            loonfs_grep::GrepDisableOutcome::NotEnabled => Ok(DisableGrepIndexResponse {
                 namespace_id: namespace_id.clone(),
                 was_enabled: false,
             }),
@@ -244,7 +242,7 @@ impl FsCore {
     /// Runs the v1 mark-and-sweep garbage collector for one namespace.
     ///
     /// Never runs implicitly: callers opt in here or through
-    /// [`MaintenanceTickOptions::gc`].
+    /// [`MaintenanceStepOptions::gc`].
     pub(crate) async fn gc_namespace(
         &self,
         namespace_id: &NamespaceId,
@@ -277,10 +275,10 @@ impl FsCore {
         Ok(response)
     }
 
-    /// Waits until every scheduled background maintenance tick has finished.
+    /// Waits until every scheduled background maintenance step has finished.
     ///
     /// Call this to quiesce before shutdown, or in tests that assert on
-    /// post-maintenance state. Panicked ticks surface as a runtime-task
+    /// post-maintenance state. Panicked steps surface as a runtime-task
     /// error.
     pub(crate) async fn wait_for_background_maintenance(&self) -> Result<()> {
         self.inner.background.drain().await

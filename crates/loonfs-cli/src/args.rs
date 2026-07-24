@@ -51,7 +51,7 @@ pub(crate) enum Command {
     Stat(FilesystemPathArgs),
     /// Print a file's content to stdout.
     Cat(FilesystemCatArgs),
-    /// Search file content through the gram index.
+    /// Search file content through the grep index.
     Grep(FilesystemGrepArgs),
     /// Download a file to a local path (or `-` for stdout).
     Get(FilesystemGetArgs),
@@ -73,7 +73,7 @@ pub(crate) enum Command {
     Cp(FilesystemTransferArgs),
     /// List committed changes after a sequence number.
     Changes(ChangesArgs),
-    /// Maintenance operations: checkpoints, ticks, retention, GC, indexes.
+    /// Maintenance operations: checkpoints, steps, retention, GC, indexes.
     Admin {
         #[command(subcommand)]
         command: AdminCommand,
@@ -535,8 +535,8 @@ pub(crate) enum AdminCommand {
     Flush(AdminNamespaceArgs),
     /// Advance the retention floor to reclaim old history.
     RetentionAdvance(AdminNamespaceArgs),
-    /// Run one core maintenance tick (WAL flush and metadata folds).
-    Tick(AdminTickArgs),
+    /// Run one core maintenance step (WAL flush and metadata folds).
+    Step(AdminStepArgs),
     /// Run a mark-and-sweep garbage-collection pass.
     Gc(AdminGcArgs),
     /// Repair one incomplete namespace installation explicitly.
@@ -575,14 +575,14 @@ pub(crate) struct AdminCheckpointReleaseArgs {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct AdminTickArgs {
+pub(crate) struct AdminStepArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
     /// Flush the visible WAL tail into metadata tables when it reaches this many
     /// segments (server default when omitted).
     #[arg(long)]
     pub max_wal_tail_segments: Option<u64>,
-    /// Run a garbage-collection pass after the tick's flush work.
+    /// Run a garbage-collection pass after the step's flush work.
     #[arg(long)]
     pub gc: bool,
 }
@@ -662,7 +662,7 @@ pub(crate) enum CommandKind {
     AdminCheckpointRelease,
     AdminFlush,
     AdminRetentionAdvance,
-    AdminTick,
+    AdminStep,
     AdminGc,
     AdminRepair,
     AdminIndexEnable,
@@ -705,7 +705,7 @@ impl CommandKind {
             CommandKind::AdminCheckpointRelease => "admin_checkpoint_release",
             CommandKind::AdminFlush => "admin_flush",
             CommandKind::AdminRetentionAdvance => "admin_retention_advance",
-            CommandKind::AdminTick => "admin_tick",
+            CommandKind::AdminStep => "admin_step",
             CommandKind::AdminGc => "admin_gc",
             CommandKind::AdminRepair => "admin_repair",
             CommandKind::AdminIndexEnable => "admin_index_enable",
@@ -759,7 +759,7 @@ impl Cli {
                 AdminCommand::CheckpointRelease(_) => CommandKind::AdminCheckpointRelease,
                 AdminCommand::Flush(_) => CommandKind::AdminFlush,
                 AdminCommand::RetentionAdvance(_) => CommandKind::AdminRetentionAdvance,
-                AdminCommand::Tick(_) => CommandKind::AdminTick,
+                AdminCommand::Step(_) => CommandKind::AdminStep,
                 AdminCommand::Gc(_) => CommandKind::AdminGc,
                 AdminCommand::Repair(_) => CommandKind::AdminRepair,
                 AdminCommand::IndexEnable(_) => CommandKind::AdminIndexEnable,

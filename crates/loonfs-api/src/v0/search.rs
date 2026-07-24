@@ -110,10 +110,10 @@ pub struct GrepResponse {
     pub next_cursor: Option<String>,
 }
 
-/// Result of enabling the gram index on a namespace (admin plane).
+/// Result of enabling the grep index on a namespace (admin plane).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct EnableGramsIndexResponse {
+pub struct EnableGrepIndexResponse {
     /// Namespace whose grep root was enabled.
     pub namespace_id: NamespaceId,
     /// Backfill covers commits at or below this sequence; later commits
@@ -123,17 +123,17 @@ pub struct EnableGramsIndexResponse {
     pub already_enabled: bool,
 }
 
-/// Result of disabling the gram index on a namespace (admin plane).
+/// Result of disabling the grep index on a namespace (admin plane).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct DisableGramsIndexResponse {
+pub struct DisableGrepIndexResponse {
     /// Namespace whose grep root was disabled.
     pub namespace_id: NamespaceId,
     /// False when the namespace had no enabled grep root.
     pub was_enabled: bool,
 }
 
-/// Result of one explicit gram-index garbage-collection pass (admin plane).
+/// Result of one explicit grep-index garbage-collection pass (admin plane).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct GrepGcResponse {

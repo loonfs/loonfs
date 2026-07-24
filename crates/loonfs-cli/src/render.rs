@@ -3,7 +3,7 @@
 use crate::args::CommandKind;
 use crate::commands::{CommandData, CommandFailure, CommandOutput};
 use crate::error::CliError;
-use loonfs_api::{FlushWalOutcome, GcResponse, MaintenanceTickOutcome, RepairNamespaceOutcome};
+use loonfs_api::{FlushWalOutcome, GcResponse, MaintenanceStepOutcome, RepairNamespaceOutcome};
 use serde::Serialize;
 use std::io::{self, Write};
 
@@ -218,30 +218,30 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             "advanced retention floor for {} to seq {}; changes before this floor are no longer replayable",
             response.namespace_id, response.retention_floor_seq.0
         ),
-        CommandData::MaintenanceTicked(response) => {
+        CommandData::MaintenanceStepped(response) => {
             let outcome = match &response.outcome {
-                MaintenanceTickOutcome::NotNeeded => format!(
+                MaintenanceStepOutcome::NotNeeded => format!(
                     "not needed (wal tail {} segments)",
                     response.status_before.wal_tail_segments
                 ),
-                MaintenanceTickOutcome::WalFlushed { manifest_head_seq } => {
+                MaintenanceStepOutcome::WalFlushed { manifest_head_seq } => {
                     format!("wal flushed @ seq {}", manifest_head_seq.0)
                 }
-                MaintenanceTickOutcome::WalFlushSuperseded {
+                MaintenanceStepOutcome::WalFlushSuperseded {
                     attempted_seq,
                     current_manifest_id,
                 } => format!(
                     "wal flush @ seq {} superseded (current manifest {})",
                     attempted_seq.0, current_manifest_id
                 ),
-                MaintenanceTickOutcome::WalFlushRaceLost { observed_head_seq } => {
+                MaintenanceStepOutcome::WalFlushRaceLost { observed_head_seq } => {
                     format!(
                         "wal flush race lost (head moved past seq {})",
                         observed_head_seq.0
                     )
                 }
             };
-            let mut line = format!("maintenance tick for {}: {outcome}", response.namespace_id);
+            let mut line = format!("maintenance step for {}: {outcome}", response.namespace_id);
             if let Some(gc) = &response.gc {
                 line.push_str(&format!("; {}", gc_summary(gc)));
             }
@@ -292,25 +292,25 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             })
             .collect::<Vec<_>>()
             .join("\n"),
-        CommandData::GramsIndexEnabled(response) => {
+        CommandData::GrepIndexEnabled(response) => {
             if response.already_enabled {
                 format!(
-                    "gram index already enabled on {} (built through seq {}); grep worker \
+                    "grep index already enabled on {} (built through seq {}); grep worker \
                      maintenance continues independently",
                     response.namespace_id, response.built_through_seq.0
                 )
             } else {
                 format!(
-                    "gram index enabled on {}; grep worker backfill targets seq <= {}",
+                    "grep index enabled on {}; grep worker backfill targets seq <= {}",
                     response.namespace_id, response.built_through_seq.0
                 )
             }
         }
-        CommandData::GramsIndexDisabled(response) => {
+        CommandData::GrepIndexDisabled(response) => {
             if response.was_enabled {
-                format!("gram index disabled on {}", response.namespace_id)
+                format!("grep index disabled on {}", response.namespace_id)
             } else {
-                format!("gram index was not enabled on {}", response.namespace_id)
+                format!("grep index was not enabled on {}", response.namespace_id)
             }
         }
         CommandData::GrepMatches {

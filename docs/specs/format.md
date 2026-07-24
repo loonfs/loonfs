@@ -1422,7 +1422,7 @@ Maintenance keeps read cost bounded, retention safe, and durable state clean.
 Maintenance **effects** are normative format semantics; maintenance
 **scheduling and triggering** are not. Two behaviors keep an un-administered
 deployment's read costs bounded regardless of scheduling: the reference
-implementation schedules a background maintenance tick after any runtime
+implementation schedules a background maintenance step after any runtime
 publish that observes the WAL tail at or past the WAL-tail policy's
 checkpoint threshold (32 segments at defaults), and every publish surface
 rejects with `maintenance_required` once the tail exceeds the same policy's
@@ -1505,7 +1505,7 @@ eventually reclaims content or metadata that is no longer reachable and no
 longer protected by retention policy. GC, floor advancement, and explicit
 namespace repair are the only consumers of listing, and nothing sweeps by
 default: a pass runs only through the admin endpoint or an explicit
-maintenance-tick opt-in.
+maintenance-step opt-in.
 
 v1 GC is listing mark-and-sweep. Its inputs are `wal/head.json`,
 `wal/floor.json`, `metadata/root.json`, and the `metadata/manifests/`,

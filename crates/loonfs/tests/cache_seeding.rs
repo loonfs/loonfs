@@ -38,7 +38,7 @@ fn runtime_cache_reuses_wal_tail_projection_for_repeated_reads() {
     .expect("put file");
 
     raw_store.reset_wal_get_count();
-    fs.read_file_bytes_blocking(&namespace_id, "/docs/file.txt")
+    fs.get_file_bytes_blocking(&namespace_id, "/docs/file.txt")
         .expect("first read is served from the projection the put seeded");
     assert_eq!(raw_store.wal_get_count(), 0);
     let after_first = fs.runtime_cache_stats();
@@ -47,7 +47,7 @@ fn runtime_cache_reuses_wal_tail_projection_for_repeated_reads() {
     assert!(after_first.wal_tail_projection_cache_hits >= 1);
 
     raw_store.reset_wal_get_count();
-    fs.read_file_bytes_blocking(&namespace_id, "/docs/file.txt")
+    fs.get_file_bytes_blocking(&namespace_id, "/docs/file.txt")
         .expect("second read should reuse cached WAL-tail projection");
     assert_eq!(raw_store.wal_get_count(), 0);
     let after_second = fs.runtime_cache_stats();
@@ -63,7 +63,7 @@ fn runtime_cache_reuses_wal_tail_projection_for_repeated_reads() {
     )
     .expect("put other");
     raw_store.reset_wal_get_count();
-    fs.read_file_bytes_blocking(&namespace_id, "/docs/file.txt")
+    fs.get_file_bytes_blocking(&namespace_id, "/docs/file.txt")
         .expect("read after local mutation reuses the newly seeded projection");
     assert_eq!(
         raw_store.wal_get_count(),
@@ -217,9 +217,9 @@ fn runtime_cache_can_be_disabled() {
     .expect("put file");
 
     raw_store.reset_wal_get_count();
-    fs.read_file_bytes_blocking(&namespace_id, "/docs/file.txt")
+    fs.get_file_bytes_blocking(&namespace_id, "/docs/file.txt")
         .expect("first read should project WAL tail");
-    fs.read_file_bytes_blocking(&namespace_id, "/docs/file.txt")
+    fs.get_file_bytes_blocking(&namespace_id, "/docs/file.txt")
         .expect("second read should project WAL tail again");
     assert_eq!(raw_store.wal_get_count(), 2);
     let stats = fs.runtime_cache_stats();
@@ -255,15 +255,15 @@ fn runtime_wal_tail_projection_cache_evicts_by_namespace_count() {
         })
     });
 
-    fs.read_file_bytes_blocking(&first, "/file.txt")
+    fs.get_file_bytes_blocking(&first, "/file.txt")
         .expect("cache first tail projection");
-    fs.read_file_bytes_blocking(&second, "/file.txt")
+    fs.get_file_bytes_blocking(&second, "/file.txt")
         .expect("cache second tail projection and evict first");
     let after_second = fs.runtime_cache_stats();
     assert_eq!(after_second.wal_tail_projection_cache_evictions, 1);
     assert!(after_second.wal_tail_projection_cache_cached_rows > 0);
 
-    fs.read_file_bytes_blocking(&first, "/file.txt")
+    fs.get_file_bytes_blocking(&first, "/file.txt")
         .expect("first tail projection reloads after eviction");
     let after_reload = fs.runtime_cache_stats();
     assert_eq!(after_reload.wal_tail_projection_cache_misses, 3);
@@ -297,9 +297,9 @@ fn runtime_wal_tail_projection_cache_skips_oversized_projection() {
     .expect("put file");
 
     raw_store.reset_wal_get_count();
-    fs.read_file_bytes_blocking(&namespace_id, "/file.txt")
+    fs.get_file_bytes_blocking(&namespace_id, "/file.txt")
         .expect("first read projects oversized tail");
-    fs.read_file_bytes_blocking(&namespace_id, "/file.txt")
+    fs.get_file_bytes_blocking(&namespace_id, "/file.txt")
         .expect("second read projects oversized tail again");
     assert_eq!(raw_store.wal_get_count(), 2);
     let stats = fs.runtime_cache_stats();
@@ -645,7 +645,7 @@ fn separate_runtime_instances_share_object_store_state() {
         .expect("put file");
 
     let file = reader
-        .read_file_bytes_blocking(&namespace_id, "/docs/shared.txt")
+        .get_file_bytes_blocking(&namespace_id, "/docs/shared.txt")
         .expect("read shared file");
     assert_eq!(file.bytes, b"shared");
 }

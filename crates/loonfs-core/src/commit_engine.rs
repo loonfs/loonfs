@@ -194,8 +194,8 @@ impl NamespaceMutationCandidate {
 /// "Maintenance operations").
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WalTailPolicy {
-    /// Visible WAL-tail length, in segments, at which a maintenance tick
-    /// publishes a checkpoint. The tick fires at or past this length.
+    /// Visible WAL-tail length, in segments, at which a maintenance step
+    /// publishes a checkpoint. The step fires at or past this length.
     pub checkpoint_at_segments: u64,
     /// Visible WAL-tail length past which (strictly greater than) every
     /// publish surface rejects with `maintenance_required`.
@@ -217,7 +217,7 @@ impl Default for WalTailPolicy {
 }
 
 // The ordering invariant `0 < checkpoint < reject` holds by construction:
-// a tick must be able to relieve backpressure before writes stop.
+// a step must be able to relieve backpressure before writes stop.
 const _: () = assert!(
     0 < WalTailPolicy::DEFAULT.checkpoint_at_segments
         && WalTailPolicy::DEFAULT.checkpoint_at_segments

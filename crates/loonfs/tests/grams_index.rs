@@ -159,12 +159,12 @@ async fn grep_worker_builds_the_gram_index_once_enabled() {
     assert_eq!(grep.code(), ErrorCode::NotSupported);
 
     let enabled = admin
-        .enable_grams_index(&namespace_id)
+        .enable_grep_index(&namespace_id)
         .await
         .expect("enable");
     assert!(!enabled.already_enabled);
     let again = admin
-        .enable_grams_index(&namespace_id)
+        .enable_grep_index(&namespace_id)
         .await
         .expect("re-enable");
     assert!(again.already_enabled);
@@ -177,12 +177,12 @@ async fn grep_worker_builds_the_gram_index_once_enabled() {
     let response = reader
         .grep(&namespace_id, &request("needle"))
         .await
-        .expect("grep after ticks");
+        .expect("grep after steps");
     assert_eq!(response.matches.len(), 1);
     assert_eq!(response.matches[0].absolute_path, "/alpha.txt");
 
     // New commits are visible immediately through the exhaustive tail, and
-    // a later tick absorbs them into the index.
+    // a later step absorbs them into the index.
     writer
         .put_file_bytes(
             &namespace_id,
@@ -201,12 +201,12 @@ async fn grep_worker_builds_the_gram_index_once_enabled() {
     let response = reader
         .grep(&namespace_id, &request("needle"))
         .await
-        .expect("grep after catch-up tick");
+        .expect("grep after catch-up step");
     assert_eq!(response.matches.len(), 2);
     assert!(response.built_through_seq.0 > 0);
 
     let disabled = admin
-        .disable_grams_index(&namespace_id)
+        .disable_grep_index(&namespace_id)
         .await
         .expect("disable");
     assert!(disabled.was_enabled);
@@ -230,7 +230,7 @@ async fn a_publish_below_the_wal_threshold_does_not_schedule_grep_work() {
     let temp_dir = tempdir().expect("tempdir");
     let store: loonfs::SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
-    let namespace_id = NamespaceId::parse("grams-auto-tick").expect("namespace id");
+    let namespace_id = NamespaceId::parse("grams-auto-step").expect("namespace id");
 
     let writer = FsWriter::builder_with_store(store.clone())
         .writer_id("grams-auto-writer")
@@ -254,7 +254,7 @@ async fn a_publish_below_the_wal_threshold_does_not_schedule_grep_work() {
         .await
         .expect("create namespace");
     admin
-        .enable_grams_index(&namespace_id)
+        .enable_grep_index(&namespace_id)
         .await
         .expect("enable");
 
@@ -310,8 +310,8 @@ async fn a_publish_below_the_wal_threshold_does_not_schedule_grep_work() {
 /// A policy passed to the worker bounds each explicit build step: with
 /// `max_files_per_step: 3`, one step consumes
 /// exactly three of the five pending file commits — the watermark lands on
-/// the third put's committed seq — and the next tick consumes the rest.
-/// Under the default 256-file budget the first tick would have caught up
+/// the third put's committed seq — and the next step consumes the rest.
+/// Under the default 256-file budget the first step would have caught up
 /// to the head outright, so the intermediate watermark is exactly the
 /// configured budget observed in effect.
 #[tokio::test]
@@ -343,7 +343,7 @@ async fn a_worker_policy_bounds_each_build_step() {
         .await
         .expect("create namespace");
     admin
-        .enable_grams_index(&namespace_id)
+        .enable_grep_index(&namespace_id)
         .await
         .expect("enable");
     // Materialize the empty backfill so the steps below run pure WAL
@@ -376,7 +376,7 @@ async fn a_worker_policy_bounds_each_build_step() {
     let after_second = grams_built_through_seq(&store, &namespace_id).await;
     assert_eq!(
         after_second, put_seqs[4],
-        "the next tick must consume the remaining two commits"
+        "the next step must consume the remaining two commits"
     );
 
     writer.shutdown_background().await.expect("writer shutdown");
@@ -417,7 +417,7 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
         .await
         .expect("create namespace");
     admin
-        .enable_grams_index(&namespace_id)
+        .enable_grep_index(&namespace_id)
         .await
         .expect("enable");
     first_worker
@@ -666,7 +666,7 @@ async fn grep_answers_identically_across_tiered_folds() {
         .await
         .expect("create namespace");
     admin
-        .enable_grams_index(&namespace_id)
+        .enable_grep_index(&namespace_id)
         .await
         .expect("enable");
 
@@ -927,7 +927,7 @@ async fn repeated_grep_serves_posting_blocks_from_the_grep_cache() {
         .expect("write bravo");
 
     admin
-        .enable_grams_index(&namespace_id)
+        .enable_grep_index(&namespace_id)
         .await
         .expect("enable");
     for _ in 0..2 {
@@ -1024,7 +1024,7 @@ async fn a_failed_candidate_read_surfaces_in_traversal_order() {
     };
 
     admin
-        .enable_grams_index(&namespace_id)
+        .enable_grep_index(&namespace_id)
         .await
         .expect("enable");
     for _ in 0..2 {
@@ -1202,7 +1202,7 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
         .await
         .expect("write alpha");
     admin
-        .enable_grams_index(&namespace_id)
+        .enable_grep_index(&namespace_id)
         .await
         .expect("enable");
     for _ in 0..2 {
@@ -1240,7 +1240,7 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
         )
         .await
         .expect("write charlie");
-    // No tick after these writes: bravo and charlie stay in the unindexed
+    // No step after these writes: bravo and charlie stay in the unindexed
     // tail, where no gram filter screens candidates before verification.
 
     let gets_before_greps = raw_store.content_blob_get_keys().len();
@@ -1334,7 +1334,7 @@ async fn a_fold_does_not_reuse_grep_private_index_blocks() {
         .await
         .expect("create namespace");
     admin
-        .enable_grams_index(&namespace_id)
+        .enable_grep_index(&namespace_id)
         .await
         .expect("enable");
     drive_worker_step(&grep_worker, &namespace_id, GramIndexBuildPolicy::default()).await;
@@ -1386,7 +1386,7 @@ async fn a_fold_does_not_reuse_grep_private_index_blocks() {
     let warm_fold_gets = raw_store.index_segment_get_count() - before_warm_fold;
     assert!(
         warm_fold_gets > 0,
-        "the sixteenth round's fold must still read the delta its own tick wrote"
+        "the sixteenth round's fold must still read the delta its own step wrote"
     );
     assert_eq!(
         warm_fold_gets, cold_fold_gets,
@@ -1506,8 +1506,8 @@ impl ObjectStore for InFlightIndexGetProbeStore {
 /// per-segment cursor opens instead of paying one round trip per
 /// segment, and the fan-out must stay within the maintenance IO cap.
 ///
-/// Put-and-tick rounds accumulate delta runs until the threshold folds
-/// them; single-step ticks lag the puts and may batch two puts into one
+/// Put-and-step rounds accumulate delta runs until the threshold folds
+/// them; single-step steps lag the puts and may batch two puts into one
 /// run, so the rounds run until the fold's reads appear rather than to a
 /// fixed count. No query ever touches the namespace and build steps only
 /// write gram segments, so the fold's reads are the only gram-segment
@@ -1537,7 +1537,7 @@ async fn a_cold_fold_fans_out_its_segment_opens_within_the_io_cap() {
         .await
         .expect("create namespace");
     admin
-        .enable_grams_index(&namespace_id)
+        .enable_grep_index(&namespace_id)
         .await
         .expect("enable");
 

@@ -128,7 +128,7 @@ pub enum CoreError {
     #[error("the pattern requires no literal bytes and cannot use the index: {0}")]
     QueryUnindexable(String),
     #[error(
-        "the gram index trails the head by {behind_commits} commits, past the \
+        "the grep index trails the head by {behind_commits} commits, past the \
          exhaustive-scan budget; run maintenance or set allow_stale"
     )]
     IndexLagging { behind_commits: u64 },

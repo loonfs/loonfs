@@ -17,17 +17,17 @@ use loonfs_api::{
     v0::{
         BeginUploadRequest, BeginUploadResponse, ChangesResponse,
         CommitResponse as ApiCommitResponse, CommitSubmissionRequest, CompleteUploadRequest,
-        CompleteUploadResponse, DisableGramsIndexResponse, EnableGramsIndexResponse,
-        GrepGcResponse, ObjectTransferAccess, RepairNamespaceResponse, UploadContentResponse,
-        UploadMode, ValidatedContentToken,
+        CompleteUploadResponse, DisableGrepIndexResponse, EnableGrepIndexResponse, GrepGcResponse,
+        ObjectTransferAccess, RepairNamespaceResponse, UploadContentResponse, UploadMode,
+        ValidatedContentToken,
     },
     AbsolutePath, AdvanceRetentionResponse, AuthoritativePathEntry, CapabilityDocument, ChangeSeq,
     CheckpointId, CommitId, ContentRef, CreateCheckpointRequest, CreateCheckpointResponse,
     CreateNamespaceRequest, DeleteDirectoryBehavior, DeleteNamespaceResponse, DestinationBehavior,
     ErrorCode, FilesystemOperation, FilesystemOperationRequest, FlushWalResponse,
     ForkNamespaceRequest, GcRequest, GcResponse, GrepRequest, GrepResponse, InodeId,
-    ListFileRevisionsResponse, ListPathEntriesResponse, MaintenanceTickRequest,
-    MaintenanceTickResponse, NamespaceId, NamespaceStatusResponse, NamespaceSummary,
+    ListFileRevisionsResponse, ListPathEntriesResponse, MaintenanceStepRequest,
+    MaintenanceStepResponse, NamespaceId, NamespaceStatusResponse, NamespaceSummary,
     ReleaseCheckpointResponse, RestoreFileRevisionRequest, RevisionNo, UploadId,
 };
 use std::sync::{Arc, OnceLock};
@@ -165,7 +165,7 @@ impl Client {
         if let Some(document) = self.capabilities.get() {
             return Ok(document.clone());
         }
-        let url = format!("{}/v0/config", self.base_url);
+        let url = format!("{}/v0/capabilities", self.base_url);
         let mut document: CapabilityDocument =
             self.request_json::<(), _>(self.agent.get(&url), None)?;
         document.retain_well_formed();
@@ -308,7 +308,7 @@ impl Client {
         self.request_json::<(), AuthoritativePathEntry>(self.agent.get(&url), None)
     }
 
-    pub fn read_file_bytes(&self, spec: &NamespacePath) -> Result<Vec<u8>> {
+    pub fn get_file_bytes(&self, spec: &NamespacePath) -> Result<Vec<u8>> {
         let url = format!(
             "{}/v0/namespaces/{}/filesystem/content?path={}",
             self.base_url,
@@ -318,7 +318,7 @@ impl Client {
         self.request_bytes(&url)
     }
 
-    pub fn read_file_revision_bytes(
+    pub fn get_file_revision_bytes(
         &self,
         spec: &NamespacePath,
         revision_no: RevisionNo,
@@ -350,7 +350,7 @@ impl Client {
         self.request_json::<(), ListFileRevisionsResponse>(self.agent.get(&url), None)
     }
 
-    pub fn list_file_revisions_for_inode_page(
+    pub fn list_file_revisions_by_inode_page(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
@@ -366,7 +366,7 @@ impl Client {
         self.request_json::<(), ListFileRevisionsResponse>(self.agent.get(&url), None)
     }
 
-    pub fn read_file_revision_bytes_for_inode(
+    pub fn get_file_revision_bytes_by_inode(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
@@ -480,7 +480,7 @@ impl Client {
         self.request_json::<_, ApiCommitResponse>(self.agent.post(&url), Some(request))
     }
 
-    pub fn list_changes_after(
+    pub fn list_changes(
         &self,
         namespace_id: &NamespaceId,
         after_seq: ChangeSeq,
@@ -554,20 +554,20 @@ impl Client {
     /// Runs one bounded maintenance step against a namespace (admin plane).
     /// Absent request fields use the server's defaults; garbage collection
     /// runs only when the request opts in.
-    pub fn maintenance_tick(
+    pub fn maintenance_step(
         &self,
         namespace_id: &NamespaceId,
-        request: &MaintenanceTickRequest,
-    ) -> Result<MaintenanceTickResponse> {
+        request: &MaintenanceStepRequest,
+    ) -> Result<MaintenanceStepResponse> {
         let url = format!(
-            "{}/v0/admin/namespaces/{namespace_id}/maintenance/tick",
+            "{}/v0/admin/namespaces/{namespace_id}/maintenance/step",
             self.base_url
         );
         self.request_json(self.agent.post(&url), Some(request))
     }
 
     /// Runs one mark-and-sweep garbage-collection pass (admin plane).
-    /// Nothing sweeps without this explicit call or a maintenance-tick
+    /// Nothing sweeps without this explicit call or a maintenance-step
     /// opt-in.
     pub fn gc_namespace(
         &self,
@@ -589,7 +589,7 @@ impl Client {
         self.request_json_once::<(), RepairNamespaceResponse>(self.agent.post(&url), None)
     }
 
-    /// Content search over the namespace's gram index (query plane).
+    /// Content search over the namespace's grep index (query plane).
     /// Gate on the `query.grep` capability before calling against unknown
     /// deployments; the namespace must also have a materialized steady-state
     /// grep root or the server answers `not_supported`.
@@ -600,34 +600,31 @@ impl Client {
 
     /// Enables the namespace's grep root (admin plane); embedded mode starts
     /// that namespace's event-driven backfill. Idempotent.
-    pub fn enable_grams_index(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<EnableGramsIndexResponse> {
+    pub fn enable_grep_index(&self, namespace_id: &NamespaceId) -> Result<EnableGrepIndexResponse> {
         let url = format!(
-            "{}/v0/admin/namespaces/{namespace_id}/index/grams/enable",
+            "{}/v0/admin/namespaces/{namespace_id}/grep/index/enable",
             self.base_url
         );
-        self.request_json::<(), EnableGramsIndexResponse>(self.agent.post(&url), None)
+        self.request_json::<(), EnableGrepIndexResponse>(self.agent.post(&url), None)
     }
 
     /// Disables the namespace's grep root (admin plane); garbage collection
     /// reclaims the segments. Idempotent.
-    pub fn disable_grams_index(
+    pub fn disable_grep_index(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<DisableGramsIndexResponse> {
+    ) -> Result<DisableGrepIndexResponse> {
         let url = format!(
-            "{}/v0/admin/namespaces/{namespace_id}/index/grams/disable",
+            "{}/v0/admin/namespaces/{namespace_id}/grep/index/disable",
             self.base_url
         );
-        self.request_json::<(), DisableGramsIndexResponse>(self.agent.post(&url), None)
+        self.request_json::<(), DisableGrepIndexResponse>(self.agent.post(&url), None)
     }
 
-    /// Runs one explicit gram-index garbage-collection pass for a namespace.
-    pub fn gc_grams_index(&self, namespace_id: &NamespaceId) -> Result<GrepGcResponse> {
+    /// Runs one explicit grep-index garbage-collection pass for a namespace.
+    pub fn gc_grep_index(&self, namespace_id: &NamespaceId) -> Result<GrepGcResponse> {
         let url = format!(
-            "{}/v0/admin/namespaces/{namespace_id}/index/grams/gc",
+            "{}/v0/admin/namespaces/{namespace_id}/grep/index/gc",
             self.base_url
         );
         self.request_json::<(), GrepGcResponse>(self.agent.post(&url), None)
@@ -844,7 +841,7 @@ impl Client {
         Ok(response)
     }
 
-    pub fn restore_file_revision_for_inode(
+    pub fn restore_file_revision_by_inode(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
