@@ -272,7 +272,7 @@ async fn checkpoint_publication_preserves_writer_identity() {
 }
 
 #[tokio::test]
-async fn maintenance_does_not_make_orphan_wal_visible() {
+async fn maintenance_and_status_do_not_make_orphan_wal_visible() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -312,6 +312,13 @@ async fn maintenance_does_not_make_orphan_wal_visible() {
         .put_overwrite(&orphan_key, Bytes::from_static(b"not a wal envelope"))
         .await
         .expect("write orphan wal");
+    let status = load_namespace_head_summary(&store, &namespace_id)
+        .await
+        .expect("load namespace status");
+    // Status reports the documented visible-chain length, not race-loser
+    // objects that await garbage collection.
+    assert_eq!(status.wal_tail_segments, 1);
+
     advance_retention_floor(&store, &namespace_id, &context)
         .await
         .expect("advance retention");

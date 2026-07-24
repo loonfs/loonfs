@@ -11,12 +11,10 @@ use crate::namespace::catalog::{
 use crate::namespace::control::{
     read_head_and_metadata_root, read_wal_floor_seq_or_zero, ControlObjectLoadError,
 };
+use crate::wal::{load_validated_wal_chain, WalChainLoadRequest};
 use loonfs_api::wire::control::NamespaceState;
-use loonfs_api::{wal_segment_id_start_seq, ChangeSeq, ManifestId, NamespaceId};
-use loonfs_objectstore::{
-    keys::{namespace_config, wal_segment_id_from_key, wal_segment_prefix},
-    ObjectStore,
-};
+use loonfs_api::{ChangeSeq, ManifestId, NamespaceId};
+use loonfs_objectstore::{keys::namespace_config, ObjectStore};
 use serde::{Deserialize, Serialize};
 
 /// Lightweight namespace head status.
@@ -25,11 +23,7 @@ pub struct NamespaceHeadSummary {
     pub namespace_id: NamespaceId,
     pub head_seq: ChangeSeq,
     pub current_manifest_id: Option<ManifestId>,
-    /// WAL segment objects positioned past the loaded manifest.
-    ///
-    /// Derived from position-ordered object names, not from walking the
-    /// chain: an inspection count for maintenance gating and operators, not
-    /// a validated chain length.
+    /// Number of visible WAL segments after the current manifest.
     pub wal_tail_segments: u64,
     pub retention_floor_seq: ChangeSeq,
 }
@@ -75,12 +69,23 @@ pub async fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
             .map_err(|error| {
                 CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
             })?;
-    let manifest_head_seq = manifest.payload.head_seq;
-    let wal_tail_segments = if head.visible_wal_tip.is_some() {
-        count_wal_tail_segments_by_position(store, expected_namespace_id, manifest_head_seq).await?
-    } else {
-        0
-    };
+    let wal_chain = load_validated_wal_chain(
+        store,
+        WalChainLoadRequest {
+            namespace_id: expected_namespace_id,
+            chain_base_seq: manifest.payload.head_seq,
+            head_seq: head.seq,
+            visible_tip: head.visible_wal_tip.clone(),
+            stop_after_seq: None,
+            recent_segments: &head.recent_segments,
+        },
+    )
+    .await
+    .map_err(|error| {
+        CoreError::MetadataProjection(MetadataProjectionLoadError::WalChainLoad(error))
+    })?;
+    let wal_tail_segments = u64::try_from(wal_chain.segments().len())
+        .map_err(|_| CoreError::Internal("WAL tail segment count overflow".to_owned()))?;
     let retention_floor_seq = read_wal_floor_seq_or_zero(store, expected_namespace_id)
         .await
         .map_err(|error| {
@@ -93,32 +98,4 @@ pub async fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
         wal_tail_segments,
         retention_floor_seq,
     })
-}
-
-/// Counts WAL tail segments from their position-ordered object names.
-///
-/// Status is an inspection surface, so the count comes from one listing
-/// instead of loading and validating segment bodies: segment file names
-/// carry their `start_seq`, and every chain segment past the manifest starts
-/// above it. Objects that lost a head race are counted until reclamation
-/// removes them, which can only over-trigger maintenance, never starve it.
-/// Recovery authority stays with the head and chain.
-async fn count_wal_tail_segments_by_position<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    manifest_head_seq: ChangeSeq,
-) -> Result<u64> {
-    let wal_prefix = wal_segment_prefix(namespace_id.as_str());
-    let keys = store
-        .list_prefix(&wal_prefix)
-        .await
-        .map_err(|error| CoreError::store(&wal_prefix, &error))?;
-    let tail_segments = keys
-        .iter()
-        .filter_map(|key| wal_segment_id_from_key(key))
-        .filter_map(wal_segment_id_start_seq)
-        .filter(|start_seq| *start_seq > manifest_head_seq)
-        .count();
-    u64::try_from(tail_segments)
-        .map_err(|_| CoreError::Internal("WAL tail segment count overflow".to_owned()))
 }
