@@ -412,7 +412,7 @@ pub struct FlushWalResponse {
 
 /// Optional overrides for one garbage-collection pass. Absent fields use
 /// the server's conservative defaults.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct GcRequest {
     /// Objects younger than this are never deleted, reachable or not. The
@@ -424,6 +424,14 @@ pub struct GcRequest {
     /// reaped or released. Must be at least the grace window.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reap_window_ms: Option<u64>,
+    /// Maximum candidates examined by this invocation. Omit to retain the
+    /// run-to-completion behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_objects: Option<u64>,
+    /// Opaque resume token returned as `next_cursor` by an earlier pass
+    /// against the same namespace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
 }
 
 /// Result of one mark-and-sweep garbage-collection pass.
@@ -458,6 +466,11 @@ pub struct GcResponse {
     /// True when the namespace lacks a complete head-and-descriptor pair, so
     /// the pass deliberately performed no listing or deletion.
     pub incomplete_namespace_ignored: bool,
+    /// Opaque resume token when more candidates remain. Resuming rebuilds
+    /// every safety proof; the token carries enumeration position only and
+    /// is valid only against the same namespace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
 }
 
 /// Result of advancing the retention floor.
@@ -472,7 +485,7 @@ pub struct AdvanceRetentionResponse {
 
 /// Options for one explicit maintenance step. Absent fields use the
 /// server's defaults; garbage collection runs only when `gc` is present.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct MaintenanceStepRequest {
     /// Flush the visible WAL tail into metadata tables when it reaches this

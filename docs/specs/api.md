@@ -429,8 +429,8 @@ A representative v0 binding is shown below.
 | Release a checkpoint | `POST /v0/admin/namespaces/{ns}/checkpoints/{checkpoint_id}/release` (idempotent; fork-owned records are rejected) |
 | Flush the WAL tail | `POST /v0/admin/namespaces/{ns}/wal/flush` (folds the visible WAL tail into metadata tables and advances the metadata root; creates no checkpoint record) |
 | Advance the retention floor | `POST /v0/admin/namespaces/{ns}/retention/advance` |
-| Run a maintenance step | `POST /v0/admin/namespaces/{ns}/maintenance/step` (optional body overrides `max_wal_tail_segments` and opts into `gc`; an override above the write-rejection threshold is rejected as `invalid_request`; flush races surface as outcomes, not errors) |
-| Collect garbage | `POST /v0/admin/namespaces/{ns}/gc` (optional body overrides `grace_window_ms`/`reap_window_ms`; a grace window below the derived safety floor is rejected as `invalid_request`; nothing sweeps without an explicit call) |
+| Run a maintenance step | `POST /v0/admin/namespaces/{ns}/maintenance/step` (optional body overrides `max_wal_tail_segments` and opts into `gc`; step-driven GC defaults `max_objects` to 1024 and returns any `next_cursor` for a later step rather than looping internally; an override above the write-rejection threshold is rejected as `invalid_request`; flush races surface as outcomes, not errors) |
+| Collect garbage | `POST /v0/admin/namespaces/{ns}/gc` (optional body overrides `grace_window_ms`/`reap_window_ms`, bounds one invocation with `max_objects`, and resumes with `cursor`; a grace window below the derived safety floor or a zero budget is rejected as `invalid_request`; absent `max_objects` preserves run-to-completion behavior; nothing sweeps without an explicit call) |
 | Repair an incomplete namespace | `POST /v0/admin/namespaces/{ns}/repair` (no body or options; reports `already_complete`, `completed`, `reaped`, or `in_flight`; an absent namespace reports `namespace_not_found`) |
 | Content search | `POST /v0/namespaces/{ns}/query/grep` (feature `query.grep`; requires a materialized steady-state grep root) |
 | Enable the grep index | `POST /v0/admin/namespaces/{ns}/grep/index/enable` (CAS-publishes the independent grep root into checkpointed backfill; embedded mode starts that namespace's event-driven driver; idempotent) |
@@ -440,6 +440,16 @@ A representative v0 binding is shown below.
 Routes under `/v0/admin/` belong to the `admin/v0` profile and routes under
 `/v0/namespaces/{ns}/query/` to `query/v0`; everything else shown belongs to
 `core/v0`.
+
+GC responses carry `next_cursor` only when more candidate enumeration remains.
+The token is opaque, tolerant of additive fields when decoded, and valid only
+against the namespace that issued it. It encodes the last examined key and
+object family, not a live set or retention proof: every resumed invocation
+reloads the current roots, WAL floor, and checkpoint protections before any
+deletion. If the namespace advances or keys disappear between calls, a stale
+cursor may re-examine work or defer a newly inserted key that sorts before its
+position until the next full pass; it can never make a newly live object
+deletable.
 
 Namespace repair is deterministic and takes no request body. Its response is
 `{"namespace_id":"...","outcome":"..."}`: `already_complete` is a no-op,

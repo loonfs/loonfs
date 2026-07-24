@@ -233,14 +233,33 @@ async fn http_admin_gc_is_explicit_and_retains_young_namespaces() {
             .expect("write file");
         post_checkpoint(&server_url, namespace.as_str()).expect("checkpoint");
 
+        // A bounded pass returns an opaque cursor, and the route accepts it
+        // on the next invocation without carrying any safety state.
+        let bounded: loonfs_api::GcResponse = post_admin_json_body(
+            &format!("{server_url}/v0/admin/namespaces/{namespace}/gc"),
+            "test-token",
+            serde_json::json!({ "max_objects": 1 }),
+        )
+        .expect("bounded gc pass");
+        let cursor = bounded.next_cursor.expect("more candidate families remain");
+        let resumed: loonfs_api::GcResponse = post_admin_json_body(
+            &format!("{server_url}/v0/admin/namespaces/{namespace}/gc"),
+            "test-token",
+            serde_json::json!({ "max_objects": 1, "cursor": cursor }),
+        )
+        .expect("resumed gc pass");
+        assert!(resumed.next_cursor.is_some());
+
         // A freshly written namespace sits entirely inside the grace
-        // window: the pass runs, deletes nothing, and reads keep working.
+        // window: the unbounded pass completes, deletes nothing, and reads
+        // keep working.
         let report = post_gc(&server_url, namespace.as_str()).expect("gc pass");
         assert_eq!(report.deleted_wal_segments, 0);
         assert_eq!(report.deleted_metadata_tables, 0);
         assert_eq!(report.deleted_manifests, 0);
         assert_eq!(report.deleted_checkpoint_records, 0);
         assert!(!report.degraded_retention);
+        assert!(report.next_cursor.is_none());
 
         let bytes = client.get_file_bytes(&target).expect("read file");
         assert_eq!(bytes, b"hello gc\n");

@@ -28,6 +28,9 @@ fn gc_summary(report: &GcResponse) -> String {
     if report.degraded_retention {
         summary.push_str("; retention degraded: ambiguous roots suppressed deletion");
     }
+    if let Some(cursor) = &report.next_cursor {
+        summary.push_str(&format!("; next_cursor: {cursor}"));
+    }
     summary
 }
 

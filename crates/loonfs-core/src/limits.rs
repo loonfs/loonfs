@@ -69,6 +69,9 @@ pub const METADATA_PUBLICATION_BUDGET_MS: u64 = 15 * 60 * 1000;
 /// plus scheduling slop around the budget checks.
 pub const GC_SAFETY_MARGIN_MS: u64 = 3 * 60 * 1000;
 
+/// Default candidate budget for one step-driven garbage-collection pass.
+pub const DEFAULT_GC_MAX_OBJECTS: u64 = 1024;
+
 const fn max_u64(left: u64, right: u64) -> u64 {
     if left > right {
         left

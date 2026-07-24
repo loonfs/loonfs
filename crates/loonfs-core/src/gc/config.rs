@@ -8,10 +8,22 @@ use serde::{Deserialize, Serialize};
 /// Both are wall-clock cleanup policy, never validity inputs. The defaults
 /// are conservative: every object gets one hour of unconditional protection,
 /// while old upload sessions and abandoned fork records wait seven days.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GcConfig {
     pub grace_window_ms: u64,
     pub reap_window_ms: u64,
+    /// Maximum sweep candidates examined by this invocation. `None` keeps
+    /// the run-to-completion behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_objects: Option<u64>,
+    /// Opaque enumeration cursor returned by an earlier invocation.
+    ///
+    /// The cursor is valid only for the same namespace. Resuming always
+    /// rebuilds the live roots and safety floors; a stale cursor can only
+    /// re-examine work or defer keys that moved before it until the next
+    /// full pass, never authorize deletion of a newly live object.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
 }
 
 impl Default for GcConfig {
@@ -19,6 +31,8 @@ impl Default for GcConfig {
         Self {
             grace_window_ms: 60 * 60 * 1000,
             reap_window_ms: 7 * 24 * 60 * 60 * 1000,
+            max_objects: None,
+            cursor: None,
         }
     }
 }
@@ -40,11 +54,16 @@ impl GcConfig {
                 "reap_window_ms must be at least the grace window".to_owned(),
             ));
         }
+        if self.max_objects == Some(0) {
+            return Err(CoreError::InvalidGcConfig(
+                "max_objects must be greater than zero".to_owned(),
+            ));
+        }
         Ok(())
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GcReport {
     pub deleted_wal_segments: u64,
     pub deleted_metadata_tables: u64,
@@ -72,4 +91,11 @@ pub struct GcReport {
     /// The namespace lacked a complete head-and-descriptor pair, so GC
     /// deliberately skipped it without listing or deleting any objects.
     pub incomplete_namespace_ignored: bool,
+    /// Opaque resume token when more sweep candidates remain.
+    ///
+    /// Callers must return it only to the same namespace. It resumes
+    /// enumeration, not safety state: every invocation rebuilds roots and
+    /// floors before deciding a deletion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
 }

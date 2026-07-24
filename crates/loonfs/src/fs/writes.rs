@@ -645,7 +645,7 @@ impl FsCore {
             loop {
                 if let Err(error) = claim
                     .fs
-                    .run_auto_maintenance(&claim.namespace_id, options)
+                    .run_auto_maintenance(&claim.namespace_id, options.clone())
                     .await
                 {
                     tracing::info!(
