@@ -16,7 +16,8 @@ a deployment exposes.
 Encoding conventions used by every durable and wire shape in this specification:
 field names and enum values are `snake_case`; fields holding typed identifiers
 are suffixed `_id`; tagged unions carry their discriminator in a `kind` field;
-decoders tolerate unknown fields (readers ignore what they do not understand).
+HTTP wire shapes and immutable, never-rewritten families tolerate unknown
+fields, while mutable control-object envelopes and payloads reject them.
 
 ## 1. Object store contract
 
@@ -247,6 +248,14 @@ Small mutable objects such as the namespace head must use compare-and-swap
 semantics. These objects must remain small enough that guarded rewrite is
 practical.
 
+Mutable control-object decoders reject unknown fields in both the envelope and
+the complete nested payload. Otherwise, an older binary could tolerate a
+newer field, erase it during read-modify-write, and still report a successful
+guarded update. Namespace configuration and content-store descriptors use the
+same strict control-object decoder; immutable WAL segments, metadata segments,
+namespace manifests, grep segments, and grep manifests remain tolerant of
+additive fields.
+
 Readers of small mutable control objects must use a full-object read that
 returns bytes and the object identity metadata for those same bytes. This does
 not by itself guarantee freshness; it guarantees self-consistency. A reader
@@ -444,6 +453,11 @@ character rules with a 768-byte cap: case folding expands at most threefold
 in bytes, so every key derivable from a valid display name is admissible.
 Requests carrying a name or key outside this grammar fail validation; nothing
 is truncated or normalized on the caller's behalf.
+
+An absolute path has one canonical spelling: exactly one leading `/`, no empty
+components or repeated separators, and no trailing `/` except for the root
+path `/`. Wire decoders reject every noncanonical spelling rather than
+normalizing it.
 
 #### 2.3.1 NamePolicy
 
@@ -972,8 +986,8 @@ retry of the same
 logical commit must fingerprint identically no matter who retries it or when.
 
 Path-level mutations fingerprint the same way with domain
-`loonfs.path.intent.semantic.v0` over the normalized path intent (intent kind,
-normalized absolute paths, and the intent's semantic parameters).
+`loonfs.path.intent.semantic.v0` over the canonical path intent (intent kind,
+canonical absolute paths, and the intent's semantic parameters).
 
 The idempotency horizon is the retention floor. Commit receipts below the
 floor are dropped when metadata runs are rebuilt, so a commit retried from
@@ -1321,7 +1335,9 @@ grep state: `namespace_id`, `lifecycle`, nested `index` bookkeeping, and the
 `segments` descriptors. Both decoders verify the checksum over the exact
 stored payload fragment before decoding, reject unknown versions and kind
 mismatches without fallback, and validate namespace, manifest-id, lifecycle,
-fold, run-allocation, and segment invariants at every boundary.
+fold, run-allocation, and segment invariants at every boundary. The mutable
+root-pointer decoder rejects unknown envelope and payload fields; the
+immutable manifest decoder tolerates additive fields.
 
 A gram-index segment uses the section 4.2.1 block grammar unchanged —
 prefix-compressed data blocks, one bloom filter block, one index block,

@@ -2,8 +2,8 @@
 //! and grep.
 
 use super::context::{
-    default_remote_put_path, destination_path_for_get, fail, namespace_path,
-    normalize_absolute_path, render_target, resolve_command_context,
+    default_remote_put_path, destination_path_for_get, fail, namespace_path, normalize_user_path,
+    render_target, resolve_command_context,
 };
 use super::output::{CommandData, CommandFailure, CommandOutput};
 use crate::args::{
@@ -117,7 +117,7 @@ pub(crate) async fn run_filesystem_grep(
     let path_prefix = args
         .path_prefix
         .as_deref()
-        .map(|path| normalize_absolute_path(path, true))
+        .map(|path| normalize_user_path(path, true))
         .transpose()
         .map_err(|error| context.fail(kind, error))?;
     let mut request = loonfs_api::GrepRequest {
@@ -336,7 +336,7 @@ pub(crate) async fn run_filesystem_put(
     }
 
     let remote_path = match args.remote_path {
-        Some(path) => normalize_absolute_path(&path, false),
+        Some(path) => normalize_user_path(&path, false),
         None => default_remote_put_path(&local_path),
     }
     .map_err(|error| context.fail(kind, error))?;

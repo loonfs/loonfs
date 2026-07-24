@@ -91,19 +91,27 @@ pub(crate) fn namespace_path(
 ) -> Result<NamespacePath, CliError> {
     Ok(NamespacePath::new(
         namespace_id.clone(),
-        normalize_absolute_path(path, allow_root)?,
+        normalize_user_path(path, allow_root)?,
     ))
 }
 
-/// Parses a CLI path argument through the API's absolute-path grammar, so
-/// the CLI rejects exactly what the server would. `allow_root` is the only
-/// CLI-local policy on top.
-pub(crate) fn normalize_absolute_path(
-    path: &str,
-    allow_root: bool,
-) -> Result<AbsolutePath, CliError> {
-    let path =
-        AbsolutePath::parse(path).map_err(|error| CliError::invalid_input(error.to_string()))?;
+/// Normalizes human-entered CLI path arguments before the strict API parser.
+pub(crate) fn normalize_user_path(path: &str, allow_root: bool) -> Result<AbsolutePath, CliError> {
+    if path.is_empty() || !path.starts_with('/') {
+        return AbsolutePath::parse(path)
+            .map_err(|error| CliError::invalid_input(error.to_string()));
+    }
+    let components = path
+        .split('/')
+        .filter(|component| !component.is_empty())
+        .collect::<Vec<_>>();
+    let normalized = if components.is_empty() {
+        "/".to_owned()
+    } else {
+        format!("/{}", components.join("/"))
+    };
+    let path = AbsolutePath::parse(normalized)
+        .map_err(|error| CliError::invalid_input(error.to_string()))?;
     if !allow_root && path.is_root() {
         return Err(CliError::invalid_input(
             "root path is not allowed for this command",
@@ -155,5 +163,28 @@ pub(crate) fn fail(
         profile,
         mode,
         error: Box::new(error.into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_user_path;
+
+    #[test]
+    fn user_paths_are_normalized_only_at_the_cli_boundary() {
+        assert_eq!(
+            normalize_user_path("//docs///A.txt/", false)
+                .expect("human path")
+                .as_str(),
+            "/docs/A.txt"
+        );
+        assert_eq!(
+            normalize_user_path("///", true)
+                .expect("human root")
+                .as_str(),
+            "/"
+        );
+        assert!(normalize_user_path("docs/A.txt", false).is_err());
+        assert!(normalize_user_path("", false).is_err());
     }
 }

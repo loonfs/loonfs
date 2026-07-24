@@ -6,8 +6,8 @@ use loonfs_api::wire::sst_blocks::BlockHandle;
 use loonfs_api::{ChangeSeq, CheckpointId, IndexSegmentId};
 use loonfs_grep::root::{
     decode_grep_manifest, decode_grep_root, encode_grep_manifest, encode_grep_root, GrepFoldState,
-    GrepIndexState, GrepLifecycle, GrepManifestEnvelope, GrepManifestId, GrepRootCodecError,
-    GrepRootEnvelope, GrepRootPointer, GrepRootState, GrepRootStateError, GrepSegmentRef,
+    GrepIndexState, GrepLifecycle, GrepManifestEnvelope, GrepRootCodecError, GrepRootEnvelope,
+    GrepRootPointer, GrepRootState, GrepRootStateError, GrepSegmentRef,
 };
 use loonfs_test_support::ids::namespace_id;
 
@@ -57,23 +57,42 @@ fn encoded_manifests_and_pointers_match_frozen_v1_bytes() {
 }
 
 #[test]
-fn decoders_read_frozen_v1_bytes_with_additive_fields() {
+fn immutable_manifest_decoder_reads_frozen_v1_bytes_with_additive_fields() {
     let decoded =
         decode_grep_manifest(ADDITIVE_V1.as_bytes()).expect("decode additive manifest fixture");
 
     assert_eq!(decoded.state(), &sample_steady_root(ChangeSeq(11), 0));
-    let pointer =
-        decode_grep_root(ADDITIVE_POINTER_V1.as_bytes()).expect("decode additive pointer fixture");
-    assert_eq!(
-        pointer.pointer(),
-        &GrepRootPointer::new(
-            namespace_id("docs"),
-            GrepManifestId::parse(
-                "9b347bb59f8d589465bddb1104e57be2d6a3babfe8b54d0fc8721b91f1a8b6ad"
-            )
-            .expect("valid manifest id")
-        )
+}
+
+#[test]
+fn mutable_pointer_payload_rejects_unknown_fields_as_corruption() {
+    let mut document: serde_json::Value =
+        serde_json::from_str(STEADY_POINTER_V1).expect("decode pointer fixture");
+    document["payload"]["field_from_the_future"] = serde_json::Value::from(true);
+    let payload = serde_json::to_string(&document["payload"]).expect("encode edited payload");
+    document["payload_checksum"] =
+        serde_json::Value::from(loonfs_api::sha256_digest(payload.as_bytes()));
+    let edited = format!(
+        "{{\"kind\":{},\"format_version\":{},\"writer_version\":{},\"payload_checksum\":{},\"payload\":{}}}",
+        document["kind"],
+        document["format_version"],
+        document["writer_version"],
+        document["payload_checksum"],
+        payload,
     );
+
+    assert!(matches!(
+        decode_grep_root(edited.as_bytes()),
+        Err(GrepRootCodecError::PayloadDecode { .. })
+    ));
+}
+
+#[test]
+fn mutable_pointer_envelope_rejects_unknown_fields_as_corruption() {
+    assert!(matches!(
+        decode_grep_root(ADDITIVE_POINTER_V1.as_bytes()),
+        Err(GrepRootCodecError::EnvelopeDecode { .. })
+    ));
 }
 
 #[test]

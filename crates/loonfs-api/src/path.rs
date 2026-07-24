@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use thiserror::Error;
 
-/// Normalized absolute path plus its parsed components.
+/// Canonical absolute path plus its parsed components.
 ///
 /// Richer than the string-id newtypes (it carries segments), so it exposes
 /// only `Display`/`AsRef<str>` on top of its structural accessors instead of
@@ -100,10 +100,11 @@ pub enum PathError {
 }
 
 impl AbsolutePath {
-    /// Parses and normalizes an absolute path while preserving each component's display spelling.
+    /// Parses a canonical absolute path while preserving each component's display spelling.
     ///
-    /// Empty and relative paths, explicit `.` or `..` components, and components
-    /// outside the [`DisplayName`] grammar are rejected.
+    /// Empty and relative paths, repeated or trailing separators, explicit `.`
+    /// or `..` components, and components outside the [`DisplayName`] grammar
+    /// are rejected.
     pub fn parse(value: impl AsRef<str>) -> Result<Self, PathError> {
         let value = value.as_ref();
         if value.is_empty() {
@@ -114,11 +115,14 @@ impl AbsolutePath {
                 path: value.to_owned(),
             });
         }
+        if value == "/" {
+            return Ok(Self::root());
+        }
 
         let mut components = Vec::new();
-        for component in value.split('/') {
+        for component in value[1..].split('/') {
             if component.is_empty() {
-                continue;
+                return Err(PathError::EmptyDisplayName);
             }
             if component == "." {
                 return Err(PathError::DotComponent {
@@ -148,7 +152,7 @@ impl AbsolutePath {
         }
     }
 
-    /// Returns the normalized absolute spelling, with `/` as the sole root representation.
+    /// Returns the canonical absolute spelling, with `/` as the sole root representation.
     pub fn as_str(&self) -> &str {
         &self.normalized
     }
@@ -375,12 +379,7 @@ mod tests {
     }
 
     #[test]
-    fn absolute_path_rejects_relative_empty_dot_and_dotdot() {
-        assert_eq!(AbsolutePath::parse(""), Err(PathError::EmptyPath));
-        assert!(matches!(
-            AbsolutePath::parse("docs"),
-            Err(PathError::RelativePath { .. })
-        ));
+    fn absolute_path_rejects_dot_and_dotdot_components() {
         assert!(matches!(
             AbsolutePath::parse("/docs/./a.txt"),
             Err(PathError::DotComponent { .. })
@@ -392,17 +391,18 @@ mod tests {
     }
 
     #[test]
-    fn absolute_path_normalizes_repeated_and_trailing_separators() {
-        let path = AbsolutePath::parse("//docs///A.txt/").expect("path should parse");
-
-        assert_eq!(path.as_str(), "/docs/A.txt");
+    fn absolute_path_rejects_noncanonical_spellings() {
+        assert_eq!(AbsolutePath::parse("//a"), Err(PathError::EmptyDisplayName));
         assert_eq!(
-            path.components()
-                .iter()
-                .map(|component| component.as_str())
-                .collect::<Vec<_>>(),
-            vec!["docs", "A.txt"]
+            AbsolutePath::parse("/a//b"),
+            Err(PathError::EmptyDisplayName)
         );
+        assert_eq!(AbsolutePath::parse("/a/"), Err(PathError::EmptyDisplayName));
+        assert!(matches!(
+            AbsolutePath::parse("a"),
+            Err(PathError::RelativePath { .. })
+        ));
+        assert_eq!(AbsolutePath::parse(""), Err(PathError::EmptyPath));
     }
 
     #[test]
