@@ -52,19 +52,21 @@ pub use loonfs_api::{
     ChangeSeq, CheckpointId, CommitId, ContentRef, ContentRefKind, CreateCheckpointRequest,
     CreateCheckpointResponse, DeleteDirectoryBehavior, DeleteNamespaceResponse,
     DestinationBehavior, DirectoryPageCursor, EffectiveLimit, FileRevision,
-    FileRevisionsPageCursor, FlushWalOutcome, FlushWalResponse, GrepMatch, GrepRequest,
-    GrepResponse, InodeId, InodeKind, ListFileRevisionsResponse, ListPathEntriesResponse,
+    FileRevisionsPageCursor, FlushWalOutcome, FlushWalResponse, GcRequest, GcResponse, GrepMatch,
+    GrepRequest, GrepResponse, InodeId, InodeKind, ListFileRevisionsResponse,
+    ListPathEntriesResponse, MaintenanceStepKind, MaintenanceStepRequest, MaintenanceStepResponse,
     ManifestId, NameKey, NamespaceId, NamespaceStatusResponse, NamespaceSummary, Page, PageRequest,
-    PaginationPolicy, ReleaseCheckpointResponse, RepairNamespaceOutcome, RevisionNo, UploadId,
-    FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK,
-    FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_PUT, PROFILE_ADMIN_V0, PROFILE_CORE_V0,
-    PROFILE_QUERY_V0, PROTOCOL_VERSION,
+    PaginationPolicy, ReleaseCheckpointResponse, ReorganizeStepOutcome, RepairNamespaceOutcome,
+    RevisionNo, UploadId, WalFlushStepOutcome, FEATURE_NAMESPACES_CREATE,
+    FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK, FEATURE_QUERY_GREP,
+    FEATURE_UPLOADS_DIRECT_PUT, PROFILE_ADMIN_V0, PROFILE_CORE_V0, PROFILE_QUERY_V0,
+    PROTOCOL_VERSION,
 };
 pub use loonfs_core::cache::MetadataTableCacheConfig;
 pub use loonfs_core::limits::DEFAULT_GC_MAX_OBJECTS;
 pub use loonfs_core::{
     BootstrapNamespaceError, DeleteNamespaceOptions, Error as CoreError, ErrorCode, ErrorKind,
-    GcConfig, GcReport, WriterFence,
+    GcConfig, WriterFence,
 };
 pub use loonfs_grep::GrepError;
 pub use publisher::PublishObserver;
@@ -111,9 +113,8 @@ pub use cache::RuntimeCacheStats;
 pub use config::{RuntimeCacheConfig, DEFAULT_MAX_CONCURRENT_MAINTENANCE};
 pub use handle::{FsAdmin, FsAdminBuilder, FsReader, FsReaderBuilder, FsWriter, FsWriterBuilder};
 pub use options::{
-    gc_config_from_request, gc_response_from_report, CopyOptions, CreateCheckpointOptions,
-    CreateDirectoryOptions, CreateNamespaceOptions, DeleteOptions, ListChangesOptions,
-    MaintenanceStepOptions, MaintenanceStepOutcome, MaintenanceStepResult, MoveOptions,
+    gc_config_from_request, CopyOptions, CreateCheckpointOptions, CreateDirectoryOptions,
+    CreateNamespaceOptions, DeleteOptions, ListChangesOptions, MaintenanceStepOptions, MoveOptions,
     PutFileOptions, RestoreRevisionOptions, UndeleteOptions,
 };
 pub use trace::{payload_class, TraceMode, TraceStoreKind};

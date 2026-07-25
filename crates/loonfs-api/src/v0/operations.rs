@@ -473,6 +473,26 @@ pub struct GcResponse {
     pub next_cursor: Option<String>,
 }
 
+impl GcResponse {
+    /// An empty report for `namespace_id`, before any candidate is examined.
+    pub fn empty(namespace_id: NamespaceId) -> Self {
+        Self {
+            namespace_id,
+            deleted_wal_segments: 0,
+            deleted_metadata_tables: 0,
+            deleted_manifests: 0,
+            deleted_checkpoint_records: 0,
+            released_fork_checkpoints: 0,
+            deleted_upload_sessions: 0,
+            released_missing_basis_checkpoints: 0,
+            retained_candidates: 0,
+            degraded_retention: false,
+            incomplete_namespace_ignored: false,
+            next_cursor: None,
+        }
+    }
+}
+
 /// Result of advancing the retention floor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -481,6 +501,22 @@ pub struct AdvanceRetentionResponse {
     pub namespace_id: NamespaceId,
     /// New minimum sequence for incremental replay.
     pub retention_floor_seq: ChangeSeq,
+}
+
+/// One sub-step of a maintenance step, for callers that want to run exactly
+/// one of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum MaintenanceStepKind {
+    /// Fold the visible WAL tail into metadata tables and advance the root.
+    WalFlush,
+    /// Merge one bounded group of metadata delta runs into its base.
+    Reorganize,
+    /// Advance the retention floor behind a verified checkpoint.
+    Retention,
+    /// Run the mark-and-sweep garbage collector.
+    Gc,
 }
 
 /// Options for one explicit maintenance step. Absent fields use the
@@ -497,33 +533,59 @@ pub struct MaintenanceStepRequest {
     /// flush work. Nothing sweeps unless this is present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gc: Option<GcRequest>,
+    /// Restrict the step to one sub-step. Absent runs the whole step: WAL
+    /// flush, then reorganization, then retention, then garbage collection
+    /// if `gc` opted in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub only: Option<MaintenanceStepKind>,
 }
 
-/// What one maintenance step did.
+/// What the WAL-flush part of a maintenance step did.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum MaintenanceStepOutcome {
-    /// The WAL tail was below the threshold; the root was left alone.
+pub enum WalFlushStepOutcome {
+    /// The step did not run this sub-step: the tail was below the threshold,
+    /// or `only` selected something else.
     NotNeeded,
     /// The step flushed the WAL tail and advanced the metadata root.
-    WalFlushed {
+    Flushed {
         /// Sequence covered by the published manifest.
         manifest_head_seq: ChangeSeq,
     },
     /// The root already covered the attempted sequence — another publisher
     /// got there first.
-    WalFlushSuperseded {
+    Superseded {
         /// Sequence this step attempted to flush through.
         attempted_seq: ChangeSeq,
         /// Manifest the root currently references.
         current_manifest_id: ManifestId,
     },
     /// A concurrent head update won the race.
-    WalFlushRaceLost {
+    RaceLost {
         /// Head sequence observed before the advance attempt.
         observed_head_seq: ChangeSeq,
     },
+}
+
+/// What the metadata-reorganization part of a maintenance step did.
+///
+/// Deliberately coarse: the run counts and byte budgets a reorganization
+/// consumes are engine policy, not a wire contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ReorganizeStepOutcome {
+    /// No family group had enough delta runs to merge, or `only` selected
+    /// something else.
+    NotNeeded,
+    /// One family group was merged and a manifest published.
+    UnitPublished,
+    /// A group needs merging but no progress-making subset fits the
+    /// per-step budget.
+    BudgetExhausted,
+    /// Another publisher advanced the root first; a later step retries.
+    Superseded,
 }
 
 /// Result of one explicit maintenance step.
@@ -534,8 +596,13 @@ pub struct MaintenanceStepResponse {
     pub namespace_id: NamespaceId,
     /// Namespace status observed before the step acted.
     pub status_before: NamespaceStatusResponse,
-    /// What the step did.
-    pub outcome: MaintenanceStepOutcome,
+    /// What the WAL-flush sub-step did.
+    pub wal_flush: WalFlushStepOutcome,
+    /// What the metadata-reorganization sub-step did.
+    pub reorganize: ReorganizeStepOutcome,
+    /// The retention floor after the step. Compare with
+    /// `status_before.retention_floor_seq` to see whether it moved.
+    pub retention_floor_seq: ChangeSeq,
     /// Garbage-collection report when the step opted into sweeping.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gc: Option<GcResponse>,

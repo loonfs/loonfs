@@ -1,7 +1,7 @@
 //! The GC entry point: orchestrates root collection, verification,
 //! and the bounded, resumable sweep.
 
-use super::config::{GcConfig, GcReport};
+use super::config::GcConfig;
 use super::cursor::{CandidateFamily, GcCursor};
 use super::fork_checkpoints::{
     maybe_release_fork_checkpoint, release_missing_basis_checkpoint, ForkCheckpointSweep,
@@ -18,6 +18,7 @@ use crate::namespace::catalog::{
 };
 use crate::protocol::{condemn_upload_session_if_aged, UploadSessionSweep};
 use futures::StreamExt;
+use loonfs_api::v0::GcResponse;
 use loonfs_api::{NamespaceId, UploadId};
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
@@ -27,7 +28,7 @@ pub async fn gc_namespace<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     config: &GcConfig,
     context: &MutationContext,
-) -> Result<GcReport> {
+) -> Result<GcResponse> {
     gc_namespace_with_reverify_chunk(store, namespace_id, config, context, SWEEP_REVERIFY_CHUNK)
         .await
 }
@@ -43,15 +44,15 @@ pub(super) async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
     config: &GcConfig,
     context: &MutationContext,
     reverify_chunk: usize,
-) -> Result<GcReport> {
+) -> Result<GcResponse> {
     config.validate()?;
     let initialization_state = namespace_initialization_state(store, namespace_id)
         .await
         .map_err(map_namespace_initialization_error_to_core)?;
     if initialization_state != NamespaceInitializationState::Complete {
-        return Ok(GcReport {
+        return Ok(GcResponse {
             incomplete_namespace_ignored: true,
-            ..GcReport::default()
+            ..GcResponse::empty(namespace_id.clone())
         });
     }
 
@@ -64,7 +65,7 @@ pub(super) async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
     // The cursor can skip enumeration only; it never carries safety state.
     let mark = Arc::new(collect_live_set(store, namespace_id, config, context).await?);
     let mut sweep = SweepVerifier::seeded(Arc::clone(&mark), reverify_chunk);
-    let mut report = GcReport::default();
+    let mut report = GcResponse::empty(namespace_id.clone());
     let mut examined = 0_u64;
     let mut position = resume.clone();
 
@@ -127,7 +128,7 @@ async fn process_candidate<S: ObjectStore + ?Sized>(
     key: &str,
     mark: &LiveSet,
     sweep: &mut SweepVerifier,
-    report: &mut GcReport,
+    report: &mut GcResponse,
 ) -> Result<()> {
     if family == CandidateFamily::UploadSessions {
         return process_upload_session(store, namespace_id, config, context, key, report).await;
@@ -204,7 +205,7 @@ async fn process_checkpoint<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     key: &str,
     sweep: &SweepVerifier,
-    report: &mut GcReport,
+    report: &mut GcResponse,
 ) -> Result<()> {
     if sweep.live.checkpoint_keys.contains(key) {
         report.retained_candidates += 1;
@@ -249,7 +250,7 @@ async fn process_upload_session<S: ObjectStore + ?Sized>(
     config: &GcConfig,
     context: &MutationContext,
     key: &str,
-    report: &mut GcReport,
+    report: &mut GcResponse,
 ) -> Result<()> {
     let Some(upload_id) = upload_id_of(key) else {
         report.retained_candidates += 1;

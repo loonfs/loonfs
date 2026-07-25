@@ -365,16 +365,14 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
                 MaintenanceStepOptions {
                     max_wal_tail_segments: 1,
                     gc: None,
+                    only: None,
                 },
             )
             .expect("checkpoint the revoke into durable tables");
         assert!(
-            matches!(
-                step.outcome,
-                loonfs::MaintenanceStepOutcome::WalFlushed { .. }
-            ),
+            matches!(step.wal_flush, loonfs::WalFlushStepOutcome::Flushed { .. }),
             "step must materialize the tail, got {:?}",
-            step.outcome
+            step.wal_flush
         );
         deletion
     };
@@ -405,16 +403,14 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
                 MaintenanceStepOptions {
                     max_wal_tail_segments: 1,
                     gc: None,
+                    only: None,
                 },
             )
             .expect("checkpoint the deletion");
         assert!(
-            matches!(
-                step.outcome,
-                loonfs::MaintenanceStepOutcome::WalFlushed { .. }
-            ),
+            matches!(step.wal_flush, loonfs::WalFlushStepOutcome::Flushed { .. }),
             "step must materialize the tail, got {:?}",
-            step.outcome
+            step.wal_flush
         );
         let fs = open_runtime(object_store.clone(), "undelete-persist-c");
         block_on(fs.writer.undelete(
@@ -431,16 +427,14 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
                 MaintenanceStepOptions {
                     max_wal_tail_segments: 1,
                     gc: None,
+                    only: None,
                 },
             )
             .expect("checkpoint the second revoke");
         assert!(
-            matches!(
-                step.outcome,
-                loonfs::MaintenanceStepOutcome::WalFlushed { .. }
-            ),
+            matches!(step.wal_flush, loonfs::WalFlushStepOutcome::Flushed { .. }),
             "step must materialize the tail, got {:?}",
-            step.outcome
+            step.wal_flush
         );
     }
     let fs = open_runtime(object_store, "undelete-persist-d");

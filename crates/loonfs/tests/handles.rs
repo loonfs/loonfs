@@ -558,8 +558,8 @@ fn manual_only_writer_never_schedules_maintenance() {
             .await
             .expect("explicit maintenance step");
         assert_ne!(
-            step.outcome,
-            loonfs::MaintenanceStepOutcome::NotNeeded,
+            step.wal_flush,
+            loonfs::WalFlushStepOutcome::NotNeeded,
             "step should act on the oversized tail"
         );
         let status = admin

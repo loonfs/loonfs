@@ -9,7 +9,7 @@ use loonfs::{
     CreateCheckpointOptions, CreateCheckpointResponse, CreateDirectoryOptions,
     CreateNamespaceOptions, DeleteOptions, DirectoryPageCursor, ErrorCode, FsAdmin, FsReader,
     FsWriter, FsWriterBuilder, InodeId, ListChangesOptions, MaintenanceStepOptions,
-    MaintenanceStepResult, MoveOptions, NamespaceId, NamespaceStatusResponse, PageRequest,
+    MaintenanceStepResponse, MoveOptions, NamespaceId, NamespaceStatusResponse, PageRequest,
     PutFileOptions, RuntimeError, SharedObjectStore, UploadContentResponse, UploadId,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -231,7 +231,7 @@ pub(crate) trait RuntimeTestExt {
         &self,
         namespace_id: &NamespaceId,
         options: MaintenanceStepOptions,
-    ) -> loonfs::Result<MaintenanceStepResult>;
+    ) -> loonfs::Result<MaintenanceStepResponse>;
     fn stat_path_blocking(
         &self,
         namespace_id: &NamespaceId,
@@ -349,7 +349,7 @@ impl RuntimeTestExt for TestRuntime {
         &self,
         namespace_id: &NamespaceId,
         options: MaintenanceStepOptions,
-    ) -> loonfs::Result<MaintenanceStepResult> {
+    ) -> loonfs::Result<MaintenanceStepResponse> {
         block_on(self.admin.maintenance_step_namespace(namespace_id, options))
     }
 

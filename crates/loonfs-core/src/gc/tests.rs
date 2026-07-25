@@ -1,6 +1,6 @@
 //! Behavior tests for namespace GC.
 
-use super::config::{GcConfig, GcReport};
+use super::config::GcConfig;
 use super::live_set::collect_live_set;
 use super::reap::{condemn_checkpoint_if_aged, CheckpointCondemn};
 use super::run::{gc_namespace, gc_namespace_with_reverify_chunk};
@@ -10,6 +10,7 @@ use crate::checkpoint::tests::{create_checkpoint, mutation_context, write_test_f
 use crate::context::MutationContext;
 use crate::error::CoreError;
 use crate::limits::GC_MIN_GRACE_WINDOW_MS;
+use loonfs_api::v0::GcResponse;
 use loonfs_api::wire::control::{
     decode_control_object, CheckpointOwner, CheckpointRecordLifecycle, CheckpointRecordState,
     ControlObjectKind, UploadSessionLifecycle, UploadSessionState,
@@ -1962,7 +1963,7 @@ async fn namespace_keys(store: &LocalFsStore, namespace_id: &NamespaceId) -> BTr
         .collect()
 }
 
-fn accumulate_report(total: &mut GcReport, pass: &GcReport) {
+fn accumulate_report(total: &mut GcResponse, pass: &GcResponse) {
     total.deleted_wal_segments += pass.deleted_wal_segments;
     total.deleted_metadata_tables += pass.deleted_metadata_tables;
     total.deleted_manifests += pass.deleted_manifests;
@@ -2000,7 +2001,7 @@ async fn bounded_passes_delete_exactly_the_unbounded_pass_set() {
     let bounded_now = now_after_newest_object(&bounded_store, &namespace_id, REAP_MS + 1).await;
     let mut bounded_config = config();
     bounded_config.max_objects = Some(3);
-    let mut bounded_report = GcReport::default();
+    let mut bounded_report = GcResponse::empty(namespace_id.clone());
     let mut passes = 0;
     loop {
         let pass = gc_namespace(

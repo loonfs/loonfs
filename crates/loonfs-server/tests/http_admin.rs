@@ -5,10 +5,7 @@ mod common;
 use bytes::Bytes;
 use common::http_split_support::*;
 use common::start_server;
-use loonfs_api::{
-    AdvanceRetentionResponse, ApiError, ChangeSeq, CheckpointId, CreateCheckpointResponse,
-    ManifestId,
-};
+use loonfs_api::{ApiError, ChangeSeq, CheckpointId, CreateCheckpointResponse, ManifestId};
 use loonfs_client::{ClientError, NamespacePath};
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::{ConfiguredObjectStore, ObjectStore};
@@ -41,10 +38,22 @@ fn post_checkpoint_release(
 }
 
 fn post_gc(server_url: &str, namespace: &str) -> Result<loonfs_api::GcResponse, ApiError> {
-    post_admin_json(
-        &format!("{server_url}/v0/admin/namespaces/{namespace}/gc"),
+    post_gc_with(server_url, namespace, serde_json::json!({}))
+}
+
+/// One garbage-collection pass, as the collapsed surface runs it: a
+/// maintenance step restricted to `gc`.
+fn post_gc_with(
+    server_url: &str,
+    namespace: &str,
+    gc: serde_json::Value,
+) -> Result<loonfs_api::GcResponse, ApiError> {
+    let step: Result<loonfs_api::MaintenanceStepResponse, ApiError> = post_admin_json_body(
+        &format!("{server_url}/v0/admin/namespaces/{namespace}/maintenance/step"),
         "test-token",
-    )
+        serde_json::json!({ "only": "gc", "gc": gc }),
+    );
+    step.map(|step| step.gc.expect("gc report present when the step opted in"))
 }
 
 fn post_maintenance_step(
@@ -57,13 +66,15 @@ fn post_maintenance_step(
     )
 }
 
+/// One retention-floor advance, as the collapsed surface runs it.
 fn post_retention_advance(
     server_url: &str,
     namespace: &str,
-) -> Result<AdvanceRetentionResponse, ApiError> {
-    post_admin_json(
-        &format!("{server_url}/v0/admin/namespaces/{namespace}/retention/advance"),
+) -> Result<loonfs_api::MaintenanceStepResponse, ApiError> {
+    post_admin_json_body(
+        &format!("{server_url}/v0/admin/namespaces/{namespace}/maintenance/step"),
         "test-token",
+        serde_json::json!({ "only": "retention" }),
     )
 }
 
@@ -174,9 +185,9 @@ async fn http_admin_checkpoint_and_retention_are_idempotent_and_soft() {
 
     // The GC grace window's derived safety floor is enforced at the API:
     // a sub-minimum override is rejected, not honored.
-    let unsafe_gc: Result<loonfs_api::GcResponse, ApiError> = post_admin_json_body(
-        &format!("{server_url}/v0/admin/namespaces/{namespace}/gc"),
-        "test-token",
+    let unsafe_gc = post_gc_with(
+        &server_url,
+        namespace.as_str(),
         serde_json::json!({ "grace_window_ms": 1 }),
     );
     let unsafe_gc = unsafe_gc.expect_err("sub-minimum grace window is rejected");
@@ -187,9 +198,18 @@ async fn http_admin_checkpoint_and_retention_are_idempotent_and_soft() {
         post_retention_advance(&server_url, namespace.as_str()).expect("advance retention");
     assert_eq!(advanced.retention_floor_seq, ChangeSeq(1));
 
+    // Idempotent in the floor it lands on. `status_before` legitimately
+    // differs: the first call observed the floor it then advanced past.
     let repeated_advance =
         post_retention_advance(&server_url, namespace.as_str()).expect("repeat retention");
-    assert_eq!(repeated_advance, advanced);
+    assert_eq!(
+        repeated_advance.retention_floor_seq,
+        advanced.retention_floor_seq
+    );
+    assert_eq!(
+        repeated_advance.status_before.retention_floor_seq,
+        advanced.retention_floor_seq
+    );
 
     let bytes = client.get_file_bytes(&target).await.expect("read file");
     assert_eq!(bytes, b"hello admin\n");
@@ -234,16 +254,16 @@ async fn http_admin_gc_is_explicit_and_retains_young_namespaces() {
 
     // A bounded pass returns an opaque cursor, and the route accepts it
     // on the next invocation without carrying any safety state.
-    let bounded: loonfs_api::GcResponse = post_admin_json_body(
-        &format!("{server_url}/v0/admin/namespaces/{namespace}/gc"),
-        "test-token",
+    let bounded = post_gc_with(
+        &server_url,
+        namespace.as_str(),
         serde_json::json!({ "max_objects": 1 }),
     )
     .expect("bounded gc pass");
     let cursor = bounded.next_cursor.expect("more candidate families remain");
-    let resumed: loonfs_api::GcResponse = post_admin_json_body(
-        &format!("{server_url}/v0/admin/namespaces/{namespace}/gc"),
-        "test-token",
+    let resumed = post_gc_with(
+        &server_url,
+        namespace.as_str(),
         serde_json::json!({ "max_objects": 1, "cursor": cursor }),
     )
     .expect("resumed gc pass");
@@ -293,7 +313,7 @@ async fn http_admin_maintenance_step_reports_outcomes_not_errors() {
     let idle = post_maintenance_step(&server_url, namespace.as_str()).expect("idle step");
     assert_eq!(idle.namespace_id, namespace);
     assert_eq!(idle.status_before.wal_tail_segments, 1);
-    assert_eq!(idle.outcome, loonfs_api::MaintenanceStepOutcome::NotNeeded);
+    assert_eq!(idle.wal_flush, loonfs_api::WalFlushStepOutcome::NotNeeded);
     assert!(idle.gc.is_none());
 
     // Forcing the threshold to one segment flushes the WAL tail
@@ -304,15 +324,23 @@ async fn http_admin_maintenance_step_reports_outcomes_not_errors() {
             &loonfs_api::MaintenanceStepRequest {
                 max_wal_tail_segments: Some(1),
                 gc: Some(loonfs_api::GcRequest::default()),
+                only: None,
             },
         )
         .await
         .expect("forced step");
     assert_eq!(
-        forced.outcome,
-        loonfs_api::MaintenanceStepOutcome::WalFlushed {
+        forced.wal_flush,
+        loonfs_api::WalFlushStepOutcome::Flushed {
             manifest_head_seq: ChangeSeq(1),
         }
+    );
+    // Retention runs inside the step now, so the floor is reported whether or
+    // not it moved, and it never goes backwards.
+    assert!(forced.retention_floor_seq >= forced.status_before.retention_floor_seq);
+    assert_eq!(
+        forced.reorganize,
+        loonfs_api::ReorganizeStepOutcome::NotNeeded
     );
     let gc = forced.gc.expect("gc report present when opted in");
     assert_eq!(gc.deleted_wal_segments, 0);

@@ -25,12 +25,11 @@ use loonfs_api::{
     v0::{
         ChangesResponse, DisableGrepIndexResponse, EnableGrepIndexResponse, RepairNamespaceResponse,
     },
-    AdvanceRetentionResponse, AuthoritativePathEntry, ChangeSeq, CheckpointId, CommitId,
-    CommitResponse, CreateCheckpointRequest, CreateCheckpointResponse, DeleteNamespaceResponse,
-    DestinationBehavior, ErrorCode, ErrorDetails, FlushWalResponse, GcRequest, GcResponse,
-    GrepRequest, GrepResponse, InodeId, ListFileRevisionsResponse, MaintenanceStepRequest,
-    MaintenanceStepResponse, NamespaceId, NamespaceStatusResponse, NamespaceSummary,
-    ReleaseCheckpointResponse, RevisionNo,
+    AuthoritativePathEntry, ChangeSeq, CheckpointId, CommitId, CommitResponse,
+    CreateCheckpointRequest, CreateCheckpointResponse, DeleteNamespaceResponse,
+    DestinationBehavior, ErrorCode, ErrorDetails, GrepRequest, GrepResponse, InodeId,
+    ListFileRevisionsResponse, MaintenanceStepRequest, MaintenanceStepResponse, NamespaceId,
+    NamespaceStatusResponse, NamespaceSummary, ReleaseCheckpointResponse, RevisionNo,
 };
 use thiserror::Error;
 
@@ -280,30 +279,15 @@ pub trait Backend {
         namespace_id: &NamespaceId,
         checkpoint_id: &CheckpointId,
     ) -> Result<ReleaseCheckpointResponse, BackendError>;
-    /// Flushes the WAL tail and advances the metadata root, creating no
-    /// checkpoint record.
-    async fn flush_wal(&self, namespace_id: &NamespaceId)
-        -> Result<FlushWalResponse, BackendError>;
-    /// Advances the namespace retention floor. Irreversible: WAL history
-    /// before the floor stops being replayable.
-    async fn advance_retention_floor(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<AdvanceRetentionResponse, BackendError>;
-    /// Runs one bounded maintenance step: a root advancement once the WAL
-    /// tail reaches the threshold, optionally followed by a GC pass.
+    /// Runs one bounded maintenance step: WAL flush, metadata
+    /// reorganization, retention advance, and — when `request.gc` opts in —
+    /// one garbage-collection pass. `request.only` restricts it to a single
+    /// sub-step.
     async fn maintenance_step(
         &self,
         namespace_id: &NamespaceId,
         request: MaintenanceStepRequest,
     ) -> Result<MaintenanceStepResponse, BackendError>;
-    /// Runs one mark-and-sweep garbage-collection pass. Nothing sweeps
-    /// without this explicit call or a maintenance-step opt-in.
-    async fn gc_namespace(
-        &self,
-        namespace_id: &NamespaceId,
-        request: GcRequest,
-    ) -> Result<GcResponse, BackendError>;
     /// Explicitly repairs one incomplete namespace installation.
     async fn repair_namespace(
         &self,
@@ -571,26 +555,6 @@ impl Backend for RemoteBackend {
             .map_err(BackendError::from)
     }
 
-    async fn flush_wal(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<FlushWalResponse, BackendError> {
-        self.client
-            .flush_wal(namespace_id)
-            .await
-            .map_err(BackendError::from)
-    }
-
-    async fn advance_retention_floor(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<AdvanceRetentionResponse, BackendError> {
-        self.client
-            .advance_retention_floor(namespace_id)
-            .await
-            .map_err(BackendError::from)
-    }
-
     async fn maintenance_step(
         &self,
         namespace_id: &NamespaceId,
@@ -598,17 +562,6 @@ impl Backend for RemoteBackend {
     ) -> Result<MaintenanceStepResponse, BackendError> {
         self.client
             .maintenance_step(namespace_id, &request)
-            .await
-            .map_err(BackendError::from)
-    }
-
-    async fn gc_namespace(
-        &self,
-        namespace_id: &NamespaceId,
-        request: GcRequest,
-    ) -> Result<GcResponse, BackendError> {
-        self.client
-            .gc_namespace(namespace_id, &request)
             .await
             .map_err(BackendError::from)
     }

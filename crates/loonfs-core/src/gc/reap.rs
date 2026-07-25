@@ -1,7 +1,6 @@
 //! Reaping: age-gated deletion of unreachable objects and the explicit
 //! namespace-repair reap for abandoned installation debris.
 
-use super::config::GcReport;
 use crate::checkpoint::record::encode_checkpoint_record;
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
@@ -9,6 +8,7 @@ use crate::limits::GC_MIN_GRACE_WINDOW_MS;
 use crate::namespace::control::{map_control_codec_error, ControlObjectLoadError};
 use bytes::Bytes;
 use futures::StreamExt;
+use loonfs_api::v0::GcResponse;
 use loonfs_api::wire::control::{
     decode_control_object, encode_control_object, CheckpointRecordLifecycle, CheckpointRecordState,
     ControlObjectKind, HeadState, HeadStateEnvelope, NamespaceState,
@@ -278,7 +278,7 @@ pub(super) async fn delete_if_aged<S: ObjectStore + ?Sized>(
     key: &str,
     grace_window_ms: u64,
     context: &MutationContext,
-    report: &mut GcReport,
+    report: &mut GcResponse,
 ) -> Result<bool> {
     let Some(metadata) = store
         .head(key)

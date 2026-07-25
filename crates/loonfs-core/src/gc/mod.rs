@@ -17,6 +17,6 @@ mod run;
 #[cfg(test)]
 mod tests;
 
-pub use config::{GcConfig, GcReport};
+pub use config::GcConfig;
 pub(crate) use reap::{reap_abandoned_bootstrap, AbandonedBootstrapReap};
 pub use run::gc_namespace;

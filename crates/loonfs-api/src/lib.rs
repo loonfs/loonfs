@@ -108,9 +108,9 @@ pub use v0::{
     DeleteNamespaceResponse, DestinationBehavior, ErrorDetails, FileRevision, FilesystemOperation,
     FilesystemOperationRequest, FlushWalOutcome, FlushWalResponse, ForkNamespaceRequest, GcRequest,
     GcResponse, GrepMatch, GrepRequest, GrepResponse, ListFileRevisionsResponse,
-    ListPathEntriesResponse, MaintenanceStepOutcome, MaintenanceStepRequest,
-    MaintenanceStepResponse, NamespaceStatusResponse, NamespaceSummary, ReleaseCheckpointResponse,
-    RepairNamespaceOutcome, RestoreFileRevisionRequest,
+    ListPathEntriesResponse, MaintenanceStepKind, MaintenanceStepRequest, MaintenanceStepResponse,
+    NamespaceStatusResponse, NamespaceSummary, ReleaseCheckpointResponse, ReorganizeStepOutcome,
+    RepairNamespaceOutcome, RestoreFileRevisionRequest, WalFlushStepOutcome,
 };
 
 #[cfg(test)]

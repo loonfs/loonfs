@@ -18,9 +18,9 @@ use loonfs_api::{
     AdvanceRetentionResponse, ApiError, ContentRef, CreateCheckpointRequest,
     CreateCheckpointResponse, CreateNamespaceRequest, FilesystemOperation,
     FilesystemOperationRequest, FlushWalOutcome, FlushWalResponse, ForkNamespaceRequest, GcRequest,
-    GcResponse, InodeId, ListFileRevisionsResponse, MaintenanceStepOutcome, MaintenanceStepRequest,
+    GcResponse, InodeId, ListFileRevisionsResponse, MaintenanceStepRequest,
     MaintenanceStepResponse, ReleaseCheckpointResponse, RepairNamespaceOutcome,
-    RestoreFileRevisionRequest, RevisionNo,
+    RestoreFileRevisionRequest, RevisionNo, WalFlushStepOutcome,
 };
 
 pub fn openapi_document() -> utoipa::openapi::OpenApi {
@@ -61,10 +61,7 @@ pub fn openapi_json_pretty() -> Result<String, serde_json::Error> {
         crate::http::handlers_filesystem::list_changes,
         crate::http::handlers_namespace::create_checkpoint,
         crate::http::handlers_namespace::release_checkpoint,
-        crate::http::handlers_namespace::flush_wal,
-        crate::http::handlers_namespace::advance_retention_floor,
         crate::http::handlers_namespace::maintenance_step,
-        crate::http::handlers_namespace::gc_namespace,
         crate::http::handlers_namespace::repair_namespace,
         crate::http::handlers_query::grep,
         crate::http::handlers_query::enable_grep_index,
@@ -95,7 +92,7 @@ pub fn openapi_json_pretty() -> Result<String, serde_json::Error> {
         FlushWalResponse,
         AdvanceRetentionResponse,
         MaintenanceStepRequest,
-        MaintenanceStepOutcome,
+        WalFlushStepOutcome,
         MaintenanceStepResponse,
         GcRequest,
         GcResponse,
