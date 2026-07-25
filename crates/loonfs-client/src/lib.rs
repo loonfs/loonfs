@@ -23,7 +23,7 @@ use loonfs_api::{
     },
     AbsolutePath, AuthoritativePathEntry, CapabilityDocument, ChangeSeq, CheckpointId, CommitId,
     ContentRef, CreateCheckpointRequest, CreateCheckpointResponse, CreateNamespaceRequest,
-    DeleteDirectoryBehavior, DeleteNamespaceResponse, DestinationBehavior, ErrorCode,
+    DeleteDirectoryBehavior, DeleteNamespaceResponse, DestinationBehavior,
     FilesystemOperation, FilesystemOperationRequest, ForkNamespaceRequest, GrepRequest,
     GrepResponse, InodeId, ListFileRevisionsResponse, ListPathEntriesResponse,
     MaintenanceStepRequest, MaintenanceStepResponse, NamespaceId, NamespaceStatusResponse,
@@ -248,54 +248,37 @@ impl Client {
 
     /// Lists a directory by aggregating every page into one response.
     ///
-    /// A commit landing mid-listing retires the cursor with
-    /// `rebootstrap_required` (API spec: restart the listing from a fresh
-    /// first page). This helper performs that restart itself, discarding
-    /// the partial aggregation, up to three times before surfacing the
-    /// error. Use [`Self::list_path_entries_page`] for page-level control and
-    /// cursor errors surfaced as-is.
+    /// Listing cursors tolerate commits landing mid-listing — each page
+    /// resumes in name-key order against the head the server has loaded —
+    /// so aggregation never restarts. The envelope's `head_seq` reports the
+    /// newest head that served a page. Use
+    /// [`Self::list_path_entries_page`] for page-level control.
     pub async fn list_path_entries_all(
         &self,
         spec: &NamespacePath,
     ) -> Result<ListPathEntriesResponse> {
-        // Bounded so a write-hot namespace cannot pin this loop forever.
-        const MAX_LISTING_RESTARTS: u32 = 3;
-        let mut restarts = 0;
-        'restart: loop {
-            let mut entries = Vec::new();
-            let mut envelope = None;
-            let mut cursor = None;
-            loop {
-                let page = match self
-                    .list_path_entries_page(spec, None, cursor.as_deref())
-                    .await
-                {
-                    Ok(page) => page,
-                    Err(error)
-                        if cursor.is_some()
-                            && restarts < MAX_LISTING_RESTARTS
-                            && error.code() == Some(ErrorCode::RebootstrapRequired) =>
-                    {
-                        restarts += 1;
-                        continue 'restart;
-                    }
-                    Err(error) => return Err(error),
-                };
-                let envelope_ref = envelope.get_or_insert_with(|| ListPathEntriesResponse {
-                    namespace_id: page.namespace_id.clone(),
-                    absolute_path: page.absolute_path.clone(),
-                    head_seq: page.head_seq,
-                    entries: Vec::new(),
-                    next_cursor: None,
-                });
-                entries.extend(page.entries);
-                cursor = page.next_cursor;
-                if cursor.is_none() {
-                    // Pages arrive in canonical name-key order; concatenation
-                    // preserves it, so aggregation must not re-sort.
-                    envelope_ref.entries = entries;
-                    return Ok(envelope.expect("first page initializes response envelope"));
-                }
+        let mut entries = Vec::new();
+        let mut envelope = None;
+        let mut cursor = None;
+        loop {
+            let page = self
+                .list_path_entries_page(spec, None, cursor.as_deref())
+                .await?;
+            let envelope_ref = envelope.get_or_insert_with(|| ListPathEntriesResponse {
+                namespace_id: page.namespace_id.clone(),
+                absolute_path: page.absolute_path.clone(),
+                head_seq: page.head_seq,
+                entries: Vec::new(),
+                next_cursor: None,
+            });
+            envelope_ref.head_seq = envelope_ref.head_seq.max(page.head_seq);
+            entries.extend(page.entries);
+            cursor = page.next_cursor;
+            if cursor.is_none() {
+                // Pages arrive in canonical name-key order; concatenation
+                // preserves it, so aggregation must not re-sort.
+                envelope_ref.entries = entries;
+                return Ok(envelope.expect("first page initializes response envelope"));
             }
         }
     }
@@ -953,7 +936,7 @@ fn append_query_param(url: &mut String, has_query: &mut bool, name: &str, value:
 mod tests {
     use super::*;
     use crate::transport::{transient_failure, MAX_TRANSIENT_ATTEMPTS};
-    use loonfs_api::ErrorKind;
+    use loonfs_api::{ErrorCode, ErrorKind};
     use std::fs;
     use tempfile::tempdir;
 

@@ -185,18 +185,21 @@ pub struct Page<T, C> {
     pub next_cursor: Option<C>,
 }
 
-/// Cursor for one directory listing snapshot.
+/// Cursor for one directory listing position.
 ///
-/// Directory pagination advances in canonical `name_key` order.
+/// Directory pagination advances in canonical `name_key` order. The cursor
+/// is an ordering resume, not a snapshot pin: any head at or past `head_seq`
+/// serves the next page, resuming strictly after `last_name_key` — the same
+/// forward-only drift grep cursors tolerate.
 ///
-/// The cursor intentionally contains only the snapshot (`head_seq`), listed
-/// directory identity (`directory_inode_id`), and resume position (`last_name_key`).
-/// HTTP clients must pass the URL namespace and `path` on every page.
-/// Runtime/server code resolves that path at `head_seq` and rejects the cursor
-/// unless it names `directory_inode_id`.
+/// The cursor intentionally contains only the minting head (`head_seq`),
+/// listed directory identity (`directory_inode_id`), and resume position
+/// (`last_name_key`). HTTP clients must pass the URL namespace and `path` on
+/// every page. Runtime/server code resolves that path at the current head
+/// and rejects the cursor unless it names `directory_inode_id`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DirectoryPageCursor {
-    /// Snapshot sequence captured by the first page.
+    /// Head sequence the issuing page was evaluated at.
     pub head_seq: ChangeSeq,
     /// Directory inode resolved at `head_seq`.
     // The wire field is frozen as `dir_inode_id` in page cursor version 1.
@@ -210,14 +213,15 @@ impl PageCursor for DirectoryPageCursor {
     const KIND: &'static str = "directory";
 }
 
-/// Cursor for one file revision listing snapshot.
+/// Cursor for one file revision listing position.
 ///
 /// Revision pagination advances in newest-first revision order for one file
-/// inode. The cursor includes the snapshot head plus the last returned row's
-/// complete ordering identity so ties stay unambiguous.
+/// inode. Like directory and grep cursors, it is an ordering resume that
+/// tolerates forward head drift; it includes the minting head plus the last
+/// returned row's complete ordering identity so ties stay unambiguous.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileRevisionsPageCursor {
-    /// Snapshot sequence captured by the first page.
+    /// Head sequence the issuing page was evaluated at.
     pub head_seq: ChangeSeq,
     /// File inode whose revisions are being listed.
     pub inode_id: InodeId,

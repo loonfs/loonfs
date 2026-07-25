@@ -166,7 +166,7 @@ fn file_revision_pages_merge_manifest_and_wal_tail_newest_first() {
 }
 
 #[test]
-fn directory_cursor_after_later_writes_is_rejected() {
+fn directory_cursor_resumes_after_later_writes() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "directory-page-snapshot-test");
     let namespace_id = namespace_id("demo");
@@ -203,12 +203,58 @@ fn directory_cursor_after_later_writes_is_rejected() {
     )
     .expect("put later file");
 
+    // The cursor is an ordering resume: the next page continues after the
+    // last returned name key against the advanced head, so the entry
+    // committed mid-listing appears in its canonical position.
+    let second = block_on(fs.list_path_entries_page(
+        &namespace_id,
+        "/docs",
+        PageRequest {
+            limit,
+            cursor: Some(cursor),
+        },
+    ))
+    .expect("second directory page resumes after head drift");
+    assert_eq!(display_names(&second.entries), vec!["c.txt", "z.txt"]);
+    assert!(second.next_cursor.is_none());
+}
+
+#[test]
+fn directory_cursor_from_the_future_is_rejected() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = runtime(temp_dir.path(), "directory-page-future-test");
+    let namespace_id = namespace_id("demo");
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    for path in ["/docs/a.txt", "/docs/b.txt", "/docs/c.txt"] {
+        fs.put_file_bytes_blocking(
+            &namespace_id,
+            path,
+            path.as_bytes(),
+            PutFileOptions::default(),
+        )
+        .expect("put file");
+    }
+
+    let first = block_on(fs.list_path_entries_page(
+        &namespace_id,
+        "/docs",
+        PageRequest {
+            limit: page_limit(2),
+            cursor: None,
+        },
+    ))
+    .expect("first directory page");
+    let mut cursor =
+        decode_directory_page_cursor(first.next_cursor.as_deref().expect("next cursor"));
+    cursor.head_seq = loonfs::ChangeSeq(cursor.head_seq.0 + 1000);
+
     assert_core_error_kind(
         block_on(fs.list_path_entries_page(
             &namespace_id,
             "/docs",
             PageRequest {
-                limit,
+                limit: page_limit(2),
                 cursor: Some(cursor),
             },
         )),
@@ -217,7 +263,7 @@ fn directory_cursor_after_later_writes_is_rejected() {
 }
 
 #[test]
-fn directory_cursor_older_than_materialized_snapshot_floor_is_rejected() {
+fn directory_cursor_resumes_across_a_wal_flush() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "directory-page-floor-test");
     let namespace_id = namespace_id("demo");
@@ -254,17 +300,93 @@ fn directory_cursor_older_than_materialized_snapshot_floor_is_rejected() {
     fs.create_checkpoint_blocking(&namespace_id)
         .expect("checkpoint newer snapshot");
 
-    assert_core_error_kind(
-        block_on(fs.list_path_entries_page(
+    // Materializing the newer state into the manifest does not retire the
+    // cursor either: retained rows answer the resume at the current head.
+    let second = block_on(fs.list_path_entries_page(
+        &namespace_id,
+        "/docs",
+        PageRequest {
+            limit: page_limit(2),
+            cursor: Some(cursor),
+        },
+    ))
+    .expect("second directory page resumes across a flush");
+    assert_eq!(display_names(&second.entries), vec!["c.txt", "z.txt"]);
+    assert!(second.next_cursor.is_none());
+}
+
+#[test]
+fn revisions_cursor_resumes_after_later_writes() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = runtime(temp_dir.path(), "revisions-page-drift-test");
+    let namespace_id = namespace_id("demo");
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    for body in ["one", "two", "three"] {
+        fs.put_file_bytes_blocking(
             &namespace_id,
-            "/docs",
-            PageRequest {
-                limit: page_limit(2),
-                cursor: Some(cursor),
+            "/docs/report.txt",
+            body.as_bytes(),
+            PutFileOptions {
+                behavior: DestinationBehavior::Replace,
+                ..PutFileOptions::default()
             },
-        )),
-        ErrorCode::RebootstrapRequired,
+        )
+        .expect("put revision");
+    }
+
+    let first = block_on(fs.list_file_revisions_page(
+        &namespace_id,
+        "/docs/report.txt",
+        PageRequest {
+            limit: page_limit(2),
+            cursor: None,
+        },
+    ))
+    .expect("first revisions page");
+    assert_eq!(
+        first
+            .revisions
+            .iter()
+            .map(|revision| revision.revision_no.0)
+            .collect::<Vec<_>>(),
+        vec![3, 2]
     );
+    let cursor =
+        decode_file_revisions_page_cursor(first.next_cursor.as_deref().expect("next cursor"));
+
+    fs.put_file_bytes_blocking(
+        &namespace_id,
+        "/docs/report.txt",
+        b"four",
+        PutFileOptions {
+            behavior: DestinationBehavior::Replace,
+            ..PutFileOptions::default()
+        },
+    )
+    .expect("put fourth revision");
+
+    // The resume continues strictly after the last returned revision, so
+    // the in-flight listing completes; the revision committed mid-listing
+    // is newer than the whole listing and stays out of it.
+    let second = block_on(fs.list_file_revisions_page(
+        &namespace_id,
+        "/docs/report.txt",
+        PageRequest {
+            limit: page_limit(2),
+            cursor: Some(cursor),
+        },
+    ))
+    .expect("second revisions page resumes after head drift");
+    assert_eq!(
+        second
+            .revisions
+            .iter()
+            .map(|revision| revision.revision_no.0)
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
+    assert!(second.next_cursor.is_none());
 }
 
 #[test]

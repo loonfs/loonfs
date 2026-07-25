@@ -198,16 +198,9 @@ pub enum MetadataViewError {
         reason: String,
     },
     #[error(
-        "the cursor's snapshot (seq `{requested_seq}`) is no longer available (current head `{head_seq}`); restart the listing"
+        "the cursor was minted at seq `{requested_seq}`, ahead of the loaded head `{head_seq}`; restart the listing"
     )]
     SnapshotUnavailable {
-        requested_seq: ChangeSeq,
-        head_seq: ChangeSeq,
-    },
-    #[error(
-        "metadata view only supports the loaded head `{head_seq}`, not historical snapshot `{requested_seq}`"
-    )]
-    UnsupportedHistoricalRead {
         requested_seq: ChangeSeq,
         head_seq: ChangeSeq,
     },
@@ -515,11 +508,10 @@ fn classify_metadata_view_error(error: &MetadataViewError) -> ErrorCode {
     match error {
         MetadataViewError::MissingManifest { .. } => ErrorCode::NamespaceCorrupt,
         MetadataViewError::MaintenanceRequired { .. } => ErrorCode::MaintenanceRequired,
-        // A well-formed cursor whose snapshot aged out is a state condition,
-        // not a malformed request: the client's recovery is to restart the
-        // listing, same as a sub-floor change cursor.
-        MetadataViewError::SnapshotUnavailable { .. }
-        | MetadataViewError::UnsupportedHistoricalRead { .. } => ErrorCode::RebootstrapRequired,
+        // A well-formed cursor from ahead of the loaded head is a state
+        // condition, not a malformed request: the client's recovery is to
+        // restart the listing, same as a sub-floor change cursor.
+        MetadataViewError::SnapshotUnavailable { .. } => ErrorCode::RebootstrapRequired,
     }
 }
 
@@ -805,13 +797,6 @@ mod tests {
             (
                 MetadataViewError::SnapshotUnavailable {
                     requested_seq: ChangeSeq(1),
-                    head_seq,
-                },
-                ErrorCode::RebootstrapRequired,
-            ),
-            (
-                MetadataViewError::UnsupportedHistoricalRead {
-                    requested_seq: ChangeSeq(2),
                     head_seq,
                 },
                 ErrorCode::RebootstrapRequired,

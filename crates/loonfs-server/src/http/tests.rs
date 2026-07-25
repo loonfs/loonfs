@@ -1385,7 +1385,7 @@ async fn http_commit_body_over_the_limit_answers_content_too_large() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_stale_revisions_cursor_answers_rebootstrap_required() {
+async fn http_revisions_cursor_resumes_after_head_drift_and_rejects_the_future() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let fs = bootstrap_namespace(&store, "runtime-writer", &namespace_id("demo")).await;
@@ -1438,7 +1438,8 @@ async fn http_stale_revisions_cursor_answers_rebootstrap_required() {
     .await
     .expect("join blocking task");
 
-    // Any commit advances the head and retires outstanding cursors.
+    // A commit landing mid-listing does not retire the cursor: the resume
+    // continues after the last returned revision against the new head.
     write_file_bytes(
         &fs,
         &namespace_id("demo"),
@@ -1448,6 +1449,33 @@ async fn http_stale_revisions_cursor_answers_rebootstrap_required() {
     )
     .await;
 
+    let resumed = tokio::task::spawn_blocking({
+        let cursor = cursor.clone();
+        move || {
+            let response = raw_agent()
+                .get(&format!(
+                    "http://{addr}/v0/namespaces/demo/filesystem/revisions"
+                ))
+                .set("authorization", "Bearer test-token")
+                .query("path", "/notes/file.txt")
+                .query("limit", "1")
+                .query("cursor", &cursor)
+                .call()
+                .expect("cursor resumes after head drift");
+            let body = response.into_string().expect("read resumed body");
+            serde_json::from_str::<serde_json::Value>(&body).expect("json resumed body")
+        }
+    })
+    .await
+    .expect("join blocking task");
+    assert_eq!(resumed["revisions"][0]["revision_no"], 1);
+    assert!(resumed["next_cursor"].is_null());
+
+    // A cursor from the future stays unanswerable.
+    let mut future_cursor: loonfs_api::FileRevisionsPageCursor =
+        loonfs_api::decode_cursor(&cursor).expect("decode revisions cursor");
+    future_cursor.head_seq = loonfs_api::ChangeSeq(future_cursor.head_seq.0 + 1000);
+    let future_cursor = loonfs_api::encode_cursor(&future_cursor).expect("encode future cursor");
     let error = raw_agent()
         .get(&format!(
             "http://{addr}/v0/namespaces/demo/filesystem/revisions"
@@ -1455,15 +1483,15 @@ async fn http_stale_revisions_cursor_answers_rebootstrap_required() {
         .set("authorization", "Bearer test-token")
         .query("path", "/notes/file.txt")
         .query("limit", "1")
-        .query("cursor", &cursor)
+        .query("cursor", &future_cursor)
         .call()
-        .expect_err("stale cursor should answer rebootstrap_required");
+        .expect_err("future cursor should answer rebootstrap_required");
     let ureq::Error::Status(status, response) = error else {
-        panic!("expected a status error for a stale cursor");
+        panic!("expected a status error for a future cursor");
     };
     assert_eq!(status, 409);
-    let body = response.into_string().expect("read stale-cursor body");
-    let body: serde_json::Value = serde_json::from_str(&body).expect("json stale-cursor body");
+    let body = response.into_string().expect("read future-cursor body");
+    let body: serde_json::Value = serde_json::from_str(&body).expect("json future-cursor body");
     assert_eq!(body["code"], "rebootstrap_required");
 
     server.abort();

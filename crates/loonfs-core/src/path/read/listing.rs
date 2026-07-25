@@ -4,9 +4,11 @@ use crate::error::{CoreError, MetadataViewError, Result};
 use crate::metadata::ResolvedVisiblePath;
 use loonfs_api::{ChangeSeq, DirectoryPageCursor, InodeKind};
 
-/// A directory cursor is only honored at the head it was minted at: a cursor
-/// from the future is unanswerable, and a cursor from an older head would
-/// need a historical listing this view does not serve.
+/// A directory cursor is an ordering resume, not a snapshot pin: any head at
+/// or past the one that minted it serves the next page, resuming strictly
+/// after the last returned name key — the same forward-only drift grep and
+/// change-feed cursors tolerate. Only a cursor from the future is
+/// unanswerable.
 pub(super) fn validate_cursor_head(
     current_head_seq: ChangeSeq,
     cursor: Option<&DirectoryPageCursor>,
@@ -16,13 +18,6 @@ pub(super) fn validate_cursor_head(
     };
     if cursor.head_seq > current_head_seq {
         return Err(MetadataViewError::SnapshotUnavailable {
-            requested_seq: cursor.head_seq,
-            head_seq: current_head_seq,
-        }
-        .into());
-    }
-    if cursor.head_seq < current_head_seq {
-        return Err(MetadataViewError::UnsupportedHistoricalRead {
             requested_seq: cursor.head_seq,
             head_seq: current_head_seq,
         }

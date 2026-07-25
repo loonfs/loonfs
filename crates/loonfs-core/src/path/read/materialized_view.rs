@@ -796,11 +796,12 @@ fn validate_file_revisions_cursor(
     head_seq: ChangeSeq,
     inode_id: InodeId,
 ) -> Result<()> {
-    if cursor.head_seq != head_seq {
-        // A stale snapshot is the same restart-from-fresh-state condition
-        // directory listing reports, not a malformed request: both answer
-        // `rebootstrap_required` (API spec, "Pagination").
-        return Err(MetadataViewError::UnsupportedHistoricalRead {
+    if cursor.head_seq > head_seq {
+        // Forward-only drift, the same rule as directory listing and grep:
+        // an older cursor resumes strictly after its last returned row at
+        // whatever head is loaded now; only a cursor from the future is
+        // unanswerable (`rebootstrap_required`).
+        return Err(MetadataViewError::SnapshotUnavailable {
             requested_seq: cursor.head_seq,
             head_seq,
         }
