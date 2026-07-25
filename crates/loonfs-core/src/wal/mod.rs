@@ -10,7 +10,7 @@ pub(crate) use self::frame::{
     DecodedWalRecord, PreparedWalSegment, ReplayedWalTail, ValidatedWalChain, ValidatedWalSegment,
     WalBuildError, WalChainLoadError, WalChainLoadRequest, WalReplayError,
 };
-pub(crate) use self::reader::load_validated_wal_chain;
+pub(crate) use self::reader::{count_visible_wal_tail_segments, load_validated_wal_chain};
 pub(crate) use self::replay::project_validated_wal_tail;
 pub(crate) use self::writer::prepare_wal_segment;
 

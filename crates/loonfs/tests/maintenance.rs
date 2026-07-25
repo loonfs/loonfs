@@ -12,7 +12,7 @@ use loonfs::{
     SharedObjectStore,
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
-use loonfs_objectstore::keys::{metadata_manifest_object, namespace_config};
+use loonfs_objectstore::keys::{metadata_manifest_object, namespace_config, wal_segment_prefix};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::block_on::block_on;
@@ -59,6 +59,38 @@ fn namespace_status_reports_wal_tail_segments() {
     assert_eq!(status.wal_tail_segments, 1);
     assert_eq!(status.retention_floor_seq, ChangeSeq(0));
     assert_eq!(store.count(OperationClass::List), 0);
+}
+
+#[test]
+fn namespace_status_counts_wal_tail_without_reading_segments() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace_id("demo");
+    // Count only WAL segment reads: the head's chain pointers must be
+    // enough to size a hint-covered tail.
+    let store = Arc::new(CountingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
+        KeyPredicate::prefix(wal_segment_prefix(namespace_id.as_str())),
+    ));
+    let fs = open_runtime(store.clone(), "status-count-test");
+
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    for revision in 0..3 {
+        fs.put_file_bytes_blocking(
+            &namespace_id,
+            &format!("/docs/hello-{revision}.txt"),
+            format!("rev {revision}").as_bytes(),
+            PutFileOptions::default(),
+        )
+        .expect("put file");
+    }
+
+    store.reset();
+    let status = fs
+        .namespace_status_blocking(&namespace_id)
+        .expect("status with populated tail");
+    assert_eq!(status.wal_tail_segments, 3);
+    assert_eq!(store.count(OperationClass::Read), 0);
 }
 
 #[test]
