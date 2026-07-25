@@ -11,7 +11,7 @@ use crate::namespace::catalog::{
 use crate::namespace::control::{
     read_head_and_metadata_root, read_wal_floor_seq_or_zero, ControlObjectLoadError,
 };
-use crate::wal::{load_validated_wal_chain, WalChainLoadRequest};
+use crate::wal::{count_visible_wal_tail_segments, WalChainLoadRequest};
 use loonfs_api::wire::control::NamespaceState;
 use loonfs_api::{ChangeSeq, ManifestId, NamespaceId};
 use loonfs_objectstore::{keys::namespace_config, ObjectStore};
@@ -24,6 +24,12 @@ pub struct NamespaceHeadSummary {
     pub head_seq: ChangeSeq,
     pub current_manifest_id: Option<ManifestId>,
     /// Number of visible WAL segments after the current manifest.
+    ///
+    /// Counted from the head's chain pointers (`recent_segments`, published
+    /// under the same CAS as the tip); segment bodies are fetched and
+    /// validated only for a tail extending past the hinted window. An
+    /// inspection count for maintenance gating and operators — replay
+    /// consumers load the validated chain instead.
     pub wal_tail_segments: u64,
     pub retention_floor_seq: ChangeSeq,
 }
@@ -69,7 +75,7 @@ pub async fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
             .map_err(|error| {
                 CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
             })?;
-    let wal_chain = load_validated_wal_chain(
+    let wal_tail_segments = count_visible_wal_tail_segments(
         store,
         WalChainLoadRequest {
             namespace_id: expected_namespace_id,
@@ -84,8 +90,6 @@ pub async fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
     .map_err(|error| {
         CoreError::MetadataProjection(MetadataProjectionLoadError::WalChainLoad(error))
     })?;
-    let wal_tail_segments = u64::try_from(wal_chain.segments().len())
-        .map_err(|_| CoreError::Internal("WAL tail segment count overflow".to_owned()))?;
     let retention_floor_seq = read_wal_floor_seq_or_zero(store, expected_namespace_id)
         .await
         .map_err(|error| {

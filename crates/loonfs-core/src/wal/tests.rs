@@ -645,3 +645,265 @@ fn rewrap_envelope(envelope: &mut WalSegmentEnvelope) {
         WalSegmentEnvelope::from_payload(envelope.writer_version.clone(), envelope.payload.clone())
             .expect("rewrap wal envelope");
 }
+
+fn prepared_create_directory_segment(
+    namespace_id: &NamespaceId,
+    prev_visible_segment: Option<WalSegmentPointer>,
+    commit_id: &str,
+    display_name: &str,
+    apply_after_seq: ChangeSeq,
+    assigned_seq: ChangeSeq,
+) -> PreparedWalSegment {
+    prepare_wal_segment(
+        namespace_id.clone(),
+        WriterEpoch(1),
+        prev_visible_segment,
+        &[materialized_create_directory(
+            namespace_id,
+            commit_id,
+            display_name,
+            apply_after_seq,
+            assigned_seq,
+        )],
+        "test-writer",
+    )
+    .expect("prepare wal segment")
+}
+
+/// Prepares a linked chain of `len` single-commit segments covering seqs
+/// `1..=len`, without writing any of them to a store.
+fn prepared_unstored_chain(namespace_id: &NamespaceId, len: u64) -> Vec<PreparedWalSegment> {
+    let mut chain: Vec<PreparedWalSegment> = Vec::new();
+    for seq in 1..=len {
+        let prev = chain
+            .last()
+            .map(|segment| segment.envelope.pointer(segment.object_key.clone()));
+        chain.push(prepared_create_directory_segment(
+            namespace_id,
+            prev,
+            &format!("c_count_{seq}"),
+            &format!("dir-{seq}"),
+            ChangeSeq(seq - 1),
+            ChangeSeq(seq),
+        ));
+    }
+    chain
+}
+
+fn newest_first_pointers(chain: &[PreparedWalSegment]) -> Vec<WalSegmentPointer> {
+    chain
+        .iter()
+        .rev()
+        .map(|segment| segment.envelope.pointer(segment.object_key.clone()))
+        .collect()
+}
+
+#[tokio::test]
+async fn tail_count_from_contiguous_hints_reads_no_bodies() {
+    // The store stays empty on purpose: any body fetch would fail with
+    // `MissingWalObject`, so a successful count came from pointers alone.
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let chain = prepared_unstored_chain(&namespace_id, 3);
+    let hints = newest_first_pointers(&chain);
+
+    let count = count_visible_wal_tail_segments(
+        &store,
+        WalChainLoadRequest {
+            namespace_id: &namespace_id,
+            chain_base_seq: ChangeSeq(0),
+            head_seq: ChangeSeq(3),
+            visible_tip: Some(hints[0].clone()),
+            stop_after_seq: None,
+            recent_segments: &hints,
+        },
+    )
+    .await
+    .expect("count from pointers");
+    assert_eq!(count, 3);
+
+    // A manifest boundary inside the hinted window is honored: only the
+    // segments above it are tail.
+    let count = count_visible_wal_tail_segments(
+        &store,
+        WalChainLoadRequest {
+            namespace_id: &namespace_id,
+            chain_base_seq: ChangeSeq(2),
+            head_seq: ChangeSeq(3),
+            visible_tip: Some(hints[0].clone()),
+            stop_after_seq: None,
+            recent_segments: &hints,
+        },
+    )
+    .await
+    .expect("count above interior boundary");
+    assert_eq!(count, 1);
+
+    // An empty tail costs nothing and consults nothing.
+    let count = count_visible_wal_tail_segments(
+        &store,
+        WalChainLoadRequest {
+            namespace_id: &namespace_id,
+            chain_base_seq: ChangeSeq(3),
+            head_seq: ChangeSeq(3),
+            visible_tip: Some(hints[0].clone()),
+            stop_after_seq: None,
+            recent_segments: &hints,
+        },
+    )
+    .await
+    .expect("count of empty tail");
+    assert_eq!(count, 0);
+}
+
+#[tokio::test]
+async fn tail_count_walks_only_past_the_hinted_window() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let chain = prepared_unstored_chain(&namespace_id, 3);
+    // Store only the middle segment: the tip is hint-covered and the
+    // oldest is resolved through the middle segment's chain link, so
+    // neither body may be touched.
+    store
+        .put_if_absent(
+            &chain[1].object_key,
+            Bytes::copy_from_slice(&chain[1].encoded_bytes),
+        )
+        .await
+        .expect("write middle wal segment");
+    let pointers = newest_first_pointers(&chain);
+    let short_window = &pointers[..2];
+
+    let count = count_visible_wal_tail_segments(
+        &store,
+        WalChainLoadRequest {
+            namespace_id: &namespace_id,
+            chain_base_seq: ChangeSeq(0),
+            head_seq: ChangeSeq(3),
+            visible_tip: Some(pointers[0].clone()),
+            stop_after_seq: None,
+            recent_segments: short_window,
+        },
+    )
+    .await
+    .expect("count past hinted window");
+    assert_eq!(count, 3);
+}
+
+#[tokio::test]
+async fn tail_count_matches_loaded_chain_length() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let chain = prepared_unstored_chain(&namespace_id, 3);
+    for segment in &chain {
+        store
+            .put_if_absent(
+                &segment.object_key,
+                Bytes::copy_from_slice(&segment.encoded_bytes),
+            )
+            .await
+            .expect("write wal segment");
+    }
+    let pointers = newest_first_pointers(&chain);
+
+    for hints in [&pointers[..], &[]] {
+        let request = WalChainLoadRequest {
+            namespace_id: &namespace_id,
+            chain_base_seq: ChangeSeq(0),
+            head_seq: ChangeSeq(3),
+            visible_tip: Some(pointers[0].clone()),
+            stop_after_seq: None,
+            recent_segments: hints,
+        };
+        let count = count_visible_wal_tail_segments(&store, request.clone())
+            .await
+            .expect("count tail");
+        let loaded = load_validated_wal_chain(&store, request)
+            .await
+            .expect("load chain");
+        assert_eq!(count as usize, loaded.segments().len());
+        assert_eq!(count, 3);
+    }
+}
+
+#[tokio::test]
+async fn tail_count_ignores_hints_that_do_not_start_at_the_tip() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let chain = prepared_unstored_chain(&namespace_id, 2);
+    for segment in &chain {
+        store
+            .put_if_absent(
+                &segment.object_key,
+                Bytes::copy_from_slice(&segment.encoded_bytes),
+            )
+            .await
+            .expect("write wal segment");
+    }
+    let pointers = newest_first_pointers(&chain);
+    let mut lying_tip = pointers[0].clone();
+    lying_tip.end_seq = ChangeSeq(999);
+    let garbage = [lying_tip, pointers[1].clone()];
+
+    let count = count_visible_wal_tail_segments(
+        &store,
+        WalChainLoadRequest {
+            namespace_id: &namespace_id,
+            chain_base_seq: ChangeSeq(0),
+            head_seq: ChangeSeq(2),
+            visible_tip: Some(pointers[0].clone()),
+            stop_after_seq: None,
+            recent_segments: &garbage,
+        },
+    )
+    .await
+    .expect("count despite garbage hints");
+    assert_eq!(count, 2);
+}
+
+#[tokio::test]
+async fn tail_count_reports_broken_chains_truthfully() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    // A segment claiming seqs (1, 2] with no predecessor link cannot reach
+    // a chain base of 0.
+    let orphan = prepared_create_directory_segment(
+        &namespace_id,
+        None,
+        "c_count_orphan",
+        "orphan",
+        ChangeSeq(1),
+        ChangeSeq(2),
+    );
+    store
+        .put_if_absent(
+            &orphan.object_key,
+            Bytes::copy_from_slice(&orphan.encoded_bytes),
+        )
+        .await
+        .expect("write wal segment");
+    let tip = orphan.envelope.pointer(orphan.object_key.clone());
+
+    let error = count_visible_wal_tail_segments(
+        &store,
+        WalChainLoadRequest {
+            namespace_id: &namespace_id,
+            chain_base_seq: ChangeSeq(0),
+            head_seq: ChangeSeq(2),
+            visible_tip: Some(tip),
+            stop_after_seq: None,
+            recent_segments: &[],
+        },
+    )
+    .await
+    .expect_err("broken chain must not count");
+    assert!(matches!(
+        error,
+        WalChainLoadError::Replay(WalReplayError::BrokenChainLink { .. })
+    ));
+}
