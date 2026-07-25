@@ -447,7 +447,7 @@ pub(super) async fn gc_namespace(
         .gc_namespace(&namespace_id, &config)
         .await
         .map_err(ApiResponseError::runtime)?;
-    Ok(Json(loonfs::gc_response_from_report(namespace_id, report)))
+    Ok(Json(report))
 }
 
 #[cfg_attr(
@@ -481,5 +481,5 @@ pub(super) async fn maintenance_step(
         .maintenance_step_namespace(&namespace_id, options)
         .await
         .map_err(ApiResponseError::runtime)?;
-    Ok(Json(result.into_response()))
+    Ok(Json(result))
 }

@@ -473,6 +473,26 @@ pub struct GcResponse {
     pub next_cursor: Option<String>,
 }
 
+impl GcResponse {
+    /// An empty report for `namespace_id`, before any candidate is examined.
+    pub fn empty(namespace_id: NamespaceId) -> Self {
+        Self {
+            namespace_id,
+            deleted_wal_segments: 0,
+            deleted_metadata_tables: 0,
+            deleted_manifests: 0,
+            deleted_checkpoint_records: 0,
+            released_fork_checkpoints: 0,
+            deleted_upload_sessions: 0,
+            released_missing_basis_checkpoints: 0,
+            retained_candidates: 0,
+            degraded_retention: false,
+            incomplete_namespace_ignored: false,
+            next_cursor: None,
+        }
+    }
+}
+
 /// Result of advancing the retention floor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

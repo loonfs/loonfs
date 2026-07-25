@@ -122,7 +122,7 @@ pub use error::{
     Error, ErrorCode, ErrorKind, MetadataProjectionLoadError, MetadataViewError, Result,
     StoreFailureClass, WriterFence,
 };
-pub use gc::{gc_namespace, GcConfig, GcReport};
+pub use gc::{gc_namespace, GcConfig};
 pub use namespace::{repair_namespace, BootstrapNamespaceError};
 pub use options::{BootstrapOptions, DeleteNamespaceOptions, WriteOptions};
 pub use timing::{MonotonicTimer, StdMonotonicTimer};

@@ -1,16 +1,14 @@
-//! Per-operation option and result types for the runtime handle surface,
-//! plus the wire conversions the server and embedded hosts share so both
-//! transports report identical maintenance shapes.
+//! Per-operation option types for the runtime handle surface, plus the
+//! request-to-options resolutions the server and embedded hosts share.
+//!
+//! Results are the `loonfs-api` wire shapes themselves: the handles return
+//! `MaintenanceStepResponse` and `GcResponse` directly, the same way they
+//! already return `CommitResponse` and `FlushWalResponse`.
 
 use crate::{
-    ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior, EffectiveLimit, GcConfig,
-    GcReport, InodeId, ManifestId, NamespaceId, NamespaceStatusResponse,
+    CommitId, DeleteDirectoryBehavior, DestinationBehavior, EffectiveLimit, GcConfig, InodeId,
 };
-use loonfs_api::v0::{
-    CreateCheckpointRequest, GcRequest, GcResponse,
-    MaintenanceStepOutcome as WireMaintenanceStepOutcome, MaintenanceStepRequest,
-    MaintenanceStepResponse,
-};
+use loonfs_api::v0::{CreateCheckpointRequest, GcRequest, MaintenanceStepRequest};
 use loonfs_core::publish::WalTailPolicy;
 
 /// Options for one maintenance step.
@@ -54,6 +52,9 @@ impl MaintenanceStepOptions {
 }
 
 /// Resolves wire-level GC window overrides onto the conservative defaults.
+///
+/// [`GcRequest`] carries optional overrides; [`GcConfig`] carries the values
+/// the pass actually runs with, so the two are deliberately distinct shapes.
 pub fn gc_config_from_request(request: GcRequest) -> GcConfig {
     let defaults = GcConfig::default();
     GcConfig {
@@ -61,92 +62,6 @@ pub fn gc_config_from_request(request: GcRequest) -> GcConfig {
         reap_window_ms: request.reap_window_ms.unwrap_or(defaults.reap_window_ms),
         max_objects: request.max_objects,
         cursor: request.cursor,
-    }
-}
-
-/// Wire response for one GC report against a namespace.
-pub fn gc_response_from_report(namespace_id: NamespaceId, report: GcReport) -> GcResponse {
-    GcResponse {
-        namespace_id,
-        deleted_wal_segments: report.deleted_wal_segments,
-        deleted_metadata_tables: report.deleted_metadata_tables,
-        deleted_manifests: report.deleted_manifests,
-        deleted_checkpoint_records: report.deleted_checkpoint_records,
-        released_fork_checkpoints: report.released_fork_checkpoints,
-        deleted_upload_sessions: report.deleted_upload_sessions,
-        released_missing_basis_checkpoints: report.released_missing_basis_checkpoints,
-        retained_candidates: report.retained_candidates,
-        degraded_retention: report.degraded_retention,
-        incomplete_namespace_ignored: report.incomplete_namespace_ignored,
-        next_cursor: report.next_cursor,
-    }
-}
-
-/// Outcome of one maintenance step.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MaintenanceStepOutcome {
-    /// The WAL tail was below the threshold; the root was left alone.
-    NotNeeded,
-    /// The step flushed the WAL tail and advanced the metadata root.
-    WalFlushed {
-        /// Sequence covered by the published manifest.
-        manifest_head_seq: ChangeSeq,
-    },
-    /// The root already covered the attempted sequence — another publisher
-    /// got there first.
-    WalFlushSuperseded {
-        /// Sequence this step attempted to flush through.
-        attempted_seq: ChangeSeq,
-        /// Manifest the root currently references.
-        current_manifest_id: ManifestId,
-    },
-    /// A concurrent head update won the race.
-    WalFlushRaceLost {
-        /// Head sequence observed before the advance attempt.
-        observed_head_seq: ChangeSeq,
-    },
-}
-
-/// Result of one maintenance step.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MaintenanceStepResult {
-    /// Namespace the step ran against.
-    pub namespace_id: NamespaceId,
-    /// Namespace status observed before the step acted.
-    pub status_before: NamespaceStatusResponse,
-    /// What the step did.
-    pub outcome: MaintenanceStepOutcome,
-    /// Garbage-collection report when the step opted into sweeping.
-    pub gc: Option<GcReport>,
-}
-
-impl MaintenanceStepResult {
-    /// Wire response for this step.
-    pub fn into_response(self) -> MaintenanceStepResponse {
-        let namespace_id = self.namespace_id;
-        MaintenanceStepResponse {
-            gc: self
-                .gc
-                .map(|report| gc_response_from_report(namespace_id.clone(), report)),
-            namespace_id,
-            status_before: self.status_before,
-            outcome: match self.outcome {
-                MaintenanceStepOutcome::NotNeeded => WireMaintenanceStepOutcome::NotNeeded,
-                MaintenanceStepOutcome::WalFlushed { manifest_head_seq } => {
-                    WireMaintenanceStepOutcome::WalFlushed { manifest_head_seq }
-                }
-                MaintenanceStepOutcome::WalFlushSuperseded {
-                    attempted_seq,
-                    current_manifest_id,
-                } => WireMaintenanceStepOutcome::WalFlushSuperseded {
-                    attempted_seq,
-                    current_manifest_id,
-                },
-                MaintenanceStepOutcome::WalFlushRaceLost { observed_head_seq } => {
-                    WireMaintenanceStepOutcome::WalFlushRaceLost { observed_head_seq }
-                }
-            },
-        }
     }
 }
 

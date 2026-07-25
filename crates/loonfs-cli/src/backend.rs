@@ -4,11 +4,11 @@ use crate::backend_error::{map_namespace_scoped_runtime_error, map_runtime_error
 use crate::render::write_stderr_warning;
 use async_trait::async_trait;
 use loonfs::{
-    gc_config_from_request, gc_response_from_report, ChangesResponse, CopyOptions,
-    CreateCheckpointOptions, CreateDirectoryOptions, CreateNamespaceOptions,
-    DeleteNamespaceOptions, DeleteNamespaceResponse, DeleteOptions, FsAdmin, FsReader, FsWriter,
-    ListChangesOptions, MaintenanceStepOptions, MaintenanceStepResult, MoveOptions, PutFileOptions,
-    RestoreRevisionOptions, RuntimeError, UndeleteOptions,
+    gc_config_from_request, ChangesResponse, CopyOptions, CreateCheckpointOptions,
+    CreateDirectoryOptions, CreateNamespaceOptions, DeleteNamespaceOptions,
+    DeleteNamespaceResponse, DeleteOptions, FsAdmin, FsReader, FsWriter, ListChangesOptions,
+    MaintenanceStepOptions, MoveOptions, PutFileOptions, RestoreRevisionOptions, RuntimeError,
+    UndeleteOptions,
 };
 use loonfs_api::{
     v0::{DisableGrepIndexResponse, EnableGrepIndexResponse, RepairNamespaceResponse},
@@ -448,7 +448,6 @@ impl Backend for EmbeddedBackend {
         self.admin
             .maintenance_step_namespace(namespace_id, options)
             .await
-            .map(MaintenanceStepResult::into_response)
             .map_err(map_runtime_error)
     }
 
@@ -461,7 +460,6 @@ impl Backend for EmbeddedBackend {
         self.admin
             .gc_namespace(namespace_id, &config)
             .await
-            .map(|report| gc_response_from_report(namespace_id.clone(), report))
             .map_err(map_runtime_error)
     }
 

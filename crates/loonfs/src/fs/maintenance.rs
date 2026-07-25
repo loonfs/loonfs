@@ -7,7 +7,7 @@ use crate::NamespaceStatusResponse;
 use crate::{
     AdvanceRetentionResponse, CheckpointId, CreateCheckpointOptions, CreateCheckpointResponse,
     ErrorCode, FlushWalOutcome, FlushWalResponse, MaintenanceStepOptions, MaintenanceStepOutcome,
-    MaintenanceStepResult, NamespaceId, ReleaseCheckpointResponse,
+    MaintenanceStepResponse, NamespaceId, ReleaseCheckpointResponse,
 };
 use crate::{Result, RuntimeError};
 use loonfs_api::v0::{DisableGrepIndexResponse, EnableGrepIndexResponse};
@@ -51,7 +51,7 @@ impl FsAdmin {
         &self,
         namespace_id: &NamespaceId,
         options: MaintenanceStepOptions,
-    ) -> Result<MaintenanceStepResult> {
+    ) -> Result<MaintenanceStepResponse> {
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
         let mut options = options;
@@ -82,7 +82,7 @@ impl FsAdmin {
         if status_before.wal_tail_segments < options.max_wal_tail_segments {
             self.run_step_reorganization(namespace_id).await?;
             let gc = self.run_step_gc(namespace_id, options.gc.as_ref()).await?;
-            return Ok(MaintenanceStepResult {
+            return Ok(MaintenanceStepResponse {
                 namespace_id: namespace_id.clone(),
                 status_before,
                 outcome: MaintenanceStepOutcome::NotNeeded,
@@ -95,7 +95,7 @@ impl FsAdmin {
             Err(RuntimeError::Core(error)) if error.code() == ErrorCode::StaleHead => {
                 self.run_step_reorganization(namespace_id).await?;
                 let gc = self.run_step_gc(namespace_id, options.gc.as_ref()).await?;
-                return Ok(MaintenanceStepResult {
+                return Ok(MaintenanceStepResponse {
                     namespace_id: namespace_id.clone(),
                     status_before,
                     outcome: MaintenanceStepOutcome::WalFlushRaceLost { observed_head_seq },
@@ -119,7 +119,7 @@ impl FsAdmin {
         };
 
         let gc = self.run_step_gc(namespace_id, options.gc.as_ref()).await?;
-        Ok(MaintenanceStepResult {
+        Ok(MaintenanceStepResponse {
             namespace_id: namespace_id.clone(),
             status_before,
             outcome,
@@ -203,7 +203,7 @@ impl FsAdmin {
         &self,
         namespace_id: &NamespaceId,
         config: Option<&crate::GcConfig>,
-    ) -> Result<Option<crate::GcReport>> {
+    ) -> Result<Option<crate::GcResponse>> {
         let Some(config) = config else {
             return Ok(None);
         };
@@ -287,7 +287,7 @@ impl FsAdmin {
         &self,
         namespace_id: &NamespaceId,
         config: &crate::GcConfig,
-    ) -> Result<crate::GcReport> {
+    ) -> Result<crate::GcResponse> {
         let report = loonfs_core::gc_namespace(
             self.core.store(),
             namespace_id,

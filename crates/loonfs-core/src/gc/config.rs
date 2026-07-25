@@ -1,4 +1,4 @@
-//! GC configuration and the per-run report.
+//! GC configuration.
 
 use crate::error::{CoreError, Result};
 use crate::limits::GC_MIN_GRACE_WINDOW_MS;
@@ -61,41 +61,4 @@ impl GcConfig {
         }
         Ok(())
     }
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GcReport {
-    pub deleted_wal_segments: u64,
-    pub deleted_metadata_tables: u64,
-    pub deleted_manifests: u64,
-    pub deleted_checkpoint_records: u64,
-    /// Fork-owned checkpoint records flipped to released because their
-    /// target namespace is provably gone (terminally deleted, or its
-    /// installation tree is absent past the reap window).
-    pub released_fork_checkpoints: u64,
-    /// Upload-session control objects deleted after the reap window.
-    #[serde(default)]
-    pub deleted_upload_sessions: u64,
-    /// Active checkpoint records released because their basis manifest is
-    /// verifiably gone (the record-write-then-crash window skipped the
-    /// creator's own release).
-    #[serde(default)]
-    pub released_missing_basis_checkpoints: u64,
-    /// Candidates dropped at delete time: still inside the grace window,
-    /// missing a provider timestamp, or reachable from the fresh root set.
-    pub retained_candidates: u64,
-    /// True when a checkpoint record could not be read or validated, which
-    /// suppresses manifest and table deletion for the whole pass (rule 5:
-    /// ambiguous roots cause retention).
-    pub degraded_retention: bool,
-    /// The namespace lacked a complete head-and-descriptor pair, so GC
-    /// deliberately skipped it without listing or deleting any objects.
-    pub incomplete_namespace_ignored: bool,
-    /// Opaque resume token when more sweep candidates remain.
-    ///
-    /// Callers must return it only to the same namespace. It resumes
-    /// enumeration, not safety state: every invocation rebuilds roots and
-    /// floors before deciding a deletion.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub next_cursor: Option<String>,
 }
