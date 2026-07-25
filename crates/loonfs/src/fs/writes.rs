@@ -710,9 +710,22 @@ impl FsWriter {
         // Background maintenance runs the same operations an operator runs,
         // through the same handle, rather than a private copy of them.
         let admin = crate::FsAdmin::from_core(self.core.clone());
-        admin
+        let started = tokio::time::Instant::now();
+        let step = admin
             .maintenance_step_namespace(namespace_id, options)
             .await?;
-        admin.drain_reorganization_backlog(namespace_id).await
+        admin.drain_reorganization_backlog(namespace_id).await?;
+        // Quiet conclusions (`NotNeeded`) emit nothing at default levels;
+        // this is the only record that a background step ran at all.
+        tracing::debug!(
+            phase = "auto_maintenance_step",
+            namespace_id = %step.namespace_id,
+            wal_tail_segments_before = step.status_before.wal_tail_segments,
+            wal_flush = ?step.wal_flush,
+            reorganize = ?step.reorganize,
+            elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            "background maintenance step concluded"
+        );
+        Ok(())
     }
 }
