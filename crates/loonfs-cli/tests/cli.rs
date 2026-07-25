@@ -1143,6 +1143,36 @@ fn namespace_delete_without_yes_fails_cleanly_when_not_interactive() {
 }
 
 #[test]
+fn admin_gc_reclaims_a_deleted_namespace_instead_of_refusing() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+
+    let payload = harness.temp_dir.path().join("payload.txt");
+    fs::write(&payload, b"body").expect("write payload");
+    assert_success(&harness.run(&["put", payload.to_str().expect("utf-8 path"), "/doc.txt"]));
+    // Materialize derived state so the tombstone has something reclaimable.
+    assert_success(&harness.run(&["admin", "flush"]));
+    assert_success(&harness.run(&["--json", "namespace", "delete", "demo", "--yes"]));
+
+    // GC is the reclamation path for a tombstoned namespace: it must run
+    // and report, not refuse. (Fresh objects sit inside the grace window,
+    // so this pins reachability, not byte counts.)
+    let gc = harness.run(&["--json", "admin", "gc"]);
+    assert_success(&gc);
+    assert_eq!(json_data(&gc)["kind"], "garbage_collected");
+
+    // Everything that is not the GC-only step still reports the deletion.
+    let step = harness.run(&["--json", "admin", "step"]);
+    assert_failure(&step);
+    assert_eq!(json_error(&step)["code"], "namespace_deleted");
+    let recreate = harness.run(&["--json", "namespace", "create", "demo"]);
+    assert_failure(&recreate);
+    assert_eq!(json_error(&recreate)["code"], "namespace_deleted");
+}
+
+#[test]
 fn index_enable_leaves_core_maintenance_decoupled() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");
