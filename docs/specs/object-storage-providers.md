@@ -35,10 +35,12 @@ Two things must both hold for direct-put to be available, and
 `StoreConfig::direct_put_is_proven` plus `ConfiguredObjectStore::transfer_issuer`
 are the code that decides:
 
-1. **The adapter can presign the required request.** Only the S3-compatible
-   adapters (AWS S3 and Cloudflare R2) issue a presigned PUT carrying a signed
-   `x-amz-checksum-sha256` and `if-none-match: *`. The local filesystem, GCS,
-   and Azure Blob adapters issue nothing.
+1. **The adapter can presign a request that binds the content ref's digest.**
+   Only the S3-compatible adapters (AWS S3 and Cloudflare R2) issue one: a
+   presigned PUT carrying a signed `x-amz-checksum-sha256` and
+   `if-none-match: *`. GCS and Azure Blob can presign and enforce create-only,
+   but validate only CRC32C/MD5, so neither can bind the SHA-256 a content ref
+   is addressed by; the local filesystem has no signing surface.
 2. **The endpoint is one the live conformance suite has actually run against.**
    An AWS S3 endpoint with no override, an override in the `amazonaws.com` or
    `amazonaws.com.cn` domain family, and an R2 endpoint in the
@@ -57,11 +59,11 @@ This never weakens ordinary uploads. The server-mediated upload path is
 available on every supported store and is the default wherever direct-put is
 not offered.
 
-| Provider | Presigns direct-put | Proven endpoints |
+| Provider | Direct-put offered | Proven endpoints |
 | --- | --- | --- |
 | AWS S3 | Yes | Default endpoint, `amazonaws.com`, `amazonaws.com.cn` |
 | Cloudflare R2 | Yes | `r2.cloudflarestorage.com` |
-| Other S3-compatible endpoints | Yes | None — unproven, direct-put unavailable |
+| Other S3-compatible endpoints | No | None — unproven |
 | Google Cloud Storage | No | n/a |
 | Azure Blob Storage | No | n/a |
 | Local filesystem | No | n/a |
