@@ -81,17 +81,11 @@ async fn begin_direct_put_upload(
     namespace_id: NamespaceId,
     request: BeginUploadRequest,
 ) -> Result<Json<BeginUploadResponse>, ApiResponseError> {
-    if !state.config.direct_put_availability().is_enabled() {
-        return Err(ApiResponseError::not_supported(
-            FEATURE_UPLOADS_DIRECT_PUT,
-            "direct_put is disabled for an unproven object-store endpoint; \
-             set `direct_put.allow_unproven = true` to opt in",
-        ));
-    }
     let Some(issuer) = state.transfer_issuer.as_ref() else {
         return Err(ApiResponseError::not_supported(
             FEATURE_UPLOADS_DIRECT_PUT,
-            "direct_put requires a presigned URL capable object store",
+            "direct_put requires an object store that can presign create-only, \
+             checksum-bound uploads; this deployment's endpoint cannot",
         ));
     };
     let Some(content_ref) = request.content_ref else {

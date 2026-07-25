@@ -83,10 +83,7 @@ where
                     .await
                 {
                     Ok(_) => return Ok(outcome),
-                    Err(
-                        ObjectStoreError::PreconditionFailed { .. }
-                        | ObjectStoreError::Conflict { .. },
-                    ) => {
+                    Err(ObjectStoreError::PreconditionFailed { .. }) => {
                         continue;
                     }
                     Err(error) => {
@@ -175,9 +172,7 @@ where
                 .await
             {
                 Ok(_) => Ok(UploadSessionCas::Applied(outcome)),
-                Err(
-                    ObjectStoreError::PreconditionFailed { .. } | ObjectStoreError::Conflict { .. },
-                ) => Ok(UploadSessionCas::Conflict),
+                Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(UploadSessionCas::Conflict),
                 Err(error) => Err(CoreError::store(&loaded.object_key, &error)),
             }
         }

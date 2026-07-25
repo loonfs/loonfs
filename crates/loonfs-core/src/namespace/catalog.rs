@@ -228,7 +228,7 @@ pub(crate) async fn put_namespace_install_gate<S: ObjectStore + ?Sized>(
         .await
     {
         Ok(_) => Ok(NamespaceInstallGate::Landed),
-        Err(ObjectStoreError::PreconditionFailed { .. } | ObjectStoreError::Conflict { .. }) => {
+        Err(ObjectStoreError::PreconditionFailed { .. }) => {
             let exact_readback = store
                 .get(&object_key, None)
                 .await
@@ -319,7 +319,7 @@ pub(crate) async fn put_target_namespace_control_object<S: ObjectStore + ?Sized>
         .await
     {
         Ok(_) => Ok(()),
-        Err(ObjectStoreError::PreconditionFailed { .. } | ObjectStoreError::Conflict { .. }) => {
+        Err(ObjectStoreError::PreconditionFailed { .. }) => {
             let state = namespace_initialization_state(store, namespace_id)
                 .await
                 .map_err(map_namespace_initialization_error_to_core)?;
@@ -368,10 +368,7 @@ pub(crate) async fn put_completion_descriptor<S: ObjectStore + ?Sized>(
         .put_if_absent(&descriptor_key, Bytes::copy_from_slice(bytes))
         .await
     {
-        Ok(_)
-        | Err(ObjectStoreError::PreconditionFailed { .. } | ObjectStoreError::Conflict { .. }) => {
-            Ok(())
-        }
+        Ok(_) | Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(()),
         Err(err) => Err(CoreError::store(&descriptor_key, &err)),
     }
 }

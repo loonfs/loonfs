@@ -102,7 +102,16 @@ pub async fn app(config: ServerConfig) -> Result<(Router, ServerLifecycle), Serv
     // file-loaded ones fail at load.
     config.validate()?;
     let store = config.object_store()?;
-    let transfer_issuer = store.transfer_issuer();
+    // The one direct-put gate. A presigned URL is a capability handed to a
+    // client, and completion trusts the provider to have enforced the signed
+    // checksum and create-only preconditions rather than reading the bytes
+    // back — so an issuer exists only when the store can presign *and* the
+    // endpoint is one the live conformance suite has proven.
+    let transfer_issuer = config
+        .store
+        .direct_put_is_proven()
+        .then(|| store.transfer_issuer())
+        .flatten();
     let store = Arc::new(store) as SharedObjectStore;
     let (router, lifecycle, _state) =
         app_with_store_and_transfer_issuer(config, store, transfer_issuer).await?;

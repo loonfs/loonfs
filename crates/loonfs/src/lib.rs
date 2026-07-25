@@ -79,7 +79,7 @@ pub mod publish {
     pub use loonfs_core::limits::{
         MAX_COMMIT_CONTENT_TOKENS, MAX_COMMIT_EXTERNAL_CONTENT_REFS, MAX_COMMIT_OPERATIONS,
     };
-    pub use loonfs_core::path::{parse_mutation_path, validate_mutation_path};
+    pub use loonfs_core::path::{ensure_mutation_path, parse_mutation_path};
     pub use loonfs_core::publish::{
         ContentPreparation, ContentPreparationError, NamespaceMutation, NamespaceMutationCandidate,
         PathMutationIntent, PreparedContent,

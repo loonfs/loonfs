@@ -48,7 +48,7 @@ pub(super) async fn capabilities(
 ) -> Result<Json<loonfs_api::CapabilityDocument>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let mut capabilities = state.reader.capabilities();
-    if state.transfer_issuer.is_some() && state.config.direct_put_availability().is_enabled() {
+    if state.transfer_issuer.is_some() {
         capabilities
             .features
             .insert(FEATURE_UPLOADS_DIRECT_PUT.to_owned(), true);

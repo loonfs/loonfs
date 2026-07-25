@@ -406,11 +406,18 @@ impl NamespacePublisher {
         self.core.upgrade().map(|inner| FsCore { inner })
     }
 
-    fn close_admission(&self) {
+    /// Recovers a poisoned lock rather than propagating: every critical
+    /// section over this state is a plain field update, and
+    /// [`PublishAbortGuard`] must take it from a drop that may run during a
+    /// panic unwind, where a second panic would abort the process.
+    fn lock_state(&self) -> std::sync::MutexGuard<'_, NamespacePublisherState> {
         self.state
             .lock()
-            .expect("namespace publisher mutex poisoned")
-            .closed = true;
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn close_admission(&self) {
+        self.lock_state().closed = true;
     }
 
     /// The path to `admit` is await-free: a submission future's first poll
@@ -450,10 +457,7 @@ impl NamespacePublisher {
         operation_class: &'static str,
         enqueued_at: Instant,
     ) -> Result<(), CoreError> {
-        let mut state = self
-            .state
-            .lock()
-            .expect("namespace publisher mutex poisoned");
+        let mut state = self.lock_state();
         if state.deleted {
             return Err(CoreError::NamespaceDeleted {
                 namespace_id: self.namespace_id.clone(),
@@ -521,10 +525,7 @@ impl NamespacePublisher {
     async fn submit_delete(&self, options: DeleteNamespaceOptions) -> DeleteResult {
         let (sender, receiver) = oneshot::channel();
         {
-            let mut state = self
-                .state
-                .lock()
-                .expect("namespace publisher mutex poisoned");
+            let mut state = self.lock_state();
             if state.deleted {
                 return Err(CoreError::NamespaceDeleted {
                     namespace_id: self.namespace_id.clone(),
@@ -588,19 +589,13 @@ impl NamespacePublisher {
         loop {
             let collect_started = Instant::now();
             let queue_depth_start = {
-                let state = self
-                    .state
-                    .lock()
-                    .expect("namespace publisher mutex poisoned");
+                let state = self.lock_state();
                 pending_queue_depth(&state)
             };
-            self.wait_for_cas_pacing().await;
+            self.await_cas_slot(false).await;
 
             let unit = {
-                let mut state = self
-                    .state
-                    .lock()
-                    .expect("namespace publisher mutex poisoned");
+                let mut state = self.lock_state();
                 // `publishing` is already true: the spawner took loop
                 // ownership before this task existed.
                 let unit = if let Some(pending) = state.pending_delete.as_mut() {
@@ -642,8 +637,8 @@ impl NamespacePublisher {
                     }
                     tracing::info!(
                         phase = "batch_collect",
-                        mode = self.trace_mode(),
-                        store_kind = self.trace_store_kind(),
+                        mode = self.trace_mode,
+                        store_kind = self.trace_store_kind,
                         batch_size = usize_to_u64(candidates.len()),
                         queue_depth_start = usize_to_u64(queue_depth_start),
                         queue_depth_end = usize_to_u64(candidates.len()),
@@ -678,8 +673,8 @@ impl NamespacePublisher {
         for candidate in &candidates {
             tracing::info!(
                 phase = "wait_for_batch",
-                mode = self.trace_mode(),
-                store_kind = self.trace_store_kind(),
+                mode = self.trace_mode,
+                store_kind = self.trace_store_kind,
                 operation_class = candidate.operation_class,
                 result = "ok",
                 wait_ms = elapsed_ms_from(candidate.enqueued_at, selected_at),
@@ -690,8 +685,8 @@ impl NamespacePublisher {
         let publish_span = tracing::info_span!(
             "loonfs.phase",
             phase = "batch_publish",
-            mode = self.trace_mode(),
-            store_kind = self.trace_store_kind(),
+            mode = self.trace_mode,
+            store_kind = self.trace_store_kind,
             batch_size = usize_to_u64(candidates.len()),
             result = tracing::field::Empty,
             retry_count = tracing::field::Empty
@@ -724,7 +719,7 @@ impl NamespacePublisher {
                     break;
                 }
                 retry_count += 1;
-                self.wait_for_next_cas_token().await;
+                self.await_cas_slot(true).await;
             }
             (results, retry_count)
         }
@@ -753,10 +748,7 @@ impl NamespacePublisher {
                 // Tombstone first, then fail everything that queued behind
                 // the delete; admissions from here on fail fast.
                 let failed_waiters = {
-                    let mut state = self
-                        .state
-                        .lock()
-                        .expect("namespace publisher mutex poisoned");
+                    let mut state = self.lock_state();
                     state.deleted = true;
                     state.publishing = false;
                     let mut failed = Vec::new();
@@ -798,41 +790,22 @@ impl NamespacePublisher {
         }
     }
 
-    /// Sleeps until the next head CAS is allowed, without claiming it.
-    async fn wait_for_cas_pacing(&self) {
+    /// Sleeps until this namespace's next head compare-and-swap is allowed.
+    ///
+    /// `claim` decides what happens on arrival: a claiming waiter also
+    /// reserves the slot by pushing the next allowed instant out by one
+    /// pacing interval, so two waiters cannot both take the same slot. A
+    /// non-claiming waiter only observes that the slot is open — the caller
+    /// reserves it later, when it actually takes a work unit.
+    async fn await_cas_slot(&self, claim: bool) {
         loop {
-            let sleep_until = {
-                let state = self
-                    .state
-                    .lock()
-                    .expect("namespace publisher mutex poisoned");
-                state.next_allowed_cas_at
-            };
-            let now = Instant::now();
-            if sleep_until <= now {
-                break;
-            }
-            tokio::time::sleep_until(sleep_until).await;
-        }
-    }
-
-    async fn wait_for_next_cas_token(&self) {
-        loop {
-            let sleep_until = {
-                let state = self
-                    .state
-                    .lock()
-                    .expect("namespace publisher mutex poisoned");
-                state.next_allowed_cas_at
-            };
-            let now = Instant::now();
-            if sleep_until <= now {
-                let mut state = self
-                    .state
-                    .lock()
-                    .expect("namespace publisher mutex poisoned");
-                state.next_allowed_cas_at = Instant::now() + self.min_publish_interval;
-                break;
+            let sleep_until = self.lock_state().next_allowed_cas_at;
+            if sleep_until <= Instant::now() {
+                if claim {
+                    let mut state = self.lock_state();
+                    state.next_allowed_cas_at = Instant::now() + self.min_publish_interval;
+                }
+                return;
             }
             tokio::time::sleep_until(sleep_until).await;
         }
@@ -847,10 +820,7 @@ impl NamespacePublisher {
         let mut deliveries = Vec::new();
         let mut wait_traces = Vec::new();
         {
-            let mut state = self
-                .state
-                .lock()
-                .expect("namespace publisher mutex poisoned");
+            let mut state = self.lock_state();
             // Positional pairing is meaningless once lengths differ, so a
             // count mismatch fails every candidate instead of delivering
             // misaligned results to the earlier ones.
@@ -885,8 +855,8 @@ impl NamespacePublisher {
         for (operation_class, result, wait_ms) in wait_traces {
             tracing::info!(
                 phase = "wait_for_result",
-                mode = self.trace_mode(),
-                store_kind = self.trace_store_kind(),
+                mode = self.trace_mode,
+                store_kind = self.trace_store_kind,
                 operation_class,
                 result,
                 wait_ms,
@@ -907,21 +877,13 @@ impl NamespacePublisher {
     ) {
         tracing::info!(
             phase = "enqueue",
-            mode = self.trace_mode(),
-            store_kind = self.trace_store_kind(),
+            mode = self.trace_mode,
+            store_kind = self.trace_store_kind,
             operation_class,
             queue_depth = usize_to_u64(queue_depth),
             reason,
             "publisher.enqueue"
         );
-    }
-
-    fn trace_mode(&self) -> &'static str {
-        self.trace_mode
-    }
-
-    fn trace_store_kind(&self) -> &'static str {
-        self.trace_store_kind
     }
 }
 
@@ -965,14 +927,7 @@ impl Drop for PublishAbortGuard {
         }
         let mut orphaned_waiters = Vec::new();
         {
-            // Recover a poisoned lock instead of `expect`: panicking in this
-            // drop during an unwind would abort the process, and every
-            // critical section over this state is a plain field update.
-            let mut state = self
-                .publisher
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut state = self.publisher.lock_state();
             state.publishing = false;
             for commit_id in self.taken_commit_ids.drain(..) {
                 if let Some(in_flight) = state.in_flight.remove(&commit_id) {

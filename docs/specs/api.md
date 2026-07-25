@@ -513,12 +513,13 @@ Without an explicit opt-in, the feature key is absent and beginning
 `feature = "core.uploads.direct_put"`. The server-mediated upload path remains
 available and is the default.
 
-The reference server derives this decision from the provider capability
-profile's direct-put-precondition expectation. First-party provider domain
-families are enabled by default; an S3-compatible custom endpoint requires
-the strict configuration opt-in
-`[direct_put] allow_unproven = true`. Other providers may use different
-headers or decline `direct_put` support.
+The reference server offers `direct_put` only where its adapter can presign the
+required create-only, checksum-bound request *and* the configured endpoint is a
+first-party provider domain family the live conformance suite has run against.
+Custom S3-compatible endpoints, Google Cloud Storage, Azure Blob Storage, and
+the local filesystem are not offered `direct_put`, and there is no
+configuration override. Other implementations may use different headers or
+decline `direct_put` support.
 
 After the client uploads bytes to the presigned URL, it calls complete with the
 same `content_ref`. Completion proves the durable object exists and carries the

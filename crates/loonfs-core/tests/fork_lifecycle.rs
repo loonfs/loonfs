@@ -287,7 +287,7 @@ async fn bootstrap_head_conflict_rechecks_complete_namespace() {
     let store = InjectCreateFailureStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
         KeyMatcher::Exact(wal_head(namespace_id.as_str())),
-        InjectedCreateFailure::Conflict {
+        InjectedCreateFailure::PreconditionFailed {
             write_attempted_object: true,
             additional_writes: vec![
                 (
@@ -1058,7 +1058,7 @@ async fn fork_target_control_conflict_rechecks_complete_namespace() {
     let store = InjectCreateFailureStore::new(
         inner,
         KeyMatcher::Exact(wal_head(clone_namespace_id.as_str())),
-        InjectedCreateFailure::Conflict {
+        InjectedCreateFailure::PreconditionFailed {
             write_attempted_object: true,
             additional_writes: vec![(
                 namespace_config(clone_namespace_id.as_str()),

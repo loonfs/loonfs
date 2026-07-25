@@ -51,7 +51,7 @@ pub(crate) async fn write_namespace_manifest<S: ObjectStore + ?Sized>(
         .await
     {
         Ok(_) => Ok(()),
-        Err(ObjectStoreError::PreconditionFailed { .. } | ObjectStoreError::Conflict { .. }) => {
+        Err(ObjectStoreError::PreconditionFailed { .. }) => {
             let Some(existing) = load_namespace_manifest_envelope_if_present(
                 store,
                 &manifest.payload.namespace_id,
@@ -169,9 +169,7 @@ pub(super) async fn publish_metadata_root<S: ObjectStore + ?Sized>(
             .await
         {
             Ok(_) => return Ok(ManifestPublicationOutcome::Published(next)),
-            Err(
-                ObjectStoreError::PreconditionFailed { .. } | ObjectStoreError::Conflict { .. },
-            ) => continue,
+            Err(ObjectStoreError::PreconditionFailed { .. }) => continue,
             Err(error) => {
                 let recovered = read_metadata_root_object(store, namespace_id)
                     .await

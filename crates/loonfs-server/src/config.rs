@@ -3,7 +3,6 @@
 
 use loonfs::RuntimeCacheConfig;
 use loonfs_grep::GrepWorkerConfig;
-use loonfs_objectstore::provider::Expectation;
 use loonfs_objectstore::{ConfiguredObjectStore, SecretString, StoreConfigError};
 use serde::Deserialize;
 use std::env;
@@ -44,10 +43,6 @@ pub struct ServerConfig {
     /// Grep serving mode plus worker pacing and bounded-step budgets.
     #[serde(default)]
     pub grep: GrepConfig,
-    /// Direct-put policy for endpoints whose provider preconditions are not
-    /// proven by the selected first-party provider profile.
-    #[serde(default)]
-    pub direct_put: DirectPutConfig,
     /// Whether the server writer schedules maintenance (checkpoints and
     /// reorganization folds) after writes that cross the WAL-tail
     /// threshold. On by default; set `false` on write-serving nodes when a
@@ -144,35 +139,6 @@ fn default_max_concurrent_downloads() -> usize {
 
 fn default_max_concurrent_maintenance() -> usize {
     loonfs::DEFAULT_MAX_CONCURRENT_MAINTENANCE
-}
-
-/// The server's `[direct_put]` table.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct DirectPutConfig {
-    /// Allows direct-put on an endpoint whose provider profile does not prove
-    /// enforcement of the signed checksum and create-only preconditions.
-    ///
-    /// This is off by default. Service-proxied uploads remain available when
-    /// direct-put is gated.
-    pub allow_unproven: bool,
-}
-
-/// Effective direct-put policy derived from the provider expectation and opt-in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DirectPutAvailability {
-    /// The first-party provider profile proves the signed preconditions.
-    Proven,
-    /// The endpoint has no first-party proof and the opt-in is absent.
-    Unproven,
-    /// The operator explicitly accepted an endpoint without first-party proof.
-    UnprovenOptIn,
-}
-
-impl DirectPutAvailability {
-    pub(crate) fn is_enabled(self) -> bool {
-        self != Self::Unproven
-    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -321,22 +287,6 @@ impl ServerConfig {
             })
     }
 
-    pub(crate) fn direct_put_availability(&self) -> DirectPutAvailability {
-        if self
-            .store
-            .provider_profile()
-            .active_contract
-            .direct_put_preconditions
-            == Expectation::ExpectedYes
-        {
-            DirectPutAvailability::Proven
-        } else if self.direct_put.allow_unproven {
-            DirectPutAvailability::UnprovenOptIn
-        } else {
-            DirectPutAvailability::Unproven
-        }
-    }
-
     /// Parses the bind address; the one authority for that conversion, used
     /// by validation and by serving.
     pub(crate) fn bind_addr(&self) -> Result<SocketAddr, ServerConfigError> {
@@ -480,7 +430,7 @@ mod tests {
     #![allow(clippy::panic)]
     // Config tests use panic in unexpected match arms for precise diagnostics.
 
-    use super::{load_server_config, DirectPutConfig, ServerConfigError};
+    use super::{load_server_config, ServerConfigError};
     use std::fs;
     use tempfile::tempdir;
 
@@ -1410,50 +1360,6 @@ root = "/tmp/loonfs-server"
         match error {
             ServerConfigError::MissingField { field: actual } => assert_eq!(actual, field),
             other => panic!("expected missing field error for {field}, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn direct_put_unproven_opt_in_defaults_off_and_parses_strictly() {
-        assert!(!DirectPutConfig::default().allow_unproven);
-
-        let path = write_config(
-            r#"
-bind = "127.0.0.1:9400"
-auth_token = "dev-token"
-writer_id = "loonfs-server"
-writer_version = "loonfs-server/0.1.0"
-
-[direct_put]
-allow_unproven = true
-
-[store]
-kind = "local-fs"
-root = "/tmp/loonfs-server"
-"#,
-        );
-        let config = load_server_config(&path).expect("valid direct-put opt-in");
-        assert!(config.direct_put.allow_unproven);
-
-        let path = write_config(
-            r#"
-bind = "127.0.0.1:9400"
-auth_token = "dev-token"
-writer_id = "loonfs-server"
-writer_version = "loonfs-server/0.1.0"
-
-[direct_put]
-allow_unprove = true
-
-[store]
-kind = "local-fs"
-root = "/tmp/loonfs-server"
-"#,
-        );
-        let error = load_server_config(&path).expect_err("typo'd direct-put key");
-        match error {
-            ServerConfigError::Decode(message) => assert!(message.contains("allow_unprove")),
-            other => panic!("expected strict decode error, got {other:?}"),
         }
     }
 }

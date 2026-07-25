@@ -107,9 +107,7 @@ pub(crate) async fn write_checkpoint_record<S: ObjectStore + ?Sized>(
     let object_key = checkpoint_record(record.namespace_id.as_str(), record.checkpoint_id.as_str());
     match store.put_if_absent(&object_key, encoded).await {
         Ok(_) => Ok(CheckpointRecordWrite::Created),
-        Err(ObjectStoreError::PreconditionFailed { .. } | ObjectStoreError::Conflict { .. }) => {
-            Ok(CheckpointRecordWrite::Existing)
-        }
+        Err(ObjectStoreError::PreconditionFailed { .. }) => Ok(CheckpointRecordWrite::Existing),
         Err(error) => Err(CoreError::store(&object_key, &error)),
     }
 }
@@ -232,9 +230,7 @@ async fn cas_checkpoint_record<S: ObjectStore + ?Sized>(
         };
         match store.compare_and_swap(&object_key, etag, encoded).await {
             Ok(_) => return Ok(()),
-            Err(
-                ObjectStoreError::PreconditionFailed { .. } | ObjectStoreError::Conflict { .. },
-            ) => continue,
+            Err(ObjectStoreError::PreconditionFailed { .. }) => continue,
             Err(error) => return Err(CoreError::store(&object_key, &error)),
         }
     }
@@ -310,9 +306,7 @@ pub(crate) async fn freshen_fork_checkpoint<S: ObjectStore + ?Sized>(
                 }
                 return Ok(next);
             }
-            Err(
-                ObjectStoreError::PreconditionFailed { .. } | ObjectStoreError::Conflict { .. },
-            ) => continue,
+            Err(ObjectStoreError::PreconditionFailed { .. }) => continue,
             Err(error) => return Err(CoreError::store(&object_key, &error)),
         }
     }

@@ -174,9 +174,7 @@ pub async fn publish_commit_head<S: ObjectStore + ?Sized>(
 
 fn map_object_store_error(object_key: &str, err: ObjectStoreError) -> CommitHeadPublishError {
     match err {
-        ObjectStoreError::PreconditionFailed { .. } | ObjectStoreError::Conflict { .. } => {
-            CommitHeadPublishError::StaleHead
-        }
+        ObjectStoreError::PreconditionFailed { .. } => CommitHeadPublishError::StaleHead,
         // A transport failure after the CAS was sent leaves the outcome
         // unobserved: the head may already reference the new segment.
         ObjectStoreError::Transport { message, .. } => {

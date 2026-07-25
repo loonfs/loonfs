@@ -443,10 +443,6 @@ pub(crate) mod mutation_split_support {
         Transport {
             message: &'static str,
         },
-        Conflict {
-            write_attempted_object: bool,
-            additional_writes: Vec<(String, Vec<u8>)>,
-        },
         PreconditionFailed {
             write_attempted_object: bool,
             additional_writes: Vec<(String, Vec<u8>)>,
@@ -462,11 +458,7 @@ pub(crate) mod mutation_split_support {
         ) -> Result<(), ObjectStoreError> {
             match self {
                 Self::Transport { .. } => Ok(()),
-                Self::Conflict {
-                    write_attempted_object,
-                    additional_writes,
-                }
-                | Self::PreconditionFailed {
+                Self::PreconditionFailed {
                     write_attempted_object,
                     additional_writes,
                 } => {
@@ -490,9 +482,6 @@ pub(crate) mod mutation_split_support {
                 Self::Transport { message } => {
                     ObjectStoreError::transport(attempted_key, (*message).to_owned())
                 }
-                Self::Conflict { .. } => ObjectStoreError::Conflict {
-                    object_key: attempted_key.to_owned(),
-                },
                 Self::PreconditionFailed { .. } => ObjectStoreError::PreconditionFailed {
                     object_key: attempted_key.to_owned(),
                 },

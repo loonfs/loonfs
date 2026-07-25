@@ -416,7 +416,7 @@ impl ObjectStore for ConflictOnManifestCreateStore {
                     }
                 };
                 self.inner.put_overwrite(key, replacement_bytes).await?;
-                return Err(ObjectStoreError::Conflict {
+                return Err(ObjectStoreError::PreconditionFailed {
                     object_key: key.to_owned(),
                 });
             }
