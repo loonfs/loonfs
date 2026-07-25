@@ -29,9 +29,9 @@ pub use operations::{
     CreateNamespaceRequest, DeleteDirectoryBehavior, DeleteNamespaceResponse, DestinationBehavior,
     ErrorDetails, FileRevision, FilesystemOperation, FilesystemOperationRequest, FlushWalOutcome,
     FlushWalResponse, ForkNamespaceRequest, GcRequest, GcResponse, ListFileRevisionsResponse,
-    MaintenanceStepOutcome, MaintenanceStepRequest, MaintenanceStepResponse,
-    NamespaceStatusResponse, NamespaceSummary, ReleaseCheckpointResponse, RepairNamespaceOutcome,
-    RepairNamespaceResponse, RestoreFileRevisionRequest,
+    MaintenanceStepKind, MaintenanceStepRequest, MaintenanceStepResponse, NamespaceStatusResponse,
+    NamespaceSummary, ReleaseCheckpointResponse, ReorganizeStepOutcome, RepairNamespaceOutcome,
+    RepairNamespaceResponse, RestoreFileRevisionRequest, WalFlushStepOutcome,
 };
 pub use reads::{AuthoritativeFileBytes, AuthoritativePathEntry, ListPathEntriesResponse};
 pub use search::{

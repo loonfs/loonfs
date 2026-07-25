@@ -8,7 +8,8 @@ use crate::args::{
     AdminStepArgs, ChangesArgs, CommandKind,
 };
 use loonfs_api::{
-    ChangeSeq, CheckpointId, CreateCheckpointRequest, ErrorCode, GcRequest, MaintenanceStepRequest,
+    ChangeSeq, CheckpointId, CreateCheckpointRequest, ErrorCode, GcRequest, MaintenanceStepKind,
+    MaintenanceStepRequest,
 };
 
 // --- maintenance/admin plane ---
@@ -58,6 +59,7 @@ async fn run_admin_step(
     let request = MaintenanceStepRequest {
         max_wal_tail_segments: args.max_wal_tail_segments,
         gc: args.gc.then(GcRequest::default),
+        only: None,
     };
     let response = context
         .target
@@ -91,9 +93,18 @@ async fn run_admin_gc(
         let pass = context
             .target
             .backend()
-            .gc_namespace(&context.namespace, request.clone())
+            .maintenance_step(
+                &context.namespace,
+                MaintenanceStepRequest {
+                    max_wal_tail_segments: None,
+                    gc: Some(request.clone()),
+                    only: Some(MaintenanceStepKind::Gc),
+                },
+            )
             .await
-            .map_err(|error| context.fail(kind, error))?;
+            .map_err(|error| context.fail(kind, error))?
+            .gc
+            .expect("gc report present when the step opted in");
         let next_cursor = pass.next_cursor.clone();
         match &mut response {
             Some(total) => accumulate_gc_response(total, pass),
@@ -186,7 +197,16 @@ async fn run_admin_flush(
     let response = context
         .target
         .backend()
-        .flush_wal(&context.namespace)
+        .maintenance_step(
+            &context.namespace,
+            MaintenanceStepRequest {
+                // The WAL flush an operator asks for explicitly runs whatever
+                // the tail length, so the threshold drops to one segment.
+                max_wal_tail_segments: Some(1),
+                gc: None,
+                only: Some(MaintenanceStepKind::WalFlush),
+            },
+        )
         .await
         .map_err(|error| context.fail(kind, error))?;
 
@@ -194,7 +214,7 @@ async fn run_admin_flush(
         kind,
         profile: Some(context.profile_name),
         mode: Some(context.mode),
-        data: CommandData::WalFlushed(response),
+        data: CommandData::MaintenanceStepped(response),
     })
 }
 
@@ -206,7 +226,14 @@ async fn run_admin_retention_advance(
     let response = context
         .target
         .backend()
-        .advance_retention_floor(&context.namespace)
+        .maintenance_step(
+            &context.namespace,
+            MaintenanceStepRequest {
+                max_wal_tail_segments: None,
+                gc: None,
+                only: Some(MaintenanceStepKind::Retention),
+            },
+        )
         .await
         .map_err(|error| context.fail(kind, error))?;
 
@@ -214,7 +241,7 @@ async fn run_admin_retention_advance(
         kind,
         profile: Some(context.profile_name),
         mode: Some(context.mode),
-        data: CommandData::RetentionAdvanced(response),
+        data: CommandData::MaintenanceStepped(response),
     })
 }
 

@@ -4,20 +4,18 @@ use crate::backend_error::{map_namespace_scoped_runtime_error, map_runtime_error
 use crate::render::write_stderr_warning;
 use async_trait::async_trait;
 use loonfs::{
-    gc_config_from_request, ChangesResponse, CopyOptions, CreateCheckpointOptions,
-    CreateDirectoryOptions, CreateNamespaceOptions, DeleteNamespaceOptions,
-    DeleteNamespaceResponse, DeleteOptions, FsAdmin, FsReader, FsWriter, ListChangesOptions,
-    MaintenanceStepOptions, MoveOptions, PutFileOptions, RestoreRevisionOptions, RuntimeError,
-    UndeleteOptions,
+    ChangesResponse, CopyOptions, CreateCheckpointOptions, CreateDirectoryOptions,
+    CreateNamespaceOptions, DeleteNamespaceOptions, DeleteNamespaceResponse, DeleteOptions,
+    FsAdmin, FsReader, FsWriter, ListChangesOptions, MaintenanceStepOptions, MoveOptions,
+    PutFileOptions, RestoreRevisionOptions, RuntimeError, UndeleteOptions,
 };
 use loonfs_api::{
     v0::{DisableGrepIndexResponse, EnableGrepIndexResponse, RepairNamespaceResponse},
-    AdvanceRetentionResponse, AuthoritativePathEntry, ChangeSeq, CheckpointId, CommitId,
-    CommitResponse, CreateCheckpointRequest, CreateCheckpointResponse, DestinationBehavior,
-    EffectiveLimit, ErrorCode, FlushWalResponse, GcRequest, GcResponse, GrepRequest, GrepResponse,
-    InodeId, ListFileRevisionsResponse, MaintenanceStepRequest, MaintenanceStepResponse,
-    NamespaceId, NamespaceStatusResponse, NamespaceSummary, PaginationPolicy,
-    ReleaseCheckpointResponse, RevisionNo,
+    AuthoritativePathEntry, ChangeSeq, CheckpointId, CommitId, CommitResponse,
+    CreateCheckpointRequest, CreateCheckpointResponse, DestinationBehavior, EffectiveLimit,
+    ErrorCode, GrepRequest, GrepResponse, InodeId, ListFileRevisionsResponse,
+    MaintenanceStepRequest, MaintenanceStepResponse, NamespaceId, NamespaceStatusResponse,
+    NamespaceSummary, PaginationPolicy, ReleaseCheckpointResponse, RevisionNo,
 };
 use loonfs_client::{
     CreateDirectoryOptions as ClientCreateDirectoryOptions, DeleteOptions as ClientDeleteOptions,
@@ -419,26 +417,6 @@ impl Backend for EmbeddedBackend {
             .map_err(map_runtime_error)
     }
 
-    async fn flush_wal(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<FlushWalResponse, BackendError> {
-        self.admin
-            .flush_wal(namespace_id)
-            .await
-            .map_err(map_runtime_error)
-    }
-
-    async fn advance_retention_floor(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<AdvanceRetentionResponse, BackendError> {
-        self.admin
-            .advance_retention_floor(namespace_id)
-            .await
-            .map_err(map_runtime_error)
-    }
-
     async fn maintenance_step(
         &self,
         namespace_id: &NamespaceId,
@@ -447,18 +425,6 @@ impl Backend for EmbeddedBackend {
         let options = MaintenanceStepOptions::from_request(request);
         self.admin
             .maintenance_step_namespace(namespace_id, options)
-            .await
-            .map_err(map_runtime_error)
-    }
-
-    async fn gc_namespace(
-        &self,
-        namespace_id: &NamespaceId,
-        request: GcRequest,
-    ) -> Result<GcResponse, BackendError> {
-        let config = gc_config_from_request(request);
-        self.admin
-            .gc_namespace(namespace_id, &config)
             .await
             .map_err(map_runtime_error)
     }

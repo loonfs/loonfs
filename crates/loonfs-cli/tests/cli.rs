@@ -1378,12 +1378,16 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
             .to_owned();
         assert!(checkpoint_id.starts_with("chk_"));
 
+        // `admin flush` runs a maintenance step restricted to the WAL
+        // flush, so it reports a step: the flush part acted, the parts `only`
+        // excluded report `not_needed`.
         let flush = harness.run(&["--json", "admin", "flush", "--profile", profile]);
         assert_success(&flush);
         let flush_data = json_data(&flush);
-        assert_eq!(flush_data["kind"], "wal_flushed");
+        assert_eq!(flush_data["kind"], "maintenance_stepped");
         assert_eq!(flush_data["namespace_id"], "demo");
-        assert_eq!(flush_data["outcome"], "already_current");
+        assert_eq!(flush_data["reorganize"]["kind"], "not_needed");
+        assert!(flush_data["gc"].is_null());
 
         let release = harness.run(&[
             "--json",
@@ -1414,7 +1418,7 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
             harness.run(&["--json", "admin", "retention-advance", "--profile", profile]);
         assert_success(&retention);
         let retention_data = json_data(&retention);
-        assert_eq!(retention_data["kind"], "retention_advanced");
+        assert_eq!(retention_data["kind"], "maintenance_stepped");
         assert_eq!(retention_data["namespace_id"], "demo");
         assert_eq!(retention_data["retention_floor_seq"], 2);
 
@@ -1425,7 +1429,10 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
         let step_data = json_data(&step);
         assert_eq!(step_data["kind"], "maintenance_stepped");
         assert_eq!(step_data["namespace_id"], "demo");
-        assert_eq!(step_data["outcome"]["kind"], "not_needed");
+        assert_eq!(step_data["wal_flush"]["kind"], "not_needed");
+        assert_eq!(step_data["reorganize"]["kind"], "not_needed");
+        // Retention runs inside every unrestricted step now.
+        assert_eq!(step_data["retention_floor_seq"], 2);
         assert_eq!(step_data["status_before"]["namespace_id"], "demo");
         assert!(step_data.get("gc").is_none());
 

@@ -6,8 +6,9 @@ use crate::FsAdmin;
 use crate::NamespaceStatusResponse;
 use crate::{
     AdvanceRetentionResponse, CheckpointId, CreateCheckpointOptions, CreateCheckpointResponse,
-    ErrorCode, FlushWalOutcome, FlushWalResponse, MaintenanceStepOptions, MaintenanceStepOutcome,
-    MaintenanceStepResponse, NamespaceId, ReleaseCheckpointResponse,
+    ErrorCode, FlushWalOutcome, FlushWalResponse, MaintenanceStepKind, MaintenanceStepOptions,
+    MaintenanceStepResponse, NamespaceId, ReleaseCheckpointResponse, ReorganizeStepOutcome,
+    WalFlushStepOutcome,
 };
 use crate::{Result, RuntimeError};
 use loonfs_api::v0::{DisableGrepIndexResponse, EnableGrepIndexResponse};
@@ -32,10 +33,15 @@ impl FsAdmin {
 
     /// Runs one bounded maintenance step against a namespace.
     ///
-    /// Publishes a checkpoint once the visible WAL tail reaches
-    /// `options.max_wal_tail_segments`. Losing the head race or being
-    /// superseded by another checkpoint is reported as an outcome, not an
-    /// error.
+    /// A full step does four things in order: flush the visible WAL tail
+    /// once it reaches `options.max_wal_tail_segments`, merge one bounded
+    /// metadata reorganization unit, advance the retention floor behind a
+    /// verified checkpoint, and — only when `options.gc` opted in — run one
+    /// bounded garbage-collection pass. `options.only` restricts the step to
+    /// a single sub-step.
+    ///
+    /// Every part reports separately. Losing the head race or being
+    /// superseded by another publisher is an outcome, not an error.
     #[tracing::instrument(
         level = "info",
         name = "loonfs.compaction",
@@ -77,52 +83,76 @@ impl FsAdmin {
             )));
         }
 
+        let runs = |kind: MaintenanceStepKind| options.only.is_none_or(|only| only == kind);
         let status_before = self.namespace_status(namespace_id).await?;
         let observed_head_seq = status_before.head_seq;
-        if status_before.wal_tail_segments < options.max_wal_tail_segments {
-            self.run_step_reorganization(namespace_id).await?;
-            let gc = self.run_step_gc(namespace_id, options.gc.as_ref()).await?;
-            return Ok(MaintenanceStepResponse {
-                namespace_id: namespace_id.clone(),
-                status_before,
-                outcome: MaintenanceStepOutcome::NotNeeded,
-                gc,
-            });
-        }
 
-        let flush = match self.flush_wal(namespace_id).await {
-            Ok(flush) => flush,
-            Err(RuntimeError::Core(error)) if error.code() == ErrorCode::StaleHead => {
-                self.run_step_reorganization(namespace_id).await?;
-                let gc = self.run_step_gc(namespace_id, options.gc.as_ref()).await?;
-                return Ok(MaintenanceStepResponse {
-                    namespace_id: namespace_id.clone(),
-                    status_before,
-                    outcome: MaintenanceStepOutcome::WalFlushRaceLost { observed_head_seq },
-                    gc,
-                });
+        let wal_flush = if runs(MaintenanceStepKind::WalFlush)
+            && status_before.wal_tail_segments >= options.max_wal_tail_segments
+        {
+            match self.flush_wal(namespace_id).await {
+                Ok(flush) => match flush.outcome {
+                    FlushWalOutcome::Published => WalFlushStepOutcome::Flushed {
+                        manifest_head_seq: flush.manifest_head_seq,
+                    },
+                    FlushWalOutcome::AlreadyCurrent | FlushWalOutcome::Superseded => {
+                        WalFlushStepOutcome::Superseded {
+                            attempted_seq: flush.target_head_seq,
+                            current_manifest_id: flush.manifest_id,
+                        }
+                    }
+                },
+                Err(RuntimeError::Core(error)) if error.code() == ErrorCode::StaleHead => {
+                    WalFlushStepOutcome::RaceLost { observed_head_seq }
+                }
+                Err(error) => return Err(error),
             }
-            Err(error) => return Err(error),
+        } else {
+            WalFlushStepOutcome::NotNeeded
         };
-        self.run_step_reorganization(namespace_id).await?;
 
-        let outcome = match flush.outcome {
-            FlushWalOutcome::Published => MaintenanceStepOutcome::WalFlushed {
-                manifest_head_seq: flush.manifest_head_seq,
-            },
-            FlushWalOutcome::AlreadyCurrent | FlushWalOutcome::Superseded => {
-                MaintenanceStepOutcome::WalFlushSuperseded {
-                    attempted_seq: flush.target_head_seq,
-                    current_manifest_id: flush.manifest_id,
+        let reorganize = if runs(MaintenanceStepKind::Reorganize) {
+            match self.run_step_reorganization(namespace_id).await? {
+                loonfs_core::MetadataReorganizeOutcome::NotNeeded { .. } => {
+                    ReorganizeStepOutcome::NotNeeded
+                }
+                loonfs_core::MetadataReorganizeOutcome::UnitPublished { .. } => {
+                    ReorganizeStepOutcome::UnitPublished
+                }
+                loonfs_core::MetadataReorganizeOutcome::BudgetExhausted { .. } => {
+                    ReorganizeStepOutcome::BudgetExhausted
+                }
+                loonfs_core::MetadataReorganizeOutcome::Superseded => {
+                    ReorganizeStepOutcome::Superseded
                 }
             }
+        } else {
+            ReorganizeStepOutcome::NotNeeded
         };
 
-        let gc = self.run_step_gc(namespace_id, options.gc.as_ref()).await?;
+        // Retention advance is idempotent: with nothing new to cover it
+        // reports the floor already in place. Running it here is what keeps
+        // an unattended deployment from growing history forever.
+        let retention_floor_seq = if runs(MaintenanceStepKind::Retention) {
+            self.advance_retention_floor(namespace_id)
+                .await?
+                .retention_floor_seq
+        } else {
+            status_before.retention_floor_seq
+        };
+
+        let gc = if runs(MaintenanceStepKind::Gc) {
+            self.run_step_gc(namespace_id, options.gc.as_ref()).await?
+        } else {
+            None
+        };
+
         Ok(MaintenanceStepResponse {
             namespace_id: namespace_id.clone(),
             status_before,
-            outcome,
+            wal_flush,
+            reorganize,
+            retention_floor_seq,
             gc,
         })
     }

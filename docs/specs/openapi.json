@@ -236,80 +236,6 @@
         }
       }
     },
-    "/v0/admin/namespaces/{namespace}/gc": {
-      "post": {
-        "tags": [
-          "admin"
-        ],
-        "summary": "Collect garbage",
-        "description": "Runs one mark-and-sweep garbage-collection pass under the format's safety rules (grace window, delete-time re-verification, retention wins). max_objects bounds candidate decisions and cursor resumes enumeration; every resumed invocation rebuilds safety roots. Incomplete namespaces are ignored without listing or deletion. Nothing sweeps without this explicit call or a maintenance-step opt-in.",
-        "operationId": "gc_namespace",
-        "parameters": [
-          {
-            "name": "namespace",
-            "in": "path",
-            "description": "Namespace id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "description": "Optional window, budget, and resume overrides",
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/GcRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Garbage collection pass completed",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/GcResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid namespace id or windows",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Namespace not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/v0/admin/namespaces/{namespace}/grep/index/disable": {
       "post": {
         "tags": [
@@ -705,162 +631,6 @@
           },
           "404": {
             "description": "Namespace not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/v0/admin/namespaces/{namespace}/retention/advance": {
-      "post": {
-        "tags": [
-          "admin"
-        ],
-        "summary": "Advance retention floor",
-        "description": "Advances the namespace retention floor after checkpoint state makes older WAL history unnecessary for normal replay.",
-        "operationId": "advance_retention_floor",
-        "parameters": [
-          {
-            "name": "namespace",
-            "in": "path",
-            "description": "Namespace id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Retention floor advanced",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AdvanceRetentionResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid namespace id",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Namespace not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "410": {
-            "description": "Namespace deleted",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/v0/admin/namespaces/{namespace}/wal/flush": {
-      "post": {
-        "tags": [
-          "admin"
-        ],
-        "summary": "Flush WAL",
-        "description": "Folds the visible WAL tail into metadata tables, publishes a manifest, and advances the metadata root to cover the current head. No checkpoint record is created; superseded manifests become garbage-collection candidates once nothing pins them. This is the routine latest-state maintenance operation.",
-        "operationId": "flush_wal",
-        "parameters": [
-          {
-            "name": "namespace",
-            "in": "path",
-            "description": "Namespace id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Metadata root covers the current head",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/FlushWalResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid namespace id",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Namespace not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Lost the root race",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "410": {
-            "description": "Namespace deleted",
             "content": {
               "application/json": {
                 "schema": {
@@ -4912,90 +4682,15 @@
           }
         }
       },
-      "MaintenanceStepOutcome": {
-        "oneOf": [
-          {
-            "type": "object",
-            "description": "The WAL tail was below the threshold; the root was left alone.",
-            "required": [
-              "kind"
-            ],
-            "properties": {
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "not_needed"
-                ]
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "The step flushed the WAL tail and advanced the metadata root.",
-            "required": [
-              "manifest_head_seq",
-              "kind"
-            ],
-            "properties": {
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "wal_flushed"
-                ]
-              },
-              "manifest_head_seq": {
-                "$ref": "#/components/schemas/ChangeSeq",
-                "description": "Sequence covered by the published manifest."
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "The root already covered the attempted sequence — another publisher\ngot there first.",
-            "required": [
-              "attempted_seq",
-              "current_manifest_id",
-              "kind"
-            ],
-            "properties": {
-              "attempted_seq": {
-                "$ref": "#/components/schemas/ChangeSeq",
-                "description": "Sequence this step attempted to flush through."
-              },
-              "current_manifest_id": {
-                "$ref": "#/components/schemas/ManifestId",
-                "description": "Manifest the root currently references."
-              },
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "wal_flush_superseded"
-                ]
-              }
-            }
-          },
-          {
-            "type": "object",
-            "description": "A concurrent head update won the race.",
-            "required": [
-              "observed_head_seq",
-              "kind"
-            ],
-            "properties": {
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "wal_flush_race_lost"
-                ]
-              },
-              "observed_head_seq": {
-                "$ref": "#/components/schemas/ChangeSeq",
-                "description": "Head sequence observed before the advance attempt."
-              }
-            }
-          }
-        ],
-        "description": "What one maintenance step did."
+      "MaintenanceStepKind": {
+        "type": "string",
+        "description": "One sub-step of a maintenance step, for callers that want to run exactly\none of them.",
+        "enum": [
+          "wal_flush",
+          "reorganize",
+          "retention",
+          "gc"
+        ]
       },
       "MaintenanceStepRequest": {
         "type": "object",
@@ -5020,6 +4715,17 @@
             "format": "int64",
             "description": "Flush the visible WAL tail into metadata tables when it reaches this\nmany segments. Values above the write-rejection threshold are\nrejected as `invalid_request`.",
             "minimum": 0
+          },
+          "only": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/MaintenanceStepKind",
+                "description": "Restrict the step to one sub-step. Absent runs the whole step: WAL\nflush, then reorganization, then retention, then garbage collection\nif `gc` opted in."
+              }
+            ]
           }
         }
       },
@@ -5029,7 +4735,9 @@
         "required": [
           "namespace_id",
           "status_before",
-          "outcome"
+          "wal_flush",
+          "reorganize",
+          "retention_floor_seq"
         ],
         "properties": {
           "gc": {
@@ -5047,13 +4755,21 @@
             "$ref": "#/components/schemas/NamespaceId",
             "description": "Namespace the step ran against."
           },
-          "outcome": {
-            "$ref": "#/components/schemas/MaintenanceStepOutcome",
-            "description": "What the step did."
+          "reorganize": {
+            "$ref": "#/components/schemas/ReorganizeStepOutcome",
+            "description": "What the metadata-reorganization sub-step did."
+          },
+          "retention_floor_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "The retention floor after the step. Compare with\n`status_before.retention_floor_seq` to see whether it moved."
           },
           "status_before": {
             "$ref": "#/components/schemas/NamespaceStatusResponse",
             "description": "Namespace status observed before the step acted."
+          },
+          "wal_flush": {
+            "$ref": "#/components/schemas/WalFlushStepOutcome",
+            "description": "What the WAL-flush sub-step did."
           }
         }
       },
@@ -5196,6 +4912,67 @@
           }
         }
       },
+      "ReorganizeStepOutcome": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "not_needed"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "unit_published"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "budget_exhausted"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "superseded"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "What the metadata-reorganization part of a maintenance step did.\n\nDeliberately coarse: the run counts and byte budgets a reorganization\nconsumes are engine policy, not a wire contract."
+      },
       "RepairNamespaceOutcome": {
         "type": "string",
         "description": "How an explicit namespace repair resolved the namespace's durable state.",
@@ -5300,6 +5077,91 @@
             "description": "Opaque, server-signed token. Clients must not parse it."
           }
         }
+      },
+      "WalFlushStepOutcome": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "The step did not run this sub-step: the tail was below the threshold,\nor `only` selected something else.",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "not_needed"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The step flushed the WAL tail and advanced the metadata root.",
+            "required": [
+              "manifest_head_seq",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "flushed"
+                ]
+              },
+              "manifest_head_seq": {
+                "$ref": "#/components/schemas/ChangeSeq",
+                "description": "Sequence covered by the published manifest."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The root already covered the attempted sequence — another publisher\ngot there first.",
+            "required": [
+              "attempted_seq",
+              "current_manifest_id",
+              "kind"
+            ],
+            "properties": {
+              "attempted_seq": {
+                "$ref": "#/components/schemas/ChangeSeq",
+                "description": "Sequence this step attempted to flush through."
+              },
+              "current_manifest_id": {
+                "$ref": "#/components/schemas/ManifestId",
+                "description": "Manifest the root currently references."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "superseded"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A concurrent head update won the race.",
+            "required": [
+              "observed_head_seq",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "race_lost"
+                ]
+              },
+              "observed_head_seq": {
+                "$ref": "#/components/schemas/ChangeSeq",
+                "description": "Head sequence observed before the advance attempt."
+              }
+            }
+          }
+        ],
+        "description": "What the WAL-flush part of a maintenance step did."
       },
       "WriterEpoch": {
         "type": "integer",

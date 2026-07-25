@@ -25,7 +25,7 @@ within a plane is expressed as **named features** (section 2).
 | Profile | Plane | Ops | Status |
 | --- | --- | --- | --- |
 | `core/v0` | Data plane | Path reads and mutations (stat, list, content, revisions, path operations), staged uploads, explicit commits, the change feed, namespace status by id, `GET /v0/capabilities`, and the standard error contract. Namespace `list`, `create`, `fork`, and `delete` are **features** within this profile. | **Mandatory** for any conforming deployment |
-| `admin/v0` | Maintenance plane | Trigger WAL flushes; create and release checkpoints; trigger retention-floor advancement; run one-shot maintenance steps; run garbage collection. Future maintenance triggers (compaction, index builds) arrive as features in this plane. | Optional |
+| `admin/v0` | Maintenance plane | Create and release checkpoints; run one-shot maintenance steps (WAL flush, metadata reorganization, retention-floor advancement, and garbage collection, together or one at a time); repair incomplete namespace installations. Future maintenance triggers (index builds) arrive as features in this plane. | Optional |
 | `query/v0` | Query plane | Content search over derived indexes (`POST /v0/namespaces/{namespace}/query/grep`). Grep-index search is the `query.grep` **feature** within this profile; using it also requires a materialized steady-state grep root for the namespace. | Optional |
 | `acl/v0` | Authorization plane | — | **Reserved name only.** Do not specify ops yet. Clients must tolerate unknown error codes, so authorization errors can land with this plane without breaking anyone. |
 
@@ -427,15 +427,37 @@ A representative v0 binding is shown below.
 | Delete a namespace | `DELETE /v0/namespaces/{ns}?expected_head_seq=418` (feature `core.namespaces.delete`; the precondition is optional) |
 | Create a checkpoint | `POST /v0/admin/namespaces/{ns}/checkpoints` (body carries the required `name` and optional `ttl_ms`; the record is user-owned and a GC root until released or expired) |
 | Release a checkpoint | `POST /v0/admin/namespaces/{ns}/checkpoints/{checkpoint_id}/release` (idempotent; fork-owned records are rejected) |
-| Flush the WAL tail | `POST /v0/admin/namespaces/{ns}/wal/flush` (folds the visible WAL tail into metadata tables and advances the metadata root; creates no checkpoint record) |
-| Advance the retention floor | `POST /v0/admin/namespaces/{ns}/retention/advance` |
-| Run a maintenance step | `POST /v0/admin/namespaces/{ns}/maintenance/step` (optional body overrides `max_wal_tail_segments` and opts into `gc`; step-driven GC defaults `max_objects` to 1024 and returns any `next_cursor` for a later step rather than looping internally; an override above the write-rejection threshold is rejected as `invalid_request`; flush races surface as outcomes, not errors) |
-| Collect garbage | `POST /v0/admin/namespaces/{ns}/gc` (optional body overrides `grace_window_ms`/`reap_window_ms`, bounds one invocation with `max_objects`, and resumes with `cursor`; a grace window below the derived safety floor or a zero budget is rejected as `invalid_request`; absent `max_objects` preserves run-to-completion behavior; nothing sweeps without an explicit call) |
+| Run a maintenance step | `POST /v0/admin/namespaces/{ns}/maintenance/step` (the one maintenance entry point; see below) |
 | Repair an incomplete namespace | `POST /v0/admin/namespaces/{ns}/repair` (no body or options; reports `already_complete`, `completed`, `reaped`, or `in_flight`; an absent namespace reports `namespace_not_found`) |
 | Content search | `POST /v0/namespaces/{ns}/query/grep` (feature `query.grep`; requires a materialized steady-state grep root) |
 | Enable the grep index | `POST /v0/admin/namespaces/{ns}/grep/index/enable` (CAS-publishes the independent grep root into checkpointed backfill; embedded mode starts that namespace's event-driven driver; idempotent) |
 | Disable the grep index | `POST /v0/admin/namespaces/{ns}/grep/index/disable` (CAS-publishes the grep root as disabled; grep-owned garbage collection later reclaims unreferenced segments; idempotent) |
 | Collect grep-index garbage | `POST /v0/admin/namespaces/{ns}/grep/index/gc` (one explicit pass over only that namespace's grep extension; also reaps aged state for an absent or tombstoned namespace) |
+
+One maintenance step does four things in order: folds the visible WAL tail
+into metadata tables and advances the metadata root once the tail reaches
+`max_wal_tail_segments`, merges one bounded metadata reorganization unit,
+advances the retention floor behind a verified checkpoint, and — only when
+the body carries `gc` — runs one bounded garbage-collection pass. None of it
+creates a checkpoint record.
+
+Each part reports separately in the response: `wal_flush`, `reorganize`,
+`retention_floor_seq`, and `gc`. Races and supersessions are outcomes, not
+errors. Compare `retention_floor_seq` with `status_before.retention_floor_seq`
+to see whether the floor moved.
+
+The body is optional. `max_wal_tail_segments` overrides the flush threshold,
+and a value above the write-rejection threshold is rejected as
+`invalid_request`. `gc` opts into sweeping and overrides
+`grace_window_ms`/`reap_window_ms`, bounds one invocation with `max_objects`,
+and resumes with `cursor`; a grace window below the derived safety floor or a
+zero budget is rejected as `invalid_request`. Step-driven GC defaults
+`max_objects` to 1024 and returns any `next_cursor` for a later step rather
+than looping internally. Nothing sweeps unless `gc` is present.
+
+`only` restricts the step to one sub-step — `wal_flush`, `reorganize`,
+`retention`, or `gc` — for operators who want exactly one of them. An
+unrestricted step runs all four.
 
 Routes under `/v0/admin/` belong to the `admin/v0` profile and routes under
 `/v0/namespaces/{ns}/query/` to `query/v0`; everything else shown belongs to

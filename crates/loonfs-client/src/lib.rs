@@ -21,14 +21,13 @@ use loonfs_api::{
         ObjectTransferAccess, RepairNamespaceResponse, UploadContentResponse, UploadMode,
         ValidatedContentToken,
     },
-    AbsolutePath, AdvanceRetentionResponse, AuthoritativePathEntry, CapabilityDocument, ChangeSeq,
-    CheckpointId, CommitId, ContentRef, CreateCheckpointRequest, CreateCheckpointResponse,
-    CreateNamespaceRequest, DeleteDirectoryBehavior, DeleteNamespaceResponse, DestinationBehavior,
-    ErrorCode, FilesystemOperation, FilesystemOperationRequest, FlushWalResponse,
-    ForkNamespaceRequest, GcRequest, GcResponse, GrepRequest, GrepResponse, InodeId,
-    ListFileRevisionsResponse, ListPathEntriesResponse, MaintenanceStepRequest,
-    MaintenanceStepResponse, NamespaceId, NamespaceStatusResponse, NamespaceSummary,
-    ReleaseCheckpointResponse, RestoreFileRevisionRequest, RevisionNo, UploadId,
+    AbsolutePath, AuthoritativePathEntry, CapabilityDocument, ChangeSeq, CheckpointId, CommitId,
+    ContentRef, CreateCheckpointRequest, CreateCheckpointResponse, CreateNamespaceRequest,
+    DeleteDirectoryBehavior, DeleteNamespaceResponse, DestinationBehavior, ErrorCode,
+    FilesystemOperation, FilesystemOperationRequest, ForkNamespaceRequest, GrepRequest,
+    GrepResponse, InodeId, ListFileRevisionsResponse, ListPathEntriesResponse,
+    MaintenanceStepRequest, MaintenanceStepResponse, NamespaceId, NamespaceStatusResponse,
+    NamespaceSummary, ReleaseCheckpointResponse, RestoreFileRevisionRequest, RevisionNo, UploadId,
 };
 use std::sync::{Arc, OnceLock};
 
@@ -557,33 +556,6 @@ impl Client {
             .await
     }
 
-    /// Flushes the WAL tail and advances the metadata root to a manifest
-    /// covering the current head (admin plane). The latest-state maintenance operation: no checkpoint
-    /// record is created. The request carries no body.
-    pub async fn flush_wal(&self, namespace_id: &NamespaceId) -> Result<FlushWalResponse> {
-        let url = format!(
-            "{}/v0/admin/namespaces/{namespace_id}/wal/flush",
-            self.base_url
-        );
-        self.request_json::<(), FlushWalResponse>(self.post(&url), None)
-            .await
-    }
-
-    /// Advances the namespace retention floor to what checkpoint state allows
-    /// (admin plane). Irreversible: WAL history before the floor stops being
-    /// replayable. The request carries no body.
-    pub async fn advance_retention_floor(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<AdvanceRetentionResponse> {
-        let url = format!(
-            "{}/v0/admin/namespaces/{namespace_id}/retention/advance",
-            self.base_url
-        );
-        self.request_json::<(), AdvanceRetentionResponse>(self.post(&url), None)
-            .await
-    }
-
     /// Runs one bounded maintenance step against a namespace (admin plane).
     /// Absent request fields use the server's defaults; garbage collection
     /// runs only when the request opts in.
@@ -596,20 +568,6 @@ impl Client {
             "{}/v0/admin/namespaces/{namespace_id}/maintenance/step",
             self.base_url
         );
-        self.request_json(self.post(&url), Some(request)).await
-    }
-
-    /// Runs one mark-and-sweep garbage-collection pass (admin plane).
-    /// `GcRequest::max_objects` bounds one invocation; pass a returned
-    /// `GcResponse::next_cursor` back as `GcRequest::cursor` to resume.
-    /// Nothing sweeps without this explicit call or a maintenance-step
-    /// opt-in.
-    pub async fn gc_namespace(
-        &self,
-        namespace_id: &NamespaceId,
-        request: &GcRequest,
-    ) -> Result<GcResponse> {
-        let url = format!("{}/v0/admin/namespaces/{namespace_id}/gc", self.base_url);
         self.request_json(self.post(&url), Some(request)).await
     }
 

@@ -30,9 +30,8 @@ use self::handlers_filesystem::{
     list_file_revisions_by_inode, list_path_entries, restore_file_revision_by_inode, stat_path,
 };
 use self::handlers_namespace::{
-    advance_retention_floor, create_checkpoint, create_namespace, delete_namespace, flush_wal,
-    fork_namespace, gc_namespace, maintenance_step, namespace_status, release_checkpoint,
-    repair_namespace,
+    create_checkpoint, create_namespace, delete_namespace, fork_namespace, maintenance_step,
+    namespace_status, release_checkpoint, repair_namespace,
 };
 use self::handlers_query::{
     disable_grep_index, enable_grep_index, gc_grep_index, grep, grep_not_supported,
@@ -180,16 +179,10 @@ fn router(state: AppState) -> Router {
             "/v0/admin/namespaces/:namespace/checkpoints/:checkpoint_id/release",
             post(release_checkpoint),
         )
-        .route("/v0/admin/namespaces/:namespace/wal/flush", post(flush_wal))
-        .route(
-            "/v0/admin/namespaces/:namespace/retention/advance",
-            post(advance_retention_floor),
-        )
         .route(
             "/v0/admin/namespaces/:namespace/maintenance/step",
             post(maintenance_step),
         )
-        .route("/v0/admin/namespaces/:namespace/gc", post(gc_namespace))
         .route(
             "/v0/admin/namespaces/:namespace/repair",
             post(repair_namespace),

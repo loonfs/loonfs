@@ -8,7 +8,9 @@
 use crate::{
     CommitId, DeleteDirectoryBehavior, DestinationBehavior, EffectiveLimit, GcConfig, InodeId,
 };
-use loonfs_api::v0::{CreateCheckpointRequest, GcRequest, MaintenanceStepRequest};
+use loonfs_api::v0::{
+    CreateCheckpointRequest, GcRequest, MaintenanceStepKind, MaintenanceStepRequest,
+};
 use loonfs_core::publish::WalTailPolicy;
 
 /// Options for one maintenance step.
@@ -21,6 +23,8 @@ pub struct MaintenanceStepOptions {
     /// Nothing sweeps unless this is set; an absent `max_objects` inside the
     /// config resolves to the per-step default.
     pub gc: Option<GcConfig>,
+    /// Restrict the step to one sub-step. Absent runs all of them.
+    pub only: Option<MaintenanceStepKind>,
 }
 
 impl Default for MaintenanceStepOptions {
@@ -28,6 +32,7 @@ impl Default for MaintenanceStepOptions {
         Self {
             max_wal_tail_segments: WalTailPolicy::DEFAULT.checkpoint_at_segments,
             gc: None,
+            only: None,
         }
     }
 }
@@ -47,6 +52,7 @@ impl MaintenanceStepOptions {
                 }
                 config
             }),
+            only: request.only,
         }
     }
 }
@@ -198,6 +204,7 @@ mod tests {
         let step = MaintenanceStepOptions::from_request(MaintenanceStepRequest {
             max_wal_tail_segments: None,
             gc: Some(GcRequest::default()),
+            only: None,
         });
         assert_eq!(
             step.gc.expect("GC opted in").max_objects,
@@ -214,6 +221,7 @@ mod tests {
                 cursor: Some("opaque".to_owned()),
                 ..GcRequest::default()
             }),
+            only: None,
         });
         let gc = step.gc.expect("GC opted in");
         assert_eq!(gc.max_objects, Some(7));

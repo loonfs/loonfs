@@ -12,13 +12,13 @@ use loonfs_api::v0::RepairNamespaceResponse;
 use loonfs_api::ApiError;
 use loonfs_api::ChangeSeq;
 use loonfs_api::{
-    AdvanceRetentionResponse, CheckpointId, CreateCheckpointRequest, CreateCheckpointResponse,
-    CreateNamespaceRequest, ErrorCode, FlushWalResponse, ForkNamespaceRequest, GcRequest,
-    GcResponse, MaintenanceStepRequest, MaintenanceStepResponse, ReleaseCheckpointResponse,
-    FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_PUT, LIMIT_COMMIT_MAX_BODY_BYTES,
-    LIMIT_DOWNLOAD_MAX_CONCURRENT, LIMIT_DOWNLOAD_MAX_CONTENT_BYTES, LIMIT_QUERY_GREP_DEFAULT,
-    LIMIT_QUERY_GREP_MAX, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES, LIMIT_QUERY_GREP_TAIL_BUDGET_FILES,
-    LIMIT_UPLOAD_MAX_CONCURRENT, LIMIT_UPLOAD_MAX_CONTENT_BYTES,
+    CheckpointId, CreateCheckpointRequest, CreateCheckpointResponse, CreateNamespaceRequest,
+    ErrorCode, ForkNamespaceRequest, MaintenanceStepRequest, MaintenanceStepResponse,
+    ReleaseCheckpointResponse, FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_PUT,
+    LIMIT_COMMIT_MAX_BODY_BYTES, LIMIT_DOWNLOAD_MAX_CONCURRENT, LIMIT_DOWNLOAD_MAX_CONTENT_BYTES,
+    LIMIT_QUERY_GREP_DEFAULT, LIMIT_QUERY_GREP_MAX, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES,
+    LIMIT_QUERY_GREP_TAIL_BUDGET_FILES, LIMIT_UPLOAD_MAX_CONCURRENT,
+    LIMIT_UPLOAD_MAX_CONTENT_BYTES,
 };
 
 #[derive(Debug, serde::Deserialize)]
@@ -348,106 +348,6 @@ fn parse_checkpoint_id(value: &str) -> Result<CheckpointId, ApiResponseError> {
             &format!("invalid checkpoint_id `{value}`: {error}"),
         )
     })
-}
-
-#[cfg_attr(
-    feature = "openapi",
-    utoipa::path(
-        post,
-        path = "/v0/admin/namespaces/{namespace}/wal/flush",
-        tag = "admin",
-        summary = "Flush WAL",
-        description = "Folds the visible WAL tail into metadata tables, publishes a manifest, and advances the metadata root to cover the current head. No checkpoint record is created; superseded manifests become garbage-collection candidates once nothing pins them. This is the routine latest-state maintenance operation.",
-        params(("namespace" = String, Path, description = "Namespace id")),
-        responses(
-            (status = 200, description = "Metadata root covers the current head", body = FlushWalResponse),
-            (status = 400, description = "Invalid namespace id", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace not found", body = ApiError),
-            (status = 409, description = "Lost the root race", body = ApiError),
-            (status = 410, description = "Namespace deleted", body = ApiError)
-        )
-    )
-)]
-pub(super) async fn flush_wal(
-    State(state): State<AppState>,
-    namespace: NamespaceIdPath,
-    headers: HeaderMap,
-) -> Result<Json<FlushWalResponse>, ApiResponseError> {
-    authorize(&state.config, &headers)?;
-    let namespace_id = namespace.into_id()?;
-    let response = state
-        .admin
-        .flush_wal(&namespace_id)
-        .await
-        .map_err(ApiResponseError::runtime)?;
-    Ok(Json(response))
-}
-
-#[cfg_attr(
-    feature = "openapi",
-    utoipa::path(
-        post,
-        path = "/v0/admin/namespaces/{namespace}/retention/advance",
-        tag = "admin",
-        summary = "Advance retention floor",
-        description = "Advances the namespace retention floor after checkpoint state makes older WAL history unnecessary for normal replay.",
-        params(("namespace" = String, Path, description = "Namespace id")),
-        responses(
-            (status = 200, description = "Retention floor advanced", body = AdvanceRetentionResponse),
-            (status = 400, description = "Invalid namespace id", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace not found", body = ApiError),
-            (status = 410, description = "Namespace deleted", body = ApiError)
-        )
-    )
-)]
-pub(super) async fn advance_retention_floor(
-    State(state): State<AppState>,
-    namespace: NamespaceIdPath,
-    headers: HeaderMap,
-) -> Result<Json<AdvanceRetentionResponse>, ApiResponseError> {
-    authorize(&state.config, &headers)?;
-    let namespace_id = namespace.into_id()?;
-    let response = state
-        .admin
-        .advance_retention_floor(&namespace_id)
-        .await
-        .map_err(ApiResponseError::runtime)?;
-    Ok(Json(response))
-}
-
-#[cfg_attr(
-    feature = "openapi",
-    utoipa::path(
-        post,
-        path = "/v0/admin/namespaces/{namespace}/gc",
-        tag = "admin",
-        summary = "Collect garbage",
-        description = "Runs one mark-and-sweep garbage-collection pass under the format's safety rules (grace window, delete-time re-verification, retention wins). max_objects bounds candidate decisions and cursor resumes enumeration; every resumed invocation rebuilds safety roots. Incomplete namespaces are ignored without listing or deletion. Nothing sweeps without this explicit call or a maintenance-step opt-in.",
-        params(("namespace" = String, Path, description = "Namespace id")),
-        request_body(content = GcRequest, description = "Optional window, budget, and resume overrides"),
-        responses(
-            (status = 200, description = "Garbage collection pass completed", body = GcResponse),
-            (status = 400, description = "Invalid namespace id or windows", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace not found", body = ApiError)
-        )
-    )
-)]
-pub(super) async fn gc_namespace(
-    State(state): State<AppState>,
-    namespace: NamespaceIdPath,
-    OptionalAppJson(request): OptionalAppJson<GcRequest>,
-) -> Result<Json<GcResponse>, ApiResponseError> {
-    let namespace_id = namespace.into_id()?;
-    let config = loonfs::gc_config_from_request(request.unwrap_or_default());
-    let report = state
-        .admin
-        .gc_namespace(&namespace_id, &config)
-        .await
-        .map_err(ApiResponseError::runtime)?;
-    Ok(Json(report))
 }
 
 #[cfg_attr(

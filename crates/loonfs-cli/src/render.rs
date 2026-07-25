@@ -3,7 +3,7 @@
 use crate::args::CommandKind;
 use crate::commands::{CommandData, CommandFailure, CommandOutput};
 use crate::error::CliError;
-use loonfs_api::{FlushWalOutcome, GcResponse, MaintenanceStepOutcome, RepairNamespaceOutcome};
+use loonfs_api::{GcResponse, ReorganizeStepOutcome, RepairNamespaceOutcome, WalFlushStepOutcome};
 use serde::Serialize;
 use std::io::{self, Write};
 
@@ -206,45 +206,49 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
                 response.checkpoint_id, response.namespace_id
             )
         }
-        CommandData::WalFlushed(response) => {
-            let outcome = match response.outcome {
-                FlushWalOutcome::AlreadyCurrent => "already current",
-                FlushWalOutcome::Published => "published",
-                FlushWalOutcome::Superseded => "superseded",
-            };
-            format!(
-                "flushed wal for {} to manifest {} @ seq {} ({outcome})",
-                response.namespace_id, response.manifest_id, response.manifest_head_seq.0
-            )
-        }
-        CommandData::RetentionAdvanced(response) => format!(
-            "advanced retention floor for {} to seq {}; changes before this floor are no longer replayable",
-            response.namespace_id, response.retention_floor_seq.0
-        ),
         CommandData::MaintenanceStepped(response) => {
-            let outcome = match &response.outcome {
-                MaintenanceStepOutcome::NotNeeded => format!(
-                    "not needed (wal tail {} segments)",
+            let wal_flush = match &response.wal_flush {
+                WalFlushStepOutcome::NotNeeded => format!(
+                    "wal flush not needed (tail {} segments)",
                     response.status_before.wal_tail_segments
                 ),
-                MaintenanceStepOutcome::WalFlushed { manifest_head_seq } => {
+                WalFlushStepOutcome::Flushed { manifest_head_seq } => {
                     format!("wal flushed @ seq {}", manifest_head_seq.0)
                 }
-                MaintenanceStepOutcome::WalFlushSuperseded {
+                WalFlushStepOutcome::Superseded {
                     attempted_seq,
                     current_manifest_id,
                 } => format!(
                     "wal flush @ seq {} superseded (current manifest {})",
                     attempted_seq.0, current_manifest_id
                 ),
-                MaintenanceStepOutcome::WalFlushRaceLost { observed_head_seq } => {
-                    format!(
-                        "wal flush race lost (head moved past seq {})",
-                        observed_head_seq.0
-                    )
-                }
+                WalFlushStepOutcome::RaceLost { observed_head_seq } => format!(
+                    "wal flush race lost (head moved past seq {})",
+                    observed_head_seq.0
+                ),
             };
-            let mut line = format!("maintenance step for {}: {outcome}", response.namespace_id);
+            let reorganize = match response.reorganize {
+                ReorganizeStepOutcome::NotNeeded => "reorganize not needed",
+                ReorganizeStepOutcome::UnitPublished => "reorganized one family group",
+                ReorganizeStepOutcome::BudgetExhausted => "reorganize over the per-step budget",
+                ReorganizeStepOutcome::Superseded => "reorganize superseded",
+            };
+            let retention =
+                if response.retention_floor_seq > response.status_before.retention_floor_seq {
+                    format!(
+                        "retention floor advanced to seq {}",
+                        response.retention_floor_seq.0
+                    )
+                } else {
+                    format!(
+                        "retention floor unchanged at seq {}",
+                        response.retention_floor_seq.0
+                    )
+                };
+            let mut line = format!(
+                "maintenance step for {}: {wal_flush}; {reorganize}; {retention}",
+                response.namespace_id
+            );
             if let Some(gc) = &response.gc {
                 line.push_str(&format!("; {}", gc_summary(gc)));
             }

@@ -8,8 +8,8 @@ mod common;
 use common::*;
 use loonfs::{
     ChangeSeq, CommitId, CommitOp, CommitRequest, CreateNamespaceOptions, ErrorCode, InodeId,
-    MaintenanceStepOptions, MaintenanceStepOutcome, ManifestId, PutFileOptions, RuntimeError,
-    SharedObjectStore,
+    MaintenanceStepOptions, ManifestId, PutFileOptions, RuntimeError, SharedObjectStore,
+    WalFlushStepOutcome,
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
 use loonfs_objectstore::keys::{metadata_manifest_object, namespace_config};
@@ -122,12 +122,13 @@ fn maintenance_step_below_threshold_is_not_needed() {
             MaintenanceStepOptions {
                 max_wal_tail_segments: 2,
                 gc: None,
+                only: None,
             },
         )
         .expect("maintenance step");
     assert_eq!(step.namespace_id, namespace_id);
     assert_eq!(step.status_before.wal_tail_segments, 1);
-    assert_eq!(step.outcome, MaintenanceStepOutcome::NotNeeded);
+    assert_eq!(step.wal_flush, WalFlushStepOutcome::NotNeeded);
 }
 
 #[test]
@@ -152,13 +153,14 @@ fn maintenance_step_at_segment_threshold_flushes_the_wal() {
             MaintenanceStepOptions {
                 max_wal_tail_segments: 1,
                 gc: None,
+                only: None,
             },
         )
         .expect("maintenance step");
     assert_eq!(step.status_before.head_seq, ChangeSeq(1));
     assert_eq!(
-        step.outcome,
-        MaintenanceStepOutcome::WalFlushed {
+        step.wal_flush,
+        WalFlushStepOutcome::Flushed {
             manifest_head_seq: ChangeSeq(1)
         }
     );
@@ -204,6 +206,7 @@ fn maintenance_step_after_existing_manifest_writes_l0_manifest() {
         MaintenanceStepOptions {
             max_wal_tail_segments: 1,
             gc: None,
+            only: None,
         },
     )
     .expect("first maintenance step");
@@ -221,12 +224,13 @@ fn maintenance_step_after_existing_manifest_writes_l0_manifest() {
             MaintenanceStepOptions {
                 max_wal_tail_segments: 1,
                 gc: None,
+                only: None,
             },
         )
         .expect("second maintenance step");
     assert_eq!(
-        step.outcome,
-        MaintenanceStepOutcome::WalFlushed {
+        step.wal_flush,
+        WalFlushStepOutcome::Flushed {
             manifest_head_seq: ChangeSeq(2)
         }
     );
@@ -309,10 +313,11 @@ fn maintenance_step_counts_segments_not_commits() {
             MaintenanceStepOptions {
                 max_wal_tail_segments: 2,
                 gc: None,
+                only: None,
             },
         )
         .expect("maintenance step");
-    assert_eq!(step.outcome, MaintenanceStepOutcome::NotNeeded);
+    assert_eq!(step.wal_flush, WalFlushStepOutcome::NotNeeded);
 
     fs.commit_operations_blocking(
         &namespace_id,
@@ -334,14 +339,15 @@ fn maintenance_step_counts_segments_not_commits() {
             MaintenanceStepOptions {
                 max_wal_tail_segments: 2,
                 gc: None,
+                only: None,
             },
         )
         .expect("maintenance step at segment threshold");
     assert_eq!(step.status_before.head_seq, ChangeSeq(3));
     assert_eq!(step.status_before.wal_tail_segments, 2);
     assert_eq!(
-        step.outcome,
-        MaintenanceStepOutcome::WalFlushed {
+        step.wal_flush,
+        WalFlushStepOutcome::Flushed {
             manifest_head_seq: ChangeSeq(3)
         }
     );
@@ -361,6 +367,7 @@ fn maintenance_step_rejects_zero_threshold() {
             MaintenanceStepOptions {
                 max_wal_tail_segments: 0,
                 gc: None,
+                only: None,
             },
         )
         .expect_err("zero threshold should fail");
@@ -386,6 +393,7 @@ fn maintenance_step_rejects_thresholds_above_the_write_rejection_cap() {
             MaintenanceStepOptions {
                 max_wal_tail_segments: 129,
                 gc: None,
+                only: None,
             },
         )
         .expect_err("over-cap threshold should fail");
@@ -426,13 +434,14 @@ fn maintenance_step_treats_metadata_root_cas_loss_as_benign_race() {
             MaintenanceStepOptions {
                 max_wal_tail_segments: 1,
                 gc: None,
+                only: None,
             },
         )
         .expect("maintenance step should not fail on metadata root publish race");
 
     assert_eq!(
-        step.outcome,
-        MaintenanceStepOutcome::WalFlushRaceLost {
+        step.wal_flush,
+        WalFlushStepOutcome::RaceLost {
             observed_head_seq: ChangeSeq(1)
         }
     );
