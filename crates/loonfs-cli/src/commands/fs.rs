@@ -8,12 +8,12 @@ use super::context::{
 use super::output::{CommandData, CommandFailure, CommandOutput};
 use crate::args::{
     CommandKind, FilesystemCatArgs, FilesystemGetArgs, FilesystemGrepArgs, FilesystemLsArgs,
-    FilesystemMkdirArgs, FilesystemPathArgs, FilesystemPathMutationArgs, FilesystemPutArgs,
-    FilesystemRestoreArgs, FilesystemRevisionsArgs, FilesystemTransferArgs, FilesystemUndeleteArgs,
+    FilesystemMkdirArgs, FilesystemPathArgs, FilesystemPutArgs, FilesystemRestoreArgs,
+    FilesystemRevisionsArgs, FilesystemRmArgs, FilesystemTransferArgs, FilesystemUndeleteArgs,
     RuntimeBehavior,
 };
 use crate::error::CliError;
-use loonfs_api::{CommitId, DestinationBehavior, InodeKind, RevisionNo};
+use loonfs_api::{CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeKind, RevisionNo};
 use loonfs_client::{CreateDirectoryOptions, DeleteOptions, NamespacePath, PutFileOptions};
 use std::fs;
 use std::io::Write;
@@ -375,7 +375,7 @@ pub(crate) async fn run_filesystem_put(
 
 pub(crate) async fn run_filesystem_rm(
     kind: CommandKind,
-    args: FilesystemPathMutationArgs,
+    args: FilesystemRmArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, &args.target).await?;
     let allow_root = false;
@@ -394,10 +394,15 @@ pub(crate) async fn run_filesystem_rm(
         .await
         .map_err(|error| context.fail(kind, error))?
         .inode_id;
+    let behavior = if args.recursive {
+        DeleteDirectoryBehavior::Recursive
+    } else {
+        DeleteDirectoryBehavior::NonRecursive
+    };
     let options = DeleteOptions {
+        behavior,
         expected_inode_id: Some(deleted_inode),
         commit_id,
-        ..DeleteOptions::default()
     };
     let result = context
         .target
