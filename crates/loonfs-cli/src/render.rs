@@ -11,8 +11,11 @@ fn gc_summary(report: &GcResponse) -> String {
     if report.incomplete_namespace_ignored {
         return "gc ignored incomplete namespace".to_owned();
     }
+    // Content blobs live in a shared content store and are never GC
+    // candidates in v0; say so rather than letting four zero-free counters
+    // imply everything reclaimable was swept.
     let mut summary = format!(
-        "gc deleted {} wal segments, {} tables, {} manifests, {} checkpoint records ({} retained)",
+        "gc deleted {} wal segments, {} tables, {} manifests, {} checkpoint records ({} retained); content objects are not swept in v0",
         report.deleted_wal_segments,
         report.deleted_metadata_tables,
         report.deleted_manifests,
