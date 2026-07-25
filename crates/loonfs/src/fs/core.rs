@@ -13,7 +13,7 @@ use crate::{
 };
 use crate::{Result, RuntimeError, SharedObjectStore};
 use loonfs_api::{
-    encode_file_revisions_cursor, generated_id, CapabilityDocument, EffectiveLimit, FileRevision,
+    encode_cursor, generated_id, CapabilityDocument, EffectiveLimit, FileRevision,
     FileRevisionsPageCursor, Page, PaginationPolicy, FEATURE_NAMESPACES_CREATE,
     FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK, FEATURE_QUERY_GREP,
     FEATURE_UPLOADS_DIRECT_PUT, LIMIT_COMMIT_MAX_OPERATIONS, LIMIT_GC_MIN_GRACE_WINDOW_MS,
@@ -303,7 +303,7 @@ pub(super) fn file_revisions_page_response(
     let next_cursor = page
         .next_cursor
         .as_ref()
-        .map(encode_file_revisions_cursor)
+        .map(encode_cursor)
         .transpose()
         .map_err(|error| CoreError::InvalidCursor(error.to_string()))?;
     Ok(ListFileRevisionsResponse {

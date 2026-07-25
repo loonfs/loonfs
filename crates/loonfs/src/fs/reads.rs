@@ -10,8 +10,8 @@ use crate::{
     RevisionNo, RuntimeError,
 };
 use loonfs_api::{
-    encode_directory_cursor, AbsolutePath, DirectoryPageCursor, FileRevisionsPageCursor,
-    GrepRequest, GrepResponse, PageRequest, PaginationPolicy,
+    encode_cursor, AbsolutePath, DirectoryPageCursor, FileRevisionsPageCursor, GrepRequest,
+    GrepResponse, PageRequest, PaginationPolicy,
 };
 use loonfs_grep::GrepIndexSnapshot;
 
@@ -38,9 +38,7 @@ impl FsReader {
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
         let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
-        let entry = engine
-            .resolve_path_with_runtime_context(absolute_path, &read_context)
-            .await?;
+        let entry = engine.resolve_path(absolute_path, &read_context).await?;
         tracing::Span::current().record(
             "cache_path",
             crate::trace::CachePath::MaterializedTables.as_str(),
@@ -102,7 +100,7 @@ impl FsReader {
             .await?;
         response.next_cursor = next_cursor
             .as_ref()
-            .map(encode_directory_cursor)
+            .map(encode_cursor)
             .transpose()
             .map_err(|error| CoreError::InvalidCursor(error.to_string()))?;
         Ok(response)
@@ -119,7 +117,7 @@ impl FsReader {
         let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
         let request_head_seq = request.cursor.as_ref().map(|cursor| cursor.head_seq);
         let page = engine
-            .list_path_page_with_runtime_context(listed_path.as_str(), request, &read_context)
+            .list_path_page(listed_path.as_str(), request, &read_context)
             .await?;
         self.core
             .inner
@@ -150,7 +148,7 @@ impl FsReader {
     ) -> Result<AuthoritativeFileBytes> {
         let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
         let read = engine
-            .read_file_with_runtime_context(
+            .read_file(
                 absolute_path,
                 &read_context,
                 self.core.inner.config.max_read_content_bytes,
@@ -170,9 +168,7 @@ impl FsReader {
         request: &GrepRequest,
     ) -> Result<GrepResponse> {
         let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
-        let view = engine
-            .load_grep_view_with_runtime_context(&read_context)
-            .await?;
+        let view = engine.load_grep_view(&read_context).await?;
         let snapshot = GrepIndexSnapshot::from_grep_root(
             self.core.store(),
             namespace_id,
@@ -202,7 +198,7 @@ impl FsReader {
         let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
         let fallback_inode_id = request.cursor.as_ref().map(|cursor| cursor.inode_id);
         let page = engine
-            .list_file_revisions_page_with_runtime_context(absolute_path, request, &read_context)
+            .list_file_revisions_page(absolute_path, request, &read_context)
             .await?;
         self.core
             .inner
@@ -225,11 +221,7 @@ impl FsReader {
     ) -> Result<ListFileRevisionsResponse> {
         let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
         let page = engine
-            .list_file_revisions_for_inode_page_with_runtime_context(
-                inode_id,
-                request,
-                &read_context,
-            )
+            .list_file_revisions_for_inode_page(inode_id, request, &read_context)
             .await?;
         self.core
             .inner
@@ -252,7 +244,7 @@ impl FsReader {
     ) -> Result<AuthoritativeFileBytes> {
         let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
         let read = engine
-            .read_file_revision_with_runtime_context(
+            .read_file_revision(
                 absolute_path,
                 revision_no,
                 &read_context,
@@ -275,7 +267,7 @@ impl FsReader {
     ) -> Result<Vec<u8>> {
         let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
         let read = engine
-            .read_file_revision_for_inode_with_runtime_context(
+            .read_file_revision_for_inode(
                 inode_id,
                 revision_no,
                 &read_context,
