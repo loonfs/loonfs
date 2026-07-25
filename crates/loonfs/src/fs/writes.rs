@@ -1,7 +1,8 @@
-//! Path mutations, commits, and the publication pipeline.
+//! [`FsWriter`]'s path mutations, commits, and the publication pipeline.
 
-use super::core::{BackgroundStepClaim, FsCore};
+use super::core::BackgroundStepClaim;
 use crate::publish::{NamespaceMutationCandidate, PathMutationIntent, PreparedContent};
+use crate::FsWriter;
 use crate::{
     ChangeSeq, CommitId, CommitOp, CommitPrecondition, CommitRequest, CommitResponse, ContentRef,
     CopyOptions, CoreError, CreateDirectoryOptions, DeleteOptions, InodeId, MaintenanceStepOptions,
@@ -9,7 +10,7 @@ use crate::{
 };
 use crate::{Result, RuntimeError};
 
-impl FsCore {
+impl FsWriter {
     /// Writes file bytes to a path.
     ///
     /// The bytes become durable content first; metadata referencing them is
@@ -27,7 +28,7 @@ impl FsCore {
             payload_class = tracing::field::Empty,
         )
     )]
-    pub(crate) async fn put_file_bytes(
+    pub async fn put_file_bytes(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
@@ -35,7 +36,7 @@ impl FsCore {
         options: PutFileOptions,
     ) -> Result<CommitResponse> {
         let span = tracing::Span::current();
-        self.record_trace_context(&span);
+        self.core.record_trace_context(&span);
         span.record("payload_class", crate::trace::payload_class(bytes.len()));
         let prepared_content = self.prepare_file_bytes(namespace_id, bytes).await?;
         self.put_file_prepared(namespace_id, absolute_path, prepared_content, options)
@@ -59,19 +60,19 @@ impl FsCore {
             payload_class = tracing::field::Empty,
         )
     )]
-    pub(crate) async fn prepare_file_bytes(
+    pub async fn prepare_file_bytes(
         &self,
         namespace_id: &NamespaceId,
         bytes: &[u8],
     ) -> Result<PreparedContent> {
         let span = tracing::Span::current();
-        self.record_trace_context(&span);
+        self.core.record_trace_context(&span);
         span.record("payload_class", crate::trace::payload_class(bytes.len()));
         let catalog = self
             .load_namespace_catalog_for_content_preparation(namespace_id)
             .await?;
         let stored = loonfs_core::content::store_bytes_as_content_with_store_id(
-            &self.inner.store,
+            &self.core.inner.store,
             catalog.content_store_id().clone(),
             bytes,
         )
@@ -98,7 +99,7 @@ impl FsCore {
             payload_class = tracing::field::Empty,
         )
     )]
-    pub(crate) async fn put_file_prepared(
+    pub async fn put_file_prepared(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
@@ -106,7 +107,7 @@ impl FsCore {
         options: PutFileOptions,
     ) -> Result<CommitResponse> {
         let span = tracing::Span::current();
-        self.record_trace_context(&span);
+        self.core.record_trace_context(&span);
         span.record(
             "payload_class",
             crate::trace::payload_class(
@@ -146,7 +147,7 @@ impl FsCore {
             payload_class = tracing::field::Empty,
         )
     )]
-    pub(crate) async fn put_file_content_ref(
+    pub async fn put_file_content_ref(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
@@ -154,7 +155,7 @@ impl FsCore {
         options: PutFileOptions,
     ) -> Result<CommitResponse> {
         let span = tracing::Span::current();
-        self.record_trace_context(&span);
+        self.core.record_trace_context(&span);
         span.record(
             "payload_class",
             crate::trace::payload_class(
@@ -183,13 +184,13 @@ impl FsCore {
             payload_class = tracing::field::Empty,
         )
     )]
-    pub(crate) async fn prepare_content_ref(
+    pub async fn prepare_content_ref(
         &self,
         namespace_id: &NamespaceId,
         content_ref: ContentRef,
     ) -> Result<PreparedContent> {
         let span = tracing::Span::current();
-        self.record_trace_context(&span);
+        self.core.record_trace_context(&span);
         span.record(
             "payload_class",
             crate::trace::payload_class(
@@ -200,7 +201,7 @@ impl FsCore {
             .load_namespace_catalog_for_content_preparation(namespace_id)
             .await?;
         Ok(loonfs_core::content::prepare_existing_content_ref(
-            &self.inner.store,
+            &self.core.inner.store,
             &catalog,
             content_ref,
         )
@@ -210,7 +211,7 @@ impl FsCore {
 
     /// Verifies an authorized content token against the namespace's durable
     /// content-store binding.
-    pub(crate) async fn prepare_content_token(
+    pub async fn prepare_content_token(
         &self,
         namespace_id: &NamespaceId,
         secret: &str,
@@ -231,19 +232,24 @@ impl FsCore {
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<loonfs_core::control::VerifiedNamespaceCatalogEntry> {
-        match self.load_namespace_catalog_cached(namespace_id).await? {
+        match self
+            .core
+            .load_namespace_catalog_cached(namespace_id)
+            .await?
+        {
             Some(catalog) => Ok(catalog),
-            None => {
-                loonfs_core::control::load_namespace_catalog_entry(&self.inner.store, namespace_id)
-                    .await
-                    .map_err(CoreError::from)
-                    .map_err(RuntimeError::from)
-            }
+            None => loonfs_core::control::load_namespace_catalog_entry(
+                &self.core.inner.store,
+                namespace_id,
+            )
+            .await
+            .map_err(CoreError::from)
+            .map_err(RuntimeError::from),
         }
     }
 
     /// Creates a directory at an absolute path.
-    pub(crate) async fn create_directory(
+    pub async fn create_directory(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
@@ -263,8 +269,10 @@ impl FsCore {
     /// Deletes a file or directory path.
     ///
     /// Deletion is tombstone-first: the commit hides the path without erasing
-    /// history. Physical reclamation is background garbage collection.
-    pub(crate) async fn delete_path(
+    /// history. Physical reclamation is explicit garbage collection: nothing
+    /// sweeps unless an operator asks, through `FsAdmin::gc_namespace` or a
+    /// maintenance step that opted in.
+    pub async fn delete_path(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
@@ -283,7 +291,7 @@ impl FsCore {
     }
 
     /// Moves a path within the same namespace.
-    pub(crate) async fn move_path(
+    pub async fn move_path(
         &self,
         namespace_id: &NamespaceId,
         from_path: &str,
@@ -304,7 +312,7 @@ impl FsCore {
 
     /// Copies a file to a new path in the same namespace. The new file
     /// reuses the source revision's content reference: no bytes are copied.
-    pub(crate) async fn copy_path(
+    pub async fn copy_path(
         &self,
         namespace_id: &NamespaceId,
         from_path: &str,
@@ -324,7 +332,7 @@ impl FsCore {
     }
 
     /// Restores a prior file revision by appending a new current revision.
-    pub(crate) async fn restore_file_revision(
+    pub async fn restore_file_revision(
         &self,
         namespace_id: &NamespaceId,
         absolute_path: &str,
@@ -345,7 +353,7 @@ impl FsCore {
     /// Recovers a deleted file or subtree: clears the tombstone rooted at
     /// `inode_id` and binds it at `absolute_path`. The inode id is the one
     /// the delete reported (also visible in the change feed).
-    pub(crate) async fn undelete(
+    pub async fn undelete(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
@@ -371,7 +379,7 @@ impl FsCore {
     /// The commit appends a new current revision from `source_revision_no`
     /// and fails if the inode's current revision is no longer
     /// `base_revision_no`.
-    pub(crate) async fn restore_file_revision_by_inode(
+    pub async fn restore_file_revision_by_inode(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
@@ -401,7 +409,7 @@ impl FsCore {
     /// This is the lower-level surface for clients that need their own commit
     /// ids, preconditions, and operation lists. Operations with external
     /// content refs require [`Self::commit_operations_prepared`].
-    pub(crate) async fn commit_operations(
+    pub async fn commit_operations(
         &self,
         namespace_id: &NamespaceId,
         request: CommitRequest,
@@ -414,7 +422,7 @@ impl FsCore {
     ///
     /// Submission and publication perform no content I/O. One prepared value
     /// covers every operation that uses its content ref.
-    pub(crate) async fn commit_operations_prepared(
+    pub async fn commit_operations_prepared(
         &self,
         namespace_id: &NamespaceId,
         request: CommitRequest,
@@ -430,7 +438,7 @@ impl FsCore {
     /// Submits explicit semantic commit requests, returning one result per
     /// request in order. Requests admitted together usually publish
     /// together, batched by the publication service.
-    pub(crate) async fn commit_operations_batch(
+    pub async fn commit_operations_batch(
         &self,
         namespace_id: &NamespaceId,
         requests: Vec<CommitRequest>,
@@ -482,7 +490,8 @@ impl FsCore {
         candidates: Vec<NamespaceMutationCandidate>,
     ) -> Vec<Result<CommitResponse>> {
         let submissions = candidates.into_iter().map(|candidate| {
-            self.inner
+            self.core
+                .inner
                 .publisher
                 .submit_candidate(namespace_id.clone(), candidate)
         });
@@ -499,25 +508,28 @@ impl FsCore {
     /// This is the engine-level publish the publication service's tasks
     /// drive; results match candidates in order. Everything else submits
     /// through [`Self::publish_through_publisher`].
-    pub(crate) async fn publish_namespace_mutations_batch(
+    pub async fn publish_namespace_mutations_batch(
         &self,
         namespace_id: &NamespaceId,
         candidates: Vec<NamespaceMutationCandidate>,
     ) -> Vec<Result<CommitResponse>> {
         let batch_size = u64::try_from(candidates.len()).unwrap_or(u64::MAX);
-        let store = self.store();
-        let context = match self.mutation_context() {
+        let store = self.core.store();
+        let context = match self.core.mutation_context() {
             Ok(context) => context,
             Err(error) => return candidates.iter().map(|_| Err(error.clone())).collect(),
         };
-        if self.control_cache_enabled() {
+        if self.core.control_cache_enabled() {
             // Warm the immutable catalog through the control cache so a
             // recreated engine starts seeded; a load failure here surfaces
             // as the publish view's own, properly shaped error instead.
-            self.load_namespace_catalog_cached(namespace_id).await.ok();
-            let engine = self.commit_engine(namespace_id);
+            self.core
+                .load_namespace_catalog_cached(namespace_id)
+                .await
+                .ok();
+            let engine = self.core.commit_engine(namespace_id);
             let mut publish = {
-                let cache_config = &self.inner.config.runtime_cache;
+                let cache_config = &self.core.inner.config.runtime_cache;
                 // Boxing erases the engine's deeply nested publish future;
                 // without it, callers awaiting a put or commit (CLI, server,
                 // embedding crates) exceed rustc's type-recursion depth.
@@ -538,22 +550,23 @@ impl FsCore {
                 let _span = tracing::info_span!(
                     "loonfs.phase",
                     phase = "batch_update_cache",
-                    mode = self.inner.config.trace_mode.as_str(),
-                    store_kind = self.inner.config.trace_store_kind.as_str(),
+                    mode = self.core.inner.config.trace_mode.as_str(),
+                    store_kind = self.core.inner.config.trace_store_kind.as_str(),
                     batch_size
                 )
                 .entered();
                 match publish.resulting_read_state.take() {
                     // A landed publish hands the caches exactly the state a
                     // rebuild would recompute; use it instead of dropping.
-                    Some(state) => self.seed_namespace_read_cache(namespace_id, state),
+                    Some(state) => self.core.seed_namespace_read_cache(namespace_id, state),
                     None => {
                         let runtime_results = publish
                             .results
                             .iter()
                             .map(|result| result.clone().map_err(RuntimeError::Core))
                             .collect::<Vec<_>>();
-                        self.invalidate_namespace_cache_after_batch(namespace_id, &runtime_results);
+                        self.core
+                            .invalidate_namespace_cache_after_batch(namespace_id, &runtime_results);
                     }
                 }
             }
@@ -573,7 +586,7 @@ impl FsCore {
         // cache configuration disables neither session state nor
         // maintenance scheduling.
         let mut engine = loonfs_core::publish::NamespaceCommitEngine::new(namespace_id.clone())
-            .writer_session(self.inner.writer_sessions.state(namespace_id));
+            .writer_session(self.core.inner.writer_sessions.state(namespace_id));
         // Boxed for the same type-recursion reason as the cached-engine path.
         let publish = Box::pin(engine.publish_batch(
             &store,
@@ -592,12 +605,13 @@ impl FsCore {
             let _span = tracing::info_span!(
                 "loonfs.phase",
                 phase = "batch_update_cache",
-                mode = self.inner.config.trace_mode.as_str(),
-                store_kind = self.inner.config.trace_store_kind.as_str(),
+                mode = self.core.inner.config.trace_mode.as_str(),
+                store_kind = self.core.inner.config.trace_store_kind.as_str(),
                 batch_size
             )
             .entered();
-            self.invalidate_namespace_cache_after_batch(namespace_id, &results);
+            self.core
+                .invalidate_namespace_cache_after_batch(namespace_id, &results);
         }
         self.notify_publish_observer(namespace_id, &results);
         self.maybe_auto_step_after_publish(namespace_id, wal_tail_segments);
@@ -609,7 +623,7 @@ impl FsCore {
         namespace_id: &NamespaceId,
         results: &[Result<CommitResponse>],
     ) {
-        let Some(observer) = &self.inner.publish_observer else {
+        let Some(observer) = &self.core.inner.publish_observer else {
             return;
         };
         if let Some(committed_seq) = results
@@ -634,11 +648,11 @@ impl FsCore {
         if wal_tail_segments < options.max_wal_tail_segments {
             return;
         }
-        if !self.inner.background.try_claim(namespace_id) {
+        if !self.core.inner.background.try_claim(namespace_id) {
             return;
         }
         let claim = BackgroundStepClaim {
-            fs: self.clone(),
+            fs: self.core.clone(),
             namespace_id: namespace_id.clone(),
         };
         self.spawn_claimed_auto_maintenance(claim, options);
@@ -655,8 +669,7 @@ impl FsCore {
             Box::pin(async move {
                 let mut claim = claim;
                 loop {
-                    if let Err(error) = claim
-                        .fs
+                    if let Err(error) = FsWriter::from_core(claim.fs.clone())
                         .run_auto_maintenance(&claim.namespace_id, options.clone())
                         .await
                     {
@@ -681,12 +694,12 @@ impl FsCore {
                         continue;
                     }
                     claim.namespace_id = next_namespace_id;
-                    let fs = claim.fs.clone();
-                    fs.spawn_claimed_auto_maintenance(claim, options);
+                    let writer = FsWriter::from_core(claim.fs.clone());
+                    writer.spawn_claimed_auto_maintenance(claim, options);
                     return;
                 }
             });
-        self.inner.background.spawn(future);
+        self.core.inner.background.spawn(future);
     }
 
     async fn run_auto_maintenance(
@@ -694,8 +707,12 @@ impl FsCore {
         namespace_id: &NamespaceId,
         options: MaintenanceStepOptions,
     ) -> Result<()> {
-        self.maintenance_step_namespace(namespace_id, options)
+        // Background maintenance runs the same operations an operator runs,
+        // through the same handle, rather than a private copy of them.
+        let admin = crate::FsAdmin::from_core(self.core.clone());
+        admin
+            .maintenance_step_namespace(namespace_id, options)
             .await?;
-        self.drain_reorganization_backlog(namespace_id).await
+        admin.drain_reorganization_backlog(namespace_id).await
     }
 }

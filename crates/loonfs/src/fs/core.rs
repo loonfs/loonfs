@@ -208,6 +208,20 @@ impl FsCore {
         )
     }
 
+    /// Waits until every scheduled background maintenance step has finished.
+    ///
+    /// Call this to quiesce before shutdown, or in tests that assert on
+    /// post-maintenance state. Panicked steps surface as a runtime-task
+    /// error.
+    pub(crate) async fn wait_for_background_maintenance(&self) -> Result<()> {
+        self.inner.background.drain().await
+    }
+
+    /// Rejects any further background maintenance scheduling.
+    pub(crate) fn shut_down_background(&self) {
+        self.inner.background.shut_down();
+    }
+
     pub(crate) fn store(&self) -> &dyn ObjectStore {
         self.inner.store.as_ref()
     }

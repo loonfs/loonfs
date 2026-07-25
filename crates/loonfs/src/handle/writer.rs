@@ -5,16 +5,10 @@ use crate::background::{BackgroundWork, FsBackgroundWork};
 use crate::config::default_writer_version;
 use crate::fs::FsCore;
 use crate::metrics::ObjectStoreMetricsRecorder;
-use crate::publish::{NamespaceMutationCandidate, PreparedContent};
-use crate::uploads::BeginDirectPutUploadTargetResponse;
 use crate::{
-    BeginUploadRequest, BeginUploadResponse, CapabilityDocument, ChangeSeq, CommitRequest,
-    CommitResponse, CompleteUploadRequest, CompleteUploadResponse, ContentRef, CopyOptions,
-    CreateDirectoryOptions, CreateNamespaceOptions, DeleteNamespaceOptions,
-    DeleteNamespaceResponse, DeleteOptions, InodeId, MoveOptions, NamespaceId, NamespaceSummary,
-    PutFileOptions, RestoreRevisionOptions, Result, RevisionNo, RuntimeCacheConfig,
+    CapabilityDocument, ChangeSeq, CreateNamespaceOptions, DeleteNamespaceOptions,
+    DeleteNamespaceResponse, NamespaceId, NamespaceSummary, Result, RuntimeCacheConfig,
     RuntimeCacheStats, RuntimeError, SharedObjectStore, StoreConfig, TraceMode, TraceStoreKind,
-    UndeleteOptions, UploadContentResponse, UploadId,
 };
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -35,7 +29,7 @@ use std::sync::Arc;
 /// background-work state.
 #[derive(Clone)]
 pub struct FsWriter {
-    core: FsCore,
+    pub(crate) core: FsCore,
 }
 
 impl FsWriter {
@@ -62,6 +56,13 @@ impl FsWriter {
     /// different runtime, open one with [`FsReader::builder`].
     pub fn reader(&self) -> FsReader {
         FsReader::from_core(self.core.clone())
+    }
+
+    /// Wraps a shared runtime core. The publication service and
+    /// writer-scheduled maintenance use this so background work runs the same
+    /// mutation path a caller runs, rather than a private copy of it.
+    pub(crate) fn from_core(core: FsCore) -> Self {
+        Self { core }
     }
 
     /// Shared runtime core, for in-crate front-ends.
@@ -126,328 +127,8 @@ impl FsWriter {
         self.core.delete_namespace(namespace_id, options).await
     }
 
-    /// Writes file bytes to a path.
-    ///
-    /// The bytes become durable content first; metadata referencing them is
-    /// published only afterward. `options.behavior` selects create-only or
-    /// replace semantics.
-    pub async fn put_file_bytes(
-        &self,
-        namespace_id: &NamespaceId,
-        absolute_path: &str,
-        bytes: &[u8],
-        options: PutFileOptions,
-    ) -> Result<CommitResponse> {
-        self.core
-            .put_file_bytes(namespace_id, absolute_path, bytes, options)
-            .await
-    }
-
-    /// Stages file bytes as durable content for later publication.
-    ///
-    /// This performs one content PUT and no content reads. Preparations may
-    /// run concurrently on this writer; pass the result to
-    /// [`Self::put_file_prepared`] or [`Self::commit_operations_prepared`].
-    pub async fn prepare_file_bytes(
-        &self,
-        namespace_id: &NamespaceId,
-        bytes: &[u8],
-    ) -> Result<PreparedContent> {
-        self.core.prepare_file_bytes(namespace_id, bytes).await
-    }
-
-    /// Publishes a file revision from already-prepared content.
-    ///
-    /// Submission and publication perform no content I/O.
-    pub async fn put_file_prepared(
-        &self,
-        namespace_id: &NamespaceId,
-        absolute_path: &str,
-        prepared_content: PreparedContent,
-        options: PutFileOptions,
-    ) -> Result<CommitResponse> {
-        self.core
-            .put_file_prepared(namespace_id, absolute_path, prepared_content, options)
-            .await
-    }
-
-    /// Publishes a file revision that points at an already-durable content ref.
-    ///
-    /// This explicitly slow helper reads the full object to prove durability
-    /// before publication. Callers that already hold proof should prefer
-    /// [`Self::put_file_prepared`].
-    pub async fn put_file_content_ref(
-        &self,
-        namespace_id: &NamespaceId,
-        absolute_path: &str,
-        content_ref: ContentRef,
-        options: PutFileOptions,
-    ) -> Result<CommitResponse> {
-        self.core
-            .put_file_content_ref(namespace_id, absolute_path, content_ref, options)
-            .await
-    }
-
-    /// Fully validates an existing content ref for later publication.
-    ///
-    /// This performs one content HEAD followed by one full content GET and
-    /// digest check. Later prepared publication performs no content I/O.
-    pub async fn prepare_content_ref(
-        &self,
-        namespace_id: &NamespaceId,
-        content_ref: ContentRef,
-    ) -> Result<PreparedContent> {
-        self.core
-            .prepare_content_ref(namespace_id, content_ref)
-            .await
-    }
-
-    /// Verifies a namespace-authorized wire token and binds its proof to the
-    /// namespace's verified content store.
-    ///
-    /// The outer result reports runtime failure. The inner result carries
-    /// token verification failure as data rather than a runtime error.
-    pub async fn prepare_content_token(
-        &self,
-        namespace_id: &NamespaceId,
-        secret: &str,
-        token: &loonfs_api::v0::ValidatedContentToken,
-        now_ms: u64,
-    ) -> Result<std::result::Result<PreparedContent, loonfs_core::content::ContentTokenError>> {
-        self.core
-            .prepare_content_token(namespace_id, secret, token, now_ms)
-            .await
-    }
-
-    /// Creates a directory at an absolute path.
-    pub async fn create_directory(
-        &self,
-        namespace_id: &NamespaceId,
-        absolute_path: &str,
-        options: CreateDirectoryOptions,
-    ) -> Result<CommitResponse> {
-        self.core
-            .create_directory(namespace_id, absolute_path, options)
-            .await
-    }
-
-    /// Deletes a file or directory path.
-    ///
-    /// Deletion is tombstone-first: the commit hides the path without erasing
-    /// history. Physical reclamation is explicit garbage collection.
-    pub async fn delete_path(
-        &self,
-        namespace_id: &NamespaceId,
-        absolute_path: &str,
-        options: DeleteOptions,
-    ) -> Result<CommitResponse> {
-        self.core
-            .delete_path(namespace_id, absolute_path, options)
-            .await
-    }
-
-    /// Moves a path within the same namespace.
-    pub async fn move_path(
-        &self,
-        namespace_id: &NamespaceId,
-        from_path: &str,
-        to_path: &str,
-        options: MoveOptions,
-    ) -> Result<CommitResponse> {
-        self.core
-            .move_path(namespace_id, from_path, to_path, options)
-            .await
-    }
-
-    /// Copies a file to a new path in the same namespace. The new file
-    /// reuses the source revision's content reference: no bytes are copied.
-    pub async fn copy_path(
-        &self,
-        namespace_id: &NamespaceId,
-        from_path: &str,
-        to_path: &str,
-        options: CopyOptions,
-    ) -> Result<CommitResponse> {
-        self.core
-            .copy_path(namespace_id, from_path, to_path, options)
-            .await
-    }
-
-    /// Restores a prior file revision by appending a new current revision.
-    pub async fn restore_file_revision(
-        &self,
-        namespace_id: &NamespaceId,
-        absolute_path: &str,
-        source_revision_no: RevisionNo,
-        options: RestoreRevisionOptions,
-    ) -> Result<CommitResponse> {
-        self.core
-            .restore_file_revision(namespace_id, absolute_path, source_revision_no, options)
-            .await
-    }
-
-    /// Recovers a deleted file or subtree: clears the tombstone rooted at
-    /// `inode_id` (the id the delete reported, also visible in the change
-    /// feed) and binds it at `absolute_path`. Fails with `not_deleted`
-    /// when the inode is not the root of a live deletion.
-    pub async fn undelete(
-        &self,
-        namespace_id: &NamespaceId,
-        inode_id: InodeId,
-        deleted_at_seq: ChangeSeq,
-        absolute_path: &str,
-        options: UndeleteOptions,
-    ) -> Result<CommitResponse> {
-        self.core
-            .undelete(
-                namespace_id,
-                inode_id,
-                deleted_at_seq,
-                absolute_path,
-                options,
-            )
-            .await
-    }
-
-    /// Restores a prior revision of an inode, guarded by a base-revision
-    /// precondition.
-    ///
-    /// The commit appends a new current revision from `source_revision_no`
-    /// and fails if the inode's current revision is no longer
-    /// `base_revision_no`.
-    pub async fn restore_file_revision_by_inode(
-        &self,
-        namespace_id: &NamespaceId,
-        inode_id: InodeId,
-        source_revision_no: RevisionNo,
-        base_revision_no: RevisionNo,
-        options: RestoreRevisionOptions,
-    ) -> Result<CommitResponse> {
-        self.core
-            .restore_file_revision_by_inode(
-                namespace_id,
-                inode_id,
-                source_revision_no,
-                base_revision_no,
-                options,
-            )
-            .await
-    }
-
-    /// Starts a durable upload session for a namespace.
-    pub async fn begin_upload(
-        &self,
-        namespace_id: &NamespaceId,
-        request: BeginUploadRequest,
-    ) -> Result<BeginUploadResponse> {
-        self.core.begin_upload(namespace_id, request).await
-    }
-
-    /// Starts a direct-put upload session and returns the internal target
-    /// for server-side signing.
-    pub async fn begin_direct_put_upload_target(
-        &self,
-        namespace_id: &NamespaceId,
-        content_ref: ContentRef,
-    ) -> Result<BeginDirectPutUploadTargetResponse> {
-        self.core
-            .begin_direct_put_upload_target(namespace_id, content_ref)
-            .await
-    }
-
-    /// Uploads whole-file content into an upload session.
-    pub async fn upload_content(
-        &self,
-        namespace_id: &NamespaceId,
-        upload_id: &UploadId,
-        bytes: &[u8],
-    ) -> Result<UploadContentResponse> {
-        self.core
-            .upload_content(namespace_id, upload_id, bytes)
-            .await
-    }
-
-    /// Completes an upload session when the expected content ref matches.
-    pub async fn complete_upload(
-        &self,
-        namespace_id: &NamespaceId,
-        upload_id: &UploadId,
-        request: &CompleteUploadRequest,
-    ) -> Result<CompleteUploadResponse> {
-        self.core
-            .complete_upload(namespace_id, upload_id, request)
-            .await
-    }
-
-    /// Completes an upload session and returns proof for later publication.
-    ///
-    /// Service-proxied completion performs no content-blob I/O. Direct-put
-    /// completion performs one content-blob HEAD and no content-blob GET.
-    /// Publishing the returned proof performs no content I/O.
-    pub async fn complete_upload_prepared(
-        &self,
-        namespace_id: &NamespaceId,
-        upload_id: &UploadId,
-        request: &CompleteUploadRequest,
-    ) -> Result<(CompleteUploadResponse, PreparedContent)> {
-        self.core
-            .complete_upload_prepared(namespace_id, upload_id, request)
-            .await
-    }
-
-    /// Submits one explicit semantic commit request.
-    ///
-    /// This is the lower-level surface for clients that need their own commit
-    /// ids, preconditions, and operation lists. Operations with external
-    /// content refs fail with `content_not_prepared`; use
-    /// [`Self::commit_operations_prepared`] to attach proofs.
-    pub async fn commit_operations(
-        &self,
-        namespace_id: &NamespaceId,
-        request: CommitRequest,
-    ) -> Result<CommitResponse> {
-        self.core.commit_operations(namespace_id, request).await
-    }
-
-    /// Submits one semantic commit request with prepared content proofs.
-    ///
-    /// Submission and publication perform no content I/O. One prepared value
-    /// covers every operation that uses its content ref.
-    pub async fn commit_operations_prepared(
-        &self,
-        namespace_id: &NamespaceId,
-        request: CommitRequest,
-        prepared_content: Vec<PreparedContent>,
-    ) -> Result<CommitResponse> {
-        self.core
-            .commit_operations_prepared(namespace_id, request, prepared_content)
-            .await
-    }
-
-    /// Submits explicit semantic commit requests as one publication attempt,
-    /// returning one result per request in order.
-    pub async fn commit_operations_batch(
-        &self,
-        namespace_id: &NamespaceId,
-        requests: Vec<CommitRequest>,
-    ) -> Vec<Result<CommitResponse>> {
-        self.core
-            .commit_operations_batch(namespace_id, requests)
-            .await
-    }
-
-    /// Publishes already-classified candidates as one batch; results match
-    /// candidates in order. (The server routes through its own publisher
-    /// registry, not this method.)
-    pub async fn publish_namespace_mutations_batch(
-        &self,
-        namespace_id: &NamespaceId,
-        candidates: Vec<NamespaceMutationCandidate>,
-    ) -> Vec<Result<CommitResponse>> {
-        self.core
-            .publish_namespace_mutations_batch(namespace_id, candidates)
-            .await
-    }
+    // Mutation, commit, and upload operations live in `fs/writes.rs`
+    // and `fs/uploads.rs`.
 
     /// Waits until every writer-scheduled maintenance task has finished,
     /// without closing the handle. Panicked tasks surface as a runtime-task

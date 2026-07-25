@@ -6,11 +6,8 @@ use crate::config::default_writer_version;
 use crate::fs::FsCore;
 use crate::metrics::ObjectStoreMetricsRecorder;
 use crate::{
-    AdvanceRetentionResponse, CheckpointId, CreateCheckpointOptions, CreateCheckpointResponse,
-    DisableGrepIndexResponse, EnableGrepIndexResponse, FlushWalResponse, GcConfig, GcReport,
-    MaintenanceStepOptions, MaintenanceStepResult, NamespaceId, NamespaceStatusResponse,
-    ReleaseCheckpointResponse, RepairNamespaceResponse, Result, RuntimeCacheConfig,
-    RuntimeCacheStats, RuntimeError, SharedObjectStore, StoreConfig, TraceMode, TraceStoreKind,
+    Result, RuntimeCacheConfig, RuntimeCacheStats, RuntimeError, SharedObjectStore, StoreConfig,
+    TraceMode, TraceStoreKind,
 };
 use std::sync::Arc;
 
@@ -26,7 +23,7 @@ use std::sync::Arc;
 /// `actor_id` for tracing, reports, and auditability.
 #[derive(Clone)]
 pub struct FsAdmin {
-    core: FsCore,
+    pub(crate) core: FsCore,
 }
 
 impl FsAdmin {
@@ -45,13 +42,11 @@ impl FsAdmin {
         FsAdminBuilder::new(HandleBuilderCore::from_store(store))
     }
 
-    /// Summarizes a namespace's current head: manifest, latest checkpoint,
-    /// WAL tail, and retention floor.
-    pub async fn namespace_status(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<NamespaceStatusResponse> {
-        self.core.namespace_status(namespace_id).await
+    /// Wraps a shared runtime core. Writer-scheduled background maintenance
+    /// uses this so it runs the same operations an operator runs, rather
+    /// than a private copy of them.
+    pub(crate) fn from_core(core: FsCore) -> Self {
+        Self { core }
     }
 
     /// Snapshots the runtime cache counters, so maintenance work driven
@@ -60,118 +55,7 @@ impl FsAdmin {
         self.core.runtime_cache_stats()
     }
 
-    /// Runs one bounded maintenance step against a namespace.
-    ///
-    /// Publishes a checkpoint once the visible WAL tail reaches
-    /// `options.max_wal_tail_segments`. Losing the head race or being
-    /// superseded by another checkpoint is reported as an outcome, not an
-    /// error.
-    pub async fn maintenance_step_namespace(
-        &self,
-        namespace_id: &NamespaceId,
-        options: MaintenanceStepOptions,
-    ) -> Result<MaintenanceStepResult> {
-        self.core
-            .maintenance_step_namespace(namespace_id, options)
-            .await
-    }
-
-    /// Enables the independent grep root for a namespace. Backfill and
-    /// incremental upkeep are driven by `loonfs-grep`'s explicit worker.
-    /// Idempotent.
-    pub async fn enable_grep_index(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<EnableGrepIndexResponse> {
-        self.core.enable_grep_index(namespace_id).await
-    }
-
-    /// Disables the independent grep root. Grep-owned garbage collection
-    /// later reclaims its unreferenced segments. Idempotent.
-    pub async fn disable_grep_index(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<DisableGrepIndexResponse> {
-        self.core.disable_grep_index(namespace_id).await
-    }
-
-    /// Creates or reuses a named checkpoint pinning the current namespace
-    /// head.
-    ///
-    /// A checkpoint pins a manifest version for retention and provenance,
-    /// and is a garbage-collection root until released or expired. If the
-    /// current head has no manifest yet, one is published first for the
-    /// current durable namespace state; this is not a request to compact
-    /// metadata.
-    pub async fn create_checkpoint(
-        &self,
-        namespace_id: &NamespaceId,
-        options: CreateCheckpointOptions,
-    ) -> Result<CreateCheckpointResponse> {
-        self.core.create_checkpoint(namespace_id, options).await
-    }
-
-    /// Releases a user-owned checkpoint by id.
-    ///
-    /// Idempotent: releasing an already-released or reaped record succeeds.
-    /// The record is reaped by a later garbage-collection pass; its basis
-    /// becomes collectable only on the pass after that.
-    pub async fn release_checkpoint(
-        &self,
-        namespace_id: &NamespaceId,
-        checkpoint_id: &CheckpointId,
-    ) -> Result<ReleaseCheckpointResponse> {
-        self.core
-            .release_checkpoint(namespace_id, checkpoint_id)
-            .await
-    }
-
-    /// Flushes the WAL tail and advances the metadata root to a manifest
-    /// covering the current head.
-    ///
-    /// This is the latest-state maintenance operation: it absorbs the
-    /// visible WAL tail into a published manifest and advances
-    /// `metadata/root.json`, creating no checkpoint record. Superseded
-    /// manifests become garbage-collection candidates once nothing pins
-    /// them.
-    pub async fn flush_wal(&self, namespace_id: &NamespaceId) -> Result<FlushWalResponse> {
-        self.core.flush_wal(namespace_id).await
-    }
-
-    /// Advances the namespace retention floor when a verified checkpoint
-    /// makes it safe.
-    pub async fn advance_retention_floor(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<AdvanceRetentionResponse> {
-        self.core.advance_retention_floor(namespace_id).await
-    }
-
-    /// Runs the v1 mark-and-sweep garbage collector for one namespace.
-    ///
-    /// `GcConfig::max_objects` bounds one invocation; return
-    /// `GcReport::next_cursor` as `GcConfig::cursor` to resume. Every resume
-    /// rebuilds the live roots. Never runs implicitly: callers opt in here or
-    /// through [`MaintenanceStepOptions::gc`].
-    pub async fn gc_namespace(
-        &self,
-        namespace_id: &NamespaceId,
-        config: &GcConfig,
-    ) -> Result<GcReport> {
-        self.core.gc_namespace(namespace_id, config).await
-    }
-
-    /// Repairs one incomplete namespace installation explicitly.
-    ///
-    /// Completable post-head installs receive their missing completion
-    /// descriptor. Non-completable debris is reaped only after the fixed
-    /// repair safety window; younger debris is reported as in flight.
-    pub async fn repair_namespace(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<RepairNamespaceResponse> {
-        self.core.repair_namespace(namespace_id).await
-    }
+    // Maintenance operations live in `fs/maintenance.rs`.
 
     /// Shuts down handle-owned background work. Admin calls are one-shot in
     /// the caller's task, so this settles immediately; it exists so every

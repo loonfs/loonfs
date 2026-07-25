@@ -1,7 +1,9 @@
-//! Explicit core maintenance: steps, GC, checkpoints, WAL flushes, and
-//! retention. Grep building and collection live in `loonfs-grep`.
+//! [`FsAdmin`]'s explicit maintenance: steps, GC, checkpoints, WAL
+//! flushes, and retention. Grep building and collection live in
+//! `loonfs-grep`.
 
-use super::core::FsCore;
+use crate::FsAdmin;
+use crate::NamespaceStatusResponse;
 use crate::{
     AdvanceRetentionResponse, CheckpointId, CreateCheckpointOptions, CreateCheckpointResponse,
     ErrorCode, FlushWalOutcome, FlushWalResponse, MaintenanceStepOptions, MaintenanceStepOutcome,
@@ -9,8 +11,25 @@ use crate::{
 };
 use crate::{Result, RuntimeError};
 use loonfs_api::v0::{DisableGrepIndexResponse, EnableGrepIndexResponse};
+use loonfs_core::cache::load_namespace_head_summary;
 
-impl FsCore {
+impl FsAdmin {
+    /// Summarizes a namespace's current head: manifest, latest checkpoint,
+    /// WAL tail, and retention floor.
+    pub async fn namespace_status(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<NamespaceStatusResponse> {
+        let summary = load_namespace_head_summary(self.core.store(), namespace_id).await?;
+        Ok(NamespaceStatusResponse {
+            namespace_id: summary.namespace_id,
+            head_seq: summary.head_seq,
+            current_manifest_id: summary.current_manifest_id,
+            wal_tail_segments: summary.wal_tail_segments,
+            retention_floor_seq: summary.retention_floor_seq,
+        })
+    }
+
     /// Runs one bounded maintenance step against a namespace.
     ///
     /// Publishes a checkpoint once the visible WAL tail reaches
@@ -28,13 +47,13 @@ impl FsCore {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub(crate) async fn maintenance_step_namespace(
+    pub async fn maintenance_step_namespace(
         &self,
         namespace_id: &NamespaceId,
         options: MaintenanceStepOptions,
     ) -> Result<MaintenanceStepResult> {
         let span = tracing::Span::current();
-        self.record_trace_context(&span);
+        self.core.record_trace_context(&span);
         let mut options = options;
         if let Some(gc) = &mut options.gc {
             if gc.max_objects.is_none() {
@@ -118,6 +137,7 @@ impl FsCore {
         namespace_id: &NamespaceId,
     ) -> Result<loonfs_core::MetadataReorganizeOutcome> {
         let report = self
+            .core
             .namespace_engine(namespace_id)
             .reorganize_metadata()
             .await
@@ -132,7 +152,7 @@ impl FsCore {
                 decoded_input_bytes,
                 ..
             } => {
-                self.invalidate_namespace_cache(namespace_id);
+                self.core.invalidate_namespace_cache(namespace_id);
                 tracing::info!(
                     families = ?families,
                     folded_l0_rows,
@@ -161,7 +181,7 @@ impl FsCore {
     /// so fold debt created by a burst of writes is settled by the burst's
     /// own background step instead of waiting for future threshold
     /// crossings that may never come.
-    pub(super) async fn drain_reorganization_backlog(
+    pub(crate) async fn drain_reorganization_backlog(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<()> {
@@ -191,7 +211,7 @@ impl FsCore {
     }
 
     /// Enables the independent grep root and starts checkpointed backfill.
-    pub(crate) async fn enable_grep_index(
+    pub async fn enable_grep_index(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<EnableGrepIndexResponse> {
@@ -223,7 +243,7 @@ impl FsCore {
 
     /// Disables the independent grep root; its segments become grep-GC
     /// candidates.
-    pub(crate) async fn disable_grep_index(
+    pub async fn disable_grep_index(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<DisableGrepIndexResponse> {
@@ -251,10 +271,10 @@ impl FsCore {
 
     fn grep_worker(&self) -> loonfs_grep::GrepWorker<crate::SharedObjectStore> {
         loonfs_grep::GrepWorker::new(
-            self.inner.store.clone(),
-            self.inner.config.writer_id.clone(),
-            self.inner.writer_session_id.clone(),
-            self.inner.config.writer_version.clone(),
+            self.core.inner.store.clone(),
+            self.core.inner.config.writer_id.clone(),
+            self.core.inner.writer_session_id.clone(),
+            self.core.inner.config.writer_version.clone(),
         )
     }
 
@@ -263,50 +283,39 @@ impl FsCore {
     /// Bounded calls return an enumeration cursor; every resume rebuilds the
     /// current live roots. Never runs implicitly: callers opt in here or
     /// through [`MaintenanceStepOptions::gc`].
-    pub(crate) async fn gc_namespace(
+    pub async fn gc_namespace(
         &self,
         namespace_id: &NamespaceId,
         config: &crate::GcConfig,
     ) -> Result<crate::GcReport> {
         let report = loonfs_core::gc_namespace(
-            self.store(),
+            self.core.store(),
             namespace_id,
             config,
-            &self.mutation_context()?,
+            &self.core.mutation_context()?,
         )
         .await
         .map_err(RuntimeError::Core)?;
         // Sweeping can remove objects cached views still reference; drop the
         // namespace caches rather than trusting them across a collection.
-        self.invalidate_namespace_read_cache(namespace_id);
+        self.core.invalidate_namespace_read_cache(namespace_id);
         Ok(report)
     }
 
     /// Explicitly completes or reaps one incomplete namespace installation.
-    pub(crate) async fn repair_namespace(
+    pub async fn repair_namespace(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<crate::RepairNamespaceResponse> {
-        let response =
-            loonfs_core::repair_namespace(self.store(), namespace_id, &self.mutation_context()?)
-                .await
-                .map_err(RuntimeError::Core)?;
-        self.invalidate_namespace_read_cache(namespace_id);
+        let response = loonfs_core::repair_namespace(
+            self.core.store(),
+            namespace_id,
+            &self.core.mutation_context()?,
+        )
+        .await
+        .map_err(RuntimeError::Core)?;
+        self.core.invalidate_namespace_read_cache(namespace_id);
         Ok(response)
-    }
-
-    /// Waits until every scheduled background maintenance step has finished.
-    ///
-    /// Call this to quiesce before shutdown, or in tests that assert on
-    /// post-maintenance state. Panicked steps surface as a runtime-task
-    /// error.
-    pub(crate) async fn wait_for_background_maintenance(&self) -> Result<()> {
-        self.inner.background.drain().await
-    }
-
-    /// Rejects any further background maintenance scheduling.
-    pub(crate) fn shut_down_background(&self) {
-        self.inner.background.shut_down();
     }
 
     /// Creates or reuses a checkpoint for the current namespace head.
@@ -326,33 +335,35 @@ impl FsCore {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub(crate) async fn create_checkpoint(
+    pub async fn create_checkpoint(
         &self,
         namespace_id: &NamespaceId,
         options: CreateCheckpointOptions,
     ) -> Result<CreateCheckpointResponse> {
         let span = tracing::Span::current();
-        self.record_trace_context(&span);
+        self.core.record_trace_context(&span);
         let result = self
+            .core
             .namespace_engine(namespace_id)
             .create_checkpoint(options.name, options.ttl_ms)
             .await
             .map_err(RuntimeError::from);
-        self.finish_namespace_mutation(namespace_id, result)
+        self.core.finish_namespace_mutation(namespace_id, result)
     }
 
     /// Releases a user-owned checkpoint by id. Idempotent.
-    pub(crate) async fn release_checkpoint(
+    pub async fn release_checkpoint(
         &self,
         namespace_id: &NamespaceId,
         checkpoint_id: &CheckpointId,
     ) -> Result<ReleaseCheckpointResponse> {
         let result = self
+            .core
             .namespace_engine(namespace_id)
             .release_checkpoint(checkpoint_id)
             .await
             .map_err(RuntimeError::from);
-        self.finish_namespace_mutation(namespace_id, result)
+        self.core.finish_namespace_mutation(namespace_id, result)
     }
 
     /// Flushes the WAL tail and advances the metadata root, creating no
@@ -368,28 +379,30 @@ impl FsCore {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub(crate) async fn flush_wal(&self, namespace_id: &NamespaceId) -> Result<FlushWalResponse> {
+    pub async fn flush_wal(&self, namespace_id: &NamespaceId) -> Result<FlushWalResponse> {
         let span = tracing::Span::current();
-        self.record_trace_context(&span);
+        self.core.record_trace_context(&span);
         let result = self
+            .core
             .namespace_engine(namespace_id)
             .flush_wal()
             .await
             .map_err(RuntimeError::from);
-        self.finish_namespace_mutation(namespace_id, result)
+        self.core.finish_namespace_mutation(namespace_id, result)
     }
 
     /// Advances the namespace retention floor when a verified checkpoint
     /// makes it safe.
-    pub(crate) async fn advance_retention_floor(
+    pub async fn advance_retention_floor(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<AdvanceRetentionResponse> {
         let result = self
+            .core
             .namespace_engine(namespace_id)
             .advance_retention_floor()
             .await
             .map_err(RuntimeError::from);
-        self.finish_namespace_mutation(namespace_id, result)
+        self.core.finish_namespace_mutation(namespace_id, result)
     }
 }

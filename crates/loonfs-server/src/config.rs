@@ -187,7 +187,7 @@ pub struct GrepConfig {
     pub max_rows_per_segment: usize,
     pub max_l0_runs: usize,
     pub max_mid_runs: usize,
-    pub max_fold_rows_per_step: usize,
+    pub max_decoded_input_rows_per_step: usize,
 }
 
 impl GrepConfig {
@@ -200,7 +200,7 @@ impl GrepConfig {
             max_rows_per_segment: self.max_rows_per_segment,
             max_l0_runs: self.max_l0_runs,
             max_mid_runs: self.max_mid_runs,
-            max_fold_rows_per_step: self.max_fold_rows_per_step,
+            max_decoded_input_rows_per_step: self.max_decoded_input_rows_per_step,
         }
     }
 }
@@ -216,7 +216,7 @@ impl Default for GrepConfig {
             max_rows_per_segment: worker.max_rows_per_segment,
             max_l0_runs: worker.max_l0_runs,
             max_mid_runs: worker.max_mid_runs,
-            max_fold_rows_per_step: worker.max_fold_rows_per_step,
+            max_decoded_input_rows_per_step: worker.max_decoded_input_rows_per_step,
         }
     }
 }
@@ -863,7 +863,7 @@ writer_version = "loonfs-server/0.1.0"
 
 [grep]
 max_concurrent_steps = 0
-max_fold_rows_per_step = 0
+max_decoded_input_rows_per_step = 0
 
 [store]
 kind = "local-fs"
@@ -1186,7 +1186,7 @@ max_content_bytes_per_step = 536870912
 max_rows_per_segment = 131072
 max_l0_runs = 4
 max_mid_runs = 6
-max_fold_rows_per_step = 262144
+max_decoded_input_rows_per_step = 262144
 
 [store]
 kind = "local-fs"
@@ -1206,7 +1206,7 @@ root = "/tmp/loonfs-server"
         assert_eq!(policy.max_rows_per_segment.get(), 131_072);
         assert_eq!(policy.max_l0_runs.get(), 4);
         assert_eq!(policy.max_mid_runs.get(), 6);
-        assert_eq!(policy.max_fold_rows_per_step.get(), 262_144);
+        assert_eq!(policy.max_decoded_input_rows_per_step.get(), 262_144);
     }
 
     #[test]

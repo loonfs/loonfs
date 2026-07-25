@@ -1,6 +1,6 @@
 //! Event-driven maintenance for one grep-enabled namespace.
 
-use crate::{GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepFoldOutcome, GrepWorker};
+use crate::{GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepReorganizeOutcome, GrepWorker};
 use loonfs_api::{ChangeSeq, ErrorCode, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 use std::num::NonZeroUsize;
@@ -13,7 +13,7 @@ use tokio::task::{JoinError, JoinHandle};
 const ERROR_BACKOFF_BASE_MS: u64 = 10;
 const ERROR_BACKOFF_CAP_MS: u64 = 1_000;
 
-/// Shared cap on concurrently executing grep build or fold steps.
+/// Shared cap on concurrently executing grep build or reorganize steps.
 ///
 /// Tokio's semaphore admits queued drivers in FIFO order, so a namespace
 /// waiting behind busy siblings cannot be starved by later arrivals.
@@ -51,7 +51,7 @@ pub enum GrepDriverParked {
 /// Observable state of one per-namespace driver.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GrepDriverState {
-    /// The driver is running bounded build and fold steps.
+    /// The driver is running bounded build and reorganize steps.
     Active,
     /// A failed step is waiting before its namespace-local retry.
     BackingOff {
@@ -267,14 +267,17 @@ impl<S: ObjectStore + Clone + Send + Sync + 'static> GrepDriver<S> {
             }
 
             let step_permit = self.acquire_step_permit().await?;
-            let fold_result = self.worker.fold_step(&self.namespace_id, self.policy).await;
+            let reorganize_result = self
+                .worker
+                .reorganize_step(&self.namespace_id, self.policy)
+                .await;
             drop(step_permit);
-            let fold = match fold_result {
+            let reorganize = match reorganize_result {
                 Ok(report) => report.outcome,
                 Err(error) => {
                     consecutive_failures = consecutive_failures.saturating_add(1);
                     if !self
-                        .back_off(consecutive_failures, "grep_fold", &error)
+                        .back_off(consecutive_failures, "grep_reorganize", &error)
                         .await
                     {
                         return None;
@@ -285,11 +288,11 @@ impl<S: ObjectStore + Clone + Send + Sync + 'static> GrepDriver<S> {
             consecutive_failures = 0;
 
             if let GrepBuildOutcome::UpToDate { built_through_seq } = build {
-                if matches!(fold, GrepFoldOutcome::NotNeeded { .. }) {
+                if matches!(reorganize, GrepReorganizeOutcome::NotNeeded { .. }) {
                     return Some(GrepDriverParked::CaughtUp { built_through_seq });
                 }
             }
-            if matches!(fold, GrepFoldOutcome::NotEnabled) {
+            if matches!(reorganize, GrepReorganizeOutcome::NotEnabled) {
                 return Some(GrepDriverParked::NotEnabled);
             }
             tokio::task::yield_now().await;

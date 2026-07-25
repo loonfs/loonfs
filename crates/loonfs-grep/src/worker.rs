@@ -1,4 +1,14 @@
-//! Explicit grep building, checkpointed backfill, folding, and garbage collection.
+//! Explicit grep building, checkpointed backfill, reorganization, and
+//! garbage collection.
+//!
+//! Reorganization is the same idea as `loonfs-core`'s metadata
+//! reorganization and uses the same word: a bounded step merges older runs
+//! into a newer one and publishes the result. The grep index carries one
+//! more level than the metadata store — delta, mid, base, against the
+//! metadata store's delta and base — because a gram posting list fans out
+//! far wider than a metadata row: every indexed file contributes to many
+//! gram keys, so merging deltas straight into the base would rewrite most
+//! of the base on every step. The mid level absorbs that churn.
 
 use crate::cache::{GrepBlockCache, MAX_CACHED_GREP_BLOCKS};
 use crate::codec::{
@@ -9,8 +19,9 @@ use crate::keyspace::{
     manifest_key, namespace_prefix, parse_key, root_key, segment_key, GrepKeyKind,
 };
 use crate::root::{
-    advance_grep_root, load_grep_root, seed_grep_root, ChangeFeedResume, GrepFoldState,
-    GrepIndexState, GrepLifecycle, GrepRootError, GrepRootState, GrepSegmentRef, LoadedGrepRoot,
+    advance_grep_root, load_grep_root, seed_grep_root, ChangeFeedResume, GrepIndexState,
+    GrepLifecycle, GrepReorganizeState, GrepRootError, GrepRootState, GrepSegmentRef,
+    LoadedGrepRoot,
 };
 use crate::service::is_indexable_text_content;
 use crate::{GrepError, Result};
@@ -59,7 +70,7 @@ const INDEX_GRAMS_DELTA_LEVEL: u32 = 0;
 const INDEX_GRAMS_MID_LEVEL: u32 = 1;
 const INDEX_GRAMS_BASE_LEVEL: u32 = 2;
 
-/// Writer-side budgets for one grep build or fold step.
+/// Writer-side budgets for one grep build or reorganize step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GramIndexBuildPolicy {
     /// Revisions examined per step.
@@ -68,12 +79,12 @@ pub struct GramIndexBuildPolicy {
     pub max_content_bytes_per_step: NonZeroU64,
     /// Rows per written grep segment.
     pub max_rows_per_segment: NonZeroUsize,
-    /// Delta-level runs that trigger a fold into a fresh mid run.
+    /// Delta-level runs that trigger a reorganization into a fresh mid run.
     pub max_l0_runs: NonZeroUsize,
-    /// Mid-level runs that trigger a fold into a fresh base run.
+    /// Mid-level runs that trigger a reorganization into a fresh base run.
     pub max_mid_runs: NonZeroUsize,
-    /// Rows one fold step merges before publishing and yielding.
-    pub max_fold_rows_per_step: NonZeroUsize,
+    /// Rows one reorganize step merges before publishing and yielding.
+    pub max_decoded_input_rows_per_step: NonZeroUsize,
 }
 
 impl Default for GramIndexBuildPolicy {
@@ -87,8 +98,8 @@ impl Default for GramIndexBuildPolicy {
                 .expect("default segment row budget should be nonzero"),
             max_l0_runs: NonZeroUsize::new(8).expect("default delta run limit should be nonzero"),
             max_mid_runs: NonZeroUsize::new(8).expect("default mid run limit should be nonzero"),
-            max_fold_rows_per_step: NonZeroUsize::new(131_072)
-                .expect("default fold row budget should be nonzero"),
+            max_decoded_input_rows_per_step: NonZeroUsize::new(131_072)
+                .expect("default reorganize row budget should be nonzero"),
         }
     }
 }
@@ -136,16 +147,16 @@ pub enum GrepBuildOutcome {
     Superseded,
 }
 
-/// Report from one bounded fold step.
+/// Report from one bounded reorganize step.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GrepFoldReport {
+pub struct GrepReorganizeReport {
     pub namespace_id: NamespaceId,
-    pub outcome: GrepFoldOutcome,
+    pub outcome: GrepReorganizeOutcome,
 }
 
-/// Outcome of one bounded fold step.
+/// Outcome of one bounded reorganize step.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GrepFoldOutcome {
+pub enum GrepReorganizeOutcome {
     NotEnabled,
     NotNeeded {
         l0_runs: usize,
@@ -548,7 +559,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             GrepIndexState::new(
                 unit.built_through_seq,
                 unit.next_delta_index,
-                current.state().index().fold.clone(),
+                current.state().index().reorganize.clone(),
                 next_run_ordinal,
             ),
             segments,
@@ -922,23 +933,29 @@ async fn write_index_segment<S: ObjectStore + ?Sized>(
 }
 
 impl<S: ObjectStore + Clone> GrepWorker<S> {
-    /// Runs one partitioned delta-to-mid or mid-plus-base fold step.
-    pub async fn fold_step(
+    /// Runs one partitioned delta-to-mid or mid-plus-base reorganize step.
+    pub async fn reorganize_step(
         &self,
         namespace_id: &NamespaceId,
         policy: GramIndexBuildPolicy,
-    ) -> Result<GrepFoldReport> {
+    ) -> Result<GrepReorganizeReport> {
         let Some(current) = load_grep_root(&self.store, namespace_id)
             .await
             .map_err(GrepError::from)?
         else {
-            return Ok(fold_report(namespace_id, GrepFoldOutcome::NotEnabled));
+            return Ok(reorganize_report(
+                namespace_id,
+                GrepReorganizeOutcome::NotEnabled,
+            ));
         };
         if matches!(current.state().lifecycle(), GrepLifecycle::Disabled) {
-            return Ok(fold_report(namespace_id, GrepFoldOutcome::NotEnabled));
+            return Ok(reorganize_report(
+                namespace_id,
+                GrepReorganizeOutcome::NotEnabled,
+            ));
         }
-        let (fold, next_run_ordinal) = match current.state().index().fold.clone() {
-            Some(fold) => (fold, current.state().index().next_run_ordinal),
+        let (reorganize, next_run_ordinal) = match current.state().index().reorganize.clone() {
+            Some(reorganize) => (reorganize, current.state().index().next_run_ordinal),
             None => {
                 let l0_runs = distinct_run_ordinals_at_level(
                     current.state().segments(),
@@ -971,13 +988,13 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                         INDEX_GRAMS_BASE_LEVEL,
                     )
                 } else {
-                    return Ok(fold_report(
+                    return Ok(reorganize_report(
                         namespace_id,
-                        GrepFoldOutcome::NotNeeded { l0_runs, mid_runs },
+                        GrepReorganizeOutcome::NotNeeded { l0_runs, mid_runs },
                     ));
                 };
                 (
-                    GrepFoldState {
+                    GrepReorganizeState {
                         snapshot_segment_ids,
                         output_segment_ids: Vec::new(),
                         row_key_cursor: String::new(),
@@ -988,7 +1005,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 )
             }
         };
-        let snapshot = fold
+        let snapshot = reorganize
             .snapshot_segment_ids
             .iter()
             .map(|segment_id| {
@@ -999,7 +1016,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                     .find(|segment| &segment.segment_id == segment_id)
                     .ok_or_else(|| GrepError::CorruptIndex {
                         message: format!(
-                            "grep fold snapshot segment `{segment_id}` is missing from the root"
+                            "grep reorganization snapshot segment `{segment_id}` is missing from the root"
                         ),
                     })
             })
@@ -1009,8 +1026,8 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             &self.block_cache,
             namespace_id,
             &snapshot,
-            &fold.row_key_cursor,
-            policy.max_fold_rows_per_step.get(),
+            &reorganize.row_key_cursor,
+            policy.max_decoded_input_rows_per_step.get(),
         )
         .await?;
         let rows = gram_postings_rows(merged.postings)?;
@@ -1025,30 +1042,30 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             &self.store,
             namespace_id,
             run_seq,
-            fold.run_ordinal,
+            reorganize.run_ordinal,
             rows,
             policy.max_rows_per_segment,
-            fold.output_level,
+            reorganize.output_level,
         )
         .await?;
         let segments_written = new_segments.len() as u64;
         let mut segments = current.state().segments().to_vec();
-        let mut next_fold = fold.clone();
-        next_fold.output_segment_ids.extend(
+        let mut next_reorganize = reorganize.clone();
+        next_reorganize.output_segment_ids.extend(
             new_segments
                 .iter()
                 .map(|segment| segment.segment_id.clone()),
         );
         segments.extend(new_segments);
         let completed = merged.exhausted;
-        let fold = if completed {
+        let reorganize = if completed {
             let snapshot_ids: BTreeSet<&IndexSegmentId> =
-                next_fold.snapshot_segment_ids.iter().collect();
+                next_reorganize.snapshot_segment_ids.iter().collect();
             segments.retain(|segment| !snapshot_ids.contains(&segment.segment_id));
             None
         } else {
-            next_fold.row_key_cursor = merged.next_cursor;
-            Some(next_fold)
+            next_reorganize.row_key_cursor = merged.next_cursor;
+            Some(next_reorganize)
         };
         let next = GrepRootState::new(
             namespace_id.clone(),
@@ -1056,7 +1073,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             GrepIndexState::new(
                 current.state().index().built_through_seq,
                 current.state().index().next_delta_index,
-                fold,
+                reorganize,
                 next_run_ordinal,
             ),
             segments,
@@ -1064,17 +1081,18 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         .map_err(core_state_error)?;
         ensure_publication_budget(&timer, publication_started_ms)?;
         match self.advance_root(&current, &next).await {
-            Ok(_) => Ok(fold_report(
+            Ok(_) => Ok(reorganize_report(
                 namespace_id,
-                GrepFoldOutcome::StepPublished {
+                GrepReorganizeOutcome::StepPublished {
                     merged_rows: merged.rows,
                     segments_written,
                     completed,
                 },
             )),
-            Err(GrepRootError::Conflict { .. }) => {
-                Ok(fold_report(namespace_id, GrepFoldOutcome::Superseded))
-            }
+            Err(GrepRootError::Conflict { .. }) => Ok(reorganize_report(
+                namespace_id,
+                GrepReorganizeOutcome::Superseded,
+            )),
             Err(error) => Err(error.into()),
         }
     }
@@ -1177,8 +1195,11 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     }
 }
 
-fn fold_report(namespace_id: &NamespaceId, outcome: GrepFoldOutcome) -> GrepFoldReport {
-    GrepFoldReport {
+fn reorganize_report(
+    namespace_id: &NamespaceId,
+    outcome: GrepReorganizeOutcome,
+) -> GrepReorganizeReport {
+    GrepReorganizeReport {
         namespace_id: namespace_id.clone(),
         outcome,
     }
@@ -1244,7 +1265,7 @@ async fn merge_snapshot_range<S: ObjectStore + ?Sized>(
             return Ok(merged);
         };
         let (key, row) = readers[position].pop();
-        fold_snapshot_row(&mut merged, row, readers[position].object_key())?;
+        reorganize_snapshot_row(&mut merged, row, readers[position].object_key())?;
         for reader in &mut readers {
             loop {
                 reader.refill(store, block_cache).await?;
@@ -1252,7 +1273,7 @@ async fn merge_snapshot_range<S: ObjectStore + ?Sized>(
                     break;
                 }
                 let (_, duplicate) = reader.pop();
-                fold_snapshot_row(&mut merged, duplicate, reader.object_key())?;
+                reorganize_snapshot_row(&mut merged, duplicate, reader.object_key())?;
             }
         }
         last_key = key;
@@ -1273,7 +1294,11 @@ async fn merge_snapshot_range<S: ObjectStore + ?Sized>(
     Ok(merged)
 }
 
-fn fold_snapshot_row(merged: &mut MergedRange, row: IndexRow, object_key: &str) -> Result<()> {
+fn reorganize_snapshot_row(
+    merged: &mut MergedRange,
+    row: IndexRow,
+    object_key: &str,
+) -> Result<()> {
     let IndexRow::GramPostings { gram, .. } = &row;
     let gram = *gram;
     let batch = row.postings().map_err(|error| GrepError::CorruptIndex {
@@ -1437,11 +1462,12 @@ fn live_grep_keys(root: &LoadedGrepRoot) -> BTreeSet<String> {
             .iter()
             .map(|segment| segment_key(namespace_id, &segment.segment_id)),
     );
-    if let Some(fold) = &root.state().index().fold {
+    if let Some(reorganize) = &root.state().index().reorganize {
         live.extend(
-            fold.snapshot_segment_ids
+            reorganize
+                .snapshot_segment_ids
                 .iter()
-                .chain(&fold.output_segment_ids)
+                .chain(&reorganize.output_segment_ids)
                 .map(|segment_id| segment_key(namespace_id, segment_id)),
         );
     }
