@@ -34,7 +34,7 @@ const GREP_INDEX_FEATURE: &str = "grep.index";
             (status = 403, description = "The backing store rejected its configured credentials", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
             (status = 410, description = "Namespace deleted", body = ApiError),
-            (status = 501, description = "Grep serving is disabled or the grep index is not materialized on this namespace", body = ApiError),
+            (status = 501, description = "Grep serving is disabled, the grep index is not enabled, or its backfill has not completed on this namespace", body = ApiError),
             (status = 503, description = "The index trails the head past the scan budget", body = ApiError),
             (status = 500, description = "The grep index is corrupt or its backing store is unavailable", body = ApiError)
         )

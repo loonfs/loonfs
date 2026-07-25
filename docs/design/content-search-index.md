@@ -163,6 +163,13 @@ head. That first-touch path resumes durable work after a restart without a
 scan. `serve_only` serves the same queries and administration operations but
 starts no drivers.
 
+A library-embedded host (the CLI's embedded mode) has no driver runtime, so
+enabling the index is the driver: `FsAdmin::enable_grep_index` runs the same
+build-and-fold pair loop synchronously until the index is caught up, and
+re-running enable on an already-enabled namespace drives catch-up the same
+way. Between enables, small write tails are served by the query-time
+exhaustive tail scan within its budget.
+
 Detached maintenance is explicitly assigned with repeatable
 `loonfs-grep --namespace <id>` flags. `--once` catches up only those namespaces
 and exits. The long-running form polls each assigned namespace's own head at

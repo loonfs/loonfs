@@ -238,11 +238,6 @@ async fn a_publish_below_the_wal_threshold_does_not_schedule_grep_work() {
         .build()
         .await
         .expect("build writer");
-    let admin = FsAdmin::builder_with_store(store.clone())
-        .actor_id("grams-auto-admin")
-        .build()
-        .await
-        .expect("build admin");
     let reader = FsReader::builder_with_store(store.clone())
         .build()
         .await
@@ -253,10 +248,13 @@ async fn a_publish_below_the_wal_threshold_does_not_schedule_grep_work() {
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
         .await
         .expect("create namespace");
-    admin
-        .enable_grep_index(&namespace_id)
-        .await
-        .expect("enable");
+    // Worker-level enable publishes the backfilling root without driving
+    // it (the admin surface drives to quiescence), so the test can observe
+    // that nothing else drives it either.
+    match grep_worker.enable(&namespace_id).await.expect("enable") {
+        loonfs_grep::GrepEnableOutcome::Enabled { .. } => {}
+        outcome => panic!("expected fresh enable, got {outcome:?}"),
+    }
 
     writer
         .put_file_bytes(

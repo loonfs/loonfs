@@ -14,10 +14,12 @@ use thiserror::Error;
 #[non_exhaustive]
 pub enum GrepError {
     /// The namespace has no active grep root.
-    #[error("feature `grep.index` is not materialized on this namespace")]
+    #[error("feature `grep.index` is not enabled on this namespace")]
     NotEnabled,
     /// The namespace's grep backfill has not completed.
-    #[error("feature `grep.index` is not materialized on this namespace")]
+    #[error(
+        "feature `grep.index` is enabled but its backfill has not completed on this namespace"
+    )]
     Backfilling,
     /// The backing provider could not serve grep-owned state.
     #[error("object-store operation failed for grep state `{object_key}`: {message}")]

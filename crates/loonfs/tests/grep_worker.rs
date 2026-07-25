@@ -674,11 +674,11 @@ fn assert_not_enabled_error(case: &str, result: loonfs::Result<GrepResponse>) {
             assert_eq!(error.code(), ErrorCode::NotSupported, "code for {case}");
             assert_eq!(
                 error.to_string(),
-                "feature `grep.index` is not materialized on this namespace",
+                "feature `grep.index` is not enabled on this namespace",
                 "error text for {case}"
             );
         }
-        outcome => panic!("expected not-materialized error for {case}, got {outcome:?}"),
+        outcome => panic!("expected not-enabled error for {case}, got {outcome:?}"),
     }
 }
 
@@ -688,7 +688,8 @@ fn assert_backfilling_error(case: &str, result: loonfs::Result<GrepResponse>) {
             assert_eq!(error.code(), ErrorCode::NotSupported, "code for {case}");
             assert_eq!(
                 error.to_string(),
-                "feature `grep.index` is not materialized on this namespace",
+                "feature `grep.index` is enabled but its backfill has not completed on this \
+                 namespace",
                 "error text for {case}"
             );
         }

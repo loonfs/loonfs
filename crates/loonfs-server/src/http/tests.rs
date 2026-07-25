@@ -477,7 +477,7 @@ async fn grep_error_disabled_root_is_not_materialized_and_core_reads_survive() {
         result.await,
         501,
         ErrorCode::NotSupported,
-        "not materialized",
+        "not enabled",
     )
     .await;
     harness.server.abort();
@@ -505,7 +505,7 @@ async fn grep_error_mid_backfill_is_not_materialized_and_core_reads_survive() {
         result.await,
         501,
         ErrorCode::NotSupported,
-        "not materialized",
+        "backfill has not completed",
     )
     .await;
     harness.server.abort();
