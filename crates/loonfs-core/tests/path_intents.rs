@@ -152,7 +152,7 @@ async fn list_path<S: ObjectStore + ?Sized>(
     let mut cursor = None;
     loop {
         let page = engine
-            .list_path_page_with_runtime_context(
+            .list_path_page(
                 absolute_path,
                 PageRequest {
                     limit: page_limit(1_000),
@@ -178,7 +178,7 @@ async fn list_path_page<S: ObjectStore + ?Sized>(
 ) -> Result<Page<AuthoritativePathEntry, DirectoryPageCursor>, CoreError> {
     let context = read_context(store, namespace_id).await;
     namespace_engine(store, namespace_id, &mutation_context())
-        .list_path_page_with_runtime_context(
+        .list_path_page(
             absolute_path,
             PageRequest {
                 limit: page_limit(limit),
@@ -211,7 +211,7 @@ async fn list_file_revisions_for_inode<S: ObjectStore + ?Sized>(
     let mut cursor = None;
     loop {
         let page = engine
-            .list_file_revisions_for_inode_page_with_runtime_context(
+            .list_file_revisions_for_inode_page(
                 inode_id,
                 PageRequest {
                     limit: page_limit(2),
@@ -242,7 +242,7 @@ async fn read_file_revision_bytes<S: ObjectStore + ?Sized>(
 ) -> Result<loonfs_api::AuthoritativeFileBytes, CoreError> {
     let context = read_context(store, namespace_id).await;
     namespace_engine(store, namespace_id, &mutation_context())
-        .read_file_revision_with_runtime_context(absolute_path, revision_no, &context, None)
+        .read_file_revision(absolute_path, revision_no, &context, None)
         .await
 }
 
@@ -254,7 +254,7 @@ async fn read_file_revision_bytes_for_inode<S: ObjectStore + ?Sized>(
 ) -> Result<Vec<u8>, CoreError> {
     let context = read_context(store, namespace_id).await;
     namespace_engine(store, namespace_id, &mutation_context())
-        .read_file_revision_for_inode_with_runtime_context(inode_id, revision_no, &context, None)
+        .read_file_revision_for_inode(inode_id, revision_no, &context, None)
         .await
 }
 

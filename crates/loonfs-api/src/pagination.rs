@@ -194,14 +194,20 @@ pub struct Page<T, C> {
 /// HTTP clients must pass the URL namespace and `path` on every page.
 /// Runtime/server code resolves that path at `head_seq` and rejects the cursor
 /// unless it names `directory_inode_id`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DirectoryPageCursor {
     /// Snapshot sequence captured by the first page.
     pub head_seq: ChangeSeq,
     /// Directory inode resolved at `head_seq`.
+    // The wire field is frozen as `dir_inode_id` in page cursor version 1.
+    #[serde(rename = "dir_inode_id")]
     pub directory_inode_id: InodeId,
     /// Last canonical name key returned to the client.
     pub last_name_key: NameKey,
+}
+
+impl PageCursor for DirectoryPageCursor {
+    const KIND: &'static str = "directory";
 }
 
 /// Cursor for one file revision listing snapshot.
@@ -209,7 +215,7 @@ pub struct DirectoryPageCursor {
 /// Revision pagination advances in newest-first revision order for one file
 /// inode. The cursor includes the snapshot head plus the last returned row's
 /// complete ordering identity so ties stay unambiguous.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileRevisionsPageCursor {
     /// Snapshot sequence captured by the first page.
     pub head_seq: ChangeSeq,
@@ -223,12 +229,16 @@ pub struct FileRevisionsPageCursor {
     pub last_revision_delta_index: u32,
 }
 
+impl PageCursor for FileRevisionsPageCursor {
+    const KIND: &'static str = "file_revisions";
+}
+
 /// Cursor for one content-search (grep) snapshot.
 ///
 /// Matches advance in ascending `(inode_id, byte_offset)` order: candidate
 /// files by durable inode identity, match positions within a file by byte
 /// offset. The cursor resumes strictly after the last returned match.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GrepPageCursor {
     /// Sequence the issuing page was evaluated at.
     pub head_seq: ChangeSeq,
@@ -244,185 +254,71 @@ pub struct GrepPageCursor {
     pub fingerprint: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-enum EncodedPageCursor {
-    Directory {
-        // The wire field is frozen as `v` in page cursor version 1.
-        #[serde(rename = "v")]
-        version: u8,
-        head_seq: ChangeSeq,
-        // The wire field is frozen as `dir_inode_id` in page cursor version 1.
-        #[serde(rename = "dir_inode_id")]
-        directory_inode_id: InodeId,
-        last_name_key: NameKey,
-    },
-    FileRevisions {
-        // The wire field is frozen as `v` in page cursor version 1.
-        #[serde(rename = "v")]
-        version: u8,
-        head_seq: ChangeSeq,
-        inode_id: InodeId,
-        last_revision_no: RevisionNo,
-        last_committed_seq: ChangeSeq,
-        last_revision_delta_index: u32,
-    },
-    Grep {
-        // The wire field is frozen as `v` in page cursor version 1.
-        #[serde(rename = "v")]
-        version: u8,
-        head_seq: ChangeSeq,
-        last_inode_id: InodeId,
-        last_byte_offset: u64,
-        fingerprint: u64,
-    },
+impl PageCursor for GrepPageCursor {
+    const KIND: &'static str = "grep";
 }
 
-impl EncodedPageCursor {
-    fn version(&self) -> u8 {
-        match self {
-            Self::Directory { version, .. }
-            | Self::FileRevisions { version, .. }
-            | Self::Grep { version, .. } => *version,
-        }
-    }
-
-    fn kind(&self) -> &'static str {
-        match self {
-            Self::Directory { .. } => "directory",
-            Self::FileRevisions { .. } => "file_revisions",
-            Self::Grep { .. } => "grep",
-        }
-    }
-
-    fn validate_version(&self) -> Result<(), PageCursorError> {
-        let actual = self.version();
-        if actual == PAGE_CURSOR_VERSION {
-            Ok(())
-        } else {
-            Err(PageCursorError::UnsupportedVersion {
-                expected: PAGE_CURSOR_VERSION,
-                actual,
-            })
-        }
-    }
+/// One paginated endpoint's cursor.
+///
+/// Cursors are opaque to clients: hex-encoded JSON carrying the endpoint's
+/// [`KIND`](Self::KIND) and the format version, so a cursor replayed against
+/// the wrong endpoint or an older build is rejected rather than misread.
+pub trait PageCursor: Serialize + serde::de::DeserializeOwned {
+    /// Frozen endpoint discriminator written into the encoded cursor.
+    const KIND: &'static str;
 }
 
-/// Encodes a directory-list cursor as an opaque string for clients.
-pub fn encode_directory_cursor(cursor: &DirectoryPageCursor) -> Result<String, PageCursorError> {
-    encode_cursor(&EncodedPageCursor::Directory {
+#[derive(Serialize, Deserialize)]
+struct CursorEnvelope<C> {
+    // The wire field is frozen as `v` in page cursor version 1.
+    #[serde(rename = "v")]
+    version: u8,
+    kind: String,
+    #[serde(flatten)]
+    cursor: C,
+}
+
+/// Encodes a cursor as the opaque string clients round-trip.
+pub fn encode_cursor<C: PageCursor>(cursor: &C) -> Result<String, PageCursorError> {
+    let bytes = serde_json::to_vec(&CursorEnvelope {
         version: PAGE_CURSOR_VERSION,
-        head_seq: cursor.head_seq,
-        directory_inode_id: cursor.directory_inode_id,
-        last_name_key: cursor.last_name_key.clone(),
+        kind: C::KIND.to_owned(),
+        cursor,
     })
+    .map_err(|error| PageCursorError::InvalidJson(error.to_string()))?;
+    Ok(crate::hex::hex_encode_bytes(&bytes))
 }
 
-/// Decodes a directory-list cursor returned by [`encode_directory_cursor`].
-pub fn decode_directory_cursor(value: &str) -> Result<DirectoryPageCursor, PageCursorError> {
-    match decode_cursor(value)? {
-        EncodedPageCursor::Directory {
-            head_seq,
-            directory_inode_id,
-            last_name_key,
-            ..
-        } => Ok(DirectoryPageCursor {
-            head_seq,
-            directory_inode_id,
-            last_name_key,
-        }),
-        other => Err(PageCursorError::WrongKind {
-            expected: "directory",
-            actual: other.kind(),
-        }),
-    }
+/// Version and endpoint, read before the body so a cursor from another
+/// endpoint reports `WrongKind` rather than a missing-field decode error.
+#[derive(Deserialize)]
+struct CursorHeader {
+    #[serde(rename = "v")]
+    version: u8,
+    kind: String,
 }
 
-/// Encodes a file-revisions cursor as an opaque string for clients.
-pub fn encode_file_revisions_cursor(
-    cursor: &FileRevisionsPageCursor,
-) -> Result<String, PageCursorError> {
-    encode_cursor(&EncodedPageCursor::FileRevisions {
-        version: PAGE_CURSOR_VERSION,
-        head_seq: cursor.head_seq,
-        inode_id: cursor.inode_id,
-        last_revision_no: cursor.last_revision_no,
-        last_committed_seq: cursor.last_committed_seq,
-        last_revision_delta_index: cursor.last_revision_delta_index,
-    })
-}
-
-/// Decodes a file-revisions cursor returned by [`encode_file_revisions_cursor`].
-pub fn decode_file_revisions_cursor(
-    value: &str,
-) -> Result<FileRevisionsPageCursor, PageCursorError> {
-    match decode_cursor(value)? {
-        EncodedPageCursor::FileRevisions {
-            head_seq,
-            inode_id,
-            last_revision_no,
-            last_committed_seq,
-            last_revision_delta_index,
-            ..
-        } => Ok(FileRevisionsPageCursor {
-            head_seq,
-            inode_id,
-            last_revision_no,
-            last_committed_seq,
-            last_revision_delta_index,
-        }),
-        other => Err(PageCursorError::WrongKind {
-            expected: "file_revisions",
-            actual: other.kind(),
-        }),
-    }
-}
-
-/// Encodes a grep cursor as an opaque string for clients.
-pub fn encode_grep_cursor(cursor: &GrepPageCursor) -> Result<String, PageCursorError> {
-    encode_cursor(&EncodedPageCursor::Grep {
-        version: PAGE_CURSOR_VERSION,
-        head_seq: cursor.head_seq,
-        last_inode_id: cursor.last_inode_id,
-        last_byte_offset: cursor.last_byte_offset,
-        fingerprint: cursor.fingerprint,
-    })
-}
-
-/// Decodes a grep cursor returned by [`encode_grep_cursor`].
-pub fn decode_grep_cursor(value: &str) -> Result<GrepPageCursor, PageCursorError> {
-    match decode_cursor(value)? {
-        EncodedPageCursor::Grep {
-            head_seq,
-            last_inode_id,
-            last_byte_offset,
-            fingerprint,
-            ..
-        } => Ok(GrepPageCursor {
-            head_seq,
-            last_inode_id,
-            last_byte_offset,
-            fingerprint,
-        }),
-        other => Err(PageCursorError::WrongKind {
-            expected: "grep",
-            actual: other.kind(),
-        }),
-    }
-}
-
-fn encode_cursor(cursor: &EncodedPageCursor) -> Result<String, PageCursorError> {
-    let bytes = serde_json::to_vec(cursor)
+/// Decodes a cursor issued by [`encode_cursor`] for the same endpoint.
+pub fn decode_cursor<C: PageCursor>(value: &str) -> Result<C, PageCursorError> {
+    let bytes =
+        crate::hex::hex_decode_bytes(value).map_err(|_| PageCursorError::InvalidEncoding)?;
+    let header: CursorHeader = serde_json::from_slice(&bytes)
         .map_err(|error| PageCursorError::InvalidJson(error.to_string()))?;
-    Ok(hex_encode(&bytes))
-}
-
-fn decode_cursor(value: &str) -> Result<EncodedPageCursor, PageCursorError> {
-    let bytes = hex_decode(value)?;
-    let cursor: EncodedPageCursor = serde_json::from_slice(&bytes)
+    if header.version != PAGE_CURSOR_VERSION {
+        return Err(PageCursorError::UnsupportedVersion {
+            expected: PAGE_CURSOR_VERSION,
+            actual: header.version,
+        });
+    }
+    if header.kind != C::KIND {
+        return Err(PageCursorError::WrongKind {
+            expected: C::KIND,
+            actual: header.kind,
+        });
+    }
+    let envelope: CursorEnvelope<C> = serde_json::from_slice(&bytes)
         .map_err(|error| PageCursorError::InvalidJson(error.to_string()))?;
-    cursor.validate_version()?;
-    Ok(cursor)
+    Ok(envelope.cursor)
 }
 
 /// Invalid opaque page cursor.
@@ -440,7 +336,7 @@ pub enum PageCursorError {
         /// Cursor kind accepted by the endpoint doing the decoding.
         expected: &'static str,
         /// Cursor kind recovered from the caller's opaque token.
-        actual: &'static str,
+        actual: String,
     },
     /// The cursor format version is not supported by this build.
     #[error("unsupported page cursor version `{actual}`; expected `{expected}`")]
@@ -450,14 +346,6 @@ pub enum PageCursorError {
         /// Version embedded in the caller's opaque token.
         actual: u8,
     },
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    crate::hex::hex_encode_bytes(bytes)
-}
-
-fn hex_decode(value: &str) -> Result<Vec<u8>, PageCursorError> {
-    crate::hex::hex_decode_bytes(value).map_err(|_| PageCursorError::InvalidEncoding)
 }
 
 #[cfg(test)]
@@ -520,8 +408,8 @@ mod tests {
             last_name_key: NameKey::parse("plan.md").expect("name key"),
         };
 
-        let encoded = encode_directory_cursor(&cursor).expect("encode cursor");
-        let decoded = decode_directory_cursor(&encoded).expect("decode cursor");
+        let encoded = encode_cursor(&cursor).expect("encode cursor");
+        let decoded: DirectoryPageCursor = decode_cursor(&encoded).expect("decode cursor");
 
         assert_eq!(decoded, cursor);
     }
@@ -536,8 +424,8 @@ mod tests {
             last_revision_delta_index: 3,
         };
 
-        let encoded = encode_file_revisions_cursor(&cursor).expect("encode cursor");
-        let decoded = decode_file_revisions_cursor(&encoded).expect("decode cursor");
+        let encoded = encode_cursor(&cursor).expect("encode cursor");
+        let decoded: FileRevisionsPageCursor = decode_cursor(&encoded).expect("decode cursor");
 
         assert_eq!(decoded, cursor);
     }
@@ -551,13 +439,13 @@ mod tests {
             last_committed_seq: ChangeSeq(10),
             last_revision_delta_index: 3,
         };
-        let encoded = encode_file_revisions_cursor(&cursor).expect("encode cursor");
+        let encoded = encode_cursor(&cursor).expect("encode cursor");
 
         assert_eq!(
-            decode_directory_cursor(&encoded),
+            decode_cursor::<DirectoryPageCursor>(&encoded),
             Err(PageCursorError::WrongKind {
                 expected: "directory",
-                actual: "file_revisions",
+                actual: "file_revisions".to_owned(),
             })
         );
     }
@@ -565,23 +453,27 @@ mod tests {
     #[test]
     fn malformed_cursor_is_invalid_encoding() {
         assert_eq!(
-            decode_directory_cursor("not-hex"),
+            decode_cursor::<DirectoryPageCursor>("not-hex"),
             Err(PageCursorError::InvalidEncoding)
         );
     }
 
     #[test]
     fn unsupported_cursor_version_is_rejected() {
-        let encoded = encode_cursor(&EncodedPageCursor::Directory {
+        let bytes = serde_json::to_vec(&CursorEnvelope {
             version: PAGE_CURSOR_VERSION + 1,
-            head_seq: ChangeSeq(11),
-            directory_inode_id: InodeId(7),
-            last_name_key: NameKey::parse("plan.md").expect("name key"),
+            kind: DirectoryPageCursor::KIND.to_owned(),
+            cursor: DirectoryPageCursor {
+                head_seq: ChangeSeq(11),
+                directory_inode_id: InodeId(7),
+                last_name_key: NameKey::parse("plan.md").expect("name key"),
+            },
         })
         .expect("encode cursor");
+        let encoded = crate::hex::hex_encode_bytes(&bytes);
 
         assert_eq!(
-            decode_directory_cursor(&encoded),
+            decode_cursor::<DirectoryPageCursor>(&encoded),
             Err(PageCursorError::UnsupportedVersion {
                 expected: PAGE_CURSOR_VERSION,
                 actual: PAGE_CURSOR_VERSION + 1,

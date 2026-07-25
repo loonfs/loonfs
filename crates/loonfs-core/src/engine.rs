@@ -171,192 +171,91 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     }
 
     /// Stats one path against the pinned runtime read context.
-    pub async fn resolve_path_with_runtime_context(
+    pub async fn resolve_path(
         &self,
         path: impl AsRef<str>,
         context: &RuntimeReadContext,
     ) -> Result<AuthoritativePathEntry> {
-        self.resolve_path_with_context(path.as_ref(), runtime_read_load_context(context))
-            .await
+        let view = self.load_read_view(context).await?;
+        view.resolve_path(path.as_ref()).await
     }
 
     /// Lists one directory page against the pinned runtime read context.
-    pub async fn list_path_page_with_runtime_context(
+    pub async fn list_path_page(
         &self,
         path: impl AsRef<str>,
         request: PageRequest<DirectoryPageCursor>,
         context: &RuntimeReadContext,
     ) -> Result<Page<AuthoritativePathEntry, DirectoryPageCursor>> {
-        self.list_path_page_with_context(path.as_ref(), request, runtime_read_load_context(context))
-            .await
+        let view = self.load_read_view(context).await?;
+        view.list_path_page(path.as_ref(), request).await
     }
 
     /// Reads file content against the pinned runtime read context.
-    pub async fn read_file_with_runtime_context(
+    pub async fn read_file(
         &self,
         path: impl AsRef<str>,
         context: &RuntimeReadContext,
         max_content_bytes: Option<u64>,
     ) -> Result<AuthoritativeFileBytes> {
-        self.read_file_with_context(
-            path.as_ref(),
-            runtime_read_load_context(context),
-            max_content_bytes,
-        )
-        .await
+        let view = self.load_read_view(context).await?;
+        view.read_file_bytes(&self.store, path.as_ref(), max_content_bytes)
+            .await
     }
 
     /// Loads the coherent read view passed to `loonfs-grep`.
     ///
     /// This is part of the read surface consumed by `loonfs-grep`.
-    pub async fn load_grep_view_with_runtime_context<'a>(
+    pub async fn load_grep_view<'a>(
         &'a self,
         context: &'a RuntimeReadContext,
     ) -> Result<LoadedMetadataView<'a, S>> {
-        self.load_read_view(runtime_read_load_context(context))
-            .await
+        self.load_read_view(context).await
     }
 
     /// Lists one revision page for a path against the pinned runtime read context.
-    pub async fn list_file_revisions_page_with_runtime_context(
+    pub async fn list_file_revisions_page(
         &self,
         path: impl AsRef<str>,
         request: PageRequest<FileRevisionsPageCursor>,
         context: &RuntimeReadContext,
     ) -> Result<Page<FileRevision, FileRevisionsPageCursor>> {
-        self.list_file_revisions_page_with_context(
-            path.as_ref(),
-            request,
-            runtime_read_load_context(context),
-        )
-        .await
+        let view = self.load_read_view(context).await?;
+        view.list_file_revisions_page(path.as_ref(), request).await
     }
 
     /// Lists one revision page for an inode against the pinned runtime read context.
-    pub async fn list_file_revisions_for_inode_page_with_runtime_context(
+    pub async fn list_file_revisions_for_inode_page(
         &self,
         inode_id: InodeId,
         request: PageRequest<FileRevisionsPageCursor>,
         context: &RuntimeReadContext,
-    ) -> Result<Page<FileRevision, FileRevisionsPageCursor>> {
-        self.list_file_revisions_for_inode_page_with_context(
-            inode_id,
-            request,
-            runtime_read_load_context(context),
-        )
-        .await
-    }
-
-    /// Reads one revision's content by path against the pinned runtime
-    /// read context.
-    pub async fn read_file_revision_with_runtime_context(
-        &self,
-        path: impl AsRef<str>,
-        revision_no: RevisionNo,
-        context: &RuntimeReadContext,
-        max_content_bytes: Option<u64>,
-    ) -> Result<AuthoritativeFileBytes> {
-        self.read_file_revision_with_context(
-            path.as_ref(),
-            revision_no,
-            runtime_read_load_context(context),
-            max_content_bytes,
-        )
-        .await
-    }
-
-    /// Reads one revision's content against the pinned runtime read context.
-    pub async fn read_file_revision_for_inode_with_runtime_context(
-        &self,
-        inode_id: InodeId,
-        revision_no: RevisionNo,
-        context: &RuntimeReadContext,
-        max_content_bytes: Option<u64>,
-    ) -> Result<Vec<u8>> {
-        self.read_file_revision_for_inode_with_context(
-            inode_id,
-            revision_no,
-            runtime_read_load_context(context),
-            max_content_bytes,
-        )
-        .await
-    }
-
-    async fn load_read_view<'a>(
-        &'a self,
-        context: ReadLoadContext<'a>,
-    ) -> Result<LoadedMetadataView<'a, S>> {
-        load_metadata_view(&self.store, &self.namespace_id, context).await
-    }
-
-    async fn resolve_path_with_context(
-        &self,
-        path: &str,
-        context: ReadLoadContext<'_>,
-    ) -> Result<AuthoritativePathEntry> {
-        let view = self.load_read_view(context).await?;
-        view.resolve_path(path).await
-    }
-
-    async fn list_path_page_with_context(
-        &self,
-        path: &str,
-        request: PageRequest<DirectoryPageCursor>,
-        context: ReadLoadContext<'_>,
-    ) -> Result<Page<AuthoritativePathEntry, DirectoryPageCursor>> {
-        let view = self.load_read_view(context).await?;
-        view.list_path_page(path, request).await
-    }
-
-    async fn read_file_with_context(
-        &self,
-        path: &str,
-        context: ReadLoadContext<'_>,
-        max_content_bytes: Option<u64>,
-    ) -> Result<AuthoritativeFileBytes> {
-        let view = self.load_read_view(context).await?;
-        view.read_file_bytes(&self.store, path, max_content_bytes)
-            .await
-    }
-
-    async fn list_file_revisions_page_with_context(
-        &self,
-        path: &str,
-        request: PageRequest<FileRevisionsPageCursor>,
-        context: ReadLoadContext<'_>,
-    ) -> Result<Page<FileRevision, FileRevisionsPageCursor>> {
-        let view = self.load_read_view(context).await?;
-        view.list_file_revisions_page(path, request).await
-    }
-
-    async fn list_file_revisions_for_inode_page_with_context(
-        &self,
-        inode_id: InodeId,
-        request: PageRequest<FileRevisionsPageCursor>,
-        context: ReadLoadContext<'_>,
     ) -> Result<Page<FileRevision, FileRevisionsPageCursor>> {
         let view = self.load_read_view(context).await?;
         view.list_file_revisions_for_inode_page(inode_id, request)
             .await
     }
 
-    async fn read_file_revision_with_context(
+    /// Reads one revision's content by path against the pinned runtime
+    /// read context.
+    pub async fn read_file_revision(
         &self,
-        path: &str,
+        path: impl AsRef<str>,
         revision_no: RevisionNo,
-        context: ReadLoadContext<'_>,
+        context: &RuntimeReadContext,
         max_content_bytes: Option<u64>,
     ) -> Result<AuthoritativeFileBytes> {
         let view = self.load_read_view(context).await?;
-        view.read_file_revision_bytes(&self.store, path, revision_no, max_content_bytes)
+        view.read_file_revision_bytes(&self.store, path.as_ref(), revision_no, max_content_bytes)
             .await
     }
 
-    async fn read_file_revision_for_inode_with_context(
+    /// Reads one revision's content against the pinned runtime read context.
+    pub async fn read_file_revision_for_inode(
         &self,
         inode_id: InodeId,
         revision_no: RevisionNo,
-        context: ReadLoadContext<'_>,
+        context: &RuntimeReadContext,
         max_content_bytes: Option<u64>,
     ) -> Result<Vec<u8>> {
         let view = self.load_read_view(context).await?;
@@ -365,6 +264,18 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             inode_id,
             revision_no,
             max_content_bytes,
+        )
+        .await
+    }
+
+    async fn load_read_view<'a>(
+        &'a self,
+        context: &'a RuntimeReadContext,
+    ) -> Result<LoadedMetadataView<'a, S>> {
+        load_metadata_view(
+            &self.store,
+            &self.namespace_id,
+            runtime_read_load_context(context),
         )
         .await
     }

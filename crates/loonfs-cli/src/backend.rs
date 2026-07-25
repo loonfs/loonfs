@@ -240,7 +240,7 @@ impl Backend for EmbeddedBackend {
         let request = loonfs_api::PageRequest {
             limit: resolve_cli_page_limit(limit)?,
             cursor: cursor
-                .map(loonfs_api::decode_file_revisions_cursor)
+                .map(loonfs_api::decode_cursor)
                 .transpose()
                 .map_err(|error| {
                     BackendError::new(ErrorCode::InvalidRequest.as_str(), error.to_string())

@@ -125,7 +125,7 @@ async fn new_query(
         .build()
         .expect("new query engine");
     let context = read_context(store, namespace_id).await;
-    let view = engine.load_grep_view_with_runtime_context(&context).await?;
+    let view = engine.load_grep_view(&context).await?;
     let service = GrepService::new();
     let snapshot = GrepIndexSnapshot::from_grep_root(&**store, namespace_id, &service).await;
     service.query(grep_request, &snapshot, &view, store).await

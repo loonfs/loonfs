@@ -350,7 +350,7 @@ pub(crate) mod mutation_split_support {
     ) -> Result<loonfs_api::AuthoritativePathEntry, CoreError> {
         let context = read_context(store, namespace_id).await;
         namespace_engine(store, namespace_id, &mutation_context())
-            .resolve_path_with_runtime_context(absolute_path, &context)
+            .resolve_path(absolute_path, &context)
             .await
     }
 
@@ -361,7 +361,7 @@ pub(crate) mod mutation_split_support {
     ) -> Result<loonfs_api::AuthoritativeFileBytes, CoreError> {
         let context = read_context(store, namespace_id).await;
         namespace_engine(store, namespace_id, &mutation_context())
-            .read_file_with_runtime_context(absolute_path, &context, None)
+            .read_file(absolute_path, &context, None)
             .await
     }
 
