@@ -1,4 +1,4 @@
-//! Blocking HTTP client for a LoonFS server.
+//! Async HTTP client for a LoonFS server.
 //!
 //! Use this crate when your process should talk to a hosted LoonFS runtime
 //! instead of embedding the runtime directly. The client keeps paths simple:
@@ -34,18 +34,21 @@ use std::sync::{Arc, OnceLock};
 
 pub use config::ClientConfig;
 pub use error::ClientError;
-use transport::IO_INACTIVITY_TIMEOUT;
+use transport::{WireRequest, IO_INACTIVITY_TIMEOUT};
 pub use ClientError as Error;
 
-/// Result type returned by the blocking client.
+/// Result type returned by the client.
 pub type Result<T> = std::result::Result<T, ClientError>;
 
-/// Synchronous HTTP client for LoonFS.
+/// Async HTTP client for LoonFS.
+///
+/// Cloning is cheap: clones share one connection pool and one capability
+/// cache.
 #[derive(Debug, Clone)]
 pub struct Client {
     base_url: String,
     auth_token: Option<String>,
-    agent: ureq::Agent,
+    http: reqwest::Client,
     /// Whether transient server errors are retried (see
     /// [`ClientConfig::disable_transient_retry`]).
     transient_retry: bool,
@@ -139,16 +142,20 @@ impl Client {
     /// validation.
     pub fn new(config: ClientConfig) -> Result<Self> {
         config.validate()?;
-        let mut agent = ureq::AgentBuilder::new()
-            .timeout_read(IO_INACTIVITY_TIMEOUT)
-            .timeout_write(IO_INACTIVITY_TIMEOUT);
+        let mut builder = reqwest::Client::builder()
+            // Bounds a stalled connection without cutting off a slow but
+            // progressing transfer, which a whole-request deadline would.
+            .read_timeout(IO_INACTIVITY_TIMEOUT)
+            .connect_timeout(IO_INACTIVITY_TIMEOUT);
         if let Some(timeout_ms) = config.request_timeout_ms {
-            agent = agent.timeout(std::time::Duration::from_millis(timeout_ms));
+            builder = builder.timeout(std::time::Duration::from_millis(timeout_ms));
         }
         Ok(Self {
             base_url: config.server_url.trim().trim_end_matches('/').to_owned(),
             auth_token: config.auth_token,
-            agent: agent.build(),
+            http: builder
+                .build()
+                .map_err(|err| ClientError::Http(err.to_string()))?,
             transient_retry: !config.disable_transient_retry,
             capabilities: Arc::new(OnceLock::new()),
         })
@@ -161,13 +168,13 @@ impl Client {
     /// Feature keys that are not parented by an advertised profile are
     /// dropped rather than trusted, per the spec's client guidance for
     /// malformed documents.
-    pub fn capabilities(&self) -> Result<CapabilityDocument> {
+    pub async fn capabilities(&self) -> Result<CapabilityDocument> {
         if let Some(document) = self.capabilities.get() {
             return Ok(document.clone());
         }
         let url = format!("{}/v0/capabilities", self.base_url);
         let mut document: CapabilityDocument =
-            self.request_json::<(), _>(self.agent.get(&url), None)?;
+            self.request_json::<(), _>(self.get(&url), None).await?;
         document.retain_well_formed();
         // If a racing clone fetched first, keep its copy; both came from the
         // same server.
@@ -179,22 +186,27 @@ impl Client {
             .clone())
     }
 
-    pub fn create_namespace(&self, namespace_id: &NamespaceId) -> Result<NamespaceSummary> {
+    pub async fn create_namespace(&self, namespace_id: &NamespaceId) -> Result<NamespaceSummary> {
         let url = format!("{}/v0/namespaces", self.base_url);
         // Namespace creation has no durable request identity to reconcile an ambiguous success.
         self.request_json_once::<_, NamespaceSummary>(
-            self.agent.post(&url),
+            self.post(&url),
             Some(&CreateNamespaceRequest {
                 namespace_id: namespace_id.clone(),
             }),
         )
+        .await
     }
 
-    pub fn namespace_status(&self, namespace_id: &NamespaceId) -> Result<NamespaceStatusResponse> {
+    pub async fn namespace_status(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<NamespaceStatusResponse> {
         // Validated namespace ids are URL-safe by construction, like the
         // other parsed id segments interpolated into paths here and below.
         let url = format!("{}/v0/namespaces/{namespace_id}", self.base_url);
-        self.request_json::<(), NamespaceStatusResponse>(self.agent.get(&url), None)
+        self.request_json::<(), NamespaceStatusResponse>(self.get(&url), None)
+            .await
     }
 
     /// Deletes a namespace (feature `core.namespaces.delete`): terminal,
@@ -202,7 +214,7 @@ impl Client {
     /// only if the namespace is still where you last observed it
     /// (`stale_head` on mismatch). Deleting an already-deleted namespace
     /// fails with `namespace_deleted`.
-    pub fn delete_namespace(
+    pub async fn delete_namespace(
         &self,
         namespace_id: &NamespaceId,
         expected_head_seq: Option<ChangeSeq>,
@@ -212,10 +224,11 @@ impl Client {
             url.push_str(&format!("?expected_head_seq={}", expected.0));
         }
         // The expected head is a precondition, not an idempotency key for an ambiguous delete.
-        self.request_json_once::<(), DeleteNamespaceResponse>(self.agent.delete(&url), None)
+        self.request_json_once::<(), DeleteNamespaceResponse>(self.delete(&url), None)
+            .await
     }
 
-    pub fn fork_namespace(
+    pub async fn fork_namespace(
         &self,
         source_namespace_id: &NamespaceId,
         new_namespace_id: &NamespaceId,
@@ -226,11 +239,12 @@ impl Client {
         );
         // Namespace forks have no durable request identity to replay after an ambiguous success.
         self.request_json_once::<_, NamespaceSummary>(
-            self.agent.post(&url),
+            self.post(&url),
             Some(&ForkNamespaceRequest {
                 new_namespace_id: new_namespace_id.clone(),
             }),
         )
+        .await
     }
 
     /// Lists a directory by aggregating every page into one response.
@@ -241,7 +255,10 @@ impl Client {
     /// the partial aggregation, up to three times before surfacing the
     /// error. Use [`Self::list_path_entries_page`] for page-level control and
     /// cursor errors surfaced as-is.
-    pub fn list_path_entries_all(&self, spec: &NamespacePath) -> Result<ListPathEntriesResponse> {
+    pub async fn list_path_entries_all(
+        &self,
+        spec: &NamespacePath,
+    ) -> Result<ListPathEntriesResponse> {
         // Bounded so a write-hot namespace cannot pin this loop forever.
         const MAX_LISTING_RESTARTS: u32 = 3;
         let mut restarts = 0;
@@ -250,7 +267,10 @@ impl Client {
             let mut envelope = None;
             let mut cursor = None;
             loop {
-                let page = match self.list_path_entries_page(spec, None, cursor.as_deref()) {
+                let page = match self
+                    .list_path_entries_page(spec, None, cursor.as_deref())
+                    .await
+                {
                     Ok(page) => page,
                     Err(error)
                         if cursor.is_some()
@@ -281,7 +301,7 @@ impl Client {
         }
     }
 
-    pub fn list_path_entries_page(
+    pub async fn list_path_entries_page(
         &self,
         spec: &NamespacePath,
         limit: Option<u32>,
@@ -295,30 +315,32 @@ impl Client {
         );
         let has_query = true;
         append_optional_pagination_query(&mut url, has_query, limit, cursor);
-        self.request_json::<(), ListPathEntriesResponse>(self.agent.get(&url), None)
+        self.request_json::<(), ListPathEntriesResponse>(self.get(&url), None)
+            .await
     }
 
-    pub fn stat_path(&self, spec: &NamespacePath) -> Result<AuthoritativePathEntry> {
+    pub async fn stat_path(&self, spec: &NamespacePath) -> Result<AuthoritativePathEntry> {
         let url = format!(
             "{}/v0/namespaces/{}/filesystem/stat?path={}",
             self.base_url,
             spec.namespace().as_str(),
             urlencoding::encode(spec.absolute_path().as_str())
         );
-        self.request_json::<(), AuthoritativePathEntry>(self.agent.get(&url), None)
+        self.request_json::<(), AuthoritativePathEntry>(self.get(&url), None)
+            .await
     }
 
-    pub fn get_file_bytes(&self, spec: &NamespacePath) -> Result<Vec<u8>> {
+    pub async fn get_file_bytes(&self, spec: &NamespacePath) -> Result<Vec<u8>> {
         let url = format!(
             "{}/v0/namespaces/{}/filesystem/content?path={}",
             self.base_url,
             spec.namespace().as_str(),
             urlencoding::encode(spec.absolute_path().as_str())
         );
-        self.request_bytes(&url)
+        self.request_bytes(&url).await
     }
 
-    pub fn get_file_revision_bytes(
+    pub async fn get_file_revision_bytes(
         &self,
         spec: &NamespacePath,
         revision_no: RevisionNo,
@@ -330,10 +352,10 @@ impl Client {
             urlencoding::encode(spec.absolute_path().as_str()),
             revision_no.0
         );
-        self.request_bytes(&url)
+        self.request_bytes(&url).await
     }
 
-    pub fn list_file_revisions_page(
+    pub async fn list_file_revisions_page(
         &self,
         spec: &NamespacePath,
         limit: Option<u32>,
@@ -347,10 +369,11 @@ impl Client {
         );
         let has_query = true;
         append_optional_pagination_query(&mut url, has_query, limit, cursor);
-        self.request_json::<(), ListFileRevisionsResponse>(self.agent.get(&url), None)
+        self.request_json::<(), ListFileRevisionsResponse>(self.get(&url), None)
+            .await
     }
 
-    pub fn list_file_revisions_by_inode_page(
+    pub async fn list_file_revisions_by_inode_page(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
@@ -363,10 +386,11 @@ impl Client {
         );
         let has_query = false;
         append_optional_pagination_query(&mut url, has_query, limit, cursor);
-        self.request_json::<(), ListFileRevisionsResponse>(self.agent.get(&url), None)
+        self.request_json::<(), ListFileRevisionsResponse>(self.get(&url), None)
+            .await
     }
 
-    pub fn get_file_revision_bytes_by_inode(
+    pub async fn get_file_revision_bytes_by_inode(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
@@ -376,27 +400,28 @@ impl Client {
             "{}/v0/namespaces/{namespace_id}/inodes/{}/revisions/{}/content",
             self.base_url, inode_id.0, revision_no.0
         );
-        self.request_bytes(&url)
+        self.request_bytes(&url).await
     }
 
-    pub fn health(&self) -> Result<()> {
+    pub async fn health(&self) -> Result<()> {
         let url = format!("{}/health", self.base_url);
-        let request = self.authenticated(self.agent.get(&url));
-        self.call_with_transient_retry(&request, None)?;
+        self.call_with_transient_retry(&self.get(&url), None)
+            .await?;
         Ok(())
     }
 
-    pub fn begin_upload(
+    pub async fn begin_upload(
         &self,
         namespace_id: &NamespaceId,
         request: &BeginUploadRequest,
     ) -> Result<BeginUploadResponse> {
         let url = format!("{}/v0/namespaces/{namespace_id}/uploads", self.base_url);
         // Beginning an upload mints a new session id, so a resend could create a second session.
-        self.request_json_once::<_, BeginUploadResponse>(self.agent.post(&url), Some(request))
+        self.request_json_once::<_, BeginUploadResponse>(self.post(&url), Some(request))
+            .await
     }
 
-    pub fn begin_direct_put(
+    pub async fn begin_direct_put(
         &self,
         namespace_id: &NamespaceId,
         content_ref: ContentRef,
@@ -408,9 +433,10 @@ impl Client {
                 content_ref: Some(content_ref),
             },
         )
+        .await
     }
 
-    pub fn upload_via_presigned_url(
+    pub async fn upload_via_presigned_url(
         &self,
         access: &ObjectTransferAccess,
         bytes: &[u8],
@@ -428,15 +454,15 @@ impl Client {
                 "unsupported presigned upload method `{method}`"
             )));
         }
-        let mut request = ureq::put(url);
+        let mut request = WireRequest::presigned(reqwest::Method::PUT, url);
         for (name, value) in headers {
-            request = request.set(name, value);
+            request = request.header(name, value);
         }
         // A successful create-only PUT may replay as a provider precondition error, not success.
-        self.call_once(&request, Some(bytes)).map(|_| ())
+        self.call_once(&request, Some(bytes)).await.map(|_| ())
     }
 
-    pub fn upload_content(
+    pub async fn upload_content(
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
@@ -447,16 +473,17 @@ impl Client {
             self.base_url
         );
         let request = self
-            .authenticated(self.agent.put(&url))
-            .set("content-type", "application/octet-stream");
+            .put(&url)
+            .header("content-type", "application/octet-stream");
         // Proxied uploads are the request most likely to hit the server's
         // concurrency cap; staging the same bytes again is idempotent.
-        let response = self.call_with_transient_retry(&request, Some(bytes))?;
-        serde_json::from_reader(response.into_reader())
-            .map_err(|err| ClientError::Json(err.to_string()))
+        let response = self
+            .call_with_transient_retry(&request, Some(bytes))
+            .await?;
+        serde_json::from_slice(&response).map_err(|err| ClientError::Json(err.to_string()))
     }
 
-    pub fn complete_upload(
+    pub async fn complete_upload(
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
@@ -467,20 +494,22 @@ impl Client {
             self.base_url
         );
         // The durable completed-session record replays an identical completion without new effect.
-        self.request_json::<_, CompleteUploadResponse>(self.agent.post(&url), Some(request))
+        self.request_json::<_, CompleteUploadResponse>(self.post(&url), Some(request))
+            .await
     }
 
-    pub fn commit_operations(
+    pub async fn commit_operations(
         &self,
         namespace_id: &NamespaceId,
         request: &CommitSubmissionRequest,
     ) -> Result<ApiCommitResponse> {
         let url = format!("{}/v0/namespaces/{namespace_id}/commits", self.base_url);
         // The request's commit id resolves an ambiguous resend through a durable receipt.
-        self.request_json::<_, ApiCommitResponse>(self.agent.post(&url), Some(request))
+        self.request_json::<_, ApiCommitResponse>(self.post(&url), Some(request))
+            .await
     }
 
-    pub fn list_changes(
+    pub async fn list_changes(
         &self,
         namespace_id: &NamespaceId,
         after_seq: ChangeSeq,
@@ -493,14 +522,15 @@ impl Client {
         if let Some(limit) = limit {
             url.push_str(&format!("&limit={limit}"));
         }
-        self.request_json::<(), ChangesResponse>(self.agent.get(&url), None)
+        self.request_json::<(), ChangesResponse>(self.get(&url), None)
+            .await
     }
 
     /// Creates or reuses a named, user-owned checkpoint pinning the
     /// namespace's current view (admin plane). This is a maintenance
     /// operation, not a file mutation. The record is a garbage-collection
     /// root until released or expired.
-    pub fn create_checkpoint(
+    pub async fn create_checkpoint(
         &self,
         namespace_id: &NamespaceId,
         request: &CreateCheckpointRequest,
@@ -509,12 +539,12 @@ impl Client {
             "{}/v0/admin/namespaces/{namespace_id}/checkpoints",
             self.base_url
         );
-        self.request_json(self.agent.post(&url), Some(request))
+        self.request_json(self.post(&url), Some(request)).await
     }
 
     /// Releases a user-owned checkpoint pin by id (admin plane). Idempotent:
     /// releasing an already-released or reaped record succeeds.
-    pub fn release_checkpoint(
+    pub async fn release_checkpoint(
         &self,
         namespace_id: &NamespaceId,
         checkpoint_id: &CheckpointId,
@@ -523,24 +553,26 @@ impl Client {
             "{}/v0/admin/namespaces/{namespace_id}/checkpoints/{checkpoint_id}/release",
             self.base_url
         );
-        self.request_json::<(), ReleaseCheckpointResponse>(self.agent.post(&url), None)
+        self.request_json::<(), ReleaseCheckpointResponse>(self.post(&url), None)
+            .await
     }
 
     /// Flushes the WAL tail and advances the metadata root to a manifest
     /// covering the current head (admin plane). The latest-state maintenance operation: no checkpoint
     /// record is created. The request carries no body.
-    pub fn flush_wal(&self, namespace_id: &NamespaceId) -> Result<FlushWalResponse> {
+    pub async fn flush_wal(&self, namespace_id: &NamespaceId) -> Result<FlushWalResponse> {
         let url = format!(
             "{}/v0/admin/namespaces/{namespace_id}/wal/flush",
             self.base_url
         );
-        self.request_json::<(), FlushWalResponse>(self.agent.post(&url), None)
+        self.request_json::<(), FlushWalResponse>(self.post(&url), None)
+            .await
     }
 
     /// Advances the namespace retention floor to what checkpoint state allows
     /// (admin plane). Irreversible: WAL history before the floor stops being
     /// replayable. The request carries no body.
-    pub fn advance_retention_floor(
+    pub async fn advance_retention_floor(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<AdvanceRetentionResponse> {
@@ -548,13 +580,14 @@ impl Client {
             "{}/v0/admin/namespaces/{namespace_id}/retention/advance",
             self.base_url
         );
-        self.request_json::<(), AdvanceRetentionResponse>(self.agent.post(&url), None)
+        self.request_json::<(), AdvanceRetentionResponse>(self.post(&url), None)
+            .await
     }
 
     /// Runs one bounded maintenance step against a namespace (admin plane).
     /// Absent request fields use the server's defaults; garbage collection
     /// runs only when the request opts in.
-    pub fn maintenance_step(
+    pub async fn maintenance_step(
         &self,
         namespace_id: &NamespaceId,
         request: &MaintenanceStepRequest,
@@ -563,7 +596,7 @@ impl Client {
             "{}/v0/admin/namespaces/{namespace_id}/maintenance/step",
             self.base_url
         );
-        self.request_json(self.agent.post(&url), Some(request))
+        self.request_json(self.post(&url), Some(request)).await
     }
 
     /// Runs one mark-and-sweep garbage-collection pass (admin plane).
@@ -571,48 +604,60 @@ impl Client {
     /// `GcResponse::next_cursor` back as `GcRequest::cursor` to resume.
     /// Nothing sweeps without this explicit call or a maintenance-step
     /// opt-in.
-    pub fn gc_namespace(
+    pub async fn gc_namespace(
         &self,
         namespace_id: &NamespaceId,
         request: &GcRequest,
     ) -> Result<GcResponse> {
         let url = format!("{}/v0/admin/namespaces/{namespace_id}/gc", self.base_url);
-        self.request_json(self.agent.post(&url), Some(request))
+        self.request_json(self.post(&url), Some(request)).await
     }
 
     /// Explicitly repairs one incomplete namespace installation.
-    pub fn repair_namespace(&self, namespace_id: &NamespaceId) -> Result<RepairNamespaceResponse> {
+    pub async fn repair_namespace(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<RepairNamespaceResponse> {
         let url = format!(
             "{}/v0/admin/namespaces/{namespace_id}/repair",
             self.base_url
         );
         // Repair can reap a namespace, so a lost success cannot be replayed
         // into the same outcome without a durable request identity.
-        self.request_json_once::<(), RepairNamespaceResponse>(self.agent.post(&url), None)
+        self.request_json_once::<(), RepairNamespaceResponse>(self.post(&url), None)
+            .await
     }
 
     /// Content search over the namespace's grep index (query plane).
     /// Gate on the `query.grep` capability before calling against unknown
     /// deployments; the namespace must also have a materialized steady-state
     /// grep root or the server answers `not_supported`.
-    pub fn grep(&self, namespace_id: &NamespaceId, request: &GrepRequest) -> Result<GrepResponse> {
+    pub async fn grep(
+        &self,
+        namespace_id: &NamespaceId,
+        request: &GrepRequest,
+    ) -> Result<GrepResponse> {
         let url = format!("{}/v0/namespaces/{namespace_id}/query/grep", self.base_url);
-        self.request_json(self.agent.post(&url), Some(request))
+        self.request_json(self.post(&url), Some(request)).await
     }
 
     /// Enables the namespace's grep root (admin plane); embedded mode starts
     /// that namespace's event-driven backfill. Idempotent.
-    pub fn enable_grep_index(&self, namespace_id: &NamespaceId) -> Result<EnableGrepIndexResponse> {
+    pub async fn enable_grep_index(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<EnableGrepIndexResponse> {
         let url = format!(
             "{}/v0/admin/namespaces/{namespace_id}/grep/index/enable",
             self.base_url
         );
-        self.request_json::<(), EnableGrepIndexResponse>(self.agent.post(&url), None)
+        self.request_json::<(), EnableGrepIndexResponse>(self.post(&url), None)
+            .await
     }
 
     /// Disables the namespace's grep root (admin plane); garbage collection
     /// reclaims the segments. Idempotent.
-    pub fn disable_grep_index(
+    pub async fn disable_grep_index(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<DisableGrepIndexResponse> {
@@ -620,19 +665,21 @@ impl Client {
             "{}/v0/admin/namespaces/{namespace_id}/grep/index/disable",
             self.base_url
         );
-        self.request_json::<(), DisableGrepIndexResponse>(self.agent.post(&url), None)
+        self.request_json::<(), DisableGrepIndexResponse>(self.post(&url), None)
+            .await
     }
 
     /// Runs one explicit grep-index garbage-collection pass for a namespace.
-    pub fn gc_grep_index(&self, namespace_id: &NamespaceId) -> Result<GrepGcResponse> {
+    pub async fn gc_grep_index(&self, namespace_id: &NamespaceId) -> Result<GrepGcResponse> {
         let url = format!(
             "{}/v0/admin/namespaces/{namespace_id}/grep/index/gc",
             self.base_url
         );
-        self.request_json::<(), GrepGcResponse>(self.agent.post(&url), None)
+        self.request_json::<(), GrepGcResponse>(self.post(&url), None)
+            .await
     }
 
-    fn apply_filesystem_operation(
+    async fn apply_filesystem_operation(
         &self,
         namespace_id: &NamespaceId,
         request: &FilesystemOperationRequest,
@@ -642,23 +689,30 @@ impl Client {
             self.base_url
         );
         // The request's commit id resolves an ambiguous resend through a durable receipt.
-        self.request_json::<_, ApiCommitResponse>(self.agent.post(&url), Some(request))
+        self.request_json::<_, ApiCommitResponse>(self.post(&url), Some(request))
+            .await
     }
 
-    fn stage_bytes_as_content_ref(
+    async fn stage_bytes_as_content_ref(
         &self,
         namespace_id: &NamespaceId,
         bytes: &[u8],
     ) -> Result<StagedContent> {
-        let upload = self.begin_upload(namespace_id, &BeginUploadRequest::default())?;
-        let staged = self.upload_content(namespace_id, &upload.upload_id, bytes)?;
-        let response = self.complete_upload(
-            namespace_id,
-            &upload.upload_id,
-            &CompleteUploadRequest {
-                content_ref: staged.content_ref,
-            },
-        )?;
+        let upload = self
+            .begin_upload(namespace_id, &BeginUploadRequest::default())
+            .await?;
+        let staged = self
+            .upload_content(namespace_id, &upload.upload_id, bytes)
+            .await?;
+        let response = self
+            .complete_upload(
+                namespace_id,
+                &upload.upload_id,
+                &CompleteUploadRequest {
+                    content_ref: staged.content_ref,
+                },
+            )
+            .await?;
         let validated_content_token =
             response
                 .validated_content_token
@@ -672,71 +726,79 @@ impl Client {
         })
     }
 
-    pub fn put_file_bytes(
+    pub async fn put_file_bytes(
         &self,
         spec: &NamespacePath,
         bytes: &[u8],
         options: &PutFileOptions,
     ) -> Result<ApiCommitResponse> {
         let commit_id = options.commit_id.clone().unwrap_or_else(CommitId::generate);
-        let staged = self.stage_bytes_as_content_ref(spec.namespace(), bytes)?;
-        let response = self.apply_filesystem_operation(
-            spec.namespace(),
-            &FilesystemOperationRequest {
-                commit_id,
-                content_tokens: staged.validated_content_token.into_iter().collect(),
-                operation: FilesystemOperation::PutFile {
-                    path: spec.absolute_path().clone(),
-                    content_ref: staged.content_ref,
-                    behavior: options.behavior,
+        let staged = self
+            .stage_bytes_as_content_ref(spec.namespace(), bytes)
+            .await?;
+        let response = self
+            .apply_filesystem_operation(
+                spec.namespace(),
+                &FilesystemOperationRequest {
+                    commit_id,
+                    content_tokens: staged.validated_content_token.into_iter().collect(),
+                    operation: FilesystemOperation::PutFile {
+                        path: spec.absolute_path().clone(),
+                        content_ref: staged.content_ref,
+                        behavior: options.behavior,
+                    },
                 },
-            },
-        )?;
+            )
+            .await?;
         Ok(response)
     }
 
-    pub fn create_directory(
+    pub async fn create_directory(
         &self,
         spec: &NamespacePath,
         options: &CreateDirectoryOptions,
     ) -> Result<ApiCommitResponse> {
         let commit_id = options.commit_id.clone().unwrap_or_else(CommitId::generate);
-        let response = self.apply_filesystem_operation(
-            spec.namespace(),
-            &FilesystemOperationRequest {
-                commit_id,
-                content_tokens: Vec::new(),
-                operation: FilesystemOperation::CreateDirectory {
-                    path: spec.absolute_path().clone(),
-                    parents: options.parents,
+        let response = self
+            .apply_filesystem_operation(
+                spec.namespace(),
+                &FilesystemOperationRequest {
+                    commit_id,
+                    content_tokens: Vec::new(),
+                    operation: FilesystemOperation::CreateDirectory {
+                        path: spec.absolute_path().clone(),
+                        parents: options.parents,
+                    },
                 },
-            },
-        )?;
+            )
+            .await?;
         Ok(response)
     }
 
-    pub fn delete_path(
+    pub async fn delete_path(
         &self,
         spec: &NamespacePath,
         options: &DeleteOptions,
     ) -> Result<ApiCommitResponse> {
         let commit_id = options.commit_id.clone().unwrap_or_else(CommitId::generate);
-        let response = self.apply_filesystem_operation(
-            spec.namespace(),
-            &FilesystemOperationRequest {
-                commit_id,
-                content_tokens: Vec::new(),
-                operation: FilesystemOperation::DeletePath {
-                    path: spec.absolute_path().clone(),
-                    behavior: options.behavior,
-                    expected_inode_id: options.expected_inode_id,
+        let response = self
+            .apply_filesystem_operation(
+                spec.namespace(),
+                &FilesystemOperationRequest {
+                    commit_id,
+                    content_tokens: Vec::new(),
+                    operation: FilesystemOperation::DeletePath {
+                        path: spec.absolute_path().clone(),
+                        behavior: options.behavior,
+                        expected_inode_id: options.expected_inode_id,
+                    },
                 },
-            },
-        )?;
+            )
+            .await?;
         Ok(response)
     }
 
-    pub fn move_path(
+    pub async fn move_path(
         &self,
         from: &NamespacePath,
         to: &NamespacePath,
@@ -751,22 +813,24 @@ impl Client {
             )));
         }
         let commit_id = options.resolve_commit_id();
-        let response = self.apply_filesystem_operation(
-            from.namespace(),
-            &FilesystemOperationRequest {
-                commit_id,
-                content_tokens: Vec::new(),
-                operation: FilesystemOperation::MovePath {
-                    from_path: from.absolute_path().clone(),
-                    to_path: to.absolute_path().clone(),
-                    behavior,
+        let response = self
+            .apply_filesystem_operation(
+                from.namespace(),
+                &FilesystemOperationRequest {
+                    commit_id,
+                    content_tokens: Vec::new(),
+                    operation: FilesystemOperation::MovePath {
+                        from_path: from.absolute_path().clone(),
+                        to_path: to.absolute_path().clone(),
+                        behavior,
+                    },
                 },
-            },
-        )?;
+            )
+            .await?;
         Ok(response)
     }
 
-    pub fn copy_path(
+    pub async fn copy_path(
         &self,
         from: &NamespacePath,
         to: &NamespacePath,
@@ -781,25 +845,27 @@ impl Client {
             )));
         }
         let commit_id = options.resolve_commit_id();
-        let response = self.apply_filesystem_operation(
-            from.namespace(),
-            &FilesystemOperationRequest {
-                commit_id,
-                content_tokens: Vec::new(),
-                operation: FilesystemOperation::CopyPath {
-                    from_path: from.absolute_path().clone(),
-                    to_path: to.absolute_path().clone(),
-                    behavior,
+        let response = self
+            .apply_filesystem_operation(
+                from.namespace(),
+                &FilesystemOperationRequest {
+                    commit_id,
+                    content_tokens: Vec::new(),
+                    operation: FilesystemOperation::CopyPath {
+                        from_path: from.absolute_path().clone(),
+                        to_path: to.absolute_path().clone(),
+                        behavior,
+                    },
                 },
-            },
-        )?;
+            )
+            .await?;
         Ok(response)
     }
 
     /// Recovers a deleted file or subtree: clears the tombstone rooted at
     /// `inode_id` (the id the delete reported) and re-binds it at the spec's
     /// path.
-    pub fn undelete(
+    pub async fn undelete(
         &self,
         spec: &NamespacePath,
         inode_id: InodeId,
@@ -807,43 +873,47 @@ impl Client {
         options: &MutationOptions,
     ) -> Result<ApiCommitResponse> {
         let commit_id = options.resolve_commit_id();
-        let response = self.apply_filesystem_operation(
-            spec.namespace(),
-            &FilesystemOperationRequest {
-                commit_id,
-                content_tokens: Vec::new(),
-                operation: FilesystemOperation::Undelete {
-                    inode_id,
-                    deleted_at_seq,
-                    path: spec.absolute_path().clone(),
+        let response = self
+            .apply_filesystem_operation(
+                spec.namespace(),
+                &FilesystemOperationRequest {
+                    commit_id,
+                    content_tokens: Vec::new(),
+                    operation: FilesystemOperation::Undelete {
+                        inode_id,
+                        deleted_at_seq,
+                        path: spec.absolute_path().clone(),
+                    },
                 },
-            },
-        )?;
+            )
+            .await?;
         Ok(response)
     }
 
-    pub fn restore_file_revision(
+    pub async fn restore_file_revision(
         &self,
         spec: &NamespacePath,
         source_revision_no: RevisionNo,
         options: &MutationOptions,
     ) -> Result<ApiCommitResponse> {
         let commit_id = options.resolve_commit_id();
-        let response = self.apply_filesystem_operation(
-            spec.namespace(),
-            &FilesystemOperationRequest {
-                commit_id,
-                content_tokens: Vec::new(),
-                operation: FilesystemOperation::RestoreRevision {
-                    path: spec.absolute_path().clone(),
-                    source_revision_no,
+        let response = self
+            .apply_filesystem_operation(
+                spec.namespace(),
+                &FilesystemOperationRequest {
+                    commit_id,
+                    content_tokens: Vec::new(),
+                    operation: FilesystemOperation::RestoreRevision {
+                        path: spec.absolute_path().clone(),
+                        source_revision_no,
+                    },
                 },
-            },
-        )?;
+            )
+            .await?;
         Ok(response)
     }
 
-    pub fn restore_file_revision_by_inode(
+    pub async fn restore_file_revision_by_inode(
         &self,
         namespace_id: &NamespaceId,
         inode_id: InodeId,
@@ -856,12 +926,13 @@ impl Client {
             self.base_url, inode_id.0, source_revision_no.0
         );
         self.request_json::<_, ApiCommitResponse>(
-            self.agent.post(&url),
+            self.post(&url),
             Some(&RestoreFileRevisionRequest {
                 commit_id: commit_id.clone(),
                 base_revision_no,
             }),
         )
+        .await
     }
 }
 
@@ -997,8 +1068,8 @@ mod tests {
 
     /// A network-level transport failure resends up to the attempt cap when
     /// retry is enabled; with it disabled the first failure surfaces.
-    #[test]
-    fn transport_failures_resend_up_to_the_attempt_cap() {
+    #[tokio::test]
+    async fn transport_failures_resend_up_to_the_attempt_cap() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let transport = crate::transport::test_transport::failures(MAX_TRANSIENT_ATTEMPTS as usize);
         let retrying = Client::new(ClientConfig {
@@ -1010,6 +1081,7 @@ mod tests {
         .expect("valid client config");
         let error = retrying
             .namespace_status(&namespace_id)
+            .await
             .expect_err("dropped connections must fail");
         assert!(matches!(error, ClientError::Http(_)), "{error:?}");
         assert_eq!(transport.attempts(), MAX_TRANSIENT_ATTEMPTS as usize);
@@ -1025,6 +1097,7 @@ mod tests {
         .expect("valid client config");
         single_shot
             .namespace_status(&namespace_id)
+            .await
             .expect_err("dropped connection must fail without retry");
         assert_eq!(transport.attempts(), 1);
     }
@@ -1039,10 +1112,20 @@ mod tests {
         .expect("valid client config")
     }
 
-    fn assert_transport_failure_after_one_attempt<T>(call: impl FnOnce(&Client) -> Result<T>) {
-        let transport = crate::transport::test_transport::failure_then_success(b"{}".to_vec());
-        let client = retry_policy_client();
-        let result = call(&client);
+    /// Installs a transport that fails once then succeeds, so a call that
+    /// stops after one attempt surfaces the failure and a call that retries
+    /// would succeed instead.
+    fn single_attempt_probe() -> (crate::transport::test_transport::Guard, Client) {
+        (
+            crate::transport::test_transport::failure_then_success(b"{}".to_vec()),
+            retry_policy_client(),
+        )
+    }
+
+    fn assert_single_attempt<T>(
+        result: Result<T>,
+        transport: &crate::transport::test_transport::Guard,
+    ) {
         assert!(
             matches!(result, Err(ClientError::Http(_))),
             "expected the first transport failure to surface"
@@ -1050,24 +1133,37 @@ mod tests {
         assert_eq!(transport.attempts(), 1);
     }
 
-    #[test]
-    fn retry_policy_lifecycle_mutations_are_single_attempt() {
+    #[tokio::test]
+    async fn retry_policy_lifecycle_mutations_are_single_attempt() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        assert_transport_failure_after_one_attempt(|client| client.create_namespace(&namespace_id));
-        assert_transport_failure_after_one_attempt(|client| {
-            client.fork_namespace(
-                &namespace_id,
-                &NamespaceId::parse("fork").expect("valid id"),
-            )
-        });
-        assert_transport_failure_after_one_attempt(|client| {
-            client.delete_namespace(&namespace_id, Some(ChangeSeq(7)))
-        });
-        assert_transport_failure_after_one_attempt(|client| client.repair_namespace(&namespace_id));
+        let fork_id = NamespaceId::parse("fork").expect("valid id");
+
+        let (transport, client) = single_attempt_probe();
+        assert_single_attempt(client.create_namespace(&namespace_id).await, &transport);
+        drop(transport);
+
+        let (transport, client) = single_attempt_probe();
+        assert_single_attempt(
+            client.fork_namespace(&namespace_id, &fork_id).await,
+            &transport,
+        );
+        drop(transport);
+
+        let (transport, client) = single_attempt_probe();
+        assert_single_attempt(
+            client
+                .delete_namespace(&namespace_id, Some(ChangeSeq(7)))
+                .await,
+            &transport,
+        );
+        drop(transport);
+
+        let (transport, client) = single_attempt_probe();
+        assert_single_attempt(client.repair_namespace(&namespace_id).await, &transport);
     }
 
-    #[test]
-    fn retry_policy_commit_id_filesystem_mutation_retries() {
+    #[tokio::test]
+    async fn retry_policy_commit_id_filesystem_mutation_retries() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let commit_id =
             CommitId::parse("c_00000000000000000000000000000001").expect("valid commit id");
@@ -1090,13 +1186,14 @@ mod tests {
                     ..CreateDirectoryOptions::default()
                 },
             )
+            .await
             .expect("commit-id mutation should retry");
         assert_eq!(actual, response);
         assert_eq!(transport.attempts(), 2);
     }
 
-    #[test]
-    fn retry_policy_read_retries() {
+    #[tokio::test]
+    async fn retry_policy_read_retries() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let response = NamespaceStatusResponse {
             namespace_id: namespace_id.clone(),
@@ -1112,24 +1209,36 @@ mod tests {
 
         let actual = client
             .namespace_status(&namespace_id)
+            .await
             .expect("read should retry");
         assert_eq!(actual, response);
         assert_eq!(transport.attempts(), 2);
     }
 
-    #[test]
-    fn retry_policy_upload_begins_are_single_attempt() {
+    #[tokio::test]
+    async fn retry_policy_upload_begins_are_single_attempt() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        assert_transport_failure_after_one_attempt(|client| {
-            client.begin_upload(&namespace_id, &BeginUploadRequest::default())
-        });
-        assert_transport_failure_after_one_attempt(|client| {
-            client.begin_direct_put(&namespace_id, ContentRef::whole_file_v0(b"direct"))
-        });
+
+        let (transport, client) = single_attempt_probe();
+        assert_single_attempt(
+            client
+                .begin_upload(&namespace_id, &BeginUploadRequest::default())
+                .await,
+            &transport,
+        );
+        drop(transport);
+
+        let (transport, client) = single_attempt_probe();
+        assert_single_attempt(
+            client
+                .begin_direct_put(&namespace_id, ContentRef::whole_file_v0(b"direct"))
+                .await,
+            &transport,
+        );
     }
 
-    #[test]
-    fn retry_policy_presigned_upload_is_single_attempt() {
+    #[tokio::test]
+    async fn retry_policy_presigned_upload_is_single_attempt() {
         let transport = crate::transport::test_transport::failure_then_success(Vec::new());
         let client = retry_policy_client();
         let access = ObjectTransferAccess::PresignedUrl {
@@ -1139,14 +1248,14 @@ mod tests {
             expires_at_ms: 1,
         };
 
-        let result = client.upload_via_presigned_url(&access, b"direct");
+        let result = client.upload_via_presigned_url(&access, b"direct").await;
 
         assert!(matches!(result, Err(ClientError::Http(_))), "{result:?}");
         assert_eq!(transport.attempts(), 1);
     }
 
-    #[test]
-    fn retry_policy_proxied_upload_content_retries() {
+    #[tokio::test]
+    async fn retry_policy_proxied_upload_content_retries() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let upload_id = loonfs_api::UploadId::parse("upl_00000000000000000000000000000001")
             .expect("valid upload id");
@@ -1162,13 +1271,14 @@ mod tests {
 
         let actual = client
             .upload_content(&namespace_id, &upload_id, b"content")
+            .await
             .expect("identical content staging should retry");
         assert_eq!(actual, response);
         assert_eq!(transport.attempts(), 2);
     }
 
-    #[test]
-    fn retry_policy_upload_completion_retries() {
+    #[tokio::test]
+    async fn retry_policy_upload_completion_retries() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let upload_id = loonfs_api::UploadId::parse("upl_00000000000000000000000000000001")
             .expect("valid upload id");
@@ -1190,6 +1300,7 @@ mod tests {
                 &upload_id,
                 &CompleteUploadRequest { content_ref },
             )
+            .await
             .expect("completed-session replay should retry");
         assert_eq!(actual, response);
         assert_eq!(transport.attempts(), 2);
@@ -1199,23 +1310,16 @@ mod tests {
     /// HTML 502) must keep its status in the surfaced error — the status is
     /// the only signal the response carried.
     #[test]
-    fn map_error_keeps_the_status_when_the_body_is_not_the_envelope() {
-        let client = Client::new(ClientConfig {
-            server_url: "http://localhost:0".to_owned(),
-            auth_token: None,
-            request_timeout_ms: None,
-            disable_transient_retry: true,
-        })
-        .expect("valid client config");
-        let response = ureq::Response::new(502, "Bad Gateway", "<html>upstream error</html>")
-            .expect("synthetic response");
-        let error = client.map_error(ureq::Error::Status(502, response));
+    fn status_errors_keep_the_status_when_the_body_is_not_the_envelope() {
+        let error = crate::transport::map_status_error(502, b"<html>upstream error</html>");
+
         let ClientError::Http(message) = error else {
             unreachable!("expected Http error, got {error:?}");
         };
         assert!(message.contains("502"), "{message}");
         assert!(message.contains("non-envelope body"), "{message}");
     }
+
     fn api_error(status: u16, code: &str) -> ClientError {
         ClientError::Api {
             status,

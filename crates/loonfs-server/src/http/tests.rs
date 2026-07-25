@@ -317,13 +317,10 @@ async fn graceful_shutdown_drains_requests_and_settles_the_writer() {
         disable_transient_retry: false,
     })
     .expect("valid client config");
-    tokio::task::spawn_blocking(move || {
-        client
-            .create_namespace(&namespace_id("demo"))
-            .expect("create namespace over http");
-    })
-    .await
-    .expect("join blocking task");
+    client
+        .create_namespace(&namespace_id("demo"))
+        .await
+        .expect("create namespace over http");
 
     shutdown_tx.send(()).expect("trigger shutdown");
     server
@@ -471,23 +468,18 @@ async fn grep_error_disabled_root_is_not_materialized_and_core_reads_survive() {
     writer.shutdown_background().await.expect("shutdown writer");
 
     let harness = start_grep_error_server(store, temp_dir.path(), "disabled-server").await;
-    tokio::task::spawn_blocking({
-        let namespace_id = namespace_id.clone();
-        let client = harness.client.clone();
-        move || {
-            let result = client.grep(&namespace_id, &grep_error_request());
-            assert_grep_api_error_and_core_read(
-                &client,
-                &namespace_id,
-                result,
-                501,
-                ErrorCode::NotSupported,
-                "not materialized",
-            );
-        }
-    })
-    .await
-    .expect("join blocking task");
+    let client = &harness.client;
+    let binding = grep_error_request();
+    let result = client.grep(&namespace_id, &binding);
+    assert_grep_api_error_and_core_read(
+        client,
+        &namespace_id,
+        result.await,
+        501,
+        ErrorCode::NotSupported,
+        "not materialized",
+    )
+    .await;
     harness.server.abort();
 }
 
@@ -504,23 +496,18 @@ async fn grep_error_mid_backfill_is_not_materialized_and_core_reads_survive() {
     writer.shutdown_background().await.expect("shutdown writer");
 
     let harness = start_grep_error_server(store, temp_dir.path(), "backfill-server").await;
-    tokio::task::spawn_blocking({
-        let namespace_id = namespace_id.clone();
-        let client = harness.client.clone();
-        move || {
-            let result = client.grep(&namespace_id, &grep_error_request());
-            assert_grep_api_error_and_core_read(
-                &client,
-                &namespace_id,
-                result,
-                501,
-                ErrorCode::NotSupported,
-                "not materialized",
-            );
-        }
-    })
-    .await
-    .expect("join blocking task");
+    let client = &harness.client;
+    let binding = grep_error_request();
+    let result = client.grep(&namespace_id, &binding);
+    assert_grep_api_error_and_core_read(
+        client,
+        &namespace_id,
+        result.await,
+        501,
+        ErrorCode::NotSupported,
+        "not materialized",
+    )
+    .await;
     harness.server.abort();
 }
 
@@ -535,23 +522,18 @@ async fn grep_error_store_outage_is_provider_failure_and_core_reads_survive() {
 
     let harness = start_grep_error_server(store, temp_dir.path(), "store-server").await;
     fault_store.fail_next_root_read();
-    tokio::task::spawn_blocking({
-        let namespace_id = namespace_id.clone();
-        let client = harness.client.clone();
-        move || {
-            let result = client.grep(&namespace_id, &grep_error_request());
-            assert_grep_api_error_and_core_read(
-                &client,
-                &namespace_id,
-                result,
-                500,
-                ErrorCode::ServerError,
-                "injected grep-root outage",
-            );
-        }
-    })
-    .await
-    .expect("join blocking task");
+    let client = &harness.client;
+    let binding = grep_error_request();
+    let result = client.grep(&namespace_id, &binding);
+    assert_grep_api_error_and_core_read(
+        client,
+        &namespace_id,
+        result.await,
+        500,
+        ErrorCode::ServerError,
+        "injected grep-root outage",
+    )
+    .await;
     harness.server.abort();
 }
 
@@ -646,23 +628,17 @@ async fn grep_error_publication_conflict_is_stale_head_and_core_reads_survive() 
 
     let harness = start_grep_error_server(store, temp_dir.path(), "conflict-server").await;
     fault_store.conflict_next_root_publication();
-    tokio::task::spawn_blocking({
-        let namespace_id = namespace_id.clone();
-        let client = harness.client.clone();
-        move || {
-            let result = client.enable_grep_index(&namespace_id);
-            assert_grep_api_error_and_core_read(
-                &client,
-                &namespace_id,
-                result,
-                409,
-                ErrorCode::StaleHead,
-                "publication conflict",
-            );
-        }
-    })
-    .await
-    .expect("join blocking task");
+    let client = &harness.client;
+    let result = client.enable_grep_index(&namespace_id);
+    assert_grep_api_error_and_core_read(
+        client,
+        &namespace_id,
+        result.await,
+        409,
+        ErrorCode::StaleHead,
+        "publication conflict",
+    )
+    .await;
     harness.server.abort();
 }
 
@@ -688,16 +664,16 @@ async fn runtime_created_state_is_readable_through_http() {
     .expect("write file through runtime");
 
     let harness = start_server(store, temp_dir.path(), "server-writer").await;
-    tokio::task::spawn_blocking(move || {
-        let target = NamespacePath::parse("demo", "/notes/hello.txt").expect("target");
-        let stat = harness.client.stat_path(&target).expect("stat file");
-        assert_eq!(stat.absolute_path, "/notes/hello.txt");
-        assert_eq!(stat.size_bytes, Some(18));
-        let bytes = harness.client.get_file_bytes(&target).expect("read file");
-        assert_eq!(bytes, b"hello from runtime");
-    })
-    .await
-    .expect("join blocking task");
+    let target = NamespacePath::parse("demo", "/notes/hello.txt").expect("target");
+    let stat = harness.client.stat_path(&target).await.expect("stat file");
+    assert_eq!(stat.absolute_path, "/notes/hello.txt");
+    assert_eq!(stat.size_bytes, Some(18));
+    let bytes = harness
+        .client
+        .get_file_bytes(&target)
+        .await
+        .expect("read file");
+    assert_eq!(bytes, b"hello from runtime");
 
     harness.server.abort();
 }
@@ -709,19 +685,17 @@ async fn http_created_state_is_readable_through_runtime() {
     let fs = test_runtime(store.clone(), "runtime-reader").await;
     let harness = start_server(store.clone(), temp_dir.path(), "server-writer").await;
 
-    tokio::task::spawn_blocking(move || {
-        harness
-            .client
-            .create_namespace(&namespace_id("demo"))
-            .expect("create namespace through http");
-        let target = NamespacePath::parse("demo", "/notes/from-http.txt").expect("target");
-        harness
-            .client
-            .put_file_bytes(&target, b"hello from http", &replace_file_options())
-            .expect("write file through http");
-    })
-    .await
-    .expect("join blocking task");
+    harness
+        .client
+        .create_namespace(&namespace_id("demo"))
+        .await
+        .expect("create namespace through http");
+    let target = NamespacePath::parse("demo", "/notes/from-http.txt").expect("target");
+    harness
+        .client
+        .put_file_bytes(&target, b"hello from http", &replace_file_options())
+        .await
+        .expect("write file through http");
 
     let file = fs
         .reader()
@@ -742,39 +716,40 @@ async fn http_missing_namespace_mutations_return_namespace_not_found() {
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let harness = start_server(store, temp_dir.path(), "server-writer").await;
 
-    tokio::task::spawn_blocking(move || {
-        let target = NamespacePath::parse("missing", "/notes/hello.txt").expect("target");
-        assert_api_error(
-            harness
-                .client
-                .put_file_bytes(&target, b"hello", &replace_file_options()),
-            404,
-            "namespace_not_found",
-            Some("namespace `missing` does not exist"),
-        );
-        assert_api_error(
-            harness
-                .client
-                .delete_path(&target, &ClientDeleteOptions::default()),
-            404,
-            "namespace_not_found",
-            Some("namespace `missing` does not exist"),
-        );
-        let destination = NamespacePath::parse("missing", "/notes/renamed.txt").expect("target");
-        assert_api_error(
-            harness.client.move_path(
+    let target = NamespacePath::parse("missing", "/notes/hello.txt").expect("target");
+    assert_api_error(
+        harness
+            .client
+            .put_file_bytes(&target, b"hello", &replace_file_options())
+            .await,
+        404,
+        "namespace_not_found",
+        Some("namespace `missing` does not exist"),
+    );
+    assert_api_error(
+        harness
+            .client
+            .delete_path(&target, &ClientDeleteOptions::default())
+            .await,
+        404,
+        "namespace_not_found",
+        Some("namespace `missing` does not exist"),
+    );
+    let destination = NamespacePath::parse("missing", "/notes/renamed.txt").expect("target");
+    assert_api_error(
+        harness
+            .client
+            .move_path(
                 &target,
                 &destination,
                 DestinationBehavior::NoReplace,
                 &MutationOptions::default(),
-            ),
-            404,
-            "namespace_not_found",
-            Some("namespace `missing` does not exist"),
-        );
-    })
-    .await
-    .expect("join blocking task");
+            )
+            .await,
+        404,
+        "namespace_not_found",
+        Some("namespace `missing` does not exist"),
+    );
 
     harness.server.abort();
 }
@@ -785,17 +760,13 @@ async fn http_missing_namespace_reads_return_namespace_not_found() {
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let harness = start_server(store, temp_dir.path(), "server-writer").await;
 
-    tokio::task::spawn_blocking(move || {
-        let target = NamespacePath::parse("missing", "/").expect("target");
-        assert_api_error(
-            harness.client.list_path_entries_all(&target),
-            404,
-            "namespace_not_found",
-            Some("namespace `missing` does not exist"),
-        );
-    })
-    .await
-    .expect("join blocking task");
+    let target = NamespacePath::parse("missing", "/").expect("target");
+    assert_api_error(
+        harness.client.list_path_entries_all(&target).await,
+        404,
+        "namespace_not_found",
+        Some("namespace `missing` does not exist"),
+    );
 
     harness.server.abort();
 }
@@ -821,32 +792,34 @@ async fn http_admin_repair_reports_completed_already_complete_in_flight_and_not_
         .expect("write young debris");
     let harness = start_server(shared, temp_dir.path(), "server-writer").await;
 
-    tokio::task::spawn_blocking(move || {
-        let completed = harness
+    let completed = harness
+        .client
+        .repair_namespace(&partial)
+        .await
+        .expect("repair partial namespace");
+    assert_eq!(completed.outcome, RepairNamespaceOutcome::Completed);
+    let already = harness
+        .client
+        .repair_namespace(&partial)
+        .await
+        .expect("repeat repair");
+    assert_eq!(already.outcome, RepairNamespaceOutcome::AlreadyComplete);
+    let in_flight = harness
+        .client
+        .repair_namespace(&young)
+        .await
+        .expect("repair young debris");
+    assert_eq!(in_flight.outcome, RepairNamespaceOutcome::InFlight);
+    assert_api_error(
+        harness
             .client
-            .repair_namespace(&partial)
-            .expect("repair partial namespace");
-        assert_eq!(completed.outcome, RepairNamespaceOutcome::Completed);
-        let already = harness
-            .client
-            .repair_namespace(&partial)
-            .expect("repeat repair");
-        assert_eq!(already.outcome, RepairNamespaceOutcome::AlreadyComplete);
-        let in_flight = harness
-            .client
-            .repair_namespace(&young)
-            .expect("repair young debris");
-        assert_eq!(in_flight.outcome, RepairNamespaceOutcome::InFlight);
-        assert_api_error(
-            harness.client.repair_namespace(&namespace_id("absent")),
-            404,
-            "namespace_not_found",
-            Some("namespace `absent` does not exist"),
-        );
-        harness.server.abort();
-    })
-    .await
-    .expect("join blocking task");
+            .repair_namespace(&namespace_id("absent"))
+            .await,
+        404,
+        "namespace_not_found",
+        Some("namespace `absent` does not exist"),
+    );
+    harness.server.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -865,16 +838,13 @@ async fn http_admin_repair_reports_reaped_for_aged_debris() {
     let shared = store.clone() as SharedObjectStore;
     let harness = start_server(shared, temp_dir.path(), "server-writer").await;
 
-    tokio::task::spawn_blocking(move || {
-        let reaped = harness
-            .client
-            .repair_namespace(&namespace_id)
-            .expect("repair aged debris");
-        assert_eq!(reaped.outcome, RepairNamespaceOutcome::Reaped);
-        harness.server.abort();
-    })
-    .await
-    .expect("join blocking task");
+    let reaped = harness
+        .client
+        .repair_namespace(&namespace_id)
+        .await
+        .expect("repair aged debris");
+    assert_eq!(reaped.outcome, RepairNamespaceOutcome::Reaped);
+    harness.server.abort();
     assert!(store.head(&root_key).await.expect("head debris").is_none());
 }
 
@@ -885,19 +855,16 @@ async fn http_delete_missing_path_returns_path_not_found() {
     bootstrap_namespace(&store, "server-writer", &namespace_id("demo")).await;
 
     let harness = start_server(store, temp_dir.path(), "server-writer").await;
-    tokio::task::spawn_blocking(move || {
-        let target = NamespacePath::parse("demo", "/missing.txt").expect("target");
-        assert_api_error(
-            harness
-                .client
-                .delete_path(&target, &ClientDeleteOptions::default()),
-            404,
-            "path_not_found",
-            None,
-        );
-    })
-    .await
-    .expect("join blocking task");
+    let target = NamespacePath::parse("demo", "/missing.txt").expect("target");
+    assert_api_error(
+        harness
+            .client
+            .delete_path(&target, &ClientDeleteOptions::default())
+            .await,
+        404,
+        "path_not_found",
+        None,
+    );
 
     harness.server.abort();
 }
@@ -933,33 +900,33 @@ async fn http_put_over_directory_and_move_into_existing_target_return_path_confl
     .await;
 
     let harness = start_server(store, temp_dir.path(), "server-writer").await;
-    tokio::task::spawn_blocking(move || {
-        let dir_target = NamespacePath::parse("demo", "/docs").expect("dir target");
-        assert_api_error(
-            harness
-                .client
-                .put_file_bytes(&dir_target, b"not a file", &replace_file_options()),
-            409,
-            "path_conflict",
-            None,
-        );
+    let dir_target = NamespacePath::parse("demo", "/docs").expect("dir target");
+    assert_api_error(
+        harness
+            .client
+            .put_file_bytes(&dir_target, b"not a file", &replace_file_options())
+            .await,
+        409,
+        "path_conflict",
+        None,
+    );
 
-        let from = NamespacePath::parse("demo", "/tmp/a.txt").expect("from");
-        let to = NamespacePath::parse("demo", "/docs/a.txt").expect("to");
-        assert_api_error(
-            harness.client.move_path(
+    let from = NamespacePath::parse("demo", "/tmp/a.txt").expect("from");
+    let to = NamespacePath::parse("demo", "/docs/a.txt").expect("to");
+    assert_api_error(
+        harness
+            .client
+            .move_path(
                 &from,
                 &to,
                 DestinationBehavior::NoReplace,
                 &MutationOptions::default(),
-            ),
-            409,
-            "path_conflict",
-            None,
-        );
-    })
-    .await
-    .expect("join blocking task");
+            )
+            .await,
+        409,
+        "path_conflict",
+        None,
+    );
 
     harness.server.abort();
 }
@@ -988,36 +955,34 @@ async fn http_put_and_move_under_deleted_ancestor_create_fresh_subtrees() {
     delete_path_recursive(&seeder, &namespace_id("demo"), "/docs", "delete-docs").await;
 
     let harness = start_server(store, temp_dir.path(), "server-writer").await;
-    tokio::task::spawn_blocking(move || {
-        // The deleted name is invisible and immediately reusable; the
-        // dead subtree's children stay dead.
-        let put_target = NamespacePath::parse("demo", "/docs/new.txt").expect("put target");
-        harness
-            .client
-            .put_file_bytes(&put_target, b"new", &replace_file_options())
-            .expect("put recreates the subtree");
-        let old_child = NamespacePath::parse("demo", "/docs/old.txt").expect("old child");
-        assert_api_error(
-            harness.client.stat_path(&old_child),
-            404,
-            "path_not_found",
-            None,
-        );
+    // The deleted name is invisible and immediately reusable; the
+    // dead subtree's children stay dead.
+    let put_target = NamespacePath::parse("demo", "/docs/new.txt").expect("put target");
+    harness
+        .client
+        .put_file_bytes(&put_target, b"new", &replace_file_options())
+        .await
+        .expect("put recreates the subtree");
+    let old_child = NamespacePath::parse("demo", "/docs/old.txt").expect("old child");
+    assert_api_error(
+        harness.client.stat_path(&old_child).await,
+        404,
+        "path_not_found",
+        None,
+    );
 
-        let from = NamespacePath::parse("demo", "/tmp/source.txt").expect("from");
-        let to = NamespacePath::parse("demo", "/docs/source.txt").expect("to");
-        harness
-            .client
-            .move_path(
-                &from,
-                &to,
-                DestinationBehavior::NoReplace,
-                &MutationOptions::default(),
-            )
-            .expect("move lands in the recreated subtree");
-    })
-    .await
-    .expect("join blocking task");
+    let from = NamespacePath::parse("demo", "/tmp/source.txt").expect("from");
+    let to = NamespacePath::parse("demo", "/docs/source.txt").expect("to");
+    harness
+        .client
+        .move_path(
+            &from,
+            &to,
+            DestinationBehavior::NoReplace,
+            &MutationOptions::default(),
+        )
+        .await
+        .expect("move lands in the recreated subtree");
 
     harness.server.abort();
 }
@@ -1029,16 +994,13 @@ async fn http_path_mutation_retries_transient_stale_head_cas() {
     bootstrap_namespace(&store, "server-writer", &namespace_id("demo")).await;
 
     let harness = start_server(store, temp_dir.path(), "server-writer").await;
-    tokio::task::spawn_blocking(move || {
-        let target = NamespacePath::parse("demo", "/notes/race.txt").expect("target");
-        let result = harness
-            .client
-            .put_file_bytes(&target, b"race", &replace_file_options())
-            .expect("path write retries stale head");
-        assert_eq!(result.committed_seq, ChangeSeq(1));
-    })
-    .await
-    .expect("join blocking task");
+    let target = NamespacePath::parse("demo", "/notes/race.txt").expect("target");
+    let result = harness
+        .client
+        .put_file_bytes(&target, b"race", &replace_file_options())
+        .await
+        .expect("path write retries stale head");
+    assert_eq!(result.committed_seq, ChangeSeq(1));
 
     harness.server.abort();
 }
@@ -1053,16 +1015,13 @@ async fn http_first_write_takes_over_a_namespace_owned_by_another_writer() {
     let store_for_check = store.clone();
 
     let harness = start_server(store, temp_dir.path(), "server-writer").await;
-    tokio::task::spawn_blocking(move || {
-        let target = NamespacePath::parse("demo", "/notes/taken-over.txt").expect("target");
-        let result = harness
-            .client
-            .put_file_bytes(&target, b"taken over", &replace_file_options())
-            .expect("first write takes over the namespace");
-        assert_eq!(result.committed_seq, ChangeSeq(1));
-    })
-    .await
-    .expect("join blocking task");
+    let target = NamespacePath::parse("demo", "/notes/taken-over.txt").expect("target");
+    let result = harness
+        .client
+        .put_file_bytes(&target, b"taken over", &replace_file_options())
+        .await
+        .expect("first write takes over the namespace");
+    assert_eq!(result.committed_seq, ChangeSeq(1));
 
     let head = loonfs_core::control::load_namespace_head_control(
         store_for_check.as_ref(),
@@ -1098,25 +1057,21 @@ async fn http_answers_401_in_envelope_for_missing_and_wrong_tokens() {
         axum::serve(listener, router).await.expect("serve app");
     });
 
-    tokio::task::spawn_blocking(move || {
-        for auth_token in [None, Some("wrong-token".to_owned())] {
-            let client = Client::new(ClientConfig {
-                server_url: format!("http://{addr}"),
-                auth_token,
-                request_timeout_ms: None,
-                disable_transient_retry: false,
-            })
-            .expect("valid client config");
-            assert_api_error(
-                client.namespace_status(&namespace_id("demo")),
-                401,
-                "unauthorized",
-                Some("missing or invalid bearer token"),
-            );
-        }
-    })
-    .await
-    .expect("join blocking task");
+    for auth_token in [None, Some("wrong-token".to_owned())] {
+        let client = Client::new(ClientConfig {
+            server_url: format!("http://{addr}"),
+            auth_token,
+            request_timeout_ms: None,
+            disable_transient_retry: false,
+        })
+        .expect("valid client config");
+        assert_api_error(
+            client.namespace_status(&namespace_id("demo")).await,
+            401,
+            "unauthorized",
+            Some("missing or invalid bearer token"),
+        );
+    }
 
     server.abort();
 }
@@ -1139,102 +1094,98 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
         axum::serve(listener, router).await.expect("serve app");
     });
 
-    tokio::task::spawn_blocking(move || {
-        let expect_enveloped = |error: ureq::Error, status: u16, code: &str| {
-            let ureq::Error::Status(actual_status, response) = error else {
-                panic!("expected a status error, got {error:?}");
-            };
-            assert_eq!(actual_status, status);
-            assert!(response.header("x-request-id").is_some());
-            let body = response.into_string().expect("read error body");
-            let body: serde_json::Value =
-                serde_json::from_str(&body).unwrap_or_else(|_| panic!("json body, got: {body}"));
-            assert_eq!(body["code"], code);
+    let expect_enveloped = |error: ureq::Error, status: u16, code: &str| {
+        let ureq::Error::Status(actual_status, response) = error else {
+            panic!("expected a status error, got {error:?}");
         };
+        assert_eq!(actual_status, status);
+        assert!(response.header("x-request-id").is_some());
+        let body = response.into_string().expect("read error body");
+        let body: serde_json::Value =
+            serde_json::from_str(&body).unwrap_or_else(|_| panic!("json body, got: {body}"));
+        assert_eq!(body["code"], code);
+    };
 
-        // A query value that fails its field type: enveloped invalid_request.
-        let changes_url = format!("http://{addr}/v0/namespaces/demo/changes?after_seq=abc");
-        let error = raw_agent()
-            .get(&changes_url)
-            .set("authorization", "Bearer test-token")
-            .call()
-            .expect_err("malformed after_seq should answer 400");
-        expect_enveloped(error, 400, "invalid_request");
+    // A query value that fails its field type: enveloped invalid_request.
+    let changes_url = format!("http://{addr}/v0/namespaces/demo/changes?after_seq=abc");
+    let error = raw_agent()
+        .get(&changes_url)
+        .set("authorization", "Bearer test-token")
+        .call()
+        .expect_err("malformed after_seq should answer 400");
+    expect_enveloped(error, 400, "invalid_request");
 
-        // The same malformed query without credentials: 401 wins.
-        let error = raw_agent()
-            .get(&changes_url)
-            .call()
-            .expect_err("unauthorized should answer 401");
-        expect_enveloped(error, 401, "unauthorized");
+    // The same malformed query without credentials: 401 wins.
+    let error = raw_agent()
+        .get(&changes_url)
+        .call()
+        .expect_err("unauthorized should answer 401");
+    expect_enveloped(error, 401, "unauthorized");
 
-        // A missing required query parameter: enveloped invalid_request.
-        let error = raw_agent()
-            .get(&format!("http://{addr}/v0/namespaces/demo/filesystem/stat"))
-            .set("authorization", "Bearer test-token")
-            .call()
-            .expect_err("missing path parameter should answer 400");
-        expect_enveloped(error, 400, "invalid_request");
+    // A missing required query parameter: enveloped invalid_request.
+    let error = raw_agent()
+        .get(&format!("http://{addr}/v0/namespaces/demo/filesystem/stat"))
+        .set("authorization", "Bearer test-token")
+        .call()
+        .expect_err("missing path parameter should answer 400");
+    expect_enveloped(error, 400, "invalid_request");
 
-        // A malformed JSON body: enveloped invalid_request with credentials,
-        // 401 without — the body is not read before authorization.
-        let create_url = format!("http://{addr}/v0/namespaces");
-        let error = raw_agent()
-            .post(&create_url)
-            .set("authorization", "Bearer test-token")
-            .set("content-type", "application/json")
-            .send_string("{not json")
-            .expect_err("malformed body should answer 400");
-        expect_enveloped(error, 400, "invalid_request");
-        let error = raw_agent()
-            .post(&create_url)
-            .set("content-type", "application/json")
-            .send_string("{not json")
-            .expect_err("unauthorized malformed body should answer 401");
-        expect_enveloped(error, 401, "unauthorized");
+    // A malformed JSON body: enveloped invalid_request with credentials,
+    // 401 without — the body is not read before authorization.
+    let create_url = format!("http://{addr}/v0/namespaces");
+    let error = raw_agent()
+        .post(&create_url)
+        .set("authorization", "Bearer test-token")
+        .set("content-type", "application/json")
+        .send_string("{not json")
+        .expect_err("malformed body should answer 400");
+    expect_enveloped(error, 400, "invalid_request");
+    let error = raw_agent()
+        .post(&create_url)
+        .set("content-type", "application/json")
+        .send_string("{not json")
+        .expect_err("unauthorized malformed body should answer 401");
+    expect_enveloped(error, 401, "unauthorized");
 
-        // Filesystem-operation paths now validate while the authorized JSON
-        // body is decoded. The served code stays the same invalid_request
-        // classification the former handler-boundary validation used.
-        let operation_url = format!("http://{addr}/v0/namespaces/demo/filesystem/operations");
-        let invalid_operation = r#"{
-            "commit_id":"invalid-path",
-            "operation":{"kind":"create_directory","path":"relative"}
-        }"#;
-        let error = raw_agent()
-            .post(&operation_url)
-            .set("authorization", "Bearer test-token")
-            .set("content-type", "application/json")
-            .send_string(invalid_operation)
-            .expect_err("invalid operation path should answer 400");
-        expect_enveloped(error, 400, "invalid_request");
-        let error = raw_agent()
-            .post(&operation_url)
-            .set("content-type", "application/json")
-            .send_string(invalid_operation)
-            .expect_err("authorization should precede operation path decoding");
-        expect_enveloped(error, 401, "unauthorized");
+    // Filesystem-operation paths now validate while the authorized JSON
+    // body is decoded. The served code stays the same invalid_request
+    // classification the former handler-boundary validation used.
+    let operation_url = format!("http://{addr}/v0/namespaces/demo/filesystem/operations");
+    let invalid_operation = r#"{
+        "commit_id":"invalid-path",
+        "operation":{"kind":"create_directory","path":"relative"}
+    }"#;
+    let error = raw_agent()
+        .post(&operation_url)
+        .set("authorization", "Bearer test-token")
+        .set("content-type", "application/json")
+        .send_string(invalid_operation)
+        .expect_err("invalid operation path should answer 400");
+    expect_enveloped(error, 400, "invalid_request");
+    let error = raw_agent()
+        .post(&operation_url)
+        .set("content-type", "application/json")
+        .send_string(invalid_operation)
+        .expect_err("authorization should precede operation path decoding");
+    expect_enveloped(error, 401, "unauthorized");
 
-        // Grep scope paths make the same boundary move and retain the same
-        // invalid_request code.
-        let grep_url = format!("http://{addr}/v0/namespaces/demo/query/grep");
-        let invalid_grep = r#"{"pattern":"needle","path_prefix":"relative"}"#;
-        let error = raw_agent()
-            .post(&grep_url)
-            .set("authorization", "Bearer test-token")
-            .set("content-type", "application/json")
-            .send_string(invalid_grep)
-            .expect_err("invalid grep path should answer 400");
-        expect_enveloped(error, 400, "invalid_request");
-        let error = raw_agent()
-            .post(&grep_url)
-            .set("content-type", "application/json")
-            .send_string(invalid_grep)
-            .expect_err("authorization should precede grep path decoding");
-        expect_enveloped(error, 401, "unauthorized");
-    })
-    .await
-    .expect("join blocking task");
+    // Grep scope paths make the same boundary move and retain the same
+    // invalid_request code.
+    let grep_url = format!("http://{addr}/v0/namespaces/demo/query/grep");
+    let invalid_grep = r#"{"pattern":"needle","path_prefix":"relative"}"#;
+    let error = raw_agent()
+        .post(&grep_url)
+        .set("authorization", "Bearer test-token")
+        .set("content-type", "application/json")
+        .send_string(invalid_grep)
+        .expect_err("invalid grep path should answer 400");
+    expect_enveloped(error, 400, "invalid_request");
+    let error = raw_agent()
+        .post(&grep_url)
+        .set("content-type", "application/json")
+        .send_string(invalid_grep)
+        .expect_err("authorization should precede grep path decoding");
+    expect_enveloped(error, 401, "unauthorized");
 
     server.abort();
 }
@@ -1255,28 +1206,27 @@ async fn http_upload_body_over_the_limit_answers_content_too_large() {
         axum::serve(listener, router).await.expect("serve app");
     });
 
-    tokio::task::spawn_blocking(move || {
-        let client = Client::new(ClientConfig {
-            server_url: format!("http://{addr}"),
-            auth_token: Some("test-token".to_owned()),
-            request_timeout_ms: None,
-            disable_transient_retry: false,
-        })
-        .expect("valid client config");
-        let target = NamespacePath::parse("demo", "/big.bin").expect("target");
-        assert_api_error(
-            client.put_file_bytes(&target, &[0u8; 4096], &replace_file_options()),
-            413,
-            "content_too_large",
-            None,
-        );
-        // A body inside the limit still goes through on the same route.
-        client
-            .put_file_bytes(&target, &[0u8; 512], &replace_file_options())
-            .expect("small upload fits under the limit");
+    let client = Client::new(ClientConfig {
+        server_url: format!("http://{addr}"),
+        auth_token: Some("test-token".to_owned()),
+        request_timeout_ms: None,
+        disable_transient_retry: false,
     })
-    .await
-    .expect("join blocking task");
+    .expect("valid client config");
+    let target = NamespacePath::parse("demo", "/big.bin").expect("target");
+    assert_api_error(
+        client
+            .put_file_bytes(&target, &[0u8; 4096], &replace_file_options())
+            .await,
+        413,
+        "content_too_large",
+        None,
+    );
+    // A body inside the limit still goes through on the same route.
+    client
+        .put_file_bytes(&target, &[0u8; 512], &replace_file_options())
+        .await
+        .expect("small upload fits under the limit");
 
     server.abort();
 }
@@ -1287,57 +1237,54 @@ async fn capability_document_advertises_the_upload_limit() {
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let harness = start_server(store, temp_dir.path(), "server-writer").await;
 
-    tokio::task::spawn_blocking(move || {
-        let capabilities = harness
-            .client
-            .capabilities()
-            .expect("fetch capability document");
-        assert_eq!(
-            capabilities.limits.get("upload.max_content_bytes").copied(),
-            Some(256 * 1024 * 1024)
-        );
-        assert_eq!(
-            capabilities
-                .limits
-                .get("download.max_content_bytes")
-                .copied(),
-            Some(256 * 1024 * 1024)
-        );
-        // Every limit a request can trip is discoverable: transfer
-        // concurrency, the commit-body cap, and the grep scan budgets.
-        assert_eq!(
-            capabilities.limits.get("upload.max_concurrent").copied(),
-            Some(8)
-        );
-        assert_eq!(
-            capabilities.limits.get("download.max_concurrent").copied(),
-            Some(16)
-        );
-        assert_eq!(
-            capabilities.limits.get("commit.max_body_bytes").copied(),
-            Some(8 * 1024 * 1024)
-        );
-        assert_eq!(
-            capabilities.limits.get("commit.max_operations").copied(),
-            Some(4096)
-        );
-        assert_eq!(
-            capabilities
-                .limits
-                .get("query.grep.scan_budget_files")
-                .copied(),
-            Some(4096)
-        );
-        assert_eq!(
-            capabilities
-                .limits
-                .get("query.grep.tail_budget_files")
-                .copied(),
-            Some(512)
-        );
-    })
-    .await
-    .expect("join blocking task");
+    let capabilities = harness
+        .client
+        .capabilities()
+        .await
+        .expect("fetch capability document");
+    assert_eq!(
+        capabilities.limits.get("upload.max_content_bytes").copied(),
+        Some(256 * 1024 * 1024)
+    );
+    assert_eq!(
+        capabilities
+            .limits
+            .get("download.max_content_bytes")
+            .copied(),
+        Some(256 * 1024 * 1024)
+    );
+    // Every limit a request can trip is discoverable: transfer
+    // concurrency, the commit-body cap, and the grep scan budgets.
+    assert_eq!(
+        capabilities.limits.get("upload.max_concurrent").copied(),
+        Some(8)
+    );
+    assert_eq!(
+        capabilities.limits.get("download.max_concurrent").copied(),
+        Some(16)
+    );
+    assert_eq!(
+        capabilities.limits.get("commit.max_body_bytes").copied(),
+        Some(8 * 1024 * 1024)
+    );
+    assert_eq!(
+        capabilities.limits.get("commit.max_operations").copied(),
+        Some(4096)
+    );
+    assert_eq!(
+        capabilities
+            .limits
+            .get("query.grep.scan_budget_files")
+            .copied(),
+        Some(4096)
+    );
+    assert_eq!(
+        capabilities
+            .limits
+            .get("query.grep.tail_budget_files")
+            .copied(),
+        Some(512)
+    );
 
     harness.server.abort();
 }
@@ -1356,36 +1303,32 @@ async fn http_unknown_routes_and_methods_answer_in_envelope() {
         axum::serve(listener, router).await.expect("serve app");
     });
 
-    tokio::task::spawn_blocking(move || {
-        // Unknown path: in-envelope 404 instead of axum's empty body.
-        let error = raw_agent()
-            .get(&format!("http://{addr}/v0/nonexistent"))
-            .call()
-            .expect_err("unknown route should answer 404");
-        let ureq::Error::Status(status, response) = error else {
-            panic!("expected a status error for an unknown route");
-        };
-        assert_eq!(status, 404);
-        assert!(response.header("x-request-id").is_some());
-        let body = response.into_string().expect("read 404 body");
-        let body: serde_json::Value = serde_json::from_str(&body).expect("json 404 body");
-        assert_eq!(body["code"], "route_not_found");
+    // Unknown path: in-envelope 404 instead of axum's empty body.
+    let error = raw_agent()
+        .get(&format!("http://{addr}/v0/nonexistent"))
+        .call()
+        .expect_err("unknown route should answer 404");
+    let ureq::Error::Status(status, response) = error else {
+        panic!("expected a status error for an unknown route");
+    };
+    assert_eq!(status, 404);
+    assert!(response.header("x-request-id").is_some());
+    let body = response.into_string().expect("read 404 body");
+    let body: serde_json::Value = serde_json::from_str(&body).expect("json 404 body");
+    assert_eq!(body["code"], "route_not_found");
 
-        // Served path, unserved method: in-envelope 405.
-        let error = raw_agent()
-            .delete(&format!("http://{addr}/v0/capabilities"))
-            .call()
-            .expect_err("wrong method should answer 405");
-        let ureq::Error::Status(status, response) = error else {
-            panic!("expected a status error for a wrong method");
-        };
-        assert_eq!(status, 405);
-        let body = response.into_string().expect("read 405 body");
-        let body: serde_json::Value = serde_json::from_str(&body).expect("json 405 body");
-        assert_eq!(body["code"], "method_not_allowed");
-    })
-    .await
-    .expect("join blocking task");
+    // Served path, unserved method: in-envelope 405.
+    let error = raw_agent()
+        .delete(&format!("http://{addr}/v0/capabilities"))
+        .call()
+        .expect_err("wrong method should answer 405");
+    let ureq::Error::Status(status, response) = error else {
+        panic!("expected a status error for a wrong method");
+    };
+    assert_eq!(status, 405);
+    let body = response.into_string().expect("read 405 body");
+    let body: serde_json::Value = serde_json::from_str(&body).expect("json 405 body");
+    assert_eq!(body["code"], "method_not_allowed");
 
     server.abort();
 }
@@ -1406,41 +1349,37 @@ async fn http_commit_body_over_the_limit_answers_content_too_large() {
         axum::serve(listener, router).await.expect("serve app");
     });
 
-    tokio::task::spawn_blocking(move || {
-        // The limit rejects on size before any parsing, so an oversized
-        // JSON-shaped body is enough to exercise it.
-        let oversized = format!(r#"{{"filler":"{}"}}"#, "d".repeat(4096));
-        let error = raw_agent()
-            .post(&format!("http://{addr}/v0/namespaces/demo/commits"))
-            .set("content-type", "application/json")
-            .send_string(&oversized)
-            .expect_err("unauthorized commit should fail before buffering");
-        let ureq::Error::Status(status, _) = error else {
-            panic!("expected a status error for an unauthorized commit");
-        };
-        assert_eq!(status, 401);
+    // The limit rejects on size before any parsing, so an oversized
+    // JSON-shaped body is enough to exercise it.
+    let oversized = format!(r#"{{"filler":"{}"}}"#, "d".repeat(4096));
+    let error = raw_agent()
+        .post(&format!("http://{addr}/v0/namespaces/demo/commits"))
+        .set("content-type", "application/json")
+        .send_string(&oversized)
+        .expect_err("unauthorized commit should fail before buffering");
+    let ureq::Error::Status(status, _) = error else {
+        panic!("expected a status error for an unauthorized commit");
+    };
+    assert_eq!(status, 401);
 
-        let error = raw_agent()
-            .post(&format!("http://{addr}/v0/namespaces/demo/commits"))
-            .set("authorization", "Bearer test-token")
-            .set("content-type", "application/json")
-            .send_string(&oversized)
-            .expect_err("over-limit commit body should answer 413");
-        let ureq::Error::Status(status, response) = error else {
-            panic!("expected a status error for an over-limit commit body");
-        };
-        assert_eq!(status, 413);
-        let body = response.into_string().expect("read 413 body");
-        let body: serde_json::Value = serde_json::from_str(&body).expect("json 413 body");
-        assert_eq!(body["code"], "content_too_large");
-        let message = body["message"].as_str().expect("message string");
-        assert!(
-            message.contains("commit.max_body_bytes"),
-            "413 guidance should name the commit-body limit, got: {message}"
-        );
-    })
-    .await
-    .expect("join blocking task");
+    let error = raw_agent()
+        .post(&format!("http://{addr}/v0/namespaces/demo/commits"))
+        .set("authorization", "Bearer test-token")
+        .set("content-type", "application/json")
+        .send_string(&oversized)
+        .expect_err("over-limit commit body should answer 413");
+    let ureq::Error::Status(status, response) = error else {
+        panic!("expected a status error for an over-limit commit body");
+    };
+    assert_eq!(status, 413);
+    let body = response.into_string().expect("read 413 body");
+    let body: serde_json::Value = serde_json::from_str(&body).expect("json 413 body");
+    assert_eq!(body["code"], "content_too_large");
+    let message = body["message"].as_str().expect("message string");
+    assert!(
+        message.contains("commit.max_body_bytes"),
+        "413 guidance should name the commit-body limit, got: {message}"
+    );
 
     server.abort();
 }
@@ -1509,27 +1448,23 @@ async fn http_stale_revisions_cursor_answers_rebootstrap_required() {
     )
     .await;
 
-    tokio::task::spawn_blocking(move || {
-        let error = raw_agent()
-            .get(&format!(
-                "http://{addr}/v0/namespaces/demo/filesystem/revisions"
-            ))
-            .set("authorization", "Bearer test-token")
-            .query("path", "/notes/file.txt")
-            .query("limit", "1")
-            .query("cursor", &cursor)
-            .call()
-            .expect_err("stale cursor should answer rebootstrap_required");
-        let ureq::Error::Status(status, response) = error else {
-            panic!("expected a status error for a stale cursor");
-        };
-        assert_eq!(status, 409);
-        let body = response.into_string().expect("read stale-cursor body");
-        let body: serde_json::Value = serde_json::from_str(&body).expect("json stale-cursor body");
-        assert_eq!(body["code"], "rebootstrap_required");
-    })
-    .await
-    .expect("join blocking task");
+    let error = raw_agent()
+        .get(&format!(
+            "http://{addr}/v0/namespaces/demo/filesystem/revisions"
+        ))
+        .set("authorization", "Bearer test-token")
+        .query("path", "/notes/file.txt")
+        .query("limit", "1")
+        .query("cursor", &cursor)
+        .call()
+        .expect_err("stale cursor should answer rebootstrap_required");
+    let ureq::Error::Status(status, response) = error else {
+        panic!("expected a status error for a stale cursor");
+    };
+    assert_eq!(status, 409);
+    let body = response.into_string().expect("read stale-cursor body");
+    let body: serde_json::Value = serde_json::from_str(&body).expect("json stale-cursor body");
+    assert_eq!(body["code"], "rebootstrap_required");
 
     server.abort();
 }
@@ -1569,29 +1504,24 @@ async fn http_uploads_answer_server_busy_at_the_concurrency_cap() {
         disable_transient_retry: true,
     };
     let config_for_busy = client_config.clone();
-    tokio::task::spawn_blocking(move || {
-        let client = Client::new(config_for_busy).expect("valid client config");
-        let target = NamespacePath::parse("demo", "/one.bin").expect("target");
-        assert_api_error(
-            client.put_file_bytes(&target, &[0u8; 64], &replace_file_options()),
-            503,
-            "server_busy",
-            Some("the server is at its concurrency limit for proxied uploads; retry shortly"),
-        );
-    })
-    .await
-    .expect("join blocking task");
-
-    drop(held);
-    tokio::task::spawn_blocking(move || {
-        let client = Client::new(client_config).expect("valid client config");
-        let target = NamespacePath::parse("demo", "/one.bin").expect("target");
+    let client = Client::new(config_for_busy).expect("valid client config");
+    let target = NamespacePath::parse("demo", "/one.bin").expect("target");
+    assert_api_error(
         client
             .put_file_bytes(&target, &[0u8; 64], &replace_file_options())
-            .expect("a freed slot admits the upload");
-    })
-    .await
-    .expect("join blocking task");
+            .await,
+        503,
+        "server_busy",
+        Some("the server is at its concurrency limit for proxied uploads; retry shortly"),
+    );
+
+    drop(held);
+    let client = Client::new(client_config).expect("valid client config");
+    let target = NamespacePath::parse("demo", "/one.bin").expect("target");
+    client
+        .put_file_bytes(&target, &[0u8; 64], &replace_file_options())
+        .await
+        .expect("a freed slot admits the upload");
 
     server.abort();
 }
@@ -1628,21 +1558,18 @@ async fn client_transient_retry_rides_out_a_briefly_full_upload_slot() {
         drop(held);
     });
 
-    tokio::task::spawn_blocking(move || {
-        let client = Client::new(ClientConfig {
-            server_url: format!("http://{addr}"),
-            auth_token: Some("test-token".to_owned()),
-            request_timeout_ms: None,
-            disable_transient_retry: false,
-        })
-        .expect("valid client config");
-        let target = NamespacePath::parse("demo", "/retried.bin").expect("target");
-        client
-            .put_file_bytes(&target, &[0u8; 64], &replace_file_options())
-            .expect("transient retry rides out the briefly full slot");
+    let client = Client::new(ClientConfig {
+        server_url: format!("http://{addr}"),
+        auth_token: Some("test-token".to_owned()),
+        request_timeout_ms: None,
+        disable_transient_retry: false,
     })
-    .await
-    .expect("join blocking task");
+    .expect("valid client config");
+    let target = NamespacePath::parse("demo", "/retried.bin").expect("target");
+    client
+        .put_file_bytes(&target, &[0u8; 64], &replace_file_options())
+        .await
+        .expect("transient retry rides out the briefly full slot");
 
     server.abort();
 }
@@ -1688,30 +1615,23 @@ async fn http_content_reads_answer_server_busy_at_the_concurrency_cap() {
         disable_transient_retry: true,
     };
     let config_for_busy = client_config.clone();
-    tokio::task::spawn_blocking(move || {
-        let client = Client::new(config_for_busy).expect("valid client config");
-        let target = NamespacePath::parse("demo", "/note.txt").expect("target");
-        assert_api_error(
-            client.get_file_bytes(&target),
-            503,
-            "server_busy",
-            Some("the server is at its concurrency limit for proxied content reads; retry shortly"),
-        );
-    })
-    .await
-    .expect("join blocking task");
+    let client = Client::new(config_for_busy).expect("valid client config");
+    let target = NamespacePath::parse("demo", "/note.txt").expect("target");
+    assert_api_error(
+        client.get_file_bytes(&target).await,
+        503,
+        "server_busy",
+        Some("the server is at its concurrency limit for proxied content reads; retry shortly"),
+    );
 
     drop(held);
-    tokio::task::spawn_blocking(move || {
-        let client = Client::new(client_config).expect("valid client config");
-        let target = NamespacePath::parse("demo", "/note.txt").expect("target");
-        let bytes = client
-            .get_file_bytes(&target)
-            .expect("a freed slot admits the read");
-        assert_eq!(bytes, b"bounded");
-    })
-    .await
-    .expect("join blocking task");
+    let client = Client::new(client_config).expect("valid client config");
+    let target = NamespacePath::parse("demo", "/note.txt").expect("target");
+    let bytes = client
+        .get_file_bytes(&target)
+        .await
+        .expect("a freed slot admits the read");
+    assert_eq!(bytes, b"bounded");
 
     server.abort();
 }
@@ -1748,28 +1668,27 @@ async fn http_content_read_over_the_download_limit_answers_content_too_large() {
         axum::serve(listener, router).await.expect("serve app");
     });
 
-    tokio::task::spawn_blocking(move || {
-        let client = Client::new(ClientConfig {
-            server_url: format!("http://{addr}"),
-            auth_token: Some("test-token".to_owned()),
-            request_timeout_ms: None,
-            disable_transient_retry: false,
-        })
-        .expect("valid client config");
-        assert_api_error(
-            client.get_file_bytes(&NamespacePath::parse("demo", "/big.bin").expect("target")),
-            413,
-            "content_too_large",
-            None,
-        );
-        // Content inside the limit still reads through the same route.
-        let bytes = client
-            .get_file_bytes(&NamespacePath::parse("demo", "/small.bin").expect("target"))
-            .expect("small content fits under the limit");
-        assert_eq!(bytes.len(), 8);
+    let client = Client::new(ClientConfig {
+        server_url: format!("http://{addr}"),
+        auth_token: Some("test-token".to_owned()),
+        request_timeout_ms: None,
+        disable_transient_retry: false,
     })
-    .await
-    .expect("join blocking task");
+    .expect("valid client config");
+    assert_api_error(
+        client
+            .get_file_bytes(&NamespacePath::parse("demo", "/big.bin").expect("target"))
+            .await,
+        413,
+        "content_too_large",
+        None,
+    );
+    // Content inside the limit still reads through the same route.
+    let bytes = client
+        .get_file_bytes(&NamespacePath::parse("demo", "/small.bin").expect("target"))
+        .await
+        .expect("small content fits under the limit");
+    assert_eq!(bytes.len(), 8);
 
     server.abort();
 }
@@ -1792,17 +1711,13 @@ async fn readiness_answers_ready_then_shutting_down_once_admission_closes() {
 
     let ready_url = format!("http://{addr}/readiness");
     let url = ready_url.clone();
-    tokio::task::spawn_blocking(move || {
-        let body = raw_agent()
-            .get(&url)
-            .call()
-            .expect("an admitting server is ready")
-            .into_string()
-            .expect("readiness body");
-        assert_eq!(body, "ready");
-    })
-    .await
-    .expect("join blocking task");
+    let body = raw_agent()
+        .get(&url)
+        .call()
+        .expect("an admitting server is ready")
+        .into_string()
+        .expect("readiness body");
+    assert_eq!(body, "ready");
 
     state.publisher.close_admission();
 
@@ -1895,26 +1810,21 @@ async fn start_grep_error_server(
 }
 
 async fn assert_index_corrupt_and_core_read(harness: TestHarness, namespace_id: NamespaceId) {
-    tokio::task::spawn_blocking({
-        let client = harness.client.clone();
-        move || {
-            let result = client.grep(&namespace_id, &grep_error_request());
-            assert_grep_api_error_and_core_read(
-                &client,
-                &namespace_id,
-                result,
-                500,
-                ErrorCode::IndexCorrupt,
-                "disable and re-enable grep to rebuild it",
-            );
-        }
-    })
-    .await
-    .expect("join blocking task");
+    let client = &harness.client;
+    let result = client.grep(&namespace_id, &grep_error_request()).await;
+    assert_grep_api_error_and_core_read(
+        client,
+        &namespace_id,
+        result,
+        500,
+        ErrorCode::IndexCorrupt,
+        "disable and re-enable grep to rebuild it",
+    )
+    .await;
     harness.server.abort();
 }
 
-fn assert_grep_api_error_and_core_read<T: std::fmt::Debug>(
+async fn assert_grep_api_error_and_core_read<T: std::fmt::Debug>(
     client: &Client,
     namespace_id: &NamespaceId,
     result: Result<T, ClientError>,
@@ -1951,6 +1861,7 @@ fn assert_grep_api_error_and_core_read<T: std::fmt::Debug>(
     let target = NamespacePath::parse(namespace_id.as_str(), "/core.txt").expect("core target");
     let bytes = client
         .get_file_bytes(&target)
+        .await
         .expect("grep failure must not affect core reads");
     assert_eq!(bytes, b"core remains readable");
 }

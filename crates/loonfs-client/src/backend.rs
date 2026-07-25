@@ -331,31 +331,16 @@ impl RemoteBackend {
     }
 }
 
-impl RemoteBackend {
-    /// Runs one synchronous wire call on the blocking pool, so async hosts
-    /// never stall an executor worker on HTTP I/O.
-    async fn wire<T, F>(&self, call: F) -> Result<T, BackendError>
-    where
-        T: Send + 'static,
-        F: FnOnce(Client) -> crate::Result<T> + Send + 'static,
-    {
-        let client = self.client.clone();
-        tokio::task::spawn_blocking(move || call(client))
-            .await
-            .map_err(|error| BackendError::runtime_error(error.to_string()))?
-            .map_err(BackendError::from)
-    }
-}
-
 #[async_trait]
 impl Backend for RemoteBackend {
     async fn create_namespace(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<NamespaceSummary, BackendError> {
-        let namespace_id = namespace_id.clone();
-        self.wire(move |client| client.create_namespace(&namespace_id))
+        self.client
+            .create_namespace(namespace_id)
             .await
+            .map_err(BackendError::from)
     }
 
     async fn delete_namespace(
@@ -363,9 +348,10 @@ impl Backend for RemoteBackend {
         namespace_id: &NamespaceId,
         expected_head_seq: Option<ChangeSeq>,
     ) -> Result<DeleteNamespaceResponse, BackendError> {
-        let namespace_id = namespace_id.clone();
-        self.wire(move |client| client.delete_namespace(&namespace_id, expected_head_seq))
+        self.client
+            .delete_namespace(namespace_id, expected_head_seq)
             .await
+            .map_err(BackendError::from)
     }
 
     async fn fork_namespace(
@@ -373,29 +359,31 @@ impl Backend for RemoteBackend {
         source_namespace_id: &NamespaceId,
         new_namespace_id: &NamespaceId,
     ) -> Result<NamespaceSummary, BackendError> {
-        let source_namespace_id = source_namespace_id.clone();
-        let new_namespace_id = new_namespace_id.clone();
-        self.wire(move |client| client.fork_namespace(&source_namespace_id, &new_namespace_id))
+        self.client
+            .fork_namespace(source_namespace_id, new_namespace_id)
             .await
+            .map_err(BackendError::from)
     }
 
     async fn namespace_status(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<NamespaceStatusResponse, BackendError> {
-        let namespace_id = namespace_id.clone();
-        self.wire(move |client| client.namespace_status(&namespace_id))
+        self.client
+            .namespace_status(namespace_id)
             .await
+            .map_err(BackendError::from)
     }
 
     async fn list_path_entries_all(
         &self,
         spec: &NamespacePath,
     ) -> Result<Vec<AuthoritativePathEntry>, BackendError> {
-        let spec = spec.clone();
         Ok(self
-            .wire(move |client| client.list_path_entries_all(&spec))
-            .await?
+            .client
+            .list_path_entries_all(spec)
+            .await
+            .map_err(BackendError::from)?
             .entries)
     }
 
@@ -403,13 +391,17 @@ impl Backend for RemoteBackend {
         &self,
         spec: &NamespacePath,
     ) -> Result<AuthoritativePathEntry, BackendError> {
-        let spec = spec.clone();
-        self.wire(move |client| client.stat_path(&spec)).await
+        self.client
+            .stat_path(spec)
+            .await
+            .map_err(BackendError::from)
     }
 
     async fn get_file_bytes(&self, spec: &NamespacePath) -> Result<Vec<u8>, BackendError> {
-        let spec = spec.clone();
-        self.wire(move |client| client.get_file_bytes(&spec)).await
+        self.client
+            .get_file_bytes(spec)
+            .await
+            .map_err(BackendError::from)
     }
 
     async fn grep(
@@ -417,28 +409,30 @@ impl Backend for RemoteBackend {
         namespace_id: &NamespaceId,
         request: &GrepRequest,
     ) -> Result<GrepResponse, BackendError> {
-        let namespace_id = namespace_id.clone();
-        let request = request.clone();
-        self.wire(move |client| client.grep(&namespace_id, &request))
+        self.client
+            .grep(namespace_id, request)
             .await
+            .map_err(BackendError::from)
     }
 
     async fn enable_grep_index(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<EnableGrepIndexResponse, BackendError> {
-        let namespace_id = namespace_id.clone();
-        self.wire(move |client| client.enable_grep_index(&namespace_id))
+        self.client
+            .enable_grep_index(namespace_id)
             .await
+            .map_err(BackendError::from)
     }
 
     async fn disable_grep_index(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<DisableGrepIndexResponse, BackendError> {
-        let namespace_id = namespace_id.clone();
-        self.wire(move |client| client.disable_grep_index(&namespace_id))
+        self.client
+            .disable_grep_index(namespace_id)
             .await
+            .map_err(BackendError::from)
     }
 
     async fn get_file_revision_bytes(
@@ -446,9 +440,10 @@ impl Backend for RemoteBackend {
         spec: &NamespacePath,
         revision_no: RevisionNo,
     ) -> Result<Vec<u8>, BackendError> {
-        let spec = spec.clone();
-        self.wire(move |client| client.get_file_revision_bytes(&spec, revision_no))
+        self.client
+            .get_file_revision_bytes(spec, revision_no)
             .await
+            .map_err(BackendError::from)
     }
 
     async fn list_file_revisions_page(
@@ -457,10 +452,11 @@ impl Backend for RemoteBackend {
         limit: Option<u32>,
         cursor: Option<&str>,
     ) -> Result<ListFileRevisionsResponse, BackendError> {
-        let spec = spec.clone();
         let cursor = cursor.map(ToOwned::to_owned);
-        self.wire(move |client| client.list_file_revisions_page(&spec, limit, cursor.as_deref()))
+        self.client
+            .list_file_revisions_page(spec, limit, cursor.as_deref())
             .await
+            .map_err(BackendError::from)
     }
 
     async fn put_file_bytes(
@@ -469,11 +465,11 @@ impl Backend for RemoteBackend {
         bytes: &[u8],
         options: &PutFileOptions,
     ) -> Result<CommitResponse, BackendError> {
-        let spec = spec.clone();
         let bytes = bytes.to_vec();
-        let options = options.clone();
-        self.wire(move |client| client.put_file_bytes(&spec, &bytes, &options))
+        self.client
+            .put_file_bytes(spec, &bytes, options)
             .await
+            .map_err(BackendError::from)
     }
 
     async fn create_directory(
@@ -481,10 +477,10 @@ impl Backend for RemoteBackend {
         spec: &NamespacePath,
         options: &CreateDirectoryOptions,
     ) -> Result<CommitResponse, BackendError> {
-        let spec = spec.clone();
-        let options = options.clone();
-        self.wire(move |client| client.create_directory(&spec, &options))
+        self.client
+            .create_directory(spec, options)
             .await
+            .map_err(BackendError::from)
     }
 
     async fn delete_path(
@@ -492,10 +488,10 @@ impl Backend for RemoteBackend {
         spec: &NamespacePath,
         options: &DeleteOptions,
     ) -> Result<CommitResponse, BackendError> {
-        let spec = spec.clone();
-        let options = options.clone();
-        self.wire(move |client| client.delete_path(&spec, &options))
+        self.client
+            .delete_path(spec, options)
             .await
+            .map_err(BackendError::from)
     }
 
     async fn move_path(
@@ -505,11 +501,11 @@ impl Backend for RemoteBackend {
         behavior: DestinationBehavior,
         commit_id: Option<CommitId>,
     ) -> Result<CommitResponse, BackendError> {
-        let from = from.clone();
-        let to = to.clone();
         let options = MutationOptions { commit_id };
-        self.wire(move |client| client.move_path(&from, &to, behavior, &options))
+        self.client
+            .move_path(from, to, behavior, &options)
             .await
+            .map_err(BackendError::from)
     }
 
     async fn copy_path(
@@ -519,11 +515,11 @@ impl Backend for RemoteBackend {
         behavior: DestinationBehavior,
         commit_id: Option<CommitId>,
     ) -> Result<CommitResponse, BackendError> {
-        let from = from.clone();
-        let to = to.clone();
         let options = MutationOptions { commit_id };
-        self.wire(move |client| client.copy_path(&from, &to, behavior, &options))
+        self.client
+            .copy_path(from, to, behavior, &options)
             .await
+            .map_err(BackendError::from)
     }
 
     async fn restore_file_revision(
@@ -532,10 +528,11 @@ impl Backend for RemoteBackend {
         source_revision_no: RevisionNo,
         commit_id: Option<CommitId>,
     ) -> Result<CommitResponse, BackendError> {
-        let spec = spec.clone();
         let options = MutationOptions { commit_id };
-        self.wire(move |client| client.restore_file_revision(&spec, source_revision_no, &options))
+        self.client
+            .restore_file_revision(spec, source_revision_no, &options)
             .await
+            .map_err(BackendError::from)
     }
 
     async fn undelete(
@@ -545,10 +542,11 @@ impl Backend for RemoteBackend {
         deleted_at_seq: ChangeSeq,
         commit_id: Option<CommitId>,
     ) -> Result<CommitResponse, BackendError> {
-        let spec = spec.clone();
         let options = MutationOptions { commit_id };
-        self.wire(move |client| client.undelete(&spec, inode_id, deleted_at_seq, &options))
+        self.client
+            .undelete(spec, inode_id, deleted_at_seq, &options)
             .await
+            .map_err(BackendError::from)
     }
 
     async fn create_checkpoint(
@@ -556,9 +554,10 @@ impl Backend for RemoteBackend {
         namespace_id: &NamespaceId,
         request: CreateCheckpointRequest,
     ) -> Result<CreateCheckpointResponse, BackendError> {
-        let namespace_id = namespace_id.clone();
-        self.wire(move |client| client.create_checkpoint(&namespace_id, &request))
+        self.client
+            .create_checkpoint(namespace_id, &request)
             .await
+            .map_err(BackendError::from)
     }
 
     async fn release_checkpoint(
@@ -566,28 +565,30 @@ impl Backend for RemoteBackend {
         namespace_id: &NamespaceId,
         checkpoint_id: &CheckpointId,
     ) -> Result<ReleaseCheckpointResponse, BackendError> {
-        let namespace_id = namespace_id.clone();
-        let checkpoint_id = checkpoint_id.clone();
-        self.wire(move |client| client.release_checkpoint(&namespace_id, &checkpoint_id))
+        self.client
+            .release_checkpoint(namespace_id, checkpoint_id)
             .await
+            .map_err(BackendError::from)
     }
 
     async fn flush_wal(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<FlushWalResponse, BackendError> {
-        let namespace_id = namespace_id.clone();
-        self.wire(move |client| client.flush_wal(&namespace_id))
+        self.client
+            .flush_wal(namespace_id)
             .await
+            .map_err(BackendError::from)
     }
 
     async fn advance_retention_floor(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<AdvanceRetentionResponse, BackendError> {
-        let namespace_id = namespace_id.clone();
-        self.wire(move |client| client.advance_retention_floor(&namespace_id))
+        self.client
+            .advance_retention_floor(namespace_id)
             .await
+            .map_err(BackendError::from)
     }
 
     async fn maintenance_step(
@@ -595,9 +596,10 @@ impl Backend for RemoteBackend {
         namespace_id: &NamespaceId,
         request: MaintenanceStepRequest,
     ) -> Result<MaintenanceStepResponse, BackendError> {
-        let namespace_id = namespace_id.clone();
-        self.wire(move |client| client.maintenance_step(&namespace_id, &request))
+        self.client
+            .maintenance_step(namespace_id, &request)
             .await
+            .map_err(BackendError::from)
     }
 
     async fn gc_namespace(
@@ -605,18 +607,20 @@ impl Backend for RemoteBackend {
         namespace_id: &NamespaceId,
         request: GcRequest,
     ) -> Result<GcResponse, BackendError> {
-        let namespace_id = namespace_id.clone();
-        self.wire(move |client| client.gc_namespace(&namespace_id, &request))
+        self.client
+            .gc_namespace(namespace_id, &request)
             .await
+            .map_err(BackendError::from)
     }
 
     async fn repair_namespace(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<RepairNamespaceResponse, BackendError> {
-        let namespace_id = namespace_id.clone();
-        self.wire(move |client| client.repair_namespace(&namespace_id))
+        self.client
+            .repair_namespace(namespace_id)
             .await
+            .map_err(BackendError::from)
     }
 
     async fn list_changes(
@@ -625,9 +629,10 @@ impl Backend for RemoteBackend {
         after_seq: ChangeSeq,
         limit: Option<u32>,
     ) -> Result<ChangesResponse, BackendError> {
-        let namespace_id = namespace_id.clone();
-        self.wire(move |client| client.list_changes(&namespace_id, after_seq, limit))
+        self.client
+            .list_changes(namespace_id, after_seq, limit)
             .await
+            .map_err(BackendError::from)
     }
 }
 
