@@ -197,6 +197,68 @@ fn embedded_profile_filesystem_flow_works_end_to_end() {
 }
 
 #[test]
+fn concurrent_embedded_puts_land_or_report_the_fence() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+
+    let mut payloads = Vec::new();
+    for index in 0..4 {
+        let path = harness.temp_dir.path().join(format!("payload-{index}.txt"));
+        fs::write(&path, format!("payload {index}")).expect("write payload");
+        payloads.push(path);
+    }
+
+    // Four simultaneous processes: each is its own writer session, so they
+    // fence each other on acquisition. Fencing is terminal — no silent
+    // reacquisition — so the contract is honesty, not recovery: every
+    // process either lands its put or reports `writer_fenced`, the last
+    // acquirer always lands, and a fenced put commits nothing.
+    let children: Vec<Child> = payloads
+        .iter()
+        .enumerate()
+        .map(|(index, path)| {
+            Command::new(loon_binary_path())
+                .env("HOME", &harness.home_dir)
+                .args([
+                    "--json",
+                    "put",
+                    path.to_str().expect("utf-8 path"),
+                    &format!("/docs/file-{index}.txt"),
+                ])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("spawn loon put")
+        })
+        .collect();
+    let mut landed = Vec::new();
+    for (index, child) in children.into_iter().enumerate() {
+        let output = child.wait_with_output().expect("join loon put");
+        if output.status.success() {
+            landed.push(index);
+        } else {
+            assert_eq!(json_error(&output)["code"], "writer_fenced");
+        }
+    }
+    assert!(
+        !landed.is_empty(),
+        "the last writer to acquire faces no later fence and must land"
+    );
+
+    for index in 0..4 {
+        let stat = harness.run(&["--json", "stat", &format!("/docs/file-{index}.txt")]);
+        if landed.contains(&index) {
+            assert_success(&stat);
+        } else {
+            assert_failure(&stat);
+            assert_eq!(json_error(&stat)["code"], "path_not_found");
+        }
+    }
+}
+
+#[test]
 fn embedded_profile_namespace_fork_reads_shared_content_and_diverges() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");

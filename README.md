@@ -38,7 +38,7 @@ loon use {namespace_id}
 
 ## Running a server
 
-Embedded mode gives one process at a time direct object-store access. To share a deployment across machines and let many clients write concurrently, run the reference server and point remote profiles at it:
+Embedded mode gives one process at a time direct object-store access. Concurrent `loon` invocations against one namespace contend for the writer role: whichever acquires it last wins, and a command that loses fails with `writer_fenced`, naming both sessions. A fenced command commits nothing, so rerunning it is always safe — but fencing is a stop signal, not a retry loop, so put bulk work in one process or run the server for concurrent writers. To share a deployment across machines and let many clients write concurrently, run the reference server and point remote profiles at it:
 
 ```bash
 cargo build -p loonfs-server

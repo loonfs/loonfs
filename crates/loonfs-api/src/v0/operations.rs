@@ -56,6 +56,10 @@ pub struct ErrorDetails {
     /// Epoch the failing writer session held when it was displaced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fenced_epoch: Option<WriterEpoch>,
+    /// Session id the fenced writer held. Distinguishes two processes that
+    /// share one writer id (the CLI defaults `writer_id` to the hostname).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fenced_writer_session: Option<String>,
     /// Epoch that currently owns the namespace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_writer_epoch: Option<WriterEpoch>,
@@ -63,6 +67,10 @@ pub struct ErrorDetails {
     /// recorded one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_writer: Option<String>,
+    /// Session id recorded by the current epoch's acquirer, when the head
+    /// recorded one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_writer_session: Option<String>,
     /// Inode the failed precondition or operation targeted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inode_id: Option<InodeId>,
