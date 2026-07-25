@@ -262,7 +262,7 @@ async fn assert_searchable(store: &SharedObjectStore, namespace_id: &NamespaceId
         catalog: None,
     };
     let view = engine
-        .load_grep_view_with_runtime_context(&context)
+        .load_grep_view(&context)
         .await
         .expect("load grep view");
     let service = GrepService::new();

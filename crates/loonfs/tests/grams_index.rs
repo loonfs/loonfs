@@ -10,7 +10,7 @@ use loonfs::{
     ChangeSeq, CommitId, CommitOp, CommitRequest, CreateNamespaceOptions, ErrorCode, FsAdmin,
     FsReader, FsWriter, GrepRequest, InodeId, NamespaceId, PutFileOptions, SharedObjectStore,
 };
-use loonfs_api::decode_grep_cursor;
+use loonfs_api::{decode_cursor, GrepPageCursor};
 use loonfs_grep::codec::INDEX_GRAMS_MAX_FILE_BYTES;
 use loonfs_grep::{GramIndexBuildPolicy, GrepBuildOutcome, GrepWorker};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -1260,7 +1260,7 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
 
     // The cursor already stands past the oversized file: fully scanned,
     // never to be re-verified by a later page.
-    let cursor = decode_grep_cursor(&cursor_token).expect("decode grep cursor");
+    let cursor: GrepPageCursor = decode_cursor(&cursor_token).expect("decode grep cursor");
     assert!(
         cursor.last_inode_id > page_one.matches[0].inode_id,
         "the cursor must have advanced past the oversized candidate"

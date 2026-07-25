@@ -83,10 +83,7 @@ impl ServiceHarness {
 
     async fn result(&self, grep_request: &GrepRequest) -> loonfs_grep::Result<GrepResponse> {
         let context = read_context(&self.store, &self.namespace_id).await;
-        let view = self
-            .engine
-            .load_grep_view_with_runtime_context(&context)
-            .await?;
+        let view = self.engine.load_grep_view(&context).await?;
         let snapshot =
             GrepIndexSnapshot::from_grep_root(&*self.store, &self.namespace_id, &self.service)
                 .await;

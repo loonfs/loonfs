@@ -889,13 +889,22 @@ impl NamespacePublisher {
 
 /// Keeps a namespace publisher serviceable if its publish task dies.
 ///
-/// The publish task owns the taken batch: if it panics mid-publish, the
-/// taken requests' waiters would otherwise wait forever, and the stuck
-/// `publishing` flag would stop every future submit from spawning a new
-/// task. On abnormal exit this guard fails the taken waiters with an
-/// unknown outcome (the panic may have struck before or after the head
-/// compare-and-swap), clears the flag, and restarts publication for any
-/// batch that queued up behind the dead task.
+/// Deliberate v0 scope, not defensive habit. This publisher is the only path
+/// by which its namespace accepts writes, so a panicked task would otherwise
+/// leave that namespace unwritable until the process restarts: the taken
+/// requests' waiters would hang forever, and the stuck `publishing` flag
+/// would stop every later submit from spawning a replacement task. On
+/// abnormal exit this guard fails the taken waiters with an unknown outcome
+/// (the panic may have struck before or after the head compare-and-swap),
+/// clears the flag, and restarts publication for any batch that queued up
+/// behind the dead task.
+///
+/// `commit_outcome_unknown` is an answer callers already know how to resolve
+/// — retry with the same commit id and the durable receipt replays — which is
+/// why converting a wedged namespace into that error is worth the machinery.
+/// It is also why [`RegistryShared::lock_state`] and this guard recover a
+/// poisoned lock instead of propagating: the guard runs from a drop that may
+/// already be unwinding a panic, where a second panic aborts the process.
 struct PublishAbortGuard {
     publisher: NamespacePublisher,
     taken_commit_ids: Vec<CommitId>,

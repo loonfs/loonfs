@@ -118,11 +118,11 @@ async fn reads_commits_and_change_feed_never_list() {
 
     let ctx = read_context(&store, &namespace_id).await;
     engine
-        .resolve_path_with_runtime_context("/docs/hello.txt", &ctx)
+        .resolve_path("/docs/hello.txt", &ctx)
         .await
         .expect("stat");
     engine
-        .list_path_page_with_runtime_context(
+        .list_path_page(
             "/docs",
             loonfs_api::PageRequest {
                 limit: loonfs_test_support::ids::page_limit(1024),
@@ -133,7 +133,7 @@ async fn reads_commits_and_change_feed_never_list() {
         .await
         .expect("list directory");
     let bytes = engine
-        .read_file_with_runtime_context("/docs/hello.txt", &ctx, None)
+        .read_file("/docs/hello.txt", &ctx, None)
         .await
         .expect("read");
     assert_eq!(bytes.bytes, b"hello\n");

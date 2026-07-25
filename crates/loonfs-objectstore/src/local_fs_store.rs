@@ -7,7 +7,10 @@
 //! are deliberately relaxed (content-hash etags, whole-file reads,
 //! whole-tree listings) and are not optimization targets.
 
-use crate::keyspace::validate_segments;
+use crate::keyspace::{
+    normalize_key_prefix, scope_list_prefix, scope_object_key, unscope_listed_key,
+    validate_segments,
+};
 use crate::object_store::Result;
 use crate::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
 use async_trait::async_trait;
@@ -33,6 +36,8 @@ const STORE_LOCK_FILE_NAME: &str = ".loonfs-store.lock";
 #[derive(Debug)]
 pub struct LocalFsStore {
     root: PathBuf,
+    /// Logical prefix every key is confined beneath, or `None` for the root.
+    key_prefix: Option<String>,
     write_lock: Mutex<()>,
 }
 
@@ -43,6 +48,12 @@ impl LocalFsStore {
     /// does not claim atomic rename-replace support, or when the root cannot
     /// be created.
     pub fn new(root: impl Into<PathBuf>) -> Result<Self> {
+        Self::with_key_prefix(root, None)
+    }
+
+    /// Opens a local store whose keys are confined beneath `key_prefix`,
+    /// matching how the provider adapters scope theirs.
+    pub fn with_key_prefix(root: impl Into<PathBuf>, key_prefix: Option<&str>) -> Result<Self> {
         require_atomic_rename_replace()?;
         let root = root.into();
         std::fs::create_dir_all(&root).map_err(|err| {
@@ -53,6 +64,7 @@ impl LocalFsStore {
         })?;
         Ok(Self {
             root,
+            key_prefix: normalize_key_prefix(key_prefix)?,
             write_lock: Mutex::new(()),
         })
     }
@@ -320,40 +332,62 @@ impl LocalFsStore {
     }
 }
 
+impl LocalFsStore {
+    /// Confines one caller key beneath the configured prefix.
+    fn scoped(&self, key: &str) -> Result<String> {
+        scope_object_key(self.key_prefix.as_deref(), key)
+    }
+}
+
 #[async_trait]
 impl ObjectStore for LocalFsStore {
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>> {
-        self.head_object(key).await
+        self.head_object(&self.scoped(key)?).await
     }
 
     async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>> {
-        self.get_with_metadata_object(key).await
+        self.get_with_metadata_object(&self.scoped(key)?).await
     }
 
     async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Option<Bytes>> {
-        self.get_object(key, range)
+        self.get_object(&self.scoped(key)?, range)
             .await
             .map(|maybe| maybe.map(Bytes::from))
     }
 
     async fn put(&self, key: &str, bytes: Bytes, mode: PutMode) -> Result<ObjectMetadata> {
-        self.put_object(key, &bytes, mode).await
+        self.put_object(&self.scoped(key)?, &bytes, mode).await
     }
 
     async fn delete(&self, key: &str) -> Result<()> {
-        self.delete_object(key).await
+        self.delete_object(&self.scoped(key)?).await
     }
 
     fn list_prefix_stream(&self, prefix: &str) -> BoxStream<'static, Result<String>> {
+        let scoped = match scope_list_prefix(self.key_prefix.as_deref(), prefix) {
+            Ok(scoped) => scoped,
+            Err(err) => return stream::once(async { Err(err) }).boxed(),
+        };
         let root = self.root.clone();
-        let prefix = prefix.to_owned();
+        let key_prefix = self.key_prefix.clone();
         Box::pin(
-            stream::once(async move { list_prefix_for_root(root, prefix).await }).flat_map(
-                |result| match result {
+            stream::once(async move { list_prefix_for_root(root, scoped).await })
+                .flat_map(|result| match result {
                     Ok(keys) => stream::iter(keys.into_iter().map(Ok)).boxed(),
                     Err(err) => stream::once(async { Err(err) }).boxed(),
-                },
-            ),
+                })
+                .filter_map(move |result| {
+                    let key_prefix = key_prefix.clone();
+                    async move {
+                        match result {
+                            Ok(key) => match key_prefix.as_deref() {
+                                Some(prefix) => unscope_listed_key(Some(prefix), &key).map(Ok),
+                                None => Some(Ok(key)),
+                            },
+                            Err(err) => Some(Err(err)),
+                        }
+                    }
+                }),
         )
     }
 }

@@ -205,11 +205,11 @@ impl TestRuntime {
 }
 
 pub(crate) fn decode_directory_page_cursor(value: &str) -> DirectoryPageCursor {
-    loonfs_api::decode_directory_cursor(value).expect("decode directory cursor")
+    loonfs_api::decode_cursor(value).expect("decode directory cursor")
 }
 
 pub(crate) fn decode_file_revisions_page_cursor(value: &str) -> loonfs::FileRevisionsPageCursor {
-    loonfs_api::decode_file_revisions_cursor(value).expect("decode file revisions cursor")
+    loonfs_api::decode_cursor(value).expect("decode file revisions cursor")
 }
 
 pub(crate) trait RuntimeTestExt {

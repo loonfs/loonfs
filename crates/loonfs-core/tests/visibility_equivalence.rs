@@ -194,7 +194,7 @@ impl VisibilityHarness {
     async fn inode_id(&self, path: &str) -> InodeId {
         let context = self.read_context().await;
         self.engine
-            .resolve_path_with_runtime_context(path, &context)
+            .resolve_path(path, &context)
             .await
             .expect("resolve tracked path")
             .inode_id
@@ -204,7 +204,7 @@ impl VisibilityHarness {
         let context = self.read_context().await;
         let error = self
             .engine
-            .resolve_path_with_runtime_context(path, &context)
+            .resolve_path(path, &context)
             .await
             .expect_err("path should be hidden");
         assert_eq!(error.code(), ErrorCode::PathNotFound);
@@ -218,7 +218,7 @@ impl VisibilityHarness {
     ) {
         let view = self
             .engine
-            .load_grep_view_with_runtime_context(context)
+            .load_grep_view(context)
             .await
             .expect("load grep visibility view");
 
@@ -251,7 +251,7 @@ impl VisibilityHarness {
             if let Some(path) = derived_path {
                 let resolved = self
                     .engine
-                    .resolve_path_with_runtime_context(&path, context)
+                    .resolve_path(&path, context)
                     .await
                     .expect("forward path resolution must confirm a root-reaching chain");
                 assert_eq!(
@@ -990,7 +990,7 @@ async fn inode_revision_reads_remain_identity_addressed_after_visibility_is_lost
 
     let revisions = harness
         .engine
-        .list_file_revisions_for_inode_page_with_runtime_context(
+        .list_file_revisions_for_inode_page(
             inode_id,
             PageRequest {
                 limit: loonfs_test_support::ids::page_limit(32),
@@ -1010,7 +1010,7 @@ async fn inode_revision_reads_remain_identity_addressed_after_visibility_is_lost
     );
     let bytes = harness
         .engine
-        .read_file_revision_for_inode_with_runtime_context(inode_id, RevisionNo(1), &context, None)
+        .read_file_revision_for_inode(inode_id, RevisionNo(1), &context, None)
         .await
         .expect("retained revision bytes remain readable by inode");
     assert_eq!(bytes, b"revision one");

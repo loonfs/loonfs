@@ -21,7 +21,7 @@ use loonfs::{
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
 use loonfs_api::{
-    decode_directory_cursor, decode_file_revisions_cursor,
+    decode_cursor,
     v0::{
         ChangesResponse, CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse,
         CommitSubmissionRequest, ValidatedContentToken,
@@ -836,7 +836,7 @@ fn decode_directory_page_cursor(
 ) -> Result<Option<DirectoryPageCursor>, ApiResponseError> {
     cursor
         .as_deref()
-        .map(decode_directory_cursor)
+        .map(decode_cursor)
         .transpose()
         .map_err(page_cursor_response_error)
 }
@@ -846,7 +846,7 @@ fn decode_file_revisions_page_cursor(
 ) -> Result<Option<FileRevisionsPageCursor>, ApiResponseError> {
     cursor
         .as_deref()
-        .map(decode_file_revisions_cursor)
+        .map(decode_cursor)
         .transpose()
         .map_err(page_cursor_response_error)
 }

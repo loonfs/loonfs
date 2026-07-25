@@ -18,8 +18,8 @@ use loonfs_api::wire::hex::hex_decode_bytes;
 use loonfs_api::wire::sst_blocks::{decode_filter_block, index_blocks_for_key_range, BlockHandle};
 use loonfs_api::wire::wal::WalDelta;
 use loonfs_api::{
-    decode_grep_cursor, encode_grep_cursor, AbsolutePath, ChangeSeq, ErrorCode, GrepMatch,
-    GrepPageCursor, GrepRequest, GrepResponse, InodeId, NamespaceId, RevisionNo,
+    decode_cursor, encode_cursor, AbsolutePath, ChangeSeq, ErrorCode, GrepMatch, GrepPageCursor,
+    GrepRequest, GrepResponse, InodeId, NamespaceId, RevisionNo,
 };
 use loonfs_core::content::read_durable_content_bytes;
 use loonfs_core::grep::{
@@ -672,7 +672,7 @@ impl GrepService {
         let fingerprint = request.fingerprint();
         let resume = match &request.cursor {
             Some(cursor) => {
-                let cursor = decode_grep_cursor(cursor)
+                let cursor: GrepPageCursor = decode_cursor(cursor)
                     .map_err(|error| CoreError::InvalidCursor(error.to_string()))?;
                 if cursor.fingerprint != fingerprint {
                     return Err(CoreError::InvalidCursor(
@@ -977,7 +977,7 @@ impl GrepService {
                 )
             })?;
             Some(
-                encode_grep_cursor(&GrepPageCursor {
+                encode_cursor(&GrepPageCursor {
                     head_seq: view.head().seq,
                     last_inode_id,
                     last_byte_offset,

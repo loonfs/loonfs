@@ -217,9 +217,7 @@ async fn warm_phase_request_accounting() {
         listed += page.entries.len();
         match page.next_cursor.as_deref() {
             Some(encoded) => {
-                cursor = Some(
-                    loonfs_api::decode_directory_cursor(encoded).expect("valid directory cursor"),
-                );
+                cursor = Some(loonfs_api::decode_cursor(encoded).expect("valid directory cursor"));
             }
             None => break,
         }
