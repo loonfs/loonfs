@@ -58,6 +58,7 @@ async fn run_admin_step(
     let context = resolve_command_context(kind, &args.target).await?;
     let request = MaintenanceStepRequest {
         max_wal_tail_segments: args.max_wal_tail_segments,
+        retention: args.retention.then_some(true),
         gc: args.gc.then(GcRequest::default),
         only: None,
     };
@@ -97,6 +98,7 @@ async fn run_admin_gc(
                 &context.namespace,
                 MaintenanceStepRequest {
                     max_wal_tail_segments: None,
+                    retention: None,
                     gc: Some(request.clone()),
                     only: Some(MaintenanceStepKind::Gc),
                 },
@@ -203,6 +205,7 @@ async fn run_admin_flush(
                 // The WAL flush an operator asks for explicitly runs whatever
                 // the tail length, so the threshold drops to one segment.
                 max_wal_tail_segments: Some(1),
+                retention: None,
                 gc: None,
                 only: Some(MaintenanceStepKind::WalFlush),
             },
@@ -230,6 +233,7 @@ async fn run_admin_retention_advance(
             &context.namespace,
             MaintenanceStepRequest {
                 max_wal_tail_segments: None,
+                retention: None,
                 gc: None,
                 only: Some(MaintenanceStepKind::Retention),
             },

@@ -323,6 +323,7 @@ async fn http_admin_maintenance_step_reports_outcomes_not_errors() {
             &namespace,
             &loonfs_api::MaintenanceStepRequest {
                 max_wal_tail_segments: Some(1),
+                retention: None,
                 gc: Some(loonfs_api::GcRequest::default()),
                 only: None,
             },

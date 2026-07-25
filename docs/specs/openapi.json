@@ -4694,7 +4694,7 @@
       },
       "MaintenanceStepRequest": {
         "type": "object",
-        "description": "Options for one explicit maintenance step. Absent fields use the\nserver's defaults; garbage collection runs only when `gc` is present.",
+        "description": "Options for one explicit maintenance step. Absent fields use the\nserver's defaults; retention advance runs only when `retention` is true\nand garbage collection only when `gc` is present.",
         "properties": {
           "gc": {
             "oneOf": [
@@ -4723,9 +4723,16 @@
               },
               {
                 "$ref": "#/components/schemas/MaintenanceStepKind",
-                "description": "Restrict the step to one sub-step. Absent runs the whole step: WAL\nflush, then reorganization, then retention, then garbage collection\nif `gc` opted in."
+                "description": "Restrict the step to one sub-step. Absent runs the whole step: WAL\nflush, then reorganization, then retention if `retention` opted in,\nthen garbage collection if `gc` opted in."
               }
             ]
+          },
+          "retention": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Advance the retention floor to the flushed manifest head. Nothing\nsurrenders replay history unless this is true or `only` selects\n`retention`."
           }
         }
       },

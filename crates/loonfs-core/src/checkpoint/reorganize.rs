@@ -5,12 +5,12 @@
 //! follows the WAL delta, never the namespace. Folding those L0 runs into
 //! the base happens here instead, one **family group** at a time: the
 //! group's rows are merged from an oldest-first, budgeted subset of complete
-//! runs, rows below the retention floor are dropped, new base segments are
-//! written, and a manifest publishes that swaps just those references.
-//! Families whose retention rules read each other compact together — bind,
-//! child bind, and unbind rows form one group; revisions and their descending
-//! index another — so index parity and the drop invariants hold within every
-//! unit.
+//! runs, rows no retained sequence can observe are dropped, new base
+//! segments are written, and a manifest publishes that swaps just those
+//! references. Families whose rows must stay mutually consistent compact
+//! together — bind, child bind, and unbind rows form one group because their
+//! drop rules read each other; revisions travel with their descending index
+//! so index parity holds within every unit.
 //!
 //! There is no progress record: each unit ends in a durable manifest, so a
 //! crashed or interrupted reorganization resumes by reading the live
@@ -51,10 +51,10 @@ use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::ObjectStore;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Families whose rows merge in one reorganization unit. Groupings follow
-/// the retention rules in `drop_rows_below_retention_floor`: families that
-/// read each other's rows to decide what to drop must compact together, and
-/// a secondary index always travels with its canonical family.
+/// Families whose rows merge in one reorganization unit. Families that read
+/// each other's rows to decide what to drop (see
+/// `drop_rows_below_retention_floor`) must compact together, and a secondary
+/// index always travels with its canonical family.
 const REORGANIZE_FAMILY_GROUPS: [&[MetadataTableFamily]; 5] = [
     &[
         MetadataTableFamily::DirentryBinds,
@@ -539,60 +539,15 @@ async fn write_reorganized_manifest<S: ObjectStore + ?Sized>(
 }
 
 /// Drops rows that no retained sequence can observe (format spec,
-/// "Compaction"). Conservative subset: superseded revisions, superseded or
-/// unbound bindings, and spent unbind markers at or below the retention
-/// floor. Tombstone and inode rows are always retained until
-/// reachability-based dropping is designed.
+/// "Compaction"). Conservative subset: superseded or unbound bindings and
+/// spent unbind markers at or below the retention floor. Revision rows are
+/// never dropped — file history is durable data retained independently of
+/// the replay floor — and tombstone and inode rows are always retained
+/// until reachability-based dropping is designed.
 pub(super) fn drop_rows_below_retention_floor(
     rows_by_family: &mut BTreeMap<MetadataTableFamily, Vec<MetadataRow>>,
     retention_floor_seq: ChangeSeq,
 ) -> Result<()> {
-    // The latest revision at or below the floor is what the floor itself
-    // observes; every older one is superseded at every retained sequence.
-    let mut latest_revision_at_floor = BTreeMap::new();
-    for row in rows_by_family
-        .get(&MetadataTableFamily::Revisions)
-        .into_iter()
-        .flatten()
-    {
-        if let MetadataRow::Revision {
-            inode_id,
-            revision_no,
-            committed_seq,
-            ..
-        } = row
-        {
-            if *committed_seq <= retention_floor_seq {
-                let latest = latest_revision_at_floor
-                    .entry(*inode_id)
-                    .or_insert(*revision_no);
-                if *revision_no > *latest {
-                    *latest = *revision_no;
-                }
-            }
-        }
-    }
-    let retain_revision = |row: &MetadataRow| match row {
-        MetadataRow::Revision {
-            inode_id,
-            revision_no,
-            committed_seq,
-            ..
-        } => {
-            *committed_seq > retention_floor_seq
-                || latest_revision_at_floor.get(inode_id) == Some(revision_no)
-        }
-        _ => true,
-    };
-    for family in [
-        MetadataTableFamily::Revisions,
-        MetadataTableFamily::RevisionsByInodeDesc,
-    ] {
-        if let Some(rows) = rows_by_family.get_mut(&family) {
-            rows.retain(retain_revision);
-        }
-    }
-
     // At the floor only the latest non-unbound bind per (parent, name) slot
     // is visible; an unbind marker at or below the floor has finished its
     // work once every bind it covered is gone.

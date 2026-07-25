@@ -437,9 +437,10 @@ A representative v0 binding is shown below.
 One maintenance step does four things in order: folds the visible WAL tail
 into metadata tables and advances the metadata root once the tail reaches
 `max_wal_tail_segments`, merges one bounded metadata reorganization unit,
-advances the retention floor behind a verified checkpoint, and — only when
-the body carries `gc` — runs one bounded garbage-collection pass. None of it
-creates a checkpoint record.
+and — each strictly opt-in — advances the retention floor (only when the
+body carries `retention: true`) and runs one bounded garbage-collection
+pass (only when the body carries `gc`). None of it creates a checkpoint
+record.
 
 Each part reports separately in the response: `wal_flush`, `reorganize`,
 `retention_floor_seq`, and `gc`. Races and supersessions are outcomes, not
@@ -448,7 +449,9 @@ to see whether the floor moved.
 
 The body is optional. `max_wal_tail_segments` overrides the flush threshold,
 and a value above the write-rejection threshold is rejected as
-`invalid_request`. `gc` opts into sweeping and overrides
+`invalid_request`. `retention: true` opts into advancing the retention
+floor to the flushed manifest head; nothing surrenders replay history
+unless it is present. `gc` opts into sweeping and overrides
 `grace_window_ms`/`reap_window_ms`, bounds one invocation with `max_objects`,
 and resumes with `cursor`; a grace window below the derived safety floor or a
 zero budget is rejected as `invalid_request`. Step-driven GC defaults
@@ -456,8 +459,13 @@ zero budget is rejected as `invalid_request`. Step-driven GC defaults
 than looping internally. Nothing sweeps unless `gc` is present.
 
 `only` restricts the step to one sub-step — `wal_flush`, `reorganize`,
-`retention`, or `gc` — for operators who want exactly one of them. An
-unrestricted step runs all four.
+`retention`, or `gc` — for operators who want exactly one of them; naming
+`retention` or `gc` this way is itself the opt-in. An unrestricted step
+runs the two opted-in sub-steps after flush and reorganization.
+
+The retention floor bounds incremental replay only. File revision history
+is never pruned: a revisions listing is always complete, however far the
+floor has advanced.
 
 Routes under `/v0/admin/` belong to the `admin/v0` profile and routes under
 `/v0/namespaces/{ns}/query/` to `query/v0`; everything else shown belongs to
@@ -754,7 +762,9 @@ Revision listing endpoints return newest revisions first and use the same
 `limit` / `cursor` pattern as directory listing. Path-based
 revision listing resolves the current path to its current inode, while inode
 revision listing is stable across later renames. Responses include
-`next_cursor` only when another page is available.
+`next_cursor` only when another page is available. Revision history is never
+pruned — paging to the end always reaches revision 1, regardless of how far
+the retention floor has advanced.
 
 ```json
 {

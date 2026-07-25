@@ -8,8 +8,8 @@ mod common;
 use common::*;
 use loonfs::{
     ChangeSeq, CommitId, CommitOp, CommitRequest, CreateNamespaceOptions, ErrorCode, InodeId,
-    MaintenanceStepOptions, ManifestId, PutFileOptions, RuntimeError, SharedObjectStore,
-    WalFlushStepOutcome,
+    MaintenanceStepKind, MaintenanceStepOptions, ManifestId, PutFileOptions, RuntimeError,
+    SharedObjectStore, WalFlushStepOutcome,
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
 use loonfs_objectstore::keys::{metadata_manifest_object, namespace_config, wal_segment_prefix};
@@ -153,6 +153,7 @@ fn maintenance_step_below_threshold_is_not_needed() {
             &namespace_id,
             MaintenanceStepOptions {
                 max_wal_tail_segments: 2,
+                retention: false,
                 gc: None,
                 only: None,
             },
@@ -184,6 +185,7 @@ fn maintenance_step_at_segment_threshold_flushes_the_wal() {
             &namespace_id,
             MaintenanceStepOptions {
                 max_wal_tail_segments: 1,
+                retention: false,
                 gc: None,
                 only: None,
             },
@@ -219,6 +221,88 @@ fn maintenance_step_at_segment_threshold_flushes_the_wal() {
 }
 
 #[test]
+fn maintenance_step_advances_the_floor_only_when_retention_opts_in() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = runtime(temp_dir.path(), "step-retention-opt-in-test");
+    let namespace_id = namespace_id("demo");
+
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    fs.put_file_bytes_blocking(
+        &namespace_id,
+        "/docs/hello.txt",
+        b"hello",
+        PutFileOptions::default(),
+    )
+    .expect("put file");
+
+    // A full step flushes, but never surrenders replay history on its own.
+    let step = fs
+        .maintenance_step_namespace_blocking(
+            &namespace_id,
+            MaintenanceStepOptions {
+                max_wal_tail_segments: 1,
+                retention: false,
+                gc: None,
+                only: None,
+            },
+        )
+        .expect("step without retention");
+    assert_eq!(
+        step.wal_flush,
+        WalFlushStepOutcome::Flushed {
+            manifest_head_seq: ChangeSeq(1)
+        }
+    );
+    assert_eq!(step.retention_floor_seq, ChangeSeq(0));
+
+    // Opting in advances the floor to the flushed manifest head.
+    let step = fs
+        .maintenance_step_namespace_blocking(
+            &namespace_id,
+            MaintenanceStepOptions {
+                max_wal_tail_segments: 1,
+                retention: true,
+                gc: None,
+                only: None,
+            },
+        )
+        .expect("step with retention");
+    assert_eq!(step.retention_floor_seq, ChangeSeq(1));
+
+    // Restricting a step to the retention sub-step is itself the opt-in.
+    fs.put_file_bytes_blocking(
+        &namespace_id,
+        "/docs/second.txt",
+        b"second",
+        PutFileOptions::default(),
+    )
+    .expect("put second file");
+    fs.maintenance_step_namespace_blocking(
+        &namespace_id,
+        MaintenanceStepOptions {
+            max_wal_tail_segments: 1,
+            retention: false,
+            gc: None,
+            only: None,
+        },
+    )
+    .expect("flush second segment");
+    let step = fs
+        .maintenance_step_namespace_blocking(
+            &namespace_id,
+            MaintenanceStepOptions {
+                max_wal_tail_segments: 1,
+                retention: false,
+                gc: None,
+                only: Some(MaintenanceStepKind::Retention),
+            },
+        )
+        .expect("retention-only step");
+    assert_eq!(step.retention_floor_seq, ChangeSeq(2));
+}
+
+#[test]
 fn maintenance_step_after_existing_manifest_writes_l0_manifest() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "step-l0-run-publish-test");
@@ -237,6 +321,7 @@ fn maintenance_step_after_existing_manifest_writes_l0_manifest() {
         &namespace_id,
         MaintenanceStepOptions {
             max_wal_tail_segments: 1,
+            retention: false,
             gc: None,
             only: None,
         },
@@ -255,6 +340,7 @@ fn maintenance_step_after_existing_manifest_writes_l0_manifest() {
             &namespace_id,
             MaintenanceStepOptions {
                 max_wal_tail_segments: 1,
+                retention: false,
                 gc: None,
                 only: None,
             },
@@ -344,6 +430,7 @@ fn maintenance_step_counts_segments_not_commits() {
             &namespace_id,
             MaintenanceStepOptions {
                 max_wal_tail_segments: 2,
+                retention: false,
                 gc: None,
                 only: None,
             },
@@ -370,6 +457,7 @@ fn maintenance_step_counts_segments_not_commits() {
             &namespace_id,
             MaintenanceStepOptions {
                 max_wal_tail_segments: 2,
+                retention: false,
                 gc: None,
                 only: None,
             },
@@ -398,6 +486,7 @@ fn maintenance_step_rejects_zero_threshold() {
             &namespace_id,
             MaintenanceStepOptions {
                 max_wal_tail_segments: 0,
+                retention: false,
                 gc: None,
                 only: None,
             },
@@ -424,6 +513,7 @@ fn maintenance_step_rejects_thresholds_above_the_write_rejection_cap() {
             &namespace_id,
             MaintenanceStepOptions {
                 max_wal_tail_segments: 129,
+                retention: false,
                 gc: None,
                 only: None,
             },
@@ -465,6 +555,7 @@ fn maintenance_step_treats_metadata_root_cas_loss_as_benign_race() {
             &namespace_id,
             MaintenanceStepOptions {
                 max_wal_tail_segments: 1,
+                retention: false,
                 gc: None,
                 only: None,
             },

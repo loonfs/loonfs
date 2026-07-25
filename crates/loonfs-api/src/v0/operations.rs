@@ -520,7 +520,8 @@ pub enum MaintenanceStepKind {
 }
 
 /// Options for one explicit maintenance step. Absent fields use the
-/// server's defaults; garbage collection runs only when `gc` is present.
+/// server's defaults; retention advance runs only when `retention` is true
+/// and garbage collection only when `gc` is present.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct MaintenanceStepRequest {
@@ -529,13 +530,18 @@ pub struct MaintenanceStepRequest {
     /// rejected as `invalid_request`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_wal_tail_segments: Option<u64>,
+    /// Advance the retention floor to the flushed manifest head. Nothing
+    /// surrenders replay history unless this is true or `only` selects
+    /// `retention`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention: Option<bool>,
     /// Run the mark-and-sweep garbage collector after the step's
     /// flush work. Nothing sweeps unless this is present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gc: Option<GcRequest>,
     /// Restrict the step to one sub-step. Absent runs the whole step: WAL
-    /// flush, then reorganization, then retention, then garbage collection
-    /// if `gc` opted in.
+    /// flush, then reorganization, then retention if `retention` opted in,
+    /// then garbage collection if `gc` opted in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub only: Option<MaintenanceStepKind>,
 }

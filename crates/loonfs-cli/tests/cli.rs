@@ -1431,7 +1431,8 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
         assert_eq!(step_data["namespace_id"], "demo");
         assert_eq!(step_data["wal_flush"]["kind"], "not_needed");
         assert_eq!(step_data["reorganize"]["kind"], "not_needed");
-        // Retention runs inside every unrestricted step now.
+        // An unrestricted step never advances the floor on its own; it
+        // reports the floor the earlier retention-advance established.
         assert_eq!(step_data["retention_floor_seq"], 2);
         assert_eq!(step_data["status_before"]["namespace_id"], "demo");
         assert!(step_data.get("gc").is_none());
