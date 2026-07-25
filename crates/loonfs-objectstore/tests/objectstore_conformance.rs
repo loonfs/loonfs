@@ -10,8 +10,9 @@ use loonfs_objectstore::keys::{
     namespace_config, upload_session, wal_head, wal_segment,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_objectstore::r2::{CloudflareR2Store, CloudflareR2StoreConfig};
-use loonfs_objectstore::s3::{AwsS3Store, AwsS3StoreConfig};
+use loonfs_objectstore::s3_compatible::{
+    AwsS3StoreConfig, CloudflareR2StoreConfig, S3CompatibleStore,
+};
 use loonfs_objectstore::ObjectStoreError;
 use loonfs_objectstore::{ByteRange, ObjectStore};
 use provider_env::{
@@ -144,7 +145,7 @@ async fn local_fs_compare_and_swap_missing_object_rejects_writer() {
 async fn aws_s3_real_provider_conformance() {
     let config = AwsS3ConformanceConfig::from_env()
         .expect("load AWS S3 real-provider conformance environment");
-    let store = AwsS3Store::new(AwsS3StoreConfig {
+    let store = S3CompatibleStore::aws_s3(AwsS3StoreConfig {
         bucket: config.bucket,
         region: config.region,
         endpoint_url: config.endpoint,
@@ -167,7 +168,7 @@ fn aws_s3_store_survives_alternating_current_thread_runtimes() {
     // caller runtime topology, so alternating runtimes stays fast.
     let config = AwsS3ConformanceConfig::from_env()
         .expect("load AWS S3 real-provider conformance environment");
-    let store = AwsS3Store::new(AwsS3StoreConfig {
+    let store = S3CompatibleStore::aws_s3(AwsS3StoreConfig {
         bucket: config.bucket,
         region: config.region,
         endpoint_url: config.endpoint,
@@ -224,7 +225,7 @@ fn aws_s3_store_survives_alternating_current_thread_runtimes() {
 async fn cloudflare_r2_real_provider_conformance() {
     let config = CloudflareR2ConformanceConfig::from_env()
         .expect("load Cloudflare R2 real-provider conformance environment");
-    let store = CloudflareR2Store::new(CloudflareR2StoreConfig {
+    let store = S3CompatibleStore::cloudflare_r2(CloudflareR2StoreConfig {
         bucket: config.bucket,
         account_id: config.account_id,
         endpoint_url: config.endpoint,

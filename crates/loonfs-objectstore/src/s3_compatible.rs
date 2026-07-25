@@ -1,5 +1,8 @@
-//! The shared S3-compatible store implementation behind the AWS S3 and
-//! Cloudflare R2 providers.
+//! [`S3CompatibleStore`]: the S3-API store, constructed per provider.
+//!
+//! AWS S3 and Cloudflare R2 differ by addressing, credentials, and whether
+//! uploads carry a client-computed checksum -- not by behaviour worth a type
+//! each, so both are constructors here.
 
 use crate::keyspace::parse_endpoint_url;
 use crate::object_store::Result;
@@ -16,25 +19,64 @@ use object_store::aws::{AmazonS3Builder, Checksum};
 use std::fmt;
 use std::sync::Arc;
 
+/// Supplies explicit credentials, addressing, and key scoping for AWS S3.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct S3CompatibleConfig {
-    pub provider_name: &'static str,
+pub struct AwsS3StoreConfig {
+    /// Bucket that acts as the LoonFS object-store root.
     pub bucket: String,
+    /// Signing region passed to the S3 client and presigner.
     pub region: String,
+    /// S3-compatible endpoint override, or `None` for the regional AWS endpoint.
     pub endpoint_url: Option<String>,
+    /// Access-key id used for SigV4 request signing.
     pub access_key_id: SecretString,
+    /// Secret access key used for SigV4 request signing.
     pub secret_access_key: SecretString,
+    /// Temporary credential token, or `None` for long-lived credentials.
     pub session_token: Option<SecretString>,
+    /// Logical prefix prepended to every key, or `None` to use the bucket root.
     pub key_prefix: Option<String>,
+    /// Selects path-style bucket addressing for compatible endpoints that require it.
     pub force_path_style: bool,
+}
+
+/// Supplies explicit S3 credentials and account addressing for Cloudflare R2.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CloudflareR2StoreConfig {
+    /// R2 bucket that acts as the LoonFS object-store root.
+    pub bucket: String,
+    /// Cloudflare account identity, required even though requests use the explicit endpoint.
+    pub account_id: String,
+    /// Account-level R2 S3 endpoint; this adapter always uses path-style bucket addressing.
+    pub endpoint_url: String,
+    /// S3-compatible access-key id used for request signing.
+    pub access_key_id: SecretString,
+    /// S3-compatible secret used for request signing.
+    pub secret_access_key: SecretString,
+    /// Logical prefix prepended to every key, or `None` to use the bucket root.
+    pub key_prefix: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct S3CompatibleConfig {
+    provider_name: &'static str,
+    bucket: String,
+    region: String,
+    endpoint_url: Option<String>,
+    access_key_id: SecretString,
+    secret_access_key: SecretString,
+    session_token: Option<SecretString>,
+    key_prefix: Option<String>,
+    force_path_style: bool,
     /// Attach a client-computed SHA-256 to every upload so the provider
     /// verifies the bytes on PUT (`x-amz-checksum-sha256`). Upload transport
     /// integrity only; nothing reads checksums back.
-    pub sha256_upload_checksum: bool,
+    sha256_upload_checksum: bool,
 }
 
+/// Implements the LoonFS storage contract on an S3-API endpoint.
 #[derive(Clone)]
-pub(crate) struct S3CompatibleStore {
+pub struct S3CompatibleStore {
     provider_name: &'static str,
     inner: ProviderObjectStore,
     /// Keeps the HTTP IO runtime alive for the provider client's lifetime;
@@ -51,7 +93,58 @@ impl fmt::Debug for S3CompatibleStore {
 }
 
 impl S3CompatibleStore {
-    pub(crate) fn new(config: S3CompatibleConfig) -> Result<Self> {
+    /// Builds an AWS S3 store with bounded retries and SHA-256 upload checksums.
+    ///
+    /// Construction fails for invalid credentials, bucket, region, endpoint,
+    /// key prefix, runtime initialization, or provider-client configuration.
+    pub fn aws_s3(config: AwsS3StoreConfig) -> Result<Self> {
+        Self::new(S3CompatibleConfig {
+            provider_name: "aws-s3",
+            bucket: config.bucket,
+            region: config.region,
+            endpoint_url: config.endpoint_url,
+            access_key_id: config.access_key_id,
+            secret_access_key: config.secret_access_key,
+            session_token: config.session_token,
+            key_prefix: config.key_prefix,
+            force_path_style: config.force_path_style,
+            sha256_upload_checksum: true,
+        })
+    }
+
+    /// Builds a Cloudflare R2 store with path-style addressing.
+    ///
+    /// Construction fails for a blank account id or any invalid shared
+    /// configuration, including credentials, endpoint, and key prefix.
+    pub fn cloudflare_r2(config: CloudflareR2StoreConfig) -> Result<Self> {
+        if config.account_id.trim().is_empty() {
+            return Err(ObjectStoreError::Configuration(
+                "account id must not be empty".to_owned(),
+            ));
+        }
+        Self::new(S3CompatibleConfig {
+            provider_name: "cloudflare-r2",
+            bucket: config.bucket,
+            region: "auto".to_owned(),
+            endpoint_url: Some(config.endpoint_url),
+            access_key_id: config.access_key_id,
+            secret_access_key: config.secret_access_key,
+            session_token: None,
+            key_prefix: config.key_prefix,
+            // The configured endpoint is the bucket-less account host; path
+            // style makes the client append the bucket. Virtual hosting would
+            // use the endpoint verbatim and address keys as buckets.
+            force_path_style: true,
+            // Left off pending a live verification: R2 historically rejected
+            // aws-chunked checksummed uploads, yet its presigner requires
+            // `x-amz-checksum-sha256` on direct puts -- so R2 provably accepts
+            // the checksum and this is likely stale caution. Verify
+            // single-part and multipart against live R2 before enabling.
+            sha256_upload_checksum: false,
+        })
+    }
+
+    fn new(config: S3CompatibleConfig) -> Result<Self> {
         validate_config(&config)?;
         let endpoint_url = config
             .endpoint_url
