@@ -2139,7 +2139,7 @@
             }
           },
           "501": {
-            "description": "Grep serving is disabled or the grep index is not materialized on this namespace",
+            "description": "Grep serving is disabled, the grep index is not enabled, or its backfill has not completed on this namespace",
             "content": {
               "application/json": {
                 "schema": {
@@ -3824,7 +3824,7 @@
           },
           "built_through_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
-            "description": "Backfill covers commits at or below this sequence; later commits\narrive through WAL replay once backfill completes."
+            "description": "Sequence the index is built through when the enabling host reports\ncompletion (an embedded host drives the backfill inside the call);\non a hosted server the backfill continues in its driver and this is\nthe sequence it targets."
           },
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
@@ -3864,6 +3864,13 @@
                 "description": "Epoch that currently owns the namespace."
               }
             ]
+          },
+          "active_writer_session": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Session id recorded by the current epoch's acquirer, when the head\nrecorded one."
           },
           "actual_revision": {
             "oneOf": [
@@ -3919,6 +3926,13 @@
                 "description": "Epoch the failing writer session held when it was displaced."
               }
             ]
+          },
+          "fenced_writer_session": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Session id the fenced writer held. Distinguishes two processes that\nshare one writer id (the CLI defaults `writer_id` to the hostname)."
           },
           "inode_id": {
             "oneOf": [

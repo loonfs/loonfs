@@ -305,13 +305,12 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
         CommandData::GrepIndexEnabled(response) => {
             if response.already_enabled {
                 format!(
-                    "grep index already enabled on {} (built through seq {}); grep worker \
-                     maintenance continues independently",
+                    "grep index already enabled on {}; caught up through seq {}",
                     response.namespace_id, response.built_through_seq.0
                 )
             } else {
                 format!(
-                    "grep index enabled on {}; grep worker backfill targets seq <= {}",
+                    "grep index enabled on {}; built through seq {}",
                     response.namespace_id, response.built_through_seq.0
                 )
             }

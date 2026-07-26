@@ -116,8 +116,10 @@ pub struct GrepResponse {
 pub struct EnableGrepIndexResponse {
     /// Namespace whose grep root was enabled.
     pub namespace_id: NamespaceId,
-    /// Backfill covers commits at or below this sequence; later commits
-    /// arrive through WAL replay once backfill completes.
+    /// Sequence the index is built through when the enabling host reports
+    /// completion (an embedded host drives the backfill inside the call);
+    /// on a hosted server the backfill continues in its driver and this is
+    /// the sequence it targets.
     pub built_through_seq: ChangeSeq,
     /// True when the namespace already carried an enabled grep root.
     pub already_enabled: bool,

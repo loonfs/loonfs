@@ -1264,6 +1264,55 @@ fn admin_gc_reclaims_a_deleted_namespace_instead_of_refusing() {
 }
 
 #[test]
+fn embedded_grep_works_after_index_enable() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "code"]));
+    assert_success(&harness.run(&["use", "code"]));
+
+    let payload = harness.temp_dir.path().join("main.rs");
+    fs::write(&payload, b"fn main() {}\n// TODO: expand\n").expect("write payload");
+    assert_success(&harness.run(&["put", payload.to_str().expect("utf-8 path"), "/src/main.rs"]));
+
+    // Before the index exists, grep names the missing feature.
+    let before = harness.run(&["--json", "grep", "TODO"]);
+    assert_failure(&before);
+    assert_eq!(json_error(&before)["code"], "not_supported");
+
+    // Enable drives the backfill to completion in-process: the one-shot
+    // CLI is its own grep maintenance, so the query works immediately —
+    // no server, no driver, no state that never resolves.
+    let enabled = harness.run(&["--json", "admin", "index-enable"]);
+    assert_success(&enabled);
+    let found = harness.run(&["--json", "grep", "TODO"]);
+    assert_success(&found);
+    assert_eq!(
+        json_data(&found)["matches"]
+            .as_array()
+            .expect("json array")
+            .len(),
+        1
+    );
+
+    // Later writes catch up when enable is re-run.
+    let more = harness.temp_dir.path().join("lib.rs");
+    fs::write(&more, b"// TODO: also here\n").expect("write payload");
+    assert_success(&harness.run(&["put", more.to_str().expect("utf-8 path"), "/src/lib.rs"]));
+    let recaught = harness.run(&["--json", "admin", "index-enable"]);
+    assert_success(&recaught);
+    assert_eq!(json_data(&recaught)["already_enabled"], true);
+    let found = harness.run(&["--json", "grep", "TODO"]);
+    assert_success(&found);
+    assert_eq!(
+        json_data(&found)["matches"]
+            .as_array()
+            .expect("json array")
+            .len(),
+        2
+    );
+}
+
+#[test]
 fn index_enable_leaves_core_maintenance_decoupled() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");
