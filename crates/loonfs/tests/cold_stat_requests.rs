@@ -78,6 +78,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
             candidates.push(loonfs::publish::NamespaceMutationCandidate::path_prepared(
                 loonfs::publish::PathMutationIntent::PutFile {
                     commit_id: loonfs::CommitId::generate(),
+                    message: None,
                     absolute_path: AbsolutePath::parse(format!(
                         "/tree/dir-000000/file-{index:09}.txt"
                     ))

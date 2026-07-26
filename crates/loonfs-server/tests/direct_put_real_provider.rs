@@ -122,6 +122,7 @@ async fn direct_put_round_trip(config: ServerConfig) {
         namespace,
         &FilesystemOperationRequest {
             commit_id: CommitId::parse("direct-put-e2e").expect("valid commit id"),
+            message: None,
             content_tokens: vec![ValidatedContentToken {
                 content_ref: content_ref.clone(),
                 token: validated_content_token,

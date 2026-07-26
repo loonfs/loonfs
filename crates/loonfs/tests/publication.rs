@@ -106,6 +106,7 @@ async fn park_two_puts(temp_dir: &Path) -> ParkedPuts {
         let namespace_id = namespace_id.clone();
         let intent = PathMutationIntent::PutFile {
             commit_id: CommitId::parse("parked-second").expect("valid commit id"),
+            message: None,
             absolute_path: parse_mutation_path("/b.txt").expect("mutation path"),
             content_ref: prepared_content_ref,
             behavior: DestinationBehavior::NoReplace,

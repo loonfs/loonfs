@@ -25,11 +25,11 @@ use loonfs_api::{
     v0::{
         ChangesResponse, DisableGrepIndexResponse, EnableGrepIndexResponse, RepairNamespaceResponse,
     },
-    AuthoritativePathEntry, ChangeSeq, CheckpointId, CommitId, CommitResponse,
-    CreateCheckpointRequest, CreateCheckpointResponse, DeleteNamespaceResponse,
-    DestinationBehavior, ErrorCode, ErrorDetails, GrepRequest, GrepResponse, InodeId,
-    ListFileRevisionsResponse, MaintenanceStepRequest, MaintenanceStepResponse, NamespaceId,
-    NamespaceStatusResponse, NamespaceSummary, ReleaseCheckpointResponse, RevisionNo,
+    AuthoritativePathEntry, ChangeSeq, CheckpointId, CommitResponse, CreateCheckpointRequest,
+    CreateCheckpointResponse, DeleteNamespaceResponse, DestinationBehavior, ErrorCode,
+    ErrorDetails, GrepRequest, GrepResponse, InodeId, ListFileRevisionsResponse,
+    MaintenanceStepRequest, MaintenanceStepResponse, NamespaceId, NamespaceStatusResponse,
+    NamespaceSummary, ReleaseCheckpointResponse, RevisionNo,
 };
 use thiserror::Error;
 
@@ -235,7 +235,7 @@ pub trait Backend {
         from: &NamespacePath,
         to: &NamespacePath,
         behavior: DestinationBehavior,
-        commit_id: Option<CommitId>,
+        options: &MutationOptions,
     ) -> Result<CommitResponse, BackendError>;
     /// Copies a file within a namespace; `behavior` selects create-only or
     /// replace semantics for the destination.
@@ -244,14 +244,14 @@ pub trait Backend {
         from: &NamespacePath,
         to: &NamespacePath,
         behavior: DestinationBehavior,
-        commit_id: Option<CommitId>,
+        options: &MutationOptions,
     ) -> Result<CommitResponse, BackendError>;
     /// Restores a file to one of its retained revisions.
     async fn restore_file_revision(
         &self,
         spec: &NamespacePath,
         source_revision_no: RevisionNo,
-        commit_id: Option<CommitId>,
+        options: &MutationOptions,
     ) -> Result<CommitResponse, BackendError>;
     /// Recovers a deleted file or subtree to the spec's path; `inode_id`
     /// and `deleted_at_seq` are the identity and committed sequence the
@@ -261,7 +261,7 @@ pub trait Backend {
         spec: &NamespacePath,
         inode_id: InodeId,
         deleted_at_seq: ChangeSeq,
-        commit_id: Option<CommitId>,
+        options: &MutationOptions,
     ) -> Result<CommitResponse, BackendError>;
 
     // --- maintenance/admin plane (`admin/v0`) ---
@@ -483,11 +483,10 @@ impl Backend for RemoteBackend {
         from: &NamespacePath,
         to: &NamespacePath,
         behavior: DestinationBehavior,
-        commit_id: Option<CommitId>,
+        options: &MutationOptions,
     ) -> Result<CommitResponse, BackendError> {
-        let options = MutationOptions { commit_id };
         self.client
-            .move_path(from, to, behavior, &options)
+            .move_path(from, to, behavior, options)
             .await
             .map_err(BackendError::from)
     }
@@ -497,11 +496,10 @@ impl Backend for RemoteBackend {
         from: &NamespacePath,
         to: &NamespacePath,
         behavior: DestinationBehavior,
-        commit_id: Option<CommitId>,
+        options: &MutationOptions,
     ) -> Result<CommitResponse, BackendError> {
-        let options = MutationOptions { commit_id };
         self.client
-            .copy_path(from, to, behavior, &options)
+            .copy_path(from, to, behavior, options)
             .await
             .map_err(BackendError::from)
     }
@@ -510,11 +508,10 @@ impl Backend for RemoteBackend {
         &self,
         spec: &NamespacePath,
         source_revision_no: RevisionNo,
-        commit_id: Option<CommitId>,
+        options: &MutationOptions,
     ) -> Result<CommitResponse, BackendError> {
-        let options = MutationOptions { commit_id };
         self.client
-            .restore_file_revision(spec, source_revision_no, &options)
+            .restore_file_revision(spec, source_revision_no, options)
             .await
             .map_err(BackendError::from)
     }
@@ -524,11 +521,10 @@ impl Backend for RemoteBackend {
         spec: &NamespacePath,
         inode_id: InodeId,
         deleted_at_seq: ChangeSeq,
-        commit_id: Option<CommitId>,
+        options: &MutationOptions,
     ) -> Result<CommitResponse, BackendError> {
-        let options = MutationOptions { commit_id };
         self.client
-            .undelete(spec, inode_id, deleted_at_seq, &options)
+            .undelete(spec, inode_id, deleted_at_seq, options)
             .await
             .map_err(BackendError::from)
     }

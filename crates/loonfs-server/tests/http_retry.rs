@@ -121,6 +121,7 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
             &PutFileOptions {
                 behavior: DestinationBehavior::NoReplace,
                 commit_id: Some(commit_id.clone()),
+                message: None,
             },
         )
         .await
@@ -135,6 +136,7 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
             &PutFileOptions {
                 behavior: DestinationBehavior::NoReplace,
                 commit_id: Some(commit_id.clone()),
+                message: None,
             },
         )
         .await
@@ -158,6 +160,7 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
             &PutFileOptions {
                 behavior: DestinationBehavior::NoReplace,
                 commit_id: Some(commit_id),
+                message: None,
             },
         )
         .await
@@ -202,6 +205,7 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
             DestinationBehavior::NoReplace,
             &MutationOptions {
                 commit_id: Some(CommitId::parse("req-v1-copy").expect("valid commit id")),
+                message: None,
             },
         )
         .await
@@ -214,6 +218,7 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
             DestinationBehavior::NoReplace,
             &MutationOptions {
                 commit_id: Some(CommitId::parse("req-v1-copy").expect("valid commit id")),
+                message: None,
             },
         )
         .await
@@ -241,6 +246,7 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
             DestinationBehavior::NoReplace,
             &MutationOptions {
                 commit_id: Some(CommitId::parse("req-v1-move").expect("valid commit id")),
+                message: None,
             },
         )
         .await
@@ -253,6 +259,7 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
             DestinationBehavior::NoReplace,
             &MutationOptions {
                 commit_id: Some(CommitId::parse("req-v1-move").expect("valid commit id")),
+                message: None,
             },
         )
         .await
@@ -271,6 +278,7 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
             &moved,
             &DeleteOptions {
                 commit_id: Some(CommitId::parse("req-v1-delete").expect("valid commit id")),
+                message: None,
                 ..DeleteOptions::default()
             },
         )
@@ -282,6 +290,7 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
             &moved,
             &DeleteOptions {
                 commit_id: Some(CommitId::parse("req-v1-delete").expect("valid commit id")),
+                message: None,
                 ..DeleteOptions::default()
             },
         )

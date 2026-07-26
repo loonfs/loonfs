@@ -101,6 +101,7 @@ pub(crate) async fn run_put_tree(
     local_root: &Path,
     remote_root: &str,
     force: bool,
+    message: Option<String>,
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
     let mut files = Vec::new();
@@ -133,6 +134,7 @@ pub(crate) async fn run_put_tree(
                 &spec,
                 &CreateDirectoryOptions {
                     commit_id: None,
+                    message: message.clone(),
                     parents: true,
                 },
             )
@@ -151,6 +153,7 @@ pub(crate) async fn run_put_tree(
     let outcomes = futures::stream::iter(files.into_iter().map(|job| {
         let backend = context.target.backend();
         let namespace = context.namespace.clone();
+        let message = message.clone();
         let remote = format!("{}/{}", remote_root.trim_end_matches('/'), job.remote);
         async move {
             let spec = match NamespacePath::parse(namespace.as_str(), &remote) {
@@ -168,6 +171,7 @@ pub(crate) async fn run_put_tree(
                     &ClientPutFileOptions {
                         behavior,
                         commit_id: None,
+                        message: message.clone(),
                     },
                 )
                 .await
@@ -275,6 +279,7 @@ pub(crate) async fn run_copy_tree(
     source_root: &str,
     destination_root: &str,
     force: bool,
+    message: Option<String>,
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
     let listing = walk_remote_tree(context, kind, source_root).await?;
@@ -301,6 +306,7 @@ pub(crate) async fn run_copy_tree(
                 &spec,
                 &CreateDirectoryOptions {
                     commit_id: None,
+                    message: message.clone(),
                     parents: components.is_empty(),
                 },
             )
@@ -324,6 +330,7 @@ pub(crate) async fn run_copy_tree(
     let outcomes = futures::stream::iter(listing.files.into_iter().map(|job| {
         let backend = context.target.backend();
         let namespace = context.namespace.clone();
+        let message = message.clone();
         let destination = joined_remote(
             destination_root,
             &job.local
@@ -341,7 +348,15 @@ pub(crate) async fn run_copy_tree(
                 }
             };
             let result = backend
-                .copy_path(&from, &to, behavior, None)
+                .copy_path(
+                    &from,
+                    &to,
+                    behavior,
+                    &loonfs_client::MutationOptions {
+                        commit_id: None,
+                        message: message.clone(),
+                    },
+                )
                 .await
                 .map(|_| spec_target(&to))
                 .map_err(CliError::from);

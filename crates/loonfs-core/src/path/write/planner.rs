@@ -38,40 +38,47 @@ pub(crate) struct PlannedPathMutation {
 enum PathFingerprintInput {
     CreateDir {
         namespace_id: NamespaceId,
+        message: Option<String>,
         absolute_path: String,
         parents: bool,
     },
     PutFile {
         namespace_id: NamespaceId,
+        message: Option<String>,
         absolute_path: String,
         behavior: DestinationBehavior,
         content_ref: ContentRef,
     },
     DeletePath {
         namespace_id: NamespaceId,
+        message: Option<String>,
         absolute_path: String,
         behavior: DeleteDirectoryBehavior,
         expected_inode_id: Option<InodeId>,
     },
     MovePath {
         namespace_id: NamespaceId,
+        message: Option<String>,
         from_path: String,
         to_path: String,
         behavior: DestinationBehavior,
     },
     CopyFilePath {
         namespace_id: NamespaceId,
+        message: Option<String>,
         from_path: String,
         to_path: String,
         behavior: DestinationBehavior,
     },
     RestoreRevision {
         namespace_id: NamespaceId,
+        message: Option<String>,
         absolute_path: String,
         source_revision_no: RevisionNo,
     },
     Undelete {
         namespace_id: NamespaceId,
+        message: Option<String>,
         inode_id: InodeId,
         deleted_at_seq: ChangeSeq,
         absolute_path: String,
@@ -97,6 +104,7 @@ pub(crate) fn path_intent_fingerprint(
     namespace_id: &NamespaceId,
     intent: &PathMutationIntent,
 ) -> Result<PathIntentFingerprint> {
+    let message = intent.message().map(ToOwned::to_owned);
     let identity = match intent {
         PathMutationIntent::CreateDir {
             absolute_path,
@@ -104,6 +112,7 @@ pub(crate) fn path_intent_fingerprint(
             ..
         } => PathFingerprintInput::CreateDir {
             namespace_id: namespace_id.clone(),
+            message: message.clone(),
             absolute_path: absolute_path.as_str().to_owned(),
             parents: *parents,
         },
@@ -114,6 +123,7 @@ pub(crate) fn path_intent_fingerprint(
             ..
         } => PathFingerprintInput::PutFile {
             namespace_id: namespace_id.clone(),
+            message: message.clone(),
             absolute_path: absolute_path.as_str().to_owned(),
             behavior: *behavior,
             content_ref: content_ref.clone(),
@@ -130,6 +140,7 @@ pub(crate) fn path_intent_fingerprint(
             ..
         } => PathFingerprintInput::DeletePath {
             namespace_id: namespace_id.clone(),
+            message: message.clone(),
             absolute_path: absolute_path.as_str().to_owned(),
             behavior: *behavior,
             expected_inode_id: *expected_inode_id,
@@ -141,6 +152,7 @@ pub(crate) fn path_intent_fingerprint(
             ..
         } => PathFingerprintInput::MovePath {
             namespace_id: namespace_id.clone(),
+            message: message.clone(),
             from_path: from_path.as_str().to_owned(),
             to_path: to_path.as_str().to_owned(),
             behavior: *behavior,
@@ -152,6 +164,7 @@ pub(crate) fn path_intent_fingerprint(
             ..
         } => PathFingerprintInput::CopyFilePath {
             namespace_id: namespace_id.clone(),
+            message: message.clone(),
             from_path: from_path.as_str().to_owned(),
             to_path: to_path.as_str().to_owned(),
             behavior: *behavior,
@@ -162,6 +175,7 @@ pub(crate) fn path_intent_fingerprint(
             ..
         } => PathFingerprintInput::RestoreRevision {
             namespace_id: namespace_id.clone(),
+            message: message.clone(),
             absolute_path: absolute_path.as_str().to_owned(),
             source_revision_no: *source_revision_no,
         },
@@ -172,6 +186,7 @@ pub(crate) fn path_intent_fingerprint(
             ..
         } => PathFingerprintInput::Undelete {
             namespace_id: namespace_id.clone(),
+            message: message.clone(),
             inode_id: *inode_id,
             deleted_at_seq: *deleted_at_seq,
             absolute_path: absolute_path.as_str().to_owned(),
@@ -192,7 +207,7 @@ pub(crate) async fn plan_path_mutation_against_publish_view<S: ObjectStore + ?Si
         head,
         metadata_state,
     };
-    let commit_request = match intent {
+    let mut commit_request = match intent {
         PathMutationIntent::CreateDir {
             absolute_path,
             parents,
@@ -258,6 +273,9 @@ pub(crate) async fn plan_path_mutation_against_publish_view<S: ObjectStore + ?Si
                 .await?
         }
     };
+    // The annotation rides the commit request from one place; the plan
+    // functions stay focused on semantics.
+    commit_request.message = intent.message().map(ToOwned::to_owned);
     Ok(PlannedPathMutation {
         commit_id,
         path_intent_fingerprint,
@@ -297,10 +315,29 @@ mod tests {
     /// retry idempotency across versions. Do not update the literal without
     /// bumping the fingerprint scheme tag.
     #[test]
+    fn a_message_changes_path_intent_identity() {
+        // The annotation is part of what the caller asked for: replaying a
+        // commit id with a different message must conflict, exactly as it
+        // does for explicit commits, so the message joins the preimage.
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let intent = |message: Option<&str>| PathMutationIntent::CreateDir {
+            commit_id: CommitId::parse("mkdir-docs").expect("valid commit id"),
+            message: message.map(ToOwned::to_owned),
+            absolute_path: AbsolutePath::parse("/docs").expect("valid path"),
+            parents: false,
+        };
+        let without = path_intent_fingerprint(&namespace_id, &intent(None)).expect("fingerprint");
+        let with = path_intent_fingerprint(&namespace_id, &intent(Some("import batch")))
+            .expect("fingerprint");
+        assert_ne!(without.as_str(), with.as_str());
+    }
+
+    #[test]
     fn path_intent_fingerprint_value_is_pinned() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let intent = PathMutationIntent::CreateDir {
             commit_id: CommitId::parse("c_00000000000000000000000000000042").expect("commit id"),
+            message: None,
             absolute_path: AbsolutePath::parse("/docs").expect("path"),
             parents: false,
         };
@@ -313,7 +350,7 @@ mod tests {
             // semantic parameter (no deployed namespaces hold the prior
             // value); post-release this literal only moves with a scheme
             // tag bump.
-            "v0:sha256:06414b716b076c98e7a61e465ae729b2340045c133437a557c76902d73a5f33b"
+            "v0:sha256:2de2ea1159b7b8ed3fb97d77f9c7b01e7b873bb45cf5b53c1116ecfad0a51cc0"
         );
     }
 
@@ -323,6 +360,7 @@ mod tests {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let intent = PathMutationIntent::DeletePath {
             commit_id: CommitId::parse("c_00000000000000000000000000000043").expect("commit id"),
+            message: None,
             absolute_path: AbsolutePath::parse("/docs").expect("path"),
             behavior: DeleteDirectoryBehavior::NonRecursive,
             expected_inode_id: Some(InodeId(42)),
@@ -334,7 +372,7 @@ mod tests {
             fingerprint.as_str(),
             // Added pre-release when the delete guard became semantic
             // request content; no deployed receipts use the prior preimage.
-            "v0:sha256:6b233b1fa124c36c09104446f8a1de60b6bec76fccf6fc41e72e064c60f47715"
+            "v0:sha256:34056f22715e481a182484d34704685c8afa7469fbe737dbae67f7d93d9fcec1"
         );
     }
 
@@ -394,6 +432,7 @@ mod tests {
             &namespace_id,
             &PathMutationIntent::CreateDir {
                 commit_id: CommitId::parse("mkdir-docs-a").expect("valid commit id"),
+                message: None,
                 absolute_path: AbsolutePath::parse("/docs/a").expect("path"),
                 parents: false,
             },
@@ -403,6 +442,7 @@ mod tests {
             &namespace_id,
             &PathMutationIntent::CreateDir {
                 commit_id: CommitId::parse("mkdir-docs-b").expect("valid commit id"),
+                message: None,
                 absolute_path: AbsolutePath::parse("/docs/a").expect("path"),
                 parents: false,
             },
@@ -419,6 +459,7 @@ mod tests {
             &namespace_id,
             &PathMutationIntent::CreateDir {
                 commit_id: CommitId::parse("mkdir-docs").expect("valid commit id"),
+                message: None,
                 absolute_path: AbsolutePath::parse("/docs").expect("path"),
                 parents: false,
             },
@@ -428,6 +469,7 @@ mod tests {
             &namespace_id,
             &PathMutationIntent::CreateDir {
                 commit_id: CommitId::parse("mkdir-drafts").expect("valid commit id"),
+                message: None,
                 absolute_path: AbsolutePath::parse("/drafts").expect("path"),
                 parents: false,
             },
@@ -444,6 +486,7 @@ mod tests {
             &namespace_id,
             &PathMutationIntent::CreateDir {
                 commit_id: CommitId::parse("mkdir-docs").expect("valid commit id"),
+                message: None,
                 absolute_path: AbsolutePath::parse("/docs").expect("path"),
                 parents: false,
             },
@@ -475,6 +518,7 @@ mod tests {
             &namespace_id,
             &PathMutationIntent::CreateDir {
                 commit_id: CommitId::parse("mkdir-docs").expect("valid commit id"),
+                message: None,
                 absolute_path: AbsolutePath::parse("/docs").expect("path"),
                 parents: false,
             },
@@ -512,6 +556,7 @@ mod tests {
             &namespace_id,
             &PathMutationIntent::PutFile {
                 commit_id: CommitId::parse("put-nested").expect("valid commit id"),
+                message: None,
                 absolute_path: AbsolutePath::parse("/docs/nested/a.txt").expect("path"),
                 content_ref: staged.content_ref.clone(),
                 behavior: DestinationBehavior::NoReplace,
@@ -562,6 +607,7 @@ mod tests {
             &namespace_id,
             &PathMutationIntent::MovePath {
                 commit_id: CommitId::parse("move-file").expect("valid commit id"),
+                message: None,
                 from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
                 to_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
                 behavior: DestinationBehavior::NoReplace,
@@ -612,6 +658,7 @@ mod tests {
             &namespace_id,
             &PathMutationIntent::CopyFilePath {
                 commit_id: CommitId::parse("copy-file").expect("valid commit id"),
+                message: None,
                 from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
                 to_path: AbsolutePath::parse("/docs/copy.txt").expect("path"),
                 behavior: DestinationBehavior::NoReplace,
@@ -719,6 +766,7 @@ mod tests {
             &namespace_id,
             &PathMutationIntent::PutFile {
                 commit_id: CommitId::parse("put-under-dead").expect("valid commit id"),
+                message: None,
                 absolute_path: AbsolutePath::parse("/dead/new.txt").expect("path"),
                 content_ref: staged.content_ref,
                 behavior: DestinationBehavior::NoReplace,

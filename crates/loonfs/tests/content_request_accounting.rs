@@ -206,6 +206,7 @@ async fn prepare_content(
 fn put_intent(commit_id: &str, path: &str, content_ref: loonfs::ContentRef) -> PathMutationIntent {
     PathMutationIntent::PutFile {
         commit_id: CommitId::parse(commit_id).expect("valid commit id"),
+        message: None,
         absolute_path: parse_mutation_path(path).expect("valid mutation path"),
         content_ref,
         behavior: DestinationBehavior::NoReplace,
@@ -792,6 +793,7 @@ async fn explicit_restore_revision_uses_retained_metadata_without_content_io() {
             PutFileOptions {
                 behavior: DestinationBehavior::Replace,
                 commit_id: None,
+                message: None,
             },
         )
         .await
@@ -920,6 +922,7 @@ async fn new_rejected_preparation_fails_before_path_planning_without_content_ope
     harness.recording.reset();
     let intent = PathMutationIntent::CreateDir {
         commit_id: CommitId::parse("new-rejected").expect("valid commit id"),
+        message: None,
         absolute_path: parse_mutation_path("/missing/child").expect("valid mutation path"),
         parents: false,
     };
@@ -1093,6 +1096,7 @@ async fn mixed_batch_publishes_admitted_put_and_rejects_unprepared_put_without_c
                     namespace_id,
                     PathMutationIntent::CreateDir {
                         commit_id: CommitId::parse("mixed-blocker").expect("valid commit id"),
+                        message: None,
                         absolute_path: parse_mutation_path("/hold").expect("valid mutation path"),
                         parents: false,
                     },

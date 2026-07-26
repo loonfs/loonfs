@@ -45,6 +45,7 @@
 //!     &publish_store,
 //!     vec![NamespaceMutationCandidate::path(PathMutationIntent::CreateDir {
 //!         commit_id: CommitId::generate(),
+//!         message: None,
 //!         absolute_path: AbsolutePath::parse("/plans").expect("path"),
 //!         parents: false,
 //!     })],

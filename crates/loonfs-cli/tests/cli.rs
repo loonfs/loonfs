@@ -259,6 +259,99 @@ fn concurrent_embedded_puts_land_or_report_the_fence() {
 }
 
 #[test]
+fn commit_messages_ride_the_feed_and_bind_identity() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+
+    let payload = harness.temp_dir.path().join("doc.txt");
+    fs::write(&payload, b"v1").expect("write payload");
+    assert_success(&harness.run(&[
+        "put",
+        payload.to_str().expect("utf-8 path"),
+        "/doc.txt",
+        "--message",
+        "initial import",
+    ]));
+    // The audit's motivating case: a restore is indistinguishable from an
+    // edit in the feed without a message.
+    fs::write(&payload, b"v2").expect("write payload");
+    assert_success(&harness.run(&[
+        "put",
+        payload.to_str().expect("utf-8 path"),
+        "/doc.txt",
+        "--force",
+    ]));
+    assert_success(&harness.run(&[
+        "--json",
+        "restore",
+        "--revision",
+        "1",
+        "/doc.txt",
+        "--message",
+        "roll back to the imported copy",
+    ]));
+
+    let changes = harness.run(&["--json", "changes"]);
+    assert_success(&changes);
+    let rows = json_data(&changes)["changes"]
+        .as_array()
+        .expect("changes array")
+        .clone();
+    assert_eq!(rows[0]["message"], "initial import");
+    assert!(rows[1].get("message").is_none());
+    assert_eq!(rows[2]["message"], "roll back to the imported copy");
+
+    // The message is part of the commit's identity: the same commit id with
+    // a different message conflicts instead of silently replaying.
+    let first = harness.run(&[
+        "--json",
+        "put",
+        payload.to_str().expect("utf-8 path"),
+        "/pinned.txt",
+        "--commit-id",
+        "pinned-put",
+        "--message",
+        "one",
+    ]);
+    assert_success(&first);
+    let replay = harness.run(&[
+        "--json",
+        "put",
+        payload.to_str().expect("utf-8 path"),
+        "/pinned.txt",
+        "--commit-id",
+        "pinned-put",
+        "--message",
+        "one",
+    ]);
+    assert_success(&replay);
+    assert_eq!(
+        json_data(&first)["committed_seq"],
+        json_data(&replay)["committed_seq"],
+        "an identical retry replays the original commit"
+    );
+    let conflicted = harness.run(&[
+        "--json",
+        "put",
+        payload.to_str().expect("utf-8 path"),
+        "/pinned.txt",
+        "--commit-id",
+        "pinned-put",
+        "--message",
+        "two",
+    ]);
+    assert_failure(&conflicted);
+    assert_eq!(
+        json_error(&conflicted)["code"],
+        "commit_id_reuse_conflict",
+        "{}",
+        json_error(&conflicted)
+    );
+}
+
+#[test]
 fn recursive_transfers_roundtrip_a_tree() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");

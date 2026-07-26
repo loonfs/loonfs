@@ -94,6 +94,7 @@ fn file_revision_pages_merge_manifest_and_wal_tail_newest_first() {
     let replace = PutFileOptions {
         behavior: DestinationBehavior::Replace,
         commit_id: None,
+        message: None,
     };
     fs.put_file_bytes_blocking(&namespace_id, "/doc.txt", b"v1", PutFileOptions::default())
         .expect("put v1");

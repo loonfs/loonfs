@@ -115,6 +115,8 @@ pub struct PutFileOptions {
     pub behavior: DestinationBehavior,
     /// Optional idempotency key.
     pub commit_id: Option<CommitId>,
+    /// Annotation recorded on the commit; part of the commit's identity.
+    pub message: Option<String>,
 }
 
 impl Default for PutFileOptions {
@@ -122,6 +124,7 @@ impl Default for PutFileOptions {
         Self {
             behavior: DestinationBehavior::NoReplace,
             commit_id: None,
+            message: None,
         }
     }
 }
@@ -131,6 +134,8 @@ impl Default for PutFileOptions {
 pub struct CreateDirectoryOptions {
     /// Optional idempotency key.
     pub commit_id: Option<CommitId>,
+    /// Annotation recorded on the commit; part of the commit's identity.
+    pub message: Option<String>,
     /// Also create missing ancestor directories, like `put_file` does.
     pub parents: bool,
 }
@@ -142,6 +147,8 @@ pub struct DeleteOptions {
     pub behavior: DeleteDirectoryBehavior,
     /// Optional idempotency key.
     pub commit_id: Option<CommitId>,
+    /// Annotation recorded on the commit; part of the commit's identity.
+    pub message: Option<String>,
     /// When set, the delete applies only while the path still resolves to
     /// this inode, so a raced rebinding fails instead of deleting the
     /// wrong inode.
@@ -153,6 +160,7 @@ impl Default for DeleteOptions {
         Self {
             behavior: DeleteDirectoryBehavior::NonRecursive,
             commit_id: None,
+            message: None,
             expected_inode_id: None,
         }
     }
@@ -165,6 +173,8 @@ pub struct MoveOptions {
     pub behavior: DestinationBehavior,
     /// Optional idempotency key.
     pub commit_id: Option<CommitId>,
+    /// Annotation recorded on the commit; part of the commit's identity.
+    pub message: Option<String>,
 }
 
 /// Options for copying a file path.
@@ -174,6 +184,8 @@ pub struct CopyOptions {
     pub behavior: DestinationBehavior,
     /// Optional idempotency key.
     pub commit_id: Option<CommitId>,
+    /// Annotation recorded on the commit; part of the commit's identity.
+    pub message: Option<String>,
 }
 
 /// Options for restoring a file revision by path.
@@ -181,6 +193,8 @@ pub struct CopyOptions {
 pub struct RestoreRevisionOptions {
     /// Optional idempotency key.
     pub commit_id: Option<CommitId>,
+    /// Annotation recorded on the commit; part of the commit's identity.
+    pub message: Option<String>,
 }
 
 /// Options for recovering a deleted file or subtree.
@@ -188,6 +202,8 @@ pub struct RestoreRevisionOptions {
 pub struct UndeleteOptions {
     /// Optional idempotency key.
     pub commit_id: Option<CommitId>,
+    /// Annotation recorded on the commit; part of the commit's identity.
+    pub message: Option<String>,
 }
 
 /// Options for reading the change feed.

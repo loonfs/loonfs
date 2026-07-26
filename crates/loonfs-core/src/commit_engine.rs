@@ -587,6 +587,7 @@ mod tests {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let intent = PathMutationIntent::CreateDir {
             commit_id: CommitId::parse("same-mutation").expect("valid commit id"),
+            message: None,
             absolute_path: loonfs_api::AbsolutePath::parse("/docs").expect("path"),
             parents: false,
         };

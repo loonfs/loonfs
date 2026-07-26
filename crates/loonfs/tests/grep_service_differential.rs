@@ -129,6 +129,7 @@ async fn publish_same_content_files(
             NamespaceMutationCandidate::path_prepared(
                 PathMutationIntent::PutFile {
                     commit_id: CommitId::generate(),
+                    message: None,
                     absolute_path: AbsolutePath::parse(format!("/{prefix}-{index:04}.txt"))
                         .expect("batch path"),
                     content_ref: content_ref.clone(),
@@ -358,6 +359,7 @@ async fn planless_scan_deduplicates_an_inode_revised_across_materialization() {
             PutFileOptions {
                 behavior: DestinationBehavior::Replace,
                 commit_id: None,
+                message: None,
             },
         )
         .await

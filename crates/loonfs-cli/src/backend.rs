@@ -11,15 +11,15 @@ use loonfs::{
 };
 use loonfs_api::{
     v0::{DisableGrepIndexResponse, EnableGrepIndexResponse, RepairNamespaceResponse},
-    AuthoritativePathEntry, ChangeSeq, CheckpointId, CommitId, CommitResponse,
-    CreateCheckpointRequest, CreateCheckpointResponse, DestinationBehavior, EffectiveLimit,
-    ErrorCode, GrepRequest, GrepResponse, InodeId, ListFileRevisionsResponse,
-    MaintenanceStepRequest, MaintenanceStepResponse, NamespaceId, NamespaceStatusResponse,
-    NamespaceSummary, PaginationPolicy, ReleaseCheckpointResponse, RevisionNo,
+    AuthoritativePathEntry, ChangeSeq, CheckpointId, CommitResponse, CreateCheckpointRequest,
+    CreateCheckpointResponse, DestinationBehavior, EffectiveLimit, ErrorCode, GrepRequest,
+    GrepResponse, InodeId, ListFileRevisionsResponse, MaintenanceStepRequest,
+    MaintenanceStepResponse, NamespaceId, NamespaceStatusResponse, NamespaceSummary,
+    PaginationPolicy, ReleaseCheckpointResponse, RevisionNo,
 };
 use loonfs_client::{
     CreateDirectoryOptions as ClientCreateDirectoryOptions, DeleteOptions as ClientDeleteOptions,
-    NamespacePath, PutFileOptions as ClientPutFileOptions,
+    MutationOptions, NamespacePath, PutFileOptions as ClientPutFileOptions,
 };
 
 #[cfg(test)]
@@ -266,6 +266,7 @@ impl Backend for EmbeddedBackend {
                 PutFileOptions {
                     behavior: options.behavior,
                     commit_id: options.commit_id.clone(),
+                    message: options.message.clone(),
                 },
             )
         })
@@ -284,6 +285,7 @@ impl Backend for EmbeddedBackend {
                 DeleteOptions {
                     behavior: options.behavior,
                     commit_id: options.commit_id.clone(),
+                    message: options.message.clone(),
                     expected_inode_id: options.expected_inode_id,
                 },
             )
@@ -302,6 +304,7 @@ impl Backend for EmbeddedBackend {
                 spec.absolute_path().as_str(),
                 CreateDirectoryOptions {
                     commit_id: options.commit_id.clone(),
+                    message: options.message.clone(),
                     parents: options.parents,
                 },
             )
@@ -314,7 +317,7 @@ impl Backend for EmbeddedBackend {
         from: &NamespacePath,
         to: &NamespacePath,
         behavior: DestinationBehavior,
-        commit_id: Option<CommitId>,
+        options: &MutationOptions,
     ) -> Result<CommitResponse, BackendError> {
         self.publish_with_maintenance_recovery(from.namespace(), || {
             self.writer.move_path(
@@ -323,7 +326,8 @@ impl Backend for EmbeddedBackend {
                 to.absolute_path().as_str(),
                 MoveOptions {
                     behavior,
-                    commit_id: commit_id.clone(),
+                    commit_id: options.commit_id.clone(),
+                    message: options.message.clone(),
                 },
             )
         })
@@ -335,7 +339,7 @@ impl Backend for EmbeddedBackend {
         from: &NamespacePath,
         to: &NamespacePath,
         behavior: DestinationBehavior,
-        commit_id: Option<CommitId>,
+        options: &MutationOptions,
     ) -> Result<CommitResponse, BackendError> {
         self.publish_with_maintenance_recovery(from.namespace(), || {
             self.writer.copy_path(
@@ -344,7 +348,8 @@ impl Backend for EmbeddedBackend {
                 to.absolute_path().as_str(),
                 CopyOptions {
                     behavior,
-                    commit_id: commit_id.clone(),
+                    commit_id: options.commit_id.clone(),
+                    message: options.message.clone(),
                 },
             )
         })
@@ -355,7 +360,7 @@ impl Backend for EmbeddedBackend {
         &self,
         spec: &NamespacePath,
         source_revision_no: RevisionNo,
-        commit_id: Option<CommitId>,
+        options: &MutationOptions,
     ) -> Result<CommitResponse, BackendError> {
         self.publish_with_maintenance_recovery(spec.namespace(), || {
             self.writer.restore_file_revision(
@@ -363,7 +368,8 @@ impl Backend for EmbeddedBackend {
                 spec.absolute_path().as_str(),
                 source_revision_no,
                 RestoreRevisionOptions {
-                    commit_id: commit_id.clone(),
+                    commit_id: options.commit_id.clone(),
+                    message: options.message.clone(),
                 },
             )
         })
@@ -375,7 +381,7 @@ impl Backend for EmbeddedBackend {
         spec: &NamespacePath,
         inode_id: InodeId,
         deleted_at_seq: ChangeSeq,
-        commit_id: Option<CommitId>,
+        options: &MutationOptions,
     ) -> Result<CommitResponse, BackendError> {
         self.publish_with_maintenance_recovery(spec.namespace(), || {
             self.writer.undelete(
@@ -384,7 +390,8 @@ impl Backend for EmbeddedBackend {
                 deleted_at_seq,
                 spec.absolute_path().as_str(),
                 UndeleteOptions {
-                    commit_id: commit_id.clone(),
+                    commit_id: options.commit_id.clone(),
+                    message: options.message.clone(),
                 },
             )
         })
@@ -704,6 +711,7 @@ mod tests {
                     PutFileOptions {
                         behavior: DestinationBehavior::NoReplace,
                         commit_id: None,
+                        message: None,
                     },
                 )
                 .await;

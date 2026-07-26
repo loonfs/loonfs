@@ -46,6 +46,7 @@ async fn delete_path<S: ObjectStore + ?Sized>(
         namespace_id,
         PathMutationIntent::DeletePath {
             commit_id: test_commit_id(commit_id),
+            message: None,
             absolute_path: AbsolutePath::parse(absolute_path).expect("path"),
             behavior: DeleteDirectoryBehavior::Recursive,
             expected_inode_id: None,
@@ -67,6 +68,7 @@ async fn delete_path_non_recursive<S: ObjectStore + ?Sized>(
         namespace_id,
         PathMutationIntent::DeletePath {
             commit_id: test_commit_id(commit_id),
+            message: None,
             absolute_path: AbsolutePath::parse(absolute_path).expect("path"),
             behavior: DeleteDirectoryBehavior::NonRecursive,
             expected_inode_id: None,
@@ -89,6 +91,7 @@ async fn move_path<S: ObjectStore + ?Sized>(
         namespace_id,
         PathMutationIntent::MovePath {
             commit_id: test_commit_id(commit_id),
+            message: None,
             from_path: AbsolutePath::parse(from_path).expect("path"),
             to_path: AbsolutePath::parse(to_path).expect("path"),
             behavior: DestinationBehavior::NoReplace,
@@ -111,6 +114,7 @@ async fn copy_file_path<S: ObjectStore + ?Sized>(
         namespace_id,
         PathMutationIntent::CopyFilePath {
             commit_id: test_commit_id(commit_id),
+            message: None,
             from_path: AbsolutePath::parse(from_path).expect("path"),
             to_path: AbsolutePath::parse(to_path).expect("path"),
             behavior: DestinationBehavior::NoReplace,
@@ -133,6 +137,7 @@ async fn restore_file_revision<S: ObjectStore + ?Sized>(
         namespace_id,
         PathMutationIntent::RestoreRevision {
             commit_id: test_commit_id(commit_id),
+            message: None,
             absolute_path: AbsolutePath::parse(absolute_path).expect("path"),
             source_revision_no,
         },
@@ -1055,6 +1060,7 @@ async fn path_intents_cover_basic_mutations() {
         &namespace_id,
         PathMutationIntent::PutFile {
             commit_id: CommitId::parse("put-path").expect("valid commit id"),
+            message: None,
             absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
             content_ref: content.content_ref.clone(),
             behavior: DestinationBehavior::NoReplace,
@@ -1070,6 +1076,7 @@ async fn path_intents_cover_basic_mutations() {
         &namespace_id,
         PathMutationIntent::MovePath {
             commit_id: CommitId::parse("move-path").expect("valid commit id"),
+            message: None,
             from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
             behavior: DestinationBehavior::NoReplace,
@@ -1085,6 +1092,7 @@ async fn path_intents_cover_basic_mutations() {
         &namespace_id,
         PathMutationIntent::CopyFilePath {
             commit_id: CommitId::parse("copy-path").expect("valid commit id"),
+            message: None,
             from_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/c.txt").expect("path"),
             behavior: DestinationBehavior::NoReplace,
@@ -1100,6 +1108,7 @@ async fn path_intents_cover_basic_mutations() {
         &namespace_id,
         PathMutationIntent::DeletePath {
             commit_id: CommitId::parse("delete-path").expect("valid commit id"),
+            message: None,
             absolute_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
             behavior: DeleteDirectoryBehavior::NonRecursive,
             expected_inode_id: None,
@@ -1138,6 +1147,7 @@ async fn path_intents_in_one_batch_see_tentative_state() {
                 &namespace_id,
                 PathMutationIntent::PutFile {
                     commit_id: CommitId::parse("put-batched-path").expect("valid commit id"),
+                    message: None,
                     absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
                     content_ref: content.content_ref,
                     behavior: DestinationBehavior::NoReplace,
@@ -1146,6 +1156,7 @@ async fn path_intents_in_one_batch_see_tentative_state() {
             .await,
             NamespaceMutationCandidate::path(PathMutationIntent::MovePath {
                 commit_id: CommitId::parse("move-batched-path").expect("valid commit id"),
+                message: None,
                 from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
                 to_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
                 behavior: DestinationBehavior::NoReplace,
@@ -1731,6 +1742,7 @@ async fn move_replace_atomically_replaces_a_file_destination() {
         &namespace_id,
         PathMutationIntent::MovePath {
             commit_id: CommitId::parse("move-no-replace").expect("valid commit id"),
+            message: None,
             from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
             behavior: DestinationBehavior::NoReplace,
@@ -1748,6 +1760,7 @@ async fn move_replace_atomically_replaces_a_file_destination() {
         &namespace_id,
         PathMutationIntent::MovePath {
             commit_id: CommitId::parse("move-replace").expect("valid commit id"),
+            message: None,
             from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
             behavior: DestinationBehavior::Replace,
@@ -1797,6 +1810,7 @@ async fn move_replace_rejects_directory_destinations_and_self_moves() {
         &namespace_id,
         PathMutationIntent::MovePath {
             commit_id: CommitId::parse("move-onto-dir").expect("valid commit id"),
+            message: None,
             from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/dir").expect("path"),
             behavior: DestinationBehavior::Replace,
@@ -1813,6 +1827,7 @@ async fn move_replace_rejects_directory_destinations_and_self_moves() {
         &namespace_id,
         PathMutationIntent::MovePath {
             commit_id: CommitId::parse("move-onto-self").expect("valid commit id"),
+            message: None,
             from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
             behavior: DestinationBehavior::Replace,
@@ -1865,6 +1880,7 @@ async fn copy_replace_appends_a_revision_to_the_destination_inode() {
         &namespace_id,
         PathMutationIntent::CopyFilePath {
             commit_id: CommitId::parse("copy-replace").expect("valid commit id"),
+            message: None,
             from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
             behavior: DestinationBehavior::Replace,

@@ -45,6 +45,7 @@ fn delete_options_select_recursive_behavior() {
         DeleteOptions {
             behavior: loonfs::DeleteDirectoryBehavior::Recursive,
             commit_id: None,
+            message: None,
             expected_inode_id: None,
         },
     )
@@ -79,6 +80,7 @@ fn undelete_recovers_a_deleted_file_and_generations_stay_scoped() {
         PutFileOptions {
             behavior: DestinationBehavior::Replace,
             commit_id: None,
+            message: None,
         },
     )
     .expect("put revision two");
@@ -215,6 +217,7 @@ fn undelete_recovers_a_deleted_subtree_and_rejects_covered_children() {
             DeleteOptions {
                 behavior: loonfs::DeleteDirectoryBehavior::Recursive,
                 commit_id: None,
+                message: None,
                 expected_inode_id: None,
             },
         )
@@ -292,6 +295,7 @@ fn undelete_of_an_ancestor_keeps_independently_deleted_children_hidden() {
             DeleteOptions {
                 behavior: loonfs::DeleteDirectoryBehavior::Recursive,
                 commit_id: None,
+                message: None,
                 expected_inode_id: None,
             },
         )
@@ -655,6 +659,7 @@ fn delete_with_expected_inode_refuses_a_raced_rebinding() {
             DeleteOptions {
                 behavior: loonfs::DeleteDirectoryBehavior::NonRecursive,
                 commit_id: None,
+                message: None,
                 expected_inode_id: Some(InodeId(inode_id.0 + 1)),
             },
         )
@@ -677,6 +682,7 @@ fn delete_with_expected_inode_refuses_a_raced_rebinding() {
         DeleteOptions {
             behavior: loonfs::DeleteDirectoryBehavior::NonRecursive,
             commit_id: None,
+            message: None,
             expected_inode_id: Some(inode_id),
         },
     )
