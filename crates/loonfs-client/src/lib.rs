@@ -23,11 +23,11 @@ use loonfs_api::{
     },
     AbsolutePath, AuthoritativePathEntry, CapabilityDocument, ChangeSeq, CheckpointId, CommitId,
     ContentRef, CreateCheckpointRequest, CreateCheckpointResponse, CreateNamespaceRequest,
-    DeleteDirectoryBehavior, DeleteNamespaceResponse, DestinationBehavior,
-    FilesystemOperation, FilesystemOperationRequest, ForkNamespaceRequest, GrepRequest,
-    GrepResponse, InodeId, ListFileRevisionsResponse, ListPathEntriesResponse,
-    MaintenanceStepRequest, MaintenanceStepResponse, NamespaceId, NamespaceStatusResponse,
-    NamespaceSummary, ReleaseCheckpointResponse, RestoreFileRevisionRequest, RevisionNo, UploadId,
+    DeleteDirectoryBehavior, DeleteNamespaceResponse, DestinationBehavior, FilesystemOperation,
+    FilesystemOperationRequest, ForkNamespaceRequest, GrepRequest, GrepResponse, InodeId,
+    ListFileRevisionsResponse, ListPathEntriesResponse, MaintenanceStepRequest,
+    MaintenanceStepResponse, NamespaceId, NamespaceStatusResponse, NamespaceSummary,
+    ReleaseCheckpointResponse, RestoreFileRevisionRequest, RevisionNo, UploadId,
 };
 use std::sync::{Arc, OnceLock};
 

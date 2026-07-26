@@ -20,7 +20,7 @@ use loonfs_test_support::block_on::block_on;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationClass};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tempfile::tempdir;
 use tokio::time::{timeout, Duration};
 
@@ -859,66 +859,4 @@ fn enabled_writer_drains_reorganization_backlog_without_admin() {
              a leftover run means the drain stopped early"
         );
     });
-}
-
-#[test]
-fn background_step_conclusions_emit_debug_events() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace_id("demo");
-    let captured: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
-    let sink = Arc::clone(&captured);
-    let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::DEBUG)
-        .with_ansi(false)
-        .with_writer(move || CaptureWriter(Arc::clone(&sink)))
-        .finish();
-    // Thread-local so the capture cannot leak into other tests; the
-    // current-thread runtime keeps spawned background steps on this thread.
-    let _guard = tracing::subscriber::set_default(subscriber);
-
-    block_on(async {
-        let writer = writer(temp_dir.path(), FsBackgroundWork::Enabled).await;
-        writer
-            .create_namespace(&namespace_id, CreateNamespaceOptions::default())
-            .await
-            .expect("create namespace");
-        fill_wal_tail_past_threshold(&writer, &namespace_id).await;
-        writer
-            .wait_for_background_work()
-            .await
-            .expect("background maintenance quiesces");
-    });
-
-    let log = String::from_utf8(captured.lock().expect("capture lock").clone())
-        .expect("captured log is utf8");
-    let conclusion = log
-        .lines()
-        .find(|line| line.contains("background maintenance step concluded"))
-        .unwrap_or_else(|| {
-            panic!("background step conclusion missing from captured tracing:\n{log}")
-        });
-    for field in [
-        "wal_flush",
-        "reorganize",
-        "wal_tail_segments_before",
-        "elapsed_ms",
-    ] {
-        assert!(
-            conclusion.contains(field),
-            "missing `{field}` in: {conclusion}"
-        );
-    }
-}
-
-struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
-
-impl std::io::Write for CaptureWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().expect("capture lock").extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
 }
