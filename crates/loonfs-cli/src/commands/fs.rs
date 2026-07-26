@@ -393,6 +393,7 @@ pub(crate) async fn run_filesystem_put(
             &local_path,
             remote_root.as_str(),
             args.force,
+            args.message.clone(),
             runtime,
         )
         .await;
@@ -424,6 +425,7 @@ pub(crate) async fn run_filesystem_put(
     let options = PutFileOptions {
         behavior,
         commit_id,
+        message: args.message.clone(),
     };
     let result = context
         .target
@@ -475,6 +477,7 @@ pub(crate) async fn run_filesystem_rm(
         behavior,
         expected_inode_id: Some(deleted_inode),
         commit_id,
+        message: args.message.clone(),
     };
     let result = context
         .target
@@ -509,7 +512,14 @@ pub(crate) async fn run_filesystem_restore(
     let result = context
         .target
         .backend()
-        .restore_file_revision(&spec, RevisionNo(args.revision), commit_id)
+        .restore_file_revision(
+            &spec,
+            RevisionNo(args.revision),
+            &loonfs_client::MutationOptions {
+                commit_id,
+                message: args.message.clone(),
+            },
+        )
         .await
         .map_err(|error| context.fail(kind, error))?;
 
@@ -543,7 +553,10 @@ pub(crate) async fn run_filesystem_undelete(
             &spec,
             loonfs_api::InodeId(args.inode),
             loonfs_api::ChangeSeq(args.deleted_at),
-            commit_id,
+            &loonfs_client::MutationOptions {
+                commit_id,
+                message: args.message.clone(),
+            },
         )
         .await
         .map_err(|error| context.fail(kind, error))?;
@@ -574,6 +587,7 @@ pub(crate) async fn run_filesystem_mkdir(
     let options = CreateDirectoryOptions {
         parents: args.parents,
         commit_id,
+        message: args.message.clone(),
     };
     let result = context
         .target
@@ -669,6 +683,7 @@ async fn run_filesystem_transfer(
                 from.absolute_path().as_str(),
                 to.absolute_path().as_str(),
                 args.force,
+                args.message.clone(),
                 runtime,
             )
             .await;
@@ -690,7 +705,15 @@ async fn run_filesystem_transfer(
         context
             .target
             .backend()
-            .copy_path(&from, &to, behavior, commit_id)
+            .copy_path(
+                &from,
+                &to,
+                behavior,
+                &loonfs_client::MutationOptions {
+                    commit_id,
+                    message: args.message.clone(),
+                },
+            )
             .await
     } else {
         let behavior = if args.force {
@@ -701,7 +724,15 @@ async fn run_filesystem_transfer(
         context
             .target
             .backend()
-            .move_path(&from, &to, behavior, commit_id)
+            .move_path(
+                &from,
+                &to,
+                behavior,
+                &loonfs_client::MutationOptions {
+                    commit_id,
+                    message: args.message.clone(),
+                },
+            )
             .await
     }
     .map_err(|error| context.fail(kind, error))?;

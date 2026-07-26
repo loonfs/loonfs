@@ -158,6 +158,7 @@ async fn warm_phase_request_accounting() {
             candidates.push(loonfs::publish::NamespaceMutationCandidate::path_prepared(
                 loonfs::publish::PathMutationIntent::PutFile {
                     commit_id: loonfs::CommitId::generate(),
+                    message: None,
                     absolute_path: AbsolutePath::parse(format!("/hot/file-{index:05}.txt"))
                         .expect("path"),
                     content_ref: content_ref.clone(),
@@ -251,6 +252,7 @@ async fn warm_phase_request_accounting() {
             PutFileOptions {
                 behavior: loonfs::DestinationBehavior::Replace,
                 commit_id: None,
+                message: None,
             },
         )
         .await
@@ -267,6 +269,7 @@ async fn warm_phase_request_accounting() {
             PutFileOptions {
                 behavior: loonfs::DestinationBehavior::Replace,
                 commit_id: None,
+                message: None,
             },
         )
         .await

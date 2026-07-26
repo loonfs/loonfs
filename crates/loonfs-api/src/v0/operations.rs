@@ -291,6 +291,12 @@ pub enum FilesystemOperation {
 pub struct FilesystemOperationRequest {
     /// Caller-supplied idempotency key for this operation.
     pub commit_id: CommitId,
+    /// Caller annotation recorded on the commit and reported by the change
+    /// feed. Part of the operation's identity: reusing `commit_id` with a
+    /// different message is a `commit_id_reuse_conflict`, exactly as it is
+    /// for an explicit commit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
     /// Proofs for any new external content refs introduced by this operation.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub content_tokens: Vec<ValidatedContentToken>,

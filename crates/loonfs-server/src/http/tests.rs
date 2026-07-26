@@ -658,6 +658,7 @@ async fn runtime_created_state_is_readable_through_http() {
         PutFileOptions {
             behavior: DestinationBehavior::NoReplace,
             commit_id: Some(CommitId::parse("runtime-put").expect("valid commit id")),
+            message: None,
         },
     )
     .await
@@ -1986,6 +1987,7 @@ async fn write_file_bytes(
         PutFileOptions {
             behavior: DestinationBehavior::Replace,
             commit_id: Some(CommitId::parse(commit_id).expect("valid test commit id")),
+            message: None,
         },
     )
     .await
@@ -2004,6 +2006,7 @@ async fn delete_path_recursive(
         DeleteOptions {
             behavior: DeleteDirectoryBehavior::Recursive,
             commit_id: Some(CommitId::parse(commit_id).expect("valid test commit id")),
+            message: None,
             expected_inode_id: None,
         },
     )

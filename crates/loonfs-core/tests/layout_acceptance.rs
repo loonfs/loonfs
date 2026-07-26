@@ -45,6 +45,7 @@ async fn put_file<S: ObjectStore + ?Sized>(
             vec![NamespaceMutationCandidate::path_prepared(
                 PathMutationIntent::PutFile {
                     commit_id: loonfs_api::CommitId::generate(),
+                    message: None,
                     absolute_path: AbsolutePath::parse(absolute_path).expect("path"),
                     content_ref,
                     behavior: loonfs_api::DestinationBehavior::NoReplace,

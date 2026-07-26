@@ -294,6 +294,7 @@ pub(crate) mod mutation_split_support {
             namespace_id,
             PathMutationIntent::PutFile {
                 commit_id: test_commit_id(commit_id),
+                message: None,
                 absolute_path: AbsolutePath::parse(absolute_path).expect("path"),
                 content_ref: content.content_ref,
                 behavior,
@@ -335,6 +336,7 @@ pub(crate) mod mutation_split_support {
             namespace_id,
             PathMutationIntent::CreateDir {
                 commit_id: test_commit_id(commit_id),
+                message: None,
                 absolute_path: AbsolutePath::parse(absolute_path).expect("path"),
                 parents: false,
             },

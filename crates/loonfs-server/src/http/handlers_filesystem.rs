@@ -465,6 +465,7 @@ pub(super) async fn apply_filesystem_operation(
     let namespace_id = namespace.into_id()?;
     let FilesystemOperationRequest {
         commit_id,
+        message,
         content_tokens,
         operation,
     } = request;
@@ -503,6 +504,7 @@ pub(super) async fn apply_filesystem_operation(
     let intent = match operation {
         FilesystemOperation::CreateDirectory { path, parents } => PathMutationIntent::CreateDir {
             commit_id,
+            message: message.clone(),
             absolute_path: validate_path(path)?,
             parents,
         },
@@ -512,6 +514,7 @@ pub(super) async fn apply_filesystem_operation(
             behavior,
         } => PathMutationIntent::PutFile {
             commit_id,
+            message: message.clone(),
             absolute_path: validate_path(path)?,
             content_ref,
             behavior,
@@ -522,6 +525,7 @@ pub(super) async fn apply_filesystem_operation(
             expected_inode_id,
         } => PathMutationIntent::DeletePath {
             commit_id,
+            message: message.clone(),
             absolute_path: validate_path(path)?,
             behavior,
             expected_inode_id,
@@ -532,6 +536,7 @@ pub(super) async fn apply_filesystem_operation(
             behavior,
         } => PathMutationIntent::MovePath {
             commit_id,
+            message: message.clone(),
             from_path: validate_path(from_path)?,
             to_path: validate_path(to_path)?,
             behavior,
@@ -542,6 +547,7 @@ pub(super) async fn apply_filesystem_operation(
             behavior,
         } => PathMutationIntent::CopyFilePath {
             commit_id,
+            message: message.clone(),
             from_path: validate_path(from_path)?,
             to_path: validate_path(to_path)?,
             behavior,
@@ -551,6 +557,7 @@ pub(super) async fn apply_filesystem_operation(
             source_revision_no,
         } => PathMutationIntent::RestoreRevision {
             commit_id,
+            message: message.clone(),
             absolute_path: validate_path(path)?,
             source_revision_no,
         },
@@ -560,6 +567,7 @@ pub(super) async fn apply_filesystem_operation(
             path,
         } => PathMutationIntent::Undelete {
             commit_id,
+            message: message.clone(),
             inode_id,
             deleted_at_seq,
             absolute_path: validate_path(path)?,

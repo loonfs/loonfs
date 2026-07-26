@@ -79,6 +79,10 @@ pub struct MutationOptions {
     /// the committed mutation instead of double-committing. A fresh id is
     /// generated when absent.
     pub commit_id: Option<CommitId>,
+    /// Annotation recorded on the commit and reported by the change feed.
+    /// Part of the commit's identity: the same `commit_id` with a different
+    /// message is a `commit_id_reuse_conflict`.
+    pub message: Option<String>,
 }
 
 impl MutationOptions {
@@ -94,6 +98,8 @@ pub struct PutFileOptions {
     pub behavior: DestinationBehavior,
     /// Optional idempotency key.
     pub commit_id: Option<CommitId>,
+    /// Annotation recorded on the commit; part of the commit's identity.
+    pub message: Option<String>,
 }
 
 impl Default for PutFileOptions {
@@ -101,6 +107,7 @@ impl Default for PutFileOptions {
         Self {
             behavior: DestinationBehavior::NoReplace,
             commit_id: None,
+            message: None,
         }
     }
 }
@@ -110,6 +117,8 @@ impl Default for PutFileOptions {
 pub struct CreateDirectoryOptions {
     /// Optional idempotency key.
     pub commit_id: Option<CommitId>,
+    /// Annotation recorded on the commit; part of the commit's identity.
+    pub message: Option<String>,
     /// Also create missing ancestor directories.
     pub parents: bool,
 }
@@ -121,6 +130,8 @@ pub struct DeleteOptions {
     pub behavior: DeleteDirectoryBehavior,
     /// Optional idempotency key.
     pub commit_id: Option<CommitId>,
+    /// Annotation recorded on the commit; part of the commit's identity.
+    pub message: Option<String>,
     /// Delete only while the path still resolves to this inode.
     pub expected_inode_id: Option<InodeId>,
 }
@@ -130,6 +141,7 @@ impl Default for DeleteOptions {
         Self {
             behavior: DeleteDirectoryBehavior::NonRecursive,
             commit_id: None,
+            message: None,
             expected_inode_id: None,
         }
     }
@@ -682,6 +694,7 @@ impl Client {
                 spec.namespace(),
                 &FilesystemOperationRequest {
                     commit_id,
+                    message: options.message.clone(),
                     content_tokens: staged.validated_content_token.into_iter().collect(),
                     operation: FilesystemOperation::PutFile {
                         path: spec.absolute_path().clone(),
@@ -705,6 +718,7 @@ impl Client {
                 spec.namespace(),
                 &FilesystemOperationRequest {
                     commit_id,
+                    message: options.message.clone(),
                     content_tokens: Vec::new(),
                     operation: FilesystemOperation::CreateDirectory {
                         path: spec.absolute_path().clone(),
@@ -727,6 +741,7 @@ impl Client {
                 spec.namespace(),
                 &FilesystemOperationRequest {
                     commit_id,
+                    message: options.message.clone(),
                     content_tokens: Vec::new(),
                     operation: FilesystemOperation::DeletePath {
                         path: spec.absolute_path().clone(),
@@ -759,6 +774,7 @@ impl Client {
                 from.namespace(),
                 &FilesystemOperationRequest {
                     commit_id,
+                    message: options.message.clone(),
                     content_tokens: Vec::new(),
                     operation: FilesystemOperation::MovePath {
                         from_path: from.absolute_path().clone(),
@@ -791,6 +807,7 @@ impl Client {
                 from.namespace(),
                 &FilesystemOperationRequest {
                     commit_id,
+                    message: options.message.clone(),
                     content_tokens: Vec::new(),
                     operation: FilesystemOperation::CopyPath {
                         from_path: from.absolute_path().clone(),
@@ -819,6 +836,7 @@ impl Client {
                 spec.namespace(),
                 &FilesystemOperationRequest {
                     commit_id,
+                    message: options.message.clone(),
                     content_tokens: Vec::new(),
                     operation: FilesystemOperation::Undelete {
                         inode_id,
@@ -843,6 +861,7 @@ impl Client {
                 spec.namespace(),
                 &FilesystemOperationRequest {
                     commit_id,
+                    message: options.message.clone(),
                     content_tokens: Vec::new(),
                     operation: FilesystemOperation::RestoreRevision {
                         path: spec.absolute_path().clone(),
@@ -1124,6 +1143,7 @@ mod tests {
                 &spec,
                 &CreateDirectoryOptions {
                     commit_id: Some(commit_id),
+                    message: None,
                     ..CreateDirectoryOptions::default()
                 },
             )

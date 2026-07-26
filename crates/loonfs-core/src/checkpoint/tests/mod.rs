@@ -136,6 +136,7 @@ pub(crate) async fn write_test_file<S: ObjectStore>(
             vec![NamespaceMutationCandidate::path_prepared(
                 PathMutationIntent::PutFile {
                     commit_id: CommitId::parse(commit_id).expect("commit id"),
+                    message: None,
                     absolute_path: AbsolutePath::parse(path).expect("path"),
                     content_ref,
                     behavior: DestinationBehavior::NoReplace,

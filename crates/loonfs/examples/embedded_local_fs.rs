@@ -36,6 +36,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             PutFileOptions {
                 behavior: DestinationBehavior::Replace,
                 commit_id: None,
+                message: None,
             },
         )
         .await?;

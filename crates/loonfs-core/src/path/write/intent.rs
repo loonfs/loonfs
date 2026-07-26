@@ -18,6 +18,10 @@ pub enum PathMutationIntent {
     /// Create one directory.
     CreateDir {
         commit_id: CommitId,
+        /// Caller annotation recorded on the commit. Part of the intent's
+        /// identity, exactly as `message` is part of an explicit commit's
+        /// fingerprint preimage.
+        message: Option<String>,
         absolute_path: AbsolutePath,
         /// Also create missing ancestor directories, like `PutFile` does.
         parents: bool,
@@ -25,6 +29,8 @@ pub enum PathMutationIntent {
     /// Put one file at a path.
     PutFile {
         commit_id: CommitId,
+        /// Caller annotation recorded on the commit; part of intent identity.
+        message: Option<String>,
         absolute_path: AbsolutePath,
         content_ref: ContentRef,
         behavior: DestinationBehavior,
@@ -32,6 +38,8 @@ pub enum PathMutationIntent {
     /// Delete one path.
     DeletePath {
         commit_id: CommitId,
+        /// Caller annotation recorded on the commit; part of intent identity.
+        message: Option<String>,
         absolute_path: AbsolutePath,
         behavior: DeleteDirectoryBehavior,
         /// When set, the delete applies only while the path still resolves
@@ -42,6 +50,8 @@ pub enum PathMutationIntent {
     /// Move one path to another path.
     MovePath {
         commit_id: CommitId,
+        /// Caller annotation recorded on the commit; part of intent identity.
+        message: Option<String>,
         from_path: AbsolutePath,
         to_path: AbsolutePath,
         behavior: DestinationBehavior,
@@ -49,6 +59,8 @@ pub enum PathMutationIntent {
     /// Copy one file path to another path.
     CopyFilePath {
         commit_id: CommitId,
+        /// Caller annotation recorded on the commit; part of intent identity.
+        message: Option<String>,
         from_path: AbsolutePath,
         to_path: AbsolutePath,
         behavior: DestinationBehavior,
@@ -56,12 +68,16 @@ pub enum PathMutationIntent {
     /// Restore a file revision at a path.
     RestoreRevision {
         commit_id: CommitId,
+        /// Caller annotation recorded on the commit; part of intent identity.
+        message: Option<String>,
         absolute_path: AbsolutePath,
         source_revision_no: RevisionNo,
     },
     /// Recover a deleted subtree to a destination path.
     Undelete {
         commit_id: CommitId,
+        /// Caller annotation recorded on the commit; part of intent identity.
+        message: Option<String>,
         inode_id: InodeId,
         deleted_at_seq: ChangeSeq,
         absolute_path: AbsolutePath,
@@ -69,6 +85,19 @@ pub enum PathMutationIntent {
 }
 
 impl PathMutationIntent {
+    /// Returns the caller annotation carried by this intent.
+    pub fn message(&self) -> Option<&str> {
+        match self {
+            Self::CreateDir { message, .. }
+            | Self::PutFile { message, .. }
+            | Self::DeletePath { message, .. }
+            | Self::MovePath { message, .. }
+            | Self::CopyFilePath { message, .. }
+            | Self::RestoreRevision { message, .. }
+            | Self::Undelete { message, .. } => message.as_deref(),
+        }
+    }
+
     /// Returns the idempotency key carried by this intent.
     pub fn commit_id(&self) -> &CommitId {
         match self {

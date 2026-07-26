@@ -121,6 +121,7 @@ async fn path_put_with_bad_content_token_fails_content_not_prepared() {
 
     let request = FilesystemOperationRequest {
         commit_id: CommitId::parse("bad-token-put").expect("valid commit id"),
+        message: None,
         content_tokens: vec![ValidatedContentToken {
             content_ref: completed.content_ref.clone(),
             token: "not.a.valid.token".to_owned(),
@@ -159,6 +160,7 @@ async fn path_put_without_content_token_fails_content_not_prepared() {
     let completed = stage_uploaded_content(&harness.client, &namespace, b"token missing").await;
     let request = FilesystemOperationRequest {
         commit_id: CommitId::parse("missing-token-put").expect("valid commit id"),
+        message: None,
         content_tokens: Vec::new(),
         operation: FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/missing-token.txt").expect("path"),
@@ -196,6 +198,7 @@ async fn path_put_with_valid_content_token_succeeds() {
     let completed = stage_uploaded_content(&harness.client, &namespace, bytes).await;
     let request = FilesystemOperationRequest {
         commit_id: CommitId::parse("valid-token-put").expect("valid commit id"),
+        message: None,
         content_tokens: vec![ValidatedContentToken {
             content_ref: completed.content_ref.clone(),
             token: completed
@@ -247,6 +250,7 @@ async fn landed_path_put_replays_after_content_token_is_absent_expired_or_garbag
     let content_ref = completed.content_ref.clone();
     let mut request = FilesystemOperationRequest {
         commit_id: CommitId::parse("token-replay-put").expect("valid commit id"),
+        message: None,
         content_tokens: vec![ValidatedContentToken {
             content_ref: completed.content_ref.clone(),
             token: completed
@@ -307,6 +311,7 @@ async fn path_put_with_only_an_irrelevant_token_reports_the_missing_put_proof() 
         stage_uploaded_content(&harness.client, &namespace, b"irrelevant content").await;
     let request = FilesystemOperationRequest {
         commit_id: CommitId::parse("irrelevant-token-put").expect("valid commit id"),
+        message: None,
         content_tokens: vec![ValidatedContentToken {
             content_ref: irrelevant.content_ref,
             token: irrelevant

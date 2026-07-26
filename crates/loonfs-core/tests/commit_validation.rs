@@ -789,6 +789,7 @@ async fn path_put_file_without_admission_fails_without_reading_content() {
         vec![NamespaceMutationCandidate::path(
             PathMutationIntent::PutFile {
                 commit_id: CommitId::parse("put-cold-content").expect("valid commit id"),
+                message: None,
                 absolute_path: AbsolutePath::parse("/docs/hello.txt").expect("path"),
                 content_ref: content.content_ref,
                 behavior: DestinationBehavior::NoReplace,
@@ -829,12 +830,14 @@ async fn path_batch_rejects_repeated_unadmitted_content_without_reading_it() {
         vec![
             NamespaceMutationCandidate::path(PathMutationIntent::PutFile {
                 commit_id: CommitId::parse("put-shared-a").expect("valid commit id"),
+                message: None,
                 absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
                 content_ref: content.content_ref.clone(),
                 behavior: DestinationBehavior::NoReplace,
             }),
             NamespaceMutationCandidate::path(PathMutationIntent::PutFile {
                 commit_id: CommitId::parse("put-shared-b").expect("valid commit id"),
+                message: None,
                 absolute_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
                 content_ref: content.content_ref,
                 behavior: DestinationBehavior::NoReplace,
@@ -893,6 +896,7 @@ async fn valid_content_admission_skips_durable_content_validation() {
         vec![NamespaceMutationCandidate::path_prepared(
             PathMutationIntent::PutFile {
                 commit_id: CommitId::parse("put-admitted-content").expect("valid commit id"),
+                message: None,
                 absolute_path: AbsolutePath::parse("/docs/admitted.txt").expect("path"),
                 content_ref: content.content_ref,
                 behavior: DestinationBehavior::NoReplace,

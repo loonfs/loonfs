@@ -105,6 +105,7 @@ async fn put_prepared_file_content<S: ObjectStore + ?Sized>(
         namespace_id,
         PathMutationIntent::PutFile {
             commit_id: normalized_commit_id(commit_id),
+            message: None,
             absolute_path: parse_mutation_path(absolute_path)?,
             content_ref,
             behavior,
@@ -147,6 +148,7 @@ async fn delete_path_with_behavior<S: ObjectStore + ?Sized>(
         namespace_id,
         PathMutationIntent::DeletePath {
             commit_id,
+            message: None,
             absolute_path: parse_mutation_path(absolute_path)?,
             behavior,
             expected_inode_id: None,
@@ -171,6 +173,7 @@ pub(crate) async fn move_path<S: ObjectStore + ?Sized>(
         namespace_id,
         PathMutationIntent::MovePath {
             commit_id,
+            message: None,
             from_path: parse_mutation_path(from_path)?,
             to_path: parse_mutation_path(to_path)?,
             behavior: DestinationBehavior::NoReplace,
@@ -195,6 +198,7 @@ pub(crate) async fn restore_file_revision<S: ObjectStore + ?Sized>(
         namespace_id,
         PathMutationIntent::RestoreRevision {
             commit_id,
+            message: None,
             absolute_path: parse_mutation_path(absolute_path)?,
             source_revision_no,
         },

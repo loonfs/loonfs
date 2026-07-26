@@ -46,6 +46,7 @@ async fn delete_path_non_recursive_expecting<S: ObjectStore + ?Sized>(
         namespace_id,
         PathMutationIntent::DeletePath {
             commit_id: CommitId::parse(commit_id).expect("valid test commit id"),
+            message: None,
             absolute_path: AbsolutePath::parse(absolute_path).expect("path"),
             behavior: DeleteDirectoryBehavior::NonRecursive,
             expected_inode_id,
@@ -366,6 +367,7 @@ async fn batch_delete_then_recreate_of_a_durable_file_layers_over_cached_state()
         .publish_namespace_mutations_batch(vec![
             NamespaceMutationCandidate::path(PathMutationIntent::DeletePath {
                 commit_id: CommitId::parse("delete-cycled").expect("valid commit id"),
+                message: None,
                 absolute_path: AbsolutePath::parse("/docs/cycled.txt").expect("path"),
                 behavior: DeleteDirectoryBehavior::NonRecursive,
                 expected_inode_id: None,
@@ -375,6 +377,7 @@ async fn batch_delete_then_recreate_of_a_durable_file_layers_over_cached_state()
                 &namespace_id,
                 PathMutationIntent::PutFile {
                     commit_id: CommitId::parse("recreate-cycled").expect("valid commit id"),
+                    message: None,
                     absolute_path: AbsolutePath::parse("/docs/cycled.txt").expect("path"),
                     content_ref: staged.content_ref,
                     behavior: DestinationBehavior::NoReplace,
@@ -556,6 +559,7 @@ async fn ack_lost_head_cas_reports_unknown_outcome_and_replays_idempotently() {
         .expect("stage content");
     let intent = || PathMutationIntent::PutFile {
         commit_id: CommitId::parse("ack-lost-put").expect("valid commit id"),
+        message: None,
         absolute_path: AbsolutePath::parse("/ack.txt").expect("path"),
         content_ref: content.content_ref.clone(),
         behavior: DestinationBehavior::NoReplace,
@@ -596,6 +600,7 @@ async fn retry_succeeds_after_wal_orphaned_by_stale_head_cas() {
         .expect("stage content");
     let intent = PathMutationIntent::PutFile {
         commit_id: CommitId::parse("retry-after-orphan").expect("valid commit id"),
+        message: None,
         absolute_path: AbsolutePath::parse("/retry.txt").expect("path"),
         content_ref: content.content_ref,
         behavior: DestinationBehavior::NoReplace,
@@ -691,6 +696,7 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
             // Rejected against the durable materialization: nothing was accepted yet.
             NamespaceMutationCandidate::path(PathMutationIntent::DeletePath {
                 commit_id: CommitId::parse("reject-materialization").expect("valid commit id"),
+                message: None,
                 absolute_path: AbsolutePath::parse("/missing.txt").expect("path"),
                 behavior: DeleteDirectoryBehavior::NonRecursive,
                 expected_inode_id: None,
@@ -701,6 +707,7 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
                 &namespace_id,
                 PathMutationIntent::PutFile {
                     commit_id: CommitId::parse("accept-a").expect("valid commit id"),
+                    message: None,
                     absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
                     content_ref: content.content_ref.clone(),
                     behavior: DestinationBehavior::NoReplace,
@@ -714,6 +721,7 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
                 &namespace_id,
                 PathMutationIntent::PutFile {
                     commit_id: CommitId::parse("reject-speculative").expect("valid commit id"),
+                    message: None,
                     absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
                     content_ref: content.content_ref.clone(),
                     behavior: DestinationBehavior::NoReplace,
@@ -723,6 +731,7 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
             // Alias of the materialization-decided rejection.
             NamespaceMutationCandidate::path(PathMutationIntent::DeletePath {
                 commit_id: CommitId::parse("reject-materialization").expect("valid commit id"),
+                message: None,
                 absolute_path: AbsolutePath::parse("/missing.txt").expect("path"),
                 behavior: DeleteDirectoryBehavior::NonRecursive,
                 expected_inode_id: None,
@@ -797,6 +806,7 @@ async fn stale_head_cas_fails_rejections_decided_against_in_batch_state() {
         vec![
             NamespaceMutationCandidate::path(PathMutationIntent::DeletePath {
                 commit_id: CommitId::parse("reject-materialization").expect("valid commit id"),
+                message: None,
                 absolute_path: AbsolutePath::parse("/missing.txt").expect("path"),
                 behavior: DeleteDirectoryBehavior::NonRecursive,
                 expected_inode_id: None,
@@ -806,6 +816,7 @@ async fn stale_head_cas_fails_rejections_decided_against_in_batch_state() {
                 &namespace_id,
                 PathMutationIntent::PutFile {
                     commit_id: CommitId::parse("accept-a").expect("valid commit id"),
+                    message: None,
                     absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
                     content_ref: content.content_ref.clone(),
                     behavior: DestinationBehavior::NoReplace,
@@ -817,6 +828,7 @@ async fn stale_head_cas_fails_rejections_decided_against_in_batch_state() {
                 &namespace_id,
                 PathMutationIntent::PutFile {
                     commit_id: CommitId::parse("reject-speculative").expect("valid commit id"),
+                    message: None,
                     absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
                     content_ref: content.content_ref.clone(),
                     behavior: DestinationBehavior::NoReplace,
@@ -1294,6 +1306,7 @@ async fn path_publishes_use_durable_path_commit_receipt_index() {
 
     let intent = PathMutationIntent::PutFile {
         commit_id: CommitId::parse("same-path-request").expect("valid commit id"),
+        message: None,
         absolute_path: AbsolutePath::parse("/same/path.txt").expect("path"),
         content_ref: content.content_ref.clone(),
         behavior: DestinationBehavior::NoReplace,
@@ -1306,6 +1319,7 @@ async fn path_publishes_use_durable_path_commit_receipt_index() {
         &namespace_id,
         PathMutationIntent::PutFile {
             commit_id: CommitId::parse("same-path-request").expect("valid commit id"),
+            message: None,
             absolute_path: AbsolutePath::parse("/same/path.txt").expect("path"),
             content_ref: content.content_ref.clone(),
             behavior: DestinationBehavior::NoReplace,
@@ -1321,6 +1335,7 @@ async fn path_publishes_use_durable_path_commit_receipt_index() {
         &namespace_id,
         PathMutationIntent::DeletePath {
             commit_id: CommitId::parse("same-path-request").expect("valid commit id"),
+            message: None,
             absolute_path: AbsolutePath::parse("/same/path.txt").expect("path"),
             behavior: DeleteDirectoryBehavior::NonRecursive,
             expected_inode_id: None,
@@ -1564,6 +1579,7 @@ async fn idempotent_path_retry_returns_receipt_before_content_validation() {
                 &namespace_id("demo"),
                 PathMutationIntent::PutFile {
                     commit_id: commit_id.clone(),
+                    message: None,
                     absolute_path: AbsolutePath::parse("/docs/idempotent.txt").expect("path"),
                     content_ref: content.content_ref.clone(),
                     behavior: DestinationBehavior::NoReplace,
@@ -1589,6 +1605,7 @@ async fn idempotent_path_retry_returns_receipt_before_content_validation() {
         vec![NamespaceMutationCandidate::path(
             PathMutationIntent::PutFile {
                 commit_id,
+                message: None,
                 absolute_path: AbsolutePath::parse("/docs/idempotent.txt").expect("path"),
                 content_ref: content.content_ref,
                 behavior: DestinationBehavior::NoReplace,

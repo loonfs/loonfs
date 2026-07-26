@@ -471,6 +471,7 @@ fn put_file_bytes_and_prepare_then_put_commit_equivalent_state() {
         let commit_id = CommitId::parse("equivalent-put").expect("valid commit id");
         let options = PutFileOptions {
             commit_id: Some(commit_id.clone()),
+            message: None,
             ..PutFileOptions::default()
         };
 

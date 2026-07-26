@@ -4251,6 +4251,13 @@
             },
             "description": "Proofs for any new external content refs introduced by this operation."
           },
+          "message": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Caller annotation recorded on the commit and reported by the change\nfeed. Part of the operation's identity: reusing `commit_id` with a\ndifferent message is a `commit_id_reuse_conflict`, exactly as it is\nfor an explicit commit."
+          },
           "operation": {
             "$ref": "#/components/schemas/FilesystemOperation",
             "description": "Operation to apply."

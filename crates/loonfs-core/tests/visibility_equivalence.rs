@@ -71,6 +71,7 @@ impl VisibilityHarness {
         self.publish(NamespaceMutationCandidate::path(
             PathMutationIntent::CreateDir {
                 commit_id: CommitId::generate(),
+                message: None,
                 absolute_path: AbsolutePath::parse(path).expect("valid path"),
                 parents: false,
             },
@@ -96,6 +97,7 @@ impl VisibilityHarness {
         self.publish(NamespaceMutationCandidate::path_prepared(
             PathMutationIntent::PutFile {
                 commit_id: CommitId::generate(),
+                message: None,
                 absolute_path: AbsolutePath::parse(path).expect("valid path"),
                 content_ref,
                 behavior,
@@ -113,6 +115,7 @@ impl VisibilityHarness {
         self.publish(NamespaceMutationCandidate::path(
             PathMutationIntent::DeletePath {
                 commit_id: CommitId::generate(),
+                message: None,
                 absolute_path: AbsolutePath::parse(path).expect("valid path"),
                 behavior,
                 expected_inode_id: None,
@@ -125,6 +128,7 @@ impl VisibilityHarness {
         self.publish(NamespaceMutationCandidate::path(
             PathMutationIntent::MovePath {
                 commit_id: CommitId::generate(),
+                message: None,
                 from_path: AbsolutePath::parse(from_path).expect("valid source path"),
                 to_path: AbsolutePath::parse(to_path).expect("valid destination path"),
                 behavior: DestinationBehavior::NoReplace,
@@ -137,6 +141,7 @@ impl VisibilityHarness {
         self.publish(NamespaceMutationCandidate::path(
             PathMutationIntent::CopyFilePath {
                 commit_id: CommitId::generate(),
+                message: None,
                 from_path: AbsolutePath::parse(from_path).expect("valid source path"),
                 to_path: AbsolutePath::parse(to_path).expect("valid destination path"),
                 behavior: DestinationBehavior::NoReplace,
@@ -153,6 +158,7 @@ impl VisibilityHarness {
         self.publish(NamespaceMutationCandidate::path(
             PathMutationIntent::RestoreRevision {
                 commit_id: CommitId::generate(),
+                message: None,
                 absolute_path: AbsolutePath::parse(path).expect("valid path"),
                 source_revision_no,
             },
@@ -169,6 +175,7 @@ impl VisibilityHarness {
         self.publish(NamespaceMutationCandidate::path(
             PathMutationIntent::Undelete {
                 commit_id: CommitId::generate(),
+                message: None,
                 inode_id,
                 deleted_at_seq,
                 absolute_path: AbsolutePath::parse(path).expect("valid path"),

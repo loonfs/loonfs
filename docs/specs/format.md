@@ -987,7 +987,9 @@ logical commit must fingerprint identically no matter who retries it or when.
 
 Path-level mutations fingerprint the same way with domain
 `loonfs.path.intent.semantic.v0` over the canonical path intent (intent kind,
-canonical absolute paths, and the intent's semantic parameters).
+canonical absolute paths, the intent's semantic parameters, and the caller
+message — `null` when absent, mirroring explicit commits, so reusing a
+`commit_id` with a different message conflicts on either surface).
 
 The idempotency horizon is the retention floor. Commit receipts below the
 floor are dropped when metadata runs are rebuilt, so a commit retried from

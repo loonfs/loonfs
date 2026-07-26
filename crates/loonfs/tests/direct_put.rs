@@ -234,6 +234,7 @@ fn put_file_bytes_gates_publish_on_its_own_content_write_without_probing() {
         PutFileOptions {
             behavior: DestinationBehavior::Replace,
             commit_id: None,
+            message: None,
         },
     )
     .expect("replace file bytes");
@@ -261,6 +262,7 @@ fn put_file_bytes_retries_a_transient_content_write_failure() {
         PutFileOptions {
             behavior: DestinationBehavior::NoReplace,
             commit_id: Some(CommitId::parse("overlap-put-retry").expect("valid commit id")),
+            message: None,
         },
     )
     .expect("immutable write retries the transient failure");
@@ -289,6 +291,7 @@ fn path_mutations_return_the_commit_id_they_committed_under() {
                 b"alpha",
                 PutFileOptions {
                     commit_id: Some(commit_id.clone()),
+                    message: None,
                     ..PutFileOptions::default()
                 },
             )
@@ -306,6 +309,7 @@ fn path_mutations_return_the_commit_id_they_committed_under() {
                 b"alpha",
                 PutFileOptions {
                     commit_id: Some(commit_id.clone()),
+                    message: None,
                     ..PutFileOptions::default()
                 },
             )
@@ -391,6 +395,7 @@ fn concurrent_puts_coalesce_into_one_wal_segment() {
                 (
                     PathMutationIntent::PutFile {
                         commit_id: CommitId::parse(commit_id).expect("valid commit id"),
+                        message: None,
                         absolute_path: parse_mutation_path(path).expect("valid mutation path"),
                         content_ref,
                         behavior: DestinationBehavior::NoReplace,
@@ -562,6 +567,7 @@ fn begin_upload_validates_controls_without_replay_reads() {
         PutFileOptions {
             behavior: DestinationBehavior::Replace,
             commit_id: None,
+            message: None,
         },
     )
     .expect("replace file");

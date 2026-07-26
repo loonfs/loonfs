@@ -122,6 +122,7 @@ mod tests {
         NamespaceMutationCandidate::path_prepared(
             PathMutationIntent::PutFile {
                 commit_id: CommitId::parse(commit_id).expect("valid commit id"),
+                message: None,
                 absolute_path: AbsolutePath::parse(absolute_path).expect("path"),
                 content_ref: content_ref.clone(),
                 behavior: DestinationBehavior::NoReplace,
@@ -170,6 +171,7 @@ mod tests {
 
         let first_intent = PathMutationIntent::PutFile {
             commit_id: CommitId::parse("plan-a").expect("valid commit id"),
+            message: None,
             absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
             content_ref: staged.content_ref.clone(),
             behavior: DestinationBehavior::NoReplace,
@@ -182,6 +184,7 @@ mod tests {
 
         let second_intent = PathMutationIntent::PutFile {
             commit_id: CommitId::parse("plan-b").expect("valid commit id"),
+            message: None,
             absolute_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
             content_ref: staged.content_ref.clone(),
             behavior: DestinationBehavior::NoReplace,
@@ -304,6 +307,7 @@ mod tests {
                 ),
                 NamespaceMutationCandidate::path(PathMutationIntent::DeletePath {
                     commit_id: CommitId::parse("delete-doomed").expect("valid commit id"),
+                    message: None,
                     absolute_path: AbsolutePath::parse("/docs/doomed.txt").expect("path"),
                     behavior: DeleteDirectoryBehavior::NonRecursive,
                     expected_inode_id: None,

@@ -331,6 +331,7 @@ fn publisher_trace_labels_are_low_cardinality() {
     ));
     let path = NamespaceMutationCandidate::path(PathMutationIntent::CreateDir {
         commit_id: CommitId::parse("path-trace").expect("valid commit id"),
+        message: None,
         absolute_path: AbsolutePath::parse("/private/path").expect("path"),
         parents: false,
     });
@@ -364,6 +365,7 @@ async fn rejected_duplicate_joins_ready_in_flight_primary() {
     let publisher = registry.publisher_for(&namespace_id).expect("publisher");
     let intent = PathMutationIntent::CreateDir {
         commit_id: CommitId::parse("ready-primary").expect("valid commit id"),
+        message: None,
         absolute_path: AbsolutePath::parse("/ready-primary").expect("path"),
         parents: false,
     };
@@ -403,6 +405,7 @@ async fn ready_duplicate_joins_rejected_in_flight_primary() {
     let publisher = registry.publisher_for(&namespace_id).expect("publisher");
     let intent = PathMutationIntent::CreateDir {
         commit_id: CommitId::parse("rejected-primary").expect("valid commit id"),
+        message: None,
         absolute_path: AbsolutePath::parse("/rejected-primary").expect("path"),
         parents: false,
     };
@@ -974,6 +977,7 @@ async fn publisher_batches_explicit_commit_and_path_intent_together() {
     };
     let path_intent = PathMutationIntent::PutFile {
         commit_id: CommitId::parse("path-put").expect("valid commit id"),
+        message: None,
         absolute_path: AbsolutePath::parse("/file.txt").expect("path"),
         content_ref: prepared_content.content_ref().clone(),
         behavior: DestinationBehavior::NoReplace,
