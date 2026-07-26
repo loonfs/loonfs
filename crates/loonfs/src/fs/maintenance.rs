@@ -85,7 +85,35 @@ impl FsAdmin {
         }
 
         let runs = |kind: MaintenanceStepKind| options.only.is_none_or(|only| only == kind);
-        let status_before = self.namespace_status(namespace_id).await?;
+        let status_before = match self.namespace_status(namespace_id).await {
+            Ok(status) => status,
+            // A tombstoned namespace keeps reclaimable derived state — WAL
+            // segments, tables, manifests, checkpoint records — until GC
+            // ages it out, and a GC-only step is the reclamation path. It
+            // proceeds against the tombstone; the summary comes from the
+            // two control objects that outlive reclamation, because the
+            // manifest and chain a live summary consults may already be
+            // reaped. Full steps still refuse: a tombstone has nothing to
+            // flush or reorganize.
+            Err(RuntimeError::Core(error))
+                if error.code() == ErrorCode::NamespaceDeleted
+                    && options.only == Some(MaintenanceStepKind::Gc) =>
+            {
+                let summary = loonfs_core::cache::load_deleted_namespace_head_summary(
+                    self.core.store(),
+                    namespace_id,
+                )
+                .await?;
+                NamespaceStatusResponse {
+                    namespace_id: summary.namespace_id,
+                    head_seq: summary.head_seq,
+                    current_manifest_id: summary.current_manifest_id,
+                    wal_tail_segments: summary.wal_tail_segments,
+                    retention_floor_seq: summary.retention_floor_seq,
+                }
+            }
+            Err(error) => return Err(error),
+        };
         let observed_head_seq = status_before.head_seq;
 
         let wal_flush = if runs(MaintenanceStepKind::WalFlush)

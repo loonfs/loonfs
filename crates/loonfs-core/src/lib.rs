@@ -82,7 +82,9 @@ pub mod cache {
         DEFAULT_METADATA_TABLE_CACHE_DECODED_BYTES, DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES,
         DEFAULT_WAL_TAIL_PROJECTION_ROWS,
     };
-    pub use crate::namespace::status::{load_namespace_head_summary, NamespaceHeadSummary};
+    pub use crate::namespace::status::{
+        load_deleted_namespace_head_summary, load_namespace_head_summary, NamespaceHeadSummary,
+    };
 }
 
 /// Typed namespace control-object loaders and verified catalog state.

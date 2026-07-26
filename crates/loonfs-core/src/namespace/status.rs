@@ -103,3 +103,39 @@ pub async fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
         retention_floor_seq,
     })
 }
+
+/// Summarizes a namespace whose head is a deletion tombstone.
+///
+/// Reads only the two control objects that outlive reclamation — the head
+/// and the WAL floor — because garbage collection may already have reaped
+/// the manifest and chain a live summary would consult. Callers reach for
+/// this only after [`load_namespace_head_summary`] reported the deletion;
+/// a live head here is an invariant breach, not a state to serve.
+pub async fn load_deleted_namespace_head_summary<S: ObjectStore + ?Sized>(
+    store: &S,
+    expected_namespace_id: &NamespaceId,
+) -> Result<NamespaceHeadSummary> {
+    let (loaded_head, _loaded_root) = read_head_and_metadata_root(store, expected_namespace_id)
+        .await
+        .map_err(|error| {
+            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
+        })?;
+    let head = loaded_head.envelope.state;
+    if head.state != NamespaceState::Deleted {
+        return Err(CoreError::Internal(format!(
+            "namespace `{expected_namespace_id}` is not deleted; the live head summary serves it"
+        )));
+    }
+    let retention_floor_seq = read_wal_floor_seq_or_zero(store, expected_namespace_id)
+        .await
+        .map_err(|error| {
+            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
+        })?;
+    Ok(NamespaceHeadSummary {
+        namespace_id: head.namespace_id,
+        head_seq: head.seq,
+        current_manifest_id: None,
+        wal_tail_segments: 0,
+        retention_floor_seq,
+    })
+}

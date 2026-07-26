@@ -136,7 +136,7 @@ hoc.
 | --- | --- | --- |
 | `core.namespaces.create` | Creating namespaces (`POST /v0/namespaces`). | |
 | `core.namespaces.fork` | Forking namespaces (`POST /v0/namespaces/{ns}/forks`). | |
-| `core.namespaces.delete` | Deleting namespaces (`DELETE /v0/namespaces/{ns}`). | Terminal, and the id is permanently retired. Deletion does not reclaim storage in v0. A deployment may still advertise `false` and answer `not_supported`. |
+| `core.namespaces.delete` | Deleting namespaces (`DELETE /v0/namespaces/{ns}`). | Terminal, and the id is permanently retired. Derived state becomes reclaimable through a `gc`-restricted maintenance step (section 6.3); content blobs are not reclaimed in v0. A deployment may still advertise `false` and answer `not_supported`. |
 | `core.uploads.direct_put` | Starting presigned `direct_put` upload sessions (`POST /v0/namespaces/{ns}/uploads`). | The server returns a short-lived presigned PUT capability for the exact content object. The key is present only when the selected provider profile proves the signed preconditions or the deployment explicitly opts into an unproven endpoint. Raw object keys and caller-managed object-store writes are not part of this feature. |
 | `query.grep` | Content search (`POST /v0/namespaces/{ns}/query/grep`). | The serving half of a data-dependent capability: the request also requires a materialized steady-state grep root, and a namespace without one answers `not_supported` whatever this key advertises. |
 
@@ -643,7 +643,15 @@ deletion"). It linearizes at the head swap: commits acknowledged before it
 stay committed; everything that observes the deleted namespace afterwards —
 reads, commits, forks, status, re-creation of the id — fails with
 `namespace_deleted` (410). Deleting an already-deleted namespace is also
-`namespace_deleted`. Storage is not reclaimed in v0.
+`namespace_deleted`.
+
+Deletion itself reclaims nothing, but a deleted namespace's derived state —
+WAL segments, metadata tables and manifests, and checkpoint records that
+protect nothing live — becomes garbage once the tombstone is in place. A
+maintenance step restricted to `gc` runs against the tombstone and ages
+that state out under the normal grace rules; the tombstone (descriptor and
+head) survives so the id stays retired. Content blobs live in a shared
+content store outside the namespace prefix and are not reclaimed in v0.
 
 The optional `expected_head_seq` query parameter deletes only if the head is
 still at that sequence, failing with `stale_head` otherwise — the same
