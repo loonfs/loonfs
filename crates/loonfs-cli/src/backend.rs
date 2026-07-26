@@ -737,4 +737,79 @@ mod tests {
                 panic!("recovery put failed: {} {}", error.code, error.message)
             });
     }
+    #[tokio::test]
+    async fn a_fenced_put_fails_terminally_and_names_both_sessions() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let store = StoreConfig::LocalFs {
+            root: temp_dir.path().display().to_string(),
+            key_prefix: None,
+        };
+        // Two backends over one store model two concurrent `loon` processes:
+        // the writer id is shared (the CLI defaults it to the hostname) and
+        // only the session ids differ, so without session identity in the
+        // fence a user reads the error as their machine fencing itself.
+        let first = EmbeddedTarget::new(&store, Some("shared-host"), None)
+            .await
+            .expect("build first embedded target");
+        first
+            .backend
+            .create_namespace(&namespace_id("demo"))
+            .await
+            .expect("create namespace");
+        first
+            .backend
+            .put_file_bytes(
+                &NamespacePath::parse("demo", "/one.txt").expect("namespace path"),
+                b"one",
+                &ClientPutFileOptions::default(),
+            )
+            .await
+            .expect("first put acquires the epoch");
+
+        let rival = EmbeddedTarget::new(&store, Some("shared-host"), None)
+            .await
+            .expect("build rival embedded target");
+        rival
+            .backend
+            .put_file_bytes(
+                &NamespacePath::parse("demo", "/two.txt").expect("namespace path"),
+                b"two",
+                &ClientPutFileOptions::default(),
+            )
+            .await
+            .expect("rival put takes the epoch over");
+
+        // Fenced sessions are terminal — no silent reacquisition, matching
+        // remote mode and the core contract. The error carries both session
+        // identities so the loser is diagnosable, and the failed put
+        // committed nothing.
+        let error = first
+            .backend
+            .put_file_bytes(
+                &NamespacePath::parse("demo", "/three.txt").expect("namespace path"),
+                b"three",
+                &ClientPutFileOptions::default(),
+            )
+            .await
+            .expect_err("a fenced session is terminal");
+        assert_eq!(error.code, ErrorCode::WriterFenced.as_str());
+        assert!(
+            error.message.contains("was fenced by epoch"),
+            "{}",
+            error.message
+        );
+        assert_eq!(
+            error.message.matches("session `wrs_").count(),
+            2,
+            "both sessions named: {}",
+            error.message
+        );
+
+        let missing = rival
+            .backend
+            .stat_path(&NamespacePath::parse("demo", "/three.txt").expect("namespace path"))
+            .await
+            .expect_err("the fenced put committed nothing");
+        assert_eq!(missing.code, ErrorCode::PathNotFound.as_str());
+    }
 }

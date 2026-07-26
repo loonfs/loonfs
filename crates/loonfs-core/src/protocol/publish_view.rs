@@ -220,8 +220,13 @@ fn ensure_publish_head_matches_acquired_writer(
     if head.writer_epoch != acquired_writer.writer_epoch {
         return Err(CoreError::WriterFenced(crate::error::WriterFence {
             fenced_epoch: acquired_writer.writer_epoch,
+            fenced_session_id: acquired_writer.writer_session_id.clone(),
             active_epoch: head.writer_epoch,
             active_writer: head.writer.as_ref().map(|writer| writer.writer_id.clone()),
+            active_session_id: head
+                .writer
+                .as_ref()
+                .map(|writer| writer.writer_session_id.clone()),
         }));
     }
     Ok(())

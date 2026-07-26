@@ -408,8 +408,10 @@ impl CoreError {
         match self {
             CoreError::WriterFenced(fence) => Some(ErrorDetails {
                 fenced_epoch: Some(fence.fenced_epoch),
+                fenced_writer_session: Some(fence.fenced_session_id.clone()),
                 active_writer_epoch: Some(fence.active_epoch),
                 active_writer: fence.active_writer.clone(),
+                active_writer_session: fence.active_session_id.clone(),
                 ..ErrorDetails::default()
             }),
             CoreError::CommitIdReuseConflict(commit_id) => Some(ErrorDetails {
@@ -431,26 +433,34 @@ impl CoreError {
 }
 
 /// The fencing event a writer session observed: the epoch the session held,
-/// the epoch that displaced it, and the winner's writer id when the head
-/// recorded one.
+/// the epoch that displaced it, and the winner's identity when the head
+/// recorded one. Session ids matter because writer ids are process labels —
+/// every CLI invocation on one machine shares the hostname — so without them
+/// a fence between two local processes reads as a machine fencing itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WriterFence {
     /// Epoch the fenced session held.
     pub fenced_epoch: WriterEpoch,
+    /// Session id the fenced writer held.
+    pub fenced_session_id: String,
     /// Epoch that owns the namespace now.
     pub active_epoch: WriterEpoch,
     /// Writer id recorded by the winning acquirer, when known.
     pub active_writer: Option<String>,
+    /// Session id recorded by the winning acquirer, when known.
+    pub active_session_id: Option<String>,
 }
 
 impl std::fmt::Display for WriterFence {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "epoch {} was fenced by epoch {} (writer `{}`)",
+            "epoch {} (session `{}`) was fenced by epoch {} (writer `{}`, session `{}`)",
             self.fenced_epoch,
+            self.fenced_session_id,
             self.active_epoch,
-            self.active_writer.as_deref().unwrap_or("unknown")
+            self.active_writer.as_deref().unwrap_or("unknown"),
+            self.active_session_id.as_deref().unwrap_or("unknown")
         )
     }
 }
@@ -813,16 +823,20 @@ mod tests {
     fn identity_bearing_errors_expose_structured_wire_details() {
         let fenced = CoreError::WriterFenced(WriterFence {
             fenced_epoch: WriterEpoch(3),
+            fenced_session_id: "wrs-a".to_owned(),
             active_epoch: WriterEpoch(4),
             active_writer: Some("writer-b".to_owned()),
+            active_session_id: Some("wrs-b".to_owned()),
         });
         let details = fenced.details().expect("fence details");
         assert_eq!(details.fenced_epoch, Some(WriterEpoch(3)));
+        assert_eq!(details.fenced_writer_session.as_deref(), Some("wrs-a"));
         assert_eq!(details.active_writer_epoch, Some(WriterEpoch(4)));
         assert_eq!(details.active_writer.as_deref(), Some("writer-b"));
-        assert!(fenced
-            .to_string()
-            .contains("epoch 3 was fenced by epoch 4 (writer `writer-b`)"));
+        assert_eq!(details.active_writer_session.as_deref(), Some("wrs-b"));
+        assert!(fenced.to_string().contains(
+            "epoch 3 (session `wrs-a`) was fenced by epoch 4 (writer `writer-b`, session `wrs-b`)"
+        ));
 
         let reuse = CoreError::CommitIdReuseConflict("retry-key-1".to_owned());
         let details = reuse.details().expect("reuse details");
