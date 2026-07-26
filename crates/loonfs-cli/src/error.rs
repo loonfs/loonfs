@@ -52,6 +52,15 @@ impl From<loonfs_client::backend::BackendError> for CliError {
 }
 
 impl CliError {
+    /// An `io_error` that names the file it concerns, so a failure inside a
+    /// loop over many files stays attributable.
+    pub(crate) fn io_for_path(path: &std::path::Path, error: std::io::Error) -> Self {
+        Self::new(
+            "io_error",
+            format!("i/o error for `{}`: {error}", path.display()),
+        )
+    }
+
     pub(crate) fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             code: code.into(),

@@ -53,9 +53,9 @@ pub(crate) enum Command {
     Cat(FilesystemCatArgs),
     /// Search file content through the grep index.
     Grep(FilesystemGrepArgs),
-    /// Download a file to a local path (or `-` for stdout).
+    /// Download a file (or directory tree with -r) to a local path.
     Get(FilesystemGetArgs),
-    /// Upload a local file to a namespace path.
+    /// Upload a local file (or directory tree with -r) to a namespace path.
     Put(FilesystemPutArgs),
     /// List a file's revision history, newest first.
     Revisions(FilesystemRevisionsArgs),
@@ -69,7 +69,7 @@ pub(crate) enum Command {
     Rm(FilesystemRmArgs),
     /// Move or rename a path.
     Mv(FilesystemTransferArgs),
-    /// Copy a file to another path.
+    /// Copy a file (or directory tree with -r) to another path.
     Cp(FilesystemTransferArgs),
     /// List committed changes after a sequence number.
     Changes(ChangesArgs),
@@ -444,6 +444,10 @@ pub(crate) struct FilesystemGetArgs {
     /// Local destination (defaults to the remote basename; `-` streams to
     /// stdout).
     pub local_destination: Option<String>,
+    /// Download the directory tree rooted at `remote_path`, with bounded
+    /// concurrency and per-file outcomes.
+    #[arg(short, long)]
+    pub recursive: bool,
     /// Download this revision instead of the current content.
     #[arg(long)]
     pub revision: Option<u64>,
@@ -458,6 +462,11 @@ pub(crate) struct FilesystemPutArgs {
     pub target: TargetSelectorArgs,
     pub local_path: String,
     pub remote_path: Option<String>,
+    /// Upload the directory tree rooted at `local_path`. Every file lands
+    /// as its own commit with bounded concurrency, so progress is per file
+    /// and a partial failure reruns per file.
+    #[arg(short, long)]
+    pub recursive: bool,
     /// Replace the remote destination if it already exists.
     #[arg(long)]
     pub force: bool,
@@ -473,6 +482,10 @@ pub(crate) struct FilesystemTransferArgs {
     pub target: TargetSelectorArgs,
     pub source_path: String,
     pub destination_path: String,
+    /// Copy the directory tree rooted at `source_path` (cp only; mv moves
+    /// a directory in one commit without -r).
+    #[arg(short, long)]
+    pub recursive: bool,
     /// Replace the destination if it already exists.
     #[arg(long)]
     pub force: bool,

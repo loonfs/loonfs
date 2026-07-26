@@ -6,6 +6,7 @@ use super::context::{
     render_target, resolve_command_context,
 };
 use super::output::{CommandData, CommandFailure, CommandOutput};
+use super::recursive;
 use crate::args::{
     CommandKind, FilesystemCatArgs, FilesystemGetArgs, FilesystemGrepArgs, FilesystemLsArgs,
     FilesystemMkdirArgs, FilesystemPathArgs, FilesystemPutArgs, FilesystemRestoreArgs,
@@ -32,7 +33,7 @@ fn parse_commit_id_arg(commit_id: Option<&str>) -> Result<Option<CommitId>, CliE
 
 /// Writes via a same-directory temp file and an atomic rename, so a failed
 /// or interrupted download never leaves a truncated file at the target.
-fn write_local_file_atomically(
+pub(super) fn write_local_file_atomically(
     destination: &Path,
     bytes: &[u8],
     force: bool,
@@ -211,7 +212,7 @@ pub(crate) async fn run_filesystem_get(
         ));
     }
 
-    let allow_root = false;
+    let allow_root = args.recursive;
     let spec = namespace_path(&context.namespace, &args.remote_path, allow_root)
         .map_err(|error| context.fail(kind, error))?;
     let entry = context
@@ -220,11 +221,48 @@ pub(crate) async fn run_filesystem_get(
         .stat_path(&spec)
         .await
         .map_err(|error| context.fail(kind, error))?;
+    if args.recursive {
+        if entry.inode_kind != InodeKind::Directory {
+            return Err(context.fail(
+                kind,
+                CliError::invalid_input(format!(
+                    "`{}` is not a directory; drop -r to download one file",
+                    spec.absolute_path()
+                )),
+            ));
+        }
+        if args.revision.is_some() {
+            return Err(context.fail(
+                kind,
+                CliError::invalid_input("--revision applies to one file, not a tree"),
+            ));
+        }
+        let local_root = match args.local_destination.as_deref() {
+            Some("-") => {
+                return Err(context.fail(
+                    kind,
+                    CliError::invalid_input("`-` streams one file; a tree needs a directory"),
+                ))
+            }
+            Some(destination) => PathBuf::from(destination),
+            None => destination_path_for_get(spec.absolute_path().as_str(), None)
+                .map_err(|error| context.fail(kind, error))?,
+        };
+        return recursive::run_get_tree(
+            kind,
+            &context,
+            spec.absolute_path().as_str(),
+            &local_root,
+            args.force,
+            runtime,
+        )
+        .await;
+    }
     if entry.inode_kind == InodeKind::Directory {
         return Err(context.fail(
             kind,
             CliError::invalid_input(format!(
-                "directory operations are not available for `{}`",
+                "`{}` is a directory; use `loon get -r` to download the tree",
                 spec.absolute_path()
             )),
         ));
@@ -311,6 +349,7 @@ pub(crate) async fn run_filesystem_revisions(
 pub(crate) async fn run_filesystem_put(
     kind: CommandKind,
     args: FilesystemPutArgs,
+    runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, &args.target).await?;
     let local_path = PathBuf::from(&args.local_path);
@@ -323,13 +362,46 @@ pub(crate) async fn run_filesystem_put(
         ));
     }
 
-    let metadata =
-        fs::metadata(&local_path).map_err(|error| context.fail(kind, CliError::io(error)))?;
+    let metadata = fs::metadata(&local_path)
+        .map_err(|error| context.fail(kind, CliError::io_for_path(&local_path, error)))?;
+    if args.recursive {
+        if !metadata.is_dir() {
+            return Err(context.fail(
+                kind,
+                CliError::invalid_input(format!(
+                    "`{}` is not a directory; drop -r to upload one file",
+                    local_path.display()
+                )),
+            ));
+        }
+        if args.commit_id.is_some() {
+            return Err(context.fail(
+                kind,
+                CliError::invalid_input(
+                    "--commit-id names one commit; a recursive upload makes one commit per file",
+                ),
+            ));
+        }
+        let remote_root = match args.remote_path {
+            Some(path) => normalize_user_path(&path, true),
+            None => default_remote_put_path(&local_path),
+        }
+        .map_err(|error| context.fail(kind, error))?;
+        return recursive::run_put_tree(
+            kind,
+            &context,
+            &local_path,
+            remote_root.as_str(),
+            args.force,
+            runtime,
+        )
+        .await;
+    }
     if metadata.is_dir() {
         return Err(context.fail(
             kind,
             CliError::invalid_input(format!(
-                "directory operations are not available for `{}`",
+                "`{}` is a directory; use `loon put -r` to upload the tree",
                 local_path.display()
             )),
         ));
@@ -526,15 +598,17 @@ pub(crate) async fn run_filesystem_mkdir(
 pub(crate) async fn run_filesystem_mv(
     kind: CommandKind,
     args: FilesystemTransferArgs,
+    runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
-    run_filesystem_transfer(kind, args, TransferKind::Move).await
+    run_filesystem_transfer(kind, args, TransferKind::Move, runtime).await
 }
 
 pub(crate) async fn run_filesystem_cp(
     kind: CommandKind,
     args: FilesystemTransferArgs,
+    runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
-    run_filesystem_transfer(kind, args, TransferKind::Copy).await
+    run_filesystem_transfer(kind, args, TransferKind::Copy, runtime).await
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -547,8 +621,15 @@ async fn run_filesystem_transfer(
     kind: CommandKind,
     args: FilesystemTransferArgs,
     transfer_kind: TransferKind,
+    runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, &args.target).await?;
+    if args.recursive && transfer_kind == TransferKind::Move {
+        return Err(context.fail(
+            kind,
+            CliError::invalid_input("mv moves a directory in one commit; -r is not needed"),
+        ));
+    }
     let allow_root = false;
     let from = namespace_path(&context.namespace, &args.source_path, allow_root)
         .map_err(|error| context.fail(kind, error))?;
@@ -564,11 +645,39 @@ async fn run_filesystem_transfer(
             .stat_path(&from)
             .await
             .map_err(|error| context.fail(kind, error))?;
+        if args.recursive {
+            if entry.inode_kind != InodeKind::Directory {
+                return Err(context.fail(
+                    kind,
+                    CliError::invalid_input(format!(
+                        "`{}` is not a directory; drop -r to copy one file",
+                        from.absolute_path()
+                    )),
+                ));
+            }
+            if args.commit_id.is_some() {
+                return Err(context.fail(
+                    kind,
+                    CliError::invalid_input(
+                        "--commit-id names one commit; a recursive copy makes one commit per item",
+                    ),
+                ));
+            }
+            return recursive::run_copy_tree(
+                kind,
+                &context,
+                from.absolute_path().as_str(),
+                to.absolute_path().as_str(),
+                args.force,
+                runtime,
+            )
+            .await;
+        }
         if entry.inode_kind == InodeKind::Directory {
             return Err(context.fail(
                 kind,
                 CliError::invalid_input(format!(
-                    "directory operations are not available for `{}`",
+                    "`{}` is a directory; use `loon cp -r` to copy the tree",
                     from.absolute_path()
                 )),
             ));

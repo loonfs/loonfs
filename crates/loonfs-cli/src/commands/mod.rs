@@ -8,6 +8,7 @@ mod namespace;
 mod output;
 mod profile;
 mod profile_config;
+mod recursive;
 
 pub(crate) use self::output::{CommandData, CommandFailure, CommandOutput};
 
@@ -51,14 +52,14 @@ pub(crate) async fn run(
         Command::Cat(args) => fs::run_filesystem_cat(kind, args).await,
         Command::Grep(args) => fs::run_filesystem_grep(kind, args).await,
         Command::Get(args) => fs::run_filesystem_get(kind, args, runtime).await,
-        Command::Put(args) => fs::run_filesystem_put(kind, args).await,
+        Command::Put(args) => fs::run_filesystem_put(kind, args, runtime).await,
         Command::Revisions(args) => fs::run_filesystem_revisions(kind, args).await,
         Command::Restore(args) => fs::run_filesystem_restore(kind, args).await,
         Command::Undelete(args) => fs::run_filesystem_undelete(kind, args).await,
         Command::Mkdir(args) => fs::run_filesystem_mkdir(kind, args).await,
         Command::Rm(args) => fs::run_filesystem_rm(kind, args).await,
-        Command::Mv(args) => fs::run_filesystem_mv(kind, args).await,
-        Command::Cp(args) => fs::run_filesystem_cp(kind, args).await,
+        Command::Mv(args) => fs::run_filesystem_mv(kind, args, runtime).await,
+        Command::Cp(args) => fs::run_filesystem_cp(kind, args, runtime).await,
         Command::Changes(args) => admin::run_admin_changes(kind, args).await,
         Command::Admin { command } => admin::run_admin_command(kind, command).await,
     }
