@@ -254,6 +254,7 @@ fn drop_pass_keeps_the_floor_visible_binding_across_a_later_rename() {
     let unbind = |bind_seq: u64, delta: u32, unbind_seq: u64| MetadataRow::DirentryUnbind {
         parent_inode_id: InodeId(1),
         name_key: NameKey::parse("docs").expect("valid name key"),
+        display_name: loonfs_api::DisplayName::parse("docs").expect("valid display name"),
         child_inode_id: InodeId(2),
         bind_seq: ChangeSeq(bind_seq),
         bind_delta_index: delta,
@@ -297,6 +298,7 @@ fn drop_pass_resolves_same_seq_rebinds_by_delta_index() {
     let unbind = MetadataRow::DirentryUnbind {
         parent_inode_id: InodeId(1),
         name_key: NameKey::parse("docs").expect("valid name key"),
+        display_name: loonfs_api::DisplayName::parse("docs").expect("valid display name"),
         child_inode_id: InodeId(2),
         bind_seq: ChangeSeq(1),
         bind_delta_index: 0,

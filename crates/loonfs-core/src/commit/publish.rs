@@ -273,6 +273,8 @@ mod tests {
                     semantic_commit_fingerprint: format!("fingerprint-{index}"),
                     committed_at_ms: 4_200,
                     message: None,
+                    writer_id: "publish-test-writer".to_owned(),
+                    writer_session_id: "wrs_publish_test".to_owned(),
                     deltas: Vec::new(),
                 }
             })

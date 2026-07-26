@@ -98,6 +98,7 @@ impl MetadataState {
                 delta_index,
                 parent_inode_id,
                 name_key,
+                display_name,
                 child_inode_id,
                 bind_seq,
                 bind_delta_index,
@@ -105,6 +106,7 @@ impl MetadataState {
                 self.push_direntry_unbind_record(DirentryUnbindRecord {
                     parent_inode_id: *parent_inode_id,
                     name_key: name_key.clone(),
+                    display_name: display_name.clone(),
                     child_inode_id: *child_inode_id,
                     bind_seq: *bind_seq,
                     bind_delta_index: *bind_delta_index,

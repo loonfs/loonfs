@@ -350,6 +350,7 @@ fn push_unbind_delta(
             delta_index,
             parent_inode_id: binding.parent_inode_id,
             name_key: binding.name_key.clone(),
+            display_name: binding.display_name.clone(),
             child_inode_id: binding.child_inode_id,
             bind_seq: binding.bind_seq,
             bind_delta_index: binding.bind_delta_index,

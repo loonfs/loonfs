@@ -157,6 +157,8 @@ pub enum MetadataRow {
         parent_inode_id: InodeId,
         /// Canonical name key of the targeted binding.
         name_key: NameKey,
+        /// User-facing spelling the retired binding carried.
+        display_name: DisplayName,
         /// Child identity recorded by the targeted binding.
         child_inode_id: InodeId,
         /// Commit sequence that created the binding being retired.

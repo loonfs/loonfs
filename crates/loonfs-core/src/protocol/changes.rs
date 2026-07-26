@@ -78,6 +78,8 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
                     commit_id: record.commit_id.clone(),
                     committed_at_ms: record.committed_at_ms,
                     message: record.message.clone(),
+                    writer_id: record.writer_id.clone(),
+                    writer_session_id: record.writer_session_id.clone(),
                     deltas: record
                         .deltas
                         .iter()
@@ -135,6 +137,7 @@ fn commit_delta_from_wal(delta: &WalCommitDelta) -> Result<CommitDelta> {
             delta_index,
             parent_inode_id,
             name_key,
+            display_name,
             child_inode_id,
             bind_seq,
             bind_delta_index,
@@ -143,6 +146,7 @@ fn commit_delta_from_wal(delta: &WalCommitDelta) -> Result<CommitDelta> {
             delta_index: *delta_index,
             parent_inode_id: *parent_inode_id,
             name_key: name_key.clone(),
+            display_name: display_name.clone(),
             child_inode_id: *child_inode_id,
             bind_seq: *bind_seq,
             bind_delta_index: *bind_delta_index,

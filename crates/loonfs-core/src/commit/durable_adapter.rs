@@ -21,6 +21,11 @@ pub(crate) fn wal_payload_from_materialized_commit(
         semantic_commit_fingerprint: prepared.semantic_identity.as_str().to_owned(),
         committed_at_ms: commit.committed_at_ms,
         message: prepared.request.message.clone(),
+        // Observational identity, like `committed_at_ms`: recorded for
+        // history, excluded from the semantic fingerprint, so replay
+        // identity is untouched by which process replays.
+        writer_id: prepared.request.writer_id.clone(),
+        writer_session_id: prepared.request.writer_session_id.clone(),
         deltas: commit
             .deltas
             .iter()

@@ -65,6 +65,7 @@ pub(crate) fn direntry_unbind_from_manifest_row(
         MetadataRow::DirentryUnbind {
             parent_inode_id,
             name_key,
+            display_name,
             child_inode_id,
             bind_seq,
             bind_delta_index,
@@ -73,6 +74,7 @@ pub(crate) fn direntry_unbind_from_manifest_row(
         } => Ok(DirentryUnbindRecord {
             parent_inode_id,
             name_key,
+            display_name,
             child_inode_id,
             bind_seq,
             bind_delta_index,
