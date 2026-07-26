@@ -768,6 +768,17 @@ stays `invalid_request`.)
 }
 ```
 
+### `GET /filesystem/trash`
+
+Lists the namespace's recoverable deletions: every active subtree tombstone,
+ascending by deleted root inode, paged with the standard `limit`/`cursor`
+pattern (the cursor is an ordering resume like every other). Tombstone rows
+are retained forever, so entries never age out of this listing, however far
+the retention floor advances. Each entry carries the inode id and deletion
+sequence that `undelete` requires, the deletion's wall-clock stamp, and the
+deleted binding's name when the delete recorded one; entries written before
+names were recorded still carry a complete recovery handle.
+
 ### 6.6 `GET /filesystem/content`
 
 The response body is the authoritative file bytes. Metadata may be exposed in

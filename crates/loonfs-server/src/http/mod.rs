@@ -27,7 +27,8 @@ use self::extractors::{
 use self::handlers_filesystem::{
     apply_filesystem_operation, commit_operations, get_file_bytes,
     get_file_revision_bytes_by_inode, list_changes, list_file_revisions,
-    list_file_revisions_by_inode, list_path_entries, restore_file_revision_by_inode, stat_path,
+    list_file_revisions_by_inode, list_path_entries, list_trash, restore_file_revision_by_inode,
+    stat_path,
 };
 use self::handlers_namespace::{
     create_checkpoint, create_namespace, delete_namespace, fork_namespace, maintenance_step,
@@ -140,6 +141,10 @@ fn router(state: AppState) -> Router {
         .route(
             "/v0/namespaces/:namespace/filesystem/revisions",
             get(list_file_revisions),
+        )
+        .route(
+            "/v0/namespaces/:namespace/filesystem/trash",
+            get(list_trash),
         )
         .route(
             "/v0/namespaces/:namespace/filesystem/operations",

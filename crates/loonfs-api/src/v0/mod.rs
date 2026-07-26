@@ -33,7 +33,10 @@ pub use operations::{
     NamespaceSummary, ReleaseCheckpointResponse, ReorganizeStepOutcome, RepairNamespaceOutcome,
     RepairNamespaceResponse, RestoreFileRevisionRequest, WalFlushStepOutcome,
 };
-pub use reads::{AuthoritativeFileBytes, AuthoritativePathEntry, ListPathEntriesResponse};
+pub use reads::{
+    AuthoritativeFileBytes, AuthoritativePathEntry, ListPathEntriesResponse, ListTrashResponse,
+    TrashEntry,
+};
 pub use search::{
     DisableGrepIndexResponse, EnableGrepIndexResponse, GrepGcResponse, GrepMatch, GrepRequest,
     GrepResponse,

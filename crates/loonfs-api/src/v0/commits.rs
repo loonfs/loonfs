@@ -286,6 +286,15 @@ pub enum CommitDelta {
         delta_index: u32,
         /// Inode at the root of the newly hidden subtree.
         root_inode_id: InodeId,
+        /// Directory that held the deleted binding, when known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_inode_id: Option<InodeId>,
+        /// Canonical key of the deleted binding, when known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name_key: Option<NameKey>,
+        /// User-facing spelling of the deleted binding, when known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display_name: Option<DisplayName>,
     },
     /// Announces a compensating event that revokes one exact subtree tombstone.
     #[cfg_attr(

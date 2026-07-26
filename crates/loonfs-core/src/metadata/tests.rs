@@ -186,6 +186,9 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
             &[WalDelta::TombstoneSubtree {
                 delta_index: 0,
                 root_inode_id: InodeId(2),
+                parent_inode_id: None,
+                name_key: None,
+                display_name: None,
             }],
         )
         .metadata_state;

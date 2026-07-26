@@ -359,6 +359,44 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             }
             lines.join("\n")
         }
+        CommandData::Trash(response) => {
+            let mut lines = vec![
+                format!(
+                    "trash for {} (head seq {})",
+                    response.namespace_id, response.head_seq.0
+                ),
+                "DELETED\tNAME\tINODE\tSEQ\tRECOVER".to_owned(),
+            ];
+            for entry in &response.entries {
+                let name = entry
+                    .display_name
+                    .as_ref()
+                    .map(|name| name.as_str().to_owned())
+                    .unwrap_or_else(|| "-".to_owned());
+                let destination = entry
+                    .display_name
+                    .as_ref()
+                    .map(|name| format!("/{name}"))
+                    .unwrap_or_else(|| "<path>".to_owned());
+                lines.push(format!(
+                    "{}\t{}\t{}\t{}\tloon undelete {} --inode {} --deleted-at {}",
+                    format_utc_ms(entry.deleted_at_ms),
+                    name,
+                    entry.root_inode_id,
+                    entry.deleted_at_seq.0,
+                    destination,
+                    entry.root_inode_id,
+                    entry.deleted_at_seq.0,
+                ));
+            }
+            if response.entries.is_empty() {
+                lines.push("(empty)".to_owned());
+            }
+            if let Some(cursor) = &response.next_cursor {
+                lines.push(format!("next_cursor: {cursor}"));
+            }
+            lines.join("\n")
+        }
         CommandData::PathEntries { entries } => entries
             .iter()
             .map(|entry| {

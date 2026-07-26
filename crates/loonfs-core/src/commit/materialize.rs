@@ -237,6 +237,9 @@ pub(super) fn materialize_validated_op(
                 WalDelta::TombstoneSubtree {
                     delta_index: *tombstone_delta_index,
                     root_inode_id: *inode_id,
+                    parent_inode_id: Some(source_binding.parent_inode_id),
+                    name_key: Some(source_binding.name_key.clone()),
+                    display_name: Some(source_binding.display_name.clone()),
                 },
             );
             CommitOpResult::DeleteFile {
@@ -285,6 +288,9 @@ pub(super) fn materialize_validated_op(
                 WalDelta::TombstoneSubtree {
                     delta_index: *tombstone_delta_index,
                     root_inode_id: *root_inode_id,
+                    parent_inode_id: Some(source_binding.parent_inode_id),
+                    name_key: Some(source_binding.name_key.clone()),
+                    display_name: Some(source_binding.display_name.clone()),
                 },
             );
             CommitOpResult::DeleteSubtree {

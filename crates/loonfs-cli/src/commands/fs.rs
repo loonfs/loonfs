@@ -11,7 +11,7 @@ use crate::args::{
     CommandKind, FilesystemCatArgs, FilesystemGetArgs, FilesystemGrepArgs, FilesystemLsArgs,
     FilesystemMkdirArgs, FilesystemPathArgs, FilesystemPutArgs, FilesystemRestoreArgs,
     FilesystemRevisionsArgs, FilesystemRmArgs, FilesystemTransferArgs, FilesystemUndeleteArgs,
-    RuntimeBehavior,
+    RuntimeBehavior, TrashArgs,
 };
 use crate::error::CliError;
 use loonfs_api::{CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeKind, RevisionNo};
@@ -316,6 +316,25 @@ pub(crate) async fn run_filesystem_get(
         profile: Some(context.profile_name),
         mode: Some(context.mode),
         data,
+    })
+}
+
+pub(crate) async fn run_filesystem_trash(
+    kind: CommandKind,
+    args: TrashArgs,
+) -> Result<CommandOutput, CommandFailure> {
+    let context = resolve_command_context(kind, &args.target).await?;
+    let response = context
+        .target
+        .backend()
+        .list_trash(&context.namespace, args.limit, args.cursor.as_deref())
+        .await
+        .map_err(|error| context.fail(kind, error))?;
+    Ok(CommandOutput {
+        kind,
+        profile: Some(context.profile_name),
+        mode: Some(context.mode),
+        data: CommandData::Trash(response),
     })
 }
 

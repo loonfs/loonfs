@@ -27,7 +27,7 @@ use loonfs_api::{
     },
     AuthoritativePathEntry, ChangeSeq, CheckpointId, CommitResponse, CreateCheckpointRequest,
     CreateCheckpointResponse, DeleteNamespaceResponse, DestinationBehavior, ErrorCode,
-    ErrorDetails, GrepRequest, GrepResponse, InodeId, ListFileRevisionsResponse,
+    ErrorDetails, GrepRequest, GrepResponse, InodeId, ListFileRevisionsResponse, ListTrashResponse,
     MaintenanceStepRequest, MaintenanceStepResponse, NamespaceId, NamespaceStatusResponse,
     NamespaceSummary, ReleaseCheckpointResponse, RevisionNo,
 };
@@ -199,6 +199,14 @@ pub trait Backend {
         revision_no: RevisionNo,
     ) -> Result<Vec<u8>, BackendError>;
     /// Lists one page of a file's retained revisions.
+    /// Lists one page of the namespace's recoverable deletions.
+    async fn list_trash(
+        &self,
+        namespace_id: &NamespaceId,
+        limit: Option<u32>,
+        cursor: Option<&str>,
+    ) -> Result<ListTrashResponse, BackendError>;
+
     async fn list_file_revisions_page(
         &self,
         spec: &NamespacePath,
@@ -426,6 +434,18 @@ impl Backend for RemoteBackend {
     ) -> Result<Vec<u8>, BackendError> {
         self.client
             .get_file_revision_bytes(spec, revision_no)
+            .await
+            .map_err(BackendError::from)
+    }
+
+    async fn list_trash(
+        &self,
+        namespace_id: &NamespaceId,
+        limit: Option<u32>,
+        cursor: Option<&str>,
+    ) -> Result<ListTrashResponse, BackendError> {
+        self.client
+            .list_trash_page(namespace_id, limit, cursor)
             .await
             .map_err(BackendError::from)
     }

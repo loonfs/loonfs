@@ -115,6 +115,9 @@ fn wal_tombstone(delta_index: u32, root_inode_id: InodeId) -> Vec<WalDelta> {
     vec![WalDelta::TombstoneSubtree {
         delta_index,
         root_inode_id,
+        parent_inode_id: None,
+        name_key: None,
+        display_name: None,
     }]
 }
 

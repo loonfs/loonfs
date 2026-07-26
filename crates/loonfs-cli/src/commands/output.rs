@@ -69,6 +69,7 @@ pub(crate) enum CommandData {
     GrepIndexEnabled(EnableGrepIndexResponse),
     GrepIndexDisabled(DisableGrepIndexResponse),
     Changes(ChangesResponse),
+    Trash(loonfs_api::ListTrashResponse),
     PathEntries {
         entries: Vec<AuthoritativePathEntry>,
     },

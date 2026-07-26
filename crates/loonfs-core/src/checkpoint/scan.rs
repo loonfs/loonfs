@@ -72,7 +72,10 @@ impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
             .map(|(_, row)| row))
     }
 
-    #[cfg(test)]
+    /// Whole-prefix scan without a bloom probe: per-row filters cannot
+    /// answer a prefix, so every segment in range is read. Production use
+    /// is deliberate and rare — the trash listing enumerates the immortal
+    /// tombstone family this way.
     pub(crate) async fn scan_prefix(
         &self,
         family: MetadataTableFamily,

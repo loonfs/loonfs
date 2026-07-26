@@ -132,10 +132,18 @@ pub(crate) fn tombstone_from_manifest_row(
             tombstone_seq,
             tombstone_delta_index,
             action,
+            deleted_at_ms,
+            parent_inode_id,
+            name_key,
+            display_name,
         } => Ok(SubtreeTombstoneRecord {
             root_inode_id,
             tombstone_seq,
             tombstone_delta_index,
+            deleted_at_ms,
+            parent_inode_id,
+            name_key,
+            display_name,
             action: subtree_tombstone_action(&action),
         }),
         other => Err(foreign_row("tombstone", &other)),
@@ -197,6 +205,10 @@ mod tests {
             tombstone_seq: ChangeSeq(1),
             tombstone_delta_index: 0,
             action: loonfs_api::wire::manifest::TombstoneRowAction::Set,
+            deleted_at_ms: 4_000,
+            parent_inode_id: None,
+            name_key: None,
+            display_name: None,
         };
         assert!(inode_from_manifest_row(tombstone).is_err());
     }

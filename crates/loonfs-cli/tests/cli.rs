@@ -352,6 +352,78 @@ fn commit_messages_ride_the_feed_and_bind_identity() {
 }
 
 #[test]
+fn trash_lists_recoverable_deletions_with_their_handles() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+
+    let payload = harness.temp_dir.path().join("doc.txt");
+    fs::write(&payload, b"body").expect("write payload");
+    assert_success(&harness.run(&[
+        "put",
+        payload.to_str().expect("utf-8 path"),
+        "/docs/Quarterly Report.PDF",
+    ]));
+    assert_success(&harness.run(&[
+        "put",
+        payload.to_str().expect("utf-8 path"),
+        "/notes/scratch.txt",
+    ]));
+    assert_success(&harness.run(&["rm", "/docs/Quarterly Report.PDF"]));
+    assert_success(&harness.run(&["rm", "-r", "/notes"]));
+
+    let trash = harness.run(&["--json", "trash"]);
+    assert_success(&trash);
+    let data = json_data(&trash);
+    let entries = data["entries"].as_array().expect("entries").clone();
+    assert_eq!(entries.len(), 2, "{data}");
+    let report = entries
+        .iter()
+        .find(|entry| entry["display_name"] == "Quarterly Report.PDF")
+        .expect("report entry");
+    assert!(report["deleted_at_ms"].as_u64().expect("ms") > 0);
+
+    // The human table prints the exact undelete invocation.
+    let human = harness.run(&["trash"]);
+    assert_success(&human);
+    let table = stdout_string(&human);
+    assert!(
+        table.contains("DELETED\tNAME\tINODE\tSEQ\tRECOVER"),
+        "{table}"
+    );
+    assert!(table.contains("Quarterly Report.PDF"), "{table}");
+    assert!(table.contains("loon undelete "), "{table}");
+
+    // Recovering through the listed handle empties that entry out of trash.
+    let inode = report["root_inode_id"].as_u64().expect("inode");
+    let seq = report["deleted_at_seq"].as_u64().expect("seq");
+    assert_success(&harness.run(&[
+        "undelete",
+        "/docs/Quarterly Report.PDF",
+        "--inode",
+        &inode.to_string(),
+        "--deleted-at",
+        &seq.to_string(),
+    ]));
+    let after = harness.run(&["--json", "trash"]);
+    assert_success(&after);
+    assert_eq!(
+        json_data(&after)["entries"]
+            .as_array()
+            .expect("entries")
+            .len(),
+        1
+    );
+
+    // Pagination pins the cursor contract: a one-entry page of a one-entry
+    // trash carries no next cursor.
+    let page = harness.run(&["--json", "trash", "--limit", "1"]);
+    assert_success(&page);
+    assert!(json_data(&page)["next_cursor"].is_null());
+}
+
+#[test]
 fn human_output_shows_dates_writers_and_delta_names() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");

@@ -25,7 +25,8 @@ use loonfs_api::ManifestObjectId;
 use loonfs_api::{
     AbsolutePath, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq, ContentStoreId,
     DirectoryPageCursor, DisplayName, FileRevision, FileRevisionsPageCursor, InodeId, InodeKind,
-    ManifestId, NamePolicy, NamespaceId, Page, PageRequest, RevisionNo,
+    ManifestId, NamePolicy, NamespaceId, Page, PageRequest, RevisionNo, TrashEntry,
+    TrashPageCursor,
 };
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
@@ -416,6 +417,85 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         }
         self.list_file_revisions_for_inode_page(entry.inode_id, request)
             .await
+    }
+
+    /// One page of the namespace's recoverable deletions: active subtree
+    /// tombstones in ascending root-inode order, reduced newest-event-wins
+    /// per root through the same shared helper every visibility read uses.
+    /// The scan is namespace-wide over the immortal tombstone family, so a
+    /// deletion stays listed however far the replay floor advances.
+    pub(crate) async fn list_trash_page(
+        &self,
+        request: PageRequest<TrashPageCursor>,
+    ) -> Result<Page<TrashEntry, TrashPageCursor>> {
+        if let Some(cursor) = request.cursor.as_ref() {
+            if cursor.head_seq > self.head.seq {
+                // Forward-only drift, the same rule as every other cursor.
+                return Err(MetadataViewError::SnapshotUnavailable {
+                    requested_seq: cursor.head_seq,
+                    head_seq: self.head.seq,
+                }
+                .into());
+            }
+        }
+        let records = self
+            .metadata_view()
+            .session()
+            .all_tombstone_records()
+            .await?;
+        let mut per_root: std::collections::BTreeMap<InodeId, Vec<_>> =
+            std::collections::BTreeMap::new();
+        for record in records {
+            per_root
+                .entry(record.root_inode_id)
+                .or_default()
+                .push(record);
+        }
+        let start_after = request
+            .cursor
+            .as_ref()
+            .map(|cursor| cursor.last_root_inode_id);
+        let mut entries = Vec::new();
+        for (root_inode_id, records) in per_root {
+            if start_after.is_some_and(|after| root_inode_id <= after) {
+                continue;
+            }
+            let Some(active) =
+                crate::metadata::active_tombstone_from_records(records, self.head.seq)
+            else {
+                continue;
+            };
+            entries.push(TrashEntry {
+                root_inode_id,
+                deleted_at_seq: active.tombstone_seq,
+                deleted_at_ms: active.deleted_at_ms,
+                parent_inode_id: active.parent_inode_id,
+                name_key: active.name_key,
+                display_name: active.display_name,
+            });
+            if entries.len() > request.limit.as_usize() {
+                break;
+            }
+        }
+        let has_more = entries.len() > request.limit.as_usize();
+        if has_more {
+            entries.truncate(request.limit.as_usize());
+        }
+        let next_cursor = if has_more {
+            Some(TrashPageCursor {
+                head_seq: self.head.seq,
+                last_root_inode_id: entries
+                    .last()
+                    .expect("non-zero page limit with more entries must return an item")
+                    .root_inode_id,
+            })
+        } else {
+            None
+        };
+        Ok(Page {
+            items: entries,
+            next_cursor,
+        })
     }
 
     pub(crate) async fn list_file_revisions_for_inode_page(

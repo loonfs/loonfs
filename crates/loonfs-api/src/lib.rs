@@ -93,7 +93,8 @@ pub use name_policy::{name_key_for_display_name, NamePolicy};
 pub use pagination::{
     decode_cursor, encode_cursor, DirectoryPageCursor, EffectiveLimit, FileRevisionsPageCursor,
     GrepPageCursor, LimitError, Page, PageCursor, PageCursorError, PageRequest, PaginationPolicy,
-    PaginationPolicyError, DEFAULT_MAX_PAGE_LIMIT, DEFAULT_PAGE_LIMIT, PAGE_CURSOR_VERSION,
+    PaginationPolicyError, TrashPageCursor, DEFAULT_MAX_PAGE_LIMIT, DEFAULT_PAGE_LIMIT,
+    PAGE_CURSOR_VERSION,
 };
 pub use path::{AbsolutePath, DisplayName, PathComponent, PathError, MAX_DISPLAY_NAME_BYTES};
 
@@ -106,9 +107,10 @@ pub use v0::{
     DeleteNamespaceResponse, DestinationBehavior, ErrorDetails, FileRevision, FilesystemOperation,
     FilesystemOperationRequest, FlushWalOutcome, FlushWalResponse, ForkNamespaceRequest, GcRequest,
     GcResponse, GrepMatch, GrepRequest, GrepResponse, ListFileRevisionsResponse,
-    ListPathEntriesResponse, MaintenanceStepKind, MaintenanceStepRequest, MaintenanceStepResponse,
-    NamespaceStatusResponse, NamespaceSummary, ReleaseCheckpointResponse, ReorganizeStepOutcome,
-    RepairNamespaceOutcome, RestoreFileRevisionRequest, WalFlushStepOutcome,
+    ListPathEntriesResponse, ListTrashResponse, MaintenanceStepKind, MaintenanceStepRequest,
+    MaintenanceStepResponse, NamespaceStatusResponse, NamespaceSummary, ReleaseCheckpointResponse,
+    ReorganizeStepOutcome, RepairNamespaceOutcome, RestoreFileRevisionRequest, TrashEntry,
+    WalFlushStepOutcome,
 };
 
 #[cfg(test)]
@@ -139,12 +141,19 @@ mod tests {
         let _wal_delta = wire::wal::WalDelta::TombstoneSubtree {
             delta_index: 0,
             root_inode_id: InodeId(1),
+            parent_inode_id: None,
+            name_key: None,
+            display_name: None,
         };
         let _manifest_row = wire::manifest::MetadataRow::Tombstone {
             root_inode_id: InodeId(1),
             tombstone_seq: ChangeSeq(1),
             tombstone_delta_index: 0,
             action: wire::manifest::TombstoneRowAction::Set,
+            deleted_at_ms: 4_000,
+            parent_inode_id: None,
+            name_key: None,
+            display_name: None,
         };
     }
 }

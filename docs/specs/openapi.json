@@ -1618,6 +1618,87 @@
         }
       }
     },
+    "/v0/namespaces/{namespace}/filesystem/trash": {
+      "get": {
+        "tags": [
+          "filesystem"
+        ],
+        "summary": "List recoverable deletions",
+        "description": "Returns the namespace's active deletions in ascending deleted-root inode order. Tombstone rows are retained forever, so entries never age out; each carries the inode id and deletion sequence undelete needs, plus the deleted name when the delete recorded one.",
+        "operationId": "list_trash",
+        "parameters": [
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "Namespace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum page size",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque trash page cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Recoverable deletions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListTrashResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v0/namespaces/{namespace}/forks": {
       "post": {
         "tags": [
@@ -3019,10 +3100,43 @@
                 "description": "Stable ordering position and tombstone identity within the commit.",
                 "minimum": 0
               },
+              "display_name": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/DisplayName",
+                    "description": "User-facing spelling of the deleted binding, when known."
+                  }
+                ]
+              },
               "kind": {
                 "type": "string",
                 "enum": [
                   "tombstone_subtree"
+                ]
+              },
+              "name_key": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/NameKey",
+                    "description": "Canonical key of the deleted binding, when known."
+                  }
+                ]
+              },
+              "parent_inode_id": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/InodeId",
+                    "description": "Directory that held the deleted binding, when known."
+                  }
                 ]
               },
               "root_inode_id": {
@@ -4718,6 +4832,39 @@
           }
         }
       },
+      "ListTrashResponse": {
+        "type": "object",
+        "description": "One trash listing page: the namespace's recoverable deletions.",
+        "required": [
+          "namespace_id",
+          "head_seq",
+          "entries"
+        ],
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TrashEntry"
+            },
+            "description": "Active deletions in ascending root-inode order."
+          },
+          "head_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Head sequence this page was evaluated at."
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace that was read."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Present when another page follows."
+          }
+        }
+      },
       "MaintenanceStepKind": {
         "type": "string",
         "description": "One sub-step of a maintenance step, for callers that want to run exactly\none of them.",
@@ -5067,6 +5214,64 @@
         "format": "int64",
         "description": "Monotonically increasing file revision counter within one file inode.",
         "minimum": 0
+      },
+      "TrashEntry": {
+        "type": "object",
+        "description": "One recoverable deletion: an active subtree tombstone plus the identity\nof the binding it deleted, when the delete recorded one. Entries with no\nrecorded name predate the enriched tombstone rows; their inode and\nsequence still form a complete `undelete` handle.",
+        "required": [
+          "root_inode_id",
+          "deleted_at_seq",
+          "deleted_at_ms"
+        ],
+        "properties": {
+          "deleted_at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Wall-clock stamp of the deleting commit. Observational.",
+            "minimum": 0
+          },
+          "deleted_at_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Commit sequence of the deletion; the other half of the handle."
+          },
+          "display_name": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/DisplayName",
+                "description": "User-facing spelling of the deleted binding, when recorded."
+              }
+            ]
+          },
+          "name_key": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/NameKey",
+                "description": "Canonical key of the deleted binding, when recorded."
+              }
+            ]
+          },
+          "parent_inode_id": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/InodeId",
+                "description": "Directory that held the deleted binding, when recorded."
+              }
+            ]
+          },
+          "root_inode_id": {
+            "$ref": "#/components/schemas/InodeId",
+            "description": "Root inode the deletion hid; half of the recovery handle."
+          }
+        }
       },
       "UploadContentResponse": {
         "type": "object",

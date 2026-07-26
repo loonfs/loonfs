@@ -96,6 +96,10 @@ pub(super) fn manifest_rows_for_family(
                 tombstone_seq: tombstone.tombstone_seq,
                 tombstone_delta_index: tombstone.tombstone_delta_index,
                 action: tombstone_row_action(&tombstone.action),
+                deleted_at_ms: tombstone.deleted_at_ms,
+                parent_inode_id: tombstone.parent_inode_id,
+                name_key: tombstone.name_key.clone(),
+                display_name: tombstone.display_name.clone(),
             })
             .collect::<Vec<_>>(),
         MetadataTableFamily::CommitReceipts => metadata_state

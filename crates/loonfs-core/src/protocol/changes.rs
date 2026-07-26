@@ -166,10 +166,16 @@ fn commit_delta_from_wal(delta: &WalCommitDelta) -> Result<CommitDelta> {
         WalDelta::TombstoneSubtree {
             delta_index,
             root_inode_id,
+            parent_inode_id,
+            name_key,
+            display_name,
         } => CommitDelta::TombstoneSubtree {
             semantic_op_index,
             delta_index: *delta_index,
             root_inode_id: *root_inode_id,
+            parent_inode_id: *parent_inode_id,
+            name_key: name_key.clone(),
+            display_name: display_name.clone(),
         },
         WalDelta::RevokeSubtreeTombstone {
             delta_index,
