@@ -65,8 +65,8 @@ pub(crate) enum Command {
     Undelete(FilesystemUndeleteArgs),
     /// Create a directory.
     Mkdir(FilesystemMkdirArgs),
-    /// Delete a file or empty directory.
-    Rm(FilesystemPathMutationArgs),
+    /// Delete a file or directory.
+    Rm(FilesystemRmArgs),
     /// Move or rename a path.
     Mv(FilesystemTransferArgs),
     /// Copy a file to another path.
@@ -360,10 +360,14 @@ pub(crate) struct FilesystemPathArgs {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct FilesystemPathMutationArgs {
+pub(crate) struct FilesystemRmArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
     pub path: String,
+    /// Delete a directory and everything under it, as one commit. The whole
+    /// subtree stays recoverable through the printed undelete handle.
+    #[arg(short, long)]
+    pub recursive: bool,
     /// Idempotency key for the commit; resubmit with the same id to retry
     /// safely. Generated when absent and returned in the output.
     #[arg(long)]

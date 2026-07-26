@@ -259,6 +259,35 @@ fn concurrent_embedded_puts_land_or_report_the_fence() {
 }
 
 #[test]
+fn rm_recursive_deletes_a_populated_directory_in_one_commit() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+
+    let payload = harness.temp_dir.path().join("payload.txt");
+    fs::write(&payload, b"body").expect("write payload");
+    for path in ["/docs/a.txt", "/docs/nested/b.txt"] {
+        assert_success(&harness.run(&["put", payload.to_str().expect("utf-8 path"), path]));
+    }
+
+    // Without -r a populated directory still refuses, exactly as before.
+    let refused = harness.run(&["--json", "rm", "/docs"]);
+    assert_failure(&refused);
+    assert_eq!(json_error(&refused)["code"], "directory_not_empty");
+
+    let removed = harness.run(&["--json", "rm", "-r", "/docs"]);
+    assert_success(&removed);
+    assert_eq!(json_data(&removed)["target"], "demo:/docs");
+
+    for path in ["/docs", "/docs/a.txt", "/docs/nested/b.txt"] {
+        let stat = harness.run(&["--json", "stat", path]);
+        assert_failure(&stat);
+        assert_eq!(json_error(&stat)["code"], "path_not_found");
+    }
+}
+
+#[test]
 fn embedded_profile_namespace_fork_reads_shared_content_and_diverges() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");
