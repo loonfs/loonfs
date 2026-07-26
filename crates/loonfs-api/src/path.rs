@@ -36,6 +36,14 @@ string_id! {
 /// as given.
 pub const MAX_DISPLAY_NAME_BYTES: usize = 255;
 
+/// Largest canonical absolute path, in UTF-8 bytes. Bounded so every real
+/// filesystem, archive format, and sync client can materialize any stored
+/// tree; per-component limits alone allowed paths no target could hold.
+pub const MAX_PATH_BYTES: usize = 4_096;
+
+/// Deepest directory nesting one path may express.
+pub const MAX_PATH_DEPTH: usize = 128;
+
 /// Describes why caller-supplied path or display-name text is not admissible.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum PathError {
@@ -86,6 +94,26 @@ pub enum PathError {
     DisplayNameTooLong {
         /// UTF-8 byte length of the rejected display name.
         byte_length: usize,
+    },
+    /// Reports a path exceeding the total canonical byte bound.
+    #[error("path is {byte_length} bytes; the maximum is {MAX_PATH_BYTES} bytes")]
+    PathTooLong {
+        /// UTF-8 byte length of the rejected canonical path.
+        byte_length: usize,
+    },
+    /// Reports a path nested deeper than the depth bound.
+    #[error("path has {depth} components; the maximum is {MAX_PATH_DEPTH}")]
+    PathTooDeep {
+        /// Component count of the rejected path.
+        depth: usize,
+    },
+    /// Reports a display name no portable target filesystem can hold.
+    #[error("display name `{display_name}` {reason}")]
+    UnportableDisplayName {
+        /// The rejected spelling.
+        display_name: String,
+        /// Which portability rule it broke.
+        reason: &'static str,
     },
     /// Reports a valid display spelling whose canonical lookup key exceeds its durable bound.
     #[error(
@@ -140,6 +168,7 @@ impl AbsolutePath {
             validate_display_name(component)?;
             components.push(PathComponent(component.to_owned()));
         }
+        validate_path_bounds(value.len(), components.len())?;
 
         Ok(Self::from_components(components))
     }
@@ -325,6 +354,35 @@ fn validate_display_name(value: &str) -> Result<(), PathError> {
             byte_length: value.len(),
         });
     }
+    // Portability floor: names every target filesystem can hold. Windows
+    // cannot materialize trailing dots or spaces or its reserved device
+    // names, and an all-whitespace name is invisible in every listing.
+    // Rejecting here is free pre-release; loosening later is compatible,
+    // tightening later would strand stored names.
+    if value.chars().all(char::is_whitespace) {
+        return Err(PathError::UnportableDisplayName {
+            display_name: value.to_owned(),
+            reason: "is entirely whitespace",
+        });
+    }
+    if value.ends_with(' ') {
+        return Err(PathError::UnportableDisplayName {
+            display_name: value.to_owned(),
+            reason: "ends with a space, which Windows cannot store",
+        });
+    }
+    if value.ends_with('.') {
+        return Err(PathError::UnportableDisplayName {
+            display_name: value.to_owned(),
+            reason: "ends with a dot, which Windows cannot store",
+        });
+    }
+    if is_windows_reserved_device_name(value) {
+        return Err(PathError::UnportableDisplayName {
+            display_name: value.to_owned(),
+            reason: "is a Windows reserved device name",
+        });
+    }
     // Every stored name key is derived from an admitted display name, and
     // the derivation site treats an invalid derived key as an invariant
     // violation — so admission must guarantee the derived key stays within
@@ -341,6 +399,29 @@ fn validate_display_name(value: &str) -> Result<(), PathError> {
     Ok(())
 }
 
+fn validate_path_bounds(byte_length: usize, depth: usize) -> Result<(), PathError> {
+    if byte_length > MAX_PATH_BYTES {
+        return Err(PathError::PathTooLong { byte_length });
+    }
+    if depth > MAX_PATH_DEPTH {
+        return Err(PathError::PathTooDeep { depth });
+    }
+    Ok(())
+}
+
+/// Device names Windows reserves regardless of extension or letter case:
+/// a file called `CON`, `con.txt`, or `Com1.log` cannot exist there.
+fn is_windows_reserved_device_name(value: &str) -> bool {
+    let stem = value.split('.').next().unwrap_or(value);
+    let stem = stem.trim_end_matches(' ');
+    let upper = stem.to_ascii_uppercase();
+    matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (upper.len() == 4
+            && (upper.starts_with("COM") || upper.starts_with("LPT"))
+            && upper[3..].chars().all(|digit| digit.is_ascii_digit())
+            && &upper[3..] != "0")
+}
+
 impl PathError {
     /// Returns rejected path text suitable for an API error, omitting hostile or oversized names.
     pub fn invalid_path_input(&self) -> &str {
@@ -352,12 +433,15 @@ impl PathError {
             Self::EmptyDisplayName => "",
             Self::DisplayNameContainsSeparator { display_name }
             | Self::ReservedDisplayName { display_name } => display_name,
+            Self::UnportableDisplayName { display_name, .. } => display_name,
             // Length and control failures do not carry the offending name:
             // an oversized or hostile name must not ride along in error
             // payloads that serialize onto the wire.
             Self::DisplayNameContainsControlCharacter { .. }
             | Self::DisplayNameTooLong { .. }
-            | Self::FoldedNameKeyTooLong { .. } => "",
+            | Self::FoldedNameKeyTooLong { .. }
+            | Self::PathTooLong { .. }
+            | Self::PathTooDeep { .. } => "",
         }
     }
 }
@@ -366,6 +450,53 @@ impl PathError {
 mod tests {
     use super::{AbsolutePath, DisplayName, PathError};
     use crate::{name_key_for_display_name, NameKey, NamePolicy};
+
+    #[test]
+    fn unportable_names_are_rejected() {
+        for name in [
+            "   ",
+            "report ",
+            "archive.",
+            "CON",
+            "con.txt",
+            "Com1.log",
+            "lpt9",
+            "aux.files.d",
+        ] {
+            assert!(
+                DisplayName::parse(name).is_err(),
+                "`{name}` should be rejected"
+            );
+        }
+        // Names that merely resemble the reserved set stay legal.
+        for name in ["CONSOLE", "com10", "lpt10.txt", ".hidden", "a.b"] {
+            assert!(
+                DisplayName::parse(name).is_ok(),
+                "`{name}` should be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn paths_are_bounded_in_bytes_and_depth() {
+        let deep = format!("/{}", vec!["d"; super::MAX_PATH_DEPTH + 1].join("/"));
+        assert!(matches!(
+            AbsolutePath::parse(&deep),
+            Err(PathError::PathTooDeep { .. })
+        ));
+        let long_component = "a".repeat(200);
+        let mut long = String::new();
+        while long.len() <= super::MAX_PATH_BYTES {
+            long.push('/');
+            long.push_str(&long_component);
+        }
+        assert!(matches!(
+            AbsolutePath::parse(&long),
+            Err(PathError::PathTooLong { .. })
+        ));
+        let fine = format!("/{}", vec!["d"; super::MAX_PATH_DEPTH].join("/"));
+        assert!(AbsolutePath::parse(&fine).is_ok());
+    }
 
     #[test]
     fn absolute_path_root_is_valid() {

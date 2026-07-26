@@ -209,6 +209,7 @@ pub(super) async fn validate_metadata_preconditions<V: CommitValidationView>(
                 validate_rename_source(&metadata_state, *inode_id).await?;
                 let new_name_key = validate_rename_target_name_absent(
                     &metadata_state,
+                    *inode_id,
                     *new_parent_inode_id,
                     new_display_name,
                     name_policy,
@@ -524,11 +525,13 @@ async fn validate_replace_target_not_covered<V: CommitValidationView>(
 /// Requires `display_name` to be valid and unbound under `parent_inode_id`,
 /// which must be an existing directory; returns the derived name key. The
 /// error vocabulary (create vs rename) is supplied by the call site.
+#[allow(clippy::too_many_arguments)]
 async fn validate_name_absent<V: CommitValidationView>(
     metadata_state: &V,
     parent_inode_id: InodeId,
     display_name: &DisplayName,
     name_policy: NamePolicy,
+    rebinding_inode_id: Option<InodeId>,
     parent_missing: impl FnOnce() -> CommitValidationError,
     parent_not_directory: impl FnOnce(InodeKind) -> CommitValidationError,
     collision: impl FnOnce(NameKey, InodeId) -> CommitValidationError,
@@ -547,7 +550,11 @@ async fn validate_name_absent<V: CommitValidationView>(
         .visible_child(parent_inode_id, &name_key)
         .await?
     {
-        return Err(collision(name_key, existing.child_inode_id).into());
+        // A binding already held by the inode being rebound is the same
+        // directory slot getting a respelled display name, not a collision.
+        if rebinding_inode_id != Some(existing.child_inode_id) {
+            return Err(collision(name_key, existing.child_inode_id).into());
+        }
     }
 
     Ok(name_key)
@@ -564,6 +571,7 @@ async fn validate_child_name_absent<V: CommitValidationView>(
         parent_inode_id,
         display_name,
         name_policy,
+        None,
         || CommitValidationError::CreateParentMissing { parent_inode_id },
         |actual_kind| CommitValidationError::CreateParentNotDirectory {
             parent_inode_id,
@@ -580,6 +588,7 @@ async fn validate_child_name_absent<V: CommitValidationView>(
 
 async fn validate_rename_target_name_absent<V: CommitValidationView>(
     metadata_state: &V,
+    renaming_inode_id: InodeId,
     parent_inode_id: InodeId,
     display_name: &DisplayName,
     name_policy: NamePolicy,
@@ -589,6 +598,7 @@ async fn validate_rename_target_name_absent<V: CommitValidationView>(
         parent_inode_id,
         display_name,
         name_policy,
+        Some(renaming_inode_id),
         || CommitValidationError::RenameTargetParentMissing { parent_inode_id },
         |actual_kind| CommitValidationError::RenameTargetParentNotDirectory {
             parent_inode_id,

@@ -91,33 +91,58 @@ pub(crate) fn namespace_path(
 ) -> Result<NamespacePath, CliError> {
     Ok(NamespacePath::new(
         namespace_id.clone(),
-        normalize_user_path(path, allow_root)?,
+        parse_user_path(path, allow_root)?,
     ))
 }
 
-/// Normalizes human-entered CLI path arguments before the strict API parser.
-pub(crate) fn normalize_user_path(path: &str, allow_root: bool) -> Result<AbsolutePath, CliError> {
-    if path.is_empty() || !path.starts_with('/') {
-        return AbsolutePath::parse(path)
-            .map_err(|error| CliError::invalid_input(error.to_string()));
-    }
-    let components = path
-        .split('/')
-        .filter(|component| !component.is_empty())
-        .collect::<Vec<_>>();
-    let normalized = if components.is_empty() {
-        "/".to_owned()
+/// Whether a human-entered path spelled directory intent: one trailing
+/// slash after a non-root path. `put`, `cp`, and `mv` destinations read it
+/// as "into this directory"; everywhere else the slash is simply accepted.
+pub(crate) fn directory_intent(path: &str) -> bool {
+    path.len() > 1 && path.ends_with('/') && !path.ends_with("//")
+}
+
+/// Parses a human-entered CLI path with the wire's strictness, plus exactly
+/// one concession: a single trailing slash (directory intent) is accepted
+/// and dropped. Repeated separators, `.`/`..`, and relative spellings fail
+/// here exactly as the wire rejects them — the CLI never silently rewrites
+/// a path into something the caller did not type.
+pub(crate) fn parse_user_path(path: &str, allow_root: bool) -> Result<AbsolutePath, CliError> {
+    let trimmed = if directory_intent(path) {
+        &path[..path.len() - 1]
     } else {
-        format!("/{}", components.join("/"))
+        path
     };
-    let path = AbsolutePath::parse(normalized)
-        .map_err(|error| CliError::invalid_input(error.to_string()))?;
-    if !allow_root && path.is_root() {
+    let parsed =
+        AbsolutePath::parse(trimmed).map_err(|error| CliError::invalid_input(error.to_string()))?;
+    if !allow_root && parsed.is_root() {
         return Err(CliError::invalid_input(
             "root path is not allowed for this command",
         ));
     }
-    Ok(path)
+    Ok(parsed)
+}
+
+/// Resolves a mutation destination: with directory intent the source's leaf
+/// name lands inside the named directory; otherwise the path is the full
+/// destination.
+pub(crate) fn destination_user_path(
+    raw: &str,
+    source_leaf: &str,
+    allow_root_directory: bool,
+) -> Result<AbsolutePath, CliError> {
+    if directory_intent(raw) || raw == "/" {
+        let directory = parse_user_path(raw, true)?;
+        if !allow_root_directory && directory.is_root() && raw == "/" {
+            return Err(CliError::invalid_input(
+                "root path is not allowed for this command",
+            ));
+        }
+        let leaf = loonfs_api::DisplayName::parse(source_leaf)
+            .map_err(|error| CliError::invalid_input(error.to_string()))?;
+        return Ok(directory.join(&leaf));
+    }
+    parse_user_path(raw, false)
 }
 
 pub(crate) fn default_remote_put_path(local_path: &Path) -> Result<AbsolutePath, CliError> {
@@ -135,16 +160,25 @@ pub(crate) fn destination_path_for_get(
     remote_path: &str,
     explicit_destination: Option<&str>,
 ) -> Result<PathBuf, CliError> {
-    match explicit_destination {
-        Some(path) => Ok(PathBuf::from(path)),
-        None => {
-            let file_name = Path::new(remote_path).file_name().ok_or_else(|| {
+    let remote_leaf = || {
+        Path::new(remote_path)
+            .file_name()
+            .map(PathBuf::from)
+            .ok_or_else(|| {
                 CliError::invalid_input(format!(
                     "unable to derive local destination from `{remote_path}`"
                 ))
-            })?;
-            Ok(PathBuf::from(file_name))
+            })
+    };
+    match explicit_destination {
+        // The cp habit: a trailing separator or an existing directory means
+        // the file lands inside it under its remote name, never as a file
+        // named like the directory.
+        Some(path) if path.ends_with('/') || Path::new(path).is_dir() => {
+            Ok(Path::new(path).join(remote_leaf()?))
         }
+        Some(path) => Ok(PathBuf::from(path)),
+        None => remote_leaf(),
     }
 }
 
@@ -168,23 +202,41 @@ pub(crate) fn fail(
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_user_path;
+    use super::{destination_user_path, parse_user_path};
 
     #[test]
-    fn user_paths_are_normalized_only_at_the_cli_boundary() {
+    fn user_paths_keep_wire_strictness_except_directory_intent() {
+        // One trailing slash is directory intent; everything else the wire
+        // rejects, the CLI rejects too, instead of silently rewriting.
         assert_eq!(
-            normalize_user_path("//docs///A.txt/", false)
-                .expect("human path")
+            parse_user_path("/docs/", false)
+                .expect("dir intent")
                 .as_str(),
-            "/docs/A.txt"
+            "/docs"
+        );
+        assert!(parse_user_path("//docs///A.txt/", false).is_err());
+        assert!(parse_user_path("//x.txt", false).is_err());
+        assert!(parse_user_path("docs/A.txt", false).is_err());
+        assert!(parse_user_path("", false).is_err());
+        assert_eq!(parse_user_path("/", true).expect("root").as_str(), "/");
+
+        assert_eq!(
+            destination_user_path("/docs/", "report.pdf", false)
+                .expect("into directory")
+                .as_str(),
+            "/docs/report.pdf"
         );
         assert_eq!(
-            normalize_user_path("///", true)
-                .expect("human root")
+            destination_user_path("/docs/renamed.pdf", "report.pdf", false)
+                .expect("full destination")
                 .as_str(),
-            "/"
+            "/docs/renamed.pdf"
         );
-        assert!(normalize_user_path("docs/A.txt", false).is_err());
-        assert!(normalize_user_path("", false).is_err());
+        assert_eq!(
+            destination_user_path("/", "report.pdf", true)
+                .expect("into root")
+                .as_str(),
+            "/report.pdf"
+        );
     }
 }

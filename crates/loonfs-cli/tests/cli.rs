@@ -471,6 +471,53 @@ fn human_output_shows_dates_writers_and_delta_names() {
 }
 
 #[test]
+fn naming_strictness_and_directory_intent_hold_end_to_end() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+
+    let payload = harness.temp_dir.path().join("report.pdf");
+    fs::write(&payload, b"body").expect("write payload");
+
+    // A trailing slash means into-directory, never a file named like the
+    // directory; other noncanonical spellings fail like the wire.
+    assert_success(&harness.run(&["mkdir", "/docs"]));
+    assert_success(&harness.run(&["put", payload.to_str().expect("utf-8 path"), "/docs/"]));
+    assert_success(&harness.run(&["--json", "stat", "/docs/report.pdf"]));
+    let double_slash = harness.run(&["put", payload.to_str().expect("utf-8 path"), "//x.txt"]);
+    assert_failure(&double_slash);
+
+    // Case-only rename works in place — including without --force — and a
+    // no-op respelling stays a conflict.
+    assert_success(&harness.run(&["--json", "mv", "/docs/report.pdf", "/docs/REPORT.PDF"]));
+    let stat = harness.run(&["--json", "stat", "/docs/REPORT.PDF"]);
+    assert_success(&stat);
+    assert_eq!(json_data(&stat)["display_name"], "REPORT.PDF");
+    let noop = harness.run(&["--json", "mv", "/docs/REPORT.PDF", "/docs/REPORT.PDF"]);
+    assert_failure(&noop);
+    assert_eq!(json_error(&noop)["code"], "path_conflict");
+
+    // A normalization-equal collision names the stored spelling, so two
+    // visually identical names stop looking like the same one.
+    let collision = harness.run(&[
+        "put",
+        payload.to_str().expect("utf-8 path"),
+        "/docs/report.pdf",
+    ]);
+    assert_failure(&collision);
+    let message = stderr_string(&collision);
+    assert!(message.contains("stored as `REPORT.PDF`"), "{message}");
+    assert!(message.contains("case folding"), "{message}");
+
+    // The portability floor rejects what no target filesystem can hold.
+    for name in ["/docs/CON", "/docs/notes.", "/docs/draft "] {
+        let rejected = harness.run(&["put", payload.to_str().expect("utf-8 path"), name]);
+        assert_failure(&rejected);
+    }
+}
+
+#[test]
 fn recursive_transfers_roundtrip_a_tree() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");

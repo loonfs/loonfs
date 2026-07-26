@@ -1,5 +1,6 @@
 //! Publish plans that move or copy visible paths.
 
+use super::planning_helpers::ReplaceDestination;
 use super::planning_helpers::{
     publish_binding_is_precondition, publish_child_name_absent_precondition,
     publish_reject_tombstoned_path_ancestor, publish_resolve_parent_directory,
@@ -40,7 +41,7 @@ pub(super) async fn plan_publish_move_path<S: ObjectStore + ?Sized>(
     let mut ops = Vec::new();
     let mut preconditions = vec![publish_binding_is_precondition(view, &source).await?];
     match &replaced {
-        Some(existing) => {
+        ReplaceDestination::Replaced(existing) => {
             ops.push(ApiCommitOp::DeleteFile {
                 inode_id: existing.inode_id,
             });
@@ -49,12 +50,26 @@ pub(super) async fn plan_publish_move_path<S: ObjectStore + ?Sized>(
                 inode_id: existing.inode_id,
             });
         }
-        None => {
+        ReplaceDestination::Vacant => {
             preconditions.push(publish_child_name_absent_precondition(
                 view,
                 target_parent,
                 &target_name,
             ));
+        }
+        // The destination is the source's own binding: a same-slot
+        // respelling (case-only rename, normalization-equal spelling). The
+        // name is legitimately present — bound to the source — so no
+        // absence precondition and nothing to delete; the rename alone
+        // rebinds the new spelling. An unchanged spelling stays a
+        // conflict: there is nothing to rename.
+        ReplaceDestination::SameInode => {
+            if target_name.as_str() == source.display_name {
+                return Err(CoreError::DestinationExists {
+                    path: to_path.as_str().to_owned(),
+                    existing_display_name: Some(source.display_name.clone()),
+                });
+            }
         }
     }
     ops.push(ApiCommitOp::Rename {
@@ -123,7 +138,16 @@ pub(super) async fn plan_publish_copy_file_path<S: ObjectStore + ?Sized>(
         },
     ];
     match &replaced {
-        Some(existing) => {
+        // Copying a file onto its own binding would delete the source to
+        // make room for its copy; that is a conflict, with or without
+        // `Replace` — the same-file rule every copy tool applies.
+        ReplaceDestination::SameInode => {
+            return Err(CoreError::DestinationExists {
+                path: to_path.as_str().to_owned(),
+                existing_display_name: Some(source.display_name.clone()),
+            })
+        }
+        ReplaceDestination::Replaced(existing) => {
             let existing_revision = view
                 .metadata_state
                 .latest_revision_head(existing.inode_id)
@@ -143,7 +167,7 @@ pub(super) async fn plan_publish_copy_file_path<S: ObjectStore + ?Sized>(
                 inode_id: existing.inode_id,
             });
         }
-        None => {
+        ReplaceDestination::Vacant => {
             ops.push(ApiCommitOp::CreateFile {
                 parent_inode_id: target_parent,
                 display_name: target_name.clone(),
