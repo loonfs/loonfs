@@ -72,6 +72,9 @@ pub enum WalDelta {
         parent_inode_id: InodeId,
         /// Canonical lookup key of the binding being removed.
         name_key: NameKey,
+        /// User-facing spelling the removed binding carried, so feed
+        /// consumers see the name a person typed without a second lookup.
+        display_name: DisplayName,
         /// Child identity expected on the targeted binding.
         child_inode_id: InodeId,
         /// Commit sequence that created the exact binding being removed.
@@ -144,6 +147,13 @@ pub struct WalCommitPayload {
     /// Caller-supplied annotation, omitted when absent and excluded from filesystem semantics.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// Writer label of the publishing session. Observational only, like
+    /// `committed_at_ms`: excluded from the semantic commit fingerprint, so
+    /// replay identity is untouched by which process replays.
+    pub writer_id: String,
+    /// Session id of the publishing session, disambiguating processes that
+    /// share one writer label. Observational only.
+    pub writer_session_id: String,
     /// Materialized mutations in their authoritative `delta_index` order.
     pub deltas: Vec<WalCommitDelta>,
 }

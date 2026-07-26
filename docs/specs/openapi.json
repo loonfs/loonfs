@@ -2904,6 +2904,7 @@
               "delta_index",
               "parent_inode_id",
               "name_key",
+              "display_name",
               "child_inode_id",
               "bind_seq",
               "bind_delta_index",
@@ -2929,6 +2930,10 @@
                 "format": "int32",
                 "description": "Stable ordering position of this unbind within the commit.",
                 "minimum": 0
+              },
+              "display_name": {
+                "$ref": "#/components/schemas/DisplayName",
+                "description": "User-facing spelling the retired binding carried, so a feed\nprojection renders the deleted name without a second lookup."
               },
               "kind": {
                 "type": "string",
@@ -3547,6 +3552,8 @@
           "seq",
           "commit_id",
           "committed_at_ms",
+          "writer_id",
+          "writer_session_id",
           "deltas"
         ],
         "properties": {
@@ -3577,6 +3584,14 @@
           "seq": {
             "$ref": "#/components/schemas/ChangeSeq",
             "description": "Namespace sequence for this logical commit."
+          },
+          "writer_id": {
+            "type": "string",
+            "description": "Writer label of the session that published this commit.\nObservational, like `committed_at_ms`."
+          },
+          "writer_session_id": {
+            "type": "string",
+            "description": "Session id of the publishing session, disambiguating processes that\nshare one writer label. Observational."
           }
         }
       },

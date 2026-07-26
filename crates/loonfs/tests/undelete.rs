@@ -518,6 +518,58 @@ fn change_feed_carries_the_exact_revoked_generation() {
 }
 
 #[test]
+fn the_feed_names_deleted_entries_and_their_writer() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = runtime(temp_dir.path(), "feed-identity-test");
+    let namespace_id = namespace_id("demo");
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    fs.put_file_bytes_blocking(
+        &namespace_id,
+        "/docs/Quarterly Report.PDF",
+        b"body",
+        PutFileOptions::default(),
+    )
+    .expect("put");
+    fs.delete_path_blocking(
+        &namespace_id,
+        "/docs/Quarterly Report.PDF",
+        DeleteOptions::default(),
+    )
+    .expect("delete");
+
+    let changes = block_on(fs.reader.list_changes(
+        &namespace_id,
+        ChangeSeq(0),
+        ListChangesOptions::default(),
+    ))
+    .expect("list changes");
+
+    // A projection of the feed sees the spelling a person typed — on the
+    // unbind as well as the bind — plus which session wrote each commit,
+    // without a second lookup per entry.
+    let unbind_display = changes
+        .changes
+        .iter()
+        .flat_map(|change| &change.deltas)
+        .find_map(|delta| match delta {
+            loonfs::CommitDelta::UnbindDirentry { display_name, .. } => {
+                Some(display_name.as_str().to_owned())
+            }
+            _ => None,
+        });
+    assert_eq!(unbind_display.as_deref(), Some("Quarterly Report.PDF"));
+    for change in &changes.changes {
+        assert!(!change.writer_id.is_empty());
+        assert!(
+            change.writer_session_id.starts_with("wrs_"),
+            "session id: {}",
+            change.writer_session_id
+        );
+    }
+}
+
+#[test]
 fn undelete_rejects_deletions_from_the_same_commit() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "undelete-same-commit-test");

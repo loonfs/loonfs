@@ -98,6 +98,9 @@ pub struct DirentryBindRecord {
 pub struct DirentryUnbindRecord {
     pub parent_inode_id: InodeId,
     pub name_key: NameKey,
+    /// User-facing spelling the retired binding carried: while the unbind
+    /// row is retained, it is the durable home of a deleted name.
+    pub display_name: DisplayName,
     pub child_inode_id: InodeId,
     pub bind_seq: ChangeSeq,
     pub bind_delta_index: u32,

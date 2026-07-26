@@ -140,6 +140,7 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
                 delta_index: 0,
                 parent_inode_id: InodeId(1),
                 name_key: NameKey::parse("docs").expect("valid name key"),
+                display_name: loonfs_api::DisplayName::parse("docs").expect("valid display name"),
                 child_inode_id: InodeId(2),
                 bind_seq: ChangeSeq(1),
                 bind_delta_index: 0,
@@ -582,6 +583,8 @@ fn churned_binding_state() -> MetadataState {
                 delta_index: 0,
                 parent_inode_id: InodeId(1),
                 name_key: NameKey::parse("contested").expect("valid name key"),
+                display_name: loonfs_api::DisplayName::parse("contested")
+                    .expect("valid display name"),
                 child_inode_id: InodeId(2),
                 bind_seq: ChangeSeq(1),
                 bind_delta_index: 1,
@@ -598,6 +601,8 @@ fn churned_binding_state() -> MetadataState {
                 delta_index: 2,
                 parent_inode_id: InodeId(1),
                 name_key: NameKey::parse("deleted").expect("valid name key"),
+                display_name: loonfs_api::DisplayName::parse("deleted")
+                    .expect("valid display name"),
                 child_inode_id: InodeId(4),
                 bind_seq: ChangeSeq(1),
                 bind_delta_index: 3,
@@ -769,6 +774,7 @@ fn has_visible_children_sees_through_unbinds() {
         vec![DirentryUnbindRecord {
             parent_inode_id: dir,
             name_key: NameKey::parse("doc.txt").expect("valid name key"),
+            display_name: loonfs_api::DisplayName::parse("doc.txt").expect("valid display name"),
             child_inode_id: InodeId(2),
             bind_seq: ChangeSeq(2),
             bind_delta_index: 0,

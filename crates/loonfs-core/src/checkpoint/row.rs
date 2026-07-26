@@ -66,6 +66,7 @@ pub(super) fn manifest_rows_for_family(
             .map(|unbind| MetadataRow::DirentryUnbind {
                 parent_inode_id: unbind.parent_inode_id,
                 name_key: unbind.name_key.clone(),
+                display_name: unbind.display_name.clone(),
                 child_inode_id: unbind.child_inode_id,
                 bind_seq: unbind.bind_seq,
                 bind_delta_index: unbind.bind_delta_index,

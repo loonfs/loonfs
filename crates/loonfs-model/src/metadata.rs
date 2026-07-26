@@ -48,6 +48,9 @@ pub struct DirentryBindRecord {
 pub struct DirentryUnbindRecord {
     pub parent_inode_id: InodeId,
     pub name_key: String,
+    /// User-facing spelling the retired binding carried. The unbind row is
+    /// the durable home of a deleted name while it is retained.
+    pub display_name: String,
     pub child_inode_id: InodeId,
     pub bind_seq: ChangeSeq,
     pub bind_delta_index: u32,
@@ -137,6 +140,7 @@ impl MetadataState {
                     delta_index,
                     parent_inode_id,
                     name_key,
+                    display_name,
                     child_inode_id,
                     bind_seq,
                     bind_delta_index,
@@ -144,6 +148,7 @@ impl MetadataState {
                     metadata_state.direntry_unbinds.push(DirentryUnbindRecord {
                         parent_inode_id: *parent_inode_id,
                         name_key: name_key.as_str().to_owned(),
+                        display_name: display_name.as_str().to_owned(),
                         child_inode_id: *child_inode_id,
                         bind_seq: *bind_seq,
                         bind_delta_index: *bind_delta_index,

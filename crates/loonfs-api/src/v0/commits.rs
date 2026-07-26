@@ -253,6 +253,9 @@ pub enum CommitDelta {
         parent_inode_id: InodeId,
         /// Canonical lookup key of the retired binding.
         name_key: NameKey,
+        /// User-facing spelling the retired binding carried, so a feed
+        /// projection renders the deleted name without a second lookup.
+        display_name: DisplayName,
         /// Child identity on the retired binding.
         child_inode_id: InodeId,
         /// Sequence that created the exact retired binding generation.
@@ -318,6 +321,12 @@ pub struct CommittedChange {
     /// Caller annotation, omitted when absent and carrying no filesystem semantics.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// Writer label of the session that published this commit.
+    /// Observational, like `committed_at_ms`.
+    pub writer_id: String,
+    /// Session id of the publishing session, disambiguating processes that
+    /// share one writer label. Observational.
+    pub writer_session_id: String,
     /// Materialized metadata deltas.
     pub deltas: Vec<CommitDelta>,
 }
@@ -413,13 +422,14 @@ mod tests {
             delta_index: 2,
             parent_inode_id: InodeId(1),
             name_key: NameKey::parse("report.txt").expect("valid name key"),
+            display_name: crate::DisplayName::parse("Report.txt").expect("valid display name"),
             child_inode_id: InodeId(2),
             bind_seq: ChangeSeq(7),
             bind_delta_index: 1,
         };
         assert_eq!(
             serde_json::to_string(&unbind).expect("serialize unbind delta"),
-            r#"{"kind":"unbind_direntry","semantic_op_index":0,"delta_index":2,"parent_inode_id":1,"name_key":"report.txt","child_inode_id":2,"bind_seq":7,"bind_delta_index":1}"#
+            r#"{"kind":"unbind_direntry","semantic_op_index":0,"delta_index":2,"parent_inode_id":1,"name_key":"report.txt","display_name":"Report.txt","child_inode_id":2,"bind_seq":7,"bind_delta_index":1}"#
         );
 
         let create_inode = CommitDelta::CreateInode {

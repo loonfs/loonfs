@@ -167,6 +167,8 @@ fn sample_wal_envelope() -> WalSegmentEnvelope {
                 delta_index: 2,
                 parent_inode_id: InodeId(1),
                 name_key: NameKey::parse("old.txt").expect("valid name key"),
+                display_name: loonfs_api::DisplayName::parse("Old.txt")
+                    .expect("valid display name"),
                 child_inode_id: InodeId(5),
                 bind_seq: ChangeSeq(1),
                 bind_delta_index: 0,
@@ -208,6 +210,8 @@ fn sample_wal_envelope() -> WalSegmentEnvelope {
                         .to_owned(),
                 committed_at_ms: 4_000,
                 message: Some("golden commit".to_owned()),
+                writer_id: "golden-writer".to_owned(),
+                writer_session_id: "wrs_golden".to_owned(),
                 deltas,
             }],
         },
@@ -1067,6 +1071,7 @@ fn wal_delta_wire_tags_match_spec_names() {
                 delta_index: 0,
                 parent_inode_id: InodeId(1),
                 name_key: NameKey::parse("a").expect("valid name key"),
+                display_name: loonfs_api::DisplayName::parse("a").expect("valid display name"),
                 child_inode_id: InodeId(2),
                 bind_seq: ChangeSeq(1),
                 bind_delta_index: 0,
@@ -1144,6 +1149,8 @@ fn sample_segment_blocks() -> loonfs_api::wire::sst_blocks::BuiltSegmentBlocks {
         MetadataRow::DirentryUnbind {
             parent_inode_id: InodeId(1),
             name_key: name_key("docs-archive"),
+            display_name: loonfs_api::DisplayName::parse("Docs-Archive")
+                .expect("valid display name"),
             child_inode_id: InodeId(5),
             bind_seq: ChangeSeq(6),
             bind_delta_index: 0,
