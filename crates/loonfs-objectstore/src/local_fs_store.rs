@@ -491,36 +491,49 @@ async fn collect_keys(prefix: &str, root: PathBuf) -> Result<Vec<String>> {
     let mut dirs = vec![root.clone()];
 
     while let Some(current) = dirs.pop() {
+        // Concurrent writers race this walk by design: deletes prune empty
+        // parent directories and publishes write-then-rename scratch files.
+        // An entry that vanishes between enumeration and inspection is an
+        // absent key, not a listing failure — exactly what a cloud
+        // provider's list reports for it.
+        let mut reader = match fs::read_dir(&current).await {
+            Ok(reader) => reader,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(io_error(prefix, err)),
+        };
         let mut entries = Vec::new();
-        let mut reader = fs::read_dir(&current)
-            .await
-            .map_err(|err| io_error(prefix, err))?;
-        while let Some(entry) = reader
-            .next_entry()
-            .await
-            .map_err(|err| io_error(prefix, err))?
-        {
-            entries.push(entry.path());
+        loop {
+            match reader.next_entry().await {
+                Ok(Some(entry)) => entries.push(entry.path()),
+                Ok(None) => break,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => break,
+                Err(err) => return Err(io_error(prefix, err)),
+            }
         }
         entries.sort();
 
         for path in entries.into_iter().rev() {
-            let metadata = fs::metadata(&path)
-                .await
-                .map_err(|err| io_error(prefix, err))?;
+            // Filter in-flight scratch names before the stat: a scratch
+            // file is renamed away mid-publish, so inspecting it first
+            // would turn the normal rename race into a listing error.
+            if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(is_scratch_name)
+            {
+                continue;
+            }
+            let metadata = match fs::metadata(&path).await {
+                Ok(metadata) => metadata,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(err) => return Err(io_error(prefix, err)),
+            };
             if metadata.is_dir() {
                 dirs.push(path);
                 continue;
             }
 
             if metadata.is_file() {
-                if path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(is_scratch_name)
-                {
-                    continue;
-                }
                 keys.push(relative_key(prefix, &root, &path)?);
             }
         }
@@ -650,6 +663,35 @@ mod tests {
                 if message.contains("requires atomic rename-replace")
                     && message.contains("Unix-family")
         ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn listing_tolerates_entries_that_vanish_mid_walk() {
+        let temp_dir = TestDir::new("listing-races");
+        let store = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
+        let key = wal_head("ns-1");
+        store
+            .put(&key, Bytes::from_static(b"{}"), PutMode::Overwrite)
+            .await
+            .expect("seed object");
+
+        // A dangling path is exactly what the walk sees when a concurrent
+        // publish renames its scratch file away, or a concurrent delete
+        // removes an object, between enumeration and inspection: read_dir
+        // listed the entry but the stat answers NotFound. Broken symlinks
+        // reproduce that window deterministically.
+        let dir = temp_dir.path().join("namespaces/ns-1/wal");
+        std::os::unix::fs::symlink(dir.join("missing"), dir.join(".head.json.tmp-1-2"))
+            .expect("dangling scratch entry");
+        std::os::unix::fs::symlink(dir.join("missing"), dir.join("vanished.json"))
+            .expect("dangling plain entry");
+
+        let keys = store
+            .list_prefix("namespaces/ns-1/")
+            .await
+            .expect("listing succeeds despite dangling entries");
+        assert_eq!(keys, vec![key]);
     }
 
     #[tokio::test]
