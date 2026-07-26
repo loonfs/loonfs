@@ -358,7 +358,7 @@ fn drop_pass_refuses_superseded_bind_without_unbind() {
 }
 
 #[tokio::test]
-async fn restore_below_the_floor_fails_with_revision_not_found() {
+async fn restore_below_the_floor_succeeds_after_reorganization() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -407,8 +407,9 @@ async fn restore_below_the_floor_fails_with_revision_not_found() {
             .await
             .expect("create checkpoint");
     }
-    // The superseded revision is reclaimed when reorganization folds the
-    // runs against the advanced floor, not at checkpoint time.
+    // Revision history is retained independently of the replay floor:
+    // folding the runs against the advanced floor must leave every
+    // revision readable.
     drain_reorganization(
         &store,
         &namespace_id,
@@ -417,7 +418,7 @@ async fn restore_below_the_floor_fails_with_revision_not_found() {
     )
     .await;
 
-    let error = restore_file_revision(
+    let restored = restore_file_revision(
         &store,
         &namespace_id,
         "/docs/a.txt",
@@ -426,12 +427,12 @@ async fn restore_below_the_floor_fails_with_revision_not_found() {
         None,
     )
     .await
-    .expect_err("restoring a reclaimed revision must fail cleanly");
-    assert_eq!(error.code(), crate::error::ErrorCode::RevisionNotFound);
+    .expect("restoring a revision below the floor succeeds");
+    assert!(restored.committed_seq > ChangeSeq(0));
 }
 
 #[tokio::test]
-async fn base_rebuild_drops_revisions_superseded_below_floor() {
+async fn base_rebuild_retains_revisions_superseded_below_floor() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -483,8 +484,9 @@ async fn base_rebuild_drops_revisions_superseded_below_floor() {
             .expect("create checkpoint");
         last_manifest_id = Some(checkpoint.manifest_id);
     }
-    // Checkpoints only append; dropping happens when reorganization folds
-    // the runs against the advanced floor.
+    // Checkpoints only append, and the base rebuild folds the runs against
+    // the advanced floor — but revision rows are never dropped: file
+    // history is durable data, not replay state.
     let _ = last_manifest_id.expect("manifest id");
     let reorganized_manifest_id = drain_reorganization(
         &store,
@@ -507,7 +509,7 @@ async fn base_rebuild_drops_revisions_superseded_below_floor() {
     );
     let digest_one = loonfs_api::sha256_digest(b"one\n");
     let digest_two = loonfs_api::sha256_digest(b"two\n");
-    assert!(!revisions.iter().any(|row| matches!(
+    assert!(revisions.iter().any(|row| matches!(
         row,
         MetadataRow::Revision { content_ref, .. } if content_ref.digest == digest_one
     )));
@@ -515,6 +517,11 @@ async fn base_rebuild_drops_revisions_superseded_below_floor() {
         row,
         MetadataRow::Revision { content_ref, .. } if content_ref.digest == digest_two
     )));
+    let index_rows = manifest_rows_for_family(
+        &materialized.metadata_state,
+        ApiMetadataTableFamily::RevisionsByInodeDesc,
+    );
+    assert_eq!(index_rows.len(), revisions.len());
 }
 
 #[tokio::test]

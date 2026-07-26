@@ -19,6 +19,10 @@ pub struct MaintenanceStepOptions {
     /// Flush the visible WAL tail into metadata tables when it reaches this many
     /// segments.
     pub max_wal_tail_segments: u64,
+    /// Advance the retention floor to the flushed manifest head as part of
+    /// the step. Nothing surrenders replay history unless this is set or
+    /// the step is restricted to `only: Retention`.
+    pub retention: bool,
     /// Run the mark-and-sweep garbage collector after the step's flush work.
     /// Nothing sweeps unless this is set; an absent `max_objects` inside the
     /// config resolves to the per-step default.
@@ -31,6 +35,7 @@ impl Default for MaintenanceStepOptions {
     fn default() -> Self {
         Self {
             max_wal_tail_segments: WalTailPolicy::DEFAULT.checkpoint_at_segments,
+            retention: false,
             gc: None,
             only: None,
         }
@@ -45,6 +50,7 @@ impl MaintenanceStepOptions {
             max_wal_tail_segments: request
                 .max_wal_tail_segments
                 .unwrap_or(defaults.max_wal_tail_segments),
+            retention: request.retention.unwrap_or(defaults.retention),
             gc: request.gc.map(|request| {
                 let mut config = gc_config_from_request(request);
                 if config.max_objects.is_none() {
@@ -203,6 +209,7 @@ mod tests {
 
         let step = MaintenanceStepOptions::from_request(MaintenanceStepRequest {
             max_wal_tail_segments: None,
+            retention: None,
             gc: Some(GcRequest::default()),
             only: None,
         });
@@ -213,9 +220,25 @@ mod tests {
     }
 
     #[test]
+    fn retention_stays_off_unless_the_request_opts_in() {
+        let defaults = MaintenanceStepOptions::default();
+        assert!(!defaults.retention);
+
+        let absent = MaintenanceStepOptions::from_request(MaintenanceStepRequest::default());
+        assert!(!absent.retention);
+
+        let opted_in = MaintenanceStepOptions::from_request(MaintenanceStepRequest {
+            retention: Some(true),
+            ..MaintenanceStepRequest::default()
+        });
+        assert!(opted_in.retention);
+    }
+
+    #[test]
     fn step_gc_preserves_explicit_budget_and_cursor() {
         let step = MaintenanceStepOptions::from_request(MaintenanceStepRequest {
             max_wal_tail_segments: None,
+            retention: None,
             gc: Some(GcRequest {
                 max_objects: Some(7),
                 cursor: Some("opaque".to_owned()),

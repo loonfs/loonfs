@@ -35,10 +35,11 @@ impl FsAdmin {
     ///
     /// A full step does four things in order: flush the visible WAL tail
     /// once it reaches `options.max_wal_tail_segments`, merge one bounded
-    /// metadata reorganization unit, advance the retention floor behind a
-    /// verified checkpoint, and — only when `options.gc` opted in — run one
-    /// bounded garbage-collection pass. `options.only` restricts the step to
-    /// a single sub-step.
+    /// metadata reorganization unit, and — each strictly opt-in — advance
+    /// the retention floor (`options.retention`) and run one bounded
+    /// garbage-collection pass (`options.gc`). Nothing surrenders replay
+    /// history or sweeps objects unless the caller asked for it.
+    /// `options.only` restricts the step to a single sub-step.
     ///
     /// Every part reports separately. Losing the head race or being
     /// superseded by another publisher is an outcome, not an error.
@@ -131,9 +132,14 @@ impl FsAdmin {
         };
 
         // Retention advance is idempotent: with nothing new to cover it
-        // reports the floor already in place. Running it here is what keeps
-        // an unattended deployment from growing history forever.
-        let retention_floor_seq = if runs(MaintenanceStepKind::Retention) {
+        // reports the floor already in place. It never runs implicitly —
+        // an unattended deployment retains its full replay history until an
+        // operator opts in here or restricts a step to this sub-step.
+        let retention_runs = match options.only {
+            Some(only) => only == MaintenanceStepKind::Retention,
+            None => options.retention,
+        };
+        let retention_floor_seq = if retention_runs {
             self.advance_retention_floor(namespace_id)
                 .await?
                 .retention_floor_seq

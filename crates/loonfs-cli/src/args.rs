@@ -533,7 +533,8 @@ pub(crate) enum AdminCommand {
     CheckpointRelease(AdminCheckpointReleaseArgs),
     /// Flush the WAL tail into a durable segment.
     Flush(AdminNamespaceArgs),
-    /// Advance the retention floor to reclaim old history.
+    /// Advance the retention floor, surrendering replay history below the
+    /// flushed manifest head. File revision history is never affected.
     RetentionAdvance(AdminNamespaceArgs),
     /// Run one core maintenance step (WAL flush and metadata folds).
     Step(AdminStepArgs),
@@ -582,6 +583,10 @@ pub(crate) struct AdminStepArgs {
     /// segments (server default when omitted).
     #[arg(long)]
     pub max_wal_tail_segments: Option<u64>,
+    /// Advance the retention floor after the step's flush work. Replay
+    /// history below the flushed manifest head is surrendered.
+    #[arg(long)]
+    pub retention: bool,
     /// Run a garbage-collection pass after the step's flush work.
     #[arg(long)]
     pub gc: bool,

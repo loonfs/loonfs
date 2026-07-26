@@ -1481,14 +1481,14 @@ the rewrite selected.
 Compaction rewrites metadata runs (and, in the future, content layouts) into
 more efficient physical shapes.
 
-A base rebuild drops rows that no retained sequence can observe: revisions
-superseded at or below the retention floor, bindings superseded or unbound at
-or below the floor, spent unbind markers, and commit receipts below the
-floor. The floor is the single retention policy: history below it — including
-file revision history — is reclaimed, except where an active checkpoint record
-still pins an older manifest that can serve it. Tombstone rows — set and
-revoke events alike — and inode rows are always retained for now;
-reachability-based dropping for them is future work.
+A base rebuild drops rows that no retained sequence can observe: bindings
+superseded or unbound at or below the retention floor, spent unbind markers,
+and commit receipts below the floor. The floor governs replay state only.
+Revision rows are never dropped: file revision history is durable data,
+retained in full regardless of the floor, and a revisions listing is always
+complete. Tombstone rows — set and revoke events alike — and inode rows are
+always retained for now; reachability-based dropping for them is future
+work.
 
 Invariants:
 
@@ -1509,10 +1509,15 @@ checkpoints — and roots its basis for as long as the record exists.
 ### 6.3 Retention management
 
 Retention management decides how far back incremental replay is still
-promised.
+promised. It bounds only replay state — change-feed resumption, superseded
+binding rows, and commit receipts — never file revision history, which is
+retained in full.
 
 A retention floor may advance only when the system has enough verified
-material to support readers from the new floor forward.
+material to support readers from the new floor forward, and it never
+advances implicitly: the default posture retains everything, and the floor
+moves only when an operator opts in (an explicit retention advance, or a
+maintenance step that requested it).
 
 ### 6.4 Garbage collection
 

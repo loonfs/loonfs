@@ -19,7 +19,7 @@
 | **Content ref** | The metadata pointer for a file revision. In v0 it has `kind: "whole_file_v0"`, a `sha256:<hex>` digest, and `size_bytes`. |
 | **NamePolicy** | The versioned rule that decides how sibling names are compared for collisions. |
 | **Tombstone** | A metadata record that hides a deleted inode or subtree without erasing history. |
-| **Retention floor** | The oldest sequence number from which the system still promises incremental replay. Older clients must re-bootstrap. |
+| **Retention floor** | The oldest sequence number from which the system still promises incremental replay. Older clients must re-bootstrap. It bounds replay only: file revision history is retained in full regardless of the floor, and the floor never advances unless an operator opts in. |
 | **Change feed** | The ordered stream of committed metadata changes after a chosen `seq`. |
 | **Cursor** | A bookmark such as `after_seq` used to resume incremental reads. |
 | **Mount** | Reserved for the future: presenting another namespace, or a subtree of one, inside a visible tree. Not a v0 inode kind. |

@@ -364,6 +364,7 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
                 &namespace_id,
                 MaintenanceStepOptions {
                     max_wal_tail_segments: 1,
+                    retention: false,
                     gc: None,
                     only: None,
                 },
@@ -402,6 +403,7 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
                 &namespace_id,
                 MaintenanceStepOptions {
                     max_wal_tail_segments: 1,
+                    retention: false,
                     gc: None,
                     only: None,
                 },
@@ -426,6 +428,7 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
                 &namespace_id,
                 MaintenanceStepOptions {
                     max_wal_tail_segments: 1,
+                    retention: false,
                     gc: None,
                     only: None,
                 },
