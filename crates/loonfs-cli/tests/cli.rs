@@ -259,6 +259,126 @@ fn concurrent_embedded_puts_land_or_report_the_fence() {
 }
 
 #[test]
+fn recursive_transfers_roundtrip_a_tree() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+
+    // A local tree with nesting, an empty directory chain, and a root file.
+    let tree = harness.temp_dir.path().join("tree");
+    fs::create_dir_all(tree.join("docs/nested")).expect("create tree dirs");
+    fs::create_dir_all(tree.join("empty/inner")).expect("create empty chain");
+    fs::write(tree.join("top.txt"), b"top").expect("write top");
+    fs::write(tree.join("docs/a.txt"), b"alpha").expect("write a");
+    fs::write(tree.join("docs/nested/b.txt"), b"beta").expect("write b");
+
+    // A plain put on a directory names the recursive flag.
+    let plain = harness.run(&["--json", "put", tree.to_str().expect("utf-8 path"), "/up"]);
+    assert_failure(&plain);
+    assert!(json_error(&plain)["message"]
+        .as_str()
+        .expect("error message")
+        .contains("put -r"),);
+
+    let put = harness.run(&[
+        "--json",
+        "put",
+        "-r",
+        tree.to_str().expect("utf-8 path"),
+        "/up",
+    ]);
+    assert_success(&put);
+    let put_data = json_data(&put);
+    assert_eq!(put_data["kind"], "tree_transfer");
+    assert_eq!(put_data["files"], 3);
+    assert_eq!(put_data["directories"], 1);
+    assert_eq!(put_data["failures"].as_array().expect("failures").len(), 0);
+    for path in ["/up/top.txt", "/up/docs/nested/b.txt", "/up/empty/inner"] {
+        assert_success(&harness.run(&["--json", "stat", path]));
+    }
+
+    // Rerunning without --force reports per-file conflicts and exits
+    // nonzero while the summary stays structured; --force replaces cleanly.
+    let rerun = harness.run(&[
+        "--json",
+        "put",
+        "-r",
+        tree.to_str().expect("utf-8 path"),
+        "/up",
+    ]);
+    assert_failure(&rerun);
+    let rerun_data = json_data(&rerun);
+    assert_eq!(rerun_data["files"], 0);
+    assert_eq!(
+        rerun_data["failures"].as_array().expect("failures").len(),
+        4
+    );
+    assert_eq!(
+        rerun_data["failures"][0]["error"]["code"], "path_conflict",
+        "{rerun_data}"
+    );
+    let forced = harness.run(&[
+        "--json",
+        "put",
+        "-r",
+        tree.to_str().expect("utf-8 path"),
+        "/up",
+        "--force",
+    ]);
+    assert_failure(&forced);
+    let forced_data = json_data(&forced);
+    assert_eq!(forced_data["files"], 3);
+    assert_eq!(
+        forced_data["failures"].as_array().expect("failures").len(),
+        1,
+        "the empty directory still conflicts: {forced_data}"
+    );
+
+    // Download the tree and compare bytes; empty directories materialize.
+    let downloaded = harness.temp_dir.path().join("downloaded");
+    let get = harness.run(&[
+        "--json",
+        "get",
+        "-r",
+        "/up",
+        downloaded.to_str().expect("utf-8 path"),
+    ]);
+    assert_success(&get);
+    let get_data = json_data(&get);
+    assert_eq!(get_data["files"], 3);
+    assert_eq!(
+        fs::read(downloaded.join("docs/nested/b.txt")).expect("downloaded bytes"),
+        b"beta"
+    );
+    assert!(downloaded.join("empty/inner").is_dir());
+
+    // Server-side copy: the tree lands without moving bytes — the copied
+    // file shares its source's content reference.
+    let cp = harness.run(&["--json", "cp", "-r", "/up", "/copy"]);
+    assert_success(&cp);
+    let cp_data = json_data(&cp);
+    assert_eq!(cp_data["files"], 3);
+    assert_eq!(cp_data["directories"], 5);
+    let source = harness.run(&["--json", "stat", "/up/docs/a.txt"]);
+    let copy = harness.run(&["--json", "stat", "/copy/docs/a.txt"]);
+    assert_success(&source);
+    assert_success(&copy);
+    assert_eq!(
+        json_data(&source)["content_ref"],
+        json_data(&copy)["content_ref"]
+    );
+    assert_success(&harness.run(&["--json", "stat", "/copy/empty/inner"]));
+
+    // mv still moves a directory in one commit, no flag involved.
+    assert_success(&harness.run(&["--json", "mv", "/copy", "/moved"]));
+    assert_success(&harness.run(&["--json", "stat", "/moved/docs/a.txt"]));
+    let mv_recursive = harness.run(&["--json", "mv", "-r", "/moved", "/again"]);
+    assert_failure(&mv_recursive);
+    assert_eq!(json_error(&mv_recursive)["code"], "invalid_input");
+}
+
+#[test]
 fn rm_recursive_deletes_a_populated_directory_in_one_commit() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");

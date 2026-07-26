@@ -100,6 +100,12 @@ pub(crate) fn write_stderr_warning(message: impl std::fmt::Display) {
     let _ = writeln!(io::stderr().lock(), "warning: {message}");
 }
 
+/// Per-item progress for long-running recursive transfers, on stderr so
+/// stdout stays the machine-readable summary.
+pub(crate) fn write_stderr_progress(message: impl std::fmt::Display) {
+    let _ = writeln!(io::stderr().lock(), "{message}");
+}
+
 pub(crate) fn json_success(output: &CommandOutput) -> io::Result<String> {
     match &output.data {
         CommandData::StreamBytes(_) => Err(io::Error::new(
@@ -389,6 +395,34 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             if let Some(cursor) = next_cursor {
                 lines.push(format!("next_cursor: {cursor}"));
             }
+            lines.join("\n")
+        }
+        CommandData::TreeTransfer {
+            source,
+            destination,
+            files,
+            directories,
+            failures,
+        } => {
+            let verb = match output.kind {
+                CommandKind::FilesystemGet => "downloaded",
+                CommandKind::FilesystemCp => "copied",
+                _ => "stored",
+            };
+            let mut lines = Vec::new();
+            for failure in failures {
+                lines.push(format!(
+                    "failed {}: {}: {}",
+                    failure.path, failure.error.code, failure.error.message
+                ));
+            }
+            let mut summary = format!(
+                "{verb} {files} files and {directories} directories ({source} -> {destination})"
+            );
+            if !failures.is_empty() {
+                summary.push_str(&format!("; {} failed", failures.len()));
+            }
+            lines.push(summary);
             lines.join("\n")
         }
         CommandData::FileTransfer {

@@ -14,6 +14,15 @@ use loonfs_api::{
 };
 use serde::Serialize;
 
+/// One failed item inside a recursive transfer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct TreeTransferFailure {
+    /// The path that failed — remote for uploads and copies, whichever side
+    /// failed for downloads.
+    pub path: String,
+    pub error: CliError,
+}
+
 pub(crate) struct CommandOutput {
     pub kind: CommandKind,
     pub profile: Option<String>,
@@ -85,6 +94,16 @@ pub(crate) enum CommandData {
         destination: String,
         bytes_written: u64,
     },
+    /// A recursive transfer's summary: per-item successes are counted, not
+    /// listed (a tree can hold tens of thousands of entries), and every
+    /// failure is listed with its own error.
+    TreeTransfer {
+        source: String,
+        destination: String,
+        files: u64,
+        directories: u64,
+        failures: Vec<TreeTransferFailure>,
+    },
     FileMutation {
         target: String,
         committed_seq: ChangeSeq,
@@ -115,4 +134,13 @@ pub(crate) enum CommandData {
         commit_date: String,
     },
     StreamBytes(Vec<u8>),
+}
+
+impl CommandData {
+    /// Whether this success-shaped output still reports failed items, so
+    /// the process can exit nonzero without discarding the structured
+    /// results a partial failure produced.
+    pub(crate) fn reports_failures(&self) -> bool {
+        matches!(self, CommandData::TreeTransfer { failures, .. } if !failures.is_empty())
+    }
 }

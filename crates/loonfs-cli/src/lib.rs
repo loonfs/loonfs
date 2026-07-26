@@ -24,6 +24,9 @@ pub async fn main() -> ExitCode {
 
     match commands::run(cli, runtime).await {
         Ok(output) => match render::render_success(&output, runtime.json) {
+            // A recursive transfer renders its per-item outcomes as success
+            // data but still exits nonzero when any item failed.
+            Ok(()) if output.data.reports_failures() => ExitCode::FAILURE,
             Ok(()) => ExitCode::SUCCESS,
             Err(err) => {
                 let failure = commands::CommandFailure {
