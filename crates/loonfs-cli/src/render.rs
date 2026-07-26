@@ -37,6 +37,67 @@ fn gc_summary(report: &GcResponse) -> String {
     summary
 }
 
+/// Renders Unix milliseconds as `YYYY-MM-DD HH:MM:SSZ`. Hand-rolled
+/// civil-from-days arithmetic (Howard Hinnant's algorithm), matching the
+/// presign signer's approach, so the CLI takes no date dependency.
+fn format_utc_ms(unix_ms: u64) -> String {
+    let seconds = unix_ms / 1_000;
+    let days = i64::try_from(seconds / 86_400).unwrap_or(0);
+    let second_of_day = seconds % 86_400;
+    let (hh, mm, ss) = (
+        second_of_day / 3_600,
+        (second_of_day % 3_600) / 60,
+        second_of_day % 60,
+    );
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { year + 1 } else { year };
+    format!("{year:04}-{month:02}-{day:02} {hh:02}:{mm:02}:{ss:02}Z")
+}
+
+/// Compact human descriptor for one feed delta, now that deltas carry the
+/// names a person typed.
+fn delta_descriptor(delta: &loonfs_api::v0::CommitDelta) -> String {
+    use loonfs_api::v0::CommitDelta;
+    match delta {
+        CommitDelta::CreateInode { inode_id, .. } => format!("inode {inode_id}"),
+        CommitDelta::BindDirentry { display_name, .. } => format!("bind '{display_name}'"),
+        CommitDelta::UnbindDirentry { display_name, .. } => {
+            format!("unbind '{display_name}'")
+        }
+        CommitDelta::AppendFileRevision { revision_no, .. } => {
+            format!("revision #{}", revision_no.0)
+        }
+        CommitDelta::TombstoneSubtree { root_inode_id, .. } => {
+            format!("delete inode {root_inode_id}")
+        }
+        CommitDelta::RevokeSubtreeTombstone {
+            root_inode_id,
+            target_seq,
+            ..
+        } => format!("undelete inode {root_inode_id}@{}", target_seq.0),
+    }
+}
+
+fn delta_summary(deltas: &[loonfs_api::v0::CommitDelta]) -> String {
+    const SHOWN: usize = 3;
+    if deltas.is_empty() {
+        return "-".to_owned();
+    }
+    let mut shown: Vec<String> = deltas.iter().take(SHOWN).map(delta_descriptor).collect();
+    if deltas.len() > SHOWN {
+        shown.push(format!("+{} more", deltas.len() - SHOWN));
+    }
+    shown.join("; ")
+}
+
 const FORMAT_VERSION: u32 = 1;
 
 #[derive(Debug, Serialize)]
@@ -281,14 +342,15 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
                     "changes for {} after seq {} (through seq {})",
                     response.namespace_id, response.after_seq.0, response.through_seq.0
                 ),
-                "SEQ\tCOMMIT_ID\tDELTAS\tMESSAGE".to_owned(),
+                "SEQ\tDATE\tWRITER\tDELTAS\tMESSAGE".to_owned(),
             ];
             for change in &response.changes {
                 lines.push(format!(
-                    "{}\t{}\t{}\t{}",
+                    "{}\t{}\t{}\t{}\t{}",
                     change.seq.0,
-                    change.commit_id,
-                    change.deltas.len(),
+                    format_utc_ms(change.committed_at_ms),
+                    change.writer_id,
+                    delta_summary(&change.deltas),
                     change.message.as_deref().unwrap_or("-")
                 ));
             }
@@ -368,6 +430,9 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             if let Some(revision) = entry.revision_no {
                 lines.push(format!("revision: {}", revision.0));
             }
+            if let Some(committed_at_ms) = entry.committed_at_ms {
+                lines.push(format!("modified: {}", format_utc_ms(committed_at_ms)));
+            }
             if let Some(content_ref) = &entry.content_ref {
                 lines.push(format!("content_ref: {}", content_ref.digest));
                 lines.push(format!("content_kind: {}", content_ref.kind));
@@ -381,12 +446,13 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
         } => {
             let mut lines = vec![
                 format!("revisions for {target}"),
-                "REVISION\tSEQ\tSIZE\tDIGEST".to_owned(),
+                "REVISION\tDATE\tSEQ\tSIZE\tDIGEST".to_owned(),
             ];
             for revision in revisions {
                 lines.push(format!(
-                    "{}\t{}\t{}\t{}",
+                    "{}\t{}\t{}\t{}\t{}",
                     revision.revision_no.0,
+                    format_utc_ms(revision.committed_at_ms),
                     revision.committed_seq.0,
                     revision.content_ref.size_bytes,
                     revision.content_ref.digest

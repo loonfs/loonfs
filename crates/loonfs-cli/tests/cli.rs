@@ -352,6 +352,53 @@ fn commit_messages_ride_the_feed_and_bind_identity() {
 }
 
 #[test]
+fn human_output_shows_dates_writers_and_delta_names() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+
+    let payload = harness.temp_dir.path().join("doc.txt");
+    fs::write(&payload, b"v1").expect("write payload");
+    assert_success(&harness.run(&[
+        "put",
+        payload.to_str().expect("utf-8 path"),
+        "/docs/Report.PDF",
+    ]));
+    assert_success(&harness.run(&["rm", "/docs/Report.PDF"]));
+
+    let changes = harness.run(&["changes"]);
+    assert_success(&changes);
+    let feed = stdout_string(&changes);
+    assert!(
+        feed.contains("SEQ\tDATE\tWRITER\tDELTAS\tMESSAGE"),
+        "{feed}"
+    );
+    assert!(feed.contains("bind 'Report.PDF'"), "{feed}");
+    assert!(feed.contains("unbind 'Report.PDF'"), "{feed}");
+    // Dates render as UTC wall-clock, not raw milliseconds.
+    assert!(feed.contains("Z\t"), "{feed}");
+
+    fs::write(&payload, b"v2").expect("write payload");
+    assert_success(&harness.run(&["put", payload.to_str().expect("utf-8 path"), "/doc.txt"]));
+    let revisions = harness.run(&["revisions", "/doc.txt"]);
+    assert_success(&revisions);
+    let table = stdout_string(&revisions);
+    assert!(
+        table.contains("REVISION\tDATE\tSEQ\tSIZE\tDIGEST"),
+        "{table}"
+    );
+
+    let stat_file = harness.run(&["stat", "/doc.txt"]);
+    assert_success(&stat_file);
+    assert!(
+        stdout_string(&stat_file).contains("modified: "),
+        "{}",
+        stdout_string(&stat_file)
+    );
+}
+
+#[test]
 fn recursive_transfers_roundtrip_a_tree() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");
