@@ -285,7 +285,7 @@ mod tests {
         results[0].as_ref().expect("first create succeeds");
         let error = results[1].as_ref().expect_err("duplicate create rejected");
         assert_eq!(error.code(), ErrorCode::PathConflict);
-        assert!(matches!(error, CoreError::DestinationExists(_)));
+        assert!(matches!(error, CoreError::DestinationExists { .. }));
     }
 
     #[tokio::test]

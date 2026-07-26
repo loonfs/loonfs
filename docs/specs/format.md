@@ -448,7 +448,12 @@ A path can change even when the underlying item has not.
 Display names are stored as given and validated at admission. A display name
 must be non-empty, must not contain `/` or any Unicode control character
 (general category `Cc`, which covers NUL, C0, and C1), must not be `.` or
-`..`, and must not exceed 255 UTF-8 bytes as stored. Name keys obey the same
+`..`, and must not exceed 255 UTF-8 bytes as stored. Names also satisfy a
+portability floor — the set every target filesystem can hold: a name must
+not be entirely whitespace, must not end with a space or a dot, and must not
+be a Windows reserved device name (`CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9`,
+`LPT1`-`LPT9`, compared case-insensitively and ignoring any extension).
+Name keys obey the same
 character rules with a 768-byte cap: case folding expands at most threefold
 in bytes, so every key derivable from a valid display name is admissible.
 Requests carrying a name or key outside this grammar fail validation; nothing
@@ -457,7 +462,9 @@ is truncated or normalized on the caller's behalf.
 An absolute path has one canonical spelling: exactly one leading `/`, no empty
 components or repeated separators, and no trailing `/` except for the root
 path `/`. Wire decoders reject every noncanonical spelling rather than
-normalizing it.
+normalizing it. A canonical path is bounded at 4,096 UTF-8 bytes and 128
+components, so any stored tree can materialize on a real filesystem, in an
+archive, or through a sync client.
 
 #### 2.3.1 NamePolicy
 

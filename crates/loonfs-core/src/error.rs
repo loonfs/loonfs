@@ -95,8 +95,15 @@ pub enum CoreError {
     DirectoryNotEmpty(String),
     #[error("cannot mutate root path")]
     RootMutationForbidden,
-    #[error("destination already exists at `{0}`")]
-    DestinationExists(String),
+    #[error("{}", destination_exists_message(.path, .existing_display_name.as_deref()))]
+    DestinationExists {
+        path: String,
+        /// Stored spelling of the occupying entry, when the planner had it.
+        /// Rendered when it differs from what the caller typed, because
+        /// sibling names collide after NFC normalization and case folding
+        /// and the two spellings can look identical.
+        existing_display_name: Option<String>,
+    },
     #[error("commit id conflict for `{0}`")]
     CommitIdReuseConflict(String),
     #[error(transparent)]
@@ -388,7 +395,7 @@ impl CoreError {
             CoreError::RebootstrapRequired { .. } => ErrorCode::RebootstrapRequired,
             CoreError::ExpectedFile { .. }
             | CoreError::ExpectedDirectory { .. }
-            | CoreError::DestinationExists(_) => ErrorCode::PathConflict,
+            | CoreError::DestinationExists { .. } => ErrorCode::PathConflict,
             CoreError::DirectoryNotEmpty(_) => ErrorCode::DirectoryNotEmpty,
             CoreError::TombstoneConflict { .. } => ErrorCode::TombstoneConflict,
             CoreError::WriterFenced(_) => ErrorCode::WriterFenced,
@@ -449,6 +456,17 @@ pub struct WriterFence {
     pub active_writer: Option<String>,
     /// Session id recorded by the winning acquirer, when known.
     pub active_session_id: Option<String>,
+}
+
+fn destination_exists_message(path: &str, existing_display_name: Option<&str>) -> String {
+    let typed_leaf = path.rsplit('/').next().unwrap_or(path);
+    match existing_display_name {
+        Some(existing) if existing != typed_leaf => format!(
+            "destination already exists at `{path}` (stored as `{existing}`; sibling names \
+             collide after Unicode NFC normalization and case folding)"
+        ),
+        _ => format!("destination already exists at `{path}`"),
+    }
 }
 
 impl std::fmt::Display for WriterFence {

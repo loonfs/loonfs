@@ -2,8 +2,8 @@
 //! and grep.
 
 use super::context::{
-    default_remote_put_path, destination_path_for_get, fail, namespace_path, normalize_user_path,
-    render_target, resolve_command_context,
+    default_remote_put_path, destination_path_for_get, destination_user_path, fail, namespace_path,
+    parse_user_path, render_target, resolve_command_context,
 };
 use super::output::{CommandData, CommandFailure, CommandOutput};
 use super::recursive;
@@ -118,7 +118,7 @@ pub(crate) async fn run_filesystem_grep(
     let path_prefix = args
         .path_prefix
         .as_deref()
-        .map(|path| normalize_user_path(path, true))
+        .map(|path| parse_user_path(path, true))
         .transpose()
         .map_err(|error| context.fail(kind, error))?;
     let mut request = loonfs_api::GrepRequest {
@@ -402,7 +402,7 @@ pub(crate) async fn run_filesystem_put(
             ));
         }
         let remote_root = match args.remote_path {
-            Some(path) => normalize_user_path(&path, true),
+            Some(path) => parse_user_path(&path, true),
             None => default_remote_put_path(&local_path),
         }
         .map_err(|error| context.fail(kind, error))?;
@@ -427,8 +427,22 @@ pub(crate) async fn run_filesystem_put(
         ));
     }
 
+    let local_leaf = local_path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .ok_or_else(|| {
+            context.fail(
+                kind,
+                CliError::invalid_input(format!(
+                    "unable to derive remote target from `{}`",
+                    local_path.display()
+                )),
+            )
+        })?;
     let remote_path = match args.remote_path {
-        Some(path) => normalize_user_path(&path, false),
+        // A trailing slash names the directory the file lands in — the
+        // cp/rsync habit — while a plain path is the full destination.
+        Some(path) => destination_user_path(&path, &local_leaf, true),
         None => default_remote_put_path(&local_path),
     }
     .map_err(|error| context.fail(kind, error))?;
@@ -666,7 +680,18 @@ async fn run_filesystem_transfer(
     let allow_root = false;
     let from = namespace_path(&context.namespace, &args.source_path, allow_root)
         .map_err(|error| context.fail(kind, error))?;
-    let to = namespace_path(&context.namespace, &args.destination_path, allow_root)
+    let source_leaf = from
+        .absolute_path()
+        .final_component()
+        .map(|component| component.as_str().to_owned())
+        .ok_or_else(|| {
+            context.fail(
+                kind,
+                CliError::invalid_input("root path is not allowed for this command"),
+            )
+        })?;
+    let to = destination_user_path(&args.destination_path, &source_leaf, true)
+        .map(|path| NamespacePath::new(context.namespace.clone(), path))
         .map_err(|error| context.fail(kind, error))?;
 
     let commit_id = parse_commit_id_arg(args.commit_id.as_deref())

@@ -100,30 +100,46 @@ pub(super) async fn publish_reject_tombstoned_path_ancestor<S: ObjectStore + ?Si
     Ok(())
 }
 
+/// How the shared move/copy destination rule resolved.
+pub(super) enum ReplaceDestination {
+    /// Nothing visible occupies the destination.
+    Vacant,
+    /// A distinct file occupies it and `Replace` accepted it.
+    Replaced(ResolvedVisiblePath),
+    /// The destination resolves to the moving inode itself: a same-slot
+    /// respelling, such as a case-only rename, whose name key already
+    /// belongs to the source.
+    SameInode,
+}
+
 /// Resolves the shared move/copy destination rule: replacement accepts a
-/// distinct file and rejects every other visible destination.
+/// distinct file, a move may respell its own binding, and everything else
+/// visible at the destination is a conflict.
 pub(super) async fn publish_resolve_replace_destination<S: ObjectStore + ?Sized>(
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     to_path: &AbsolutePath,
     behavior: DestinationBehavior,
     source_inode_id: InodeId,
-) -> Result<Option<ResolvedVisiblePath>> {
+) -> Result<ReplaceDestination> {
     Ok(
         match view.metadata_state.resolve_visible_path(to_path).await {
-            Ok(existing)
-                if behavior == DestinationBehavior::Replace
-                    && existing.inode_id != source_inode_id =>
-            {
+            Ok(existing) if existing.inode_id == source_inode_id => ReplaceDestination::SameInode,
+            Ok(existing) if behavior == DestinationBehavior::Replace => {
                 if existing.inode_kind != InodeKind::File {
                     return Err(CoreError::ExpectedFile {
                         path: to_path.as_str().to_owned(),
                         kind: existing.inode_kind,
                     });
                 }
-                Some(existing)
+                ReplaceDestination::Replaced(existing)
             }
-            Ok(_) => return Err(CoreError::DestinationExists(to_path.as_str().to_owned())),
-            Err(error) if is_missing_visible_path(&error) => None,
+            Ok(existing) => {
+                return Err(CoreError::DestinationExists {
+                    path: to_path.as_str().to_owned(),
+                    existing_display_name: Some(existing.display_name),
+                })
+            }
+            Err(error) if is_missing_visible_path(&error) => ReplaceDestination::Vacant,
             Err(error) => return Err(error),
         },
     )

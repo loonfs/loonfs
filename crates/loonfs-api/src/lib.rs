@@ -96,7 +96,10 @@ pub use pagination::{
     PaginationPolicyError, TrashPageCursor, DEFAULT_MAX_PAGE_LIMIT, DEFAULT_PAGE_LIMIT,
     PAGE_CURSOR_VERSION,
 };
-pub use path::{AbsolutePath, DisplayName, PathComponent, PathError, MAX_DISPLAY_NAME_BYTES};
+pub use path::{
+    AbsolutePath, DisplayName, PathComponent, PathError, MAX_DISPLAY_NAME_BYTES, MAX_PATH_BYTES,
+    MAX_PATH_DEPTH,
+};
 
 // Curated root re-exports of the common v0 HTTP surface. v0 HTTP shapes live
 // in `v0`; add here only what most consumers touch.

@@ -1236,6 +1236,60 @@ async fn move_path_into_occupied_target_is_path_conflict() {
 }
 
 #[tokio::test]
+async fn move_path_respells_the_same_slot_without_a_conflict() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id("demo"), &context, false)
+        .await
+        .expect("bootstrap namespace");
+    write_file_bytes(
+        &store,
+        &namespace_id("demo"),
+        "/docs/report.pdf",
+        b"alpha",
+        &context,
+        Some("seed-respell"),
+    )
+    .await
+    .expect("seed respell");
+    let before = resolve_path_latest(&store, &namespace_id("demo"), "/docs/report.pdf")
+        .await
+        .expect("resolve before respell");
+
+    // Case-only rename: same name key under the same parent, new spelling.
+    move_path(
+        &store,
+        &namespace_id("demo"),
+        "/docs/report.pdf",
+        "/docs/REPORT.PDF",
+        &context,
+        Some("respell"),
+    )
+    .await
+    .expect("case-only respelling lands");
+
+    let after = resolve_path_latest(&store, &namespace_id("demo"), "/docs/report.pdf")
+        .await
+        .expect("resolve after respell");
+    assert_eq!(named_entry(&after), "REPORT.PDF");
+    assert_eq!(after.inode_id, before.inode_id);
+
+    // Repeating the identical spelling changes nothing and stays a conflict.
+    let error = move_path(
+        &store,
+        &namespace_id("demo"),
+        "/docs/REPORT.PDF",
+        "/docs/REPORT.PDF",
+        &context,
+        Some("respell-noop"),
+    )
+    .await
+    .expect_err("unchanged spelling");
+    assert_eq!(error.code(), ErrorCode::PathConflict);
+}
+
+#[tokio::test]
 async fn move_path_directory_cycle_is_would_cycle() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -1751,7 +1805,7 @@ async fn move_replace_atomically_replaces_a_file_destination() {
     )
     .await
     .expect_err("no-replace move onto an occupied name fails");
-    assert!(matches!(error, CoreError::DestinationExists(_)));
+    assert!(matches!(error, CoreError::DestinationExists { .. }));
 
     // Replace compiles to one commit: the destination file's delete and the
     // source's rebind land atomically.
@@ -1836,7 +1890,7 @@ async fn move_replace_rejects_directory_destinations_and_self_moves() {
     )
     .await
     .expect_err("replace move onto itself fails");
-    assert!(matches!(error, CoreError::DestinationExists(_)));
+    assert!(matches!(error, CoreError::DestinationExists { .. }));
 }
 
 #[tokio::test]

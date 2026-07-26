@@ -30,10 +30,11 @@ pub(super) async fn plan_publish_create_directory<S: ObjectStore + ?Sized>(
         .resolve_visible_path(absolute_path)
         .await
     {
-        Ok(_) => {
-            return Err(CoreError::DestinationExists(
-                absolute_path.as_str().to_owned(),
-            ));
+        Ok(existing) => {
+            return Err(CoreError::DestinationExists {
+                path: absolute_path.as_str().to_owned(),
+                existing_display_name: Some(existing.display_name),
+            });
         }
         Err(error) if is_missing_visible_path(&error) => {}
         Err(error) => return Err(error),
@@ -92,10 +93,11 @@ pub(super) async fn plan_publish_undelete<S: ObjectStore + ?Sized>(
         .resolve_visible_path(absolute_path)
         .await
     {
-        Ok(_) => {
-            return Err(CoreError::DestinationExists(
-                absolute_path.as_str().to_owned(),
-            ));
+        Ok(existing) => {
+            return Err(CoreError::DestinationExists {
+                path: absolute_path.as_str().to_owned(),
+                existing_display_name: Some(existing.display_name),
+            });
         }
         Err(error) if is_missing_visible_path(&error) => {}
         Err(error) => return Err(error),
@@ -148,9 +150,10 @@ pub(super) async fn plan_publish_put_file_content_ref<S: ObjectStore + ?Sized>(
     match target {
         Ok(existing) => {
             if behavior == DestinationBehavior::NoReplace {
-                return Err(CoreError::DestinationExists(
-                    absolute_path.as_str().to_owned(),
-                ));
+                return Err(CoreError::DestinationExists {
+                    path: absolute_path.as_str().to_owned(),
+                    existing_display_name: Some(existing.display_name.clone()),
+                });
             }
             if existing.inode_kind != InodeKind::File {
                 return Err(CoreError::ExpectedFile {
