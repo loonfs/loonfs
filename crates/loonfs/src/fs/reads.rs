@@ -52,9 +52,12 @@ impl FsReader {
 
     /// Lists a directory by aggregating every page into one response.
     ///
-    /// The envelope and every entry come from one consistent head, so an
-    /// empty directory still reports which state answered the question. Entries
-    /// are returned in canonical name-key order, matching paged listings.
+    /// Listing cursors tolerate commits landing mid-listing — each page
+    /// resumes in name-key order against the current head — so the
+    /// envelope's `head_seq` reports the newest head that served a page (an
+    /// empty directory still reports which state answered the question).
+    /// Entries are returned in canonical name-key order, matching paged
+    /// listings.
     pub async fn list_path_entries_all(
         &self,
         namespace_id: &NamespaceId,
@@ -79,6 +82,7 @@ impl FsReader {
                 entries: Vec::new(),
                 next_cursor: None,
             });
+            envelope_ref.head_seq = envelope_ref.head_seq.max(page.head_seq);
             entries.extend(page.entries);
             cursor = next_cursor;
             if cursor.is_none() {

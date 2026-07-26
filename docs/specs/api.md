@@ -241,7 +241,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `upload_already_completed` | 409 | The upload session is already completed. |
 | `upload_content_conflict` | 409 | Different bytes were staged under this upload id. |
 | `query_unindexable` | 400 | The pattern has no run of at least 3 literal bytes, so the trigram index cannot narrow candidates; rewrite the pattern, or set `allow_scan` (capped by `query.grep.scan_budget_files`). |
-| `rebootstrap_required` | 409 | The resume position — a change cursor or listing snapshot — is no longer available; restart from a fresh listing or checkpoint. |
+| `rebootstrap_required` | 409 | The resume position is unanswerable — a change cursor below the retention floor, or a listing cursor minted ahead of the serving head; restart from a fresh listing or checkpoint. |
 | `not_supported` | 501 | The deployment does not implement the requested op or feature. |
 | `commit_outcome_unknown` | 503 | The publish outcome was not observed; the commit may or may not be visible. Retry with the same commit id or reconcile. |
 | `commit_queue_full` | 503 | The namespace write queue is full; back off and retry. |
@@ -706,16 +706,23 @@ shape as `stat` (directory entries leave the file-only fields out).
 Directory listing advances in canonical `name_key` order. Concatenating pages
 in cursor order yields the complete listing in that same order; clients must
 not re-sort aggregated pages. The `path` query parameter is
-required on every page; the cursor pins the snapshot and resume position, but
-the request path remains the authority for what is being listed. Responses
+required on every page; the cursor carries the resume position, but the
+request path remains the authority for what is being listed. Responses
 include `next_cursor` only when another page is available.
 
-A cursor pins the head sequence it was issued at, and v0 serves pages only
-against the current head: once any commit advances the namespace, resuming an
-older cursor answers `rebootstrap_required` — restart the listing from a
-fresh first page. Directory listing and revision listing behave identically
-here. (A malformed cursor, or one replayed against a different target, stays
-`invalid_request`.)
+A cursor is an ordering resume, not a snapshot pin. Every cursor in the API
+— directory listing, revision listing, grep, and the change feed alike —
+tolerates forward head drift: commits landing mid-listing never retire it,
+and the resumed page evaluates at the then-current head, continuing strictly
+after the last returned position. Each page is internally consistent at its
+own head, but a multi-page listing spans whatever heads its pages ran at: an
+entry created behind the resume position is missed, an entry deleted behind
+it was already returned, and a rename can surface as a duplicate or a miss.
+A client that needs one consistent cut re-issues the listing when `head_seq`
+changes between pages. Only a cursor minted ahead of the serving head
+answers `rebootstrap_required` — drift tolerance runs forward, never
+backward. (A malformed cursor, or one replayed against a different target,
+stays `invalid_request`.)
 
 ```json
 {
@@ -1147,11 +1154,10 @@ resumes strictly after the last candidate the issuing page finished
 scanning and is bound to that request — replaying it with different
 criteria is rejected as `invalid_request`.
 
-Grep cursors deliberately tolerate head drift, unlike directory listing
-cursors (section 5), which are bound to the head that minted them and must
-re-bootstrap after any commit. A grep cursor minted at an older head is
-accepted, and the resumed page evaluates at the then-current head and
-reports it: each page is internally consistent at its own head, but a
+Grep cursors tolerate head drift with the same forward-only rule as every
+other cursor in the API (section 6.5). A grep cursor minted at an older
+head is accepted, and the resumed page evaluates at the then-current head
+and reports it: each page is internally consistent at its own head, but a
 multi-page search spans whatever heads its pages ran at, and candidates
 the cursor has passed are not revisited even if later commits changed
 them. A search is a bounded sampling read over content, not an
