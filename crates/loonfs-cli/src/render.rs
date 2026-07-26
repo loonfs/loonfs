@@ -574,6 +574,11 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
         CommandData::ConfigShow { config } => {
             toml::to_string_pretty(config).unwrap_or_else(|_| "failed to render config".to_owned())
         }
+        CommandData::ConfigShowDegraded { error, config_toml } => {
+            format!(
+                "warning: {error}\nshowing the file as parsed, secrets masked:\n\n{config_toml}"
+            )
+        }
         CommandData::Version {
             version,
             commit,

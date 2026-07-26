@@ -213,14 +213,14 @@ impl Client {
 
         let response = builder.send().await.map_err(|err| FailedAttempt {
             transport: true,
-            error: ClientError::Http(err.to_string()),
+            error: ClientError::Http(describe_send_error(&request.url, &err)),
         })?;
         let status = response.status();
         let bytes = response.bytes().await.map_err(|err| FailedAttempt {
             // The status arrived but the body did not: the connection failed
             // mid-response, which is a transport failure like any other.
             transport: true,
-            error: ClientError::Http(err.to_string()),
+            error: ClientError::Http(describe_send_error(&request.url, &err)),
         })?;
         if status.is_success() {
             return Ok(bytes.to_vec());
@@ -258,6 +258,46 @@ pub(crate) fn map_status_error(status: u16, body: &[u8]) -> ClientError {
         Err(err) => ClientError::Http(format!(
             "http status {status} with a non-envelope body: {err}"
         )),
+    }
+}
+
+/// Renders a request-send failure with its root cause visible. Reqwest's
+/// own `Display` stops at "error sending request", hiding the
+/// connection-refused or DNS cause underneath — the one line that tells an
+/// operator whether the server is down or `server_url` points at the wrong
+/// place.
+fn describe_send_error(url: &str, error: &reqwest::Error) -> String {
+    render_send_error(url, error, error.is_connect(), error.is_timeout())
+}
+
+/// [`describe_send_error`] with the reqwest classification lifted out, so
+/// the composition is testable without manufacturing reqwest errors.
+fn render_send_error(
+    url: &str,
+    error: &(dyn std::error::Error + 'static),
+    connect_failure: bool,
+    timed_out: bool,
+) -> String {
+    let mut detail = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        let rendered = cause.to_string();
+        // Wrapper layers usually restate their child; keep layers that add text.
+        if !detail.contains(&rendered) {
+            detail.push_str(": ");
+            detail.push_str(&rendered);
+        }
+        source = cause.source();
+    }
+    if connect_failure {
+        format!(
+            "cannot connect to `{url}`: {detail}; check that the server is running and that the \
+             profile's `server_url` points at it"
+        )
+    } else if timed_out {
+        format!("request to `{url}` timed out: {detail}")
+    } else {
+        format!("request to `{url}` failed: {detail}")
     }
 }
 
@@ -373,5 +413,69 @@ pub(crate) mod test_transport {
                 Outcome::Success(body) => Ok(body),
             })
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_send_error;
+
+    #[derive(Debug)]
+    struct Layered {
+        message: &'static str,
+        cause: Option<Box<Layered>>,
+    }
+
+    impl std::fmt::Display for Layered {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self.message)
+        }
+    }
+
+    impl std::error::Error for Layered {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            self.cause
+                .as_deref()
+                .map(|cause| cause as &(dyn std::error::Error + 'static))
+        }
+    }
+
+    #[test]
+    fn send_errors_surface_the_root_cause_and_the_url() {
+        let error = Layered {
+            message: "error sending request",
+            cause: Some(Box::new(Layered {
+                message: "client error (Connect)",
+                cause: Some(Box::new(Layered {
+                    message: "tcp connect error: Connection refused (os error 61)",
+                    cause: None,
+                })),
+            })),
+        };
+
+        let connect = render_send_error("http://127.0.0.1:9/v0/namespaces", &error, true, false);
+        assert!(
+            connect.contains("cannot connect to `http://127.0.0.1:9/v0/namespaces`"),
+            "{connect}"
+        );
+        assert!(connect.contains("Connection refused"), "{connect}");
+        assert!(connect.contains("`server_url`"), "{connect}");
+
+        let timeout = render_send_error("http://h/v0", &error, false, true);
+        assert!(timeout.contains("timed out"), "{timeout}");
+
+        // A layer that restates its child is not repeated.
+        let repeated = Layered {
+            message: "outer: inner detail",
+            cause: Some(Box::new(Layered {
+                message: "inner detail",
+                cause: None,
+            })),
+        };
+        let rendered = render_send_error("http://h/v0", &repeated, false, false);
+        assert_eq!(
+            rendered,
+            "request to `http://h/v0` failed: outer: inner detail"
+        );
     }
 }

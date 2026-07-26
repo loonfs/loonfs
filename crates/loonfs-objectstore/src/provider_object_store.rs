@@ -838,20 +838,107 @@ fn map_provider_error(object_key: &str, err: provider_store::Error) -> ObjectSto
             )
         }
         provider_store::Error::Generic { source, .. } => {
-            ObjectStoreError::transport(object_key, source.to_string())
+            ObjectStoreError::transport(object_key, sanitize_provider_message(&source.to_string()))
         }
         provider_store::Error::JoinError { source } => {
-            ObjectStoreError::transport(object_key, source.to_string())
+            ObjectStoreError::transport(object_key, sanitize_provider_message(&source.to_string()))
         }
         provider_store::Error::PermissionDenied { source, .. }
         | provider_store::Error::Unauthenticated { source, .. } => {
             ObjectStoreError::PermissionDenied {
                 object_key: object_key.to_owned(),
-                message: source.to_string(),
+                message: sanitize_provider_message(&source.to_string()),
             }
         }
-        other => ObjectStoreError::transport(object_key, other.to_string()),
+        other => {
+            ObjectStoreError::transport(object_key, sanitize_provider_message(&other.to_string()))
+        }
     }
+}
+
+/// Query parameters whose values are credential material when they appear in
+/// a URL a provider error echoes back (signed and presigned requests).
+const CREDENTIAL_QUERY_PARAMS: &[&str] = &[
+    "X-Amz-Signature",
+    "X-Amz-Credential",
+    "X-Amz-Security-Token",
+    "AWSAccessKeyId",
+    "Signature",
+    "sig",
+];
+
+/// Response-body XML elements that echo signing inputs back to the caller in
+/// provider auth failures (`SignatureDoesNotMatch` and friends).
+const CREDENTIAL_XML_ELEMENTS: &[&str] = &[
+    "StringToSign",
+    "StringToSignBytes",
+    "CanonicalRequest",
+    "SignatureProvided",
+    "AWSAccessKeyId",
+];
+
+/// Strips credential material from free-text provider errors before they
+/// enter the error chain: signature/credential query parameters in echoed
+/// URLs, and the signing-input elements auth-failure bodies quote back.
+/// The diagnosable parts (status, provider error code, cause) stay.
+fn sanitize_provider_message(message: &str) -> String {
+    let mut sanitized = message.to_owned();
+    for param in CREDENTIAL_QUERY_PARAMS {
+        sanitized = mask_query_param_values(&sanitized, param);
+    }
+    for element in CREDENTIAL_XML_ELEMENTS {
+        sanitized = mask_xml_element_text(&sanitized, element);
+    }
+    sanitized
+}
+
+/// Replaces every `?param=value` / `&param=value` occurrence's value with
+/// `<redacted>`. Matches only at a query-parameter boundary so `Signature=`
+/// does not fire inside `X-Amz-Signature=`.
+fn mask_query_param_values(message: &str, param: &str) -> String {
+    let needle = format!("{param}=");
+    let mut out = String::with_capacity(message.len());
+    let mut cursor = 0;
+    while let Some(found) = message[cursor..].find(&needle) {
+        let start = cursor + found;
+        let value_start = start + needle.len();
+        out.push_str(&message[cursor..value_start]);
+        cursor = value_start;
+        let at_boundary = start > 0 && matches!(message.as_bytes()[start - 1], b'?' | b'&');
+        if at_boundary {
+            let value_len = message[cursor..]
+                .find(|c: char| {
+                    matches!(c, '&' | '"' | '\'' | ')' | '<' | '>' | ':' | ',') || c.is_whitespace()
+                })
+                .unwrap_or(message.len() - cursor);
+            out.push_str("<redacted>");
+            cursor += value_len;
+        }
+    }
+    out.push_str(&message[cursor..]);
+    out
+}
+
+/// Replaces the text inside `<element>...</element>` with `<redacted>`; if
+/// the closing tag never arrives (truncated body), everything after the
+/// opening tag goes.
+fn mask_xml_element_text(message: &str, element: &str) -> String {
+    let open = format!("<{element}>");
+    let close = format!("</{element}>");
+    let mut out = String::with_capacity(message.len());
+    let mut rest = message;
+    while let Some(position) = rest.find(&open) {
+        let text_start = position + open.len();
+        out.push_str(&rest[..text_start]);
+        out.push_str("<redacted>");
+        rest = &rest[text_start..];
+        match rest.find(&close) {
+            Some(text_end) => rest = &rest[text_end..],
+            None => rest = "",
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 #[cfg(test)]
@@ -871,6 +958,67 @@ mod tests {
             },
         )
         .expect("provider store")
+    }
+
+    #[test]
+    fn provider_messages_drop_credential_material_and_keep_the_diagnosis() {
+        let presigned = sanitize_provider_message(
+            "Generic S3 error: error sending request for url \
+             (https://bucket.s3.amazonaws.com/k?X-Amz-Algorithm=AWS4-HMAC-SHA256\
+             &X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20260726%2Fus-east-1%2Fs3%2Faws4_request\
+             &X-Amz-Signature=deadbeefcafe): operation timed out",
+        );
+        assert!(!presigned.contains("AKIAIOSFODNN7EXAMPLE"), "{presigned}");
+        assert!(!presigned.contains("deadbeefcafe"), "{presigned}");
+        assert!(
+            presigned.contains("X-Amz-Signature=<redacted>"),
+            "{presigned}"
+        );
+        assert!(presigned.contains("operation timed out"), "{presigned}");
+        assert!(
+            presigned.contains("bucket.s3.amazonaws.com/k"),
+            "{presigned}"
+        );
+
+        let signature_mismatch = sanitize_provider_message(
+            "Client error with status 403 Forbidden: <Error>\
+             <Code>SignatureDoesNotMatch</Code>\
+             <StringToSign>AWS4-HMAC-SHA256 20260726T000000Z scope digest</StringToSign>\
+             <SignatureProvided>cafe0123</SignatureProvided>\
+             <AWSAccessKeyId>AKIAIOSFODNN7EXAMPLE</AWSAccessKeyId></Error>",
+        );
+        assert!(
+            !signature_mismatch.contains("AKIAIOSFODNN7EXAMPLE"),
+            "{signature_mismatch}"
+        );
+        assert!(
+            !signature_mismatch.contains("cafe0123"),
+            "{signature_mismatch}"
+        );
+        assert!(
+            !signature_mismatch.contains("20260726T000000Z"),
+            "{signature_mismatch}"
+        );
+        assert!(
+            signature_mismatch.contains("SignatureDoesNotMatch"),
+            "{signature_mismatch}"
+        );
+        assert!(
+            signature_mismatch.contains("403 Forbidden"),
+            "{signature_mismatch}"
+        );
+
+        let azure_sas = sanitize_provider_message(
+            "error for url https://account.blob.core.windows.net/c/k?sv=2021-08-06\
+             &se=2026-07-26&sig=aGVsbG8: 403",
+        );
+        assert!(!azure_sas.contains("aGVsbG8"), "{azure_sas}");
+        assert!(azure_sas.contains("sig=<redacted>"), "{azure_sas}");
+
+        // A bare name inside a longer parameter is not a boundary match.
+        let unrelated = sanitize_provider_message("policy?ResponseSignature=keep&sigil=keep2");
+        assert!(unrelated.contains("keep2"), "{unrelated}");
+        assert!(!unrelated.contains("Signature=<redacted>"), "{unrelated}");
     }
 
     #[tokio::test]

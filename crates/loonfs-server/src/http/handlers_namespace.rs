@@ -293,7 +293,7 @@ pub(super) async fn create_checkpoint(
             loonfs::CreateCheckpointOptions::from_request(request),
         )
         .await
-        .map_err(ApiResponseError::runtime)?;
+        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok(Json(response))
 }
 
@@ -331,7 +331,7 @@ pub(super) async fn release_checkpoint(
         .admin
         .release_checkpoint(&namespace_id, &checkpoint_id)
         .await
-        .map_err(ApiResponseError::runtime)?;
+        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok(Json(response))
 }
 
@@ -380,6 +380,6 @@ pub(super) async fn maintenance_step(
         .admin
         .maintenance_step_namespace(&namespace_id, options)
         .await
-        .map_err(ApiResponseError::runtime)?;
+        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok(Json(result))
 }

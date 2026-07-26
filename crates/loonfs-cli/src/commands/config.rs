@@ -5,7 +5,8 @@ use super::output::{CommandData, CommandFailure, CommandOutput};
 use super::profile_config::{build_profile_from_create_spec, create_profile_spec_from_init};
 use crate::args::{CommandKind, ConfigCommand, InitArgs, RuntimeBehavior};
 use crate::config::{
-    default_config_path, load_config, load_or_default_config, save_config, ProfileConfig,
+    default_config_path, load_config_for_repair, load_or_default_config, redacted_config_table,
+    save_config, ConfigLoad, ProfileConfig,
 };
 use crate::error::CliError;
 use crate::profiles::add_profile;
@@ -67,15 +68,27 @@ pub(crate) fn run_config_command(
             },
         }),
         ConfigCommand::Show => {
-            let config =
-                load_config(&config_path).map_err(|error| fail(kind, None, None, error))?;
+            let loaded = load_config_for_repair(&config_path)
+                .map_err(|error| fail(kind, None, None, error))?;
+            let data = match loaded {
+                ConfigLoad::Valid(config) => CommandData::ConfigShow {
+                    config: config.redacted(),
+                },
+                // Show is a repair command: a config the strict decoder
+                // rejects still renders (secrets masked) with the failure on
+                // top, so the file can be inspected with the tool that reads
+                // it.
+                ConfigLoad::Degraded { table, error } => CommandData::ConfigShowDegraded {
+                    error: error.message,
+                    config_toml: toml::to_string_pretty(&redacted_config_table(&table))
+                        .unwrap_or_else(|_| "failed to render config".to_owned()),
+                },
+            };
             Ok(CommandOutput {
                 kind,
                 profile: None,
                 mode: None,
-                data: CommandData::ConfigShow {
-                    config: config.redacted(),
-                },
+                data,
             })
         }
     }

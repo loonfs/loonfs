@@ -294,7 +294,7 @@ pub(crate) async fn run_filesystem_get(
                 if !args.force && error.kind() == std::io::ErrorKind::AlreadyExists {
                     return context.fail(kind, CliError::destination_exists(&destination));
                 }
-                let mut error = CliError::io(error);
+                let mut error = CliError::io_for_path(&destination, error);
                 if derived_name {
                     error.message.push_str(
                         "; if the remote name exceeds local filesystem limits, pass an \
@@ -447,7 +447,8 @@ pub(crate) async fn run_filesystem_put(
     }
     .map_err(|error| context.fail(kind, error))?;
     let spec = NamespacePath::new(context.namespace.clone(), remote_path);
-    let bytes = fs::read(&local_path).map_err(|error| context.fail(kind, CliError::io(error)))?;
+    let bytes = fs::read(&local_path)
+        .map_err(|error| context.fail(kind, CliError::io_for_path(&local_path, error)))?;
     let commit_id = parse_commit_id_arg(args.commit_id.as_deref())
         .map_err(|error| context.fail(kind, error))?;
     let behavior = if args.force {

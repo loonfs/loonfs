@@ -206,17 +206,85 @@ fn profile_field(name: &str, field: &str) -> String {
 }
 
 pub(crate) fn load_config(path: &Path) -> Result<CliConfig, CliError> {
+    let table = load_config_table(path)?;
+    decode_config_table(path, table)
+}
+
+/// A config load for the repair commands. When the strict decode rejects the
+/// file, they get the loose TOML table instead, so a typo in one profile
+/// never bricks the commands that would fix it.
+pub(crate) enum ConfigLoad {
+    Valid(CliConfig),
+    Degraded {
+        table: toml::Table,
+        /// The strict-decode failure, reported alongside the degraded output.
+        error: Box<CliError>,
+    },
+}
+
+pub(crate) fn load_config_for_repair(path: &Path) -> Result<ConfigLoad, CliError> {
+    let table = load_config_table(path)?;
+    match decode_config_table(path, table.clone()) {
+        Ok(config) => Ok(ConfigLoad::Valid(config)),
+        Err(error) => Ok(ConfigLoad::Degraded {
+            table,
+            error: Box::new(error),
+        }),
+    }
+}
+
+/// Stage one of loading: bytes to a loose TOML table, plus the version
+/// probe. Unknown fields and per-profile shape problems survive this stage;
+/// unreadable files, TOML syntax errors, and other config versions do not.
+fn load_config_table(path: &Path) -> Result<toml::Table, CliError> {
     let bytes = fs::read(path).map_err(|err| {
         if err.kind() == std::io::ErrorKind::NotFound {
             CliError::invalid_config(format!("config file does not exist: {}", path.display()))
         } else {
-            CliError::invalid_config(format!("failed to read config: {err}"))
+            CliError::invalid_config(format!("failed to read config {}: {err}", path.display()))
         }
     })?;
-    let contents = std::str::from_utf8(&bytes)
-        .map_err(|err| CliError::invalid_config(format!("failed to decode config: {err}")))?;
-    let config: CliConfig = toml::from_str(contents)
-        .map_err(|err| CliError::invalid_config(format!("failed to decode config: {err}")))?;
+    let contents = std::str::from_utf8(&bytes).map_err(|err| {
+        CliError::invalid_config(format!("failed to decode config {}: {err}", path.display()))
+    })?;
+    let table: toml::Table = toml::from_str(contents).map_err(|err| {
+        CliError::invalid_config(format!("failed to decode config {}: {err}", path.display()))
+    })?;
+    // Version before shape: a config written for another version should say
+    // so directly, not surface as unknown-field noise from the strict decode.
+    match table.get("config_version") {
+        None => {
+            return Err(CliError::invalid_config(format!(
+                "config {} is missing `config_version`",
+                path.display()
+            )));
+        }
+        Some(value) => match value.as_integer() {
+            Some(version) if version == i64::from(CONFIG_VERSION) => {}
+            Some(version) => {
+                return Err(CliError::invalid_config(format!(
+                    "config {} declares `config_version = {version}`; this build supports \
+                     `{CONFIG_VERSION}`",
+                    path.display()
+                )));
+            }
+            None => {
+                return Err(CliError::invalid_config(format!(
+                    "config {}: `config_version` must be an integer",
+                    path.display()
+                )));
+            }
+        },
+    }
+    Ok(table)
+}
+
+/// Stage two of loading: the strict typed decode (`deny_unknown_fields`)
+/// plus semantic validation.
+fn decode_config_table(path: &Path, table: toml::Table) -> Result<CliConfig, CliError> {
+    let config: CliConfig = toml::Value::Table(table).try_into().map_err(|err| {
+        CliError::invalid_config(format!("failed to decode config {}: {err}", path.display()))
+    })?;
     config.validate()?;
     Ok(config)
 }
@@ -234,6 +302,21 @@ pub(crate) fn load_or_default_config(path: &Path) -> Result<CliConfig, CliError>
 
 pub(crate) fn save_config(path: &Path, config: &CliConfig) -> Result<(), CliError> {
     config.validate()?;
+    let contents = toml::to_string_pretty(config)
+        .map_err(|err| CliError::invalid_config(format!("failed to encode config: {err}")))?;
+    persist_config_contents(path, &contents)
+}
+
+/// Persists a loose config table as-is (atomic, owner-only), for the repair
+/// commands when the file no longer strict-decodes: round-tripping through
+/// [`CliConfig`] would drop the content the user still needs to fix.
+pub(crate) fn save_config_table(path: &Path, table: &toml::Table) -> Result<(), CliError> {
+    let contents = toml::to_string_pretty(table)
+        .map_err(|err| CliError::invalid_config(format!("failed to encode config: {err}")))?;
+    persist_config_contents(path, &contents)
+}
+
+fn persist_config_contents(path: &Path, contents: &str) -> Result<(), CliError> {
     let parent = path.parent().ok_or_else(|| {
         CliError::invalid_config(format!(
             "config path has no parent directory: {}",
@@ -243,8 +326,6 @@ pub(crate) fn save_config(path: &Path, config: &CliConfig) -> Result<(), CliErro
     fs::create_dir_all(parent).map_err(|err| {
         CliError::invalid_config(format!("failed to create config directory: {err}"))
     })?;
-    let contents = toml::to_string_pretty(config)
-        .map_err(|err| CliError::invalid_config(format!("failed to encode config: {err}")))?;
     let tmp_path = path.with_extension("tmp");
     write_owner_only(&tmp_path, contents.as_bytes())?;
     fs::rename(&tmp_path, path).map_err(|err| {
@@ -254,6 +335,42 @@ pub(crate) fn save_config(path: &Path, config: &CliConfig) -> Result<(), CliErro
         ))
     })?;
     Ok(())
+}
+
+/// Key names whose values never leave the file unmasked, whatever shape the
+/// config is in. Mirrors the typed redaction: the `SecretString` store
+/// fields plus the remote profile's `auth_token`.
+const SECRET_CONFIG_KEYS: &[&str] = &[
+    "access_key",
+    "access_key_id",
+    "auth_token",
+    "secret_access_key",
+    "session_token",
+];
+
+/// Deep-masks secret-named keys in a loose config table so degraded
+/// `config show` output stays as safe to paste as the typed redaction.
+pub(crate) fn redacted_config_table(table: &toml::Table) -> toml::Table {
+    table
+        .iter()
+        .map(|(key, value)| (key.clone(), redacted_config_value(Some(key), value)))
+        .collect()
+}
+
+fn redacted_config_value(key: Option<&str>, value: &toml::Value) -> toml::Value {
+    if key.is_some_and(|key| SECRET_CONFIG_KEYS.contains(&key)) {
+        return toml::Value::String("<redacted>".to_owned());
+    }
+    match value {
+        toml::Value::Table(table) => toml::Value::Table(redacted_config_table(table)),
+        toml::Value::Array(items) => toml::Value::Array(
+            items
+                .iter()
+                .map(|item| redacted_config_value(None, item))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
 }
 
 fn write_owner_only(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
@@ -492,6 +609,115 @@ secret_access_key = "secret"
             examples >= 2,
             "expected at least 2 CLI example configs, found {examples}"
         );
+    }
+
+    #[test]
+    fn load_errors_name_the_file_and_probe_the_version_first() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let write = |contents: &str| std::fs::write(&path, contents).expect("write config");
+        let shown_path = path.display().to_string();
+
+        let missing = super::load_config(&path).expect_err("missing file");
+        assert!(missing.message.contains(&shown_path), "{}", missing.message);
+
+        write("config_version = ");
+        let syntax = super::load_config(&path).expect_err("syntax error");
+        assert!(syntax.message.contains(&shown_path), "{}", syntax.message);
+
+        // The version verdict beats unknown-field noise: a config written
+        // for another version says so directly.
+        write("config_version = 2\nfuture_setting = true\n");
+        let version = super::load_config(&path).expect_err("future version");
+        assert!(
+            version.message.contains("`config_version = 2`"),
+            "{}",
+            version.message
+        );
+        assert!(
+            !version.message.contains("future_setting"),
+            "{}",
+            version.message
+        );
+
+        write("default_profile = \"x\"\n");
+        let unversioned = super::load_config(&path).expect_err("missing version");
+        assert!(
+            unversioned.message.contains("missing `config_version`"),
+            "{}",
+            unversioned.message
+        );
+
+        write("config_version = 1\ndefault_profil = \"typo\"\n");
+        let unknown = super::load_config(&path).expect_err("unknown field");
+        assert!(unknown.message.contains(&shown_path), "{}", unknown.message);
+        assert!(
+            unknown.message.contains("default_profil"),
+            "{}",
+            unknown.message
+        );
+    }
+
+    #[test]
+    fn repair_load_keeps_the_loose_table_and_masks_secrets() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+config_version = 1
+default_profile = "broken"
+
+[profiles.broken]
+mode = "remote"
+server_url = "https://loonfs.example.com"
+auth_token = "degraded-auth-token"
+unknown_knob = true
+
+[profiles.ok]
+mode = "embedded"
+
+[profiles.ok.store]
+kind = "local-fs"
+root = "/tmp/store"
+"#,
+        )
+        .expect("write config");
+
+        let super::ConfigLoad::Degraded { mut table, error } =
+            super::load_config_for_repair(&path).expect("stage one holds")
+        else {
+            panic!("unknown_knob must fail the strict decode");
+        };
+        assert!(error.message.contains("unknown_knob"), "{}", error.message);
+
+        let redacted = toml::to_string_pretty(&super::redacted_config_table(&table))
+            .expect("render redacted table");
+        assert!(!redacted.contains("degraded-auth-token"), "{redacted}");
+        assert!(redacted.contains("<redacted>"), "{redacted}");
+        assert!(redacted.contains("unknown_knob"), "{redacted}");
+
+        // Deleting the broken profile through the table heals the file: the
+        // strict decoder accepts what remains.
+        let removed =
+            crate::profiles::delete_profile_in_table(&mut table, "broken").expect("delete broken");
+        assert_eq!(removed.mode, "remote");
+        crate::profiles::make_default_profile_in_table(&mut table, "ok").expect("switch default");
+        assert!(
+            crate::profiles::make_default_profile_in_table(&mut table, "gone").is_err(),
+            "unknown profile must not become the default"
+        );
+        super::save_config_table(&path, &table).expect("save repaired table");
+
+        match super::load_config_for_repair(&path).expect("reload") {
+            super::ConfigLoad::Valid(config) => {
+                assert_eq!(config.default_profile.as_deref(), Some("ok"));
+                assert!(!config.profiles.contains_key("broken"));
+            }
+            super::ConfigLoad::Degraded { error, .. } => {
+                panic!("repaired config must strict-decode: {}", error.message)
+            }
+        }
     }
 
     #[test]

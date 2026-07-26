@@ -129,7 +129,7 @@ impl Backend for EmbeddedBackend {
             .writer
             .delete_namespace(namespace_id, options)
             .await
-            .map_err(map_runtime_error);
+            .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error));
         self.settle_background_work_after(result).await
     }
 
@@ -142,7 +142,7 @@ impl Backend for EmbeddedBackend {
             .writer
             .fork_namespace(source_namespace_id, new_namespace_id)
             .await
-            .map_err(map_runtime_error);
+            .map_err(|error| map_namespace_scoped_runtime_error(source_namespace_id, error));
         self.settle_background_work_after(result).await
     }
 
@@ -420,8 +420,9 @@ impl Backend for EmbeddedBackend {
     }
 
     // The admin methods mirror the server handlers' error scoping exactly:
-    // checkpoint/retention map runtime errors unscoped, the change feed is
-    // namespace-scoped. Parity keeps embedded and remote outputs identical.
+    // every operation addressing an existing namespace names it when the
+    // runtime reports namespace_not_found. Parity keeps embedded and remote
+    // outputs identical.
 
     async fn create_checkpoint(
         &self,
@@ -431,7 +432,7 @@ impl Backend for EmbeddedBackend {
         self.admin
             .create_checkpoint(namespace_id, CreateCheckpointOptions::from_request(request))
             .await
-            .map_err(map_runtime_error)
+            .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
     }
 
     async fn release_checkpoint(
@@ -442,7 +443,7 @@ impl Backend for EmbeddedBackend {
         self.admin
             .release_checkpoint(namespace_id, checkpoint_id)
             .await
-            .map_err(map_runtime_error)
+            .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
     }
 
     async fn maintenance_step(
@@ -454,7 +455,7 @@ impl Backend for EmbeddedBackend {
         self.admin
             .maintenance_step_namespace(namespace_id, options)
             .await
-            .map_err(map_runtime_error)
+            .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
     }
 
     async fn repair_namespace(

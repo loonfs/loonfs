@@ -10,12 +10,13 @@ use crate::args::{
     CommandKind, ProfileCommand, ProfileCreateArgs, ProfileUpdateArgs, RuntimeBehavior,
 };
 use crate::config::{
-    default_config_path, load_config, load_config_if_exists, load_or_default_config, save_config,
-    ProfileConfig,
+    default_config_path, load_config, load_config_for_repair, load_config_if_exists,
+    load_or_default_config, save_config, save_config_table, ConfigLoad, ProfileConfig,
 };
 use crate::error::CliError;
 use crate::profiles::{
-    add_profile, delete_profile, list_profiles, make_default_profile, show_profile, update_profile,
+    add_profile, delete_profile, delete_profile_in_table, list_profiles, make_default_profile,
+    make_default_profile_in_table, show_profile, update_profile,
 };
 use crate::prompt;
 use std::path::Path;
@@ -144,17 +145,43 @@ fn run_profile_delete(
         }
     }
 
-    let mut config =
-        load_config(config_path).map_err(|error| fail(kind, Some(name.to_owned()), None, error))?;
-    let removed = delete_profile(&mut config, name)
+    // Delete is a repair command: it operates on the loose table when the
+    // strict decode fails, so the profile that broke the config can still be
+    // removed with the tool that manages it.
+    let loaded = load_config_for_repair(config_path)
         .map_err(|error| fail(kind, Some(name.to_owned()), None, error))?;
-    let mode = removed.mode.clone();
-    save_config(config_path, &config)
-        .map_err(|error| fail(kind, Some(name.to_owned()), Some(mode.clone()), error))?;
+    let removed = match loaded {
+        ConfigLoad::Valid(mut config) => {
+            let removed = delete_profile(&mut config, name)
+                .map_err(|error| fail(kind, Some(name.to_owned()), None, error))?;
+            save_config(config_path, &config).map_err(|error| {
+                fail(
+                    kind,
+                    Some(name.to_owned()),
+                    Some(removed.mode.clone()),
+                    error,
+                )
+            })?;
+            removed
+        }
+        ConfigLoad::Degraded { mut table, .. } => {
+            let removed = delete_profile_in_table(&mut table, name)
+                .map_err(|error| fail(kind, Some(name.to_owned()), None, error))?;
+            save_config_table(config_path, &table).map_err(|error| {
+                fail(
+                    kind,
+                    Some(name.to_owned()),
+                    Some(removed.mode.clone()),
+                    error,
+                )
+            })?;
+            removed
+        }
+    };
     Ok(CommandOutput {
         kind,
         profile: Some(name.to_owned()),
-        mode: Some(mode),
+        mode: Some(removed.mode.clone()),
         data: CommandData::ProfileSummary(removed),
     })
 }
@@ -164,12 +191,24 @@ fn run_profile_use(
     config_path: &Path,
     name: &str,
 ) -> Result<CommandOutput, CommandFailure> {
-    let mut config =
-        load_config(config_path).map_err(|error| fail(kind, Some(name.to_owned()), None, error))?;
-    make_default_profile(&mut config, name)
+    // Use is a repair command like delete: switching the default away from a
+    // profile that broke the config must not require hand-editing the file.
+    let loaded = load_config_for_repair(config_path)
         .map_err(|error| fail(kind, Some(name.to_owned()), None, error))?;
-    save_config(config_path, &config)
-        .map_err(|error| fail(kind, Some(name.to_owned()), None, error))?;
+    match loaded {
+        ConfigLoad::Valid(mut config) => {
+            make_default_profile(&mut config, name)
+                .map_err(|error| fail(kind, Some(name.to_owned()), None, error))?;
+            save_config(config_path, &config)
+                .map_err(|error| fail(kind, Some(name.to_owned()), None, error))?;
+        }
+        ConfigLoad::Degraded { mut table, .. } => {
+            make_default_profile_in_table(&mut table, name)
+                .map_err(|error| fail(kind, Some(name.to_owned()), None, error))?;
+            save_config_table(config_path, &table)
+                .map_err(|error| fail(kind, Some(name.to_owned()), None, error))?;
+        }
+    }
     Ok(CommandOutput {
         kind,
         profile: Some(name.to_owned()),
