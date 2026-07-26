@@ -3,7 +3,8 @@
 //! The mutating operation shapes live in [`super::operations`].
 
 use crate::{
-    AbsolutePath, ChangeSeq, ContentRef, DisplayName, InodeId, InodeKind, NamespaceId, RevisionNo,
+    AbsolutePath, ChangeSeq, ContentRef, DisplayName, InodeId, InodeKind, NameKey, NamespaceId,
+    RevisionNo,
 };
 use serde::{Deserialize, Serialize};
 
@@ -157,4 +158,43 @@ mod tests {
             .expect("serialize named entry");
         assert_eq!(named_json["display_name"], "docs");
     }
+}
+
+/// One recoverable deletion: an active subtree tombstone plus the identity
+/// of the binding it deleted, when the delete recorded one. Entries with no
+/// recorded name predate the enriched tombstone rows; their inode and
+/// sequence still form a complete `undelete` handle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct TrashEntry {
+    /// Root inode the deletion hid; half of the recovery handle.
+    pub root_inode_id: InodeId,
+    /// Commit sequence of the deletion; the other half of the handle.
+    pub deleted_at_seq: ChangeSeq,
+    /// Wall-clock stamp of the deleting commit. Observational.
+    pub deleted_at_ms: u64,
+    /// Directory that held the deleted binding, when recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_inode_id: Option<InodeId>,
+    /// Canonical key of the deleted binding, when recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name_key: Option<NameKey>,
+    /// User-facing spelling of the deleted binding, when recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<DisplayName>,
+}
+
+/// One trash listing page: the namespace's recoverable deletions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ListTrashResponse {
+    /// Namespace that was read.
+    pub namespace_id: NamespaceId,
+    /// Head sequence this page was evaluated at.
+    pub head_seq: ChangeSeq,
+    /// Active deletions in ascending root-inode order.
+    pub entries: Vec<TrashEntry>,
+    /// Present when another page follows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
 }

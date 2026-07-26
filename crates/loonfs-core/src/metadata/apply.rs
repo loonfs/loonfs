@@ -134,11 +134,18 @@ impl MetadataState {
             WalDelta::TombstoneSubtree {
                 delta_index,
                 root_inode_id,
+                parent_inode_id,
+                name_key,
+                display_name,
             } => {
                 self.push_subtree_tombstone_record(SubtreeTombstoneRecord {
                     root_inode_id: *root_inode_id,
                     tombstone_seq: committed_seq,
                     tombstone_delta_index: *delta_index,
+                    deleted_at_ms: committed_at_ms,
+                    parent_inode_id: *parent_inode_id,
+                    name_key: name_key.clone(),
+                    display_name: display_name.clone(),
                     action: SubtreeTombstoneAction::Set,
                 });
                 InvariantId::TombstoneSubtreeWritesTombstoneRow
@@ -153,6 +160,10 @@ impl MetadataState {
                     root_inode_id: *root_inode_id,
                     tombstone_seq: committed_seq,
                     tombstone_delta_index: *delta_index,
+                    deleted_at_ms: committed_at_ms,
+                    parent_inode_id: None,
+                    name_key: None,
+                    display_name: None,
                     action: SubtreeTombstoneAction::Revoke {
                         target_seq: *target_seq,
                         target_delta_index: *target_delta_index,

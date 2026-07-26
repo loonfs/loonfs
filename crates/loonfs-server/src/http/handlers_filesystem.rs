@@ -27,8 +27,8 @@ use loonfs_api::{
         CommitSubmissionRequest, ValidatedContentToken,
     },
     AbsolutePath, ContentRef, DirectoryPageCursor, FileRevisionsPageCursor, FilesystemOperation,
-    FilesystemOperationRequest, InodeId, LimitError, ListFileRevisionsResponse, PageCursorError,
-    PageRequest, PaginationPolicy, RestoreFileRevisionRequest, RevisionNo,
+    FilesystemOperationRequest, InodeId, LimitError, ListFileRevisionsResponse, ListTrashResponse,
+    PageCursorError, PageRequest, PaginationPolicy, RestoreFileRevisionRequest, RevisionNo,
 };
 use std::collections::HashSet;
 use tracing::Instrument;
@@ -224,6 +224,50 @@ pub(super) async fn get_file_bytes(
     }
     .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok((StatusCode::OK, file.bytes).into_response())
+}
+
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        get,
+        path = "/v0/namespaces/{namespace}/filesystem/trash",
+        tag = "filesystem",
+        summary = "List recoverable deletions",
+        description = "Returns the namespace's active deletions in ascending deleted-root inode order. Tombstone rows are retained forever, so entries never age out; each carries the inode id and deletion sequence undelete needs, plus the deleted name when the delete recorded one.",
+        params(
+            ("namespace" = String, Path, description = "Namespace id"),
+            ("limit" = Option<String>, Query, description = "Maximum page size"),
+            ("cursor" = Option<String>, Query, description = "Opaque trash page cursor")
+        ),
+        responses(
+            (status = 200, description = "Recoverable deletions", body = ListTrashResponse),
+            (status = 401, description = "Unauthorized", body = ApiError),
+            (status = 404, description = "Namespace not found", body = ApiError),
+            (status = 410, description = "Namespace deleted", body = ApiError)
+        )
+    )
+)]
+pub(super) async fn list_trash(
+    State(state): State<AppState>,
+    namespace: NamespaceIdPath,
+    headers: HeaderMap,
+    query: AppQuery<PageQuery>,
+) -> Result<Json<ListTrashResponse>, ApiResponseError> {
+    authorize(&state.config, &headers)?;
+    let namespace_id = namespace.into_id()?;
+    let query = query.into_params()?;
+    let response = state
+        .reader
+        .list_trash_page(
+            &namespace_id,
+            PageRequest {
+                limit: resolve_page_limit(query.limit)?,
+                cursor: decode_optional_cursor(query.cursor)?,
+            },
+        )
+        .await
+        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+    Ok(Json(response))
 }
 
 #[cfg_attr(
@@ -842,6 +886,16 @@ fn parse_page_limit(value: &str) -> Result<u32, ApiResponseError> {
 fn decode_directory_page_cursor(
     cursor: Option<String>,
 ) -> Result<Option<DirectoryPageCursor>, ApiResponseError> {
+    cursor
+        .as_deref()
+        .map(decode_cursor)
+        .transpose()
+        .map_err(page_cursor_response_error)
+}
+
+fn decode_optional_cursor<C: loonfs_api::PageCursor>(
+    cursor: Option<String>,
+) -> Result<Option<C>, ApiResponseError> {
     cursor
         .as_deref()
         .map(decode_cursor)

@@ -278,6 +278,21 @@ pub(super) async fn revisions_for_inode_page_desc<S: ObjectStore + ?Sized>(
         .collect()
 }
 
+/// Every tombstone event row in the namespace, across all roots. The trash
+/// listing's raw material: rows are immortal (never dropped by compaction),
+/// so this is complete for the namespace's whole history.
+pub(super) async fn all_subtree_tombstones<S: ObjectStore + ?Sized>(
+    tables: &VerifiedMetadataTables<'_, S>,
+) -> Result<Vec<SubtreeTombstoneRecord>> {
+    tables
+        .scan_prefix(MetadataTableFamily::Tombstones, "tombstone-")
+        .await
+        .map_err(manifest_error_to_core)?
+        .into_iter()
+        .map(tombstone_from_manifest_row)
+        .collect()
+}
+
 pub(super) async fn tombstones_for_root<S: ObjectStore + ?Sized>(
     tables: &VerifiedMetadataTables<'_, S>,
     root_inode_id: InodeId,

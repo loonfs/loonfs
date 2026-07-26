@@ -42,6 +42,7 @@ pub use self::rows::{
 };
 
 pub(crate) use self::durable_cache::DurableVisibilityCache;
+pub(crate) use self::rows::active_tombstone_from_records;
 pub(crate) use self::view::{InMemoryMetadataView, MetadataView};
 pub(crate) use self::view_session::VisibleChildEntry;
 pub use self::view_session::{LeafRevisionPrefetch, MetadataViewSession};

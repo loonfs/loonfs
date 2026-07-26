@@ -13,7 +13,7 @@ use loonfs_api::{
     v0::{DisableGrepIndexResponse, EnableGrepIndexResponse, RepairNamespaceResponse},
     AuthoritativePathEntry, ChangeSeq, CheckpointId, CommitResponse, CreateCheckpointRequest,
     CreateCheckpointResponse, DestinationBehavior, EffectiveLimit, ErrorCode, GrepRequest,
-    GrepResponse, InodeId, ListFileRevisionsResponse, MaintenanceStepRequest,
+    GrepResponse, InodeId, ListFileRevisionsResponse, ListTrashResponse, MaintenanceStepRequest,
     MaintenanceStepResponse, NamespaceId, NamespaceStatusResponse, NamespaceSummary,
     PaginationPolicy, ReleaseCheckpointResponse, RevisionNo,
 };
@@ -229,6 +229,27 @@ impl Backend for EmbeddedBackend {
             .await
             .map_err(|error| map_namespace_scoped_runtime_error(spec.namespace(), error))?;
         Ok(result.bytes)
+    }
+
+    async fn list_trash(
+        &self,
+        namespace_id: &NamespaceId,
+        limit: Option<u32>,
+        cursor: Option<&str>,
+    ) -> Result<ListTrashResponse, BackendError> {
+        let request = loonfs_api::PageRequest {
+            limit: resolve_cli_page_limit(limit)?,
+            cursor: cursor
+                .map(loonfs_api::decode_cursor)
+                .transpose()
+                .map_err(|error| {
+                    BackendError::new(ErrorCode::InvalidRequest.as_str(), error.to_string())
+                })?,
+        };
+        self.reader
+            .list_trash_page(namespace_id, request)
+            .await
+            .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
     }
 
     async fn list_file_revisions_page(

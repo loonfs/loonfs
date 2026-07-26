@@ -198,6 +198,20 @@ pub enum MetadataRow {
         /// What this event did; readers take the newest row per root and
         /// treat a `revoke` newest row as "no active tombstone".
         action: TombstoneRowAction,
+        /// Wall-clock stamp of the recording commit. Observational, like
+        /// every `committed_at_ms`.
+        deleted_at_ms: u64,
+        /// Directory that held the deleted binding, for `set` rows from
+        /// path deletes; tombstone rows are immortal, so this is where a
+        /// deleted name survives after unbind rows age out.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_inode_id: Option<InodeId>,
+        /// Canonical key of the deleted binding, when known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name_key: Option<NameKey>,
+        /// User-facing spelling of the deleted binding, when known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display_name: Option<DisplayName>,
     },
     /// Preserves the evidence needed to answer a retried logical commit.
     CommitReceipt {
@@ -324,10 +338,10 @@ impl MetadataRow {
                 root_inode_id,
                 tombstone_seq,
                 tombstone_delta_index,
-                // The action lives in the value: revoke rows sort exactly
-                // like the deletions they cancel, so newest-per-root scans
-                // see them in one prefix pass.
-                action: _,
+                // The action and binding context live in the value: revoke
+                // rows sort exactly like the deletions they cancel, so
+                // newest-per-root scans see them in one prefix pass.
+                ..
             } => {
                 format!(
                     "tombstone-{:020}-{:020}-{:010}",

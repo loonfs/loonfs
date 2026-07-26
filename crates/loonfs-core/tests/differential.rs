@@ -123,6 +123,9 @@ fn tombstone(delta_index: u32, root_inode_id: InodeId) -> Vec<WalDelta> {
     vec![WalDelta::TombstoneSubtree {
         delta_index,
         root_inode_id,
+        parent_inode_id: None,
+        name_key: None,
+        display_name: None,
     }]
 }
 
@@ -239,7 +242,7 @@ fn assert_states_match(sequences: &[Vec<WalDelta>]) {
             .apply_committed_wal_deltas(seq, 4_200, deltas)
             .metadata_state;
         model_state = model_state
-            .apply_committed_wal_deltas(seq, deltas)
+            .apply_committed_wal_deltas(seq, 4_200, deltas)
             .metadata_state;
     }
 

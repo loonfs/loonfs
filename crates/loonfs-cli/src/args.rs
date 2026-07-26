@@ -71,6 +71,9 @@ pub(crate) enum Command {
     Mv(FilesystemTransferArgs),
     /// Copy a file (or directory tree with -r) to another path.
     Cp(FilesystemTransferArgs),
+    /// List recoverable deletions: what was deleted, when, and the exact
+    /// handle `undelete` needs.
+    Trash(TrashArgs),
     /// List committed changes after a sequence number.
     Changes(ChangesArgs),
     /// Maintenance operations: checkpoints, steps, retention, GC, indexes.
@@ -560,6 +563,18 @@ pub(crate) struct FilesystemUndeleteArgs {
 }
 
 #[derive(Debug, Args)]
+pub(crate) struct TrashArgs {
+    #[command(flatten)]
+    pub target: TargetSelectorArgs,
+    /// Maximum number of entries to return.
+    #[arg(long)]
+    pub limit: Option<u32>,
+    /// Resume cursor from a previous page.
+    #[arg(long)]
+    pub cursor: Option<String>,
+}
+
+#[derive(Debug, Args)]
 pub(crate) struct ChangesArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
@@ -707,6 +722,7 @@ pub(crate) enum CommandKind {
     FilesystemGet,
     FilesystemPut,
     FilesystemRevisions,
+    FilesystemTrash,
     FilesystemRestore,
     FilesystemUndelete,
     FilesystemMkdir,
@@ -750,6 +766,7 @@ impl CommandKind {
             CommandKind::FilesystemGet => "filesystem_get",
             CommandKind::FilesystemPut => "filesystem_put",
             CommandKind::FilesystemRevisions => "filesystem_revisions",
+            CommandKind::FilesystemTrash => "filesystem_trash",
             CommandKind::FilesystemRestore => "filesystem_restore",
             CommandKind::FilesystemUndelete => "filesystem_undelete",
             CommandKind::FilesystemMkdir => "filesystem_mkdir",
@@ -803,6 +820,7 @@ impl Cli {
             Command::Get(_) => CommandKind::FilesystemGet,
             Command::Put(_) => CommandKind::FilesystemPut,
             Command::Revisions(_) => CommandKind::FilesystemRevisions,
+            Command::Trash(_) => CommandKind::FilesystemTrash,
             Command::Restore(_) => CommandKind::FilesystemRestore,
             Command::Undelete(_) => CommandKind::FilesystemUndelete,
             Command::Mkdir(_) => CommandKind::FilesystemMkdir,

@@ -237,6 +237,24 @@ impl PageCursor for FileRevisionsPageCursor {
     const KIND: &'static str = "file_revisions";
 }
 
+/// Cursor for one trash listing position.
+///
+/// Trash pagination advances in ascending deleted-root inode order. Like
+/// every cursor, it is an ordering resume tolerating forward head drift:
+/// the next page evaluates at whatever head is loaded and continues
+/// strictly after `last_root_inode_id`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrashPageCursor {
+    /// Head sequence the issuing page was evaluated at.
+    pub head_seq: ChangeSeq,
+    /// Deleted root inode the previous page ended on.
+    pub last_root_inode_id: InodeId,
+}
+
+impl PageCursor for TrashPageCursor {
+    const KIND: &'static str = "trash";
+}
+
 /// Cursor for one content-search (grep) snapshot.
 ///
 /// Matches advance in ascending `(inode_id, byte_offset)` order: candidate

@@ -18,9 +18,9 @@ use loonfs_api::{
     AdvanceRetentionResponse, ApiError, ContentRef, CreateCheckpointRequest,
     CreateCheckpointResponse, CreateNamespaceRequest, FilesystemOperation,
     FilesystemOperationRequest, FlushWalOutcome, FlushWalResponse, ForkNamespaceRequest, GcRequest,
-    GcResponse, InodeId, ListFileRevisionsResponse, MaintenanceStepRequest,
+    GcResponse, InodeId, ListFileRevisionsResponse, ListTrashResponse, MaintenanceStepRequest,
     MaintenanceStepResponse, ReleaseCheckpointResponse, RepairNamespaceOutcome,
-    RestoreFileRevisionRequest, RevisionNo, WalFlushStepOutcome,
+    RestoreFileRevisionRequest, RevisionNo, TrashEntry, WalFlushStepOutcome,
 };
 
 pub fn openapi_document() -> utoipa::openapi::OpenApi {
@@ -50,6 +50,7 @@ pub fn openapi_json_pretty() -> Result<String, serde_json::Error> {
         crate::http::handlers_filesystem::stat_path,
         crate::http::handlers_filesystem::get_file_bytes,
         crate::http::handlers_filesystem::list_file_revisions,
+        crate::http::handlers_filesystem::list_trash,
         crate::http::handlers_filesystem::apply_filesystem_operation,
         crate::http::handlers_filesystem::list_file_revisions_by_inode,
         crate::http::handlers_filesystem::get_file_revision_bytes_by_inode,
@@ -84,6 +85,8 @@ pub fn openapi_json_pretty() -> Result<String, serde_json::Error> {
         FilesystemOperationRequest,
         loonfs_api::FileRevision,
         ListFileRevisionsResponse,
+        ListTrashResponse,
+        TrashEntry,
         RestoreFileRevisionRequest,
         CreateCheckpointRequest,
         CreateCheckpointResponse,

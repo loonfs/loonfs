@@ -127,6 +127,14 @@ pub struct SubtreeTombstoneRecord {
     /// `Set`, the undelete's committed seq for a `Revoke`.
     pub tombstone_seq: ChangeSeq,
     pub tombstone_delta_index: u32,
+    /// Wall-clock stamp of the recording commit.
+    pub deleted_at_ms: u64,
+    /// Deleted-binding identity for `Set` rows from path deletes; the
+    /// tombstone row is immortal, so the deleted name lives here after
+    /// unbind rows age out.
+    pub parent_inode_id: Option<InodeId>,
+    pub name_key: Option<NameKey>,
+    pub display_name: Option<DisplayName>,
     /// What this event did. Newest-by-(seq, delta) wins at every read
     /// site: a `Set` newest means that deletion is active, a `Revoke`
     /// newest means none is, and a later re-delete supersedes the revoke.

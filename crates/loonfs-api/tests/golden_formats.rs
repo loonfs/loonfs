@@ -188,6 +188,11 @@ fn sample_wal_envelope() -> WalSegmentEnvelope {
             delta: WalDelta::TombstoneSubtree {
                 delta_index: 4,
                 root_inode_id: InodeId(9),
+                parent_inode_id: Some(InodeId(1)),
+                name_key: Some(NameKey::parse("old.txt").expect("valid name key")),
+                display_name: Some(
+                    loonfs_api::DisplayName::parse("Old.txt").expect("valid display name"),
+                ),
             },
         },
     ];
@@ -1091,6 +1096,9 @@ fn wal_delta_wire_tags_match_spec_names() {
             serde_json::to_value(WalDelta::TombstoneSubtree {
                 delta_index: 0,
                 root_inode_id: InodeId(2),
+                parent_inode_id: None,
+                name_key: None,
+                display_name: None,
             }),
             "tombstone_subtree",
         ),
@@ -1180,6 +1188,12 @@ fn sample_segment_blocks() -> loonfs_api::wire::sst_blocks::BuiltSegmentBlocks {
             tombstone_seq: ChangeSeq(8),
             tombstone_delta_index: 0,
             action: TombstoneRowAction::Set,
+            deleted_at_ms: 4_000,
+            parent_inode_id: Some(InodeId(1)),
+            name_key: Some(name_key("docs-archive")),
+            display_name: Some(
+                loonfs_api::DisplayName::parse("Docs-Archive").expect("valid display name"),
+            ),
         },
         MetadataRow::Tombstone {
             root_inode_id: InodeId(5),
@@ -1189,6 +1203,10 @@ fn sample_segment_blocks() -> loonfs_api::wire::sst_blocks::BuiltSegmentBlocks {
                 target_seq: ChangeSeq(8),
                 target_delta_index: 0,
             },
+            deleted_at_ms: 4_100,
+            parent_inode_id: None,
+            name_key: None,
+            display_name: None,
         },
     ];
     for row in &rows {

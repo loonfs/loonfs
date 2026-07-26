@@ -734,6 +734,18 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         Ok(tombstone)
     }
 
+    /// Every tombstone event in the namespace, durable and overlay merged.
+    /// Uncached: one call serves one trash listing page request.
+    pub(crate) async fn all_tombstone_records(
+        &mut self,
+    ) -> Result<Vec<SubtreeTombstoneRecord>, CoreError> {
+        self.counters.scan_prefix_calls = self.counters.scan_prefix_calls.saturating_add(1);
+        let rows = self.base.all_tombstones().await?;
+        let mut merged: Vec<SubtreeTombstoneRecord> = rows.durable.as_ref().clone();
+        merged.extend(rows.overlay.iter().cloned());
+        Ok(merged)
+    }
+
     pub(crate) async fn active_subtree_tombstone(
         &mut self,
         root_inode_id: InodeId,

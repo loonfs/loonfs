@@ -22,7 +22,7 @@ use loonfs_api::{
     CheckpointId, ContentRef, CreateCheckpointResponse, DeleteNamespaceResponse,
     DirectoryPageCursor, FileRevision, FileRevisionsPageCursor, FlushWalResponse, InodeId,
     ManifestId, ManifestObjectId, NamespaceId, NamespaceSummary, Page, PageRequest,
-    ReleaseCheckpointResponse, RevisionNo, UploadId,
+    ReleaseCheckpointResponse, RevisionNo, TrashEntry, TrashPageCursor, UploadId,
 };
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
@@ -222,6 +222,16 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     ) -> Result<Page<FileRevision, FileRevisionsPageCursor>> {
         let view = self.load_read_view(context).await?;
         view.list_file_revisions_page(path.as_ref(), request).await
+    }
+
+    /// Lists one trash page against the pinned runtime read context.
+    pub async fn list_trash_page(
+        &self,
+        request: PageRequest<TrashPageCursor>,
+        context: &RuntimeReadContext,
+    ) -> Result<Page<TrashEntry, TrashPageCursor>> {
+        let view = self.load_read_view(context).await?;
+        view.list_trash_page(request).await
     }
 
     /// Lists one revision page for an inode against the pinned runtime read context.

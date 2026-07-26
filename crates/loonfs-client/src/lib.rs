@@ -25,7 +25,7 @@ use loonfs_api::{
     ContentRef, CreateCheckpointRequest, CreateCheckpointResponse, CreateNamespaceRequest,
     DeleteDirectoryBehavior, DeleteNamespaceResponse, DestinationBehavior, FilesystemOperation,
     FilesystemOperationRequest, ForkNamespaceRequest, GrepRequest, GrepResponse, InodeId,
-    ListFileRevisionsResponse, ListPathEntriesResponse, MaintenanceStepRequest,
+    ListFileRevisionsResponse, ListPathEntriesResponse, ListTrashResponse, MaintenanceStepRequest,
     MaintenanceStepResponse, NamespaceId, NamespaceStatusResponse, NamespaceSummary,
     ReleaseCheckpointResponse, RestoreFileRevisionRequest, RevisionNo, UploadId,
 };
@@ -364,6 +364,23 @@ impl Client {
         let has_query = true;
         append_optional_pagination_query(&mut url, has_query, limit, cursor);
         self.request_json::<(), ListFileRevisionsResponse>(self.get(&url), None)
+            .await
+    }
+
+    pub async fn list_trash_page(
+        &self,
+        namespace_id: &NamespaceId,
+        limit: Option<u32>,
+        cursor: Option<&str>,
+    ) -> Result<ListTrashResponse> {
+        let mut url = format!(
+            "{}/v0/namespaces/{}/filesystem/trash",
+            self.base_url,
+            namespace_id.as_str()
+        );
+        let has_query = false;
+        append_optional_pagination_query(&mut url, has_query, limit, cursor);
+        self.request_json::<(), ListTrashResponse>(self.get(&url), None)
             .await
     }
 

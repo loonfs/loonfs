@@ -60,6 +60,7 @@ pub(crate) async fn run(
         Command::Rm(args) => fs::run_filesystem_rm(kind, args).await,
         Command::Mv(args) => fs::run_filesystem_mv(kind, args, runtime).await,
         Command::Cp(args) => fs::run_filesystem_cp(kind, args, runtime).await,
+        Command::Trash(args) => fs::run_filesystem_trash(kind, args).await,
         Command::Changes(args) => admin::run_admin_changes(kind, args).await,
         Command::Admin { command } => admin::run_admin_command(kind, command).await,
     }

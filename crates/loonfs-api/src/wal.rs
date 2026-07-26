@@ -99,6 +99,17 @@ pub enum WalDelta {
         delta_index: u32,
         /// Inode at the root of the newly hidden subtree.
         root_inode_id: InodeId,
+        /// Directory that held the deleted binding, when the tombstone came
+        /// from a path delete. Carried so the deleted name survives on the
+        /// immortal tombstone row after unbind rows age out.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_inode_id: Option<InodeId>,
+        /// Canonical key of the deleted binding, when known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name_key: Option<NameKey>,
+        /// User-facing spelling of the deleted binding, when known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display_name: Option<DisplayName>,
     },
     /// Revokes exactly one subtree tombstone — the one recorded at
     /// `(target_seq, target_delta_index)` — making the subtree eligible for

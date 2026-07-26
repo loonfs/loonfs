@@ -72,6 +72,10 @@ pub struct SubtreeTombstoneRecord {
     pub root_inode_id: InodeId,
     pub tombstone_seq: ChangeSeq,
     pub tombstone_delta_index: u32,
+    pub deleted_at_ms: u64,
+    pub parent_inode_id: Option<InodeId>,
+    pub name_key: Option<String>,
+    pub display_name: Option<String>,
     /// What this event did, mirroring the core row semantics: the newest
     /// event per root wins, and a revoke as the newest means no active
     /// tombstone.
@@ -97,6 +101,7 @@ impl MetadataState {
     pub fn apply_committed_wal_deltas(
         &self,
         committed_seq: ChangeSeq,
+        committed_at_ms: u64,
         deltas: &[WalDelta],
     ) -> AppliedMetadataState {
         let mut metadata_state = self.clone();
@@ -181,6 +186,9 @@ impl MetadataState {
                 WalDelta::TombstoneSubtree {
                     delta_index,
                     root_inode_id,
+                    parent_inode_id,
+                    name_key,
+                    display_name,
                 } => {
                     metadata_state
                         .subtree_tombstones
@@ -188,6 +196,12 @@ impl MetadataState {
                             root_inode_id: *root_inode_id,
                             tombstone_seq: committed_seq,
                             tombstone_delta_index: *delta_index,
+                            deleted_at_ms: committed_at_ms,
+                            parent_inode_id: *parent_inode_id,
+                            name_key: name_key.as_ref().map(|key| key.as_str().to_owned()),
+                            display_name: display_name
+                                .as_ref()
+                                .map(|name| name.as_str().to_owned()),
                             action: SubtreeTombstoneAction::Set,
                         });
                     push_unique_invariant(
@@ -207,6 +221,10 @@ impl MetadataState {
                             root_inode_id: *root_inode_id,
                             tombstone_seq: committed_seq,
                             tombstone_delta_index: *delta_index,
+                            deleted_at_ms: committed_at_ms,
+                            parent_inode_id: None,
+                            name_key: None,
+                            display_name: None,
                             action: SubtreeTombstoneAction::Revoke {
                                 target_seq: *target_seq,
                                 target_delta_index: *target_delta_index,
@@ -242,6 +260,7 @@ mod tests {
     fn bind_direntry_replay_uses_persisted_name_key() {
         let applied = MetadataState::default().apply_committed_wal_deltas(
             ChangeSeq(1),
+            4_200,
             &[WalDelta::BindDirentry {
                 delta_index: 7,
                 parent_inode_id: InodeId(1),

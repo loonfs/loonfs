@@ -697,6 +697,32 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         revisions
     }
 
+    /// Every tombstone event in the namespace, merged across manifest
+    /// tables and row states. Uncached: the trash listing is a cold read
+    /// over a family that per-root probes never enumerate.
+    pub(super) async fn all_tombstones(
+        &self,
+    ) -> Result<SharedRows<SubtreeTombstoneRecord>, CoreError> {
+        let mut durable = if let Some(tables) = self.manifest_tables() {
+            manifest_index::all_subtree_tombstones(tables).await?
+        } else {
+            Vec::new()
+        };
+        durable.extend(
+            self.durable_row_states()
+                .flat_map(|state| state.subtree_tombstones().iter().cloned()),
+        );
+        let overlay = self
+            .overlay_state()
+            .into_iter()
+            .flat_map(|state| state.subtree_tombstones().iter().cloned())
+            .collect();
+        Ok(SharedRows {
+            durable: Arc::new(durable),
+            overlay,
+        })
+    }
+
     pub(super) async fn tombstones_for_root(
         &self,
         root_inode_id: InodeId,

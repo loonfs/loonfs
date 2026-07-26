@@ -192,6 +192,35 @@ impl FsReader {
         Ok(response)
     }
 
+    /// Lists one page of the namespace's recoverable deletions, ascending
+    /// by deleted root inode. Tombstone rows are immortal, so this answers
+    /// however far the replay floor has advanced; entries carry the deleted
+    /// name when the delete recorded one.
+    pub async fn list_trash_page(
+        &self,
+        namespace_id: &NamespaceId,
+        request: PageRequest<loonfs_api::TrashPageCursor>,
+    ) -> Result<loonfs_api::ListTrashResponse> {
+        let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
+        let page = engine.list_trash_page(request, &read_context).await?;
+        self.core
+            .inner
+            .cache_stats
+            .record_latest_metadata_view_read();
+        let next_cursor = page
+            .next_cursor
+            .as_ref()
+            .map(encode_cursor)
+            .transpose()
+            .map_err(|error| CoreError::InvalidCursor(error.to_string()))?;
+        Ok(loonfs_api::ListTrashResponse {
+            namespace_id: namespace_id.clone(),
+            head_seq: read_context.head.seq,
+            entries: page.items,
+            next_cursor,
+        })
+    }
+
     /// Lists one page of a file path's revision history.
     pub async fn list_file_revisions_page(
         &self,
