@@ -126,6 +126,12 @@ pub(crate) enum CommandData {
     ConfigShow {
         config: CliConfig,
     },
+    /// `config show` when the file no longer strict-decodes: the failure and
+    /// the file as parsed (secrets masked), so the user can see what to fix.
+    ConfigShowDegraded {
+        error: String,
+        config_toml: String,
+    },
     Version {
         version: String,
         /// Git commit the binary was built from ("unknown" without git).

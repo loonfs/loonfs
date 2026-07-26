@@ -80,6 +80,108 @@ fn profile_create_list_show_delete_work() {
 }
 
 #[test]
+fn broken_configs_stay_repairable_with_the_repair_commands() {
+    let harness = Harness::new();
+    harness.write_cli_config(format!(
+        r#"config_version = 1
+default_profile = "broken"
+
+[profiles.broken]
+mode = "remote"
+server_url = "https://loonfs.example.com"
+auth_token = "secret-degraded-token"
+unknown_knob = true
+
+[profiles.keeper]
+mode = "embedded"
+
+[profiles.keeper.store]
+kind = "local-fs"
+root = "{}"
+"#,
+        harness.store_root("keeper").display()
+    ));
+
+    // Ordinary commands reject the file, naming it and the offending key.
+    let list = harness.run(&["profile", "list"]);
+    assert_failure(&list);
+    let message = stderr_string(&list);
+    assert!(message.contains("config.toml"), "{message}");
+    assert!(message.contains("unknown_knob"), "{message}");
+
+    // The repair commands still work. Show renders the file as parsed, with
+    // the failure on top and secrets masked.
+    let show = harness.run(&["config", "show"]);
+    assert_success(&show);
+    let shown = stdout_string(&show);
+    assert!(shown.contains("warning:"), "{shown}");
+    assert!(shown.contains("unknown_knob"), "{shown}");
+    assert!(shown.contains("<redacted>"), "{shown}");
+    assert!(!shown.contains("secret-degraded-token"), "{shown}");
+
+    // Use switches the default while the file is still degraded; delete then
+    // removes the broken profile, which heals the file for every command.
+    assert_success(&harness.run(&["profile", "use", "keeper"]));
+    let delete = harness.run(&["--json", "profile", "delete", "broken"]);
+    assert_success(&delete);
+    assert_eq!(json_data(&delete)["name"], "broken");
+    assert_eq!(json_data(&delete)["mode"], "remote");
+
+    let healed = harness.run(&["--json", "profile", "list"]);
+    assert_success(&healed);
+    let healed_data = json_data(&healed);
+    assert_eq!(healed_data["default_profile"], "keeper");
+    assert_eq!(
+        healed_data["profiles"]
+            .as_array()
+            .expect("json array")
+            .len(),
+        1
+    );
+
+    // A config for another version is a hard error, named before any
+    // unknown-field noise; repair commands do not edit files written for a
+    // different version.
+    harness.write_cli_config("config_version = 2\nfuture_setting = true\n");
+    let future = harness.run(&["config", "show"]);
+    assert_failure(&future);
+    let future_message = stderr_string(&future);
+    assert!(
+        future_message.contains("`config_version = 2`"),
+        "{future_message}"
+    );
+    assert!(
+        !future_message.contains("future_setting"),
+        "{future_message}"
+    );
+}
+
+#[test]
+fn unreachable_servers_are_named_with_their_url() {
+    let harness = Harness::new();
+    // A port that was just free with nothing listening: connection refused.
+    let dead_url = format!("http://127.0.0.1:{}", available_port());
+    let create = harness.run(&[
+        "--json",
+        "profile",
+        "create",
+        "dead",
+        "--mode",
+        "remote",
+        "--server-url",
+        &dead_url,
+    ]);
+    assert_success(&create);
+
+    let attempt = harness.run(&["namespace", "create", "ghost"]);
+    assert_failure(&attempt);
+    let message = stderr_string(&attempt);
+    assert!(message.contains("cannot connect to"), "{message}");
+    assert!(message.contains(&dead_url), "{message}");
+    assert!(message.contains("`server_url`"), "{message}");
+}
+
+#[test]
 fn embedded_profile_filesystem_flow_works_end_to_end() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");
@@ -1776,6 +1878,12 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
         ]);
         assert_failure(&missing);
         assert_eq!(json_error(&missing)["code"], "namespace_not_found");
+        // Both modes name the namespace: the CLI mapper mirrors the server
+        // handler's scoping.
+        assert_eq!(
+            json_error(&missing)["message"],
+            "namespace `missing` does not exist"
+        );
 
         shapes_by_mode.push((
             sorted_object_keys(&changes_data),
