@@ -10,7 +10,9 @@ use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result, StoreFailureClass};
 use crate::metadata::{CommitReceiptRecord, MetadataState, MetadataView};
 use crate::namespace::catalog::{load_namespace_catalog_entry, VerifiedNamespaceCatalogEntry};
-use crate::namespace::control::{read_head_and_metadata_root, ControlObjectLoadError};
+use crate::namespace::control::{
+    read_head_and_metadata_root, read_head_object, ControlObjectLoadError,
+};
 use crate::wal::{load_validated_wal_chain, project_validated_wal_tail, WalChainLoadRequest};
 use loonfs_api::wire::control::{AcquiredWriter, HeadState, NamespaceState};
 use loonfs_api::{
@@ -197,7 +199,13 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
     };
 
     let tail_state = projection.tail_state.clone();
-    ensure_publish_head_etag_still_current(store, namespace_id, &head_etag).await?;
+    ensure_publish_head_etag_still_current(
+        store,
+        namespace_id,
+        &head_etag,
+        acquired_writer.as_ref(),
+    )
+    .await?;
 
     Ok((
         PublishMetadataView {
@@ -304,10 +312,20 @@ fn ensure_publish_reconstructed_head_matches(
     Ok(())
 }
 
+/// Closes the load by confirming the head has not moved underneath it.
+///
+/// A moved head is ambiguous on its own: it means either that another
+/// publisher committed (retryable) or that another session took the writer
+/// epoch and fenced this one (terminal). The fence check at the top of the
+/// load only sees the opening snapshot, so a takeover landing mid-load would
+/// otherwise be reported as `stale_head` — telling a permanently fenced
+/// writer to retry. Re-reading the head on the mismatch path resolves which
+/// it was, at the cost of one extra read on a path that already failed.
 async fn ensure_publish_head_etag_still_current<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     loaded_head_etag: &str,
+    acquired_writer: Option<&AcquiredWriter>,
 ) -> Result<()> {
     let object_key = wal_head(namespace_id.as_str());
     let metadata = store
@@ -335,6 +353,16 @@ async fn ensure_publish_head_etag_still_current<S: ObjectStore + ?Sized>(
         })
     })?;
     if current_head_etag != loaded_head_etag {
+        if let Some(acquired_writer) = acquired_writer {
+            let moved_head = read_head_object(store, namespace_id)
+                .await
+                .map_err(|error| {
+                    CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
+                })?
+                .envelope
+                .state;
+            ensure_publish_head_matches_acquired_writer(&moved_head, acquired_writer)?;
+        }
         return Err(CoreError::MetadataProjection(
             MetadataProjectionLoadError::HeadChangedDuringLoad {
                 object_key,
