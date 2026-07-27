@@ -734,6 +734,83 @@ mod tests {
         assert_eq!(head.writer.expect("writer block").writer_id, "writer-b");
     }
 
+    /// A takeover that lands while the loser is mid-load is still a fence,
+    /// not a head race. The loser must be told so — `stale_head` would send a
+    /// permanently fenced session back to retry.
+    #[tokio::test]
+    async fn fencing_during_publish_view_load_still_reports_writer_fenced() {
+        use loonfs_test_support::stores::{BlockingStore, KeyPredicate};
+        use std::sync::Arc as StdArc;
+
+        let temp_dir = tempdir().expect("tempdir");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let writer_a = context("writer-a", "session-a");
+
+        // Block the WAL tail read: it sits between the head snapshot that the
+        // fence check uses and the closing etag recheck.
+        let store = StdArc::new(BlockingStore::new(
+            LocalFsStore::new(temp_dir.path()).expect("store"),
+            KeyPredicate::prefix(wal_segment_prefix(namespace_id.as_str())),
+            OperationClass::Read,
+        ));
+
+        bootstrap_namespace(store.inner(), &namespace_id, &writer_a, false)
+            .await
+            .expect("bootstrap");
+
+        let mut engine_a = NamespaceCommitEngine::new(namespace_id.clone());
+        engine_a
+            .publish_batch(
+                store.inner(),
+                vec![create_dir("from-a-first", "alpha")],
+                &writer_a,
+                &PublishTailOptions::default(),
+            )
+            .await
+            .results[0]
+            .as_ref()
+            .expect("writer a first commit");
+        // Force a fresh manifest load on the next publish.
+        engine_a.invalidate();
+
+        store.block_next();
+        let blocked_store = StdArc::clone(&store);
+        let publish_a = tokio::spawn(async move {
+            let mut engine = engine_a;
+            let result = engine
+                .publish_batch(
+                    blocked_store.as_ref(),
+                    vec![create_dir("from-a-second", "gamma")],
+                    &writer_a,
+                    &PublishTailOptions::default(),
+                )
+                .await;
+            result.results[0].as_ref().err().map(|error| error.code())
+        });
+
+        // A has snapshotted a head that still names it. Writer B takes the
+        // epoch while A is parked mid-load, so A is fenced by the time it
+        // rechecks the etag.
+        store.wait_until_blocked().await;
+        let writer_b = context("writer-b", "session-b");
+        let mut engine_b = NamespaceCommitEngine::new(namespace_id.clone());
+        engine_b
+            .publish_batch(
+                store.inner(),
+                vec![create_dir("from-b-first", "beta")],
+                &writer_b,
+                &PublishTailOptions::default(),
+            )
+            .await
+            .results[0]
+            .as_ref()
+            .expect("writer b takeover commit");
+        store.release();
+
+        let code = publish_a.await.expect("join publish a");
+        assert_eq!(code, Some(ErrorCode::WriterFenced));
+    }
+
     #[tokio::test]
     async fn shared_session_keeps_fencing_across_engine_rebuilds() {
         let temp_dir = tempdir().expect("tempdir");
