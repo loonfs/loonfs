@@ -81,6 +81,7 @@ fn undelete_recovers_a_deleted_file_and_generations_stay_scoped() {
             behavior: DestinationBehavior::Replace,
             commit_id: None,
             message: None,
+            expected_revision_no: None,
         },
     )
     .expect("put revision two");
@@ -454,7 +455,7 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
 }
 
 #[test]
-fn change_feed_carries_the_exact_revoked_generation() {
+fn change_feed_reports_the_deletion_generation_an_undelete_takes() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "undelete-feed-test");
     let namespace_id = namespace_id("demo");
@@ -490,35 +491,33 @@ fn change_feed_carries_the_exact_revoked_generation() {
         ListChangesOptions::default(),
     ))
     .expect("list changes");
-    let mut tombstone_target = None;
-    let mut revoke_target = None;
+    let mut deleted_seq = None;
+    let mut undeleted = None;
     for change in &changes.changes {
-        for delta in &change.deltas {
-            match delta {
-                loonfs::CommitDelta::TombstoneSubtree {
-                    delta_index,
-                    root_inode_id,
+        for event in &change.events {
+            match event {
+                loonfs::FilesystemChange::Deleted {
+                    inode_id: deleted_inode_id,
                     ..
-                } if *root_inode_id == inode_id => {
-                    tombstone_target = Some((change.seq, *delta_index));
+                } if *deleted_inode_id == inode_id => {
+                    deleted_seq = Some(change.seq);
                 }
-                loonfs::CommitDelta::RevokeSubtreeTombstone {
-                    root_inode_id,
-                    target_seq,
-                    target_delta_index,
+                loonfs::FilesystemChange::Undeleted {
+                    inode_id: undeleted_inode_id,
+                    name,
                     ..
-                } if *root_inode_id == inode_id => {
-                    revoke_target = Some((*target_seq, *target_delta_index));
+                } if *undeleted_inode_id == inode_id => {
+                    undeleted = Some(name.as_str().to_owned());
                 }
                 _ => {}
             }
         }
     }
-    // The revoke names the exact deletion event it cancels, so a
-    // projection can reduce state without guessing at "newest".
-    let tombstone_target = tombstone_target.expect("delete emitted a tombstone delta");
-    assert_eq!(tombstone_target.0, deletion);
-    assert_eq!(revoke_target, Some(tombstone_target));
+    // The `Deleted` event's enclosing sequence is the deletion generation an
+    // undelete passes as `deleted_at_seq`, so a feed projection can drive a
+    // recovery without guessing at "newest".
+    assert_eq!(deleted_seq, Some(deletion));
+    assert_eq!(undeleted.as_deref(), Some("report.txt"));
 }
 
 #[test]
@@ -550,19 +549,19 @@ fn the_feed_names_deleted_entries_and_their_writer() {
     .expect("list changes");
 
     // A projection of the feed sees the spelling a person typed — on the
-    // unbind as well as the bind — plus which session wrote each commit,
-    // without a second lookup per entry.
-    let unbind_display = changes
+    // deletion as well as the creation — plus which session wrote each
+    // commit, without a second lookup per entry.
+    let deleted_name = changes
         .changes
         .iter()
-        .flat_map(|change| &change.deltas)
-        .find_map(|delta| match delta {
-            loonfs::CommitDelta::UnbindDirentry { display_name, .. } => {
-                Some(display_name.as_str().to_owned())
-            }
+        .flat_map(|change| &change.events)
+        .find_map(|event| match event {
+            loonfs::FilesystemChange::Deleted {
+                name: Some(name), ..
+            } => Some(name.as_str().to_owned()),
             _ => None,
         });
-    assert_eq!(unbind_display.as_deref(), Some("Quarterly Report.PDF"));
+    assert_eq!(deleted_name.as_deref(), Some("Quarterly Report.PDF"));
     for change in &changes.changes {
         assert!(!change.writer_id.is_empty());
         assert!(

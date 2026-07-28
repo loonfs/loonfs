@@ -451,7 +451,10 @@ pub(crate) async fn run_filesystem_put(
         .map_err(|error| context.fail(kind, CliError::io_for_path(&local_path, error)))?;
     let commit_id = parse_commit_id_arg(args.commit_id.as_deref())
         .map_err(|error| context.fail(kind, error))?;
-    let behavior = if args.force {
+    let expected_revision_no = args.expected_revision.map(RevisionNo);
+    // The revision guard is a stronger replace statement, so it implies
+    // --force rather than demanding both flags.
+    let behavior = if args.force || expected_revision_no.is_some() {
         DestinationBehavior::Replace
     } else {
         DestinationBehavior::NoReplace
@@ -460,6 +463,7 @@ pub(crate) async fn run_filesystem_put(
         behavior,
         commit_id,
         message: args.message.clone(),
+        expected_revision_no,
     };
     let result = context
         .target

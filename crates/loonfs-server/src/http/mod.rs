@@ -21,14 +21,12 @@ pub use self::serve::{app, serve, serve_with_shutdown, ServeError, ServerLifecyc
 
 use self::error::ApiResponseError;
 use self::extractors::{
-    authorize, server_busy_error, AppJson, AppPath, AppQuery, CommitAppJson, NamespaceIdPath,
-    OptionalAppJson, UploadBodyBytes,
+    authorize, server_busy_error, AppJson, AppPath, AppQuery, NamespaceIdPath, OptionalAppJson,
+    UploadBodyBytes,
 };
 use self::handlers_filesystem::{
-    apply_filesystem_operation, commit_operations, get_file_bytes,
-    get_file_revision_bytes_by_inode, list_changes, list_file_revisions,
-    list_file_revisions_by_inode, list_path_entries, list_trash, restore_file_revision_by_inode,
-    stat_path,
+    apply_filesystem_operation, get_file_bytes, list_changes, list_file_revisions,
+    list_path_entries, list_trash, stat_path,
 };
 use self::handlers_namespace::{
     create_checkpoint, create_namespace, delete_namespace, fork_namespace, maintenance_step,
@@ -80,12 +78,10 @@ async fn with_request_id(request: Request, next: Next) -> Response {
 }
 
 fn router(state: AppState) -> Router {
-    // Two routes carry legitimately large bodies and get configured
-    // budgets: upload content (raw file bytes) and commits (bulk metadata
-    // JSON). Every other route keeps axum's conservative default limit.
+    // Upload content carries legitimately large bodies and gets a
+    // configured budget. Every other route keeps axum's conservative
+    // default limit.
     let max_upload_bytes = usize::try_from(state.config.max_upload_bytes).unwrap_or(usize::MAX);
-    let max_commit_body_bytes =
-        usize::try_from(state.config.max_commit_body_bytes).unwrap_or(usize::MAX);
     let grep_route = if state.config.grep.mode.serves_grep() {
         post(grep)
     } else {
@@ -150,18 +146,6 @@ fn router(state: AppState) -> Router {
             "/v0/namespaces/:namespace/filesystem/operations",
             post(apply_filesystem_operation),
         )
-        .route(
-            "/v0/namespaces/:namespace/inodes/:inode_id/revisions",
-            get(list_file_revisions_by_inode),
-        )
-        .route(
-            "/v0/namespaces/:namespace/inodes/:inode_id/revisions/:revision_no/content",
-            get(get_file_revision_bytes_by_inode),
-        )
-        .route(
-            "/v0/namespaces/:namespace/inodes/:inode_id/revisions/:source_revision_no/restore",
-            post(restore_file_revision_by_inode),
-        )
         .route("/v0/namespaces/:namespace/uploads", post(begin_upload))
         .route(
             "/v0/namespaces/:namespace/uploads/:upload_id/content",
@@ -170,10 +154,6 @@ fn router(state: AppState) -> Router {
         .route(
             "/v0/namespaces/:namespace/uploads/:upload_id/complete",
             post(complete_upload),
-        )
-        .route(
-            "/v0/namespaces/:namespace/commits",
-            post(commit_operations).layer(DefaultBodyLimit::max(max_commit_body_bytes)),
         )
         .route("/v0/namespaces/:namespace/changes", get(list_changes))
         .route(

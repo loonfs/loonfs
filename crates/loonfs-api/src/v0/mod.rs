@@ -21,8 +21,8 @@ mod search;
 mod uploads;
 
 pub use commits::{
-    ChangesResponse, CommitDelta, CommitOp, CommitPrecondition, CommitRequest, CommitResponse,
-    CommitSubmissionRequest, CommittedChange,
+    ChangesResponse, CommitOp, CommitPrecondition, CommitRequest, CommitResponse, CommittedChange,
+    FilesystemChange,
 };
 pub use operations::{
     AdvanceRetentionResponse, ApiError, CreateCheckpointRequest, CreateCheckpointResponse,
@@ -31,7 +31,7 @@ pub use operations::{
     FlushWalResponse, ForkNamespaceRequest, GcRequest, GcResponse, ListFileRevisionsResponse,
     MaintenanceStepKind, MaintenanceStepRequest, MaintenanceStepResponse, NamespaceStatusResponse,
     NamespaceSummary, ReleaseCheckpointResponse, ReorganizeStepOutcome, RepairNamespaceOutcome,
-    RepairNamespaceResponse, RestoreFileRevisionRequest, WalFlushStepOutcome,
+    RepairNamespaceResponse, WalFlushStepOutcome,
 };
 pub use reads::{
     AuthoritativeFileBytes, AuthoritativePathEntry, ListPathEntriesResponse, ListTrashResponse,

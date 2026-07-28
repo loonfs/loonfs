@@ -110,6 +110,7 @@ async fn park_two_puts(temp_dir: &Path) -> ParkedPuts {
             absolute_path: parse_mutation_path("/b.txt").expect("mutation path"),
             content_ref: prepared_content_ref,
             behavior: DestinationBehavior::NoReplace,
+            expected_revision_no: None,
         };
         Box::pin(async move {
             registry

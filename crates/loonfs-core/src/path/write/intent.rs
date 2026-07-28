@@ -34,6 +34,10 @@ pub enum PathMutationIntent {
         absolute_path: AbsolutePath,
         content_ref: ContentRef,
         behavior: DestinationBehavior,
+        /// When set, replacing applies only while the file's current
+        /// revision is still this one; a raced write fails the plan
+        /// instead of stacking a revision on state the caller never saw.
+        expected_revision_no: Option<RevisionNo>,
     },
     /// Delete one path.
     DeletePath {

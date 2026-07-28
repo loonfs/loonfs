@@ -72,12 +72,12 @@ pub mod wire {
 pub use capability::{
     CapabilityDocument, CapabilityDocumentError, FEATURE_NAMESPACES_CREATE,
     FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK, FEATURE_QUERY_GREP,
-    FEATURE_UPLOADS_DIRECT_PUT, LIMIT_COMMIT_MAX_BODY_BYTES, LIMIT_COMMIT_MAX_OPERATIONS,
-    LIMIT_DOWNLOAD_MAX_CONCURRENT, LIMIT_DOWNLOAD_MAX_CONTENT_BYTES, LIMIT_GC_MIN_GRACE_WINDOW_MS,
-    LIMIT_PAGINATION_DEFAULT, LIMIT_PAGINATION_MAX, LIMIT_QUERY_GREP_DEFAULT, LIMIT_QUERY_GREP_MAX,
-    LIMIT_QUERY_GREP_SCAN_BUDGET_FILES, LIMIT_QUERY_GREP_TAIL_BUDGET_FILES,
-    LIMIT_UPLOAD_MAX_CONCURRENT, LIMIT_UPLOAD_MAX_CONTENT_BYTES, PROFILE_ADMIN_V0, PROFILE_CORE_V0,
-    PROFILE_QUERY_V0, PROTOCOL_VERSION,
+    FEATURE_UPLOADS_DIRECT_PUT, LIMIT_DOWNLOAD_MAX_CONCURRENT, LIMIT_DOWNLOAD_MAX_CONTENT_BYTES,
+    LIMIT_GC_MIN_GRACE_WINDOW_MS, LIMIT_PAGINATION_DEFAULT, LIMIT_PAGINATION_MAX,
+    LIMIT_QUERY_GREP_DEFAULT, LIMIT_QUERY_GREP_MAX, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES,
+    LIMIT_QUERY_GREP_TAIL_BUDGET_FILES, LIMIT_UPLOAD_MAX_CONCURRENT,
+    LIMIT_UPLOAD_MAX_CONTENT_BYTES, PROFILE_ADMIN_V0, PROFILE_CORE_V0, PROFILE_QUERY_V0,
+    PROTOCOL_VERSION,
 };
 pub use content::{ContentRef, ContentRefKind};
 pub use digest::sha256_digest;
@@ -105,15 +105,14 @@ pub use path::{
 // in `v0`; add here only what most consumers touch.
 pub use v0::{
     AdvanceRetentionResponse, ApiError, AuthoritativeFileBytes, AuthoritativePathEntry, CommitOp,
-    CommitPrecondition, CommitResponse, CommitSubmissionRequest, CreateCheckpointRequest,
-    CreateCheckpointResponse, CreateNamespaceRequest, DeleteDirectoryBehavior,
-    DeleteNamespaceResponse, DestinationBehavior, ErrorDetails, FileRevision, FilesystemOperation,
-    FilesystemOperationRequest, FlushWalOutcome, FlushWalResponse, ForkNamespaceRequest, GcRequest,
-    GcResponse, GrepMatch, GrepRequest, GrepResponse, ListFileRevisionsResponse,
-    ListPathEntriesResponse, ListTrashResponse, MaintenanceStepKind, MaintenanceStepRequest,
-    MaintenanceStepResponse, NamespaceStatusResponse, NamespaceSummary, ReleaseCheckpointResponse,
-    ReorganizeStepOutcome, RepairNamespaceOutcome, RestoreFileRevisionRequest, TrashEntry,
-    WalFlushStepOutcome,
+    CommitPrecondition, CommitResponse, CreateCheckpointRequest, CreateCheckpointResponse,
+    CreateNamespaceRequest, DeleteDirectoryBehavior, DeleteNamespaceResponse, DestinationBehavior,
+    ErrorDetails, FileRevision, FilesystemOperation, FilesystemOperationRequest, FlushWalOutcome,
+    FlushWalResponse, ForkNamespaceRequest, GcRequest, GcResponse, GrepMatch, GrepRequest,
+    GrepResponse, ListFileRevisionsResponse, ListPathEntriesResponse, ListTrashResponse,
+    MaintenanceStepKind, MaintenanceStepRequest, MaintenanceStepResponse, NamespaceStatusResponse,
+    NamespaceSummary, ReleaseCheckpointResponse, ReorganizeStepOutcome, RepairNamespaceOutcome,
+    TrashEntry, WalFlushStepOutcome,
 };
 
 #[cfg(test)]

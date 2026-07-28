@@ -16,10 +16,9 @@ mod transport;
 use loonfs_api::{
     v0::{
         BeginUploadRequest, BeginUploadResponse, ChangesResponse,
-        CommitResponse as ApiCommitResponse, CommitSubmissionRequest, CompleteUploadRequest,
-        CompleteUploadResponse, DisableGrepIndexResponse, EnableGrepIndexResponse, GrepGcResponse,
-        ObjectTransferAccess, RepairNamespaceResponse, UploadContentResponse, UploadMode,
-        ValidatedContentToken,
+        CommitResponse as ApiCommitResponse, CompleteUploadRequest, CompleteUploadResponse,
+        DisableGrepIndexResponse, EnableGrepIndexResponse, GrepGcResponse, ObjectTransferAccess,
+        RepairNamespaceResponse, UploadContentResponse, UploadMode, ValidatedContentToken,
     },
     AbsolutePath, AuthoritativePathEntry, CapabilityDocument, ChangeSeq, CheckpointId, CommitId,
     ContentRef, CreateCheckpointRequest, CreateCheckpointResponse, CreateNamespaceRequest,
@@ -27,7 +26,7 @@ use loonfs_api::{
     FilesystemOperationRequest, ForkNamespaceRequest, GrepRequest, GrepResponse, InodeId,
     ListFileRevisionsResponse, ListPathEntriesResponse, ListTrashResponse, MaintenanceStepRequest,
     MaintenanceStepResponse, NamespaceId, NamespaceStatusResponse, NamespaceSummary,
-    ReleaseCheckpointResponse, RestoreFileRevisionRequest, RevisionNo, UploadId,
+    ReleaseCheckpointResponse, RevisionNo, UploadId,
 };
 use std::sync::{Arc, OnceLock};
 
@@ -100,6 +99,10 @@ pub struct PutFileOptions {
     pub commit_id: Option<CommitId>,
     /// Annotation recorded on the commit; part of the commit's identity.
     pub message: Option<String>,
+    /// Replace only while the file's current revision is still this one.
+    /// Requires `Replace` behavior; a raced write fails instead of
+    /// stacking a revision on state the caller never saw.
+    pub expected_revision_no: Option<RevisionNo>,
 }
 
 impl Default for PutFileOptions {
@@ -108,6 +111,7 @@ impl Default for PutFileOptions {
             behavior: DestinationBehavior::NoReplace,
             commit_id: None,
             message: None,
+            expected_revision_no: None,
         }
     }
 }
@@ -384,36 +388,6 @@ impl Client {
             .await
     }
 
-    pub async fn list_file_revisions_by_inode_page(
-        &self,
-        namespace_id: &NamespaceId,
-        inode_id: InodeId,
-        limit: Option<u32>,
-        cursor: Option<&str>,
-    ) -> Result<ListFileRevisionsResponse> {
-        let mut url = format!(
-            "{}/v0/namespaces/{namespace_id}/inodes/{}/revisions",
-            self.base_url, inode_id.0
-        );
-        let has_query = false;
-        append_optional_pagination_query(&mut url, has_query, limit, cursor);
-        self.request_json::<(), ListFileRevisionsResponse>(self.get(&url), None)
-            .await
-    }
-
-    pub async fn get_file_revision_bytes_by_inode(
-        &self,
-        namespace_id: &NamespaceId,
-        inode_id: InodeId,
-        revision_no: RevisionNo,
-    ) -> Result<Vec<u8>> {
-        let url = format!(
-            "{}/v0/namespaces/{namespace_id}/inodes/{}/revisions/{}/content",
-            self.base_url, inode_id.0, revision_no.0
-        );
-        self.request_bytes(&url).await
-    }
-
     pub async fn health(&self) -> Result<()> {
         let url = format!("{}/health", self.base_url);
         self.call_with_transient_retry(&self.get(&url), None)
@@ -506,17 +480,6 @@ impl Client {
         );
         // The durable completed-session record replays an identical completion without new effect.
         self.request_json::<_, CompleteUploadResponse>(self.post(&url), Some(request))
-            .await
-    }
-
-    pub async fn commit_operations(
-        &self,
-        namespace_id: &NamespaceId,
-        request: &CommitSubmissionRequest,
-    ) -> Result<ApiCommitResponse> {
-        let url = format!("{}/v0/namespaces/{namespace_id}/commits", self.base_url);
-        // The request's commit id resolves an ambiguous resend through a durable receipt.
-        self.request_json::<_, ApiCommitResponse>(self.post(&url), Some(request))
             .await
     }
 
@@ -717,6 +680,7 @@ impl Client {
                         path: spec.absolute_path().clone(),
                         content_ref: staged.content_ref,
                         behavior: options.behavior,
+                        expected_revision_no: options.expected_revision_no,
                     },
                 },
             )
@@ -890,27 +854,6 @@ impl Client {
         Ok(response)
     }
 
-    pub async fn restore_file_revision_by_inode(
-        &self,
-        namespace_id: &NamespaceId,
-        inode_id: InodeId,
-        source_revision_no: RevisionNo,
-        base_revision_no: RevisionNo,
-        commit_id: &CommitId,
-    ) -> Result<ApiCommitResponse> {
-        let url = format!(
-            "{}/v0/namespaces/{namespace_id}/inodes/{}/revisions/{}/restore",
-            self.base_url, inode_id.0, source_revision_no.0
-        );
-        self.request_json::<_, ApiCommitResponse>(
-            self.post(&url),
-            Some(&RestoreFileRevisionRequest {
-                commit_id: commit_id.clone(),
-                base_revision_no,
-            }),
-        )
-        .await
-    }
 }
 
 impl NamespacePath {

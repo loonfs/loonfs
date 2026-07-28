@@ -42,9 +42,9 @@ mod writer_session;
 use thiserror::Error;
 
 pub use loonfs_api::v0::{
-    BeginUploadRequest, BeginUploadResponse, ChangesResponse, CommitDelta, CommitOp,
-    CommitPrecondition, CommitRequest, CommitResponse, CommittedChange, CompleteUploadRequest,
-    CompleteUploadResponse, DirectPutUpload, DisableGrepIndexResponse, EnableGrepIndexResponse,
+    BeginUploadRequest, BeginUploadResponse, ChangesResponse, CommitOp, CommitPrecondition,
+    CommitRequest, CommitResponse, CommittedChange, CompleteUploadRequest, CompleteUploadResponse,
+    DirectPutUpload, DisableGrepIndexResponse, EnableGrepIndexResponse, FilesystemChange,
     ObjectTransferAccess, RepairNamespaceResponse, UploadContentResponse, UploadMode,
 };
 pub use loonfs_api::{

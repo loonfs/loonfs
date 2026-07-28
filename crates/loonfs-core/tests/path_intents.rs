@@ -9,7 +9,8 @@ use common::mutation_split_support::*;
 use common::{namespace_engine, read_context};
 use loonfs_api::{
     v0::{
-        CommitDelta, CommitOp as ApiCommitOp, CommitPrecondition, CommitRequest as ApiCommitRequest,
+        CommitOp as ApiCommitOp, CommitPrecondition, CommitRequest as ApiCommitRequest,
+        FilesystemChange,
     },
     wire::wal::{decode_wal_segment_envelope_zstd, WalDelta},
     AbsolutePath, AuthoritativePathEntry, ChangeSeq, CommitId, DeleteDirectoryBehavior,
@@ -1064,6 +1065,7 @@ async fn path_intents_cover_basic_mutations() {
             absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
             content_ref: content.content_ref.clone(),
             behavior: DestinationBehavior::NoReplace,
+            expected_revision_no: None,
         },
         &context,
     )
@@ -1151,6 +1153,7 @@ async fn path_intents_in_one_batch_see_tentative_state() {
                     absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
                     content_ref: content.content_ref,
                     behavior: DestinationBehavior::NoReplace,
+                    expected_revision_no: None,
                 },
             )
             .await,
@@ -1446,8 +1449,7 @@ async fn path_move_writes_unbind_and_stale_binding_is_fails() {
         .await
         .expect("resolve file");
     let old_binding =
-        latest_binding_for_child_from_change_feed(&store, &namespace_id("demo"), file.inode_id)
-            .await;
+        current_binding_for_child(&store, &namespace_id("demo"), file.inode_id).await;
 
     move_path(
         &store,
@@ -1459,15 +1461,15 @@ async fn path_move_writes_unbind_and_stale_binding_is_fails() {
     )
     .await
     .expect("move file");
-    let unbind_count = list_changes_after(&store, &namespace_id("demo"), ChangeSeq(0))
+    let move_count = list_changes_after(&store, &namespace_id("demo"), ChangeSeq(0))
         .await
         .expect("change feed")
         .changes
         .iter()
-        .flat_map(|change| &change.deltas)
-        .filter(|delta| matches!(delta, CommitDelta::UnbindDirentry { .. }))
+        .flat_map(|change| &change.events)
+        .filter(|event| matches!(event, FilesystemChange::Moved { .. }))
         .count();
-    assert_eq!(unbind_count, 1);
+    assert_eq!(move_count, 1);
     assert!(resolve_path(&store, &namespace_id("demo"), "/docs/a.txt")
         .await
         .is_err());

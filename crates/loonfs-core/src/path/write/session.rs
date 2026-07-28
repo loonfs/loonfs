@@ -126,6 +126,7 @@ mod tests {
                 absolute_path: AbsolutePath::parse(absolute_path).expect("path"),
                 content_ref: content_ref.clone(),
                 behavior: DestinationBehavior::NoReplace,
+                expected_revision_no: None,
             },
             vec![PreparedContent::from_admission(admission)],
         )
@@ -175,6 +176,7 @@ mod tests {
             absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
             content_ref: staged.content_ref.clone(),
             behavior: DestinationBehavior::NoReplace,
+            expected_revision_no: None,
         };
         session
             .plan_path_mutation(&namespace_id, &first_intent, view.metadata_view())
@@ -188,6 +190,7 @@ mod tests {
             absolute_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
             content_ref: staged.content_ref.clone(),
             behavior: DestinationBehavior::NoReplace,
+            expected_revision_no: None,
         };
         session
             .plan_path_mutation(&namespace_id, &second_intent, view.metadata_view())

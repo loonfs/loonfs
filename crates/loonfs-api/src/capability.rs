@@ -40,11 +40,6 @@ pub const LIMIT_UPLOAD_MAX_CONCURRENT: &str = "upload.max_concurrent";
 /// Advisory limit: how many service-proxied content reads the deployment
 /// materializes at once; requests past the cap answer `server_busy`.
 pub const LIMIT_DOWNLOAD_MAX_CONCURRENT: &str = "download.max_concurrent";
-/// Advisory limit: the largest JSON body the commits endpoint accepts.
-/// Metadata-only; file bytes ride uploads, not commit bodies.
-pub const LIMIT_COMMIT_MAX_BODY_BYTES: &str = "commit.max_body_bytes";
-/// Advisory limit: the most semantic operations one explicit commit accepts.
-pub const LIMIT_COMMIT_MAX_OPERATIONS: &str = "commit.max_operations";
 /// Advisory capability key for the default page size applied when callers omit `limit`.
 pub const LIMIT_PAGINATION_DEFAULT: &str = "pagination.default_limit";
 /// Advisory capability key for the largest page size accepted by a deployment.

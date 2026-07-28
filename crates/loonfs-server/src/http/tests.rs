@@ -659,6 +659,7 @@ async fn runtime_created_state_is_readable_through_http() {
             behavior: DestinationBehavior::NoReplace,
             commit_id: Some(CommitId::parse("runtime-put").expect("valid commit id")),
             message: None,
+            expected_revision_no: None,
         },
     )
     .await
@@ -1255,7 +1256,7 @@ async fn capability_document_advertises_the_upload_limit() {
         Some(256 * 1024 * 1024)
     );
     // Every limit a request can trip is discoverable: transfer
-    // concurrency, the commit-body cap, and the grep scan budgets.
+    // concurrency and the grep scan budgets.
     assert_eq!(
         capabilities.limits.get("upload.max_concurrent").copied(),
         Some(8)
@@ -1263,14 +1264,6 @@ async fn capability_document_advertises_the_upload_limit() {
     assert_eq!(
         capabilities.limits.get("download.max_concurrent").copied(),
         Some(16)
-    );
-    assert_eq!(
-        capabilities.limits.get("commit.max_body_bytes").copied(),
-        Some(8 * 1024 * 1024)
-    );
-    assert_eq!(
-        capabilities.limits.get("commit.max_operations").copied(),
-        Some(4096)
     );
     assert_eq!(
         capabilities
@@ -1330,57 +1323,6 @@ async fn http_unknown_routes_and_methods_answer_in_envelope() {
     let body = response.into_string().expect("read 405 body");
     let body: serde_json::Value = serde_json::from_str(&body).expect("json 405 body");
     assert_eq!(body["code"], "method_not_allowed");
-
-    server.abort();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_commit_body_over_the_limit_answers_content_too_large() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
-    bootstrap_namespace(&store, "runtime-writer", &namespace_id("demo")).await;
-    let mut config = test_config(temp_dir.path(), "server-writer");
-    config.max_commit_body_bytes = 1024;
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind listener");
-    let addr = listener.local_addr().expect("listener addr");
-    let router = app_with_store(config, store).await.expect("build app");
-    let server = tokio::spawn(async move {
-        axum::serve(listener, router).await.expect("serve app");
-    });
-
-    // The limit rejects on size before any parsing, so an oversized
-    // JSON-shaped body is enough to exercise it.
-    let oversized = format!(r#"{{"filler":"{}"}}"#, "d".repeat(4096));
-    let error = raw_agent()
-        .post(&format!("http://{addr}/v0/namespaces/demo/commits"))
-        .set("content-type", "application/json")
-        .send_string(&oversized)
-        .expect_err("unauthorized commit should fail before buffering");
-    let ureq::Error::Status(status, _) = error else {
-        panic!("expected a status error for an unauthorized commit");
-    };
-    assert_eq!(status, 401);
-
-    let error = raw_agent()
-        .post(&format!("http://{addr}/v0/namespaces/demo/commits"))
-        .set("authorization", "Bearer test-token")
-        .set("content-type", "application/json")
-        .send_string(&oversized)
-        .expect_err("over-limit commit body should answer 413");
-    let ureq::Error::Status(status, response) = error else {
-        panic!("expected a status error for an over-limit commit body");
-    };
-    assert_eq!(status, 413);
-    let body = response.into_string().expect("read 413 body");
-    let body: serde_json::Value = serde_json::from_str(&body).expect("json 413 body");
-    assert_eq!(body["code"], "content_too_large");
-    let message = body["message"].as_str().expect("message string");
-    assert!(
-        message.contains("commit.max_body_bytes"),
-        "413 guidance should name the commit-body limit, got: {message}"
-    );
 
     server.abort();
 }
@@ -1945,7 +1887,6 @@ fn test_config(root: &Path, writer_id: &str) -> ServerConfig {
         min_publish_interval_ms: 0,
         max_upload_bytes: 256 * 1024 * 1024,
         max_download_bytes: 256 * 1024 * 1024,
-        max_commit_body_bytes: 8 * 1024 * 1024,
         max_concurrent_uploads: 8,
         max_concurrent_downloads: 16,
         max_concurrent_maintenance: loonfs::DEFAULT_MAX_CONCURRENT_MAINTENANCE,
@@ -1988,6 +1929,7 @@ async fn write_file_bytes(
             behavior: DestinationBehavior::Replace,
             commit_id: Some(CommitId::parse(commit_id).expect("valid test commit id")),
             message: None,
+            expected_revision_no: None,
         },
     )
     .await

@@ -72,7 +72,7 @@ pub(crate) mod mutation_split_support {
     use futures::stream::BoxStream;
     use loonfs_api::{
         sha256_digest,
-        v0::{CommitDelta, CommitOp as ApiCommitOp, CommitRequest as ApiCommitRequest},
+        v0::{CommitOp as ApiCommitOp, CommitRequest as ApiCommitRequest},
         AbsolutePath, ChangeSeq, CommitId, ContentRef, ContentRefKind, DestinationBehavior,
         DisplayName, InodeId, NameKey, NamespaceId,
     };
@@ -298,6 +298,7 @@ pub(crate) mod mutation_split_support {
                 absolute_path: AbsolutePath::parse(absolute_path).expect("path"),
                 content_ref: content.content_ref,
                 behavior,
+                expected_revision_no: None,
             },
             context,
         )
@@ -367,39 +368,35 @@ pub(crate) mod mutation_split_support {
             .await
     }
 
-    pub(crate) async fn latest_binding_for_child_from_change_feed<S: ObjectStore + ?Sized>(
+    /// Reads the child's active parent binding, with the generation identity
+    /// (`bind_seq`, `bind_delta_index`) a `BindingIs` precondition pins. The
+    /// change feed reports semantic events without delta positions, so tests
+    /// capture the observed binding from the metadata view like the embedded
+    /// planner does.
+    pub(crate) async fn current_binding_for_child<S: ObjectStore + ?Sized>(
         store: &S,
         namespace_id: &NamespaceId,
         target_child_inode_id: InodeId,
     ) -> BindingIdentity {
-        list_changes_after(store, namespace_id, ChangeSeq(0))
+        let context = read_context(store, namespace_id).await;
+        let engine = namespace_engine(store, namespace_id, &mutation_context());
+        let view = engine
+            .load_grep_view(&context)
             .await
-            .expect("change feed")
-            .changes
-            .into_iter()
-            .flat_map(|change| {
-                change
-                    .deltas
-                    .into_iter()
-                    .filter_map(move |delta| match delta {
-                        CommitDelta::BindDirentry {
-                            delta_index,
-                            parent_inode_id,
-                            name_key,
-                            child_inode_id,
-                            ..
-                        } if child_inode_id == target_child_inode_id => Some(BindingIdentity {
-                            parent_inode_id,
-                            name_key,
-                            child_inode_id,
-                            bind_seq: change.seq,
-                            bind_delta_index: delta_index,
-                        }),
-                        _ => None,
-                    })
-            })
-            .max_by_key(|binding| (binding.bind_seq, binding.bind_delta_index))
-            .expect("binding exists in change feed")
+            .expect("load metadata view");
+        let binding = view
+            .grep_session()
+            .current_parent_binding_for_child(target_child_inode_id)
+            .await
+            .expect("read current binding")
+            .expect("binding exists");
+        BindingIdentity {
+            parent_inode_id: binding.parent_inode_id,
+            name_key: binding.name_key,
+            child_inode_id: binding.child_inode_id,
+            bind_seq: binding.bind_seq,
+            bind_delta_index: binding.bind_delta_index,
+        }
     }
 
     #[derive(Debug)]

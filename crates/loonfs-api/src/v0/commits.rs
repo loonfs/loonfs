@@ -1,19 +1,20 @@
-//! Explicit-commit and change-feed shapes for the v0 HTTP API: commit
-//! requests with preconditions and semantic operations, the materialized
-//! deltas those commits produce, and the ordered change feed that exposes
-//! them. Path-oriented convenience operations live in [`super::operations`].
+//! The engine's commit vocabulary and the change-feed shapes for the v0
+//! HTTP API: commit requests with preconditions and semantic operations
+//! (the internal IR path operations compile into), and the ordered feed of
+//! semantic filesystem events those commits produce. Path-oriented
+//! operations live in [`super::operations`].
 
-use super::ValidatedContentToken;
 use crate::{
     ChangeSeq, CommitId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, NamespaceId,
     RevisionNo,
 };
 use serde::{Deserialize, Serialize};
 
-/// Explicit semantic commit request.
+/// Explicit semantic commit request: one commit id, optional preconditions,
+/// and multiple ordered operations.
 ///
-/// Use this lower-level shape when you need one commit id, optional
-/// preconditions, and multiple ordered operations.
+/// This is the engine's internal mutation vocabulary — path operations
+/// compile into it during planning. It is not a stable wire surface.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct CommitRequest {
@@ -27,22 +28,6 @@ pub struct CommitRequest {
     /// Optional human-readable note.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
-}
-
-/// Transport wrapper for submitting an explicit semantic commit.
-///
-/// The flattened commit fields preserve the original bare request shape,
-/// while `content_tokens` carries transport-only preparation proofs that do
-/// not participate in the semantic commit fingerprint.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct CommitSubmissionRequest {
-    /// Semantic commit whose fields remain at the top level on the wire.
-    #[serde(flatten)]
-    pub commit: CommitRequest,
-    /// Proofs for new external content refs introduced by the commit.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub content_tokens: Vec<ValidatedContentToken>,
 }
 
 /// Result of one committed mutation.
@@ -207,69 +192,38 @@ pub enum CommitPrecondition {
     },
 }
 
-/// Durable metadata fact exposed through the change feed.
+/// One semantic filesystem change inside a committed mutation.
 ///
-/// Sync and projection clients can apply deltas directly.
+/// Each event corresponds to one operation of the committed request, in
+/// request order. Events name inodes and their parent-directory bindings
+/// rather than full paths; a consumer that needs paths can stat the inode
+/// or maintain its own binding projection from this feed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum CommitDelta {
-    /// Announces a newly allocated inode and its immutable kind.
-    #[cfg_attr(feature = "openapi", schema(title = "CommitDeltaCreateInode"))]
-    CreateInode {
-        /// Zero-based request-operation position that produced this fact.
-        semantic_op_index: u32,
-        /// Stable ordering position of this fact within the commit.
-        delta_index: u32,
+pub enum FilesystemChange {
+    /// A file or directory was created.
+    #[cfg_attr(feature = "openapi", schema(title = "FilesystemChangeCreated"))]
+    Created {
         /// Newly allocated namespace-scoped inode identity.
         inode_id: InodeId,
         /// File-or-directory classification fixed at creation.
         inode_kind: InodeKind,
-    },
-    /// Announces a newly visible generation of a directory binding.
-    #[cfg_attr(feature = "openapi", schema(title = "CommitDeltaBindDirentry"))]
-    BindDirentry {
-        /// Zero-based request-operation position that produced this fact.
-        semantic_op_index: u32,
-        /// Stable ordering position and binding identity within the commit.
-        delta_index: u32,
-        /// Directory receiving the binding.
+        /// Directory the new entry was bound under.
         parent_inode_id: InodeId,
-        /// Policy-derived key used for uniqueness and lookup.
-        name_key: NameKey,
-        /// User-facing spelling retained for directory responses.
-        display_name: DisplayName,
-        /// Inode made reachable by the binding.
-        child_inode_id: InodeId,
+        /// User-facing spelling of the new entry.
+        name: DisplayName,
+        /// First revision number, for file creations.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        revision_no: Option<RevisionNo>,
+        /// Content of the first revision, for file creations.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content_ref: Option<ContentRef>,
     },
-    /// Announces retirement of one exact historical directory binding.
-    #[cfg_attr(feature = "openapi", schema(title = "CommitDeltaUnbindDirentry"))]
-    UnbindDirentry {
-        /// Zero-based request-operation position that produced this fact.
-        semantic_op_index: u32,
-        /// Stable ordering position of this unbind within the commit.
-        delta_index: u32,
-        /// Directory from which the binding was removed.
-        parent_inode_id: InodeId,
-        /// Canonical lookup key of the retired binding.
-        name_key: NameKey,
-        /// User-facing spelling the retired binding carried, so a feed
-        /// projection renders the deleted name without a second lookup.
-        display_name: DisplayName,
-        /// Child identity on the retired binding.
-        child_inode_id: InodeId,
-        /// Sequence that created the exact retired binding generation.
-        bind_seq: ChangeSeq,
-        /// Delta position that disambiguates the generation within `bind_seq`.
-        bind_delta_index: u32,
-    },
-    /// Announces publication of the next immutable content revision of a file.
-    #[cfg_attr(feature = "openapi", schema(title = "CommitDeltaAppendFileRevision"))]
-    AppendFileRevision {
-        /// Zero-based request-operation position that produced this fact.
-        semantic_op_index: u32,
-        /// Stable ordering position of this revision within the commit.
-        delta_index: u32,
+    /// A file received a new current revision — a put over an existing
+    /// file, or a revision restore (one durable fact for both).
+    #[cfg_attr(feature = "openapi", schema(title = "FilesystemChangeContentChanged"))]
+    ContentChanged {
         /// File inode whose history advanced.
         inode_id: InodeId,
         /// New monotonic position in that file's revision history.
@@ -277,42 +231,44 @@ pub enum CommitDelta {
         /// Immutable content published by the revision.
         content_ref: ContentRef,
     },
-    /// Announces a tombstone that hides one rooted subtree.
-    #[cfg_attr(feature = "openapi", schema(title = "CommitDeltaTombstoneSubtree"))]
-    TombstoneSubtree {
-        /// Zero-based request-operation position that produced this fact.
-        semantic_op_index: u32,
-        /// Stable ordering position and tombstone identity within the commit.
-        delta_index: u32,
-        /// Inode at the root of the newly hidden subtree.
-        root_inode_id: InodeId,
-        /// Directory that held the deleted binding, when known.
+    /// An inode moved to a new parent directory or name.
+    #[cfg_attr(feature = "openapi", schema(title = "FilesystemChangeMoved"))]
+    Moved {
+        /// Inode whose binding changed.
+        inode_id: InodeId,
+        /// Directory that held the old binding.
+        from_parent_inode_id: InodeId,
+        /// Spelling of the old binding.
+        from_name: DisplayName,
+        /// Directory holding the new binding.
+        to_parent_inode_id: InodeId,
+        /// Spelling of the new binding.
+        to_name: DisplayName,
+    },
+    /// A file or directory subtree was deleted. The enclosing change's
+    /// `seq` is the deletion generation an undelete request passes as
+    /// `deleted_at_seq`.
+    #[cfg_attr(feature = "openapi", schema(title = "FilesystemChangeDeleted"))]
+    Deleted {
+        /// Inode at the root of the deleted subtree.
+        inode_id: InodeId,
+        /// Directory that held the deleted binding, when the delete
+        /// recorded one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent_inode_id: Option<InodeId>,
-        /// Canonical key of the deleted binding, when known.
+        /// Spelling of the deleted binding, when the delete recorded one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        name_key: Option<NameKey>,
-        /// User-facing spelling of the deleted binding, when known.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        display_name: Option<DisplayName>,
+        name: Option<DisplayName>,
     },
-    /// Announces a compensating event that revokes one exact subtree tombstone.
-    #[cfg_attr(
-        feature = "openapi",
-        schema(title = "CommitDeltaRevokeSubtreeTombstone")
-    )]
-    RevokeSubtreeTombstone {
-        /// Zero-based request-operation position that produced this fact.
-        semantic_op_index: u32,
-        /// Stable ordering position of this revoke within the commit.
-        delta_index: u32,
-        /// Root inode governed by the targeted tombstone.
-        root_inode_id: InodeId,
-        /// The exact deletion generation this revoke cancels. Projections
-        /// must reduce with the target, never "whatever is newest".
-        target_seq: ChangeSeq,
-        /// Delta position that identifies the targeted deletion within `target_seq`.
-        target_delta_index: u32,
+    /// A deleted inode was recovered and re-bound.
+    #[cfg_attr(feature = "openapi", schema(title = "FilesystemChangeUndeleted"))]
+    Undeleted {
+        /// Recovered inode.
+        inode_id: InodeId,
+        /// Directory the recovered entry was bound under.
+        parent_inode_id: InodeId,
+        /// Spelling of the recovered binding.
+        name: DisplayName,
     },
 }
 
@@ -336,8 +292,9 @@ pub struct CommittedChange {
     /// Session id of the publishing session, disambiguating processes that
     /// share one writer label. Observational.
     pub writer_session_id: String,
-    /// Materialized metadata deltas.
-    pub deltas: Vec<CommitDelta>,
+    /// Semantic filesystem events, one per committed operation, in
+    /// request-operation order.
+    pub events: Vec<FilesystemChange>,
 }
 
 /// Change-feed response after a cursor.
@@ -359,32 +316,8 @@ pub struct ChangesResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::{CommitDelta, CommitOp, CommitPrecondition, CommitSubmissionRequest};
-    use crate::{ChangeSeq, CommitId, InodeId, InodeKind, NameKey};
-
-    #[test]
-    fn bare_commit_body_without_content_tokens_parses_as_submission() {
-        let body = br#"{
-            "commit_id":"commit-a",
-            "preconditions":[],
-            "ops":[{
-                "kind":"create_directory",
-                "parent_inode_id":1,
-                "display_name":"docs"
-            }],
-            "message":"existing body"
-        }"#;
-
-        let submission: CommitSubmissionRequest =
-            serde_json::from_slice(body).expect("parse pre-token commit body");
-
-        assert_eq!(
-            submission.commit.commit_id,
-            CommitId::parse("commit-a").expect("valid commit id")
-        );
-        assert_eq!(submission.commit.ops.len(), 1);
-        assert!(submission.content_tokens.is_empty());
-    }
+    use super::{CommitOp, CommitPrecondition, FilesystemChange};
+    use crate::{InodeId, InodeKind, NameKey};
 
     #[test]
     fn commit_precondition_name_key_serializes_as_plain_string() {
@@ -411,45 +344,80 @@ mod tests {
     }
 
     #[test]
-    fn commit_delta_name_key_serializes_as_plain_string() {
-        let delta = CommitDelta::BindDirentry {
-            semantic_op_index: 0,
-            delta_index: 1,
-            parent_inode_id: InodeId(1),
-            name_key: NameKey::parse("report.txt").expect("valid name key"),
-            display_name: crate::DisplayName::parse("Report.txt").expect("valid display name"),
-            child_inode_id: InodeId(2),
+    fn filesystem_change_events_use_snake_case_kind_tags() {
+        let sample_content_ref = crate::ContentRef {
+            kind: crate::ContentRefKind::WholeFileV0,
+            digest: "sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+                .to_owned(),
+            size_bytes: 5,
         };
 
-        assert_eq!(
-            serde_json::to_string(&delta).expect("serialize delta"),
-            r#"{"kind":"bind_direntry","semantic_op_index":0,"delta_index":1,"parent_inode_id":1,"name_key":"report.txt","display_name":"Report.txt","child_inode_id":2}"#
-        );
-
-        let unbind = CommitDelta::UnbindDirentry {
-            semantic_op_index: 0,
-            delta_index: 2,
+        let created = FilesystemChange::Created {
+            inode_id: InodeId(2),
+            inode_kind: InodeKind::Directory,
             parent_inode_id: InodeId(1),
-            name_key: NameKey::parse("report.txt").expect("valid name key"),
-            display_name: crate::DisplayName::parse("Report.txt").expect("valid display name"),
-            child_inode_id: InodeId(2),
-            bind_seq: ChangeSeq(7),
-            bind_delta_index: 1,
+            name: crate::DisplayName::parse("Docs").expect("valid display name"),
+            revision_no: None,
+            content_ref: None,
         };
         assert_eq!(
-            serde_json::to_string(&unbind).expect("serialize unbind delta"),
-            r#"{"kind":"unbind_direntry","semantic_op_index":0,"delta_index":2,"parent_inode_id":1,"name_key":"report.txt","display_name":"Report.txt","child_inode_id":2,"bind_seq":7,"bind_delta_index":1}"#
+            serde_json::to_string(&created).expect("serialize created event"),
+            r#"{"kind":"created","inode_id":2,"inode_kind":"dir","parent_inode_id":1,"name":"Docs"}"#
         );
 
-        let create_inode = CommitDelta::CreateInode {
-            semantic_op_index: 0,
-            delta_index: 0,
+        let created_file = FilesystemChange::Created {
             inode_id: InodeId(2),
             inode_kind: InodeKind::File,
+            parent_inode_id: InodeId(1),
+            name: crate::DisplayName::parse("a.txt").expect("valid display name"),
+            revision_no: Some(crate::RevisionNo(1)),
+            content_ref: Some(sample_content_ref.clone()),
         };
         assert_eq!(
-            serde_json::to_string(&create_inode).expect("serialize create inode"),
-            r#"{"kind":"create_inode","semantic_op_index":0,"delta_index":0,"inode_id":2,"inode_kind":"file"}"#
+            serde_json::to_string(&created_file).expect("serialize created file event"),
+            r#"{"kind":"created","inode_id":2,"inode_kind":"file","parent_inode_id":1,"name":"a.txt","revision_no":1,"content_ref":{"kind":"whole_file_v0","digest":"sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824","size_bytes":5}}"#
+        );
+
+        let content_changed = FilesystemChange::ContentChanged {
+            inode_id: InodeId(2),
+            revision_no: crate::RevisionNo(3),
+            content_ref: sample_content_ref,
+        };
+        assert_eq!(
+            serde_json::to_string(&content_changed).expect("serialize content changed event"),
+            r#"{"kind":"content_changed","inode_id":2,"revision_no":3,"content_ref":{"kind":"whole_file_v0","digest":"sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824","size_bytes":5}}"#
+        );
+
+        let moved = FilesystemChange::Moved {
+            inode_id: InodeId(2),
+            from_parent_inode_id: InodeId(1),
+            from_name: crate::DisplayName::parse("a.txt").expect("valid display name"),
+            to_parent_inode_id: InodeId(3),
+            to_name: crate::DisplayName::parse("b.txt").expect("valid display name"),
+        };
+        assert_eq!(
+            serde_json::to_string(&moved).expect("serialize moved event"),
+            r#"{"kind":"moved","inode_id":2,"from_parent_inode_id":1,"from_name":"a.txt","to_parent_inode_id":3,"to_name":"b.txt"}"#
+        );
+
+        let deleted = FilesystemChange::Deleted {
+            inode_id: InodeId(2),
+            parent_inode_id: Some(InodeId(1)),
+            name: Some(crate::DisplayName::parse("a.txt").expect("valid display name")),
+        };
+        assert_eq!(
+            serde_json::to_string(&deleted).expect("serialize deleted event"),
+            r#"{"kind":"deleted","inode_id":2,"parent_inode_id":1,"name":"a.txt"}"#
+        );
+
+        let undeleted = FilesystemChange::Undeleted {
+            inode_id: InodeId(2),
+            parent_inode_id: InodeId(1),
+            name: crate::DisplayName::parse("a.txt").expect("valid display name"),
+        };
+        assert_eq!(
+            serde_json::to_string(&undeleted).expect("serialize undeleted event"),
+            r#"{"kind":"undeleted","inode_id":2,"parent_inode_id":1,"name":"a.txt"}"#
         );
     }
 

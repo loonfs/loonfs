@@ -8,7 +8,7 @@ use loonfs::{
     CompleteUploadRequest, CompleteUploadResponse, ContentRef, CopyOptions,
     CreateCheckpointOptions, CreateCheckpointResponse, CreateDirectoryOptions,
     CreateNamespaceOptions, DeleteOptions, DirectoryPageCursor, ErrorCode, FsAdmin, FsReader,
-    FsWriter, FsWriterBuilder, InodeId, ListChangesOptions, MaintenanceStepOptions,
+    FsWriter, FsWriterBuilder, ListChangesOptions, MaintenanceStepOptions,
     MaintenanceStepResponse, MoveOptions, NamespaceId, NamespaceStatusResponse, PageRequest,
     PutFileOptions, RuntimeError, SharedObjectStore, UploadContentResponse, UploadId,
 };
@@ -160,17 +160,6 @@ impl TestRuntime {
     ) -> loonfs::Result<loonfs::ListFileRevisionsResponse> {
         self.reader
             .list_file_revisions_page(namespace_id, absolute_path, request)
-            .await
-    }
-
-    pub(crate) async fn list_file_revisions_by_inode_page(
-        &self,
-        namespace_id: &NamespaceId,
-        inode_id: InodeId,
-        request: PageRequest<loonfs::FileRevisionsPageCursor>,
-    ) -> loonfs::Result<loonfs::ListFileRevisionsResponse> {
-        self.reader
-            .list_file_revisions_by_inode_page(namespace_id, inode_id, request)
             .await
     }
 

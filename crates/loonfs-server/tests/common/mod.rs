@@ -72,7 +72,6 @@ pub(crate) fn test_config(
         min_publish_interval_ms: 0,
         max_upload_bytes: 256 * 1024 * 1024,
         max_download_bytes: 256 * 1024 * 1024,
-        max_commit_body_bytes: 8 * 1024 * 1024,
         max_concurrent_uploads: 8,
         max_concurrent_downloads: 16,
         max_concurrent_maintenance: loonfs::DEFAULT_MAX_CONCURRENT_MAINTENANCE,
@@ -86,10 +85,10 @@ pub(crate) mod http_split_support {
 
     use loonfs_api::{
         v0::{
-            BeginUploadRequest, CommitSubmissionRequest, CompleteUploadRequest,
-            CompleteUploadResponse, ValidatedContentToken,
+            BeginUploadRequest, CompleteUploadRequest, CompleteUploadResponse,
+            ValidatedContentToken,
         },
-        DestinationBehavior, NamespaceId,
+        DestinationBehavior, FilesystemOperationRequest, NamespaceId,
     };
     use loonfs_client::{Client, PutFileOptions};
 
@@ -122,22 +121,22 @@ pub(crate) mod http_split_support {
         )
     }
 
-    pub(crate) fn send_commit_submission(
+    pub(crate) fn send_filesystem_operation(
         server_url: &str,
         namespace_id: &NamespaceId,
-        request: &CommitSubmissionRequest,
+        request: &FilesystemOperationRequest,
     ) -> Result<ureq::Response, Box<ureq::Error>> {
-        send_commit_json(server_url, namespace_id, request)
+        send_filesystem_operation_json(server_url, namespace_id, request)
     }
 
-    pub(crate) fn send_commit_json(
+    pub(crate) fn send_filesystem_operation_json(
         server_url: &str,
         namespace_id: &NamespaceId,
         request: &impl serde::Serialize,
     ) -> Result<ureq::Response, Box<ureq::Error>> {
         raw_agent()
             .post(&format!(
-                "{server_url}/v0/namespaces/{namespace_id}/commits"
+                "{server_url}/v0/namespaces/{namespace_id}/filesystem/operations"
             ))
             .set("authorization", "Bearer test-token")
             .send_json(request)

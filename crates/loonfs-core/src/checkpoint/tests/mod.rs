@@ -140,6 +140,7 @@ pub(crate) async fn write_test_file<S: ObjectStore>(
                     absolute_path: AbsolutePath::parse(path).expect("path"),
                     content_ref,
                     behavior: DestinationBehavior::NoReplace,
+                    expected_revision_no: None,
                 },
                 vec![prepared],
             )],

@@ -299,6 +299,51 @@ fn embedded_profile_filesystem_flow_works_end_to_end() {
 }
 
 #[test]
+fn put_expected_revision_replaces_only_the_observed_revision() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+
+    let payload = harness.temp_dir.path().join("doc.txt");
+    fs::write(&payload, b"v1").expect("write payload");
+    assert_success(&harness.run(&["put", payload.to_str().expect("utf-8 path"), "/doc.txt"]));
+
+    // The guard implies --force: replacing the revision the caller observed
+    // needs no second flag.
+    fs::write(&payload, b"v2").expect("write payload");
+    let guarded = harness.run(&[
+        "--json",
+        "put",
+        payload.to_str().expect("utf-8 path"),
+        "/doc.txt",
+        "--expected-revision",
+        "1",
+    ]);
+    assert_success(&guarded);
+    let stat = harness.run(&["--json", "stat", "/doc.txt"]);
+    assert_success(&stat);
+    assert_eq!(json_data(&stat)["revision_no"], 2);
+
+    // A raced write fails instead of stacking on it: the file has moved on
+    // from revision 1, so the same guard now reports the stale revision.
+    fs::write(&payload, b"v3").expect("write payload");
+    let stale = harness.run(&[
+        "--json",
+        "put",
+        payload.to_str().expect("utf-8 path"),
+        "/doc.txt",
+        "--expected-revision",
+        "1",
+    ]);
+    assert_failure(&stale);
+    assert_eq!(json_error(&stale)["code"], "stale_revision");
+    let cat = harness.run(&["cat", "/doc.txt"]);
+    assert_success(&cat);
+    assert_eq!(cat.stdout, b"v2");
+}
+
+#[test]
 fn concurrent_embedded_puts_land_or_report_the_fence() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");
@@ -526,7 +571,7 @@ fn trash_lists_recoverable_deletions_with_their_handles() {
 }
 
 #[test]
-fn human_output_shows_dates_writers_and_delta_names() {
+fn human_output_shows_dates_writers_and_event_names() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");
     assert_success(&harness.run(&["namespace", "create", "demo"]));
@@ -545,11 +590,11 @@ fn human_output_shows_dates_writers_and_delta_names() {
     assert_success(&changes);
     let feed = stdout_string(&changes);
     assert!(
-        feed.contains("SEQ\tDATE\tWRITER\tDELTAS\tMESSAGE"),
+        feed.contains("SEQ\tDATE\tWRITER\tEVENTS\tMESSAGE"),
         "{feed}"
     );
-    assert!(feed.contains("bind 'Report.PDF'"), "{feed}");
-    assert!(feed.contains("unbind 'Report.PDF'"), "{feed}");
+    assert!(feed.contains("create 'Report.PDF'"), "{feed}");
+    assert!(feed.contains("delete 'Report.PDF'"), "{feed}");
     // Dates render as UTC wall-clock, not raw milliseconds.
     assert!(feed.contains("Z\t"), "{feed}");
 
@@ -1981,7 +2026,7 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
             .as_str()
             .expect("json string")
             .starts_with("c_"));
-        assert!(!listed[1]["deltas"]
+        assert!(!listed[1]["events"]
             .as_array()
             .expect("json array")
             .is_empty());

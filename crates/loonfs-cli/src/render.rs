@@ -62,38 +62,35 @@ fn format_utc_ms(unix_ms: u64) -> String {
     format!("{year:04}-{month:02}-{day:02} {hh:02}:{mm:02}:{ss:02}Z")
 }
 
-/// Compact human descriptor for one feed delta, now that deltas carry the
-/// names a person typed.
-fn delta_descriptor(delta: &loonfs_api::v0::CommitDelta) -> String {
-    use loonfs_api::v0::CommitDelta;
-    match delta {
-        CommitDelta::CreateInode { inode_id, .. } => format!("inode {inode_id}"),
-        CommitDelta::BindDirentry { display_name, .. } => format!("bind '{display_name}'"),
-        CommitDelta::UnbindDirentry { display_name, .. } => {
-            format!("unbind '{display_name}'")
-        }
-        CommitDelta::AppendFileRevision { revision_no, .. } => {
-            format!("revision #{}", revision_no.0)
-        }
-        CommitDelta::TombstoneSubtree { root_inode_id, .. } => {
-            format!("delete inode {root_inode_id}")
-        }
-        CommitDelta::RevokeSubtreeTombstone {
-            root_inode_id,
-            target_seq,
+/// Compact human descriptor for one semantic feed event.
+fn event_descriptor(event: &loonfs_api::v0::FilesystemChange) -> String {
+    use loonfs_api::v0::FilesystemChange;
+    match event {
+        FilesystemChange::Created { name, .. } => format!("create '{name}'"),
+        FilesystemChange::ContentChanged {
+            inode_id,
+            revision_no,
             ..
-        } => format!("undelete inode {root_inode_id}@{}", target_seq.0),
+        } => format!("write inode {inode_id} rev #{}", revision_no.0),
+        FilesystemChange::Moved {
+            from_name, to_name, ..
+        } => format!("move '{from_name}' -> '{to_name}'"),
+        FilesystemChange::Deleted { inode_id, name, .. } => match name {
+            Some(name) => format!("delete '{name}'"),
+            None => format!("delete inode {inode_id}"),
+        },
+        FilesystemChange::Undeleted { name, .. } => format!("undelete '{name}'"),
     }
 }
 
-fn delta_summary(deltas: &[loonfs_api::v0::CommitDelta]) -> String {
+fn event_summary(events: &[loonfs_api::v0::FilesystemChange]) -> String {
     const SHOWN: usize = 3;
-    if deltas.is_empty() {
+    if events.is_empty() {
         return "-".to_owned();
     }
-    let mut shown: Vec<String> = deltas.iter().take(SHOWN).map(delta_descriptor).collect();
-    if deltas.len() > SHOWN {
-        shown.push(format!("+{} more", deltas.len() - SHOWN));
+    let mut shown: Vec<String> = events.iter().take(SHOWN).map(event_descriptor).collect();
+    if events.len() > SHOWN {
+        shown.push(format!("+{} more", events.len() - SHOWN));
     }
     shown.join("; ")
 }
@@ -342,7 +339,7 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
                     "changes for {} after seq {} (through seq {})",
                     response.namespace_id, response.after_seq.0, response.through_seq.0
                 ),
-                "SEQ\tDATE\tWRITER\tDELTAS\tMESSAGE".to_owned(),
+                "SEQ\tDATE\tWRITER\tEVENTS\tMESSAGE".to_owned(),
             ];
             for change in &response.changes {
                 lines.push(format!(
@@ -350,7 +347,7 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
                     change.seq.0,
                     format_utc_ms(change.committed_at_ms),
                     change.writer_id,
-                    delta_summary(&change.deltas),
+                    event_summary(&change.events),
                     change.message.as_deref().unwrap_or("-")
                 ));
             }

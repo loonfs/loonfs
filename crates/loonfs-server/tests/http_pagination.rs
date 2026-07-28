@@ -5,9 +5,8 @@ mod common;
 use common::http_split_support::*;
 use common::start_server;
 use loonfs_api::{
-    v0::{CommitDelta, CommitOp, CommitRequest as ApiCommitRequest, CommitSubmissionRequest},
-    ApiError, ChangeSeq, CommitId, DestinationBehavior, InodeId, ListPathEntriesResponse,
-    RevisionNo,
+    v0::FilesystemChange, ApiError, ChangeSeq, CommitId, DestinationBehavior,
+    ListPathEntriesResponse, RevisionNo,
 };
 use loonfs_client::{
     ClientError, CreateDirectoryOptions, MutationOptions, NamespacePath, PutFileOptions,
@@ -204,7 +203,7 @@ async fn http_client_listing_preserves_canonical_name_key_order() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
+async fn http_restore_revision_appends_new_head_and_reports_change() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
@@ -221,54 +220,35 @@ async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
         .await
         .expect("create namespace");
 
-    let first = stage_uploaded_content(&harness.client, &namespace, b"first bytes\n").await;
-    let first_content_ref = first.content_ref.clone();
     harness
         .client
-        .commit_operations(
-            &namespace,
-            &CommitSubmissionRequest {
-                commit: ApiCommitRequest {
-                    commit_id: CommitId::parse("req-restore-create").expect("valid commit id"),
-                    preconditions: Vec::new(),
-                    ops: vec![CommitOp::CreateFile {
-                        parent_inode_id: InodeId(1),
-                        display_name: loonfs_api::DisplayName::parse("restore.txt")
-                            .expect("valid display name"),
-                        content_ref: first_content_ref.clone(),
-                    }],
-                    message: None,
-                },
-                content_tokens: vec![validated_content_token(&first)],
+        .put_file_bytes(
+            &target,
+            b"first bytes\n",
+            &PutFileOptions {
+                commit_id: Some(CommitId::parse("req-restore-create").expect("valid commit id")),
+                ..PutFileOptions::default()
             },
         )
         .await
         .expect("create file");
-    let inode_id = harness
+    let created = harness
         .client
         .stat_path(&target)
         .await
-        .expect("stat created file")
-        .inode_id;
+        .expect("stat created file");
+    let inode_id = created.inode_id;
+    let first_content_ref = created.content_ref.expect("created file content ref");
 
-    let second = stage_uploaded_content(&harness.client, &namespace, b"second bytes\n").await;
-    let second_content_ref = second.content_ref.clone();
     let replace = harness
         .client
-        .commit_operations(
-            &namespace,
-            &CommitSubmissionRequest {
-                commit: ApiCommitRequest {
-                    commit_id: CommitId::parse("req-restore-replace").expect("valid commit id"),
-                    preconditions: Vec::new(),
-                    ops: vec![CommitOp::ReplaceFile {
-                        inode_id,
-                        base_revision_no: RevisionNo(1),
-                        content_ref: second_content_ref.clone(),
-                    }],
-                    message: None,
-                },
-                content_tokens: vec![validated_content_token(&second)],
+        .put_file_bytes(
+            &target,
+            b"second bytes\n",
+            &PutFileOptions {
+                behavior: DestinationBehavior::Replace,
+                commit_id: Some(CommitId::parse("req-restore-replace").expect("valid commit id")),
+                ..PutFileOptions::default()
             },
         )
         .await
@@ -277,20 +257,12 @@ async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
 
     let restore = harness
         .client
-        .commit_operations(
-            &namespace,
-            &CommitSubmissionRequest {
-                commit: ApiCommitRequest {
-                    commit_id: CommitId::parse("req-restore-restore").expect("valid commit id"),
-                    preconditions: Vec::new(),
-                    ops: vec![CommitOp::RestoreRevision {
-                        inode_id,
-                        source_revision_no: RevisionNo(1),
-                        base_revision_no: RevisionNo(2),
-                    }],
-                    message: Some("restore revision".to_owned()),
-                },
-                content_tokens: Vec::new(),
+        .restore_file_revision(
+            &target,
+            RevisionNo(1),
+            &MutationOptions {
+                commit_id: Some(CommitId::parse("req-restore-restore").expect("valid commit id")),
+                message: Some("restore revision".to_owned()),
             },
         )
         .await
@@ -321,15 +293,16 @@ async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
         changes.changes[2].commit_id,
         CommitId::parse("req-restore-restore").expect("valid commit id")
     );
+    // The restore reports as a content change: one durable fact for a put
+    // over an existing file and a revision restore alike.
+    assert_eq!(changes.changes[2].events.len(), 1);
     assert!(matches!(
-        &changes.changes[2].deltas[0],
-        CommitDelta::AppendFileRevision {
-            semantic_op_index: 0,
-            inode_id: delta_inode,
+        &changes.changes[2].events[0],
+        FilesystemChange::ContentChanged {
+            inode_id: event_inode,
             revision_no,
             content_ref,
-            ..
-        } if *delta_inode == inode_id
+        } if *event_inode == inode_id
             && *revision_no == RevisionNo(3)
             && *content_ref == first_content_ref
     ));
@@ -369,7 +342,7 @@ async fn http_commit_restore_revision_appends_new_head_and_reports_change() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_revision_routes_list_read_and_restore_by_path_and_inode() {
+async fn http_revision_routes_list_read_and_restore_by_path() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
@@ -428,20 +401,14 @@ async fn http_revision_routes_list_read_and_restore_by_path_and_inode() {
         harness.client.list_file_revisions_page(&target, None, None).await,
         Err(ClientError::Api { code, .. }) if code == "path_not_found"
     ));
-    let inode_revisions = harness
+    // The revision history follows the inode to its new binding.
+    let moved_revisions = harness
         .client
-        .list_file_revisions_by_inode_page(&namespace, entry.inode_id, None, None)
+        .list_file_revisions_page(&moved, None, None)
         .await
-        .expect("inode revisions");
-    assert_eq!(inode_revisions.revisions.len(), 2);
-    assert_eq!(
-        harness
-            .client
-            .get_file_revision_bytes_by_inode(&namespace, entry.inode_id, RevisionNo(2))
-            .await
-            .expect("read inode revision"),
-        b"two"
-    );
+        .expect("moved-path revisions");
+    assert_eq!(moved_revisions.inode_id, entry.inode_id);
+    assert_eq!(moved_revisions.revisions.len(), 2);
 
     harness
         .client
@@ -456,31 +423,12 @@ async fn http_revision_routes_list_read_and_restore_by_path_and_inode() {
             .expect("read restored file"),
         b"one"
     );
-    harness
-        .client
-        .restore_file_revision_by_inode(
-            &namespace,
-            entry.inode_id,
-            RevisionNo(2),
-            RevisionNo(3),
-            &CommitId::parse("c_restore_file_revision_0001").expect("valid commit id"),
-        )
-        .await
-        .expect("inode restore");
-    assert_eq!(
-        harness
-            .client
-            .get_file_bytes(&moved)
-            .await
-            .expect("read inode-restored file"),
-        b"two"
-    );
 
     harness.server.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_commit_restore_revision_missing_source_returns_revision_not_found() {
+async fn http_restore_revision_missing_source_returns_revision_not_found() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
@@ -496,54 +444,23 @@ async fn http_commit_restore_revision_missing_source_returns_revision_not_found(
         .await
         .expect("create namespace");
     let target = NamespacePath::parse("demo", "/restore.txt").expect("target");
-
-    let first = stage_uploaded_content(&harness.client, &namespace, b"first bytes\n").await;
     harness
         .client
-        .commit_operations(
-            &namespace,
-            &CommitSubmissionRequest {
-                commit: ApiCommitRequest {
-                    commit_id: CommitId::parse("req-restore-missing-source-create")
-                        .expect("valid commit id"),
-                    preconditions: Vec::new(),
-                    ops: vec![CommitOp::CreateFile {
-                        parent_inode_id: InodeId(1),
-                        display_name: loonfs_api::DisplayName::parse("restore.txt")
-                            .expect("valid display name"),
-                        content_ref: first.content_ref.clone(),
-                    }],
-                    message: None,
-                },
-                content_tokens: vec![validated_content_token(&first)],
-            },
-        )
+        .put_file_bytes(&target, b"first bytes\n", &PutFileOptions::default())
         .await
         .expect("create file");
-    let inode_id = harness
-        .client
-        .stat_path(&target)
-        .await
-        .expect("stat created file")
-        .inode_id;
 
     match harness
         .client
-        .commit_operations(
-            &namespace,
-            &CommitSubmissionRequest {
-                commit: ApiCommitRequest {
-                    commit_id: CommitId::parse("req-restore-missing-source-restore")
+        .restore_file_revision(
+            &target,
+            RevisionNo(99),
+            &MutationOptions {
+                commit_id: Some(
+                    CommitId::parse("req-restore-missing-source-restore")
                         .expect("valid commit id"),
-                    preconditions: Vec::new(),
-                    ops: vec![CommitOp::RestoreRevision {
-                        inode_id,
-                        source_revision_no: RevisionNo(99),
-                        base_revision_no: RevisionNo(1),
-                    }],
-                    message: None,
-                },
-                content_tokens: Vec::new(),
+                ),
+                message: None,
             },
         )
         .await

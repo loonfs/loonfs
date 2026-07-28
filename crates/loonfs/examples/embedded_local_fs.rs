@@ -37,6 +37,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 behavior: DestinationBehavior::Replace,
                 commit_id: None,
                 message: None,
+                expected_revision_no: None,
             },
         )
         .await?;

@@ -101,6 +101,7 @@ impl VisibilityHarness {
                 absolute_path: AbsolutePath::parse(path).expect("valid path"),
                 content_ref,
                 behavior,
+                expected_revision_no: None,
             },
             vec![prepared],
         ))

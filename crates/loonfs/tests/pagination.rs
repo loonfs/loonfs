@@ -95,6 +95,7 @@ fn file_revision_pages_merge_manifest_and_wal_tail_newest_first() {
         behavior: DestinationBehavior::Replace,
         commit_id: None,
         message: None,
+        expected_revision_no: None,
     };
     fs.put_file_bytes_blocking(&namespace_id, "/doc.txt", b"v1", PutFileOptions::default())
         .expect("put v1");
@@ -146,24 +147,6 @@ fn file_revision_pages_merge_manifest_and_wal_tail_newest_first() {
         vec![2, 1]
     );
     assert!(second.next_cursor.is_none());
-
-    let inode_page = block_on(fs.list_file_revisions_by_inode_page(
-        &namespace_id,
-        first.inode_id,
-        PageRequest {
-            limit,
-            cursor: None,
-        },
-    ))
-    .expect("inode revision page");
-    assert_eq!(
-        inode_page
-            .revisions
-            .iter()
-            .map(|revision| revision.revision_no.0)
-            .collect::<Vec<_>>(),
-        vec![4, 3]
-    );
 }
 
 #[test]

@@ -15,10 +15,9 @@ use loonfs_api::{
     CheckpointId, CreateCheckpointRequest, CreateCheckpointResponse, CreateNamespaceRequest,
     ErrorCode, ForkNamespaceRequest, MaintenanceStepRequest, MaintenanceStepResponse,
     ReleaseCheckpointResponse, FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_PUT,
-    LIMIT_COMMIT_MAX_BODY_BYTES, LIMIT_DOWNLOAD_MAX_CONCURRENT, LIMIT_DOWNLOAD_MAX_CONTENT_BYTES,
-    LIMIT_QUERY_GREP_DEFAULT, LIMIT_QUERY_GREP_MAX, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES,
-    LIMIT_QUERY_GREP_TAIL_BUDGET_FILES, LIMIT_UPLOAD_MAX_CONCURRENT,
-    LIMIT_UPLOAD_MAX_CONTENT_BYTES,
+    LIMIT_DOWNLOAD_MAX_CONCURRENT, LIMIT_DOWNLOAD_MAX_CONTENT_BYTES, LIMIT_QUERY_GREP_DEFAULT,
+    LIMIT_QUERY_GREP_MAX, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES, LIMIT_QUERY_GREP_TAIL_BUDGET_FILES,
+    LIMIT_UPLOAD_MAX_CONCURRENT, LIMIT_UPLOAD_MAX_CONTENT_BYTES,
 };
 
 #[derive(Debug, serde::Deserialize)]
@@ -70,10 +69,6 @@ pub(super) async fn capabilities(
     capabilities.limits.insert(
         LIMIT_DOWNLOAD_MAX_CONCURRENT.to_owned(),
         state.config.max_concurrent_downloads as u64,
-    );
-    capabilities.limits.insert(
-        LIMIT_COMMIT_MAX_BODY_BYTES.to_owned(),
-        state.config.max_commit_body_bytes,
     );
     if !state.config.grep.mode.serves_grep() {
         capabilities.features.remove(FEATURE_QUERY_GREP);

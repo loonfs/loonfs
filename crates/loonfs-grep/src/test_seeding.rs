@@ -49,6 +49,7 @@ pub(crate) async fn put_file<S: ObjectStore + Clone>(
                 absolute_path: AbsolutePath::parse(path).expect("path"),
                 content_ref,
                 behavior: DestinationBehavior::NoReplace,
+                expected_revision_no: None,
             },
             vec![prepared],
         )])

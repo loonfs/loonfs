@@ -4,10 +4,7 @@ mod common;
 
 use common::http_split_support::*;
 use common::start_server;
-use loonfs_api::{
-    v0::{CommitOp, CommitRequest as ApiCommitRequest, CommitSubmissionRequest},
-    CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeId,
-};
+use loonfs_api::{DeleteDirectoryBehavior, DestinationBehavior};
 use loonfs_client::{ClientError, DeleteOptions, MutationOptions, NamespacePath, PutFileOptions};
 use loonfs_test_support::http::raw_agent;
 use loonfs_test_support::ids::namespace_id;
@@ -129,7 +126,7 @@ async fn http_put_no_replace_and_copy_preserve_cli_semantics() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_commit_name_collision_reports_readable_error_message() {
+async fn http_name_collision_reports_readable_error_message() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
@@ -144,49 +141,24 @@ async fn http_commit_name_collision_reports_readable_error_message() {
         .create_namespace(&namespace)
         .await
         .expect("create namespace");
-
-    let completed = stage_uploaded_content(&harness.client, &namespace, b"taken bytes\n").await;
-    let content_ref = completed.content_ref.clone();
     harness
         .client
-        .commit_operations(
-            &namespace,
-            &CommitSubmissionRequest {
-                commit: ApiCommitRequest {
-                    commit_id: CommitId::parse("req-collision-create").expect("valid commit id"),
-                    preconditions: Vec::new(),
-                    ops: vec![CommitOp::CreateFile {
-                        parent_inode_id: InodeId(1),
-                        display_name: loonfs_api::DisplayName::parse("taken.txt")
-                            .expect("valid display name"),
-                        content_ref: content_ref.clone(),
-                    }],
-                    message: None,
-                },
-                content_tokens: vec![validated_content_token(&completed)],
-            },
+        .put_file_bytes(
+            &NamespacePath::parse("demo", "/taken.txt").expect("target"),
+            b"taken bytes\n",
+            &PutFileOptions::default(),
         )
         .await
         .expect("create file");
 
+    // A case-folded sibling collides with the stored name: the conflict
+    // must name both spellings so the caller can see why.
     match harness
         .client
-        .commit_operations(
-            &namespace,
-            &CommitSubmissionRequest {
-                commit: ApiCommitRequest {
-                    commit_id: CommitId::parse("req-collision-repeat").expect("valid commit id"),
-                    preconditions: Vec::new(),
-                    ops: vec![CommitOp::CreateFile {
-                        parent_inode_id: InodeId(1),
-                        display_name: loonfs_api::DisplayName::parse("taken.txt")
-                            .expect("valid display name"),
-                        content_ref,
-                    }],
-                    message: None,
-                },
-                content_tokens: vec![validated_content_token(&completed)],
-            },
+        .put_file_bytes(
+            &NamespacePath::parse("demo", "/TAKEN.txt").expect("colliding target"),
+            b"taken bytes\n",
+            &PutFileOptions::default(),
         )
         .await
     {
@@ -201,7 +173,8 @@ async fn http_commit_name_collision_reports_readable_error_message() {
             // The error body carries the human-readable Display message,
             // not Rust Debug syntax.
             assert!(
-                message.contains("collides with existing name `taken.txt`"),
+                message.contains("destination already exists at `/TAKEN.txt`")
+                    && message.contains("stored as `taken.txt`"),
                 "expected readable collision message, got {message:?}"
             );
             assert!(

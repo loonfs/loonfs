@@ -1,11 +1,11 @@
-//! The change feed: committed changes after a sequence number, with durable
-//! WAL deltas converted to API deltas.
+//! The change feed: committed changes after a sequence number, with each
+//! commit's durable WAL deltas mapped to semantic filesystem events.
 
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::namespace::catalog::load_namespace_catalog_entry;
 use crate::namespace::control::{load_namespace_head_control, read_wal_floor_seq_or_zero};
 use crate::wal::{load_validated_wal_chain, WalChainLoadRequest};
-use loonfs_api::v0::{ChangesResponse, CommitDelta, CommittedChange};
+use loonfs_api::v0::{ChangesResponse, CommittedChange, FilesystemChange};
 use loonfs_api::wire::control::NamespaceState;
 use loonfs_api::wire::wal::{WalCommitDelta, WalDelta};
 use loonfs_api::{ChangeSeq, EffectiveLimit, NamespaceId};
@@ -80,11 +80,7 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
                     message: record.message.clone(),
                     writer_id: record.writer_id.clone(),
                     writer_session_id: record.writer_session_id.clone(),
-                    deltas: record
-                        .deltas
-                        .iter()
-                        .map(commit_delta_from_wal)
-                        .collect::<Result<Vec<_>>>()?,
+                    events: events_from_wal_deltas(&record.deltas)?,
                 });
                 if changes.len() == limit.as_usize() {
                     through_seq = seq;
@@ -106,88 +102,140 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
     })
 }
 
-fn commit_delta_from_wal(delta: &WalCommitDelta) -> Result<CommitDelta> {
-    let semantic_op_index = delta.semantic_op_index;
-    Ok(match &delta.delta {
-        WalDelta::CreateInode {
-            delta_index,
+/// Maps one commit's ordered WAL deltas to semantic filesystem events, one
+/// per request operation.
+///
+/// The reducer materializes every operation as one fixed delta pattern
+/// (`materialize_validated_op`), so this match is total over well-formed
+/// commits; an unmatched pattern means the feed mapper and the reducer have
+/// drifted and is reported as a server error rather than guessed at.
+pub(crate) fn events_from_wal_deltas(
+    deltas: &[WalCommitDelta],
+) -> Result<Vec<FilesystemChange>> {
+    let mut events = Vec::new();
+    let mut group: Vec<&WalDelta> = Vec::new();
+    let mut group_op_index = None;
+    for delta in deltas {
+        if group_op_index != Some(delta.semantic_op_index) {
+            if group_op_index.is_some() {
+                events.push(event_from_op_deltas(&group)?);
+                group.clear();
+            }
+            group_op_index = Some(delta.semantic_op_index);
+        }
+        group.push(&delta.delta);
+    }
+    if group_op_index.is_some() {
+        events.push(event_from_op_deltas(&group)?);
+    }
+    Ok(events)
+}
+
+fn event_from_op_deltas(deltas: &[&WalDelta]) -> Result<FilesystemChange> {
+    Ok(match deltas {
+        // CreateDirectory: allocate + bind.
+        [WalDelta::CreateInode {
             inode_id,
             inode_kind,
-        } => CommitDelta::CreateInode {
-            semantic_op_index,
-            delta_index: *delta_index,
+            ..
+        }, WalDelta::BindDirentry {
+            parent_inode_id,
+            display_name,
+            child_inode_id,
+            ..
+        }] if child_inode_id == inode_id => FilesystemChange::Created {
             inode_id: *inode_id,
             inode_kind: *inode_kind,
+            parent_inode_id: *parent_inode_id,
+            name: display_name.clone(),
+            revision_no: None,
+            content_ref: None,
         },
-        WalDelta::BindDirentry {
-            delta_index,
+        // CreateFile (and copy-file): allocate + bind + first revision.
+        [WalDelta::CreateInode {
+            inode_id,
+            inode_kind,
+            ..
+        }, WalDelta::BindDirentry {
             parent_inode_id,
-            name_key,
             display_name,
             child_inode_id,
-        } => CommitDelta::BindDirentry {
-            semantic_op_index,
-            delta_index: *delta_index,
-            parent_inode_id: *parent_inode_id,
-            name_key: name_key.clone(),
-            display_name: display_name.clone(),
-            child_inode_id: *child_inode_id,
-        },
-        WalDelta::UnbindDirentry {
-            delta_index,
-            parent_inode_id,
-            name_key,
-            display_name,
-            child_inode_id,
-            bind_seq,
-            bind_delta_index,
-        } => CommitDelta::UnbindDirentry {
-            semantic_op_index,
-            delta_index: *delta_index,
-            parent_inode_id: *parent_inode_id,
-            name_key: name_key.clone(),
-            display_name: display_name.clone(),
-            child_inode_id: *child_inode_id,
-            bind_seq: *bind_seq,
-            bind_delta_index: *bind_delta_index,
-        },
-        WalDelta::AppendFileRevision {
-            delta_index,
+            ..
+        }, WalDelta::AppendFileRevision {
+            inode_id: revision_inode_id,
+            revision_no,
+            content_ref,
+            ..
+        }] if child_inode_id == inode_id && revision_inode_id == inode_id => {
+            FilesystemChange::Created {
+                inode_id: *inode_id,
+                inode_kind: *inode_kind,
+                parent_inode_id: *parent_inode_id,
+                name: display_name.clone(),
+                revision_no: Some(*revision_no),
+                content_ref: Some(content_ref.clone()),
+            }
+        }
+        // ReplaceFile or RestoreRevision: one durable fact for both.
+        [WalDelta::AppendFileRevision {
             inode_id,
             revision_no,
             content_ref,
-        } => CommitDelta::AppendFileRevision {
-            semantic_op_index,
-            delta_index: *delta_index,
+            ..
+        }] => FilesystemChange::ContentChanged {
             inode_id: *inode_id,
             revision_no: *revision_no,
             content_ref: content_ref.clone(),
         },
-        WalDelta::TombstoneSubtree {
-            delta_index,
+        // Rename: retire the old binding, publish the new one.
+        [WalDelta::UnbindDirentry {
+            parent_inode_id: from_parent_inode_id,
+            display_name: from_name,
+            child_inode_id,
+            ..
+        }, WalDelta::BindDirentry {
+            parent_inode_id: to_parent_inode_id,
+            display_name: to_name,
+            child_inode_id: bound_inode_id,
+            ..
+        }] if child_inode_id == bound_inode_id => FilesystemChange::Moved {
+            inode_id: *child_inode_id,
+            from_parent_inode_id: *from_parent_inode_id,
+            from_name: from_name.clone(),
+            to_parent_inode_id: *to_parent_inode_id,
+            to_name: to_name.clone(),
+        },
+        // DeleteFile / DeleteSubtree: retire the binding, hide the subtree.
+        [WalDelta::UnbindDirentry {
+            child_inode_id, ..
+        }, WalDelta::TombstoneSubtree {
             root_inode_id,
             parent_inode_id,
-            name_key,
             display_name,
-        } => CommitDelta::TombstoneSubtree {
-            semantic_op_index,
-            delta_index: *delta_index,
-            root_inode_id: *root_inode_id,
+            ..
+        }] if child_inode_id == root_inode_id => FilesystemChange::Deleted {
+            inode_id: *root_inode_id,
             parent_inode_id: *parent_inode_id,
-            name_key: name_key.clone(),
-            display_name: display_name.clone(),
+            name: display_name.clone(),
         },
-        WalDelta::RevokeSubtreeTombstone {
-            delta_index,
-            root_inode_id,
-            target_seq,
-            target_delta_index,
-        } => CommitDelta::RevokeSubtreeTombstone {
-            semantic_op_index,
-            delta_index: *delta_index,
-            root_inode_id: *root_inode_id,
-            target_seq: *target_seq,
-            target_delta_index: *target_delta_index,
+        // Undelete: revoke the exact deletion generation, re-bind the root.
+        [WalDelta::RevokeSubtreeTombstone { root_inode_id, .. }, WalDelta::BindDirentry {
+            parent_inode_id,
+            display_name,
+            child_inode_id,
+            ..
+        }] if root_inode_id == child_inode_id => FilesystemChange::Undeleted {
+            inode_id: *root_inode_id,
+            parent_inode_id: *parent_inode_id,
+            name: display_name.clone(),
         },
+        other => {
+            return Err(CoreError::Internal(format!(
+                "change feed cannot map a committed operation's delta \
+                 pattern ({} deltas); the feed mapper and the commit \
+                 reducer have drifted",
+                other.len()
+            )))
+        }
     })
 }

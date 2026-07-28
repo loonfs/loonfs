@@ -914,7 +914,7 @@
     "/v0/namespaces/{namespace}/changes": {
       "get": {
         "tags": [
-          "commits"
+          "filesystem"
         ],
         "summary": "List changes after a sequence",
         "description": "Returns committed changes from the write-ahead log. Callers can use this feed to keep another projection synchronized with WAL history.",
@@ -993,119 +993,6 @@
           },
           "410": {
             "description": "Namespace deleted",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/v0/namespaces/{namespace}/commits": {
-      "post": {
-        "tags": [
-          "commits"
-        ],
-        "summary": "Commit operations",
-        "description": "Applies an explicit semantic commit containing ordered inode-level operations and optional preconditions. Use this for advanced cases that require inode-specificity, preconditions, or batch transactions.",
-        "operationId": "commit_operations",
-        "parameters": [
-          {
-            "name": "namespace",
-            "in": "path",
-            "description": "Namespace id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/CommitSubmissionRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Commit accepted",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/CommitResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid commit request",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Namespace not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Commit conflict",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "410": {
-            "description": "Namespace deleted",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "413": {
-            "description": "Commit body exceeds the advertised `commit.max_body_bytes` limit",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "Commit unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -1792,333 +1679,6 @@
         }
       }
     },
-    "/v0/namespaces/{namespace}/inodes/{inode_id}/revisions": {
-      "get": {
-        "tags": [
-          "inodes"
-        ],
-        "summary": "List file revisions by inode",
-        "description": "Returns revisions for a file inode, independent of the file's current path or later renames.",
-        "operationId": "list_file_revisions_by_inode",
-        "parameters": [
-          {
-            "name": "namespace",
-            "in": "path",
-            "description": "Namespace id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "inode_id",
-            "in": "path",
-            "description": "File inode id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "limit",
-            "in": "query",
-            "description": "Maximum page size",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "cursor",
-            "in": "query",
-            "description": "Opaque file-revisions page cursor",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "File revisions",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ListFileRevisionsResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid inode id",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Namespace or inode not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "410": {
-            "description": "Namespace deleted",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/v0/namespaces/{namespace}/inodes/{inode_id}/revisions/{revision_no}/content": {
-      "get": {
-        "tags": [
-          "inodes"
-        ],
-        "summary": "Read file revision by inode",
-        "description": "Returns bytes for one retained file revision by inode id and revision number.",
-        "operationId": "get_file_revision_bytes_by_inode",
-        "parameters": [
-          {
-            "name": "namespace",
-            "in": "path",
-            "description": "Namespace id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "inode_id",
-            "in": "path",
-            "description": "File inode id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "revision_no",
-            "in": "path",
-            "description": "File revision number",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Revision bytes",
-            "content": {
-              "application/octet-stream": {
-                "schema": {
-                  "type": "array",
-                  "items": {
-                    "type": "integer",
-                    "format": "int32",
-                    "minimum": 0
-                  }
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid inode id or revision",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Namespace, inode, or revision not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "410": {
-            "description": "Namespace deleted",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "413": {
-            "description": "Content exceeds the advertised `download.max_content_bytes` limit",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "The server is at its concurrent content-read limit; retry shortly",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/v0/namespaces/{namespace}/inodes/{inode_id}/revisions/{source_revision_no}/restore": {
-      "post": {
-        "tags": [
-          "inodes"
-        ],
-        "summary": "Restore file revision by inode",
-        "description": "Appends a new current revision to a file inode using bytes from an older retained revision. The request includes the caller's expected current revision for race safety.",
-        "operationId": "restore_file_revision_by_inode",
-        "parameters": [
-          {
-            "name": "namespace",
-            "in": "path",
-            "description": "Namespace id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "inode_id",
-            "in": "path",
-            "description": "File inode id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "source_revision_no",
-            "in": "path",
-            "description": "Revision number to restore",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/RestoreFileRevisionRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Restore commit response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/CommitResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid inode id, revision, or request",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Namespace, inode, or revision not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Commit conflict",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "410": {
-            "description": "Namespace deleted",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/v0/namespaces/{namespace}/query/grep": {
       "post": {
         "tags": [
@@ -2571,24 +2131,6 @@
         "type": "string",
         "description": "Validated complete absolute namespace path, serialized as a plain string."
       },
-      "AdvanceRetentionResponse": {
-        "type": "object",
-        "description": "Result of advancing the retention floor.",
-        "required": [
-          "namespace_id",
-          "retention_floor_seq"
-        ],
-        "properties": {
-          "namespace_id": {
-            "$ref": "#/components/schemas/NamespaceId",
-            "description": "Namespace whose retention floor changed."
-          },
-          "retention_floor_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
-            "description": "New minimum sequence for incremental replay."
-          }
-        }
-      },
       "ApiError": {
         "type": "object",
         "description": "HTTP error body used by LoonFS APIs.",
@@ -2884,736 +2426,9 @@
         "type": "string",
         "description": "Durable checkpoint identifier.\n\nA checkpoint is a durable bookmark to a namespace manifest version."
       },
-      "CommitDelta": {
-        "oneOf": [
-          {
-            "type": "object",
-            "title": "CommitDeltaCreateInode",
-            "description": "Announces a newly allocated inode and its immutable kind.",
-            "required": [
-              "semantic_op_index",
-              "delta_index",
-              "inode_id",
-              "inode_kind",
-              "kind"
-            ],
-            "properties": {
-              "delta_index": {
-                "type": "integer",
-                "format": "int32",
-                "description": "Stable ordering position of this fact within the commit.",
-                "minimum": 0
-              },
-              "inode_id": {
-                "$ref": "#/components/schemas/InodeId",
-                "description": "Newly allocated namespace-scoped inode identity."
-              },
-              "inode_kind": {
-                "$ref": "#/components/schemas/InodeKind",
-                "description": "File-or-directory classification fixed at creation."
-              },
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "create_inode"
-                ]
-              },
-              "semantic_op_index": {
-                "type": "integer",
-                "format": "int32",
-                "description": "Zero-based request-operation position that produced this fact.",
-                "minimum": 0
-              }
-            }
-          },
-          {
-            "type": "object",
-            "title": "CommitDeltaBindDirentry",
-            "description": "Announces a newly visible generation of a directory binding.",
-            "required": [
-              "semantic_op_index",
-              "delta_index",
-              "parent_inode_id",
-              "name_key",
-              "display_name",
-              "child_inode_id",
-              "kind"
-            ],
-            "properties": {
-              "child_inode_id": {
-                "$ref": "#/components/schemas/InodeId",
-                "description": "Inode made reachable by the binding."
-              },
-              "delta_index": {
-                "type": "integer",
-                "format": "int32",
-                "description": "Stable ordering position and binding identity within the commit.",
-                "minimum": 0
-              },
-              "display_name": {
-                "$ref": "#/components/schemas/DisplayName",
-                "description": "User-facing spelling retained for directory responses."
-              },
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "bind_direntry"
-                ]
-              },
-              "name_key": {
-                "$ref": "#/components/schemas/NameKey",
-                "description": "Policy-derived key used for uniqueness and lookup."
-              },
-              "parent_inode_id": {
-                "$ref": "#/components/schemas/InodeId",
-                "description": "Directory receiving the binding."
-              },
-              "semantic_op_index": {
-                "type": "integer",
-                "format": "int32",
-                "description": "Zero-based request-operation position that produced this fact.",
-                "minimum": 0
-              }
-            }
-          },
-          {
-            "type": "object",
-            "title": "CommitDeltaUnbindDirentry",
-            "description": "Announces retirement of one exact historical directory binding.",
-            "required": [
-              "semantic_op_index",
-              "delta_index",
-              "parent_inode_id",
-              "name_key",
-              "display_name",
-              "child_inode_id",
-              "bind_seq",
-              "bind_delta_index",
-              "kind"
-            ],
-            "properties": {
-              "bind_delta_index": {
-                "type": "integer",
-                "format": "int32",
-                "description": "Delta position that disambiguates the generation within `bind_seq`.",
-                "minimum": 0
-              },
-              "bind_seq": {
-                "$ref": "#/components/schemas/ChangeSeq",
-                "description": "Sequence that created the exact retired binding generation."
-              },
-              "child_inode_id": {
-                "$ref": "#/components/schemas/InodeId",
-                "description": "Child identity on the retired binding."
-              },
-              "delta_index": {
-                "type": "integer",
-                "format": "int32",
-                "description": "Stable ordering position of this unbind within the commit.",
-                "minimum": 0
-              },
-              "display_name": {
-                "$ref": "#/components/schemas/DisplayName",
-                "description": "User-facing spelling the retired binding carried, so a feed\nprojection renders the deleted name without a second lookup."
-              },
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "unbind_direntry"
-                ]
-              },
-              "name_key": {
-                "$ref": "#/components/schemas/NameKey",
-                "description": "Canonical lookup key of the retired binding."
-              },
-              "parent_inode_id": {
-                "$ref": "#/components/schemas/InodeId",
-                "description": "Directory from which the binding was removed."
-              },
-              "semantic_op_index": {
-                "type": "integer",
-                "format": "int32",
-                "description": "Zero-based request-operation position that produced this fact.",
-                "minimum": 0
-              }
-            }
-          },
-          {
-            "type": "object",
-            "title": "CommitDeltaAppendFileRevision",
-            "description": "Announces publication of the next immutable content revision of a file.",
-            "required": [
-              "semantic_op_index",
-              "delta_index",
-              "inode_id",
-              "revision_no",
-              "content_ref",
-              "kind"
-            ],
-            "properties": {
-              "content_ref": {
-                "$ref": "#/components/schemas/ContentRef",
-                "description": "Immutable content published by the revision."
-              },
-              "delta_index": {
-                "type": "integer",
-                "format": "int32",
-                "description": "Stable ordering position of this revision within the commit.",
-                "minimum": 0
-              },
-              "inode_id": {
-                "$ref": "#/components/schemas/InodeId",
-                "description": "File inode whose history advanced."
-              },
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "append_file_revision"
-                ]
-              },
-              "revision_no": {
-                "$ref": "#/components/schemas/RevisionNo",
-                "description": "New monotonic position in that file's revision history."
-              },
-              "semantic_op_index": {
-                "type": "integer",
-                "format": "int32",
-                "description": "Zero-based request-operation position that produced this fact.",
-                "minimum": 0
-              }
-            }
-          },
-          {
-            "type": "object",
-            "title": "CommitDeltaTombstoneSubtree",
-            "description": "Announces a tombstone that hides one rooted subtree.",
-            "required": [
-              "semantic_op_index",
-              "delta_index",
-              "root_inode_id",
-              "kind"
-            ],
-            "properties": {
-              "delta_index": {
-                "type": "integer",
-                "format": "int32",
-                "description": "Stable ordering position and tombstone identity within the commit.",
-                "minimum": 0
-              },
-              "display_name": {
-                "oneOf": [
-                  {
-                    "type": "null"
-                  },
-                  {
-                    "$ref": "#/components/schemas/DisplayName",
-                    "description": "User-facing spelling of the deleted binding, when known."
-                  }
-                ]
-              },
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "tombstone_subtree"
-                ]
-              },
-              "name_key": {
-                "oneOf": [
-                  {
-                    "type": "null"
-                  },
-                  {
-                    "$ref": "#/components/schemas/NameKey",
-                    "description": "Canonical key of the deleted binding, when known."
-                  }
-                ]
-              },
-              "parent_inode_id": {
-                "oneOf": [
-                  {
-                    "type": "null"
-                  },
-                  {
-                    "$ref": "#/components/schemas/InodeId",
-                    "description": "Directory that held the deleted binding, when known."
-                  }
-                ]
-              },
-              "root_inode_id": {
-                "$ref": "#/components/schemas/InodeId",
-                "description": "Inode at the root of the newly hidden subtree."
-              },
-              "semantic_op_index": {
-                "type": "integer",
-                "format": "int32",
-                "description": "Zero-based request-operation position that produced this fact.",
-                "minimum": 0
-              }
-            }
-          },
-          {
-            "type": "object",
-            "title": "CommitDeltaRevokeSubtreeTombstone",
-            "description": "Announces a compensating event that revokes one exact subtree tombstone.",
-            "required": [
-              "semantic_op_index",
-              "delta_index",
-              "root_inode_id",
-              "target_seq",
-              "target_delta_index",
-              "kind"
-            ],
-            "properties": {
-              "delta_index": {
-                "type": "integer",
-                "format": "int32",
-                "description": "Stable ordering position of this revoke within the commit.",
-                "minimum": 0
-              },
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "revoke_subtree_tombstone"
-                ]
-              },
-              "root_inode_id": {
-                "$ref": "#/components/schemas/InodeId",
-                "description": "Root inode governed by the targeted tombstone."
-              },
-              "semantic_op_index": {
-                "type": "integer",
-                "format": "int32",
-                "description": "Zero-based request-operation position that produced this fact.",
-                "minimum": 0
-              },
-              "target_delta_index": {
-                "type": "integer",
-                "format": "int32",
-                "description": "Delta position that identifies the targeted deletion within `target_seq`.",
-                "minimum": 0
-              },
-              "target_seq": {
-                "$ref": "#/components/schemas/ChangeSeq",
-                "description": "The exact deletion generation this revoke cancels. Projections\nmust reduce with the target, never \"whatever is newest\"."
-              }
-            }
-          }
-        ],
-        "description": "Durable metadata fact exposed through the change feed.\n\nSync and projection clients can apply deltas directly."
-      },
       "CommitId": {
         "type": "string",
         "description": "Client-supplied idempotency key for one logical commit.\n\nReuse the same `CommitId` when retrying the same request."
-      },
-      "CommitOp": {
-        "oneOf": [
-          {
-            "type": "object",
-            "title": "CommitOpCreateDirectory",
-            "description": "Create a directory under a parent inode.",
-            "required": [
-              "parent_inode_id",
-              "display_name",
-              "kind"
-            ],
-            "properties": {
-              "display_name": {
-                "$ref": "#/components/schemas/DisplayName",
-                "description": "Requested child spelling, whose derived name key must be absent."
-              },
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "create_directory"
-                ]
-              },
-              "parent_inode_id": {
-                "$ref": "#/components/schemas/InodeId",
-                "description": "Visible directory that will own the new binding."
-              }
-            }
-          },
-          {
-            "type": "object",
-            "title": "CommitOpCreateFile",
-            "description": "Create a file under a parent inode.",
-            "required": [
-              "parent_inode_id",
-              "display_name",
-              "content_ref",
-              "kind"
-            ],
-            "properties": {
-              "content_ref": {
-                "$ref": "#/components/schemas/ContentRef",
-                "description": "Immutable initial bytes, which must have valid preparation proof before publication."
-              },
-              "display_name": {
-                "$ref": "#/components/schemas/DisplayName",
-                "description": "Requested child spelling, whose derived name key must be absent."
-              },
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "create_file"
-                ]
-              },
-              "parent_inode_id": {
-                "$ref": "#/components/schemas/InodeId",
-                "description": "Visible directory that will own the new binding."
-              }
-            }
-          },
-          {
-            "type": "object",
-            "title": "CommitOpReplaceFile",
-            "description": "Append a new revision to an existing file.",
-            "required": [
-              "inode_id",
-              "base_revision_no",
-              "content_ref",
-              "kind"
-            ],
-            "properties": {
-              "base_revision_no": {
-                "$ref": "#/components/schemas/RevisionNo",
-                "description": "Revision the caller observed; the operation conflicts if it is no longer current."
-              },
-              "content_ref": {
-                "$ref": "#/components/schemas/ContentRef",
-                "description": "Immutable replacement bytes, which must have valid preparation proof before publication."
-              },
-              "inode_id": {
-                "$ref": "#/components/schemas/InodeId",
-                "description": "Visible file inode receiving a new revision."
-              },
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "replace_file"
-                ]
-              }
-            }
-          },
-          {
-            "type": "object",
-            "title": "CommitOpRestoreRevision",
-            "description": "Restore a prior revision as a new current revision.",
-            "required": [
-              "inode_id",
-              "source_revision_no",
-              "base_revision_no",
-              "kind"
-            ],
-            "properties": {
-              "base_revision_no": {
-                "$ref": "#/components/schemas/RevisionNo",
-                "description": "Current revision the caller observed; concurrent advancement causes a conflict."
-              },
-              "inode_id": {
-                "$ref": "#/components/schemas/InodeId",
-                "description": "Visible file inode receiving the restored content as a new revision."
-              },
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "restore_revision"
-                ]
-              },
-              "source_revision_no": {
-                "$ref": "#/components/schemas/RevisionNo",
-                "description": "Existing historical revision whose content is copied forward."
-              }
-            }
-          },
-          {
-            "type": "object",
-            "title": "CommitOpDeleteFile",
-            "description": "Delete a file inode.",
-            "required": [
-              "inode_id",
-              "kind"
-            ],
-            "properties": {
-              "inode_id": {
-                "$ref": "#/components/schemas/InodeId",
-                "description": "Visible file whose exact parent binding and subtree visibility are validated."
-              },
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "delete_file"
-                ]
-              }
-            }
-          },
-          {
-            "type": "object",
-            "title": "CommitOpRename",
-            "description": "Rename or move an inode.",
-            "required": [
-              "inode_id",
-              "new_parent_inode_id",
-              "new_display_name",
-              "kind"
-            ],
-            "properties": {
-              "inode_id": {
-                "$ref": "#/components/schemas/InodeId",
-                "description": "Visible inode whose current binding will be replaced."
-              },
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "rename"
-                ]
-              },
-              "new_display_name": {
-                "$ref": "#/components/schemas/DisplayName",
-                "description": "Destination spelling, whose derived key must not name another child."
-              },
-              "new_parent_inode_id": {
-                "$ref": "#/components/schemas/InodeId",
-                "description": "Visible destination directory, which may equal the current parent."
-              }
-            }
-          },
-          {
-            "type": "object",
-            "title": "CommitOpDeleteSubtree",
-            "description": "Delete a directory subtree.",
-            "required": [
-              "root_inode_id",
-              "kind"
-            ],
-            "properties": {
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "delete_subtree"
-                ]
-              },
-              "root_inode_id": {
-                "$ref": "#/components/schemas/InodeId",
-                "description": "Visible non-root directory whose entire reachable subtree becomes tombstoned."
-              }
-            }
-          },
-          {
-            "type": "object",
-            "title": "CommitOpUndelete",
-            "description": "Recover a deleted file or subtree: revoke the deletion recorded at\n`deleted_at_seq` (the delete's committed sequence, reported by the\ndelete and by the change feed) and re-bind the inode under a visible\nparent directory. Scoping recovery to the observed generation keeps\na stale request from cancelling a later deletion of the same inode.",
-            "required": [
-              "inode_id",
-              "deleted_at_seq",
-              "parent_inode_id",
-              "display_name",
-              "kind"
-            ],
-            "properties": {
-              "deleted_at_seq": {
-                "$ref": "#/components/schemas/ChangeSeq",
-                "description": "Observed deletion sequence, which prevents cancelling a newer tombstone generation."
-              },
-              "display_name": {
-                "$ref": "#/components/schemas/DisplayName",
-                "description": "Recovered child spelling, whose derived key must be absent."
-              },
-              "inode_id": {
-                "$ref": "#/components/schemas/InodeId",
-                "description": "Deleted inode to make reachable again."
-              },
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "undelete"
-                ]
-              },
-              "parent_inode_id": {
-                "$ref": "#/components/schemas/InodeId",
-                "description": "Visible directory that will own the recovered binding."
-              }
-            }
-          }
-        ],
-        "description": "Semantic operation inside a commit request."
-      },
-      "CommitPrecondition": {
-        "oneOf": [
-          {
-            "type": "object",
-            "title": "CommitPreconditionInodeRevisionIs",
-            "description": "File inode is still at this revision.",
-            "required": [
-              "inode_id",
-              "revision_no",
-              "kind"
-            ],
-            "properties": {
-              "inode_id": {
-                "$ref": "#/components/schemas/InodeId",
-                "description": "File inode whose visible revision is tested."
-              },
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "inode_revision_is"
-                ]
-              },
-              "revision_no": {
-                "$ref": "#/components/schemas/RevisionNo",
-                "description": "Exact revision required at commit evaluation time."
-              }
-            }
-          },
-          {
-            "type": "object",
-            "title": "CommitPreconditionAncestorsNotSubtreeDeleted",
-            "description": "Inode ancestors have not been subtree-deleted.",
-            "required": [
-              "inode_id",
-              "kind"
-            ],
-            "properties": {
-              "inode_id": {
-                "$ref": "#/components/schemas/InodeId",
-                "description": "Inode whose ancestor chain must contain no active tombstone."
-              },
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "ancestors_not_subtree_deleted"
-                ]
-              }
-            }
-          },
-          {
-            "type": "object",
-            "title": "CommitPreconditionChildNameAbsent",
-            "description": "Directory child name is still absent.",
-            "required": [
-              "parent_inode_id",
-              "name_key",
-              "kind"
-            ],
-            "properties": {
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "child_name_absent"
-                ]
-              },
-              "name_key": {
-                "$ref": "#/components/schemas/NameKey",
-                "description": "Canonical lookup key that must not have an active binding."
-              },
-              "parent_inode_id": {
-                "$ref": "#/components/schemas/InodeId",
-                "description": "Visible directory in which absence is tested."
-              }
-            }
-          },
-          {
-            "type": "object",
-            "title": "CommitPreconditionBindingIs",
-            "description": "Directory binding is still exactly the binding the caller saw.",
-            "required": [
-              "parent_inode_id",
-              "name_key",
-              "child_inode_id",
-              "bind_seq",
-              "bind_delta_index",
-              "kind"
-            ],
-            "properties": {
-              "bind_delta_index": {
-                "type": "integer",
-                "format": "int32",
-                "description": "Delta position that disambiguates the generation within `bind_seq`.",
-                "minimum": 0
-              },
-              "bind_seq": {
-                "$ref": "#/components/schemas/ChangeSeq",
-                "description": "Sequence that created the exact observed binding generation."
-              },
-              "child_inode_id": {
-                "$ref": "#/components/schemas/InodeId",
-                "description": "Child identity expected at that name."
-              },
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "binding_is"
-                ]
-              },
-              "name_key": {
-                "$ref": "#/components/schemas/NameKey",
-                "description": "Canonical name key of the observed binding."
-              },
-              "parent_inode_id": {
-                "$ref": "#/components/schemas/InodeId",
-                "description": "Directory expected to own the observed binding."
-              }
-            }
-          },
-          {
-            "type": "object",
-            "title": "CommitPreconditionDirectoryEmpty",
-            "description": "Directory is still empty.",
-            "required": [
-              "inode_id",
-              "kind"
-            ],
-            "properties": {
-              "inode_id": {
-                "$ref": "#/components/schemas/InodeId",
-                "description": "Visible directory that must have no active child bindings."
-              },
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "directory_empty"
-                ]
-              }
-            }
-          }
-        ],
-        "description": "Race check evaluated before a commit is accepted."
-      },
-      "CommitRequest": {
-        "type": "object",
-        "description": "Explicit semantic commit request.\n\nUse this lower-level shape when you need one commit id, optional\npreconditions, and multiple ordered operations.",
-        "required": [
-          "commit_id",
-          "ops"
-        ],
-        "properties": {
-          "commit_id": {
-            "$ref": "#/components/schemas/CommitId",
-            "description": "Client idempotency key for this logical commit."
-          },
-          "message": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Optional human-readable note."
-          },
-          "ops": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/CommitOp"
-            },
-            "description": "Ordered semantic operations."
-          },
-          "preconditions": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/CommitPrecondition"
-            },
-            "description": "Optional race checks evaluated before mutation."
-          }
-        }
       },
       "CommitResponse": {
         "type": "object",
@@ -3638,27 +2453,6 @@
           }
         }
       },
-      "CommitSubmissionRequest": {
-        "allOf": [
-          {
-            "$ref": "#/components/schemas/CommitRequest",
-            "description": "Semantic commit whose fields remain at the top level on the wire."
-          },
-          {
-            "type": "object",
-            "properties": {
-              "content_tokens": {
-                "type": "array",
-                "items": {
-                  "$ref": "#/components/schemas/ValidatedContentToken"
-                },
-                "description": "Proofs for new external content refs introduced by the commit."
-              }
-            }
-          }
-        ],
-        "description": "Transport wrapper for submitting an explicit semantic commit.\n\nThe flattened commit fields preserve the original bare request shape,\nwhile `content_tokens` carries transport-only preparation proofs that do\nnot participate in the semantic commit fingerprint."
-      },
       "CommittedChange": {
         "type": "object",
         "description": "One committed change in namespace order.",
@@ -3668,7 +2462,7 @@
           "committed_at_ms",
           "writer_id",
           "writer_session_id",
-          "deltas"
+          "events"
         ],
         "properties": {
           "commit_id": {
@@ -3681,12 +2475,12 @@
             "description": "Wall-clock stamp of the commit, in Unix milliseconds.\nObservational: `seq` is the order.",
             "minimum": 0
           },
-          "deltas": {
+          "events": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/CommitDelta"
+              "$ref": "#/components/schemas/FilesystemChange"
             },
-            "description": "Materialized metadata deltas."
+            "description": "Semantic filesystem events, one per committed operation, in\nrequest-operation order."
           },
           "message": {
             "type": [
@@ -4133,6 +2927,215 @@
           }
         }
       },
+      "FilesystemChange": {
+        "oneOf": [
+          {
+            "type": "object",
+            "title": "FilesystemChangeCreated",
+            "description": "A file or directory was created.",
+            "required": [
+              "inode_id",
+              "inode_kind",
+              "parent_inode_id",
+              "name",
+              "kind"
+            ],
+            "properties": {
+              "content_ref": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/ContentRef",
+                    "description": "Content of the first revision, for file creations."
+                  }
+                ]
+              },
+              "inode_id": {
+                "$ref": "#/components/schemas/InodeId",
+                "description": "Newly allocated namespace-scoped inode identity."
+              },
+              "inode_kind": {
+                "$ref": "#/components/schemas/InodeKind",
+                "description": "File-or-directory classification fixed at creation."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "created"
+                ]
+              },
+              "name": {
+                "$ref": "#/components/schemas/DisplayName",
+                "description": "User-facing spelling of the new entry."
+              },
+              "parent_inode_id": {
+                "$ref": "#/components/schemas/InodeId",
+                "description": "Directory the new entry was bound under."
+              },
+              "revision_no": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/RevisionNo",
+                    "description": "First revision number, for file creations."
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "title": "FilesystemChangeContentChanged",
+            "description": "A file received a new current revision — a put over an existing\nfile, or a revision restore (one durable fact for both).",
+            "required": [
+              "inode_id",
+              "revision_no",
+              "content_ref",
+              "kind"
+            ],
+            "properties": {
+              "content_ref": {
+                "$ref": "#/components/schemas/ContentRef",
+                "description": "Immutable content published by the revision."
+              },
+              "inode_id": {
+                "$ref": "#/components/schemas/InodeId",
+                "description": "File inode whose history advanced."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "content_changed"
+                ]
+              },
+              "revision_no": {
+                "$ref": "#/components/schemas/RevisionNo",
+                "description": "New monotonic position in that file's revision history."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "title": "FilesystemChangeMoved",
+            "description": "An inode moved to a new parent directory or name.",
+            "required": [
+              "inode_id",
+              "from_parent_inode_id",
+              "from_name",
+              "to_parent_inode_id",
+              "to_name",
+              "kind"
+            ],
+            "properties": {
+              "from_name": {
+                "$ref": "#/components/schemas/DisplayName",
+                "description": "Spelling of the old binding."
+              },
+              "from_parent_inode_id": {
+                "$ref": "#/components/schemas/InodeId",
+                "description": "Directory that held the old binding."
+              },
+              "inode_id": {
+                "$ref": "#/components/schemas/InodeId",
+                "description": "Inode whose binding changed."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "moved"
+                ]
+              },
+              "to_name": {
+                "$ref": "#/components/schemas/DisplayName",
+                "description": "Spelling of the new binding."
+              },
+              "to_parent_inode_id": {
+                "$ref": "#/components/schemas/InodeId",
+                "description": "Directory holding the new binding."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "title": "FilesystemChangeDeleted",
+            "description": "A file or directory subtree was deleted. The enclosing change's\n`seq` is the deletion generation an undelete request passes as\n`deleted_at_seq`.",
+            "required": [
+              "inode_id",
+              "kind"
+            ],
+            "properties": {
+              "inode_id": {
+                "$ref": "#/components/schemas/InodeId",
+                "description": "Inode at the root of the deleted subtree."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "deleted"
+                ]
+              },
+              "name": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/DisplayName",
+                    "description": "Spelling of the deleted binding, when the delete recorded one."
+                  }
+                ]
+              },
+              "parent_inode_id": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/InodeId",
+                    "description": "Directory that held the deleted binding, when the delete\nrecorded one."
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "title": "FilesystemChangeUndeleted",
+            "description": "A deleted inode was recovered and re-bound.",
+            "required": [
+              "inode_id",
+              "parent_inode_id",
+              "name",
+              "kind"
+            ],
+            "properties": {
+              "inode_id": {
+                "$ref": "#/components/schemas/InodeId",
+                "description": "Recovered inode."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "undeleted"
+                ]
+              },
+              "name": {
+                "$ref": "#/components/schemas/DisplayName",
+                "description": "Spelling of the recovered binding."
+              },
+              "parent_inode_id": {
+                "$ref": "#/components/schemas/InodeId",
+                "description": "Directory the recovered entry was bound under."
+              }
+            }
+          }
+        ],
+        "description": "One semantic filesystem change inside a committed mutation.\n\nEach event corresponds to one operation of the committed request, in\nrequest order. Events name inodes and their parent-directory bindings\nrather than full paths; a consumer that needs paths can stat the inode\nor maintain its own binding projection from this feed."
+      },
       "FilesystemOperation": {
         "oneOf": [
           {
@@ -4177,6 +3180,17 @@
               "content_ref": {
                 "$ref": "#/components/schemas/ContentRef",
                 "description": "Immutable bytes that must be covered by a valid preparation proof."
+              },
+              "expected_revision_no": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/RevisionNo",
+                    "description": "When set (with `replace` behavior), the put applies only while\nthe file's current revision is still this one; a raced write\nfails the request instead of silently stacking on it, and a\nmissing file answers `path_not_found`."
+                  }
+                ]
               },
               "kind": {
                 "type": "string",
@@ -4375,48 +3389,6 @@
           "operation": {
             "$ref": "#/components/schemas/FilesystemOperation",
             "description": "Operation to apply."
-          }
-        }
-      },
-      "FlushWalOutcome": {
-        "type": "string",
-        "description": "How one WAL flush satisfied its goal.",
-        "enum": [
-          "already_current",
-          "published",
-          "superseded"
-        ]
-      },
-      "FlushWalResponse": {
-        "type": "object",
-        "description": "Result of one WAL flush: how the metadata root covers the head.",
-        "required": [
-          "namespace_id",
-          "target_head_seq",
-          "manifest_id",
-          "manifest_head_seq",
-          "outcome"
-        ],
-        "properties": {
-          "manifest_head_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
-            "description": "Sequence covered by that manifest."
-          },
-          "manifest_id": {
-            "$ref": "#/components/schemas/ManifestId",
-            "description": "Manifest `metadata/root.json` references after the operation."
-          },
-          "namespace_id": {
-            "$ref": "#/components/schemas/NamespaceId",
-            "description": "Namespace whose WAL tail was flushed."
-          },
-          "outcome": {
-            "$ref": "#/components/schemas/FlushWalOutcome",
-            "description": "How the root came to cover the head."
-          },
-          "target_head_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
-            "description": "Head sequence the flush attempted to cover."
           }
         }
       },
@@ -5191,24 +4163,6 @@
           }
         }
       },
-      "RestoreFileRevisionRequest": {
-        "type": "object",
-        "description": "Request to restore a file revision by inode.",
-        "required": [
-          "commit_id",
-          "base_revision_no"
-        ],
-        "properties": {
-          "base_revision_no": {
-            "$ref": "#/components/schemas/RevisionNo",
-            "description": "Current revision the caller expects to replace."
-          },
-          "commit_id": {
-            "$ref": "#/components/schemas/CommitId",
-            "description": "Caller-supplied idempotency key."
-          }
-        }
-      },
       "RevisionNo": {
         "type": "integer",
         "format": "int64",
@@ -5437,16 +4391,8 @@
       "description": "Path-oriented filesystem APIs"
     },
     {
-      "name": "inodes",
-      "description": "Inode revision APIs"
-    },
-    {
       "name": "uploads",
       "description": "Upload session APIs"
-    },
-    {
-      "name": "commits",
-      "description": "Commit and change-feed APIs"
     },
     {
       "name": "admin",

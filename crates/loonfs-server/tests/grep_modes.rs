@@ -334,7 +334,6 @@ fn test_config(store_root: &Path, mode: GrepMode) -> ServerConfig {
         min_publish_interval_ms: 0,
         max_upload_bytes: 1024 * 1024,
         max_download_bytes: 1024 * 1024,
-        max_commit_body_bytes: 1024 * 1024,
         max_concurrent_uploads: 2,
         max_concurrent_downloads: 2,
         max_concurrent_maintenance: 2,

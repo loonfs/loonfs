@@ -5,11 +5,9 @@ mod common;
 use common::http_split_support::*;
 use common::start_server;
 use loonfs_api::{
-    v0::{
-        BeginUploadRequest, CommitDelta, CommitOp, CommitRequest as ApiCommitRequest,
-        CommitSubmissionRequest, CompleteUploadRequest,
-    },
-    ApiError, ChangeSeq, CommitId, ContentRef, InodeId,
+    v0::{BeginUploadRequest, CompleteUploadRequest, FilesystemChange},
+    AbsolutePath, ApiError, ChangeSeq, CommitId, CommitResponse, ContentRef, DestinationBehavior,
+    FilesystemOperation, FilesystemOperationRequest, InodeId, InodeKind, RevisionNo,
 };
 use loonfs_client::{ClientError, NamespacePath};
 use loonfs_test_support::http::raw_agent;
@@ -129,36 +127,33 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
     let completed = stage_uploaded_content(&harness.client, &namespace, file_bytes).await;
     let content_ref = completed.content_ref.clone();
 
-    let commit_request = CommitSubmissionRequest {
-        commit: ApiCommitRequest {
-            commit_id: CommitId::parse("req-phase-2a-create-file").expect("valid commit id"),
-            preconditions: Vec::new(),
-            ops: vec![CommitOp::CreateFile {
-                parent_inode_id: InodeId(1),
-                display_name: loonfs_api::DisplayName::parse("uploaded.txt")
-                    .expect("valid display name"),
-                content_ref: content_ref.clone(),
-            }],
-            message: Some("upload over http".to_owned()),
-        },
+    // The staged upload publishes through a put that references the
+    // uploaded ref with its validated content token.
+    let put_request = FilesystemOperationRequest {
+        commit_id: CommitId::parse("req-phase-2a-create-file").expect("valid commit id"),
+        message: Some("upload over http".to_owned()),
         content_tokens: vec![validated_content_token(&completed)],
+        operation: FilesystemOperation::PutFile {
+            path: AbsolutePath::parse("/uploaded.txt").expect("path"),
+            content_ref: content_ref.clone(),
+            behavior: DestinationBehavior::NoReplace,
+            expected_revision_no: None,
+        },
     };
-    let commit = harness
-        .client
-        .commit_operations(&namespace, &commit_request)
-        .await
-        .expect("commit uploaded file");
+    let send_put = |request: &FilesystemOperationRequest| {
+        let response = send_filesystem_operation(&harness.server_url, &namespace, request)
+            .expect("commit uploaded file");
+        serde_json::from_reader::<_, CommitResponse>(response.into_reader())
+            .expect("decode operation response")
+    };
+    let commit = send_put(&put_request);
     assert_eq!(
         commit.commit_id,
         CommitId::parse("req-phase-2a-create-file").expect("valid commit id")
     );
     assert_eq!(commit.committed_seq, ChangeSeq(1));
 
-    let repeated_commit = harness
-        .client
-        .commit_operations(&namespace, &commit_request)
-        .await
-        .expect("repeat commit");
+    let repeated_commit = send_put(&put_request);
     assert_eq!(repeated_commit, commit);
 
     let stat = harness
@@ -187,18 +182,21 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
     let change = &changes.changes[0];
     assert_eq!(change.seq, commit.committed_seq);
     assert_eq!(change.commit_id, commit.commit_id);
-    assert_eq!(change.commit_id, commit_request.commit.commit_id);
+    assert_eq!(change.commit_id, put_request.commit_id);
     assert_eq!(change.message.as_deref(), Some("upload over http"));
-    assert_eq!(change.deltas.len(), 3);
+    // One semantic event per request operation: the file creation with its
+    // binding and first revision.
+    assert_eq!(change.events.len(), 1);
     assert!(matches!(
-        &change.deltas[1],
-        CommitDelta::BindDirentry {
-            semantic_op_index: 0,
-            delta_index: 1,
-            name_key,
-            display_name,
-            ..
-        } if name_key.as_str() == "uploaded.txt" && display_name.as_str() == "uploaded.txt"
+        &change.events[0],
+        FilesystemChange::Created {
+            inode_id: InodeId(2),
+            inode_kind: InodeKind::File,
+            parent_inode_id: InodeId(1),
+            name,
+            revision_no: Some(RevisionNo(1)),
+            content_ref: Some(created_ref),
+        } if name.as_str() == "uploaded.txt" && *created_ref == content_ref
     ));
 
     let empty = harness

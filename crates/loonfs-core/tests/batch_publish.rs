@@ -11,7 +11,7 @@ use common::mutation_split_support::*;
 use common::namespace_engine;
 use futures::stream::BoxStream;
 use loonfs_api::{
-    v0::{CommitDelta, CommitOp as ApiCommitOp, CommitRequest as ApiCommitRequest},
+    v0::{CommitOp as ApiCommitOp, CommitRequest as ApiCommitRequest, FilesystemChange},
     wire::control::{decode_control_object, ControlObjectKind, HeadState, HeadStateEnvelope},
     wire::wal::{decode_wal_segment_envelope_zstd, WalDelta},
     AbsolutePath, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeId,
@@ -381,6 +381,7 @@ async fn batch_delete_then_recreate_of_a_durable_file_layers_over_cached_state()
                     absolute_path: AbsolutePath::parse("/docs/cycled.txt").expect("path"),
                     content_ref: staged.content_ref,
                     behavior: DestinationBehavior::NoReplace,
+                    expected_revision_no: None,
                 },
             )
             .await,
@@ -488,25 +489,17 @@ async fn batch_commit_writes_one_segment_and_expands_change_feed() {
         changes.changes[1].commit_id,
         CommitId::parse("req-batch-b").expect("valid commit id")
     );
-    assert_eq!(changes.changes[0].deltas.len(), 2);
+    assert_eq!(changes.changes[0].events.len(), 1);
     assert!(matches!(
-        &changes.changes[0].deltas[0],
-        CommitDelta::CreateInode {
-            semantic_op_index: 0,
-            delta_index: 0,
+        &changes.changes[0].events[0],
+        FilesystemChange::Created {
             inode_kind: InodeKind::Directory,
+            parent_inode_id: InodeId(1),
+            name,
+            revision_no: None,
+            content_ref: None,
             ..
-        }
-    ));
-    assert!(matches!(
-        &changes.changes[0].deltas[1],
-        CommitDelta::BindDirentry {
-            semantic_op_index: 0,
-            delta_index: 1,
-            name_key,
-            display_name,
-            ..
-        } if name_key.as_str() == "alpha" && display_name.as_str() == "alpha"
+        } if name.as_str() == "alpha"
     ));
 }
 
@@ -563,6 +556,7 @@ async fn ack_lost_head_cas_reports_unknown_outcome_and_replays_idempotently() {
         absolute_path: AbsolutePath::parse("/ack.txt").expect("path"),
         content_ref: content.content_ref.clone(),
         behavior: DestinationBehavior::NoReplace,
+        expected_revision_no: None,
     };
 
     // The CAS landed but its acknowledgment was lost: this must surface as
@@ -604,6 +598,7 @@ async fn retry_succeeds_after_wal_orphaned_by_stale_head_cas() {
         absolute_path: AbsolutePath::parse("/retry.txt").expect("path"),
         content_ref: content.content_ref,
         behavior: DestinationBehavior::NoReplace,
+        expected_revision_no: None,
     };
     let error = submit_intent_async(&store, &namespace_id, intent.clone(), &context)
         .await
@@ -711,6 +706,7 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
                     absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
                     content_ref: content.content_ref.clone(),
                     behavior: DestinationBehavior::NoReplace,
+                    expected_revision_no: None,
                 },
             )
             .await,
@@ -725,6 +721,7 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
                     absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
                     content_ref: content.content_ref.clone(),
                     behavior: DestinationBehavior::NoReplace,
+                    expected_revision_no: None,
                 },
             )
             .await,
@@ -820,6 +817,7 @@ async fn stale_head_cas_fails_rejections_decided_against_in_batch_state() {
                     absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
                     content_ref: content.content_ref.clone(),
                     behavior: DestinationBehavior::NoReplace,
+                    expected_revision_no: None,
                 },
             )
             .await,
@@ -832,6 +830,7 @@ async fn stale_head_cas_fails_rejections_decided_against_in_batch_state() {
                     absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
                     content_ref: content.content_ref.clone(),
                     behavior: DestinationBehavior::NoReplace,
+                    expected_revision_no: None,
                 },
             )
             .await,
@@ -1310,6 +1309,7 @@ async fn path_publishes_use_durable_path_commit_receipt_index() {
         absolute_path: AbsolutePath::parse("/same/path.txt").expect("path"),
         content_ref: content.content_ref.clone(),
         behavior: DestinationBehavior::NoReplace,
+        expected_revision_no: None,
     };
     let first = submit_intent_async(&store, &namespace_id, intent.clone(), &context)
         .await
@@ -1323,6 +1323,7 @@ async fn path_publishes_use_durable_path_commit_receipt_index() {
             absolute_path: AbsolutePath::parse("/same/path.txt").expect("path"),
             content_ref: content.content_ref.clone(),
             behavior: DestinationBehavior::NoReplace,
+            expected_revision_no: None,
         },
         &context,
     )
@@ -1583,6 +1584,7 @@ async fn idempotent_path_retry_returns_receipt_before_content_validation() {
                     absolute_path: AbsolutePath::parse("/docs/idempotent.txt").expect("path"),
                     content_ref: content.content_ref.clone(),
                     behavior: DestinationBehavior::NoReplace,
+                    expected_revision_no: None,
                 },
             )
             .await,
@@ -1609,6 +1611,7 @@ async fn idempotent_path_retry_returns_receipt_before_content_validation() {
                 absolute_path: AbsolutePath::parse("/docs/idempotent.txt").expect("path"),
                 content_ref: content.content_ref,
                 behavior: DestinationBehavior::NoReplace,
+                expected_revision_no: None,
             },
         )],
         &context,
