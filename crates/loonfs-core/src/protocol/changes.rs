@@ -109,9 +109,7 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
 /// (`materialize_validated_op`), so this match is total over well-formed
 /// commits; an unmatched pattern means the feed mapper and the reducer have
 /// drifted and is reported as a server error rather than guessed at.
-pub(crate) fn events_from_wal_deltas(
-    deltas: &[WalCommitDelta],
-) -> Result<Vec<FilesystemChange>> {
+pub(crate) fn events_from_wal_deltas(deltas: &[WalCommitDelta]) -> Result<Vec<FilesystemChange>> {
     let mut events = Vec::new();
     let mut group: Vec<&WalDelta> = Vec::new();
     let mut group_op_index = None;
@@ -206,9 +204,7 @@ fn event_from_op_deltas(deltas: &[&WalDelta]) -> Result<FilesystemChange> {
             to_name: to_name.clone(),
         },
         // DeleteFile / DeleteSubtree: retire the binding, hide the subtree.
-        [WalDelta::UnbindDirentry {
-            child_inode_id, ..
-        }, WalDelta::TombstoneSubtree {
+        [WalDelta::UnbindDirentry { child_inode_id, .. }, WalDelta::TombstoneSubtree {
             root_inode_id,
             parent_inode_id,
             display_name,

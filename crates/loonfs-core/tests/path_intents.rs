@@ -1448,8 +1448,7 @@ async fn path_move_writes_unbind_and_stale_binding_is_fails() {
     let file = resolve_path(&store, &namespace_id("demo"), "/docs/a.txt")
         .await
         .expect("resolve file");
-    let old_binding =
-        current_binding_for_child(&store, &namespace_id("demo"), file.inode_id).await;
+    let old_binding = current_binding_for_child(&store, &namespace_id("demo"), file.inode_id).await;
 
     move_path(
         &store,

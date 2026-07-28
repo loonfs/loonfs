@@ -457,8 +457,7 @@ async fn http_restore_revision_missing_source_returns_revision_not_found() {
             RevisionNo(99),
             &MutationOptions {
                 commit_id: Some(
-                    CommitId::parse("req-restore-missing-source-restore")
-                        .expect("valid commit id"),
+                    CommitId::parse("req-restore-missing-source-restore").expect("valid commit id"),
                 ),
                 message: None,
             },

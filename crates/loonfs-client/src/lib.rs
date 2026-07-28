@@ -853,7 +853,6 @@ impl Client {
             .await?;
         Ok(response)
     }
-
 }
 
 impl NamespacePath {
