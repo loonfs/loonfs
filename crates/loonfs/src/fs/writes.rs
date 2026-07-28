@@ -1,7 +1,8 @@
 //! [`FsWriter`]'s path mutations, commits, and the publication pipeline.
 
-use super::core::BackgroundStepClaim;
+use super::core::{BackgroundStepClaim, ReadCore, WriterBits};
 use crate::publish::{NamespaceMutationCandidate, PathMutationIntent, PreparedContent};
+use crate::publisher::PublisherRegistry;
 use crate::FsWriter;
 use crate::{
     ChangeSeq, CommitId, CommitRequest, CommitResponse, ContentRef, CopyOptions, CoreError,
@@ -9,8 +10,36 @@ use crate::{
     NamespaceId, PutFileOptions, RestoreRevisionOptions, RevisionNo, UndeleteOptions,
 };
 use crate::{Result, RuntimeError};
+use loonfs_core::NamespaceEngine;
+use std::sync::Arc;
 
 impl FsWriter {
+    /// A mutating engine under this writer's identity.
+    pub(crate) fn engine(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> NamespaceEngine<crate::SharedObjectStore> {
+        self.core.writer_engine(&self.bits.identity, namespace_id)
+    }
+
+    /// Drops everything this runtime caches for a namespace: the read
+    /// caches, and the rebuildable half of its publisher's publish state.
+    pub(crate) fn invalidate_namespace(&self, namespace_id: &NamespaceId) {
+        self.core.invalidate_namespace_read_cache(namespace_id);
+        self.publisher.invalidate_engine(namespace_id);
+    }
+
+    pub(crate) fn finish_namespace_mutation<T>(
+        &self,
+        namespace_id: &NamespaceId,
+        result: Result<T>,
+    ) -> Result<T> {
+        if super::should_invalidate_after_result(&result) {
+            self.invalidate_namespace(namespace_id);
+        }
+        result
+    }
+
     /// Writes file bytes to a path.
     ///
     /// The bytes become durable content first; metadata referencing them is
@@ -431,193 +460,204 @@ impl FsWriter {
         namespace_id: &NamespaceId,
         candidate: NamespaceMutationCandidate,
     ) -> Result<CommitResponse> {
-        self.core
-            .inner
-            .publisher
+        self.publisher
             .submit_candidate(namespace_id.clone(), candidate)
             .await
             .map_err(RuntimeError::Core)
     }
+}
 
-    /// Publishes already-classified candidates as one batch — one WAL
-    /// segment, one head compare-and-swap — through the namespace
-    /// publisher's own commit engine, and settles the runtime state the
-    /// batch produced: read caches, publish observer, maintenance.
-    ///
-    /// Only the publication service calls this: it owns the engine, and
-    /// borrowing it here keeps engine construction and locking in that one
-    /// place. Results match candidates in order.
-    pub(crate) async fn publish_batch_with_engine(
-        &self,
-        namespace_id: &NamespaceId,
-        engine: &mut loonfs_core::publish::NamespaceCommitEngine,
-        candidates: Vec<NamespaceMutationCandidate>,
-    ) -> Vec<Result<CommitResponse>> {
-        let batch_size = u64::try_from(candidates.len()).unwrap_or(u64::MAX);
-        let store = self.core.store();
-        let context = match self.core.mutation_context() {
-            Ok(context) => context,
-            Err(error) => return candidates.iter().map(|_| Err(error.clone())).collect(),
-        };
-        let cache_config = &self.core.inner.config.runtime_cache;
-        let tail_options = loonfs_core::publish::PublishTailOptions {
-            max_tail_rows: cache_config.max_cached_wal_tail_projection_rows,
-            max_tail_decoded_bytes: cache_config.max_cached_wal_tail_projection_decoded_bytes,
-        };
-        // Boxing erases the engine's deeply nested publish future; without
-        // it, callers awaiting a put or commit (CLI, server, embedding
-        // crates) exceed rustc's type-recursion depth.
-        let mut publish =
-            Box::pin(engine.publish_batch(&store, candidates, &context, &tail_options)).await;
-        if !self.core.control_cache_enabled() {
-            // Diagnostic mode: the publisher's engine outlives the publish
-            // even with caches off, so drop the tail projection it just
-            // built. Every publish then reads what a cold engine reads.
-            engine.invalidate();
-        }
-        {
-            let _span = tracing::info_span!(
-                "loonfs.phase",
-                phase = "batch_update_cache",
-                mode = self.core.inner.config.trace_mode.as_str(),
-                store_kind = self.core.inner.config.trace_store_kind.as_str(),
-                batch_size
-            )
-            .entered();
-            match publish.resulting_read_state.take() {
-                // A landed publish hands the caches exactly the state a
-                // rebuild would recompute; use it instead of dropping.
-                Some(state) => self.core.seed_namespace_read_cache(namespace_id, state),
-                None => {
-                    let runtime_results = publish
-                        .results
-                        .iter()
-                        .map(|result| result.clone().map_err(RuntimeError::Core))
-                        .collect::<Vec<_>>();
-                    self.core
-                        .invalidate_namespace_cache_after_batch(namespace_id, &runtime_results);
-                }
+/// Publishes already-classified candidates as one batch — one WAL
+/// segment, one head compare-and-swap — through the namespace
+/// publisher's own commit engine, and settles the runtime state the
+/// batch produced: read caches, publish observer, maintenance.
+///
+/// Only the publication service calls this: it owns the engine, and
+/// borrowing it here keeps engine construction and locking in that one
+/// place. `publisher` is the registry a scheduled maintenance step
+/// invalidates engines through; it is absent only for a publisher whose
+/// registry is already gone. Results match candidates in order.
+pub(crate) async fn publish_batch_with_engine(
+    core: &ReadCore,
+    writer: &Arc<WriterBits>,
+    publisher: Option<&PublisherRegistry>,
+    namespace_id: &NamespaceId,
+    engine: &mut loonfs_core::publish::NamespaceCommitEngine,
+    candidates: Vec<NamespaceMutationCandidate>,
+) -> Vec<Result<CommitResponse>> {
+    let batch_size = u64::try_from(candidates.len()).unwrap_or(u64::MAX);
+    let store = core.store();
+    let context = match writer.identity.mutation_context() {
+        Ok(context) => context,
+        Err(error) => return candidates.iter().map(|_| Err(error.clone())).collect(),
+    };
+    let cache_config = &core.inner.config.runtime_cache;
+    let tail_options = loonfs_core::publish::PublishTailOptions {
+        max_tail_rows: cache_config.max_cached_wal_tail_projection_rows,
+        max_tail_decoded_bytes: cache_config.max_cached_wal_tail_projection_decoded_bytes,
+    };
+    // Boxing erases the engine's deeply nested publish future; without
+    // it, callers awaiting a put or commit (CLI, server, embedding
+    // crates) exceed rustc's type-recursion depth.
+    let mut publish =
+        Box::pin(engine.publish_batch(&store, candidates, &context, &tail_options)).await;
+    if !core.control_cache_enabled() {
+        // Diagnostic mode: the publisher's engine outlives the publish
+        // even with caches off, so drop the tail projection it just
+        // built. Every publish then reads what a cold engine reads.
+        engine.invalidate();
+    }
+    {
+        let _span = tracing::info_span!(
+            "loonfs.phase",
+            phase = "batch_update_cache",
+            mode = core.trace_mode(),
+            store_kind = core.trace_store_kind(),
+            batch_size
+        )
+        .entered();
+        match publish.resulting_read_state.take() {
+            // A landed publish hands the caches exactly the state a
+            // rebuild would recompute; use it instead of dropping.
+            Some(state) => core.seed_namespace_read_cache(namespace_id, state),
+            None => {
+                let runtime_results = publish
+                    .results
+                    .iter()
+                    .map(|result| result.clone().map_err(RuntimeError::Core))
+                    .collect::<Vec<_>>();
+                core.invalidate_read_cache_after_batch(namespace_id, &runtime_results);
             }
         }
-        let wal_tail_segments = publish.wal_tail_segments;
-        let results = publish
-            .results
-            .into_iter()
-            .map(|result| result.map_err(RuntimeError::Core))
-            .collect::<Vec<_>>();
-        self.notify_publish_observer(namespace_id, &results);
-        self.maybe_auto_step_after_publish(namespace_id, wal_tail_segments);
-        results
     }
+    let wal_tail_segments = publish.wal_tail_segments;
+    let results = publish
+        .results
+        .into_iter()
+        .map(|result| result.map_err(RuntimeError::Core))
+        .collect::<Vec<_>>();
+    notify_publish_observer(writer, namespace_id, &results);
+    maybe_auto_step_after_publish(core, writer, publisher, namespace_id, wal_tail_segments);
+    results
+}
 
-    fn notify_publish_observer(
-        &self,
-        namespace_id: &NamespaceId,
-        results: &[Result<CommitResponse>],
-    ) {
-        let Some(observer) = &self.core.inner.publish_observer else {
-            return;
-        };
-        if let Some(committed_seq) = results
-            .iter()
-            .filter_map(|result| result.as_ref().ok())
-            .map(|response| response.committed_seq)
-            .max()
-        {
-            observer(namespace_id, committed_seq);
-        }
+fn notify_publish_observer(
+    writer: &WriterBits,
+    namespace_id: &NamespaceId,
+    results: &[Result<CommitResponse>],
+) {
+    let Some(observer) = &writer.publish_observer else {
+        return;
+    };
+    if let Some(committed_seq) = results
+        .iter()
+        .filter_map(|result| result.as_ref().ok())
+        .map(|response| response.committed_seq)
+        .max()
+    {
+        observer(namespace_id, committed_seq);
     }
+}
 
-    /// Schedules a maintenance step after a publish that observed the WAL
-    /// tail at or past the checkpoint threshold. Steps are spawned on the
-    /// handle's owning runtime — never on a hidden LoonFS runtime — so no
-    /// writer (and no server batch pipeline) waits behind a checkpoint or
-    /// base rebuild. The per-namespace singleflight claim dedupes concurrent
-    /// publishers and is released on every outcome, including step panics
-    /// and dropped tasks.
-    fn maybe_auto_step_after_publish(&self, namespace_id: &NamespaceId, wal_tail_segments: u64) {
-        let options = MaintenanceStepOptions::default();
-        if wal_tail_segments < options.max_wal_tail_segments {
-            return;
-        }
-        if !self.core.inner.background.try_claim(namespace_id) {
-            return;
-        }
-        let claim = BackgroundStepClaim {
-            fs: self.core.clone(),
-            namespace_id: namespace_id.clone(),
-        };
-        self.spawn_claimed_auto_maintenance(claim, options);
+/// Schedules a maintenance step after a publish that observed the WAL
+/// tail at or past the checkpoint threshold. Steps are spawned on the
+/// writer's owning runtime — never on a hidden LoonFS runtime — so no
+/// writer (and no server batch pipeline) waits behind a checkpoint or
+/// base rebuild. The per-namespace singleflight claim dedupes concurrent
+/// publishers and is released on every outcome, including step panics
+/// and dropped tasks.
+fn maybe_auto_step_after_publish(
+    core: &ReadCore,
+    writer: &Arc<WriterBits>,
+    publisher: Option<&PublisherRegistry>,
+    namespace_id: &NamespaceId,
+    wal_tail_segments: u64,
+) {
+    let options = MaintenanceStepOptions::default();
+    if wal_tail_segments < options.max_wal_tail_segments {
+        return;
     }
+    // No registry means the publication service that would own the step is
+    // already gone; there is nothing left to schedule maintenance for.
+    let Some(publisher) = publisher else {
+        return;
+    };
+    if !writer.background.try_claim(namespace_id) {
+        return;
+    }
+    let claim = BackgroundStepClaim {
+        core: core.clone(),
+        bits: Arc::clone(writer),
+        publisher: publisher.clone(),
+        namespace_id: namespace_id.clone(),
+    };
+    spawn_claimed_auto_maintenance(claim, options);
+}
 
-    fn spawn_claimed_auto_maintenance(
-        &self,
-        claim: BackgroundStepClaim,
-        options: MaintenanceStepOptions,
-    ) {
-        // Type erasure lets a finishing task transfer its claim and spawn the
-        // next queued namespace without forming a recursive future type.
-        let future: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
-            Box::pin(async move {
-                let mut claim = claim;
-                loop {
-                    if let Err(error) = FsWriter::from_core(claim.fs.clone())
-                        .run_auto_maintenance(&claim.namespace_id, options.clone())
-                        .await
-                    {
-                        tracing::info!(
-                            phase = "auto_maintenance_step",
-                            result = "error",
-                            error = %error,
-                            "post-publish maintenance step failed"
-                        );
-                    }
-                    let Some(next_namespace_id) = claim
-                        .fs
-                        .inner
-                        .background
-                        .finish_or_rerun(&claim.namespace_id)
-                    else {
-                        break;
-                    };
-                    if next_namespace_id == claim.namespace_id {
-                        // Preserve the existing own-namespace rerun in this
-                        // task before handing its slot to global queued work.
-                        continue;
-                    }
-                    claim.namespace_id = next_namespace_id;
-                    let writer = FsWriter::from_core(claim.fs.clone());
-                    writer.spawn_claimed_auto_maintenance(claim, options);
-                    return;
+fn spawn_claimed_auto_maintenance(claim: BackgroundStepClaim, options: MaintenanceStepOptions) {
+    // Type erasure lets a finishing task transfer its claim and spawn the
+    // next queued namespace without forming a recursive future type.
+    let background = Arc::clone(&claim.bits.background);
+    let future: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
+        Box::pin(async move {
+            let mut claim = claim;
+            loop {
+                if let Err(error) = run_auto_maintenance(&claim, options.clone()).await {
+                    tracing::info!(
+                        phase = "auto_maintenance_step",
+                        result = "error",
+                        error = %error,
+                        "post-publish maintenance step failed"
+                    );
                 }
-            });
-        self.core.inner.background.spawn(future);
-    }
+                let Some(next_namespace_id) =
+                    claim.bits.background.finish_or_rerun(&claim.namespace_id)
+                else {
+                    break;
+                };
+                if next_namespace_id == claim.namespace_id {
+                    // Preserve the existing own-namespace rerun in this
+                    // task before handing its slot to global queued work.
+                    continue;
+                }
+                claim.namespace_id = next_namespace_id;
+                spawn_claimed_auto_maintenance(claim, options);
+                return;
+            }
+        });
+    background.spawn(future);
+}
 
-    async fn run_auto_maintenance(
-        &self,
-        namespace_id: &NamespaceId,
-        options: MaintenanceStepOptions,
-    ) -> Result<()> {
-        // Background maintenance runs the same operations an operator runs,
-        // through the same handle, rather than a private copy of them.
-        let admin = crate::FsAdmin::from_core(self.core.clone());
-        let started = tokio::time::Instant::now();
-        let step = admin
-            .maintenance_step_namespace(namespace_id, options)
-            .await?;
-        admin.drain_reorganization_backlog(namespace_id).await?;
-        // Quiet conclusions (`NotNeeded`) emit nothing at default levels;
-        // this is the only record that a background step ran at all.
-        tracing::debug!(
-            phase = "auto_maintenance_step",
-            namespace_id = %step.namespace_id,
-            wal_tail_segments_before = step.status_before.wal_tail_segments,
-            wal_flush = ?step.wal_flush,
-            reorganize = ?step.reorganize,
-            elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-            "background maintenance step concluded"
-        );
-        Ok(())
-    }
+async fn run_auto_maintenance(
+    claim: &BackgroundStepClaim,
+    options: MaintenanceStepOptions,
+) -> Result<()> {
+    // Background maintenance runs the same operations an operator runs,
+    // through the same handle, rather than a private copy of them — over
+    // the writer's own runtime, so its invalidations reach the writer's
+    // caches and publisher engines.
+    let admin = crate::FsAdmin::from_writer_parts(
+        claim.core.clone(),
+        claim.bits.identity.clone(),
+        claim.publisher.clone(),
+    );
+    let started = tokio::time::Instant::now();
+    let step = admin
+        .maintenance_step_namespace(&claim.namespace_id, options)
+        .await?;
+    admin
+        .drain_reorganization_backlog(&claim.namespace_id)
+        .await?;
+    // Quiet conclusions (`NotNeeded`) emit nothing at default levels;
+    // this is the only record that a background step ran at all.
+    tracing::debug!(
+        phase = "auto_maintenance_step",
+        namespace_id = %step.namespace_id,
+        wal_tail_segments_before = step.status_before.wal_tail_segments,
+        wal_flush = ?step.wal_flush,
+        reorganize = ?step.reorganize,
+        elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        "background maintenance step concluded"
+    );
+    Ok(())
 }

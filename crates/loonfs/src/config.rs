@@ -1,5 +1,6 @@
-//! Runtime configuration: writer identity, publication pacing, and cache
-//! sizing, with the defaults the rest of the crate advertises.
+//! Runtime configuration: read-side limits and cache sizing, plus the
+//! writer-identity validation the write-capable builders apply, with the
+//! defaults the rest of the crate advertises.
 
 use crate::trace::{TraceMode, TraceStoreKind};
 use crate::{MetadataTableCacheConfig, Result, RuntimeError};
@@ -26,17 +27,13 @@ pub(crate) const DEFAULT_MIN_PUBLISH_INTERVAL_MS: u64 = 15;
 /// publish that observes the namespace still over its threshold.
 pub const DEFAULT_MAX_CONCURRENT_MAINTENANCE: usize = 2;
 
-/// Configuration for one runtime core, assembled by the handle builders.
+/// Configuration for one read core, assembled by the handle builders.
+///
+/// Everything here governs reading and caching, so every handle carries it.
+/// Writer-side settings — the actor identity and publication pacing — belong
+/// to the write-capable handles and never reach a reader.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct FsConfig {
-    /// Writer id used for namespace epoch acquisition and commits.
-    pub writer_id: String,
-    /// Writer version reported in mutation context.
-    pub writer_version: String,
-    /// Minimum interval between publication starts per namespace, in
-    /// milliseconds; zero keeps only the batching that in-flight
-    /// publications force.
-    pub min_publish_interval_ms: u64,
+pub(crate) struct ReadConfig {
     /// Largest file content the buffered read APIs will materialize for one
     /// call, checked against resolved metadata before any content fetch.
     /// `None` (the embedded default) reads files of any size; servers set
@@ -100,13 +97,17 @@ pub(crate) fn default_writer_version() -> String {
     format!("loonfs/{}", env!("CARGO_PKG_VERSION"))
 }
 
-pub(crate) fn validate_config(config: &FsConfig) -> Result<()> {
-    if config.writer_id.trim().is_empty() {
+/// Checks the actor identity a write-capable handle will publish under.
+///
+/// Only the writer and admin builders call this; a reader has no identity to
+/// check.
+pub(crate) fn validate_writer_identity(writer_id: &str, writer_version: &str) -> Result<()> {
+    if writer_id.trim().is_empty() {
         return Err(RuntimeError::Config(
             "writer_id must not be empty".to_owned(),
         ));
     }
-    if config.writer_version.trim().is_empty() {
+    if writer_version.trim().is_empty() {
         return Err(RuntimeError::Config(
             "writer_version must not be empty".to_owned(),
         ));

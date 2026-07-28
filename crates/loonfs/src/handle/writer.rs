@@ -3,13 +3,14 @@
 use super::{owning_runtime, FsReader, HandleBuilderCore};
 use crate::background::{BackgroundWork, FsBackgroundWork};
 use crate::config::default_writer_version;
-use crate::fs::FsCore;
+use crate::fs::{ReadCore, WriterBits, WriterIdentity};
 use crate::metrics::ObjectStoreMetricsRecorder;
+use crate::publisher::{PublishObserver, PublisherRegistry};
 use crate::{
-    CapabilityDocument, ChangeSeq, CreateNamespaceOptions, DeleteNamespaceOptions,
-    DeleteNamespaceResponse, NamespaceId, NamespaceSummary, Result, RuntimeCacheConfig,
-    RuntimeCacheStats, RuntimeError, SharedObjectStore, StoreConfig, TraceMode, TraceStoreKind,
+    CapabilityDocument, ChangeSeq, NamespaceId, Result, RuntimeCacheConfig, RuntimeCacheStats,
+    RuntimeError, SharedObjectStore, StoreConfig, TraceMode, TraceStoreKind,
 };
+use loonfs_core::cache::MetadataTableCache;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
@@ -29,7 +30,13 @@ use std::sync::Arc;
 /// background-work state.
 #[derive(Clone)]
 pub struct FsWriter {
-    pub(crate) core: FsCore,
+    pub(crate) core: ReadCore,
+    /// The writer half of the runtime: the session identity, the
+    /// background-work policy, and the publish observer. Publisher workers
+    /// hold this weakly, so dropping every clone of this handle stops new
+    /// publication work.
+    pub(crate) bits: Arc<WriterBits>,
+    pub(crate) publisher: PublisherRegistry,
 }
 
 impl FsWriter {
@@ -55,19 +62,24 @@ impl FsWriter {
     /// process, such as a server's read endpoints. For a reader driven by a
     /// different runtime, open one with [`FsReader::builder`].
     pub fn reader(&self) -> FsReader {
-        FsReader::from_core(self.core.clone())
+        FsReader::from_read_core(self.core.clone())
     }
 
-    /// Wraps a shared runtime core. The publication service and
-    /// writer-scheduled maintenance use this so background work runs the same
-    /// mutation path a caller runs, rather than a private copy of it.
-    pub(crate) fn from_core(core: FsCore) -> Self {
-        Self { core }
+    /// This writer's shared decoded-block cache handle, for builders that
+    /// open another core sharing it.
+    pub(crate) fn metadata_table_cache(&self) -> Arc<MetadataTableCache> {
+        self.core.metadata_table_cache()
     }
 
-    /// Shared runtime core, for in-crate front-ends.
-    pub(crate) fn core(&self) -> &FsCore {
-        &self.core
+    /// This writer's object-store client, instrumented exactly as the
+    /// handle's own traffic is.
+    ///
+    /// Server integrations that read LoonFS-owned objects outside the handle
+    /// surface — the grep root and the grep worker's keyspace — use this so
+    /// their requests are measured like every other request instead of
+    /// escaping instrumentation on a second, raw client.
+    pub fn object_store(&self) -> SharedObjectStore {
+        self.core.shared_store()
     }
 
     /// This writer's publication service (see [`crate::publisher`]).
@@ -76,8 +88,8 @@ impl FsWriter {
     /// service; hosts that classify their own mutation candidates — the
     /// reference server, for example — submit here directly. Clones share
     /// the writer's per-namespace publishers.
-    pub fn publisher(&self) -> crate::publisher::PublisherRegistry {
-        self.core.publisher().clone()
+    pub fn publisher(&self) -> PublisherRegistry {
+        self.publisher.clone()
     }
 
     /// Returns the capability document for this embedded build (API spec,
@@ -91,50 +103,14 @@ impl FsWriter {
         self.core.runtime_cache_stats()
     }
 
-    /// Creates a namespace, bootstrapping its durable state.
-    ///
-    /// With `options.allow_existing`, an already-existing namespace is
-    /// treated as success.
-    pub async fn create_namespace(
-        &self,
-        namespace_id: &NamespaceId,
-        options: CreateNamespaceOptions,
-    ) -> Result<NamespaceSummary> {
-        self.core.create_namespace(namespace_id, options).await
-    }
-
-    /// Forks `source` into `target` at the source's current head.
-    ///
-    /// The fork shares immutable file bytes but gets its own metadata history.
-    pub async fn fork_namespace(
-        &self,
-        source: &NamespaceId,
-        target: &NamespaceId,
-    ) -> Result<NamespaceSummary> {
-        self.core.fork_namespace(source, target).await
-    }
-
-    /// Deletes a namespace: a fenced, terminal head transition (format
-    /// spec, "Tombstones and deletion"). Commits acknowledged before the
-    /// swap stay committed; reads, writes, forks, and re-creation of the id
-    /// fail with `namespace_deleted` afterward. Deletion does not reclaim
-    /// storage; reclamation is explicit garbage collection.
-    pub async fn delete_namespace(
-        &self,
-        namespace_id: &NamespaceId,
-        options: DeleteNamespaceOptions,
-    ) -> Result<DeleteNamespaceResponse> {
-        self.core.delete_namespace(namespace_id, options).await
-    }
-
-    // Mutation, commit, and upload operations live in `fs/writes.rs`
-    // and `fs/uploads.rs`.
+    // Namespace lifecycle lives in `fs/namespaces.rs`; mutation, commit,
+    // and upload operations in `fs/writes.rs` and `fs/uploads.rs`.
 
     /// Waits until every writer-scheduled maintenance task has finished,
     /// without closing the handle. Panicked tasks surface as a runtime-task
     /// error.
     pub async fn wait_for_background_work(&self) -> Result<()> {
-        self.core.wait_for_background_maintenance().await
+        self.bits.background.drain().await
     }
 
     /// Shuts down writer-scheduled background work: settles admitted
@@ -158,9 +134,9 @@ impl FsWriter {
         // step settles. Draining without closing admission keeps the
         // handle usable; a caller that keeps submitting concurrently just
         // keeps the drain waiting.
-        self.core.publisher().drain().await?;
-        self.core.shut_down_background();
-        self.core.wait_for_background_maintenance().await
+        self.publisher.drain().await?;
+        self.bits.background.shut_down();
+        self.bits.background.drain().await
     }
 }
 
@@ -171,6 +147,8 @@ pub struct FsWriterBuilder {
     writer_version: String,
     background_work: FsBackgroundWork,
     max_concurrent_maintenance: usize,
+    min_publish_interval_ms: u64,
+    publish_observer: Option<PublishObserver>,
 }
 
 impl FsWriterBuilder {
@@ -181,6 +159,8 @@ impl FsWriterBuilder {
             writer_version: default_writer_version(),
             background_work: FsBackgroundWork::ManualOnly,
             max_concurrent_maintenance: crate::config::DEFAULT_MAX_CONCURRENT_MAINTENANCE,
+            min_publish_interval_ms: crate::config::DEFAULT_MIN_PUBLISH_INTERVAL_MS,
+            publish_observer: None,
         }
     }
 
@@ -238,7 +218,7 @@ impl FsWriterBuilder {
     /// durable, visible result. Defaults to 15 ms; zero keeps only the
     /// batching that in-flight publications force.
     pub fn min_publish_interval_ms(mut self, min_publish_interval_ms: u64) -> Self {
-        self.core.min_publish_interval_ms = min_publish_interval_ms;
+        self.min_publish_interval_ms = min_publish_interval_ms;
         self
     }
 
@@ -283,16 +263,22 @@ impl FsWriterBuilder {
         mut self,
         observer: impl Fn(&NamespaceId, ChangeSeq) + Send + Sync + 'static,
     ) -> Self {
-        self.core.publish_observer = Some(Arc::new(observer));
+        self.publish_observer = Some(Arc::new(observer));
         self
     }
 
     /// Opens the writer inside the Tokio runtime that will own it. Any
     /// background work the writer schedules is spawned on that runtime.
+    ///
+    /// Construction runs one way only, so nothing here is cyclic: the read
+    /// core opens first, the writer's bits are built on top of it, and the
+    /// publication service is created last, holding the core strongly and
+    /// the bits weakly.
     pub async fn build(self) -> Result<FsWriter> {
         let writer_id = self
             .writer_id
             .ok_or_else(|| RuntimeError::Config("writer_id is required".to_owned()))?;
+        let identity = WriterIdentity::new(writer_id, self.writer_version)?;
         let max_concurrent_maintenance = NonZeroUsize::new(self.max_concurrent_maintenance)
             .ok_or_else(|| {
                 RuntimeError::Config(
@@ -301,13 +287,28 @@ impl FsWriterBuilder {
                         .to_owned(),
                 )
             })?;
-        let background = BackgroundWork::new(
+        let background = Arc::new(BackgroundWork::new(
             self.background_work,
             Some(owning_runtime()?),
             max_concurrent_maintenance,
+        ));
+        let core = self.core.open_read_core()?;
+        let bits = Arc::new(WriterBits {
+            identity,
+            background,
+            publish_observer: self.publish_observer,
+        });
+        let publisher = PublisherRegistry::new(
+            core.clone(),
+            Arc::downgrade(&bits),
+            std::time::Duration::from_millis(self.min_publish_interval_ms),
+            core.trace_mode(),
+            core.trace_store_kind(),
         );
         Ok(FsWriter {
-            core: self.core.open(writer_id, self.writer_version, background)?,
+            core,
+            bits,
+            publisher,
         })
     }
 }

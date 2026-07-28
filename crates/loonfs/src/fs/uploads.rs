@@ -17,11 +17,7 @@ impl FsWriter {
         namespace_id: &NamespaceId,
         request: BeginUploadRequest,
     ) -> Result<BeginUploadResponse> {
-        Ok(self
-            .core
-            .namespace_engine(namespace_id)
-            .begin_upload(request)
-            .await?)
+        Ok(self.engine(namespace_id).begin_upload(request).await?)
     }
 
     /// Starts a direct-put upload session and returns the internal target for server-side signing.
@@ -31,8 +27,7 @@ impl FsWriter {
         content_ref: ContentRef,
     ) -> Result<BeginDirectPutUploadTargetResponse> {
         Ok(self
-            .core
-            .namespace_engine(namespace_id)
+            .engine(namespace_id)
             .begin_direct_put_upload_target(content_ref)
             .await?)
     }
@@ -45,8 +40,7 @@ impl FsWriter {
         bytes: &[u8],
     ) -> Result<UploadContentResponse> {
         Ok(self
-            .core
-            .namespace_engine(namespace_id)
+            .engine(namespace_id)
             .upload_content(upload_id, bytes)
             .await?)
     }
@@ -78,8 +72,7 @@ impl FsWriter {
             .load_namespace_catalog_for_content_preparation(namespace_id)
             .await?;
         Ok(self
-            .core
-            .namespace_engine(namespace_id)
+            .engine(namespace_id)
             .complete_upload_prepared_with_catalog(&catalog, upload_id, request)
             .await?)
     }

@@ -243,7 +243,7 @@ async fn health() -> &'static str {
     )
 )]
 async fn readiness(State(state): State<AppState>) -> Result<&'static str, ApiResponseError> {
-    if state.publisher.is_admission_closed() {
+    if state.writer.publisher().is_admission_closed() {
         return Err(ApiResponseError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             ErrorCode::ShuttingDown,

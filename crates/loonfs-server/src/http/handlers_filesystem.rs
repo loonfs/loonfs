@@ -456,7 +456,8 @@ pub(super) async fn apply_filesystem_operation(
                 ),
             };
             state
-                .publisher
+                .writer
+                .publisher()
                 .submit_candidate(namespace_id.clone(), candidate)
                 .await
         }
@@ -464,7 +465,8 @@ pub(super) async fn apply_filesystem_operation(
         .await
     } else {
         state
-            .publisher
+            .writer
+            .publisher()
             .submit_path_intent(namespace_id.clone(), intent)
             .await
     };

@@ -4,9 +4,10 @@
 // Publisher tests use panic in async result helpers for precise diagnostics.
 
 use super::*;
-use crate::background::BackgroundWork;
-use crate::config::FsConfig;
+use crate::background::{BackgroundWork, FsBackgroundWork};
+use crate::config::ReadConfig;
 use crate::content_tokens::ContentTokenError;
+use crate::fs::WriterIdentity;
 use crate::publish::{ContentPreparationError, NamespaceMutation};
 use crate::{
     BeginUploadRequest, CreateNamespaceOptions, ErrorCode, RuntimeCacheConfig,
@@ -189,25 +190,44 @@ fn lost_head_cas_ack_store(
     .apply_then_fail()
 }
 
-fn test_fs(store: SharedStore) -> FsCore {
-    FsCore::open_with_background(
+fn test_read_core(store: SharedStore) -> ReadCore {
+    ReadCore::open(
         store,
-        FsConfig {
-            writer_id: "writer-a".to_owned(),
-            writer_version: "test".to_owned(),
-            // The publisher under test is itself the coalescer; direct
-            // windows would only add latency to these tests.
-            min_publish_interval_ms: 0,
+        ReadConfig {
             max_read_content_bytes: None,
             runtime_cache: RuntimeCacheConfig::default(),
             trace_mode: TraceMode::Remote,
             trace_store_kind: TraceStoreKind::LocalFs,
         },
-        BackgroundWork::inert(),
-        None,
         None,
     )
-    .expect("open runtime")
+}
+
+fn test_writer_bits() -> Arc<WriterBits> {
+    Arc::new(WriterBits {
+        identity: WriterIdentity::new("writer-a".to_owned(), "test".to_owned())
+            .expect("valid writer identity"),
+        background: Arc::new(BackgroundWork::new(
+            FsBackgroundWork::ManualOnly,
+            None,
+            std::num::NonZeroUsize::new(1).expect("nonzero"),
+        )),
+        publish_observer: None,
+    })
+}
+
+/// A read core plus the writer bits a standalone publisher publishes
+/// under. The caller keeps both alive; the publisher holds the bits weakly.
+struct TestRuntime {
+    core: ReadCore,
+    bits: Arc<WriterBits>,
+}
+
+fn test_runtime(store: SharedStore) -> TestRuntime {
+    TestRuntime {
+        core: test_read_core(store),
+        bits: test_writer_bits(),
+    }
 }
 
 async fn test_writer(store: SharedStore) -> crate::FsWriter {
@@ -229,8 +249,16 @@ async fn test_writer_with_interval(
         .expect("build writer")
 }
 
-async fn create_namespace(fs: &FsCore, namespace_id: &NamespaceId) {
-    fs.create_namespace(namespace_id, CreateNamespaceOptions::default())
+/// Bootstraps a namespace under the identity the standalone publisher will
+/// publish with, so its first publication continues the writer session the
+/// bootstrap left behind — the same continuity a writer handle has.
+async fn create_namespace(runtime: &TestRuntime, namespace_id: &NamespaceId) {
+    runtime
+        .core
+        .writer_engine(&runtime.bits.identity, namespace_id)
+        .bootstrap_namespace(loonfs_core::BootstrapOptions {
+            allow_existing: false,
+        })
         .await
         .expect("bootstrap");
 }
@@ -279,15 +307,16 @@ async fn wait_for_queued_delete(publisher: &NamespacePublisher) {
 
 /// A publisher with no owning registry, exercising the unowned-task
 /// fallback the production paths reserve for a dropped registry. The
-/// caller keeps `fs` alive; the publisher holds it weakly.
-fn standalone_publisher(namespace_id: &NamespaceId, fs: &FsCore) -> NamespacePublisher {
+/// caller keeps `runtime` alive; the publisher holds its bits weakly.
+fn standalone_publisher(namespace_id: &NamespaceId, runtime: &TestRuntime) -> NamespacePublisher {
     NamespacePublisher::new(
         namespace_id.clone(),
-        Arc::downgrade(&fs.inner),
+        runtime.core.clone(),
+        Arc::downgrade(&runtime.bits),
         Weak::new(),
         TEST_STANDALONE_PACING,
-        fs.inner.config.trace_mode.as_str(),
-        fs.inner.config.trace_store_kind.as_str(),
+        runtime.core.trace_mode(),
+        runtime.core.trace_store_kind(),
     )
 }
 
@@ -399,7 +428,10 @@ async fn rejected_duplicate_joins_ready_in_flight_primary() {
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let writer = test_writer(store).await;
-    create_namespace(writer.core(), &namespace_id).await;
+    writer
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("bootstrap");
     let registry = writer.publisher();
     let publisher = registry.publisher_for(&namespace_id).expect("publisher");
     let intent = PathMutationIntent::CreateDir {
@@ -439,7 +471,10 @@ async fn ready_duplicate_joins_rejected_in_flight_primary() {
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let writer = test_writer(store).await;
-    create_namespace(writer.core(), &namespace_id).await;
+    writer
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("bootstrap");
     let registry = writer.publisher();
     let publisher = registry.publisher_for(&namespace_id).expect("publisher");
     let intent = PathMutationIntent::CreateDir {
@@ -481,9 +516,9 @@ async fn publisher_admits_pending_batch_while_active_publish_blocks() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let store = Arc::new(blocking_head_cas_store(temp_dir.path(), &namespace_id));
     let shared = store.clone() as SharedStore;
-    let fs = test_fs(shared.clone());
-    create_namespace(&fs, &namespace_id).await;
-    let publisher = standalone_publisher(&namespace_id, &fs);
+    let runtime = test_runtime(shared.clone());
+    create_namespace(&runtime, &namespace_id).await;
+    let publisher = standalone_publisher(&namespace_id, &runtime);
 
     store.block_next();
     let active = admit_commit(
@@ -524,9 +559,9 @@ async fn publisher_duplicate_active_request_joins_while_conflict_fails() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let store = Arc::new(blocking_head_cas_store(temp_dir.path(), &namespace_id));
     let shared = store.clone() as SharedStore;
-    let fs = test_fs(shared.clone());
-    create_namespace(&fs, &namespace_id).await;
-    let publisher = standalone_publisher(&namespace_id, &fs);
+    let runtime = test_runtime(shared.clone());
+    create_namespace(&runtime, &namespace_id).await;
+    let publisher = standalone_publisher(&namespace_id, &runtime);
 
     store.block_next();
     let active = admit_commit(
@@ -565,9 +600,9 @@ async fn publisher_pending_batch_full_rejects_distinct_but_allows_duplicate() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let store = Arc::new(blocking_head_cas_store(temp_dir.path(), &namespace_id));
     let shared = store.clone() as SharedStore;
-    let fs = test_fs(shared.clone());
-    create_namespace(&fs, &namespace_id).await;
-    let publisher = standalone_publisher(&namespace_id, &fs);
+    let runtime = test_runtime(shared.clone());
+    create_namespace(&runtime, &namespace_id).await;
+    let publisher = standalone_publisher(&namespace_id, &runtime);
 
     store.block_next();
     let active = admit_commit(
@@ -634,9 +669,9 @@ async fn publisher_takes_a_cold_full_batch_immediately() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let store = Arc::new(blocking_head_cas_store(temp_dir.path(), &namespace_id));
     let shared = store.clone() as SharedStore;
-    let fs = test_fs(shared.clone());
-    create_namespace(&fs, &namespace_id).await;
-    let publisher = standalone_publisher(&namespace_id, &fs);
+    let runtime = test_runtime(shared.clone());
+    create_namespace(&runtime, &namespace_id).await;
+    let publisher = standalone_publisher(&namespace_id, &runtime);
 
     store.block_next();
     let mut receivers = Vec::with_capacity(MAX_BATCH_CANDIDATES);
@@ -671,9 +706,9 @@ async fn cold_submission_publishes_without_a_coalescing_delay() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let fs = test_fs(store);
-    create_namespace(&fs, &namespace_id).await;
-    let publisher = standalone_publisher(&namespace_id, &fs);
+    let runtime = test_runtime(store);
+    create_namespace(&runtime, &namespace_id).await;
+    let publisher = standalone_publisher(&namespace_id, &runtime);
 
     let receiver = admit_commit(
         &publisher,
@@ -698,7 +733,10 @@ async fn hot_submissions_wait_out_the_pacing_interval() {
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let writer = test_writer_with_interval(store.clone(), 400).await;
-    create_namespace(writer.core(), &namespace_id).await;
+    writer
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("bootstrap");
     let registry = writer.publisher();
 
     let warmup_started = Instant::now();
@@ -728,9 +766,9 @@ async fn publisher_resolves_unknown_head_outcome_by_replaying_receipt() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let store = Arc::new(lost_head_cas_ack_store(temp_dir.path(), &namespace_id));
     let shared = store.clone() as SharedStore;
-    let fs = test_fs(shared);
-    create_namespace(&fs, &namespace_id).await;
-    let publisher = standalone_publisher(&namespace_id, &fs);
+    let runtime = test_runtime(shared);
+    create_namespace(&runtime, &namespace_id).await;
+    let publisher = standalone_publisher(&namespace_id, &runtime);
 
     // The commit lands but the CAS acknowledgement is lost. The publisher
     // retries with the same commit id and replays the durable receipt
@@ -755,9 +793,9 @@ async fn publisher_survives_publish_panic_and_keeps_serving() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let store = Arc::new(PanicHeadCasStore::new(temp_dir.path(), &namespace_id));
     let shared = store.clone() as SharedStore;
-    let fs = test_fs(shared.clone());
-    create_namespace(&fs, &namespace_id).await;
-    let publisher = standalone_publisher(&namespace_id, &fs);
+    let runtime = test_runtime(shared.clone());
+    create_namespace(&runtime, &namespace_id).await;
+    let publisher = standalone_publisher(&namespace_id, &runtime);
 
     store.arm_blocking_panic();
     let doomed = admit_commit(
@@ -807,9 +845,9 @@ async fn delete_barrier_publishes_admitted_work_and_rejects_later_work() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let store = Arc::new(blocking_head_cas_store(temp_dir.path(), &namespace_id));
     let shared = store.clone() as SharedStore;
-    let fs = test_fs(shared.clone());
-    create_namespace(&fs, &namespace_id).await;
-    let publisher = standalone_publisher(&namespace_id, &fs);
+    let runtime = test_runtime(shared.clone());
+    create_namespace(&runtime, &namespace_id).await;
+    let publisher = standalone_publisher(&namespace_id, &runtime);
 
     // A publishes and blocks at its head CAS; B queues behind it.
     store.block_next();
@@ -887,9 +925,9 @@ async fn second_delete_during_inflight_delete_settles_both() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let store = Arc::new(blocking_head_cas_store(temp_dir.path(), &namespace_id));
     let shared = store.clone() as SharedStore;
-    let fs = test_fs(shared.clone());
-    create_namespace(&fs, &namespace_id).await;
-    let publisher = standalone_publisher(&namespace_id, &fs);
+    let runtime = test_runtime(shared.clone());
+    create_namespace(&runtime, &namespace_id).await;
+    let publisher = standalone_publisher(&namespace_id, &runtime);
 
     // One publication first, so the session already holds its writer epoch:
     // the next head compare-and-swap is the delete's own tombstone swap.
@@ -960,9 +998,9 @@ async fn mutations_admitted_after_a_queued_delete_wait_behind_it() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let store = Arc::new(blocking_head_cas_store(temp_dir.path(), &namespace_id));
     let shared = store.clone() as SharedStore;
-    let fs = test_fs(shared.clone());
-    create_namespace(&fs, &namespace_id).await;
-    let publisher = standalone_publisher(&namespace_id, &fs);
+    let runtime = test_runtime(shared.clone());
+    create_namespace(&runtime, &namespace_id).await;
+    let publisher = standalone_publisher(&namespace_id, &runtime);
 
     store.block_next();
     let before = admit_commit(
@@ -1019,7 +1057,10 @@ async fn publisher_batches_concurrent_distinct_commits_into_one_wal_segment() {
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let writer = test_writer_with_interval(store.clone(), 400).await;
-    create_namespace(writer.core(), &namespace_id).await;
+    writer
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("bootstrap");
     let registry = writer.publisher();
 
     // Warm the namespace: a cold one publishes its first submission
@@ -1076,7 +1117,10 @@ async fn publisher_batches_explicit_commit_and_path_intent_together() {
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let writer = test_writer_with_interval(store.clone(), 400).await;
-    create_namespace(writer.core(), &namespace_id).await;
+    writer
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("bootstrap");
     let upload = writer
         .begin_upload(
             &namespace_id,
@@ -1171,7 +1215,10 @@ async fn registry_close_admission_refuses_new_work_while_admitted_work_drains() 
     let store = Arc::new(blocking_head_cas_store(temp_dir.path(), &namespace_id));
     let shared = store.clone() as SharedStore;
     let writer = test_writer(shared.clone()).await;
-    create_namespace(writer.core(), &namespace_id).await;
+    writer
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("bootstrap");
     let registry = writer.publisher();
 
     // An admitted publication blocks at its head CAS...
@@ -1237,7 +1284,10 @@ async fn worker_survives_panic_and_processes_later_queue_items() {
     let store = Arc::new(PanicHeadCasStore::new(temp_dir.path(), &namespace_id));
     let shared = store.clone() as SharedStore;
     let writer = test_writer(shared.clone()).await;
-    create_namespace(writer.core(), &namespace_id).await;
+    writer
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("bootstrap");
     let registry = writer.publisher();
 
     store.arm_blocking_panic();
@@ -1303,7 +1353,10 @@ async fn successful_delete_evicts_the_namespace_publisher() {
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let writer = test_writer(store.clone()).await;
-    create_namespace(writer.core(), &namespace_id).await;
+    writer
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("bootstrap");
     let registry = writer.publisher();
 
     registry
@@ -1371,7 +1424,10 @@ async fn delete_queued_mid_publish_waits_behind_admitted_work() {
     let store = Arc::new(blocking_head_cas_store(temp_dir.path(), &namespace_id));
     let shared = store.clone() as SharedStore;
     let writer = test_writer(shared.clone()).await;
-    create_namespace(writer.core(), &namespace_id).await;
+    writer
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("bootstrap");
     let registry = writer.publisher();
 
     // Park the first publication at its head CAS, batch a second commit

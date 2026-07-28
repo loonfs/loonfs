@@ -8,13 +8,42 @@ use crate::{
     AdvanceRetentionResponse, CheckpointId, CreateCheckpointOptions, CreateCheckpointResponse,
     ErrorCode, FlushWalOutcome, FlushWalResponse, MaintenanceStepKind, MaintenanceStepOptions,
     MaintenanceStepResponse, NamespaceId, ReleaseCheckpointResponse, ReorganizeStepOutcome,
-    WalFlushStepOutcome,
+    SharedObjectStore, WalFlushStepOutcome,
 };
 use crate::{Result, RuntimeError};
 use loonfs_api::v0::{DisableGrepIndexResponse, EnableGrepIndexResponse};
 use loonfs_core::cache::load_namespace_head_summary;
 
 impl FsAdmin {
+    /// A mutating engine under this handle's actor identity.
+    fn engine(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> loonfs_core::NamespaceEngine<SharedObjectStore> {
+        self.core.writer_engine(&self.actor, namespace_id)
+    }
+
+    /// Drops everything this runtime caches for a namespace: the read
+    /// caches, and — when this handle runs over a writer's runtime — the
+    /// rebuildable half of that namespace's publisher state.
+    fn invalidate_namespace(&self, namespace_id: &NamespaceId) {
+        self.core.invalidate_namespace_read_cache(namespace_id);
+        if let Some(publisher) = &self.publisher {
+            publisher.invalidate_engine(namespace_id);
+        }
+    }
+
+    fn finish_namespace_mutation<T>(
+        &self,
+        namespace_id: &NamespaceId,
+        result: Result<T>,
+    ) -> Result<T> {
+        if crate::fs::should_invalidate_after_result(&result) {
+            self.invalidate_namespace(namespace_id);
+        }
+        result
+    }
+
     /// Summarizes a namespace's current head: manifest, latest checkpoint,
     /// WAL tail, and retention floor.
     pub async fn namespace_status(
@@ -201,8 +230,7 @@ impl FsAdmin {
         namespace_id: &NamespaceId,
     ) -> Result<loonfs_core::MetadataReorganizeOutcome> {
         let report = self
-            .core
-            .namespace_engine(namespace_id)
+            .engine(namespace_id)
             .reorganize_metadata()
             .await
             .map_err(RuntimeError::Core)?;
@@ -216,7 +244,7 @@ impl FsAdmin {
                 decoded_input_bytes,
                 ..
             } => {
-                self.core.invalidate_namespace_cache(namespace_id);
+                self.invalidate_namespace(namespace_id);
                 tracing::info!(
                     families = ?families,
                     folded_l0_rows,
@@ -381,10 +409,10 @@ impl FsAdmin {
 
     fn grep_worker(&self) -> loonfs_grep::GrepWorker<crate::SharedObjectStore> {
         loonfs_grep::GrepWorker::new(
-            self.core.inner.store.clone(),
-            self.core.inner.config.writer_id.clone(),
-            self.core.inner.writer_session_id.clone(),
-            self.core.inner.config.writer_version.clone(),
+            self.core.shared_store(),
+            self.actor.writer_id.clone(),
+            self.actor.writer_session_id.clone(),
+            self.actor.writer_version.clone(),
         )
     }
 
@@ -402,13 +430,13 @@ impl FsAdmin {
             self.core.store(),
             namespace_id,
             config,
-            &self.core.mutation_context()?,
+            &self.actor.mutation_context()?,
         )
         .await
         .map_err(RuntimeError::Core)?;
         // Sweeping can remove objects cached views still reference; drop the
         // namespace caches rather than trusting them across a collection.
-        self.core.invalidate_namespace_read_cache(namespace_id);
+        self.invalidate_namespace(namespace_id);
         Ok(report)
     }
 
@@ -420,11 +448,11 @@ impl FsAdmin {
         let response = loonfs_core::repair_namespace(
             self.core.store(),
             namespace_id,
-            &self.core.mutation_context()?,
+            &self.actor.mutation_context()?,
         )
         .await
         .map_err(RuntimeError::Core)?;
-        self.core.invalidate_namespace_read_cache(namespace_id);
+        self.invalidate_namespace(namespace_id);
         Ok(response)
     }
 
@@ -453,12 +481,11 @@ impl FsAdmin {
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
         let result = self
-            .core
-            .namespace_engine(namespace_id)
+            .engine(namespace_id)
             .create_checkpoint(options.name, options.ttl_ms)
             .await
             .map_err(RuntimeError::from);
-        self.core.finish_namespace_mutation(namespace_id, result)
+        self.finish_namespace_mutation(namespace_id, result)
     }
 
     /// Releases a user-owned checkpoint by id. Idempotent.
@@ -468,12 +495,11 @@ impl FsAdmin {
         checkpoint_id: &CheckpointId,
     ) -> Result<ReleaseCheckpointResponse> {
         let result = self
-            .core
-            .namespace_engine(namespace_id)
+            .engine(namespace_id)
             .release_checkpoint(checkpoint_id)
             .await
             .map_err(RuntimeError::from);
-        self.core.finish_namespace_mutation(namespace_id, result)
+        self.finish_namespace_mutation(namespace_id, result)
     }
 
     /// Flushes the WAL tail and advances the metadata root, creating no
@@ -493,12 +519,11 @@ impl FsAdmin {
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
         let result = self
-            .core
-            .namespace_engine(namespace_id)
+            .engine(namespace_id)
             .flush_wal()
             .await
             .map_err(RuntimeError::from);
-        self.core.finish_namespace_mutation(namespace_id, result)
+        self.finish_namespace_mutation(namespace_id, result)
     }
 
     /// Advances the namespace retention floor when a verified checkpoint
@@ -508,11 +533,10 @@ impl FsAdmin {
         namespace_id: &NamespaceId,
     ) -> Result<AdvanceRetentionResponse> {
         let result = self
-            .core
-            .namespace_engine(namespace_id)
+            .engine(namespace_id)
             .advance_retention_floor()
             .await
             .map_err(RuntimeError::from);
-        self.core.finish_namespace_mutation(namespace_id, result)
+        self.finish_namespace_mutation(namespace_id, result)
     }
 }
