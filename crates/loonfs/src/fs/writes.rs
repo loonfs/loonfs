@@ -4,9 +4,9 @@ use super::core::BackgroundStepClaim;
 use crate::publish::{NamespaceMutationCandidate, PathMutationIntent, PreparedContent};
 use crate::FsWriter;
 use crate::{
-    ChangeSeq, CommitId, CommitRequest, CommitResponse, ContentRef,
-    CopyOptions, CoreError, CreateDirectoryOptions, DeleteOptions, InodeId, MaintenanceStepOptions,
-    MoveOptions, NamespaceId, PutFileOptions, RestoreRevisionOptions, RevisionNo, UndeleteOptions,
+    ChangeSeq, CommitId, CommitRequest, CommitResponse, ContentRef, CopyOptions, CoreError,
+    CreateDirectoryOptions, DeleteOptions, InodeId, MaintenanceStepOptions, MoveOptions,
+    NamespaceId, PutFileOptions, RestoreRevisionOptions, RevisionNo, UndeleteOptions,
 };
 use crate::{Result, RuntimeError};
 

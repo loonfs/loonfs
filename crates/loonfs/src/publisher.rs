@@ -234,7 +234,12 @@ impl PublisherRegistry {
     /// A held engine means a publication or delete is in flight; that unit
     /// revalidates against the live head itself, so skipping it is safe.
     pub(crate) fn invalidate_engine(&self, namespace_id: &NamespaceId) {
-        let publisher = self.shared.lock_state().publishers.get(namespace_id).cloned();
+        let publisher = self
+            .shared
+            .lock_state()
+            .publishers
+            .get(namespace_id)
+            .cloned();
         if let Some(publisher) = publisher {
             publisher.invalidate_engine();
         }
@@ -292,8 +297,13 @@ impl PublisherRegistry {
     /// it this settles only the work admitted so far, and new submissions
     /// keep scheduling more.
     pub async fn drain(&self) -> Result<(), RuntimeError> {
-        let publishers: Vec<NamespacePublisher> =
-            self.shared.lock_state().publishers.values().cloned().collect();
+        let publishers: Vec<NamespacePublisher> = self
+            .shared
+            .lock_state()
+            .publishers
+            .values()
+            .cloned()
+            .collect();
         // Awaited outside the registry lock, for the same nesting reason as
         // the admission sweep.
         for publisher in publishers {

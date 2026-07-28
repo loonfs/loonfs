@@ -156,11 +156,11 @@ impl From<ControlUpdateError> for WriterEpochAcquireError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commit_engine::delete_namespace;
     use crate::commit_engine::{NamespaceCommitEngine, NamespaceMutationCandidate};
     use crate::error::ErrorCode;
     use crate::namespace::bootstrap::bootstrap_namespace;
     use crate::namespace::control::read_head_object;
-    use crate::commit_engine::delete_namespace;
     use crate::options::DeleteNamespaceOptions;
 
     async fn commit_operations<S: loonfs_objectstore::ObjectStore + ?Sized>(
