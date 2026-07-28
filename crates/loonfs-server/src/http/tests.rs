@@ -1690,7 +1690,7 @@ async fn readiness_answers_ready_then_shutting_down_once_admission_closes() {
         .expect("readiness body");
     assert_eq!(body, "ready");
 
-    state.publisher.close_admission();
+    state.writer.publisher().close_admission();
 
     tokio::task::spawn_blocking(move || match raw_agent().get(&ready_url).call() {
         Err(ureq::Error::Status(503, response)) => {

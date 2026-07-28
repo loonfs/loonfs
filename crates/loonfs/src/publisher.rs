@@ -22,7 +22,7 @@
 //! and the delete barrier run through one engine, under one session epoch,
 //! on one worker task draining one queue.
 //!
-//! Every runtime core owns one registry, and the direct
+//! Every writer owns one registry, and the direct
 //! [`FsWriter`](crate::FsWriter) mutation methods, the reference server,
 //! and any embedded host with many in-process writer agents all submit
 //! through it — one publication implementation, one batching policy, one
@@ -52,7 +52,7 @@
 //! [`FsWriter::shutdown_background`](crate::FsWriter::shutdown_background)
 //! drains without closing, so the handle stays usable.
 
-use crate::fs::{FsCore, FsInner};
+use crate::fs::{ReadCore, WriterBits};
 use crate::publish::{NamespaceMutationCandidate, PathMutationIntent, PreparedContent};
 use crate::{CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, RuntimeError};
 use futures::FutureExt;
@@ -88,7 +88,7 @@ pub type PublishObserver = Arc<dyn Fn(&NamespaceId, loonfs_api::ChangeSeq) + Sen
 /// `commit_queue_full`.
 const MAX_BATCH_CANDIDATES: usize = 1024;
 
-/// Shared front door to the per-namespace publishers of one runtime core.
+/// Shared front door to the per-namespace publishers of one writer.
 ///
 /// Cloning is cheap; clones share the same per-namespace publishers, so
 /// every writer in the process should submit through clones of one
@@ -101,10 +101,15 @@ const MAX_BATCH_CANDIDATES: usize = 1024;
 #[derive(Clone)]
 pub struct PublisherRegistry {
     shared: Arc<RegistryShared>,
-    /// Weak: the runtime core owns this registry, so a strong reference
-    /// back would cycle the runtime into a leak. Publish work upgrades per
-    /// use and reports `shutting_down` once the core is gone.
-    core: Weak<FsInner>,
+    /// Strong: the read core owns neither this registry nor the writer, so
+    /// holding it here cannot cycle. Publications read through its caches
+    /// and seed them with what they produce.
+    read_core: ReadCore,
+    /// Weak: the writer owns its bits, and a publication is the writer's
+    /// work. Publish work upgrades per unit and reports `shutting_down`
+    /// once the writer is gone, so dropping the writer stops new work
+    /// without ever leaving the caches or store dangling.
+    writer: Weak<WriterBits>,
     min_publish_interval: Duration,
     trace_mode: &'static str,
     trace_store_kind: &'static str,
@@ -142,12 +147,13 @@ impl RegistryShared {
 }
 
 impl PublisherRegistry {
-    /// Creates the registry a runtime core owns. Batches publish through
-    /// each publisher's own commit engine and writer session, and the
-    /// core's [`FsBackgroundWork`](crate::FsBackgroundWork) policy governs
-    /// any post-publish maintenance.
-    pub(crate) fn from_core(
-        core: Weak<FsInner>,
+    /// Creates the registry a writer owns. Batches publish through each
+    /// publisher's own commit engine and writer session, and the writer's
+    /// [`FsBackgroundWork`](crate::FsBackgroundWork) policy governs any
+    /// post-publish maintenance.
+    pub(crate) fn new(
+        read_core: ReadCore,
+        writer: Weak<WriterBits>,
         min_publish_interval: Duration,
         trace_mode: &'static str,
         trace_store_kind: &'static str,
@@ -160,7 +166,8 @@ impl PublisherRegistry {
                 }),
                 panicked_units: AtomicUsize::new(0),
             }),
-            core,
+            read_core,
+            writer,
             min_publish_interval,
             trace_mode,
             trace_store_kind,
@@ -258,7 +265,8 @@ impl PublisherRegistry {
             .or_insert_with(|| {
                 NamespacePublisher::new(
                     namespace_id.clone(),
-                    self.core.clone(),
+                    self.read_core.clone(),
+                    self.writer.clone(),
                     Arc::downgrade(&self.shared),
                     self.min_publish_interval,
                     self.trace_mode,
@@ -322,9 +330,10 @@ impl PublisherRegistry {
 #[derive(Clone)]
 struct NamespacePublisher {
     namespace_id: NamespaceId,
-    /// Weak for the same reason as the registry's reference: the core owns
-    /// the registry that owns this publisher.
-    core: Weak<FsInner>,
+    read_core: ReadCore,
+    /// Weak for the same reason as the registry's reference: a publication
+    /// is the owning writer's work, and it stops when that writer is gone.
+    writer: Weak<WriterBits>,
     state: Arc<Mutex<NamespacePublisherState>>,
     /// Locked only by the worker, across one publication or delete, and by
     /// [`Self::invalidate_engine`], which never waits for it.
@@ -420,7 +429,8 @@ struct InFlightRequest {
 impl NamespacePublisher {
     fn new(
         namespace_id: NamespaceId,
-        core: Weak<FsInner>,
+        read_core: ReadCore,
+        writer: Weak<WriterBits>,
         shared: Weak<RegistryShared>,
         min_publish_interval: Duration,
         trace_mode: &'static str,
@@ -428,7 +438,8 @@ impl NamespacePublisher {
     ) -> Self {
         Self {
             namespace_id,
-            core,
+            read_core,
+            writer,
             state: Arc::new(Mutex::new(NamespacePublisherState {
                 queue: VecDeque::new(),
                 in_flight: HashMap::new(),
@@ -448,11 +459,18 @@ impl NamespacePublisher {
         }
     }
 
-    /// The owning runtime core, while it is still alive. `None` means the
-    /// core was dropped without draining; admitted work then settles as
-    /// `shutting_down`.
-    fn core(&self) -> Option<FsCore> {
-        self.core.upgrade().map(|inner| FsCore { inner })
+    /// A registry handle over the same shared state — what a clone of the
+    /// owning registry is — for the writer-side work a publication
+    /// schedules. `None` once that registry is gone.
+    fn registry(&self) -> Option<PublisherRegistry> {
+        Some(PublisherRegistry {
+            shared: self.shared.upgrade()?,
+            read_core: self.read_core.clone(),
+            writer: self.writer.clone(),
+            min_publish_interval: self.min_publish_interval,
+            trace_mode: self.trace_mode,
+            trace_store_kind: self.trace_store_kind,
+        })
     }
 
     /// Recovers a poisoned lock rather than propagating, for the same reason
@@ -748,14 +766,14 @@ impl NamespacePublisher {
                     .iter()
                     .map(|candidate| candidate.candidate.clone())
                     .collect::<Vec<_>>();
-                let Some(core) = self.core() else {
+                let Some(writer) = self.writer.upgrade() else {
                     results = candidates
                         .iter()
                         .map(|_| Err(CoreError::ShuttingDown))
                         .collect();
                     break;
                 };
-                results = self.publish_through_engine(&core, batch_candidates).await;
+                results = self.publish_through_engine(&writer, batch_candidates).await;
                 if !results.iter().any(is_retryable_head_publish) {
                     break;
                 }
@@ -780,17 +798,24 @@ impl NamespacePublisher {
     /// engine, one writer session, for the publisher's whole life.
     async fn publish_through_engine(
         &self,
-        core: &FsCore,
+        writer: &Arc<WriterBits>,
         candidates: Vec<NamespaceMutationCandidate>,
     ) -> Vec<CommitResult> {
+        let registry = self.registry();
         let mut slot = self.engine.lock().await;
-        let engine = self.engine_for(&mut slot, core).await;
-        crate::FsWriter::from_core(core.clone())
-            .publish_batch_with_engine(&self.namespace_id, engine, candidates)
-            .await
-            .into_iter()
-            .map(|result| result.map_err(runtime_error_to_core))
-            .collect()
+        let engine = self.engine_for(&mut slot).await;
+        crate::fs::publish_batch_with_engine(
+            &self.read_core,
+            writer,
+            registry.as_ref(),
+            &self.namespace_id,
+            engine,
+            candidates,
+        )
+        .await
+        .into_iter()
+        .map(|result| result.map_err(runtime_error_to_core))
+        .collect()
     }
 
     /// The publisher's engine, built on first use. A new engine starts from
@@ -800,16 +825,16 @@ impl NamespacePublisher {
     async fn engine_for<'slot>(
         &self,
         slot: &'slot mut EngineSlot,
-        core: &FsCore,
     ) -> &'slot mut NamespaceCommitEngine {
         if slot.engine.is_none() {
-            let catalog = core
+            let catalog = self
+                .read_core
                 .load_namespace_catalog_cached(&self.namespace_id)
                 .await
                 .ok()
                 .flatten();
             let mut engine = NamespaceCommitEngine::new(self.namespace_id.clone())
-                .table_cache(core.metadata_table_cache())
+                .table_cache(self.read_core.metadata_table_cache())
                 .writer_session(Arc::clone(&slot.session));
             if let Some(catalog) = catalog {
                 engine = engine.catalog_entry(catalog);
@@ -880,14 +905,20 @@ impl NamespacePublisher {
     }
 
     async fn delete_through_engine(&self, options: DeleteNamespaceOptions) -> DeleteResult {
-        let Some(core) = self.core() else {
+        let Some(writer) = self.writer.upgrade() else {
             return Err(CoreError::ShuttingDown);
         };
         let mut slot = self.engine.lock().await;
-        let engine = self.engine_for(&mut slot, &core).await;
-        core.delete_namespace_with_engine(&self.namespace_id, engine, options)
-            .await
-            .map_err(runtime_error_to_core)
+        let engine = self.engine_for(&mut slot).await;
+        crate::fs::delete_namespace_with_engine(
+            &self.read_core,
+            &writer.identity,
+            &self.namespace_id,
+            engine,
+            options,
+        )
+        .await
+        .map_err(runtime_error_to_core)
     }
 
     fn namespace_deleted(&self) -> CoreError {

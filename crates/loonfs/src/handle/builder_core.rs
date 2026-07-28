@@ -1,13 +1,12 @@
 //! Shared plumbing for the three handle builders: where the store comes
-//! from, the common builder state, and the runtime the handles bind to.
+//! from, the read-side builder state, and the runtime the handles bind to.
 
-use crate::background::BackgroundWork;
-use crate::config::FsConfig;
-use crate::fs::FsCore;
+use crate::config::ReadConfig;
+use crate::fs::ReadCore;
 use crate::metrics::ObjectStoreMetricsRecorder;
 use crate::{
-    PublishObserver, Result, RuntimeCacheConfig, RuntimeError, SharedObjectStore, StoreConfig,
-    TraceMode, TraceStoreKind,
+    Result, RuntimeCacheConfig, RuntimeError, SharedObjectStore, StoreConfig, TraceMode,
+    TraceStoreKind,
 };
 use loonfs_core::cache::MetadataTableCache;
 use loonfs_objectstore::metrics::InstrumentedObjectStore;
@@ -22,19 +21,18 @@ pub(super) enum StoreSource {
 }
 
 /// Builder state every handle shares: the store source, cache sizing, and
-/// trace/metrics wiring.
+/// trace/metrics wiring. Everything here feeds the read core, so all three
+/// builders carry exactly this and nothing more.
 pub(super) struct HandleBuilderCore {
     pub(super) source: StoreSource,
-    pub(super) min_publish_interval_ms: u64,
     pub(super) max_read_content_bytes: Option<u64>,
     pub(super) runtime_cache: RuntimeCacheConfig,
     /// An existing decoded-block cache to share instead of sizing a fresh
-    /// one from `runtime_cache`; see [`FsCore::open_with_background`].
+    /// one from `runtime_cache`; see [`ReadCore::open`].
     pub(super) shared_metadata_table_cache: Option<Arc<MetadataTableCache>>,
     pub(super) trace_mode: TraceMode,
     pub(super) trace_store_kind: Option<TraceStoreKind>,
     pub(super) metrics_recorder: Option<Arc<dyn ObjectStoreMetricsRecorder>>,
-    pub(super) publish_observer: Option<PublishObserver>,
 }
 
 impl HandleBuilderCore {
@@ -49,23 +47,19 @@ impl HandleBuilderCore {
     pub(super) fn new(source: StoreSource) -> Self {
         Self {
             source,
-            min_publish_interval_ms: crate::config::DEFAULT_MIN_PUBLISH_INTERVAL_MS,
             max_read_content_bytes: None,
             runtime_cache: RuntimeCacheConfig::default(),
             shared_metadata_table_cache: None,
             trace_mode: TraceMode::Embedded,
             trace_store_kind: None,
             metrics_recorder: None,
-            publish_observer: None,
         }
     }
 
-    pub(super) fn open(
-        self,
-        writer_id: String,
-        writer_version: String,
-        background: BackgroundWork,
-    ) -> Result<FsCore> {
+    /// Resolves the object-store client, wraps it for metrics when the
+    /// builder was given a recorder, and opens the read core every handle
+    /// is built on.
+    pub(super) fn open_read_core(self) -> Result<ReadCore> {
         let (store, derived_kind) = match self.source {
             StoreSource::Config(config) => {
                 let kind = TraceStoreKind::from(config.kind());
@@ -83,21 +77,16 @@ impl HandleBuilderCore {
             ) as SharedObjectStore,
             None => store,
         };
-        FsCore::open_with_background(
+        Ok(ReadCore::open(
             store,
-            FsConfig {
-                writer_id,
-                writer_version,
-                min_publish_interval_ms: self.min_publish_interval_ms,
+            ReadConfig {
                 max_read_content_bytes: self.max_read_content_bytes,
                 runtime_cache: self.runtime_cache,
                 trace_mode: self.trace_mode,
                 trace_store_kind,
             },
-            background,
             self.shared_metadata_table_cache,
-            self.publish_observer,
-        )
+        ))
     }
 }
 

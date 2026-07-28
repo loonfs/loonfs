@@ -1,9 +1,10 @@
-//! [`FsCore`]: the shared runtime state behind the handles, its
-//! constructor, and the background-step bookkeeping.
+//! [`ReadCore`]: the read-side runtime state every handle shares, and the
+//! writer-side state — actor identity, background work, publish observer —
+//! that only a write-capable handle owns on top of it.
 
 use crate::background::BackgroundWork;
 use crate::cache::{RuntimeCacheStatsInner, RuntimeControlCache};
-use crate::config::{validate_config, FsConfig};
+use crate::config::{validate_writer_identity, ReadConfig};
 use crate::publisher::{PublishObserver, PublisherRegistry};
 use crate::time::current_time_ms;
 use crate::{
@@ -27,35 +28,70 @@ use loonfs_grep::GrepService;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-/// Shared runtime core. [`FsWriter`](crate::FsWriter),
-/// [`FsReader`](crate::FsReader), and [`FsAdmin`](crate::FsAdmin) each wrap
-/// one; handles derived from the same core share its caches and store.
+/// Shared read-side runtime state: the object-store client, the read caches,
+/// and the grep service. [`FsWriter`](crate::FsWriter),
+/// [`FsReader`](crate::FsReader), and [`FsAdmin`](crate::FsAdmin) each hold
+/// one; handles built from the same core share its caches and store.
 ///
-/// `FsCore` is cheap to clone.
+/// A read core carries no actor identity, owns no publisher, and starts no
+/// background work — it is what a read needs and nothing more. `ReadCore` is
+/// cheap to clone.
 #[derive(Clone)]
-pub(crate) struct FsCore {
-    pub(crate) inner: Arc<FsInner>,
+pub(crate) struct ReadCore {
+    pub(crate) inner: Arc<ReadCoreInner>,
 }
 
-pub(crate) struct FsInner {
+pub(crate) struct ReadCoreInner {
     pub(crate) store: SharedObjectStore,
-    pub(crate) config: FsConfig,
-    pub(crate) writer_session_id: String,
+    pub(crate) config: ReadConfig,
     pub(crate) control_cache: Mutex<RuntimeControlCache>,
     pub(crate) metadata_table_cache: Arc<MetadataTableCache>,
     pub(crate) wal_tail_projection_cache: Arc<WalTailProjectionCache>,
     pub(crate) grep_service: GrepService,
     pub(crate) cache_stats: RuntimeCacheStatsInner,
-    pub(crate) background: BackgroundWork,
+}
+
+/// The actor identity a write-capable handle publishes under: immutable
+/// plain data, minted once when the handle is built.
+#[derive(Clone)]
+pub(crate) struct WriterIdentity {
+    pub(crate) writer_id: String,
+    pub(crate) writer_session_id: String,
+    pub(crate) writer_version: String,
+}
+
+/// What a publisher worker needs from the writer that owns it, in one
+/// allocation the worker can hold weakly: dropping the writer drops these,
+/// and admitted work then settles as `shutting_down` instead of publishing
+/// under an identity nobody owns any more.
+pub(crate) struct WriterBits {
+    pub(crate) identity: WriterIdentity,
+    pub(crate) background: Arc<BackgroundWork>,
     /// Optional synchronous notification after a mutation batch durably
     /// advances a namespace. Callers promise that it does not block.
     pub(crate) publish_observer: Option<PublishObserver>,
-    /// The core's publication service: every mutation — direct handle
-    /// calls and server submissions alike — publishes through it. Its
-    /// per-namespace publishers own the commit engines and writer sessions,
-    /// deliberately outside every rebuildable cache. It holds this core
-    /// weakly, so the ownership does not cycle.
-    pub(crate) publisher: PublisherRegistry,
+}
+
+impl WriterIdentity {
+    /// Mints an identity with a fresh session id, rejecting an empty actor
+    /// id or version.
+    pub(crate) fn new(writer_id: String, writer_version: String) -> Result<Self> {
+        validate_writer_identity(&writer_id, &writer_version)?;
+        Ok(Self {
+            writer_id,
+            writer_session_id: generated_id("wrs"),
+            writer_version,
+        })
+    }
+
+    pub(crate) fn mutation_context(&self) -> Result<MutationContext> {
+        Ok(MutationContext {
+            writer_id: self.writer_id.clone(),
+            writer_session_id: self.writer_session_id.clone(),
+            writer_version: self.writer_version.clone(),
+            now_ms: current_time_ms()?,
+        })
+    }
 }
 
 /// Lock accessors for the runtime caches.
@@ -63,7 +99,7 @@ pub(crate) struct FsInner {
 /// Poisoning is propagated as a panic: a poisoned cache means another thread
 /// panicked mid-update, and serving from it could violate the consistency the
 /// caches promise.
-impl FsInner {
+impl ReadCoreInner {
     pub(crate) fn control_cache(&self) -> MutexGuard<'_, RuntimeControlCache> {
         self.control_cache
             .lock()
@@ -71,22 +107,19 @@ impl FsInner {
     }
 }
 
-impl FsCore {
-    /// Opens a runtime core. `shared_metadata_table_cache` substitutes an
+impl ReadCore {
+    /// Opens a read core. `shared_metadata_table_cache` substitutes an
     /// existing decoded-block cache for a freshly sized one, so handles
     /// with distinct actor identities can still share warmed blocks —
     /// sound across cores because entries are keyed by immutable
     /// identities (payload checksums and manifest object keys); the
     /// sharing caller owns the sizing decision, and
     /// `config.runtime_cache.metadata_table_cache` goes unused.
-    pub(crate) fn open_with_background(
+    pub(crate) fn open(
         store: SharedObjectStore,
-        config: FsConfig,
-        background: BackgroundWork,
+        config: ReadConfig,
         shared_metadata_table_cache: Option<Arc<MetadataTableCache>>,
-        publish_observer: Option<PublishObserver>,
-    ) -> Result<Self> {
-        validate_config(&config)?;
+    ) -> Self {
         let metadata_table_cache = shared_metadata_table_cache.unwrap_or_else(|| {
             Arc::new(MetadataTableCache::new(
                 config.runtime_cache.metadata_table_cache.clone(),
@@ -100,36 +133,17 @@ impl FsCore {
                     .runtime_cache
                     .max_cached_wal_tail_projection_decoded_bytes,
             }));
-        let min_publish_interval = std::time::Duration::from_millis(config.min_publish_interval_ms);
-        let trace_mode = config.trace_mode.as_str();
-        let trace_store_kind = config.trace_store_kind.as_str();
-        // Cyclic by design: the core owns its publication service, and the
-        // service reaches back into the core through a weak reference.
-        Ok(Self {
-            inner: Arc::new_cyclic(|weak| FsInner {
+        Self {
+            inner: Arc::new(ReadCoreInner {
                 store,
                 config,
-                writer_session_id: generated_id("wrs"),
                 control_cache: Mutex::new(RuntimeControlCache::default()),
                 metadata_table_cache,
                 wal_tail_projection_cache,
                 grep_service: GrepService::new(),
                 cache_stats: RuntimeCacheStatsInner::default(),
-                background,
-                publish_observer,
-                publisher: PublisherRegistry::from_core(
-                    weak.clone(),
-                    min_publish_interval,
-                    trace_mode,
-                    trace_store_kind,
-                ),
             }),
-        })
-    }
-
-    /// The core's publication service; see [`crate::publisher`].
-    pub(crate) fn publisher(&self) -> &PublisherRegistry {
-        &self.inner.publisher
+        }
     }
 
     /// This runtime's shared decoded-block cache handle, for builders
@@ -138,9 +152,17 @@ impl FsCore {
         Arc::clone(&self.inner.metadata_table_cache)
     }
 
+    pub(crate) fn trace_mode(&self) -> &'static str {
+        self.inner.config.trace_mode.as_str()
+    }
+
+    pub(crate) fn trace_store_kind(&self) -> &'static str {
+        self.inner.config.trace_store_kind.as_str()
+    }
+
     pub(super) fn record_trace_context(&self, span: &tracing::Span) {
-        span.record("mode", self.inner.config.trace_mode.as_str());
-        span.record("store_kind", self.inner.config.trace_store_kind.as_str());
+        span.record("mode", self.trace_mode());
+        span.record("store_kind", self.trace_store_kind());
     }
 
     /// Returns the capability document for this embedded build (API spec,
@@ -200,66 +222,60 @@ impl FsCore {
         )
     }
 
-    /// Waits until every scheduled background maintenance step has finished.
-    ///
-    /// Call this to quiesce before shutdown, or in tests that assert on
-    /// post-maintenance state. Panicked steps surface as a runtime-task
-    /// error.
-    pub(crate) async fn wait_for_background_maintenance(&self) -> Result<()> {
-        self.inner.background.drain().await
-    }
-
-    /// Rejects any further background maintenance scheduling.
-    pub(crate) fn shut_down_background(&self) {
-        self.inner.background.shut_down();
-    }
-
     pub(crate) fn store(&self) -> &dyn ObjectStore {
         self.inner.store.as_ref()
     }
 
-    pub(crate) fn namespace_engine(
+    /// This core's object-store client, for the few in-process consumers
+    /// that read LoonFS-owned objects outside the handle surface.
+    pub(crate) fn shared_store(&self) -> SharedObjectStore {
+        Arc::clone(&self.inner.store)
+    }
+
+    /// A read-only engine: no actor identity, so a reader mints no writer
+    /// session id and cannot mutate even by mistake.
+    pub(crate) fn reader_engine(
         &self,
         namespace_id: &NamespaceId,
     ) -> NamespaceEngine<SharedObjectStore> {
-        self.namespace_engine_with_store(namespace_id, self.inner.store.clone())
-    }
-
-    pub(crate) fn namespace_engine_with_store<S: ObjectStore>(
-        &self,
-        namespace_id: &NamespaceId,
-        store: S,
-    ) -> NamespaceEngine<S> {
-        NamespaceEngine::builder(store)
+        NamespaceEngine::builder(self.inner.store.clone())
             .namespace_id(namespace_id.clone())
-            .writer_id(self.inner.config.writer_id.clone())
-            .writer_session_id(self.inner.writer_session_id.clone())
-            .writer_version(self.inner.config.writer_version.clone())
-            .build()
-            .expect("validated runtime config should build namespace engine")
+            .build_reader()
+            .expect("a namespace id is the reader engine's only requirement")
     }
 
-    pub(crate) fn mutation_context(&self) -> Result<MutationContext> {
-        Ok(MutationContext {
-            writer_id: self.inner.config.writer_id.clone(),
-            writer_session_id: self.inner.writer_session_id.clone(),
-            writer_version: self.inner.config.writer_version.clone(),
-            now_ms: current_time_ms()?,
-        })
+    /// A mutating engine bound to one actor identity.
+    pub(crate) fn writer_engine(
+        &self,
+        actor: &WriterIdentity,
+        namespace_id: &NamespaceId,
+    ) -> NamespaceEngine<SharedObjectStore> {
+        NamespaceEngine::builder(self.inner.store.clone())
+            .namespace_id(namespace_id.clone())
+            .writer_id(actor.writer_id.clone())
+            .writer_session_id(actor.writer_session_id.clone())
+            .writer_version(actor.writer_version.clone())
+            .build()
+            .expect("a validated actor identity should build a namespace engine")
     }
 }
 
 /// Holds a background singleflight claim across a spawned step. Dropping —
 /// on completion, panic, or a task discarded with its runtime — releases the
 /// namespace for the next scheduling decision.
+///
+/// The claim holds the writer's bits strongly on purpose: a scheduled step is
+/// the writer's own work, and it dies with the task that runs it.
 pub(super) struct BackgroundStepClaim {
-    pub(super) fs: FsCore,
+    pub(super) core: ReadCore,
+    pub(super) bits: Arc<WriterBits>,
+    pub(super) publisher: PublisherRegistry,
     pub(super) namespace_id: NamespaceId,
 }
 
 impl Drop for BackgroundStepClaim {
     fn drop(&mut self) {
-        self.fs.inner.background.release(&self.namespace_id);
+        self.bits.background.release(&self.namespace_id);
     }
 }
 

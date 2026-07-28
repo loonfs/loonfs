@@ -434,18 +434,135 @@ fn writer_reader_and_admin_share_a_namespace_through_store_config() {
         // cache counters, like writer and reader work through theirs.
         let _ = admin.runtime_cache_stats();
 
-        standalone
+        // Only the writer owns background work, so only the writer has
+        // anything to shut down.
+        writer
             .shutdown_background()
             .await
-            .expect("shut down standalone reader background work");
-        derived
-            .shutdown_background()
+            .expect("shut down writer background work");
+    });
+}
+
+/// A standalone reader carries no actor identity at all: its engines are
+/// reader-built, so there is no writer id and — the part that used to be
+/// fabricated — no writer session id minted for a handle that never
+/// mutates.
+#[test]
+fn standalone_reader_builds_without_writer_identity() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace_id("demo");
+    block_on(async {
+        let writer = writer(temp_dir.path(), FsBackgroundWork::ManualOnly).await;
+        writer
+            .create_namespace(&namespace_id, CreateNamespaceOptions::default())
             .await
-            .expect("shut down derived reader background work");
-        admin
-            .shutdown_background()
+            .expect("create namespace");
+        writer
+            .put_file_bytes(
+                &namespace_id,
+                "/docs/hello.txt",
+                b"hello",
+                PutFileOptions::default(),
+            )
             .await
-            .expect("shut down admin background work");
+            .expect("put file");
+
+        let reader = FsReader::builder(store_config(temp_dir.path()))
+            .build()
+            .await
+            .expect("build standalone reader");
+        // The reader serves the full read surface without an identity.
+        let stat = reader
+            .stat_path(&namespace_id, "/docs/hello.txt")
+            .await
+            .expect("stat through standalone reader");
+        assert_eq!(stat.size_bytes, Some(5));
+        let entries = reader
+            .list_path_entries_all(&namespace_id, "/docs")
+            .await
+            .expect("list through standalone reader")
+            .entries;
+        assert_eq!(entries.len(), 1);
+
+        // The identity the reader would have carried is the writer session
+        // recorded on the head. Only the writer's own session is there: a
+        // read minted none of its own.
+        let store = LocalFsStore::new(temp_dir.path()).expect("open store for inspection");
+        let head = loonfs_core::control::load_namespace_head_control(&store, &namespace_id)
+            .await
+            .expect("load head")
+            .state;
+        let writer_block = head.writer.expect("head records the writer that published");
+        assert_eq!(writer_block.writer_id, "handle-test-writer");
+        assert_ne!(
+            writer_block.writer_session_id, "",
+            "the writer's own session is the only session in play"
+        );
+    });
+}
+
+/// Writer-scheduled maintenance runs as an admin over the writer's own
+/// runtime, so its invalidations land on the caches the writer reads
+/// through: after the scheduled step rewrites the namespace's metadata
+/// root, a read on the same runtime observes post-maintenance state
+/// instead of failing on a cached view of reaped objects.
+#[test]
+fn admin_over_writer_core_invalidates_shared_caches() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace_id("demo");
+    block_on(async {
+        let writer = writer(temp_dir.path(), FsBackgroundWork::Enabled).await;
+        writer
+            .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+            .await
+            .expect("create namespace");
+        let reader = writer.reader();
+        fill_wal_tail_past_threshold(&writer, &namespace_id).await;
+        writer
+            .wait_for_background_work()
+            .await
+            .expect("background maintenance quiesces");
+
+        // The scheduled step ran: it published a manifest and bounded the
+        // tail, both through the writer's own runtime.
+        let admin = FsAdmin::builder(store_config(temp_dir.path()))
+            .actor_id("handle-test-admin")
+            .build()
+            .await
+            .expect("build admin");
+        let status = admin
+            .namespace_status(&namespace_id)
+            .await
+            .expect("status after the scheduled step");
+        assert!(
+            status.current_manifest_id > Some(ManifestId(0)),
+            "the scheduled step should have published a manifest: {status:?}"
+        );
+        assert!(
+            status.wal_tail_segments < wal_tail_segment_threshold(),
+            "the scheduled step should have bounded the tail: {status:?}"
+        );
+
+        // Reads and writes on the writer's own runtime see the state the
+        // step left behind, with no stale-cache error in between.
+        reader
+            .stat_path(&namespace_id, "/docs/file-0.txt")
+            .await
+            .expect("read after maintenance is served from revalidated caches");
+        writer
+            .put_file_bytes(
+                &namespace_id,
+                "/docs/after-maintenance.txt",
+                b"body",
+                PutFileOptions::default(),
+            )
+            .await
+            .expect("writes continue against the post-maintenance head");
+        reader
+            .stat_path(&namespace_id, "/docs/after-maintenance.txt")
+            .await
+            .expect("read after write on the shared core");
+
         writer
             .shutdown_background()
             .await

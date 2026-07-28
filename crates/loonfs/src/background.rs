@@ -1,9 +1,10 @@
 //! Writer-scheduled background maintenance: the policy knob, the
 //! per-namespace singleflight, and the task registry a shutdown drains.
 //!
-//! LoonFS never creates a hidden runtime for maintenance. Work a handle
-//! schedules for itself is spawned on the handle's owning Tokio runtime and
-//! stays visible to shutdown through the registry here.
+//! LoonFS never creates a hidden runtime for maintenance. Work a writer
+//! schedules for itself is spawned on the writer's owning Tokio runtime and
+//! stays visible to shutdown through the registry here. Only a writer owns
+//! one of these: readers and admins schedule nothing.
 
 use crate::{NamespaceId, Result, RuntimeError};
 use std::collections::BTreeSet;
@@ -61,15 +62,6 @@ struct BackgroundState {
 }
 
 impl BackgroundWork {
-    pub(crate) fn inert() -> Self {
-        Self::new(
-            FsBackgroundWork::ManualOnly,
-            None,
-            NonZeroUsize::new(crate::config::DEFAULT_MAX_CONCURRENT_MAINTENANCE)
-                .expect("default maintenance concurrency should be nonzero"),
-        )
-    }
-
     pub(crate) fn new(
         policy: FsBackgroundWork,
         runtime: Option<tokio::runtime::Handle>,

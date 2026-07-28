@@ -77,24 +77,35 @@ pub struct BeginDirectPutUploadTargetResponse {
     pub target: DirectPutUploadTarget,
 }
 
-/// A namespace-scoped core API.
-///
-/// `NamespaceEngine` owns an object store handle plus the writer identity used
-/// for mutations. It is the main entrypoint for direct reads, path writes,
-/// explicit commits, uploads, checkpoints, and retention work.
+/// The actor identity a mutating engine publishes under.
 #[derive(Debug)]
-pub struct NamespaceEngine<S> {
-    store: S,
-    namespace_id: NamespaceId,
+struct EngineWriter {
     writer_id: String,
     writer_session_id: String,
     writer_version: String,
 }
 
+/// A namespace-scoped core API.
+///
+/// `NamespaceEngine` owns an object store handle plus, for a mutating engine,
+/// the writer identity used for mutations. It is the main entrypoint for
+/// direct reads, path writes, explicit commits, uploads, checkpoints, and
+/// retention work.
+///
+/// An engine built by [`NamespaceEngineBuilder::build_reader`] carries no
+/// writer identity: it serves reads, and every mutation refuses.
+#[derive(Debug)]
+pub struct NamespaceEngine<S> {
+    store: S,
+    namespace_id: NamespaceId,
+    writer: Option<EngineWriter>,
+}
+
 impl<S: ObjectStore> NamespaceEngine<S> {
     /// Starts an engine builder for the supplied object store.
     ///
-    /// The builder requires a namespace id and writer id before it can build.
+    /// The builder requires a namespace id, and a writer id unless it is
+    /// finished with [`NamespaceEngineBuilder::build_reader`].
     pub fn builder(store: S) -> NamespaceEngineBuilder<S> {
         NamespaceEngineBuilder {
             store,
@@ -110,19 +121,26 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         &self.namespace_id
     }
 
-    /// Returns the writer id used for epoch acquisition and commit publication.
-    pub fn writer_id(&self) -> &str {
-        &self.writer_id
+    /// Returns the writer id used for epoch acquisition and commit
+    /// publication, or `None` for a read-only engine.
+    pub fn writer_id(&self) -> Option<&str> {
+        self.writer.as_ref().map(|writer| writer.writer_id.as_str())
     }
 
-    /// Returns the unique writer session id for this engine instance.
-    pub fn writer_session_id(&self) -> &str {
-        &self.writer_session_id
+    /// Returns the unique writer session id for this engine instance, or
+    /// `None` for a read-only engine.
+    pub fn writer_session_id(&self) -> Option<&str> {
+        self.writer
+            .as_ref()
+            .map(|writer| writer.writer_session_id.as_str())
     }
 
-    /// Returns the writer version reported in mutation context.
-    pub fn writer_version(&self) -> &str {
-        &self.writer_version
+    /// Returns the writer version reported in mutation context, or `None`
+    /// for a read-only engine.
+    pub fn writer_version(&self) -> Option<&str> {
+        self.writer
+            .as_ref()
+            .map(|writer| writer.writer_version.as_str())
     }
 
     /// Creates the namespace if it does not already exist.
@@ -495,11 +513,22 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         .await
     }
 
+    /// The identity every mutation publishes under.
+    ///
+    /// A read-only engine has none, so this fails instead of inventing one.
+    /// Nothing routes that error: the runtime hands read-only engines only to
+    /// read paths, and this exists so a wiring mistake fails honestly rather
+    /// than publishing under a fabricated writer.
     fn mutation_context(&self) -> Result<MutationContext> {
+        let writer = self.writer.as_ref().ok_or_else(|| {
+            crate::error::CoreError::Internal(
+                "engine built without writer identity cannot mutate".to_owned(),
+            )
+        })?;
         Ok(MutationContext {
-            writer_id: self.writer_id.clone(),
-            writer_session_id: self.writer_session_id.clone(),
-            writer_version: self.writer_version.clone(),
+            writer_id: writer.writer_id.clone(),
+            writer_session_id: writer.writer_session_id.clone(),
+            writer_version: writer.writer_version.clone(),
             now_ms: current_time_ms()?,
         })
     }
@@ -544,7 +573,7 @@ impl<S: ObjectStore> NamespaceEngineBuilder<S> {
         self
     }
 
-    /// Builds the engine after required fields are present.
+    /// Builds a mutating engine after required fields are present.
     pub fn build(self) -> std::result::Result<NamespaceEngine<S>, NamespaceEngineBuildError> {
         let namespace_id = self
             .namespace_id
@@ -562,11 +591,31 @@ impl<S: ObjectStore> NamespaceEngineBuilder<S> {
         Ok(NamespaceEngine {
             store: self.store,
             namespace_id,
-            writer_id,
-            writer_session_id: self
-                .writer_session_id
-                .unwrap_or_else(|| generated_id("wrs")),
-            writer_version: self.writer_version,
+            writer: Some(EngineWriter {
+                writer_id,
+                writer_session_id: self
+                    .writer_session_id
+                    .unwrap_or_else(|| generated_id("wrs")),
+                writer_version: self.writer_version,
+            }),
+        })
+    }
+
+    /// Builds a read-only engine: no writer identity, and therefore no
+    /// writer session id minted for a caller that will never mutate.
+    ///
+    /// Only the namespace is required. Any writer identity set on the
+    /// builder is dropped — a read-only engine carries none by definition.
+    pub fn build_reader(
+        self,
+    ) -> std::result::Result<NamespaceEngine<S>, NamespaceEngineBuildError> {
+        let namespace_id = self
+            .namespace_id
+            .ok_or(NamespaceEngineBuildError::MissingNamespace)?;
+        Ok(NamespaceEngine {
+            store: self.store,
+            namespace_id,
+            writer: None,
         })
     }
 }
@@ -622,8 +671,80 @@ mod tests {
             .expect("engine builds");
 
         assert_eq!(engine.namespace_id(), &namespace_id);
-        assert_eq!(engine.writer_id(), "writer-a");
-        assert!(!engine.writer_version().is_empty());
+        assert_eq!(engine.writer_id(), Some("writer-a"));
+        assert!(engine.writer_session_id().is_some());
+        assert!(!engine.writer_version().expect("writer version").is_empty());
+    }
+
+    #[test]
+    fn reader_engine_builds_without_any_writer_identity() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+
+        let engine = NamespaceEngine::builder(store)
+            .namespace_id(namespace_id.clone())
+            .build_reader()
+            .expect("reader engine builds without a writer");
+
+        assert_eq!(engine.namespace_id(), &namespace_id);
+        assert_eq!(engine.writer_id(), None);
+        assert_eq!(
+            engine.writer_session_id(),
+            None,
+            "a reader must not mint a writer session id"
+        );
+        assert_eq!(engine.writer_version(), None);
+    }
+
+    #[tokio::test]
+    async fn reader_engine_still_serves_reads() {
+        let temp_dir = tempdir().expect("tempdir");
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        NamespaceEngine::builder(LocalFsStore::new(temp_dir.path()).expect("store"))
+            .namespace_id(namespace_id.clone())
+            .writer_id("writer-a")
+            .build()
+            .expect("engine builds")
+            .bootstrap_namespace(BootstrapOptions::default())
+            .await
+            .expect("bootstrap namespace");
+
+        let reader = NamespaceEngine::builder(LocalFsStore::new(temp_dir.path()).expect("store"))
+            .namespace_id(namespace_id.clone())
+            .build_reader()
+            .expect("reader engine builds");
+        let changes = reader
+            .list_changes_after(
+                ChangeSeq(0),
+                loonfs_api::PaginationPolicy::default()
+                    .resolve_limit(None)
+                    .expect("default limit"),
+            )
+            .await
+            .expect("a reader-built engine serves reads");
+        assert_eq!(changes.namespace_id, namespace_id);
+    }
+
+    #[tokio::test]
+    async fn reader_engine_refuses_to_mutate() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let reader = NamespaceEngine::builder(store)
+            .namespace_id(NamespaceId::parse("demo").expect("valid namespace id"))
+            .build_reader()
+            .expect("reader engine builds");
+
+        let error = reader
+            .flush_wal()
+            .await
+            .expect_err("a reader-built engine must refuse mutations");
+        assert!(
+            error
+                .to_string()
+                .contains("engine built without writer identity cannot mutate"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

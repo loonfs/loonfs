@@ -283,7 +283,7 @@ impl FsReader {
         };
         Ok(self
             .core
-            .namespace_engine(namespace_id)
+            .reader_engine(namespace_id)
             .list_changes_after(after_seq, limit)
             .await?)
     }

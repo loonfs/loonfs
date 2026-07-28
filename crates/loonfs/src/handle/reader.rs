@@ -1,9 +1,7 @@
 //! The read-only runtime handle.
 
 use super::HandleBuilderCore;
-use crate::background::BackgroundWork;
-use crate::config::default_writer_version;
-use crate::fs::FsCore;
+use crate::fs::ReadCore;
 use crate::metrics::ObjectStoreMetricsRecorder;
 use crate::{
     CapabilityDocument, Result, RuntimeCacheConfig, RuntimeCacheStats, SharedObjectStore,
@@ -14,17 +12,17 @@ use std::sync::Arc;
 /// Read-only handle for latest namespace views.
 ///
 /// `FsReader` serves stat, list, read, revision, and change-feed queries. It
-/// owns no writer session, publishes nothing, and never schedules
-/// maintenance, so read-only workers cannot accidentally participate in
-/// writer scheduling. Reads revalidate cached control state against durable
-/// state, so a standalone reader stays consistent without any writer
-/// coordination.
+/// carries no actor identity at all — no writer id, no writer session —
+/// publishes nothing, and never schedules maintenance, so read-only workers
+/// cannot accidentally participate in writer scheduling. Reads revalidate
+/// cached control state against durable state, so a standalone reader stays
+/// consistent without any writer coordination.
 ///
 /// The handle is runtime-bound: open it with `build().await` inside the
 /// Tokio runtime that will drive its reads. `FsReader` is cheap to clone.
 #[derive(Clone)]
 pub struct FsReader {
-    pub(crate) core: FsCore,
+    pub(crate) core: ReadCore,
 }
 
 impl FsReader {
@@ -43,8 +41,8 @@ impl FsReader {
         FsReaderBuilder::new(HandleBuilderCore::from_store(store))
     }
 
-    /// Wraps a shared runtime core; used by [`FsWriter::reader`](crate::FsWriter::reader).
-    pub(super) fn from_core(core: FsCore) -> Self {
+    /// Wraps a shared read core; used by [`FsWriter::reader`](crate::FsWriter::reader).
+    pub(super) fn from_read_core(core: ReadCore) -> Self {
         Self { core }
     }
 
@@ -60,13 +58,6 @@ impl FsReader {
     }
 
     // Read operations live in `fs/reads.rs`.
-
-    /// Shuts down handle-owned background work. Readers own none, so this
-    /// settles immediately; it exists so every handle shares one shutdown
-    /// shape.
-    pub async fn shutdown_background(&self) -> Result<()> {
-        Ok(())
-    }
 }
 
 /// Builder for [`FsReader`].
@@ -116,16 +107,12 @@ impl FsReaderBuilder {
     }
 
     /// Opens the reader inside the Tokio runtime that will drive its reads.
+    ///
+    /// Async for uniformity with the other handle builders; a reader owns no
+    /// background work, so it needs no ambient runtime of its own.
     pub async fn build(self) -> Result<FsReader> {
-        // Readers never mutate, so the engine identity below is inert; it
-        // exists because shared internals require a non-empty actor.
-        let background = BackgroundWork::inert();
         Ok(FsReader {
-            core: self.core.open(
-                "loonfs-reader".to_owned(),
-                default_writer_version(),
-                background,
-            )?,
+            core: self.core.open_read_core()?,
         })
     }
 }

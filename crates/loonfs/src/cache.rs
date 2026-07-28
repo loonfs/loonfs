@@ -1,10 +1,10 @@
 //! Runtime caching: control-object reads and WAL-tail projections, plus the
-//! cache-management half of [`FsCore`].
+//! cache-management half of [`ReadCore`].
 //!
 //! Every cache revalidates against durable state before its contents are
 //! used; nothing here weakens read-after-write consistency.
 
-use crate::fs::{should_invalidate_after_result, FsCore};
+use crate::fs::{should_invalidate_after_result, ReadCore};
 use crate::{CommitResponse, CoreError, NamespaceId};
 use crate::{Result, RuntimeError};
 use loonfs_api::wire::control::HeadState;
@@ -220,7 +220,7 @@ impl RuntimeControlCache {
     }
 }
 
-impl FsCore {
+impl ReadCore {
     pub(crate) async fn load_namespace_head_cached(
         &self,
         namespace_id: &NamespaceId,
@@ -388,7 +388,7 @@ impl FsCore {
         );
         let head = head?;
         let read_context = self.runtime_read_context(&head, catalog?);
-        Ok((self.namespace_engine(namespace_id), read_context))
+        Ok((self.reader_engine(namespace_id), read_context))
     }
 
     /// Returns the namespace's immutable catalog pair through the control
@@ -417,16 +417,6 @@ impl FsCore {
             self.inner.config.runtime_cache.max_cached_namespaces,
         );
         Ok(Some(loaded))
-    }
-
-    #[tracing::instrument(
-        level = "info",
-        name = "loonfs.phase",
-        skip_all,
-        fields(phase = "update_cache")
-    )]
-    pub(crate) fn invalidate_namespace_cache(&self, namespace_id: &NamespaceId) {
-        self.invalidate_namespace_read_cache(namespace_id);
     }
 
     /// Namespace-terminal invalidation: the whole entry is removed, because
@@ -479,6 +469,16 @@ impl FsCore {
         );
     }
 
+    /// Drops the namespace's read caches. The publish-side view of the same
+    /// state — a namespace publisher's WAL tail projection — is stale for
+    /// exactly the same reasons, so a caller that owns a publication service
+    /// drops that too; see `FsWriter::invalidate_namespace`.
+    #[tracing::instrument(
+        level = "info",
+        name = "loonfs.phase",
+        skip_all,
+        fields(phase = "update_cache")
+    )]
     pub(crate) fn invalidate_namespace_read_cache(&self, namespace_id: &NamespaceId) {
         self.inner
             .control_cache()
@@ -486,23 +486,13 @@ impl FsCore {
         self.inner
             .wal_tail_projection_cache
             .invalidate_namespace(namespace_id);
-        // The namespace's publish-side view of the same state: its WAL tail
-        // projection is stale for exactly the reasons the read caches are.
-        self.inner.publisher.invalidate_engine(namespace_id);
     }
 
-    pub(crate) fn finish_namespace_mutation<T>(
-        &self,
-        namespace_id: &NamespaceId,
-        result: Result<T>,
-    ) -> Result<T> {
-        if should_invalidate_after_result(&result) {
-            self.invalidate_namespace_cache(namespace_id);
-        }
-        result
-    }
-
-    pub(crate) fn invalidate_namespace_cache_after_batch(
+    /// Drops the read caches after a publication batch that may have moved
+    /// the namespace on. The publisher's own engine needs no invalidation
+    /// here: it is the engine that just published, and it revalidates
+    /// against the live head on its next unit of work.
+    pub(crate) fn invalidate_read_cache_after_batch(
         &self,
         namespace_id: &NamespaceId,
         results: &[Result<CommitResponse>],

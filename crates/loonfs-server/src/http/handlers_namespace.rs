@@ -182,7 +182,8 @@ pub(super) async fn delete_namespace(
         expected_head_seq: query.expected_head_seq.map(ChangeSeq),
     };
     let response = state
-        .publisher
+        .writer
+        .publisher()
         .submit_delete(namespace_id.clone(), options)
         .await
         .map_err(|error| ApiResponseError::core_for_namespace(&namespace_id, error))?;

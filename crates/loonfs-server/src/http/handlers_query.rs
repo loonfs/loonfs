@@ -260,7 +260,7 @@ async fn start_driver_for_query_if_needed(
     let Some(drivers) = &state.grep_drivers else {
         return;
     };
-    let Ok(Some(root)) = load_grep_root(&*state.store, namespace_id).await else {
+    let Ok(Some(root)) = load_grep_root(&*state.writer.object_store(), namespace_id).await else {
         return;
     };
     let needs_catch_up = match root.state().lifecycle() {

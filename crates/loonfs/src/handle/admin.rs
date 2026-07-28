@@ -1,10 +1,10 @@
 //! The administrative and maintenance runtime handle.
 
 use super::HandleBuilderCore;
-use crate::background::BackgroundWork;
 use crate::config::default_writer_version;
-use crate::fs::FsCore;
+use crate::fs::{ReadCore, WriterIdentity};
 use crate::metrics::ObjectStoreMetricsRecorder;
+use crate::publisher::PublisherRegistry;
 use crate::{
     Result, RuntimeCacheConfig, RuntimeCacheStats, RuntimeError, SharedObjectStore, StoreConfig,
     TraceMode, TraceStoreKind,
@@ -23,7 +23,14 @@ use std::sync::Arc;
 /// `actor_id` for tracing, reports, and auditability.
 #[derive(Clone)]
 pub struct FsAdmin {
-    pub(crate) core: FsCore,
+    pub(crate) core: ReadCore,
+    pub(crate) actor: WriterIdentity,
+    /// `invalidate_engine` matters only where a publisher exists for the
+    /// namespace, so a standalone admin holds `None` — its
+    /// engines-to-invalidate do not exist — and an admin built over a
+    /// writer's runtime for background maintenance holds that writer's
+    /// registry.
+    pub(crate) publisher: Option<PublisherRegistry>,
 }
 
 impl FsAdmin {
@@ -42,11 +49,21 @@ impl FsAdmin {
         FsAdminBuilder::new(HandleBuilderCore::from_store(store))
     }
 
-    /// Wraps a shared runtime core. Writer-scheduled background maintenance
-    /// uses this so it runs the same operations an operator runs, rather
-    /// than a private copy of them.
-    pub(crate) fn from_core(core: FsCore) -> Self {
-        Self { core }
+    /// Builds an admin over a writer's own runtime: its read core, its
+    /// identity, and its publication service. Writer-scheduled background
+    /// maintenance uses this so it runs the same operations an operator
+    /// runs — and so its invalidations reach the writer's caches and
+    /// publisher engines rather than a private copy of them.
+    pub(crate) fn from_writer_parts(
+        core: ReadCore,
+        actor: WriterIdentity,
+        publisher: PublisherRegistry,
+    ) -> Self {
+        Self {
+            core,
+            actor,
+            publisher: Some(publisher),
+        }
     }
 
     /// Snapshots the runtime cache counters, so maintenance work driven
@@ -56,13 +73,6 @@ impl FsAdmin {
     }
 
     // Maintenance operations live in `fs/maintenance.rs`.
-
-    /// Shuts down handle-owned background work. Admin calls are one-shot in
-    /// the caller's task, so this settles immediately; it exists so every
-    /// handle shares one shutdown shape.
-    pub async fn shutdown_background(&self) -> Result<()> {
-        Ok(())
-    }
 }
 
 /// Builder for [`FsAdmin`].
@@ -108,7 +118,7 @@ impl FsAdminBuilder {
     /// writer's byte budget: [`Self::runtime_cache`] still sizes this
     /// handle's other caches, but its decoded-block budget goes unused.
     pub fn shared_metadata_table_cache(mut self, writer: &super::FsWriter) -> Self {
-        self.core.shared_metadata_table_cache = Some(writer.core().metadata_table_cache());
+        self.core.shared_metadata_table_cache = Some(writer.metadata_table_cache());
         self
     }
 
@@ -139,9 +149,11 @@ impl FsAdminBuilder {
         let actor_id = self
             .actor_id
             .ok_or_else(|| RuntimeError::Config("actor_id is required".to_owned()))?;
-        let background = BackgroundWork::inert();
+        let actor = WriterIdentity::new(actor_id, self.actor_version)?;
         Ok(FsAdmin {
-            core: self.core.open(actor_id, self.actor_version, background)?,
+            core: self.core.open_read_core()?,
+            actor,
+            publisher: None,
         })
     }
 }

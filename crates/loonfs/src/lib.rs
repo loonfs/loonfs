@@ -23,9 +23,11 @@
 //! # Ok(()) }
 //! ```
 //!
-//! LoonFS never creates a hidden maintenance runtime: any background work a
-//! handle starts is spawned on that handle's owning runtime, and each handle
-//! has an async `shutdown_background()` that settles what it owns.
+//! Background work belongs to the writer — publications, and the maintenance
+//! a publication schedules. LoonFS never creates a hidden maintenance
+//! runtime: that work is spawned on the writer's own owning runtime, and
+//! [`FsWriter::shutdown_background`] settles it. Readers and admins start no
+//! background work at all, so they have nothing to shut down.
 #![warn(missing_docs)]
 
 mod background;
