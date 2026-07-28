@@ -4,16 +4,13 @@ mod common;
 
 use common::http_split_support::*;
 use common::start_server;
-use loonfs_api::{
-    v0::{CommitOp, CommitRequest as ApiCommitRequest, CommitSubmissionRequest},
-    CommitId, DestinationBehavior, InodeId,
-};
+use loonfs_api::{CommitId, DestinationBehavior};
 use loonfs_client::{ClientError, DeleteOptions, MutationOptions, NamespacePath, PutFileOptions};
 use loonfs_test_support::ids::namespace_id;
 use tempfile::tempdir;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_commit_rejects_same_commit_id_with_different_payload() {
+async fn http_operation_rejects_same_commit_id_with_different_payload() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
@@ -29,46 +26,32 @@ async fn http_commit_rejects_same_commit_id_with_different_payload() {
         .await
         .expect("create namespace");
 
-    let first = stage_uploaded_content(&harness.client, &namespace, b"first payload\n").await;
-    let first_request = CommitSubmissionRequest {
-        commit: ApiCommitRequest {
-            commit_id: CommitId::parse("req-phase-2a-conflict").expect("valid commit id"),
-            preconditions: Vec::new(),
-            ops: vec![CommitOp::CreateFile {
-                parent_inode_id: InodeId(1),
-                display_name: loonfs_api::DisplayName::parse("first.txt")
-                    .expect("valid display name"),
-                content_ref: first.content_ref.clone(),
-            }],
-            message: Some("first commit".to_owned()),
-        },
-        content_tokens: vec![validated_content_token(&first)],
-    };
+    let commit_id = CommitId::parse("req-phase-2a-conflict").expect("valid commit id");
     harness
         .client
-        .commit_operations(&namespace, &first_request)
+        .put_file_bytes(
+            &NamespacePath::parse("demo", "/first.txt").expect("first target"),
+            b"first payload\n",
+            &PutFileOptions {
+                commit_id: Some(commit_id.clone()),
+                message: Some("first commit".to_owned()),
+                ..PutFileOptions::default()
+            },
+        )
         .await
-        .expect("first commit");
-
-    let second = stage_uploaded_content(&harness.client, &namespace, b"second payload\n").await;
-    let conflicting_request = CommitSubmissionRequest {
-        commit: ApiCommitRequest {
-            commit_id: first_request.commit.commit_id.clone(),
-            preconditions: first_request.commit.preconditions.clone(),
-            ops: vec![CommitOp::CreateFile {
-                parent_inode_id: InodeId(1),
-                display_name: loonfs_api::DisplayName::parse("second.txt")
-                    .expect("valid display name"),
-                content_ref: second.content_ref.clone(),
-            }],
-            message: Some("second commit".to_owned()),
-        },
-        content_tokens: vec![validated_content_token(&second)],
-    };
+        .expect("first put");
 
     match harness
         .client
-        .commit_operations(&namespace, &conflicting_request)
+        .put_file_bytes(
+            &NamespacePath::parse("demo", "/second.txt").expect("second target"),
+            b"second payload\n",
+            &PutFileOptions {
+                commit_id: Some(commit_id.clone()),
+                message: Some("second commit".to_owned()),
+                ..PutFileOptions::default()
+            },
+        )
         .await
     {
         Err(ClientError::Api {
@@ -82,10 +65,7 @@ async fn http_commit_rejects_same_commit_id_with_different_payload() {
             // structured fields, not prose (API spec, "Standard error
             // contract").
             let details = details.expect("structured details");
-            assert_eq!(
-                details.commit_id,
-                Some(first_request.commit.commit_id.clone())
-            );
+            assert_eq!(details.commit_id, Some(commit_id));
             let request_id = request_id.expect("request id");
             assert!(request_id.starts_with("req_"), "got `{request_id}`");
         }
@@ -122,6 +102,7 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
                 behavior: DestinationBehavior::NoReplace,
                 commit_id: Some(commit_id.clone()),
                 message: None,
+                expected_revision_no: None,
             },
         )
         .await
@@ -137,6 +118,7 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
                 behavior: DestinationBehavior::NoReplace,
                 commit_id: Some(commit_id.clone()),
                 message: None,
+                expected_revision_no: None,
             },
         )
         .await
@@ -161,6 +143,7 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
                 behavior: DestinationBehavior::NoReplace,
                 commit_id: Some(commit_id),
                 message: None,
+                expected_revision_no: None,
             },
         )
         .await

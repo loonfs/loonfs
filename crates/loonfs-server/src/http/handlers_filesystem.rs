@@ -1,36 +1,30 @@
-//! Path- and inode-oriented filesystem handlers: directory listing, stat,
-//! content reads, revision listings and restore, filesystem mutations,
-//! semantic commits, and the committed-change feed.
+//! Path-oriented filesystem handlers: directory listing, stat, content
+//! reads, revision listings, filesystem mutations, and the committed-change
+//! feed.
 
 use super::error::ApiResponseError;
 use super::handlers_uploads::{
     content_preparation_for_put, current_unix_ms, PutContentPreparation,
 };
-use super::{authorize, AppJson, AppPath, AppQuery, AppState, CommitAppJson, NamespaceIdPath};
+use super::{authorize, AppJson, AppQuery, AppState, NamespaceIdPath};
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use loonfs::publish::{
     ensure_mutation_path, ContentPreparationError, NamespaceMutation, NamespaceMutationCandidate,
-    PathMutationIntent, PreparedContent,
+    PathMutationIntent,
 };
-use loonfs::{
-    content_tokens::ContentTokenError, payload_class, ErrorCode, ListChangesOptions, TraceStoreKind,
-};
+use loonfs::{payload_class, ErrorCode, ListChangesOptions, TraceStoreKind};
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
 use loonfs_api::{
     decode_cursor,
-    v0::{
-        ChangesResponse, CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse,
-        CommitSubmissionRequest, ValidatedContentToken,
-    },
-    AbsolutePath, ContentRef, DirectoryPageCursor, FileRevisionsPageCursor, FilesystemOperation,
-    FilesystemOperationRequest, InodeId, LimitError, ListFileRevisionsResponse, ListTrashResponse,
-    PageCursorError, PageRequest, PaginationPolicy, RestoreFileRevisionRequest, RevisionNo,
+    v0::{ChangesResponse, CommitResponse as ApiCommitResponse},
+    AbsolutePath, DirectoryPageCursor, FileRevisionsPageCursor, FilesystemOperation,
+    FilesystemOperationRequest, LimitError, ListFileRevisionsResponse, ListTrashResponse,
+    PageCursorError, PageRequest, PaginationPolicy, RevisionNo,
 };
-use std::collections::HashSet;
 use tracing::Instrument;
 
 #[derive(Debug, serde::Deserialize)]
@@ -61,23 +55,6 @@ pub(super) struct ContentQuery {
 pub(super) struct ChangesQuery {
     after_seq: u64,
     limit: Option<String>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-pub(super) struct InodePathParams {
-    inode_id: String,
-}
-
-#[derive(Debug, serde::Deserialize)]
-pub(super) struct InodeRevisionPathParams {
-    inode_id: String,
-    revision_no: String,
-}
-
-#[derive(Debug, serde::Deserialize)]
-pub(super) struct InodeRestorePathParams {
-    inode_id: String,
-    source_revision_no: String,
 }
 
 #[cfg_attr(
@@ -321,168 +298,6 @@ pub(super) async fn list_file_revisions(
 #[cfg_attr(
     feature = "openapi",
     utoipa::path(
-        get,
-        path = "/v0/namespaces/{namespace}/inodes/{inode_id}/revisions",
-        tag = "inodes",
-        summary = "List file revisions by inode",
-        description = "Returns revisions for a file inode, independent of the file's current path or later renames.",
-        params(
-            ("namespace" = String, Path, description = "Namespace id"),
-            ("inode_id" = String, Path, description = "File inode id"),
-            ("limit" = Option<String>, Query, description = "Maximum page size"),
-            ("cursor" = Option<String>, Query, description = "Opaque file-revisions page cursor")
-        ),
-        responses(
-            (status = 200, description = "File revisions", body = ListFileRevisionsResponse),
-            (status = 400, description = "Invalid inode id", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace or inode not found", body = ApiError),
-            (status = 410, description = "Namespace deleted", body = ApiError)
-        )
-    )
-)]
-pub(super) async fn list_file_revisions_by_inode(
-    State(state): State<AppState>,
-    namespace: NamespaceIdPath,
-    path: AppPath<InodePathParams>,
-    headers: HeaderMap,
-    query: AppQuery<PageQuery>,
-) -> Result<Json<ListFileRevisionsResponse>, ApiResponseError> {
-    authorize(&state.config, &headers)?;
-    let namespace_id = namespace.into_id()?;
-    let InodePathParams { inode_id } = path.into_params()?;
-    let query = query.into_params()?;
-    let inode_id = parse_inode_id(&inode_id)?;
-    let response = state
-        .reader
-        .list_file_revisions_by_inode_page(
-            &namespace_id,
-            inode_id,
-            PageRequest {
-                limit: resolve_page_limit(query.limit)?,
-                cursor: decode_file_revisions_page_cursor(query.cursor)?,
-            },
-        )
-        .await
-        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
-    Ok(Json(response))
-}
-
-#[cfg_attr(
-    feature = "openapi",
-    utoipa::path(
-        get,
-        path = "/v0/namespaces/{namespace}/inodes/{inode_id}/revisions/{revision_no}/content",
-        tag = "inodes",
-        summary = "Read file revision by inode",
-        description = "Returns bytes for one retained file revision by inode id and revision number.",
-        params(
-            ("namespace" = String, Path, description = "Namespace id"),
-            ("inode_id" = String, Path, description = "File inode id"),
-            ("revision_no" = String, Path, description = "File revision number")
-        ),
-        responses(
-            (status = 200, description = "Revision bytes", body = Vec<u8>, content_type = "application/octet-stream"),
-            (status = 400, description = "Invalid inode id or revision", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace, inode, or revision not found", body = ApiError),
-            (status = 410, description = "Namespace deleted", body = ApiError),
-            (status = 413, description = "Content exceeds the advertised `download.max_content_bytes` limit", body = ApiError),
-            (status = 503, description = "The server is at its concurrent content-read limit; retry shortly", body = ApiError)
-        )
-    )
-)]
-pub(super) async fn get_file_revision_bytes_by_inode(
-    State(state): State<AppState>,
-    namespace: NamespaceIdPath,
-    path: AppPath<InodeRevisionPathParams>,
-    headers: HeaderMap,
-) -> Result<Response, ApiResponseError> {
-    authorize(&state.config, &headers)?;
-    let namespace_id = namespace.into_id()?;
-    let InodeRevisionPathParams {
-        inode_id,
-        revision_no,
-    } = path.into_params()?;
-    let _permit = state
-        .download_permits
-        .clone()
-        .try_acquire_owned()
-        .map_err(|_| super::server_busy_error("proxied content reads"))?;
-    let inode_id = parse_inode_id(&inode_id)?;
-    let revision_no = parse_revision_no(&revision_no)?;
-    let bytes = state
-        .reader
-        .get_file_revision_bytes_by_inode(&namespace_id, inode_id, revision_no)
-        .await
-        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
-    Ok((StatusCode::OK, bytes).into_response())
-}
-
-#[cfg_attr(
-    feature = "openapi",
-    utoipa::path(
-        post,
-        path = "/v0/namespaces/{namespace}/inodes/{inode_id}/revisions/{source_revision_no}/restore",
-        tag = "inodes",
-        summary = "Restore file revision by inode",
-        description = "Appends a new current revision to a file inode using bytes from an older retained revision. The request includes the caller's expected current revision for race safety.",
-        params(
-            ("namespace" = String, Path, description = "Namespace id"),
-            ("inode_id" = String, Path, description = "File inode id"),
-            ("source_revision_no" = String, Path, description = "Revision number to restore")
-        ),
-        request_body = RestoreFileRevisionRequest,
-        responses(
-            (status = 200, description = "Restore commit response", body = ApiCommitResponse),
-            (status = 400, description = "Invalid inode id, revision, or request", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace, inode, or revision not found", body = ApiError),
-            (status = 409, description = "Commit conflict", body = ApiError),
-            (status = 410, description = "Namespace deleted", body = ApiError)
-        )
-    )
-)]
-pub(super) async fn restore_file_revision_by_inode(
-    State(state): State<AppState>,
-    namespace: NamespaceIdPath,
-    path: AppPath<InodeRestorePathParams>,
-    AppJson(request): AppJson<RestoreFileRevisionRequest>,
-) -> Result<Json<ApiCommitResponse>, ApiResponseError> {
-    let namespace_id = namespace.into_id()?;
-    let InodeRestorePathParams {
-        inode_id,
-        source_revision_no,
-    } = path.into_params()?;
-    let inode_id = parse_inode_id(&inode_id)?;
-    let source_revision_no = parse_revision_no(&source_revision_no)?;
-    let commit = ApiCommitRequest {
-        commit_id: request.commit_id,
-        preconditions: vec![loonfs_api::v0::CommitPrecondition::InodeRevisionIs {
-            inode_id,
-            revision_no: request.base_revision_no,
-        }],
-        ops: vec![loonfs_api::v0::CommitOp::RestoreRevision {
-            inode_id,
-            source_revision_no,
-            base_revision_no: request.base_revision_no,
-        }],
-        message: None,
-    };
-    let commit_id = commit.commit_id.clone();
-    let response = state
-        .publisher
-        .submit_commit(namespace_id.clone(), commit)
-        .await
-        .map_err(|error| {
-            ApiResponseError::core_for_namespace(&namespace_id, error).with_commit_id(&commit_id)
-        })?;
-    Ok(Json(response))
-}
-
-#[cfg_attr(
-    feature = "openapi",
-    utoipa::path(
         post,
         path = "/v0/namespaces/{namespace}/filesystem/operations",
         tag = "filesystem",
@@ -556,12 +371,14 @@ pub(super) async fn apply_filesystem_operation(
             path,
             content_ref,
             behavior,
+            expected_revision_no,
         } => PathMutationIntent::PutFile {
             commit_id,
             message: message.clone(),
             absolute_path: validate_path(path)?,
             content_ref,
             behavior,
+            expected_revision_no,
         },
         FilesystemOperation::DeletePath {
             path,
@@ -661,150 +478,9 @@ pub(super) async fn apply_filesystem_operation(
 #[cfg_attr(
     feature = "openapi",
     utoipa::path(
-        post,
-        path = "/v0/namespaces/{namespace}/commits",
-        tag = "commits",
-        summary = "Commit operations",
-        description = "Applies an explicit semantic commit containing ordered inode-level operations and optional preconditions. Use this for advanced cases that require inode-specificity, preconditions, or batch transactions.",
-        params(("namespace" = String, Path, description = "Namespace id")),
-        request_body = CommitSubmissionRequest,
-        responses(
-            (status = 200, description = "Commit accepted", body = ApiCommitResponse),
-            (status = 400, description = "Invalid commit request", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace not found", body = ApiError),
-            (status = 409, description = "Commit conflict", body = ApiError),
-            (status = 410, description = "Namespace deleted", body = ApiError),
-            (status = 413, description = "Commit body exceeds the advertised `commit.max_body_bytes` limit", body = ApiError),
-            (status = 503, description = "Commit unavailable", body = ApiError)
-        )
-    )
-)]
-pub(super) async fn commit_operations(
-    State(state): State<AppState>,
-    namespace: NamespaceIdPath,
-    CommitAppJson(submission): CommitAppJson<CommitSubmissionRequest>,
-) -> Result<Json<ApiCommitResponse>, ApiResponseError> {
-    let CommitSubmissionRequest {
-        commit: request,
-        content_tokens,
-    } = submission;
-    let namespace_id = namespace.into_id()?;
-    let commit_id = request.commit_id.clone();
-    let external_content_refs = distinct_external_content_refs(&request);
-    // The router's commit-body limit is the transport guard. Semantic limits
-    // stay in candidate preparation so durable replays reach receipt lookup.
-    let content_preparation = prepare_commit_content(
-        &state.writer,
-        &state.config,
-        &namespace_id,
-        &external_content_refs,
-        &content_tokens,
-    )
-    .await?;
-    let candidate = match content_preparation {
-        CommitContentPreparation::Ready(content) => {
-            NamespaceMutationCandidate::commit_prepared(request, content)
-        }
-        CommitContentPreparation::Rejected(error) => NamespaceMutationCandidate::rejected(
-            NamespaceMutation::Commit(request),
-            ContentPreparationError::ContentToken(error),
-        ),
-    };
-    let response = state
-        .publisher
-        .submit_candidate(namespace_id.clone(), candidate)
-        .await
-        .map_err(|error| {
-            ApiResponseError::core_for_namespace(&namespace_id, error).with_commit_id(&commit_id)
-        })?;
-    Ok(Json(response))
-}
-
-enum CommitContentPreparation {
-    Ready(Vec<PreparedContent>),
-    Rejected(ContentTokenError),
-}
-
-fn distinct_external_content_refs(request: &ApiCommitRequest) -> Vec<ContentRef> {
-    let mut seen = HashSet::new();
-    let mut refs = Vec::new();
-    for content_ref in request.ops.iter().filter_map(|op| match op {
-        loonfs_api::v0::CommitOp::CreateFile { content_ref, .. }
-        | loonfs_api::v0::CommitOp::ReplaceFile { content_ref, .. } => Some(content_ref),
-        _ => None,
-    }) {
-        if seen.insert(content_ref.clone()) {
-            refs.push(content_ref.clone());
-        }
-    }
-    refs
-}
-
-async fn prepare_commit_content(
-    writer: &loonfs::FsWriter,
-    config: &crate::config::ServerConfig,
-    namespace_id: &loonfs_api::NamespaceId,
-    external_content_refs: &[ContentRef],
-    content_tokens: &[ValidatedContentToken],
-) -> Result<CommitContentPreparation, ApiResponseError> {
-    let relevant_refs = external_content_refs
-        .iter()
-        .cloned()
-        .collect::<HashSet<_>>();
-    let relevant_tokens = content_tokens
-        .iter()
-        .filter(|token| relevant_refs.contains(&token.content_ref))
-        .cloned()
-        .collect::<Vec<_>>();
-    if relevant_tokens.is_empty() {
-        return Ok(CommitContentPreparation::Ready(Vec::new()));
-    }
-
-    let now_ms = current_unix_ms()?;
-    let mut prepared = Vec::new();
-    let mut prepared_refs = HashSet::new();
-    let mut first_error = None;
-    for token in &relevant_tokens {
-        match writer
-            .prepare_content_token(namespace_id, config.content_token_secret(), token, now_ms)
-            .await
-            .map_err(|error| ApiResponseError::runtime_for_namespace(namespace_id, error))?
-        {
-            Ok(content) => {
-                prepared_refs.insert(content.content_ref().clone());
-                prepared.push(content);
-            }
-            Err(error) => {
-                tracing::debug!(
-                    namespace_id = %namespace_id,
-                    content_ref_digest = %token.content_ref.digest,
-                    error = %error,
-                    "content token rejected during commit preparation"
-                );
-                first_error.get_or_insert(error);
-            }
-        }
-    }
-
-    if external_content_refs
-        .iter()
-        .all(|content_ref| prepared_refs.contains(content_ref))
-    {
-        Ok(CommitContentPreparation::Ready(prepared))
-    } else if let Some(error) = first_error {
-        Ok(CommitContentPreparation::Rejected(error))
-    } else {
-        Ok(CommitContentPreparation::Ready(prepared))
-    }
-}
-
-#[cfg_attr(
-    feature = "openapi",
-    utoipa::path(
         get,
         path = "/v0/namespaces/{namespace}/changes",
-        tag = "commits",
+        tag = "filesystem",
         summary = "List changes after a sequence",
         description = "Returns committed changes from the write-ahead log. Callers can use this feed to keep another projection synchronized with WAL history.",
         params(
@@ -842,16 +518,6 @@ pub(super) async fn list_changes(
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok(Json(response))
-}
-
-fn parse_inode_id(value: &str) -> Result<InodeId, ApiResponseError> {
-    value.parse::<u64>().map(InodeId).map_err(|err| {
-        ApiResponseError::new(
-            StatusCode::BAD_REQUEST,
-            ErrorCode::InvalidRequest,
-            &format!("invalid inode_id `{value}`: {err}"),
-        )
-    })
 }
 
 fn parse_revision_no(value: &str) -> Result<RevisionNo, ApiResponseError> {

@@ -24,7 +24,7 @@ within a plane is expressed as **named features** (section 2).
 
 | Profile | Plane | Ops | Status |
 | --- | --- | --- | --- |
-| `core/v0` | Data plane | Path reads and mutations (stat, list, content, revisions, path operations), staged uploads, explicit commits, the change feed, namespace status by id, `GET /v0/capabilities`, and the standard error contract. Namespace `list`, `create`, `fork`, and `delete` are **features** within this profile. | **Mandatory** for any conforming deployment |
+| `core/v0` | Data plane | Path reads and mutations (stat, list, content, revisions, path operations), staged uploads, the change feed, namespace status by id, `GET /v0/capabilities`, and the standard error contract. Namespace `list`, `create`, `fork`, and `delete` are **features** within this profile. | **Mandatory** for any conforming deployment |
 | `admin/v0` | Maintenance plane | Create and release checkpoints; run one-shot maintenance steps (WAL flush, metadata reorganization, retention-floor advancement, and garbage collection, together or one at a time); repair incomplete namespace installations. Future maintenance triggers (index builds) arrive as features in this plane. | Optional |
 | `query/v0` | Query plane | Content search over derived indexes (`POST /v0/namespaces/{namespace}/query/grep`). Grep-index search is the `query.grep` **feature** within this profile; using it also requires a materialized steady-state grep root for the namespace. | Optional |
 | `acl/v0` | Authorization plane | — | **Reserved name only.** Do not specify ops yet. Clients must tolerate unknown error codes, so authorization errors can land with this plane without breaking anyone. |
@@ -77,7 +77,6 @@ therefore identical for both backends.
     "query.grep": true
   },
   "limits": {
-    "commit.max_operations": 4096,
     "maintenance.gc.min_grace_window_ms": 1230000,
     "pagination.default_limit": 1000,
     "pagination.max_limit": 1000,
@@ -118,8 +117,6 @@ Registered limit keys:
 | `download.max_content_bytes` | Largest file content a service-proxied read (`GET .../filesystem/content`, inode revision content) will buffer and return in one response. Over-limit reads answer `content_too_large`; v0 has no proxied streaming or range reads. |
 | `upload.max_concurrent` | How many service-proxied upload bodies the deployment buffers at once; requests past the cap answer `server_busy`. |
 | `download.max_concurrent` | How many service-proxied content reads the deployment materializes at once; requests past the cap answer `server_busy`. |
-| `commit.max_body_bytes` | Largest JSON body accepted by `POST .../commits`. Commit bodies are metadata only — file bytes ride uploads — so over-limit commits should be split into smaller batches, not routed through `direct_put`. |
-| `commit.max_operations` | Largest number of semantic operations accepted in one explicit commit. Larger transactions answer `invalid_request`; the whole request is rejected and must be split before retry. |
 | `maintenance.gc.min_grace_window_ms` | Smallest accepted `grace_window_ms` on a `gc` request; smaller values answer `invalid_request`. Derived from the publication budgets, not tuned. |
 | `query.grep.default_limit` | Matches per grep page when the request omits `limit`. |
 | `query.grep.max_limit` | Largest accepted grep page limit; invalid limits are rejected as `invalid_request`. Distinct from the pagination keys because a grep item costs a verified file read, not a row. |
@@ -218,7 +215,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `invalid_request` | 400 | The request is malformed: a path, id, cursor, parameter, staged content reference, configuration value, or commit request limit fails validation. The message names the offending field or limit. |
 | `unauthorized` | 401 | Missing or wrong credentials. |
 | `permission_denied` | 403 | The backing object store rejected the deployment's storage credentials for this operation. Fix the storage credentials or bucket policy; retrying unchanged will not succeed. |
-| `content_too_large` | 413 | The request body exceeds the deployment's limit: `upload.max_content_bytes` for proxied uploads, `commit.max_body_bytes` for commit bodies. Served file content past `download.max_content_bytes` reports it too. For uploads, send a smaller payload or use `direct_put` when that feature is advertised; for commits, split the batch; for reads, the deployment limit must be raised. |
+| `content_too_large` | 413 | The request body exceeds the deployment's limit: `upload.max_content_bytes` for proxied uploads. Served file content past `download.max_content_bytes` reports it too. For uploads, send a smaller payload or use `direct_put` when that feature is advertised; for reads, the deployment limit must be raised. |
 | `route_not_found` | 404 | No route matches the request path. |
 | `method_not_allowed` | 405 | The path exists but does not serve this HTTP method. |
 | `namespace_not_found` | 404 | The namespace does not exist. |
@@ -277,9 +274,9 @@ codebase.
   grouped (`core`, `admin`, and later), so the surface a deployment does not
   support is visibly absent instead of failing call by call.
 
-## 5. Minimal upload, commit, and change-feed model
+## 5. Minimal upload, mutation, and change-feed model
 
-The lower-level writer surface has three stages:
+The writer surface has three stages:
 
 1. make content durable
 2. make metadata visible
@@ -291,28 +288,33 @@ This split is deliberate:
 - WAL-segment durability is not visibility by itself; and
 - head advance is the visibility point.
 
-A commit request may therefore be rejected immediately, or tentatively
+A mutation request may therefore be rejected immediately, or tentatively
 accepted into a WAL batch, without yet being a committed or successful change.
 
 The embedded `loonfs::FsWriter` makes the first two stages independently
 drivable. `prepare_file_bytes` stages bytes, while `prepare_content_ref`
 fully validates an existing reference; both return opaque prepared content.
-`put_file_prepared` and `commit_operations_prepared` consume that evidence
-without content-store I/O during publication. `complete_upload_prepared`
-returns the ordinary completion response together with the same evidence.
-These are embedded conveniences, not HTTP operations; hosted clients continue
-to carry validated content tokens on the existing wire requests.
+`put_file_prepared` consumes that evidence without content-store I/O during
+publication. `complete_upload_prepared` returns the ordinary completion
+response together with the same evidence. These are embedded conveniences,
+not HTTP operations; hosted clients continue to carry validated content
+tokens on the existing wire requests.
 
-### 5.1 Commit request envelope
+### 5.1 Mutation identity and race guards
 
-A commit request carries the following logical fields:
+Every mutation carries a `commit_id` — a client-generated stable idempotency
+key that must be reused verbatim for safe retries — and an optional
+`message`, a human-readable annotation that is part of the mutation's
+identity.
 
-| Field | Meaning |
-| --- | --- |
-| `commit_id` | Client-generated stable idempotency key for this logical commit request. The same value must be reused for safe retries. |
-| `preconditions` | Explicit semantic checks such as `inode_revision_is`, `binding_is`, `child_name_absent`, `directory_empty`, or ancestor-visibility checks that make races fail explicitly rather than silently merge. |
-| `ops` | Ordered list of mutation operations. Operation order is preserved through validation, logical commit creation, and change-feed output. |
-| `message` | Optional human-readable description of the mutation event. |
+The server plans each path operation against authoritative namespace state
+under the publish lock, synthesizing the exact semantic checks the operation
+implies (revision identity, binding identity, name absence, directory
+emptiness, ancestor visibility) so races fail explicitly rather than
+silently merge. Callers add their own cross-request guards on the operation
+itself where staleness matters: `expected_revision_no` on a replacing put,
+`expected_inode_id` on a delete, `deleted_at_seq` on an undelete, and
+`expected_head_seq` on a namespace delete.
 
 The server validates each request against authoritative namespace state and
 may reject it immediately. A tentatively accepted request becomes one
@@ -341,8 +343,7 @@ available.
 
 ### 5.2 Mutation responses and safe retry
 
-Every committed mutation — an explicit commit or a path-oriented operation —
-returns the same response envelope: the `namespace_id` that changed, the
+Every committed mutation returns the same response envelope: the `namespace_id` that changed, the
 `commit_id` the mutation committed under, and the `committed_seq` where it
 became visible. When the caller did not supply a commit id, the surface that
 accepted the request generates one and returns it, so every caller holds the
@@ -358,9 +359,10 @@ The retry rule has three cases:
   `commit_id_reuse_conflict`.
 - Retrying with a new `commit_id` is a new logical mutation.
 
-For a path-oriented delete, `expected_inode_id` is part of the mutation's
-semantic identity, so changing, adding, or removing the guard while reusing a
-`commit_id` fails with `commit_id_reuse_conflict`.
+Caller-supplied race guards (`expected_inode_id` on delete,
+`expected_revision_no` on put) are part of the mutation's semantic identity,
+so changing, adding, or removing a guard while reusing a `commit_id` fails
+with `commit_id_reuse_conflict`.
 
 Identical resubmission is the reconciliation mechanism. There is no separate
 commit-status lookup: after `commit_outcome_unknown`, a transport failure, or
@@ -394,9 +396,9 @@ operator can tell a planned failover from two writers misconfigured against
 one namespace.
 
 The standard lower-level mutation set is defined in `format.md` ("Standard
-mutation operations"). The path-oriented filesystem surface may compile
-higher-level operations into that lower-level model, but both surfaces
-preserve the same identity, content-durability, and visibility rules.
+mutation operations"). The path-oriented filesystem surface compiles into
+that lower-level model server-side, preserving the same identity,
+content-durability, and visibility rules.
 
 ## 6. Representative HTTP binding
 
@@ -415,13 +417,10 @@ A representative v0 binding is shown below.
 | List file revisions by path | `GET /v0/namespaces/{ns}/filesystem/revisions?path=/docs/report.txt&limit=100&cursor=...` |
 | Read file content | `GET /v0/namespaces/{ns}/filesystem/content?path=/docs/report.txt` |
 | Read prior file content by path | `GET /v0/namespaces/{ns}/filesystem/content?path=/docs/report.txt&revision_no=3` |
-| List file revisions by inode | `GET /v0/namespaces/{ns}/inodes/{inode_id}/revisions?limit=100&cursor=...` |
-| Read prior file content by inode | `GET /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{revision_no}/content` |
 | Apply path-oriented operations | `POST /v0/namespaces/{ns}/filesystem/operations` |
 | Begin or prepare upload | `POST /v0/namespaces/{ns}/uploads` |
 | Upload full staged content | `PUT /v0/namespaces/{ns}/uploads/{upload_id}/content` |
 | Complete staged upload | `POST /v0/namespaces/{ns}/uploads/{upload_id}/complete` |
-| Submit an explicit commit request | `POST /v0/namespaces/{ns}/commits` |
 | Read committed changes | `GET /v0/namespaces/{ns}/changes?after_seq=123&limit=100` |
 | Fork a namespace | `POST /v0/namespaces/{source_ns}/forks` |
 | Delete a namespace | `DELETE /v0/namespaces/{ns}?expected_head_seq=418` (feature `core.namespaces.delete`; the precondition is optional) |
@@ -768,7 +767,7 @@ stays `invalid_request`.)
 }
 ```
 
-### `GET /filesystem/trash`
+### 6.6 `GET /filesystem/trash`
 
 Lists the namespace's recoverable deletions: every active subtree tombstone,
 ascending by deleted root inode, paged with the standard `limit`/`cursor`
@@ -779,15 +778,14 @@ sequence that `undelete` requires, the deletion's wall-clock stamp, and the
 deleted binding's name when the delete recorded one; entries written before
 names were recorded still carry a complete recovery handle.
 
-### 6.6 `GET /filesystem/content`
+### 6.7 `GET /filesystem/content`
 
 The response body is the authoritative file bytes. Metadata may be exposed in
 headers, but the body itself is raw content rather than JSON.
 
-Revision listing endpoints return newest revisions first and use the same
-`limit` / `cursor` pattern as directory listing. Path-based
-revision listing resolves the current path to its current inode, while inode
-revision listing is stable across later renames. Responses include
+Revision listing returns newest revisions first and uses the same
+`limit` / `cursor` pattern as directory listing, resolving the current path
+to its current inode. Responses include
 `next_cursor` only when another page is available. Revision history is never
 pruned — paging to the end always reaches revision 1, regardless of how far
 the retention floor has advanced.
@@ -814,7 +812,7 @@ the retention floor has advanced.
 }
 ```
 
-### 6.7 `POST /filesystem/operations`
+### 6.8 `POST /filesystem/operations`
 
 Representative request:
 
@@ -837,9 +835,17 @@ the source in one commit; a replacing copy appends a revision to the
 destination inode, keeping its identity and revision history. Only a file
 destination can be replaced, and a path never replaces itself.
 
+A replacing `put_file` may also carry `expected_revision_no`: the put then
+applies only while the file's current revision is still that one, so a raced
+write fails with the revision conflict's expected/actual details instead of
+silently stacking a revision on state the caller never saw. The guard
+asserts an existing file — an absent path answers `path_not_found`, and
+combining it with `no_replace` is `invalid_request`. Like the delete guard,
+it is part of the mutation's semantic identity for commit-id reuse.
+
 A successful response is returned only after the underlying change is actually
-committed: the WAL segment is durable and the head has advanced. Path
-operations return the same envelope as explicit commits (section 5.2).
+committed: the WAL segment is durable and the head has advanced. Every
+mutation returns the same envelope (section 5.2).
 
 Representative response:
 
@@ -900,19 +906,7 @@ with the requested and active generations in the details, so a stale
 recovery request can never cancel a later deletion. The destination parent
 must exist and be visible, and the destination name must be free.
 
-Inode-based restore is available when a caller already has stable inode
-identity and the expected current base revision:
-
-`POST /v0/namespaces/{ns}/inodes/{inode_id}/revisions/{source_revision_no}/restore`
-
-```json
-{
-  "commit_id": "c_271e8c2b45a04e5da6a7e8d9f0012345",
-  "base_revision_no": 7
-}
-```
-
-### 6.8 Upload transport
+### 6.9 Upload transport
 
 The upload transport standardizes staged content publication, not one specific
 byte path. In v0, uploads are whole-file uploads: the staged body is the
@@ -989,81 +983,12 @@ Representative complete-upload response:
 }
 ```
 
-### 6.9 `POST /commits`
-
-Representative request:
-
-```json
-{
-  "commit_id": "c_f3a9c2d4b6e8417a90c5d2f8e1b7a6c0",
-  "message": "replace report bytes",
-  "preconditions": [
-    {
-      "kind": "inode_revision_is",
-      "inode_id": 42,
-      "revision_no": 7
-    },
-    {
-      "kind": "ancestors_not_subtree_deleted",
-      "inode_id": 42
-    }
-  ],
-  "ops": [
-    {
-      "kind": "replace_file",
-      "inode_id": 42,
-      "base_revision_no": 7,
-      "content_ref": {
-        "kind": "whole_file_v0",
-        "digest": "sha256:7ab...",
-        "size_bytes": 20591
-      }
-    }
-  ],
-  "content_tokens": [
-    {
-      "content_ref": {
-        "kind": "whole_file_v0",
-        "digest": "sha256:7ab...",
-        "size_bytes": 20591
-      },
-      "token": "opaque-server-token"
-    }
-  ]
-}
-```
-
-`content_tokens` is an optional sibling of `commit_id`, `preconditions`, `ops`,
-and `message`; omitting it preserves the pre-token request shape. It is
-transport-only and is excluded from the semantic commit fingerprint. Each
-distinct external `content_ref` introduced by `create_file` or `replace_file`
-must have a verified proof; one token covers every operation using the same
-ref. `restore_revision` resolves retained namespace metadata and needs no
-proof. Tokens naming refs outside the commit are ignored. If coverage is
-incomplete, the first rejected relevant token is reported when present;
-otherwise `content_not_prepared` names the first uncovered digest. A retry of
-an already-landed semantic commit replays its durable receipt even when tokens
-are then absent, expired, or malformed.
-
-One new request accepts at most 4096 operations, 4096 prepared
-`content_tokens` proofs, and 4096 distinct new external refs. A violation
-answers `invalid_request`; the server never splits the commit. Current limits
-apply to new requests, while a committed request always replays from its
-receipt. These bounds protect serialized publisher occupancy, not commit
-correctness. A successful response is returned only after the request is
-committed (section 5.1).
-
-Representative response:
-
-```json
-{
-  "namespace_id": "demo",
-  "commit_id": "c_f3a9c2d4b6e8417a90c5d2f8e1b7a6c0",
-  "committed_seq": 419
-}
-```
-
 ### 6.10 `GET /changes`
+
+Each change is one committed mutation carrying its identity (`seq`,
+`commit_id`, observational `committed_at_ms`, writer provenance, optional
+`message`) and `events`: semantic filesystem events, exactly one per
+committed operation, in request-operation order.
 
 ```json
 {
@@ -1076,11 +1001,9 @@ Representative response:
       "commit_id": "c_f3a9c2d4b6e8417a90c5d2f8e1b7a6c0",
       "committed_at_ms": 1752624000000,
       "message": "replace report bytes",
-      "deltas": [
+      "events": [
         {
-          "semantic_op_index": 0,
-          "delta_index": 0,
-          "kind": "append_file_revision",
+          "kind": "content_changed",
           "inode_id": 42,
           "revision_no": 8,
           "content_ref": {
@@ -1094,6 +1017,21 @@ Representative response:
   ]
 }
 ```
+
+Event kinds:
+
+| Kind | Meaning | Fields |
+| --- | --- | --- |
+| `created` | A file or directory was created. | `inode_id`, `inode_kind`, `parent_inode_id`, `name`; file creations also carry `revision_no` and `content_ref`. |
+| `content_changed` | A file received a new current revision — a replacing put or a revision restore (one durable fact for both). | `inode_id`, `revision_no`, `content_ref`. |
+| `moved` | An entry moved to a new parent directory or name. | `inode_id`, `from_parent_inode_id`, `from_name`, `to_parent_inode_id`, `to_name`. |
+| `deleted` | A file or directory subtree was deleted. The enclosing change's `seq` is the `deleted_at_seq` an undelete passes. | `inode_id`, plus `parent_inode_id` and `name` when the delete recorded them. |
+| `undeleted` | A deleted inode was recovered and re-bound. | `inode_id`, `parent_inode_id`, `name`. |
+
+Events name inodes and their parent-directory bindings rather than full
+paths; a consumer that needs paths can stat the inode or maintain its own
+binding projection from this feed. Clients must ignore unknown event kinds
+and unknown fields.
 
 If `limit` truncates the page before the namespace head, the response includes
 `next_after_seq` set to the last returned change seq. The client resumes with
@@ -1279,22 +1217,10 @@ Typical behavior:
 
 - maintains a durable cursor;
 - projects remote state into local state;
-- may upload content and publish explicit commits;
+- may upload content and publish mutations of its own;
 - preserves conflicts according to the client's conflict policy.
 
-### 8.3 Explicit-commit client
-
-This client uses the upload, commit, and change-feed surface more directly.
-It stages content and publishes explicit commits, but it does not necessarily
-maintain a long-lived local mirror.
-
-Typical behavior:
-
-- content hashing and upload;
-- explicit commit with preconditions and commit ids;
-- change-feed reads or cursors where incremental observation is needed.
-
-### 8.4 Operator or admin tool
+### 8.3 Operator or admin tool
 
 This client uses low-level recovery or inspection surfaces that are specific
 to an implementation or deployment.

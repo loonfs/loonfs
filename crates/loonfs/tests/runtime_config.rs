@@ -119,6 +119,7 @@ fn filesystem_operations_match_core_semantics() {
             behavior: DestinationBehavior::Replace,
             commit_id: None,
             message: None,
+            expected_revision_no: None,
         },
     )
     .expect("replace file");
@@ -211,6 +212,7 @@ fn forked_namespace_shares_content_then_diverges() {
             behavior: DestinationBehavior::Replace,
             commit_id: None,
             message: None,
+            expected_revision_no: None,
         },
     )
     .expect("replace clone file");

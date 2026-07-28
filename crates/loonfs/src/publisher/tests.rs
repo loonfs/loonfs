@@ -981,6 +981,7 @@ async fn publisher_batches_explicit_commit_and_path_intent_together() {
         absolute_path: AbsolutePath::parse("/file.txt").expect("path"),
         content_ref: prepared_content.content_ref().clone(),
         behavior: DestinationBehavior::NoReplace,
+        expected_revision_no: None,
     };
     let (explicit_response, path_response) = tokio::join!(
         registry.submit_commit(namespace_id.clone(), explicit),

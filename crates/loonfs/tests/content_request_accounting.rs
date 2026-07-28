@@ -210,6 +210,7 @@ fn put_intent(commit_id: &str, path: &str, content_ref: loonfs::ContentRef) -> P
         absolute_path: parse_mutation_path(path).expect("valid mutation path"),
         content_ref,
         behavior: DestinationBehavior::NoReplace,
+        expected_revision_no: None,
     }
 }
 
@@ -794,6 +795,7 @@ async fn explicit_restore_revision_uses_retained_metadata_without_content_io() {
                 behavior: DestinationBehavior::Replace,
                 commit_id: None,
                 message: None,
+                expected_revision_no: None,
             },
         )
         .await

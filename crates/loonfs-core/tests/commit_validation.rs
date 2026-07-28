@@ -796,6 +796,7 @@ async fn path_put_file_without_admission_fails_without_reading_content() {
                 absolute_path: AbsolutePath::parse("/docs/hello.txt").expect("path"),
                 content_ref: content.content_ref,
                 behavior: DestinationBehavior::NoReplace,
+                expected_revision_no: None,
             },
         )],
         &context,
@@ -837,6 +838,7 @@ async fn path_batch_rejects_repeated_unadmitted_content_without_reading_it() {
                 absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
                 content_ref: content.content_ref.clone(),
                 behavior: DestinationBehavior::NoReplace,
+                expected_revision_no: None,
             }),
             NamespaceMutationCandidate::path(PathMutationIntent::PutFile {
                 commit_id: CommitId::parse("put-shared-b").expect("valid commit id"),
@@ -844,6 +846,7 @@ async fn path_batch_rejects_repeated_unadmitted_content_without_reading_it() {
                 absolute_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
                 content_ref: content.content_ref,
                 behavior: DestinationBehavior::NoReplace,
+                expected_revision_no: None,
             }),
         ],
         &context,
@@ -903,6 +906,7 @@ async fn valid_content_admission_skips_durable_content_validation() {
                 absolute_path: AbsolutePath::parse("/docs/admitted.txt").expect("path"),
                 content_ref: content.content_ref,
                 behavior: DestinationBehavior::NoReplace,
+                expected_revision_no: None,
             },
             vec![prepared],
         )],
@@ -942,8 +946,7 @@ async fn binding_is_precondition_observes_earlier_batch_candidate() {
         .await
         .expect("resolve file")
         .inode_id;
-    let original_binding =
-        latest_binding_for_child_from_change_feed(&store, &namespace_id, file_inode).await;
+    let original_binding = current_binding_for_child(&store, &namespace_id, file_inode).await;
 
     let responses = commit_operations_batch(
         &store,

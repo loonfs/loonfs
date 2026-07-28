@@ -224,6 +224,12 @@ pub enum FilesystemOperation {
         /// Whether an existing file may receive a new revision instead of causing a conflict.
         #[serde(default)]
         behavior: DestinationBehavior,
+        /// When set (with `replace` behavior), the put applies only while
+        /// the file's current revision is still this one; a raced write
+        /// fails the request instead of silently stacking on it, and a
+        /// missing file answers `path_not_found`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision_no: Option<RevisionNo>,
     },
     /// Delete one path.
     #[cfg_attr(feature = "openapi", schema(title = "FsOpDeletePath"))]
@@ -336,16 +342,6 @@ pub struct ListFileRevisionsResponse {
     /// Opaque cursor for the next page, if more revisions are available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
-}
-
-/// Request to restore a file revision by inode.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct RestoreFileRevisionRequest {
-    /// Caller-supplied idempotency key.
-    pub commit_id: CommitId,
-    /// Current revision the caller expects to replace.
-    pub base_revision_no: RevisionNo,
 }
 
 /// Request to create a durable checkpoint pin.
@@ -755,6 +751,7 @@ mod tests {
             put,
             FilesystemOperation::PutFile {
                 behavior: DestinationBehavior::NoReplace,
+                expected_revision_no: None,
                 ..
             }
         ));
@@ -813,6 +810,7 @@ mod tests {
                     path: path("/docs/a.txt"),
                     content_ref: content_ref.clone(),
                     behavior: DestinationBehavior::NoReplace,
+                    expected_revision_no: None,
                 },
                 serde_json::json!({
                     "kind": "put_file",

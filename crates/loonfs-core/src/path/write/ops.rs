@@ -109,6 +109,7 @@ async fn put_prepared_file_content<S: ObjectStore + ?Sized>(
             absolute_path: parse_mutation_path(absolute_path)?,
             content_ref,
             behavior,
+            expected_revision_no: None,
         },
         vec![prepared_content],
         context,

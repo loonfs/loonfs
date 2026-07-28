@@ -14,6 +14,7 @@ use loonfs_api::{
         CommitRequest as ApiCommitRequest,
     },
     AbsolutePath, ChangeSeq, CommitId, ContentRef, DestinationBehavior, InodeId, InodeKind,
+    RevisionNo,
 };
 use loonfs_objectstore::ObjectStore;
 
@@ -129,10 +130,18 @@ pub(super) async fn plan_publish_put_file_content_ref<S: ObjectStore + ?Sized>(
     absolute_path: &AbsolutePath,
     content_ref: ContentRef,
     behavior: DestinationBehavior,
+    expected_revision_no: Option<RevisionNo>,
     commit_id: &CommitId,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
 ) -> Result<ApiCommitRequest> {
     ensure_mutation_path(absolute_path)?;
+    if expected_revision_no.is_some() && behavior == DestinationBehavior::NoReplace {
+        return Err(CoreError::InvalidCommitRequest(
+            "expected_revision_no asserts an existing file revision, which \
+             contradicts no_replace; use replace behavior with the guard"
+                .to_owned(),
+        ));
+    }
     publish_reject_tombstoned_path_ancestor(view, absolute_path).await?;
     let target = view
         .metadata_state
@@ -166,21 +175,31 @@ pub(super) async fn plan_publish_put_file_content_ref<S: ObjectStore + ?Sized>(
                 .latest_revision_head(existing.inode_id)
                 .await?
                 .ok_or_else(|| CoreError::PathNotFound(absolute_path.as_str().to_owned()))?;
+            // A caller-supplied guard replaces the freshly-read revision in
+            // both the op and the precondition, so commit validation rejects
+            // a raced write with the existing base-revision-mismatch error
+            // and its expected/actual details.
+            let base_revision_no = expected_revision_no.unwrap_or(revision.revision_no);
             preconditions.push(publish_binding_is_precondition(view, &existing).await?);
             ops.push(ApiCommitOp::ReplaceFile {
                 inode_id: existing.inode_id,
-                base_revision_no: revision.revision_no,
+                base_revision_no,
                 content_ref: content_ref.clone(),
             });
             preconditions.push(ApiCommitPrecondition::InodeRevisionIs {
                 inode_id: existing.inode_id,
-                revision_no: revision.revision_no,
+                revision_no: base_revision_no,
             });
             preconditions.push(ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
                 inode_id: existing.inode_id,
             });
         }
         Err(error) if is_missing_visible_path(&error) => {
+            // The guard asserts an existing file at a revision; an absent
+            // path fails that assertion rather than silently creating.
+            if expected_revision_no.is_some() {
+                return Err(CoreError::PathNotFound(absolute_path.as_str().to_owned()));
+            }
             ops.push(ApiCommitOp::CreateFile {
                 parent_inode_id: final_parent_inode,
                 display_name: final_name.clone(),

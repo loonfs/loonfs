@@ -5,7 +5,7 @@ use super::core::{default_page_limit, file_revisions_page_response};
 use crate::FsReader;
 use crate::Result;
 use crate::{
-    AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq, ChangesResponse, CoreError, InodeId,
+    AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq, ChangesResponse, CoreError,
     ListChangesOptions, ListFileRevisionsResponse, ListPathEntriesResponse, NamespaceId,
     RevisionNo, RuntimeError,
 };
@@ -245,29 +245,6 @@ impl FsReader {
         )?)
     }
 
-    /// Lists one page of a file inode's revision history.
-    pub async fn list_file_revisions_by_inode_page(
-        &self,
-        namespace_id: &NamespaceId,
-        inode_id: InodeId,
-        request: PageRequest<FileRevisionsPageCursor>,
-    ) -> Result<ListFileRevisionsResponse> {
-        let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
-        let page = engine
-            .list_file_revisions_for_inode_page(inode_id, request, &read_context)
-            .await?;
-        self.core
-            .inner
-            .cache_stats
-            .record_latest_metadata_view_read();
-        Ok(file_revisions_page_response(
-            namespace_id.clone(),
-            read_context.head.seq,
-            page,
-            Some(inode_id),
-        )?)
-    }
-
     /// Reads the content of one historical file revision by path.
     pub async fn get_file_revision_bytes(
         &self,
@@ -279,29 +256,6 @@ impl FsReader {
         let read = engine
             .read_file_revision(
                 absolute_path,
-                revision_no,
-                &read_context,
-                self.core.inner.config.max_read_content_bytes,
-            )
-            .await?;
-        self.core
-            .inner
-            .cache_stats
-            .record_latest_metadata_view_read();
-        Ok(read)
-    }
-
-    /// Reads the content of one historical file revision by inode id.
-    pub async fn get_file_revision_bytes_by_inode(
-        &self,
-        namespace_id: &NamespaceId,
-        inode_id: InodeId,
-        revision_no: RevisionNo,
-    ) -> Result<Vec<u8>> {
-        let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
-        let read = engine
-            .read_file_revision_for_inode(
-                inode_id,
                 revision_no,
                 &read_context,
                 self.core.inner.config.max_read_content_bytes,

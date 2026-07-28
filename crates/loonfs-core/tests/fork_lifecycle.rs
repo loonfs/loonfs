@@ -334,6 +334,7 @@ async fn namespace_delete_is_terminal_for_reads_writes_creation_and_forks() {
             absolute_path: AbsolutePath::parse("/keep.txt").expect("path"),
             content_ref: content.content_ref.clone(),
             behavior: DestinationBehavior::NoReplace,
+            expected_revision_no: None,
         },
         &context,
     )
@@ -371,6 +372,7 @@ async fn namespace_delete_is_terminal_for_reads_writes_creation_and_forks() {
             absolute_path: AbsolutePath::parse("/late.txt").expect("path"),
             content_ref: content.content_ref.clone(),
             behavior: DestinationBehavior::NoReplace,
+            expected_revision_no: None,
         },
         &context,
     )
@@ -417,6 +419,7 @@ async fn fork_clone_survives_source_delete() {
             absolute_path: AbsolutePath::parse("/shared.txt").expect("path"),
             content_ref: content.content_ref,
             behavior: DestinationBehavior::NoReplace,
+            expected_revision_no: None,
         },
         &context,
     )

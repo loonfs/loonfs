@@ -5,34 +5,15 @@ mod common;
 use common::http_split_support::*;
 use common::start_server;
 use loonfs::content_tokens::mint_content_token;
-use loonfs::publish::MAX_COMMIT_CONTENT_TOKENS;
 use loonfs_api::{
-    v0::{
-        CommitOp, CommitRequest as ApiCommitRequest, CommitSubmissionRequest, ValidatedContentToken,
-    },
-    AbsolutePath, ApiError, ChangeSeq, CommitId, CommitResponse, ContentRef, DestinationBehavior,
-    ErrorCode, FilesystemOperation, FilesystemOperationRequest, InodeId, NamespaceId,
+    v0::ValidatedContentToken, AbsolutePath, ApiError, ChangeSeq, CommitId, CommitResponse,
+    ContentRef, DestinationBehavior, ErrorCode, FilesystemOperation, FilesystemOperationRequest,
 };
 use loonfs_client::NamespacePath;
-use loonfs_test_support::http::raw_agent;
 use loonfs_test_support::ids::namespace_id;
 use serde_json::json;
 use std::io::Read as _;
 use tempfile::tempdir;
-
-fn send_filesystem_operation(
-    server_url: &str,
-    namespace_id: &NamespaceId,
-    request: &FilesystemOperationRequest,
-) -> Result<ureq::Response, Box<ureq::Error>> {
-    raw_agent()
-        .post(&format!(
-            "{server_url}/v0/namespaces/{namespace_id}/filesystem/operations"
-        ))
-        .set("authorization", "Bearer test-token")
-        .send_json(request)
-        .map_err(Box::new)
-}
 
 fn response_bytes(response: ureq::Response) -> Vec<u8> {
     let mut bytes = Vec::new();
@@ -41,30 +22,6 @@ fn response_bytes(response: ureq::Response) -> Vec<u8> {
         .read_to_end(&mut bytes)
         .expect("read response bytes");
     bytes
-}
-
-fn assert_commit_content_not_prepared_response(
-    result: Result<ureq::Response, Box<ureq::Error>>,
-    commit_id: &CommitId,
-    expected_message: &str,
-) {
-    match result {
-        Err(error) if matches!(error.as_ref(), ureq::Error::Status(_, _)) => {
-            let ureq::Error::Status(status, response) = *error else {
-                unreachable!("guard requires an HTTP status error");
-            };
-            assert_eq!(status, 409);
-            let error: ApiError =
-                serde_json::from_reader(response.into_reader()).expect("decode api error");
-            assert_eq!(error.code, ErrorCode::ContentNotPrepared.as_str());
-            assert_eq!(error.message, expected_message);
-            assert_eq!(
-                error.details.and_then(|details| details.commit_id),
-                Some(commit_id.clone())
-            );
-        }
-        other => unreachable!("expected content_not_prepared response, got {other:?}"),
-    }
 }
 
 fn assert_content_not_prepared_response(
@@ -130,6 +87,7 @@ async fn path_put_with_bad_content_token_fails_content_not_prepared() {
             path: AbsolutePath::parse("/bad-token.txt").expect("path"),
             content_ref: completed.content_ref,
             behavior: DestinationBehavior::NoReplace,
+            expected_revision_no: None,
         },
     };
     assert_content_not_prepared_response(
@@ -166,6 +124,7 @@ async fn path_put_without_content_token_fails_content_not_prepared() {
             path: AbsolutePath::parse("/missing-token.txt").expect("path"),
             content_ref: completed.content_ref,
             behavior: DestinationBehavior::NoReplace,
+            expected_revision_no: None,
         },
     };
 
@@ -209,6 +168,7 @@ async fn path_put_with_valid_content_token_succeeds() {
             path: AbsolutePath::parse("/valid-token.txt").expect("path"),
             content_ref: completed.content_ref,
             behavior: DestinationBehavior::NoReplace,
+            expected_revision_no: None,
         },
     };
     let response = send_filesystem_operation(&harness.server_url, &namespace, &request)
@@ -261,15 +221,19 @@ async fn landed_path_put_replays_after_content_token_is_absent_expired_or_garbag
             path: AbsolutePath::parse("/token-replay.txt").expect("path"),
             content_ref: completed.content_ref,
             behavior: DestinationBehavior::NoReplace,
+            expected_revision_no: None,
         },
     };
+    // Replays must be byte-for-byte: the durable receipt answers, not a
+    // fresh evaluation that could phrase the same outcome differently.
     let send = |request: &FilesystemOperationRequest| {
-        let response = send_filesystem_operation(&harness.server_url, &namespace, request)
-            .expect("landed put should replay");
-        serde_json::from_reader::<_, CommitResponse>(response.into_reader())
-            .expect("decode operation response")
+        response_bytes(
+            send_filesystem_operation(&harness.server_url, &namespace, request)
+                .expect("landed put should replay"),
+        )
     };
     let original = send(&request);
+    serde_json::from_slice::<CommitResponse>(&original).expect("decode operation response");
 
     request.content_tokens.clear();
     assert_eq!(send(&request), original);
@@ -322,6 +286,7 @@ async fn path_put_with_only_an_irrelevant_token_reports_the_missing_put_proof() 
             path: AbsolutePath::parse("/irrelevant-token.txt").expect("path"),
             content_ref: target.content_ref,
             behavior: DestinationBehavior::NoReplace,
+            expected_revision_no: None,
         },
     };
 
@@ -335,7 +300,7 @@ async fn path_put_with_only_an_irrelevant_token_reports_the_missing_put_proof() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn commit_with_valid_tokens_for_all_distinct_refs_succeeds() {
+async fn puts_with_a_valid_token_reuse_the_ref_and_ignore_irrelevant_tokens() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
@@ -351,57 +316,46 @@ async fn commit_with_valid_tokens_for_all_distinct_refs_succeeds() {
         .await
         .expect("create namespace");
     let first = stage_uploaded_content(&harness.client, &namespace, b"first").await;
-    let second = stage_uploaded_content(&harness.client, &namespace, b"second").await;
-    let third = stage_uploaded_content(&harness.client, &namespace, b"third").await;
-    let request = CommitSubmissionRequest {
-        commit: ApiCommitRequest {
-            commit_id: CommitId::parse("commit-all-proofs").expect("valid commit id"),
-            preconditions: Vec::new(),
-            ops: vec![
-                CommitOp::CreateFile {
-                    parent_inode_id: InodeId(1),
-                    display_name: loonfs_api::DisplayName::parse("first.txt")
-                        .expect("valid display name"),
-                    content_ref: first.content_ref.clone(),
-                },
-                CommitOp::CreateFile {
-                    parent_inode_id: InodeId(1),
-                    display_name: loonfs_api::DisplayName::parse("first-copy.txt")
-                        .expect("valid display name"),
-                    content_ref: first.content_ref.clone(),
-                },
-                CommitOp::CreateFile {
-                    parent_inode_id: InodeId(1),
-                    display_name: loonfs_api::DisplayName::parse("second.txt")
-                        .expect("valid display name"),
-                    content_ref: second.content_ref.clone(),
-                },
-                CommitOp::CreateFile {
-                    parent_inode_id: InodeId(1),
-                    display_name: loonfs_api::DisplayName::parse("third.txt")
-                        .expect("valid display name"),
-                    content_ref: third.content_ref.clone(),
-                },
-            ],
-            message: None,
-        },
+    // An irrelevant garbage token rides along with the valid proof; only
+    // the token covering the operation's ref decides admission.
+    let request = FilesystemOperationRequest {
+        commit_id: CommitId::parse("put-all-proofs").expect("valid commit id"),
+        message: None,
         content_tokens: vec![
             validated_content_token(&first),
-            validated_content_token(&second),
-            validated_content_token(&third),
             ValidatedContentToken {
                 content_ref: ContentRef::whole_file_v0(b"irrelevant"),
                 token: "irrelevant.garbage".to_owned(),
             },
         ],
+        operation: FilesystemOperation::PutFile {
+            path: AbsolutePath::parse("/first.txt").expect("path"),
+            content_ref: first.content_ref.clone(),
+            behavior: DestinationBehavior::NoReplace,
+            expected_revision_no: None,
+        },
     };
-
-    let response = harness
-        .client
-        .commit_operations(&namespace, &request)
-        .await
-        .expect("all distinct refs are prepared");
+    let response = send_filesystem_operation(&harness.server_url, &namespace, &request)
+        .expect("covered ref is prepared");
+    let response: CommitResponse =
+        serde_json::from_reader(response.into_reader()).expect("decode operation response");
     assert_eq!(response.committed_seq, ChangeSeq(1));
+
+    // The same staged ref and token admit a second put: preparation
+    // belongs to the content, not to one operation.
+    let repeat_ref = FilesystemOperationRequest {
+        commit_id: CommitId::parse("put-repeated-ref").expect("valid commit id"),
+        message: None,
+        content_tokens: vec![validated_content_token(&first)],
+        operation: FilesystemOperation::PutFile {
+            path: AbsolutePath::parse("/first-copy.txt").expect("path"),
+            content_ref: first.content_ref.clone(),
+            behavior: DestinationBehavior::NoReplace,
+            expected_revision_no: None,
+        },
+    };
+    send_filesystem_operation(&harness.server_url, &namespace, &repeat_ref)
+        .expect("repeated ref is still prepared");
     assert_eq!(
         harness
             .client
@@ -416,167 +370,7 @@ async fn commit_with_valid_tokens_for_all_distinct_refs_succeeds() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn commit_with_one_missing_proof_reports_first_uncovered_digest() {
-    let temp_dir = tempdir().expect("tempdir");
-    let harness = start_server(test_config(
-        temp_dir.path().join("store"),
-        "loonfs-server-commit-missing-token",
-        "http-commit-missing-token",
-    ))
-    .await;
-
-    let namespace = namespace_id("demo");
-    harness
-        .client
-        .create_namespace(&namespace)
-        .await
-        .expect("create namespace");
-    let covered = stage_uploaded_content(&harness.client, &namespace, b"covered").await;
-    let uncovered = stage_uploaded_content(&harness.client, &namespace, b"uncovered").await;
-    let request = CommitSubmissionRequest {
-        commit: ApiCommitRequest {
-            commit_id: CommitId::parse("commit-missing-proof").expect("valid commit id"),
-            preconditions: Vec::new(),
-            ops: vec![
-                CommitOp::CreateFile {
-                    parent_inode_id: InodeId(1),
-                    display_name: loonfs_api::DisplayName::parse("covered.txt")
-                        .expect("valid display name"),
-                    content_ref: covered.content_ref.clone(),
-                },
-                CommitOp::CreateFile {
-                    parent_inode_id: InodeId(1),
-                    display_name: loonfs_api::DisplayName::parse("uncovered.txt")
-                        .expect("valid display name"),
-                    content_ref: uncovered.content_ref.clone(),
-                },
-            ],
-            message: None,
-        },
-        content_tokens: vec![validated_content_token(&covered)],
-    };
-
-    assert_commit_content_not_prepared_response(
-        send_commit_submission(&harness.server_url, &namespace, &request),
-        &request.commit.commit_id,
-        &format!(
-            "content ref `{}` is not prepared for publication",
-            uncovered.content_ref.digest
-        ),
-    );
-
-    harness.server.abort();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn commit_with_invalid_relevant_token_reports_token_failure() {
-    let temp_dir = tempdir().expect("tempdir");
-    let harness = start_server(test_config(
-        temp_dir.path().join("store"),
-        "loonfs-server-commit-invalid-token",
-        "http-commit-invalid-token",
-    ))
-    .await;
-
-    let namespace = namespace_id("demo");
-    harness
-        .client
-        .create_namespace(&namespace)
-        .await
-        .expect("create namespace");
-    let completed = stage_uploaded_content(&harness.client, &namespace, b"invalid token").await;
-    let request = CommitSubmissionRequest {
-        commit: ApiCommitRequest {
-            commit_id: CommitId::parse("commit-invalid-token").expect("valid commit id"),
-            preconditions: Vec::new(),
-            ops: vec![CommitOp::CreateFile {
-                parent_inode_id: InodeId(1),
-                display_name: loonfs_api::DisplayName::parse("invalid.txt")
-                    .expect("valid display name"),
-                content_ref: completed.content_ref.clone(),
-            }],
-            message: None,
-        },
-        content_tokens: vec![ValidatedContentToken {
-            content_ref: completed.content_ref,
-            token: "not.a.valid.token".to_owned(),
-        }],
-    };
-
-    assert_commit_content_not_prepared_response(
-        send_commit_submission(&harness.server_url, &namespace, &request),
-        &request.commit.commit_id,
-        "content token was rejected: content token is malformed",
-    );
-
-    harness.server.abort();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn landed_commit_replays_byte_for_byte_with_over_limit_absent_expired_or_garbage_tokens() {
-    let temp_dir = tempdir().expect("tempdir");
-    let harness = start_server(test_config(
-        temp_dir.path().join("store"),
-        "loonfs-server-commit-token-replay",
-        "http-commit-token-replay",
-    ))
-    .await;
-
-    let namespace = namespace_id("demo");
-    harness
-        .client
-        .create_namespace(&namespace)
-        .await
-        .expect("create namespace");
-    let completed = stage_uploaded_content(&harness.client, &namespace, b"commit replay").await;
-    let content_ref = completed.content_ref.clone();
-    let valid_token = validated_content_token(&completed);
-    let mut request = CommitSubmissionRequest {
-        commit: ApiCommitRequest {
-            commit_id: CommitId::parse("commit-token-replay").expect("valid commit id"),
-            preconditions: Vec::new(),
-            ops: vec![CommitOp::CreateFile {
-                parent_inode_id: InodeId(1),
-                display_name: loonfs_api::DisplayName::parse("replay.txt")
-                    .expect("valid display name"),
-                content_ref: content_ref.clone(),
-            }],
-            message: None,
-        },
-        content_tokens: vec![valid_token.clone()],
-    };
-    let send = |request: &CommitSubmissionRequest| {
-        response_bytes(
-            send_commit_submission(&harness.server_url, &namespace, request)
-                .expect("landed commit should replay"),
-        )
-    };
-    let original = send(&request);
-
-    request.content_tokens = vec![valid_token; MAX_COMMIT_CONTENT_TOKENS + 1];
-    assert_eq!(send(&request), original);
-
-    request.content_tokens.clear();
-    assert_eq!(send(&request), original);
-
-    request.content_tokens = vec![ValidatedContentToken {
-        content_ref: content_ref.clone(),
-        token: mint_content_token(TEST_CONTENT_TOKEN_SECRET, &namespace, &content_ref, 0)
-            .expect("mint expired token"),
-    }];
-    assert_eq!(send(&request), original);
-
-    request.content_tokens = vec![ValidatedContentToken {
-        content_ref,
-        token: "not.a.valid.token".to_owned(),
-    }];
-    assert_eq!(send(&request), original);
-
-    harness.server.abort();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn bare_commit_body_without_content_tokens_still_parses_and_commits_mkdir() {
+async fn bare_operation_body_without_content_tokens_still_parses_and_commits_mkdir() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
@@ -593,17 +387,15 @@ async fn bare_commit_body_without_content_tokens_still_parses_and_commits_mkdir(
         .expect("create namespace");
     let body = json!({
         "commit_id": "bare-commit-mkdir",
-        "preconditions": [],
-        "ops": [{
+        "operation": {
             "kind": "create_directory",
-            "parent_inode_id": 1,
-            "display_name": "docs"
-        }],
+            "path": "/docs"
+        },
         "message": null
     });
 
-    let response =
-        send_commit_json(&harness.server_url, &namespace, &body).expect("bare commit body");
+    let response = send_filesystem_operation_json(&harness.server_url, &namespace, &body)
+        .expect("bare operation body");
     let response: CommitResponse =
         serde_json::from_reader(response.into_reader()).expect("decode response");
     assert_eq!(response.committed_seq, ChangeSeq(1));

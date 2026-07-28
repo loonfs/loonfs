@@ -48,6 +48,7 @@ enum PathFingerprintInput {
         absolute_path: String,
         behavior: DestinationBehavior,
         content_ref: ContentRef,
+        expected_revision_no: Option<RevisionNo>,
     },
     DeletePath {
         namespace_id: NamespaceId,
@@ -116,10 +117,14 @@ pub(crate) fn path_intent_fingerprint(
             absolute_path: absolute_path.as_str().to_owned(),
             parents: *parents,
         },
+        // The put guard joins the preimage for the same reason as the
+        // delete guard below: a changed expected revision is a different
+        // logical request and must conflict rather than replay a receipt.
         PathMutationIntent::PutFile {
             absolute_path,
             behavior,
             content_ref,
+            expected_revision_no,
             ..
         } => PathFingerprintInput::PutFile {
             namespace_id: namespace_id.clone(),
@@ -127,6 +132,7 @@ pub(crate) fn path_intent_fingerprint(
             absolute_path: absolute_path.as_str().to_owned(),
             behavior: *behavior,
             content_ref: content_ref.clone(),
+            expected_revision_no: *expected_revision_no,
         },
         // Path-intent identity covers the complete caller-visible logical
         // request. A changed delete guard must conflict instead of replaying
@@ -217,12 +223,14 @@ pub(crate) async fn plan_path_mutation_against_publish_view<S: ObjectStore + ?Si
             absolute_path,
             content_ref,
             behavior,
+            expected_revision_no,
             ..
         } => {
             plan_publish_put_file_content_ref(
                 absolute_path,
                 content_ref.clone(),
                 *behavior,
+                *expected_revision_no,
                 &commit_id,
                 &view,
             )
@@ -560,6 +568,7 @@ mod tests {
                 absolute_path: AbsolutePath::parse("/docs/nested/a.txt").expect("path"),
                 content_ref: staged.content_ref.clone(),
                 behavior: DestinationBehavior::NoReplace,
+                expected_revision_no: None,
             },
         )
         .await;
@@ -770,6 +779,7 @@ mod tests {
                 absolute_path: AbsolutePath::parse("/dead/new.txt").expect("path"),
                 content_ref: staged.content_ref,
                 behavior: DestinationBehavior::NoReplace,
+                expected_revision_no: None,
             },
         )
         .await

@@ -235,6 +235,7 @@ fn put_file_bytes_gates_publish_on_its_own_content_write_without_probing() {
             behavior: DestinationBehavior::Replace,
             commit_id: None,
             message: None,
+            expected_revision_no: None,
         },
     )
     .expect("replace file bytes");
@@ -263,6 +264,7 @@ fn put_file_bytes_retries_a_transient_content_write_failure() {
             behavior: DestinationBehavior::NoReplace,
             commit_id: Some(CommitId::parse("overlap-put-retry").expect("valid commit id")),
             message: None,
+            expected_revision_no: None,
         },
     )
     .expect("immutable write retries the transient failure");
@@ -399,6 +401,7 @@ fn concurrent_puts_coalesce_into_one_wal_segment() {
                         absolute_path: parse_mutation_path(path).expect("valid mutation path"),
                         content_ref,
                         behavior: DestinationBehavior::NoReplace,
+                        expected_revision_no: None,
                     },
                     vec![prepared],
                 )
@@ -568,6 +571,7 @@ fn begin_upload_validates_controls_without_replay_reads() {
             behavior: DestinationBehavior::Replace,
             commit_id: None,
             message: None,
+            expected_revision_no: None,
         },
     )
     .expect("replace file");

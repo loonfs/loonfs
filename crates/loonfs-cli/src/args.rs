@@ -483,6 +483,10 @@ pub(crate) struct FilesystemPutArgs {
     /// Replace the remote destination if it already exists.
     #[arg(long)]
     pub force: bool,
+    /// Replace only while the file's current revision is still this one
+    /// (implies --force); a raced write fails instead of stacking on it.
+    #[arg(long)]
+    pub expected_revision: Option<u64>,
     /// Annotation recorded on the commit and shown by `loon changes`. Part
     /// of the commit's identity: resubmitting the same --commit-id with a
     /// different message is a commit id conflict.

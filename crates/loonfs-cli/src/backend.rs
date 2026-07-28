@@ -288,6 +288,7 @@ impl Backend for EmbeddedBackend {
                     behavior: options.behavior,
                     commit_id: options.commit_id.clone(),
                     message: options.message.clone(),
+                    expected_revision_no: options.expected_revision_no,
                 },
             )
         })
@@ -734,6 +735,7 @@ mod tests {
                         behavior: DestinationBehavior::NoReplace,
                         commit_id: None,
                         message: None,
+                        expected_revision_no: None,
                     },
                 )
                 .await;

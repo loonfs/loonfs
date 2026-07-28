@@ -7,6 +7,7 @@
 
 use crate::{
     CommitId, DeleteDirectoryBehavior, DestinationBehavior, EffectiveLimit, GcConfig, InodeId,
+    RevisionNo,
 };
 use loonfs_api::v0::{
     CreateCheckpointRequest, GcRequest, MaintenanceStepKind, MaintenanceStepRequest,
@@ -117,6 +118,10 @@ pub struct PutFileOptions {
     pub commit_id: Option<CommitId>,
     /// Annotation recorded on the commit; part of the commit's identity.
     pub message: Option<String>,
+    /// Replace only while the file's current revision is still this one.
+    /// Requires `Replace` behavior; a raced write fails instead of
+    /// stacking a revision on state the caller never saw.
+    pub expected_revision_no: Option<RevisionNo>,
 }
 
 impl Default for PutFileOptions {
@@ -125,6 +130,7 @@ impl Default for PutFileOptions {
             behavior: DestinationBehavior::NoReplace,
             commit_id: None,
             message: None,
+            expected_revision_no: None,
         }
     }
 }

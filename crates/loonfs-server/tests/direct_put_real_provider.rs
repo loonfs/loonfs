@@ -131,6 +131,7 @@ async fn direct_put_round_trip(config: ServerConfig) {
                 path: target.absolute_path().clone(),
                 content_ref,
                 behavior: DestinationBehavior::NoReplace,
+                expected_revision_no: None,
             },
         },
     );

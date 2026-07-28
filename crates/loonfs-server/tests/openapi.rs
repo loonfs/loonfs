@@ -43,18 +43,6 @@ fn openapi_documents_current_server_paths() {
         ("/v0/namespaces/{namespace}/filesystem/content", "get"),
         ("/v0/namespaces/{namespace}/filesystem/revisions", "get"),
         ("/v0/namespaces/{namespace}/filesystem/operations", "post"),
-        (
-            "/v0/namespaces/{namespace}/inodes/{inode_id}/revisions",
-            "get",
-        ),
-        (
-            "/v0/namespaces/{namespace}/inodes/{inode_id}/revisions/{revision_no}/content",
-            "get",
-        ),
-        (
-            "/v0/namespaces/{namespace}/inodes/{inode_id}/revisions/{source_revision_no}/restore",
-            "post",
-        ),
         ("/v0/namespaces/{namespace}/uploads", "post"),
         (
             "/v0/namespaces/{namespace}/uploads/{upload_id}/content",
@@ -64,7 +52,6 @@ fn openapi_documents_current_server_paths() {
             "/v0/namespaces/{namespace}/uploads/{upload_id}/complete",
             "post",
         ),
-        ("/v0/namespaces/{namespace}/commits", "post"),
         ("/v0/namespaces/{namespace}/changes", "get"),
         ("/v0/admin/namespaces/{namespace}/checkpoints", "post"),
         ("/v0/admin/namespaces/{namespace}/maintenance/step", "post"),
@@ -108,37 +95,13 @@ fn openapi_names_tagged_one_of_alternatives() {
 
     for (schema_name, expected_titles) in [
         (
-            "CommitOp",
+            "FilesystemChange",
             &[
-                "CommitOpCreateDirectory",
-                "CommitOpCreateFile",
-                "CommitOpReplaceFile",
-                "CommitOpRestoreRevision",
-                "CommitOpDeleteFile",
-                "CommitOpRename",
-                "CommitOpDeleteSubtree",
-                "CommitOpUndelete",
-            ][..],
-        ),
-        (
-            "CommitPrecondition",
-            &[
-                "CommitPreconditionInodeRevisionIs",
-                "CommitPreconditionAncestorsNotSubtreeDeleted",
-                "CommitPreconditionChildNameAbsent",
-                "CommitPreconditionBindingIs",
-                "CommitPreconditionDirectoryEmpty",
-            ][..],
-        ),
-        (
-            "CommitDelta",
-            &[
-                "CommitDeltaCreateInode",
-                "CommitDeltaBindDirentry",
-                "CommitDeltaUnbindDirentry",
-                "CommitDeltaAppendFileRevision",
-                "CommitDeltaTombstoneSubtree",
-                "CommitDeltaRevokeSubtreeTombstone",
+                "FilesystemChangeCreated",
+                "FilesystemChangeContentChanged",
+                "FilesystemChangeMoved",
+                "FilesystemChangeDeleted",
+                "FilesystemChangeUndeleted",
             ][..],
         ),
         (

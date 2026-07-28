@@ -4,7 +4,7 @@ use super::core::BackgroundStepClaim;
 use crate::publish::{NamespaceMutationCandidate, PathMutationIntent, PreparedContent};
 use crate::FsWriter;
 use crate::{
-    ChangeSeq, CommitId, CommitOp, CommitPrecondition, CommitRequest, CommitResponse, ContentRef,
+    ChangeSeq, CommitId, CommitRequest, CommitResponse, ContentRef,
     CopyOptions, CoreError, CreateDirectoryOptions, DeleteOptions, InodeId, MaintenanceStepOptions,
     MoveOptions, NamespaceId, PutFileOptions, RestoreRevisionOptions, RevisionNo, UndeleteOptions,
 };
@@ -124,6 +124,7 @@ impl FsWriter {
                     absolute_path: loonfs_core::path::parse_mutation_path(absolute_path)?,
                     content_ref,
                     behavior: options.behavior,
+                    expected_revision_no: options.expected_revision_no,
                 },
                 vec![prepared_content],
             ),
@@ -378,37 +379,6 @@ impl FsWriter {
             },
         )
         .await
-    }
-
-    /// Restores a prior revision of an inode, guarded by a base-revision
-    /// precondition.
-    ///
-    /// The commit appends a new current revision from `source_revision_no`
-    /// and fails if the inode's current revision is no longer
-    /// `base_revision_no`.
-    pub async fn restore_file_revision_by_inode(
-        &self,
-        namespace_id: &NamespaceId,
-        inode_id: InodeId,
-        source_revision_no: RevisionNo,
-        base_revision_no: RevisionNo,
-        options: RestoreRevisionOptions,
-    ) -> Result<CommitResponse> {
-        let commit_id = options.commit_id.unwrap_or_else(CommitId::generate);
-        let request = CommitRequest {
-            commit_id,
-            preconditions: vec![CommitPrecondition::InodeRevisionIs {
-                inode_id,
-                revision_no: base_revision_no,
-            }],
-            ops: vec![CommitOp::RestoreRevision {
-                inode_id,
-                source_revision_no,
-                base_revision_no,
-            }],
-            message: options.message.clone(),
-        };
-        self.commit_operations(namespace_id, request).await
     }
 
     /// Submits one explicit semantic commit request.

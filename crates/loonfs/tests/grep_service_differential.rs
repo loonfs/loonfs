@@ -134,6 +134,7 @@ async fn publish_same_content_files(
                         .expect("batch path"),
                     content_ref: content_ref.clone(),
                     behavior: DestinationBehavior::NoReplace,
+                    expected_revision_no: None,
                 },
                 vec![prepared.clone()],
             )
@@ -360,6 +361,7 @@ async fn planless_scan_deduplicates_an_inode_revised_across_materialization() {
                 behavior: DestinationBehavior::Replace,
                 commit_id: None,
                 message: None,
+                expected_revision_no: None,
             },
         )
         .await

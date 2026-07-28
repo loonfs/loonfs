@@ -220,29 +220,6 @@ where
     }
 }
 
-/// Commit JSON is both larger than the framework default and potentially
-/// expensive to buffer, so authenticate before reading it and give its 413
-/// the route-specific recovery guidance.
-pub(super) struct CommitAppJson<T>(pub(super) T);
-
-#[async_trait]
-impl<T> FromRequest<AppState> for CommitAppJson<T>
-where
-    T: serde::de::DeserializeOwned,
-{
-    type Rejection = ApiResponseError;
-
-    async fn from_request(
-        req: axum::extract::Request,
-        state: &AppState,
-    ) -> Result<Self, Self::Rejection> {
-        authorize(&state.config, req.headers())?;
-        extract_json(req, state, commit_body_too_large_error)
-            .await
-            .map(CommitAppJson)
-    }
-}
-
 /// The proxied-upload body plus the admission permit that bounds how many
 /// such bodies the server buffers at once.
 ///
@@ -308,18 +285,6 @@ fn json_body_too_large_error() -> ApiResponseError {
         StatusCode::PAYLOAD_TOO_LARGE,
         ErrorCode::ContentTooLarge,
         "JSON request body exceeds this route's body limit",
-    )
-}
-
-/// 413 for over-limit commit JSON. Commit bodies are metadata, so the fix
-/// is splitting the batch rather than routing content through `direct_put`.
-fn commit_body_too_large_error() -> ApiResponseError {
-    ApiResponseError::new(
-        StatusCode::PAYLOAD_TOO_LARGE,
-        ErrorCode::ContentTooLarge,
-        "commit request body exceeds this deployment's \
-         `commit.max_body_bytes` capability limit — split the commit into \
-         smaller batches",
     )
 }
 
