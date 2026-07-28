@@ -29,6 +29,7 @@ use loonfs_test_support::stores::{
 use std::path::Path;
 use std::sync::Condvar;
 use tempfile::tempdir;
+use tokio::time::timeout;
 
 fn blocking_head_cas_store(
     root: impl AsRef<Path>,
@@ -237,6 +238,44 @@ async fn create_namespace(fs: &FsCore, namespace_id: &NamespaceId) {
 /// Pacing for standalone test publishers, long enough that
 /// `wait_past_cas_pacing` outlasting it is meaningful.
 const TEST_STANDALONE_PACING: Duration = Duration::from_secs(1);
+
+fn publisher_state(
+    publisher: &NamespacePublisher,
+) -> std::sync::MutexGuard<'_, NamespacePublisherState> {
+    publisher
+        .state
+        .lock()
+        .expect("namespace publisher mutex poisoned")
+}
+
+/// True while exactly one worker owns the publisher's queue.
+fn single_live_worker(publisher: &NamespacePublisher) -> bool {
+    publisher_state(publisher)
+        .worker
+        .as_ref()
+        .is_some_and(|worker| !worker.liveness.is_finished())
+}
+
+/// Yields until the publisher's queue holds candidates the worker has not
+/// taken yet.
+async fn wait_for_queued_candidates(publisher: &NamespacePublisher) {
+    while queued_candidates(&publisher_state(publisher)) == 0 {
+        tokio::task::yield_now().await;
+    }
+}
+
+/// Yields until a delete sits at the tail of the publisher's queue.
+async fn wait_for_queued_delete(publisher: &NamespacePublisher) {
+    loop {
+        if matches!(
+            publisher_state(publisher).queue.back(),
+            Some(WorkItem::Delete(_))
+        ) {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+}
 
 /// A publisher with no owning registry, exercising the unowned-task
 /// fallback the production paths reserve for a dropped registry. The
@@ -460,20 +499,9 @@ async fn publisher_admits_pending_batch_while_active_publish_blocks() {
         create_directory_request("pending", "pending"),
     );
     {
-        let state = publisher
-            .state
-            .lock()
-            .expect("namespace publisher mutex poisoned");
-        assert!(state.publishing);
-        assert_eq!(
-            state
-                .batch
-                .as_ref()
-                .expect("pending batch")
-                .candidates
-                .len(),
-            1
-        );
+        let state = publisher_state(&publisher);
+        assert!(state.worker.is_some());
+        assert_eq!(queued_candidates(&state), 1);
     }
 
     store.release();
@@ -622,12 +650,9 @@ async fn publisher_takes_a_cold_full_batch_immediately() {
 
     tokio::task::yield_now().await;
     {
-        let state = publisher
-            .state
-            .lock()
-            .expect("namespace publisher mutex poisoned");
-        assert!(state.publishing);
-        assert!(state.batch.is_none());
+        let state = publisher_state(&publisher);
+        assert!(state.worker.is_some());
+        assert!(state.queue.is_empty());
     }
     store.release();
     for (index, receiver) in receivers.into_iter().enumerate() {
@@ -656,16 +681,10 @@ async fn cold_submission_publishes_without_a_coalescing_delay() {
         create_directory_request("cold", "cold"),
     );
     tokio::task::yield_now().await;
-    {
-        let state = publisher
-            .state
-            .lock()
-            .expect("namespace publisher mutex poisoned");
-        assert!(
-            state.batch.is_none(),
-            "a cold batch must be taken immediately, not held for a coalescing timer"
-        );
-    }
+    assert!(
+        publisher_state(&publisher).queue.is_empty(),
+        "a cold batch must be taken immediately, not held for a coalescing timer"
+    );
     let response = recv_commit(receiver, "cold").await;
     assert_eq!(response.committed_seq, ChangeSeq(1));
 }
@@ -729,9 +748,9 @@ async fn publisher_resolves_unknown_head_outcome_by_replaying_receipt() {
     assert_eq!(response.committed_seq, ChangeSeq(1));
 }
 
-/// Queued publication races recovery from a panicked publish task.
+/// Queued publication races a publication whose panic the worker contains.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn publisher_survives_publish_task_panic_and_keeps_serving() {
+async fn publisher_survives_publish_panic_and_keeps_serving() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let store = Arc::new(PanicHeadCasStore::new(temp_dir.path(), &namespace_id));
@@ -748,8 +767,8 @@ async fn publisher_survives_publish_task_panic_and_keeps_serving() {
     );
     store.wait_until_blocked().await;
 
-    // Queued behind the in-flight batch: only the abort guard's respawn
-    // can ever publish this one.
+    // Queued behind the in-flight batch: only a worker that survives the
+    // panic can ever publish this one.
     let queued = admit_commit(
         &publisher,
         &namespace_id,
@@ -816,20 +835,8 @@ async fn delete_barrier_publishes_admitted_work_and_rejects_later_work() {
                 .await
         })
     };
-    // Deterministic: wait until the delete has sealed the open batch.
-    loop {
-        let sealed = {
-            let state = publisher
-                .state
-                .lock()
-                .expect("namespace publisher mutex poisoned");
-            state.pending_delete.is_some()
-        };
-        if sealed {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
+    // Deterministic: wait until the delete has queued behind the open batch.
+    wait_for_queued_delete(&publisher).await;
     let after = admit_commit(
         &publisher,
         &namespace_id,
@@ -866,6 +873,143 @@ async fn delete_barrier_publishes_admitted_work_and_rejects_later_work() {
         create_directory_request("too-late", "too-late"),
     );
     assert!(matches!(fast_fail, Err(CoreError::NamespaceDeleted { .. })));
+}
+
+/// A second delete races the first one's head compare-and-swap.
+///
+/// Both callers must be answered. The second delete is a queue item of its
+/// own, so the tombstone sweep settles it exactly like any other work that
+/// queued behind a landed delete — where the sealed-batch design stranded
+/// its waiters forever.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn second_delete_during_inflight_delete_settles_both() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let store = Arc::new(blocking_head_cas_store(temp_dir.path(), &namespace_id));
+    let shared = store.clone() as SharedStore;
+    let fs = test_fs(shared.clone());
+    create_namespace(&fs, &namespace_id).await;
+    let publisher = standalone_publisher(&namespace_id, &fs);
+
+    // One publication first, so the session already holds its writer epoch:
+    // the next head compare-and-swap is the delete's own tombstone swap.
+    recv_commit(
+        admit_commit(
+            &publisher,
+            &namespace_id,
+            create_directory_request("seed", "seed"),
+        ),
+        "seed",
+    )
+    .await;
+
+    store.block_next();
+    let first = {
+        let publisher = publisher.clone();
+        tokio::spawn(async move {
+            publisher
+                .submit_delete(DeleteNamespaceOptions::default())
+                .await
+        })
+    };
+    store.wait_until_blocked().await;
+
+    // Admitted while the first delete holds the head: a mutation, then a
+    // second delete behind it.
+    let orphan = admit_commit(
+        &publisher,
+        &namespace_id,
+        create_directory_request("orphan", "orphan"),
+    );
+    let second = {
+        let publisher = publisher.clone();
+        tokio::spawn(async move {
+            publisher
+                .submit_delete(DeleteNamespaceOptions::default())
+                .await
+        })
+    };
+    wait_for_queued_delete(&publisher).await;
+
+    store.release();
+    let first_response = first
+        .await
+        .expect("first delete task")
+        .expect("first delete succeeds");
+    assert_eq!(first_response.head_seq, ChangeSeq(1));
+
+    // Bounded: a stranded waiter is a hang, and a hang must fail the test.
+    let second_error = timeout(Duration::from_secs(10), second)
+        .await
+        .expect("the second delete must settle, not hang")
+        .expect("second delete task")
+        .expect_err("second delete after the tombstone");
+    assert_eq!(second_error.code(), ErrorCode::NamespaceDeleted);
+    let orphan_error = orphan
+        .await
+        .expect("orphan waiter answered")
+        .expect_err("admitted behind the delete");
+    assert_eq!(orphan_error.code(), ErrorCode::NamespaceDeleted);
+}
+
+/// Mutation admission races a delete already queued behind an in-flight
+/// publication.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mutations_admitted_after_a_queued_delete_wait_behind_it() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let store = Arc::new(blocking_head_cas_store(temp_dir.path(), &namespace_id));
+    let shared = store.clone() as SharedStore;
+    let fs = test_fs(shared.clone());
+    create_namespace(&fs, &namespace_id).await;
+    let publisher = standalone_publisher(&namespace_id, &fs);
+
+    store.block_next();
+    let before = admit_commit(
+        &publisher,
+        &namespace_id,
+        create_directory_request("before", "before"),
+    );
+    store.wait_until_blocked().await;
+
+    let delete_task = {
+        let publisher = publisher.clone();
+        tokio::spawn(async move {
+            publisher
+                .submit_delete(DeleteNamespaceOptions::default())
+                .await
+        })
+    };
+    wait_for_queued_delete(&publisher).await;
+    let after = admit_commit(
+        &publisher,
+        &namespace_id,
+        create_directory_request("after", "after"),
+    );
+
+    // Admission order is the queue order: the later mutation opens a batch
+    // behind the delete instead of coalescing into work admitted before it.
+    {
+        let state = publisher_state(&publisher);
+        assert!(matches!(state.queue.front(), Some(WorkItem::Delete(_))));
+        assert_eq!(queued_candidates(&state), 1);
+    }
+
+    store.release();
+    assert_eq!(
+        recv_commit(before, "before").await.committed_seq,
+        ChangeSeq(1)
+    );
+    let delete_response = delete_task
+        .await
+        .expect("delete task")
+        .expect("delete succeeds behind the in-flight publication");
+    assert_eq!(delete_response.head_seq, ChangeSeq(1));
+    let after_error = after
+        .await
+        .expect("after waiter answered")
+        .expect_err("admitted after the delete");
+    assert_eq!(after_error.code(), ErrorCode::NamespaceDeleted);
 }
 
 /// Concurrent submissions race to share one pending publication batch.
@@ -1069,7 +1213,7 @@ async fn registry_close_admission_refuses_new_work_while_admitted_work_drains() 
     );
     assert!(matches!(direct, Err(CoreError::ShuttingDown)));
 
-    // The admitted publication still settles, and drain joins its task.
+    // The admitted publication still settles, and drain joins its worker.
     store.release();
     let response = active
         .await
@@ -1077,12 +1221,17 @@ async fn registry_close_admission_refuses_new_work_while_admitted_work_drains() 
         .expect("admitted commit publishes");
     assert_eq!(response.committed_seq, ChangeSeq(1));
     registry.drain().await.expect("drain settles publish tasks");
-    assert!(registry.shared.lock_state().tasks.is_empty());
+    assert!(registry
+        .shared
+        .lock_state()
+        .publishers
+        .values()
+        .all(|publisher| publisher_state(publisher).worker.is_none()));
 }
 
-/// Registry drain races panic recovery and respawned queued work.
+/// Registry drain races a contained panic and the queue behind it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn registry_drain_surfaces_panics_and_settles_respawned_work() {
+async fn worker_survives_panic_and_processes_later_queue_items() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let store = Arc::new(PanicHeadCasStore::new(temp_dir.path(), &namespace_id));
@@ -1103,8 +1252,8 @@ async fn registry_drain_surfaces_panics_and_settles_respawned_work() {
     };
     store.wait_until_blocked().await;
 
-    // Queued behind the blocked batch: only the abort guard's respawn
-    // publishes this one, and the drain must join that respawn.
+    // Queued behind the doomed batch: only a worker that survives the panic
+    // publishes this one, and the drain must wait for it.
     let queued = {
         let registry = registry.clone();
         let namespace_id = namespace_id.clone();
@@ -1121,22 +1270,7 @@ async fn registry_drain_surfaces_panics_and_settles_respawned_work() {
         .get(&namespace_id)
         .expect("publisher exists while blocked")
         .clone();
-    loop {
-        let queued_admitted = {
-            let state = publisher
-                .state
-                .lock()
-                .expect("namespace publisher mutex poisoned");
-            state
-                .batch
-                .as_ref()
-                .is_some_and(|batch| !batch.candidates.is_empty())
-        };
-        if queued_admitted {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
+    wait_for_queued_candidates(&publisher).await;
 
     store.release_into_panic();
     registry.close_admission();
@@ -1149,13 +1283,13 @@ async fn registry_drain_surfaces_panics_and_settles_respawned_work() {
     let queued_response = queued
         .await
         .expect("queued submit task")
-        .expect("respawned task publishes queued work");
+        .expect("the surviving worker publishes queued work");
     assert_eq!(queued_response.committed_seq, ChangeSeq(1));
 
     let drain_error = registry
         .drain()
         .await
-        .expect_err("drain surfaces the panicked task");
+        .expect_err("drain surfaces the contained panic");
     assert!(
         drain_error.to_string().contains("panicked"),
         "drain reports panicked publisher tasks: {drain_error}"
@@ -1231,7 +1365,7 @@ async fn close_admission_refuses_without_creating_publishers() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn delete_queued_mid_publish_waits_behind_the_sealed_batch() {
+async fn delete_queued_mid_publish_waits_behind_admitted_work() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let store = Arc::new(blocking_head_cas_store(temp_dir.path(), &namespace_id));
@@ -1241,9 +1375,9 @@ async fn delete_queued_mid_publish_waits_behind_the_sealed_batch() {
     let registry = writer.publisher();
 
     // Park the first publication at its head CAS, batch a second commit
-    // behind it, then queue the delete: the sealed batch must publish
+    // behind it, then queue the delete: the queued batch must publish
     // before the delete runs, and the blocked CAS outlasts the pacing
-    // interval — the interleaving where a racing second task could run
+    // interval — the interleaving where a racing second worker could run
     // the delete first.
     store.block_next();
     let before = {
@@ -1264,8 +1398,8 @@ async fn delete_queued_mid_publish_waits_behind_the_sealed_batch() {
         .cloned()
         .expect("publisher exists once a publish is in flight");
 
-    // The publish task is parked in the blocked CAS, so this admission
-    // deterministically opens the next batch instead of being taken.
+    // The worker is parked in the blocked CAS, so this admission
+    // deterministically queues the next batch instead of being taken.
     let second = {
         let registry = registry.clone();
         let namespace_id = namespace_id.clone();
@@ -1275,22 +1409,7 @@ async fn delete_queued_mid_publish_waits_behind_the_sealed_batch() {
                 .await
         })
     };
-    loop {
-        let batch_open = {
-            let state = publisher
-                .state
-                .lock()
-                .expect("namespace publisher mutex poisoned");
-            state
-                .batch
-                .as_ref()
-                .is_some_and(|batch| !batch.candidates.is_empty())
-        };
-        if batch_open {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
+    wait_for_queued_candidates(&publisher).await;
 
     let delete = {
         let registry = registry.clone();
@@ -1301,56 +1420,38 @@ async fn delete_queued_mid_publish_waits_behind_the_sealed_batch() {
                 .await
         })
     };
-    // Deterministic: the delete has sealed the open batch.
-    loop {
-        let sealed = {
-            let state = publisher
-                .state
-                .lock()
-                .expect("namespace publisher mutex poisoned");
-            state.pending_delete.is_some()
-        };
-        if sealed {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
+    // Deterministic: the delete has queued behind the open batch.
+    wait_for_queued_delete(&publisher).await;
 
     // Snapshots are taken while the CAS is blocked but asserted only
     // after the gate is released: a regression then fails the test
     // instead of hanging runtime teardown on the never-released gate.
-    let unfinished_tasks_while_blocked = registry
-        .shared
-        .lock_state()
-        .tasks
-        .iter()
-        .filter(|task| !task.is_finished())
-        .count();
-    // With the sealed batch still blocked at its head CAS, outlast the
+    let single_worker_while_blocked = single_live_worker(&publisher);
+    // With the queued batch still blocked at its head CAS, outlast the
     // pacing interval: the delete must still not have run.
     wait_past_cas_pacing().await;
     let (deleted_while_blocked, delete_queued_while_blocked) = {
-        let state = publisher
-            .state
-            .lock()
-            .expect("namespace publisher mutex poisoned");
-        (state.deleted, state.pending_delete.is_some())
+        let state = publisher_state(&publisher);
+        (
+            state.deleted,
+            matches!(state.queue.back(), Some(WorkItem::Delete(_))),
+        )
     };
 
-    // Released: the parked commit publishes, then the sealed batch, and
+    // Released: the parked commit publishes, then the queued batch, and
     // only then the delete.
     store.release();
-    assert_eq!(
-        unfinished_tasks_while_blocked, 1,
-        "a delete must not spawn a racing second publish task"
+    assert!(
+        single_worker_while_blocked,
+        "a delete must not spawn a racing second worker"
     );
     assert!(
         !deleted_while_blocked,
-        "delete executed while the sealed batch was still publishing"
+        "delete executed while the queued batch was still publishing"
     );
     assert!(
         delete_queued_while_blocked,
-        "delete must stay queued behind the sealed batch"
+        "delete must stay queued behind the admitted batch"
     );
     let before_response = before
         .await
@@ -1360,12 +1461,12 @@ async fn delete_queued_mid_publish_waits_behind_the_sealed_batch() {
     let second_response = second
         .await
         .expect("second submit task")
-        .expect("sealed batch publishes before the delete");
+        .expect("queued batch publishes before the delete");
     assert_eq!(second_response.committed_seq, ChangeSeq(2));
     let delete_response = delete
         .await
         .expect("delete task")
-        .expect("delete succeeds after the sealed batch");
+        .expect("delete succeeds after the queued batch");
     assert_eq!(delete_response.head_seq, ChangeSeq(2));
     registry.close_admission();
     registry.drain().await.expect("drain settles both units");

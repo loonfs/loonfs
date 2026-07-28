@@ -17,6 +17,11 @@
 //!   ambiguity, and
 //! - paces successive head compare-and-swap attempts per namespace.
 //!
+//! A publisher owns its namespace's commit engine and writer session for its
+//! whole life, so it is the single writer of head-advancing state: batches
+//! and the delete barrier run through one engine, under one session epoch,
+//! on one worker task draining one queue.
+//!
 //! Every runtime core owns one registry, and the direct
 //! [`FsWriter`](crate::FsWriter) mutation methods, the reference server,
 //! and any embedded host with many in-process writer agents all submit
@@ -37,7 +42,7 @@
 //! submission publishes alone and the rest coalesce into the next paced
 //! batch, so one extra segment buys the immediate first flush.
 //!
-//! Admitted work is owned by registry-spawned publish tasks, never by the
+//! Admitted work is owned by the publisher's worker task, never by the
 //! caller futures awaiting results: a cancelled caller abandons only its
 //! result delivery, and the publication still lands. At shutdown,
 //! [`PublisherRegistry::close_admission`] refuses new submissions with
@@ -50,15 +55,19 @@
 use crate::fs::{FsCore, FsInner};
 use crate::publish::{NamespaceMutationCandidate, PathMutationIntent, PreparedContent};
 use crate::{CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, RuntimeError};
+use futures::FutureExt;
 use loonfs_api::v0::{CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse};
 use loonfs_api::{CommitId, NamespaceId};
 use loonfs_core::commit::{CommitHeadPublishError, SemanticMutationIdentity};
 // Publisher head-CAS races use the core-wide bounded contention retry limit.
 use loonfs_core::limits::CONTENTION_RETRY_LIMIT;
-use std::collections::HashMap;
-use std::future::Future;
+use loonfs_core::publish::{NamespaceCommitEngine, SharedWriterSessionState};
+use std::collections::{HashMap, VecDeque};
+use std::panic::AssertUnwindSafe;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use tokio::sync::oneshot;
+use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant};
 use tracing::Instrument;
@@ -75,7 +84,7 @@ type DeleteResult = Result<DeleteNamespaceResponse, CoreError>;
 /// that publication batch.
 pub type PublishObserver = Arc<dyn Fn(&NamespaceId, loonfs_api::ChangeSeq) + Send + Sync + 'static>;
 
-/// Maximum candidates held by one pending batch before admission reports
+/// Maximum candidates queued for one namespace before admission reports
 /// `commit_queue_full`.
 const MAX_BATCH_CANDIDATES: usize = 1024;
 
@@ -86,7 +95,7 @@ const MAX_BATCH_CANDIDATES: usize = 1024;
 /// registry — [`FsWriter::publisher`](crate::FsWriter::publisher) hands
 /// out exactly that.
 ///
-/// The registry owns the publish tasks its publishers spawn. Shut it down
+/// The registry owns the worker tasks its publishers spawn. Shut it down
 /// in two steps once the host stops accepting work:
 /// [`Self::close_admission`], then [`Self::drain`].
 #[derive(Clone)]
@@ -102,36 +111,29 @@ pub struct PublisherRegistry {
 }
 
 /// Registry state every publisher reaches back into: admission gating, the
-/// publisher map, and the task registry a shutdown drains.
+/// publisher map, and the panic tally a shutdown reports.
 struct RegistryShared {
     state: Mutex<RegistryState>,
+    /// Publications and deletes whose panic a worker survived. Workers
+    /// contain panics to keep their namespace writable, so this — not a
+    /// task join error — is what a drain reports.
+    panicked_units: AtomicUsize,
 }
 
 struct RegistryState {
     closed: bool,
     publishers: HashMap<NamespaceId, NamespacePublisher>,
-    tasks: Vec<JoinHandle<()>>,
 }
 
 impl RegistryShared {
     // Recover a poisoned lock instead of `expect`: every critical section
-    // over this state is a plain field update, and the publish abort guard
-    // registers respawns from a drop that may run during a panic unwind,
-    // where a second panic would abort the process.
+    // over this state is a plain field update, and turning one panicked
+    // publication into a permanently unusable registry is exactly the
+    // failure the workers' panic containment exists to prevent.
     fn lock_state(&self) -> std::sync::MutexGuard<'_, RegistryState> {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    /// Spawns a publish task and registers it for shutdown. Callers hold
-    /// their publisher's state lock, so admitting work and registering the
-    /// task that owns it is atomic: a shutdown drain either observes the
-    /// task or the admission never happened.
-    fn register_task(&self, future: impl Future<Output = ()> + Send + 'static) {
-        let mut state = self.lock_state();
-        state.tasks.retain(|task| !task.is_finished());
-        state.tasks.push(tokio::spawn(future));
     }
 
     fn evict(&self, namespace_id: &NamespaceId) {
@@ -141,9 +143,9 @@ impl RegistryShared {
 
 impl PublisherRegistry {
     /// Creates the registry a runtime core owns. Batches publish through
-    /// the core's writer session, and its
-    /// [`FsBackgroundWork`](crate::FsBackgroundWork) policy governs any
-    /// post-publish maintenance.
+    /// each publisher's own commit engine and writer session, and the
+    /// core's [`FsBackgroundWork`](crate::FsBackgroundWork) policy governs
+    /// any post-publish maintenance.
     pub(crate) fn from_core(
         core: Weak<FsInner>,
         min_publish_interval: Duration,
@@ -155,8 +157,8 @@ impl PublisherRegistry {
                 state: Mutex::new(RegistryState {
                     closed: false,
                     publishers: HashMap::new(),
-                    tasks: Vec::new(),
                 }),
+                panicked_units: AtomicUsize::new(0),
             }),
             core,
             min_publish_interval,
@@ -225,6 +227,19 @@ impl PublisherRegistry {
         publisher.submit(candidate).await
     }
 
+    /// Drops the rebuildable half of the namespace's publish state (its WAL
+    /// tail projection). The session's epoch and fencing are untouched:
+    /// they are facts about this process, not a cache.
+    ///
+    /// A held engine means a publication or delete is in flight; that unit
+    /// revalidates against the live head itself, so skipping it is safe.
+    pub(crate) fn invalidate_engine(&self, namespace_id: &NamespaceId) {
+        let publisher = self.shared.lock_state().publishers.get(namespace_id).cloned();
+        if let Some(publisher) = publisher {
+            publisher.invalidate_engine();
+        }
+    }
+
     /// Looks up or creates the namespace's publisher, refusing once
     /// admission is closed.
     fn publisher_for(&self, namespace_id: &NamespaceId) -> Result<NamespacePublisher, CoreError> {
@@ -264,34 +279,27 @@ impl PublisherRegistry {
             state.publishers.values().cloned().collect()
         };
         // Swept outside the registry lock: locks nest publisher-then-
-        // registry on the spawn path, never the other way around.
+        // registry on the eviction path, never the other way around.
         for publisher in publishers {
             publisher.close_admission();
         }
     }
 
-    /// Waits for every admitted publication to settle, surfacing panics.
-    /// Loops because admitted work may respawn its publish task (panic
-    /// recovery) while the drain waits.
+    /// Waits for every publisher's worker to settle the work it owns,
+    /// surfacing publications whose panic the worker contained.
     ///
     /// Call [`Self::close_admission`] first for a terminal drain; without
-    /// it this settles only the work registered so far, and new submissions
+    /// it this settles only the work admitted so far, and new submissions
     /// keep scheduling more.
     pub async fn drain(&self) -> Result<(), RuntimeError> {
-        let mut panicked = 0usize;
-        loop {
-            let drained = std::mem::take(&mut self.shared.lock_state().tasks);
-            if drained.is_empty() {
-                break;
-            }
-            for task in drained {
-                if let Err(error) = task.await {
-                    if error.is_panic() {
-                        panicked += 1;
-                    }
-                }
-            }
+        let publishers: Vec<NamespacePublisher> =
+            self.shared.lock_state().publishers.values().cloned().collect();
+        // Awaited outside the registry lock, for the same nesting reason as
+        // the admission sweep.
+        for publisher in publishers {
+            publisher.wait_for_worker().await;
         }
+        let panicked = self.shared.panicked_units.load(Ordering::SeqCst);
         if panicked > 0 {
             return Err(RuntimeError::RuntimeTask(format!(
                 "{panicked} publisher task(s) panicked"
@@ -308,48 +316,77 @@ struct NamespacePublisher {
     /// the registry that owns this publisher.
     core: Weak<FsInner>,
     state: Arc<Mutex<NamespacePublisherState>>,
+    /// Locked only by the worker, across one publication or delete, and by
+    /// [`Self::invalidate_engine`], which never waits for it.
+    engine: Arc<AsyncMutex<EngineSlot>>,
     /// Weak: the registry map owns its publishers, and a strong reference
     /// back would cycle the whole structure into a leak. A publisher whose
-    /// registry is gone keeps serving, with unowned tasks.
+    /// registry is gone keeps serving, with an unowned worker.
     shared: Weak<RegistryShared>,
     min_publish_interval: Duration,
     trace_mode: &'static str,
     trace_store_kind: &'static str,
 }
 
+/// The publisher's commit engine and writer session for its namespace.
+///
+/// A writer session's acquired epoch and terminal fencing record are facts
+/// about this process, not cached views of durable state: nothing in the
+/// store can rebuild "this session was fenced". When they lived inside the
+/// LRU control cache, eviction erased them (and cache-disabled runs never
+/// kept them at all), so a fenced writer could silently bump the epoch back
+/// and fence the legitimate writer instead. They live here instead, with the
+/// publisher that owns every head-advancing write for the namespace: a few
+/// dozen bytes per namespace this process has published to, released only
+/// with the publisher itself, once the namespace is deleted and its id can
+/// never rebind.
+struct EngineSlot {
+    /// Built on the first unit of work and kept for the publisher's life.
+    /// Invalidation drops only its rebuildable tail projection.
+    engine: Option<NamespaceCommitEngine>,
+    /// Never dropped or rebuilt while the publisher lives.
+    session: SharedWriterSessionState,
+}
+
 struct NamespacePublisherState {
-    batch: Option<OpenBatch>,
-    /// At most one delete waits here (later deletes join its waiters). It
-    /// seals the batch that was open when it arrived: those requests publish
-    /// first, the delete runs next, and anything admitted afterwards lands
-    /// in a fresh `batch` that only publishes if the delete fails.
-    pending_delete: Option<PendingDelete>,
+    /// Admitted work in admission order. Mutations coalesce into the tail
+    /// batch, so a delete queued between them keeps its barrier position.
+    queue: VecDeque<WorkItem>,
+    in_flight: HashMap<CommitId, InFlightRequest>,
     /// Terminal: set once a delete succeeds. Admissions fail fast from then
     /// on without touching the store.
     deleted: bool,
     /// Set by the registry's admission close. Later admissions fail with
-    /// `shutting_down`; everything already batched keeps publishing.
+    /// `shutting_down`; everything already queued keeps publishing.
     closed: bool,
-    in_flight: HashMap<CommitId, InFlightRequest>,
-    /// A publish task owns this publisher's work loop. Set by whoever
-    /// spawns the task — not by the task's first unit-take — and cleared
-    /// only when the task exits, so at most one task processes work units
-    /// at a time. That single flight is what makes the delete barrier's
-    /// admission order deterministic: a delete arriving inside a batch's
-    /// coalescing window queues behind the sealed batch in the one live
-    /// task instead of racing it from a second one.
-    publishing: bool,
-    next_allowed_cas_at: Instant,
+    /// The worker draining `queue`, while one is running. A live entry is
+    /// what makes the loop single-flight: a worker installs itself under
+    /// the admission lock and releases the slot under the same lock that
+    /// finds the queue empty. That single flight is what makes the delete
+    /// barrier's admission order deterministic.
+    worker: Option<WorkerHandle>,
+    /// Earliest instant the next head compare-and-swap may start. `None` is
+    /// a cold namespace: it publishes immediately.
+    next_allowed_cas_at: Option<Instant>,
+}
+
+/// One publisher's worker task, split so a drain can await it without
+/// making the publisher look idle.
+struct WorkerHandle {
+    /// Taken by a drain, which awaits it. The task itself is unaffected.
+    task: Option<JoinHandle<()>>,
+    /// Answers admission's single-flight check, which must stay answerable
+    /// while a drain holds `task`. Never used to abort.
+    liveness: tokio::task::AbortHandle,
 }
 
 struct PendingDelete {
-    sealed_batch: Option<OpenBatch>,
     options: DeleteNamespaceOptions,
     waiters: Vec<oneshot::Sender<DeleteResult>>,
 }
 
-enum WorkUnit {
-    Mutations(Vec<BatchCandidate>),
+enum WorkItem {
+    Batch(OpenBatch),
     Delete(PendingDelete),
 }
 
@@ -383,14 +420,16 @@ impl NamespacePublisher {
             namespace_id,
             core,
             state: Arc::new(Mutex::new(NamespacePublisherState {
-                batch: None,
-                pending_delete: None,
+                queue: VecDeque::new(),
+                in_flight: HashMap::new(),
                 deleted: false,
                 closed: false,
-                in_flight: HashMap::new(),
-                publishing: false,
-                // In the past, so a cold namespace publishes immediately.
-                next_allowed_cas_at: Instant::now(),
+                worker: None,
+                next_allowed_cas_at: None,
+            })),
+            engine: Arc::new(AsyncMutex::new(EngineSlot {
+                engine: None,
+                session: SharedWriterSessionState::default(),
             })),
             shared,
             min_publish_interval,
@@ -406,10 +445,10 @@ impl NamespacePublisher {
         self.core.upgrade().map(|inner| FsCore { inner })
     }
 
-    /// Recovers a poisoned lock rather than propagating: every critical
-    /// section over this state is a plain field update, and
-    /// [`PublishAbortGuard`] must take it from a drop that may run during a
-    /// panic unwind, where a second panic would abort the process.
+    /// Recovers a poisoned lock rather than propagating, for the same reason
+    /// as [`RegistryShared::lock_state`]: every critical section here is a
+    /// plain field update, and one panicked publication must not leave the
+    /// namespace permanently unwritable.
     fn lock_state(&self) -> std::sync::MutexGuard<'_, NamespacePublisherState> {
         self.state
             .lock()
@@ -420,11 +459,18 @@ impl NamespacePublisher {
         self.lock_state().closed = true;
     }
 
+    fn invalidate_engine(&self) {
+        if let Ok(mut slot) = self.engine.try_lock() {
+            if let Some(engine) = slot.engine.as_mut() {
+                engine.invalidate();
+            }
+        }
+    }
+
     /// The path to `admit` is await-free: a submission future's first poll
     /// either admits the candidate or fails, and only then parks on the
     /// result channel. Cancellation tests rely on this — after one poll of
-    /// a submission, the publication is admitted and owned by the publish
-    /// task.
+    /// a submission, the publication is admitted and owned by the worker.
     async fn submit(&self, candidate: NamespaceMutationCandidate) -> CommitResult {
         let commit_id = candidate.commit_id().clone();
         let enqueued_at = Instant::now();
@@ -471,42 +517,31 @@ impl NamespacePublisher {
                 return Err(CoreError::CommitIdReuseConflict(commit_id.to_string()));
             }
             existing.waiters.push(waiter);
-            self.trace_enqueue(operation_class, pending_queue_depth(&state), "duplicate");
+            self.trace_enqueue(operation_class, queued_candidates(&state), "duplicate");
             return Ok(());
         }
 
-        if state.batch.is_none() {
-            let should_spawn = !state.publishing;
-            state.batch = Some(OpenBatch {
-                candidates: Vec::new(),
-            });
-            if should_spawn {
-                // Ownership is taken here, under the admission lock, so no
-                // other caller spawns a second task for the same work.
-                // Registered while this lock is held, so a shutdown drain
-                // that finds no tasks cannot miss the work this admission
-                // is about to queue; the task blocks on this same lock
-                // until the batch below is populated.
-                state.publishing = true;
-                self.spawn_publish_task();
-            }
+        let queued = queued_candidates(&state);
+        if queued >= MAX_BATCH_CANDIDATES {
+            self.trace_enqueue(operation_class, queued, "full");
+            return Err(CoreError::CommitQueueFull);
         }
-
-        let batch_len = {
-            let batch = state.batch.as_mut().expect("open batch should exist");
-            if batch.candidates.len() >= MAX_BATCH_CANDIDATES {
-                self.trace_enqueue(operation_class, batch.candidates.len(), "full");
-                return Err(CoreError::CommitQueueFull);
-            }
-            batch.candidates.push(BatchCandidate {
-                commit_id: commit_id.clone(),
-                candidate: candidate.clone(),
-                operation_class,
-                enqueued_at,
-            });
-            batch.candidates.len()
+        let candidate = BatchCandidate {
+            commit_id: commit_id.clone(),
+            candidate,
+            operation_class,
+            enqueued_at,
         };
-        self.trace_enqueue(operation_class, batch_len, "new");
+        match state.queue.back_mut() {
+            // Coalesce with the tail batch, unless a delete sits at the tail:
+            // work admitted after a delete opens a batch behind it and
+            // publishes only if that delete fails.
+            Some(WorkItem::Batch(batch)) => batch.candidates.push(candidate),
+            _ => state.queue.push_back(WorkItem::Batch(OpenBatch {
+                candidates: vec![candidate],
+            })),
+        }
+        self.trace_enqueue(operation_class, queued + 1, "new");
         state.in_flight.insert(
             commit_id,
             InFlightRequest {
@@ -514,13 +549,14 @@ impl NamespacePublisher {
                 waiters: vec![waiter],
             },
         );
+        self.ensure_worker(&mut state);
         Ok(())
     }
 
     /// Enqueues the delete as a barrier: requests admitted before it
-    /// publish first, the delete runs next, and requests admitted after it
-    /// fail with `namespace_deleted` once it succeeds. If the delete fails
-    /// (for example a stale `expected_head_seq`), later requests publish
+    /// publish first, and requests admitted after it fail with
+    /// `namespace_deleted` once it succeeds. If the delete fails (for
+    /// example a stale `expected_head_seq`), later requests publish
     /// normally — nothing is rejected for a delete that did not happen.
     async fn submit_delete(&self, options: DeleteNamespaceOptions) -> DeleteResult {
         let (sender, receiver) = oneshot::channel();
@@ -534,22 +570,16 @@ impl NamespacePublisher {
             if state.closed {
                 return Err(CoreError::ShuttingDown);
             }
-            if let Some(pending) = state.pending_delete.as_mut() {
-                pending.waiters.push(sender);
-            } else {
-                state.pending_delete = Some(PendingDelete {
-                    sealed_batch: state.batch.take(),
+            match state.queue.back_mut() {
+                // A delete already queued at the tail is the same barrier:
+                // both callers get its outcome.
+                Some(WorkItem::Delete(pending)) => pending.waiters.push(sender),
+                _ => state.queue.push_back(WorkItem::Delete(PendingDelete {
                     options,
                     waiters: vec![sender],
-                });
-                if !state.publishing {
-                    // Ownership taken and the task registered under the
-                    // lock, for the same single-flight and shutdown-drain
-                    // atomicity as `admit`.
-                    state.publishing = true;
-                    self.spawn_publish_task();
-                }
+                })),
             }
+            self.ensure_worker(&mut state);
         }
         receiver.await.unwrap_or_else(|_| {
             Err(CoreError::HeadPublish(
@@ -560,97 +590,60 @@ impl NamespacePublisher {
         })
     }
 
-    /// Spawns this namespace's publish loop, registered with the owning
-    /// registry so a shutdown drain joins it. Callers hold the publisher
-    /// state lock across this call. Without a registry (it was dropped, or
-    /// the publisher was built standalone in tests) the task runs unowned.
-    fn spawn_publish_task(&self) {
-        let publisher = self.clone();
-        let future = async move {
-            publisher.publish_open_batch().await;
-        };
-        match self.shared.upgrade() {
-            Some(shared) => shared.register_task(future),
-            None => {
-                tokio::spawn(future);
-            }
+    /// Makes sure a worker owns this publisher's queue.
+    ///
+    /// Callers hold the state lock, so admitting work and installing the
+    /// task that owns it is atomic: no second worker takes the same queue,
+    /// and a shutdown drain that finds no worker cannot miss work an
+    /// admission is about to queue.
+    fn ensure_worker(&self, state: &mut NamespacePublisherState) {
+        if state
+            .worker
+            .as_ref()
+            .is_some_and(|worker| !worker.liveness.is_finished())
+        {
+            return;
         }
+        let publisher = self.clone();
+        let task = tokio::spawn(async move {
+            publisher.run_worker().await;
+        });
+        state.worker = Some(WorkerHandle {
+            liveness: task.abort_handle(),
+            task: Some(task),
+        });
     }
 
-    async fn publish_open_batch(self) {
-        let mut abort_guard = PublishAbortGuard::new(self.clone());
-
-        // Drain work units in admission order: the batch sealed by a pending
-        // delete, then the delete itself, then whatever queued behind it.
-        // There is no fixed coalescing wait — batches form from what arrives
-        // while a publish is in flight or while the pacing interval since
-        // the last publication start runs out, so a cold namespace
-        // publishes its first submission immediately.
+    /// Drains the queue in admission order, then exits.
+    async fn run_worker(self) {
         loop {
             let collect_started = Instant::now();
-            let queue_depth_start = {
-                let state = self.lock_state();
-                pending_queue_depth(&state)
-            };
+            let queue_depth_start = queued_candidates(&self.lock_state());
+            // There is no fixed coalescing wait — batches form from what
+            // arrives while a publication is in flight or while the pacing
+            // interval since the last publication start runs out, so a cold
+            // namespace publishes its first submission immediately.
             self.await_cas_slot(false).await;
-
-            let unit = {
-                let mut state = self.lock_state();
-                // `publishing` is already true: the spawner took loop
-                // ownership before this task existed.
-                let unit = if let Some(pending) = state.pending_delete.as_mut() {
-                    if let Some(batch) = pending.sealed_batch.take() {
-                        Some(WorkUnit::Mutations(batch.candidates))
-                    } else {
-                        state.pending_delete.take().map(WorkUnit::Delete)
-                    }
-                } else {
-                    state
-                        .batch
-                        .take()
-                        .map(|batch| WorkUnit::Mutations(batch.candidates))
-                };
-                match unit {
-                    Some(unit) => {
-                        state.next_allowed_cas_at = Instant::now() + self.min_publish_interval;
-                        Some(unit)
-                    }
-                    None => {
-                        // Ownership checked and released under one lock, so
-                        // a racing admit either sees `publishing` already
-                        // false and spawns its own task, or queued before
-                        // this check and was taken.
-                        state.publishing = false;
-                        None
-                    }
-                }
-            };
-            let Some(unit) = unit else {
-                abort_guard.disarm();
+            let Some(item) = self.take_next_item() else {
                 return;
             };
 
-            match unit {
-                WorkUnit::Mutations(candidates) => {
-                    if candidates.is_empty() {
-                        continue;
-                    }
+            match item {
+                WorkItem::Batch(batch) => {
                     tracing::info!(
                         phase = "batch_collect",
                         mode = self.trace_mode,
                         store_kind = self.trace_store_kind,
-                        batch_size = usize_to_u64(candidates.len()),
+                        batch_size = usize_to_u64(batch.candidates.len()),
                         queue_depth_start = usize_to_u64(queue_depth_start),
-                        queue_depth_end = usize_to_u64(candidates.len()),
+                        queue_depth_end = usize_to_u64(batch.candidates.len()),
                         collect_ms = elapsed_ms_since(collect_started),
                         "publisher.batch_collect"
                     );
-                    self.publish_mutation_run(&mut abort_guard, candidates)
-                        .await;
+                    self.publish_batch(batch.candidates).await;
                 }
-                WorkUnit::Delete(pending) => {
+                WorkItem::Delete(pending) => {
                     if self.execute_delete(pending).await {
-                        abort_guard.disarm();
                         return;
                     }
                 }
@@ -658,17 +651,63 @@ impl NamespacePublisher {
         }
     }
 
-    async fn publish_mutation_run(
-        &self,
-        abort_guard: &mut PublishAbortGuard,
-        candidates: Vec<BatchCandidate>,
-    ) {
-        abort_guard.batch_taken(
-            candidates
-                .iter()
-                .map(|candidate| candidate.commit_id.clone())
-                .collect(),
-        );
+    /// Takes the next unit of work, or releases the worker slot.
+    ///
+    /// Ownership is released under the same lock that finds the queue empty,
+    /// so a racing admission either queued before this check and is taken
+    /// here, or finds no worker and spawns one.
+    fn take_next_item(&self) -> Option<WorkItem> {
+        let mut state = self.lock_state();
+        // Terminal: a successful delete emptied the queue and set this
+        // before its worker returned, so nothing may be taken afterwards.
+        if state.deleted || state.queue.is_empty() {
+            state.worker = None;
+            return None;
+        }
+        let item = state.queue.pop_front();
+        state.next_allowed_cas_at = Some(Instant::now() + self.min_publish_interval);
+        item
+    }
+
+    /// Publishes one taken batch, containing a panic in the publication.
+    ///
+    /// Deliberate v0 scope, not defensive habit. This publisher is the only
+    /// path by which its namespace accepts writes, so a panic that killed
+    /// the worker would leave that namespace unwritable until the process
+    /// restarts, with every taken waiter hanging. The taken requests instead
+    /// settle as `commit_outcome_unknown` — the panic may have struck either
+    /// side of the head compare-and-swap, and that is an answer callers
+    /// already know how to resolve: retry with the same commit id and the
+    /// durable receipt replays. The worker keeps its queue and moves on.
+    async fn publish_batch(&self, candidates: Vec<BatchCandidate>) {
+        let taken_commit_ids = candidates
+            .iter()
+            .map(|candidate| candidate.commit_id.clone())
+            .collect::<Vec<_>>();
+        if AssertUnwindSafe(self.publish_taken_batch(candidates))
+            .catch_unwind()
+            .await
+            .is_ok()
+        {
+            return;
+        }
+        self.record_panic();
+        let orphaned_waiters = {
+            let mut state = self.lock_state();
+            taken_commit_ids
+                .into_iter()
+                .filter_map(|commit_id| state.in_flight.remove(&commit_id))
+                .flat_map(|request| request.waiters)
+                .collect::<Vec<_>>()
+        };
+        for waiter in orphaned_waiters {
+            let _ = waiter.send(Err(CoreError::HeadPublish(
+                CommitHeadPublishError::OutcomeUnknown("publish task aborted mid-batch".to_owned()),
+            )));
+        }
+    }
+
+    async fn publish_taken_batch(&self, candidates: Vec<BatchCandidate>) {
         let selected_at = Instant::now();
         for candidate in &candidates {
             tracing::info!(
@@ -706,12 +745,7 @@ impl NamespacePublisher {
                         .collect();
                     break;
                 };
-                results = crate::FsWriter::from_core(core)
-                    .publish_namespace_mutations_batch(&self.namespace_id, batch_candidates)
-                    .await
-                    .into_iter()
-                    .map(|result| result.map_err(runtime_error_to_core))
-                    .collect();
+                results = self.publish_through_engine(&core, batch_candidates).await;
                 if !results.iter().any(is_retryable_head_publish) {
                     break;
                 }
@@ -730,36 +764,80 @@ impl NamespacePublisher {
         drop(publish_span);
 
         self.deliver_batch_results(candidates, results, selected_at);
-        abort_guard.batch_taken(Vec::new());
+    }
+
+    /// Publishes through the publisher-owned engine: one namespace, one
+    /// engine, one writer session, for the publisher's whole life.
+    async fn publish_through_engine(
+        &self,
+        core: &FsCore,
+        candidates: Vec<NamespaceMutationCandidate>,
+    ) -> Vec<CommitResult> {
+        let mut slot = self.engine.lock().await;
+        let engine = self.engine_for(&mut slot, core).await;
+        crate::FsWriter::from_core(core.clone())
+            .publish_batch_with_engine(&self.namespace_id, engine, candidates)
+            .await
+            .into_iter()
+            .map(|result| result.map_err(runtime_error_to_core))
+            .collect()
+    }
+
+    /// The publisher's engine, built on first use. A new engine starts from
+    /// the namespace's immutable catalog pair when the control cache can
+    /// supply it, so the first publication does not walk the descriptor
+    /// chain twice.
+    async fn engine_for<'slot>(
+        &self,
+        slot: &'slot mut EngineSlot,
+        core: &FsCore,
+    ) -> &'slot mut NamespaceCommitEngine {
+        if slot.engine.is_none() {
+            let catalog = core
+                .load_namespace_catalog_cached(&self.namespace_id)
+                .await
+                .ok()
+                .flatten();
+            let mut engine = NamespaceCommitEngine::new(self.namespace_id.clone())
+                .table_cache(core.metadata_table_cache())
+                .writer_session(Arc::clone(&slot.session));
+            if let Some(catalog) = catalog {
+                engine = engine.catalog_entry(catalog);
+            }
+            slot.engine = Some(engine);
+        }
+        slot.engine
+            .as_mut()
+            .expect("engine is present once installed")
     }
 
     /// Runs the delete barrier. Returns true when the publisher is now
-    /// terminal and the task should exit.
+    /// terminal and its worker should exit.
     async fn execute_delete(&self, pending: PendingDelete) -> bool {
-        let outcome = match self.core() {
-            Some(core) => core
-                .delete_namespace_unqueued(&self.namespace_id, pending.options)
-                .await
-                .map_err(runtime_error_to_core),
-            None => Err(CoreError::ShuttingDown),
+        let PendingDelete { options, waiters } = pending;
+        let outcome = match AssertUnwindSafe(self.delete_through_engine(options))
+            .catch_unwind()
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(_) => {
+                // Contained like a panicked publication, but a delete has no
+                // receipt to replay: the caller is told, and the worker keeps
+                // serving the namespace the delete did not remove.
+                self.record_panic();
+                Err(CoreError::Internal(
+                    "delete task aborted mid-delete".to_owned(),
+                ))
+            }
         };
         match outcome {
             Ok(response) => {
                 // Tombstone first, then fail everything that queued behind
                 // the delete; admissions from here on fail fast.
-                let failed_waiters = {
+                let queued = {
                     let mut state = self.lock_state();
                     state.deleted = true;
-                    state.publishing = false;
-                    let mut failed = Vec::new();
-                    if let Some(batch) = state.batch.take() {
-                        for candidate in batch.candidates {
-                            if let Some(in_flight) = state.in_flight.remove(&candidate.commit_id) {
-                                failed.extend(in_flight.waiters);
-                            }
-                        }
-                    }
-                    failed
+                    take_queued_waiters(&mut state)
                 };
                 // The publisher is terminal; drop it from the registry map
                 // so the map stays bounded by live namespaces. Clones still
@@ -769,24 +847,64 @@ impl NamespacePublisher {
                 if let Some(shared) = self.shared.upgrade() {
                     shared.evict(&self.namespace_id);
                 }
-                for waiter in pending.waiters {
+                for waiter in waiters {
                     let _ = waiter.send(Ok(response.clone()));
                 }
-                for waiter in failed_waiters {
-                    let _ = waiter.send(Err(CoreError::NamespaceDeleted {
-                        namespace_id: self.namespace_id.clone(),
-                    }));
+                for waiter in queued.commits {
+                    let _ = waiter.send(Err(self.namespace_deleted()));
+                }
+                for waiter in queued.deletes {
+                    let _ = waiter.send(Err(self.namespace_deleted()));
                 }
                 true
             }
             Err(error) => {
                 // The namespace was not deleted (stale precondition, fencing
                 // conflict, ...). Report it and let queued work publish.
-                for waiter in pending.waiters {
+                for waiter in waiters {
                     let _ = waiter.send(Err(error.clone()));
                 }
                 false
             }
+        }
+    }
+
+    async fn delete_through_engine(&self, options: DeleteNamespaceOptions) -> DeleteResult {
+        let Some(core) = self.core() else {
+            return Err(CoreError::ShuttingDown);
+        };
+        let mut slot = self.engine.lock().await;
+        let engine = self.engine_for(&mut slot, &core).await;
+        core.delete_namespace_with_engine(&self.namespace_id, engine, options)
+            .await
+            .map_err(runtime_error_to_core)
+    }
+
+    fn namespace_deleted(&self) -> CoreError {
+        CoreError::NamespaceDeleted {
+            namespace_id: self.namespace_id.clone(),
+        }
+    }
+
+    fn record_panic(&self) {
+        if let Some(shared) = self.shared.upgrade() {
+            shared.panicked_units.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// Waits for the running worker, if any.
+    ///
+    /// Only the join handle is taken; the liveness half stays in the slot,
+    /// so an admission racing this drain still sees a live worker instead of
+    /// spawning a second one for the same queue.
+    async fn wait_for_worker(&self) {
+        let task = self
+            .lock_state()
+            .worker
+            .as_mut()
+            .and_then(|worker| worker.task.take());
+        if let Some(task) = task {
+            let _ = task.await;
         }
     }
 
@@ -796,18 +914,21 @@ impl NamespacePublisher {
     /// reserves the slot by pushing the next allowed instant out by one
     /// pacing interval, so two waiters cannot both take the same slot. A
     /// non-claiming waiter only observes that the slot is open — the caller
-    /// reserves it later, when it actually takes a work unit.
+    /// reserves it later, when it actually takes a work item.
     async fn await_cas_slot(&self, claim: bool) {
         loop {
             let sleep_until = self.lock_state().next_allowed_cas_at;
-            if sleep_until <= Instant::now() {
+            let arrived = sleep_until.is_none_or(|instant| instant <= Instant::now());
+            if arrived {
                 if claim {
                     let mut state = self.lock_state();
-                    state.next_allowed_cas_at = Instant::now() + self.min_publish_interval;
+                    state.next_allowed_cas_at = Some(Instant::now() + self.min_publish_interval);
                 }
                 return;
             }
-            tokio::time::sleep_until(sleep_until).await;
+            if let Some(sleep_until) = sleep_until {
+                tokio::time::sleep_until(sleep_until).await;
+            }
         }
     }
 
@@ -887,83 +1008,31 @@ impl NamespacePublisher {
     }
 }
 
-/// Keeps a namespace publisher serviceable if its publish task dies.
-///
-/// Deliberate v0 scope, not defensive habit. This publisher is the only path
-/// by which its namespace accepts writes, so a panicked task would otherwise
-/// leave that namespace unwritable until the process restarts: the taken
-/// requests' waiters would hang forever, and the stuck `publishing` flag
-/// would stop every later submit from spawning a replacement task. On
-/// abnormal exit this guard fails the taken waiters with an unknown outcome
-/// (the panic may have struck before or after the head compare-and-swap),
-/// clears the flag, and restarts publication for any batch that queued up
-/// behind the dead task.
-///
-/// `commit_outcome_unknown` is an answer callers already know how to resolve
-/// — retry with the same commit id and the durable receipt replays — which is
-/// why converting a wedged namespace into that error is worth the machinery.
-/// It is also why [`RegistryShared::lock_state`] and this guard recover a
-/// poisoned lock instead of propagating: the guard runs from a drop that may
-/// already be unwinding a panic, where a second panic aborts the process.
-struct PublishAbortGuard {
-    publisher: NamespacePublisher,
-    taken_commit_ids: Vec<CommitId>,
-    disarmed: bool,
+/// Waiters a landed delete barrier leaves behind, one vector per result
+/// type.
+#[derive(Default)]
+struct QueuedWaiters {
+    commits: Vec<oneshot::Sender<CommitResult>>,
+    deletes: Vec<oneshot::Sender<DeleteResult>>,
 }
 
-impl PublishAbortGuard {
-    fn new(publisher: NamespacePublisher) -> Self {
-        Self {
-            publisher,
-            taken_commit_ids: Vec::new(),
-            disarmed: false,
-        }
-    }
-
-    fn batch_taken(&mut self, commit_ids: Vec<CommitId>) {
-        self.taken_commit_ids = commit_ids;
-    }
-
-    fn disarm(&mut self) {
-        self.disarmed = true;
-    }
-}
-
-impl Drop for PublishAbortGuard {
-    fn drop(&mut self) {
-        if self.disarmed {
-            return;
-        }
-        let mut orphaned_waiters = Vec::new();
-        {
-            let mut state = self.publisher.lock_state();
-            state.publishing = false;
-            for commit_id in self.taken_commit_ids.drain(..) {
-                if let Some(in_flight) = state.in_flight.remove(&commit_id) {
-                    orphaned_waiters.extend(in_flight.waiters);
+/// Empties the queue and hands back every waiter it held. Called once the
+/// delete barrier lands: nothing queued behind a tombstone may publish.
+fn take_queued_waiters(state: &mut NamespacePublisherState) -> QueuedWaiters {
+    let mut waiters = QueuedWaiters::default();
+    for item in std::mem::take(&mut state.queue) {
+        match item {
+            WorkItem::Batch(batch) => {
+                for candidate in batch.candidates {
+                    if let Some(request) = state.in_flight.remove(&candidate.commit_id) {
+                        waiters.commits.extend(request.waiters);
+                    }
                 }
             }
-            let should_spawn_next = state.pending_delete.is_some()
-                || state
-                    .batch
-                    .as_ref()
-                    .is_some_and(|batch| !batch.candidates.is_empty());
-            if should_spawn_next {
-                // The respawn re-takes loop ownership and is registered
-                // under the lock, so a racing admit does not double-spawn
-                // and a shutdown drain joins the respawn instead of
-                // concluding while queued work remains.
-                state.publishing = true;
-                self.publisher.spawn_publish_task();
-            }
-        }
-
-        for waiter in orphaned_waiters {
-            let _ = waiter.send(Err(CoreError::HeadPublish(
-                CommitHeadPublishError::OutcomeUnknown("publish task aborted mid-batch".to_owned()),
-            )));
+            WorkItem::Delete(pending) => waiters.deletes.extend(pending.waiters),
         }
     }
+    waiters
 }
 
 /// Retrying with the same commit ids is safe: candidates that actually
@@ -996,11 +1065,17 @@ fn operation_class(semantic_identity: &SemanticMutationIdentity) -> &'static str
     }
 }
 
-fn pending_queue_depth(state: &NamespacePublisherState) -> usize {
+/// Candidates queued but not yet taken by the worker: the depth admission
+/// bounds and traces.
+fn queued_candidates(state: &NamespacePublisherState) -> usize {
     state
-        .batch
-        .as_ref()
-        .map_or(0, |batch| batch.candidates.len())
+        .queue
+        .iter()
+        .map(|item| match item {
+            WorkItem::Batch(batch) => batch.candidates.len(),
+            WorkItem::Delete(_) => 0,
+        })
+        .sum()
 }
 
 fn result_label<T, E>(result: &Result<T, E>) -> &'static str {

@@ -3,11 +3,11 @@
 use crate::context::MutationContext;
 use crate::error::CoreError;
 use crate::namespace::control::read_head_object;
-use crate::namespace::writer_epoch::acquire_writer_epoch;
 use crate::options::DeleteNamespaceOptions;
 use bytes::Bytes;
 use loonfs_api::wire::control::{
-    encode_control_object, ControlObjectKind, HeadState, HeadStateEnvelope, NamespaceState,
+    encode_control_object, AcquiredWriter, ControlObjectKind, HeadState, HeadStateEnvelope,
+    NamespaceState,
 };
 use loonfs_api::{DeleteNamespaceResponse, NamespaceId};
 use loonfs_objectstore::{ObjectStore, ObjectStoreError, PutMode};
@@ -17,11 +17,13 @@ const MAX_DELETE_CAS_ATTEMPTS: usize = 8;
 /// Deletes a namespace by compare-and-swapping its head into the terminal
 /// `deleted` state (format spec, "Tombstones and deletion").
 ///
-/// The deleting writer first acquires the namespace writer epoch, so no stale
-/// writer session can publish past the delete, then swaps the head. Every
-/// retry re-checks the acquired epoch against the reloaded head, so a writer
-/// takeover between acquisition and the swap aborts the delete instead of
-/// deleting a namespace another writer now owns.
+/// `acquired_writer` is the deleting session's writer epoch, so no stale
+/// writer session can publish past the delete. The caller owns acquisition —
+/// [`NamespaceCommitEngine`](crate::publish::NamespaceCommitEngine), which
+/// refuses outright when the session is already fenced. Every retry re-checks
+/// that epoch against the reloaded head, so a writer takeover between
+/// acquisition and the swap aborts the delete instead of deleting a namespace
+/// another writer now owns.
 /// The delete linearizes at that swap: commits whose
 /// head advance serialized before it stay committed and durable; everything
 /// that observes the deleted head afterward fails with `namespace_deleted`.
@@ -35,9 +37,8 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     options: DeleteNamespaceOptions,
     context: &MutationContext,
+    acquired_writer: AcquiredWriter,
 ) -> Result<DeleteNamespaceResponse, CoreError> {
-    let acquired_writer = acquire_writer_epoch(store, namespace_id, context).await?;
-
     let mut attempted_swap = false;
     for _attempt in 0..MAX_DELETE_CAS_ATTEMPTS {
         let loaded = read_head_object(store, namespace_id)

@@ -3,9 +3,10 @@
 //! LRU eviction, or running with caches disabled — erases writer fencing.
 
 use loonfs::{
-    CreateNamespaceOptions, FsWriter, NamespaceId, PutFileOptions, RuntimeCacheConfig,
-    RuntimeError, SharedObjectStore,
+    CreateNamespaceOptions, DeleteNamespaceOptions, FsWriter, NamespaceId, PutFileOptions,
+    RuntimeCacheConfig, RuntimeError, SharedObjectStore, WriterFence,
 };
+use loonfs_api::wire::control::{HeadState, NamespaceState};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{CountingStore, KeyPredicate, OperationClass, RecordingStore};
 use std::sync::Arc;
@@ -29,7 +30,8 @@ async fn writer_with_cache(
         .expect("build writer")
 }
 
-fn expect_writer_fenced<T: std::fmt::Debug>(result: loonfs::Result<T>, when: &str) {
+/// Asserts a terminal fencing refusal and hands back the fence it carries.
+fn expect_writer_fenced<T: std::fmt::Debug>(result: loonfs::Result<T>, when: &str) -> WriterFence {
     let error = result.expect_err(when);
     assert!(
         matches!(
@@ -38,6 +40,17 @@ fn expect_writer_fenced<T: std::fmt::Debug>(result: loonfs::Result<T>, when: &st
         ),
         "{when}: unexpected error: {error:?}"
     );
+    match error {
+        RuntimeError::Core(loonfs::CoreError::WriterFenced(fence)) => fence,
+        other => unreachable!("{when}: {other:?}"),
+    }
+}
+
+async fn head_state(store: &SharedObjectStore, namespace_id: &NamespaceId) -> HeadState {
+    loonfs_core::control::load_namespace_head_control(store, namespace_id)
+        .await
+        .expect("load head")
+        .state
 }
 
 /// A fenced writer session must stay fenced: before this fix, the runtime
@@ -99,12 +112,66 @@ async fn fenced_writer_stays_fenced_instead_of_reacquiring() {
         .expect("live writer is not fenced back");
 }
 
+/// Deleting is a head-advancing write, so a fenced session must be refused
+/// there too. Before this fix the delete acquired an epoch of its own,
+/// bypassing the session entirely: a superseded writer could bump the epoch
+/// back and delete a namespace the live writer owned.
+#[tokio::test]
+async fn fenced_session_cannot_delete_namespace() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store: SharedObjectStore =
+        Arc::new(LocalFsStore::new(temp_dir.path()).expect("create store"));
+    let namespace_id = NamespaceId::parse("fence").expect("valid namespace id");
+
+    let writer_a = writer(&store, "writer-a").await;
+    writer_a
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
+    writer_a
+        .put_file_bytes(&namespace_id, "/a1.txt", b"a", PutFileOptions::default())
+        .await
+        .expect("writer a first put");
+
+    let writer_b = writer(&store, "writer-b").await;
+    writer_b
+        .put_file_bytes(&namespace_id, "/b1.txt", b"b", PutFileOptions::default())
+        .await
+        .expect("writer b takes over the epoch");
+    expect_writer_fenced(
+        writer_a
+            .put_file_bytes(&namespace_id, "/a2.txt", b"a", PutFileOptions::default())
+            .await,
+        "superseded writer surfaces fencing",
+    );
+    let head_after_fencing = head_state(&store, &namespace_id).await;
+
+    let fence = expect_writer_fenced(
+        writer_a
+            .delete_namespace(&namespace_id, DeleteNamespaceOptions::default())
+            .await,
+        "a fenced session must not delete the namespace",
+    );
+    assert_eq!(fence.active_writer.as_deref(), Some("writer-b"));
+    assert_eq!(fence.active_epoch, head_after_fencing.writer_epoch);
+
+    // The namespace is untouched: same epoch, still active, still writer B's.
+    let head = head_state(&store, &namespace_id).await;
+    assert_eq!(head.state, NamespaceState::Active);
+    assert_eq!(head.writer_epoch, head_after_fencing.writer_epoch);
+    assert_eq!(head.writer.expect("writer block").writer_id, "writer-b");
+    writer_b
+        .put_file_bytes(&namespace_id, "/b2.txt", b"b", PutFileOptions::default())
+        .await
+        .expect("live writer keeps publishing after the refused delete");
+}
+
 /// Fencing must also survive LRU eviction of the namespace's cache entry:
-/// the writer-session registry, not the evictable commit engine, owns it.
-/// Before this fix, capacity pressure from touching other namespaces
-/// evicted the fenced engine, and the fresh engine's first publish silently
-/// re-acquired the epoch — the fenced writer resumed publishing and fenced
-/// the legitimate writer back.
+/// the namespace's publisher owns the session and its engine, and no cache
+/// holds either. Before this fix, capacity pressure from touching other
+/// namespaces evicted the fenced engine, and the fresh engine's first
+/// publish silently re-acquired the epoch — the fenced writer resumed
+/// publishing and fenced the legitimate writer back.
 #[tokio::test]
 async fn fenced_writer_stays_fenced_after_namespace_lru_eviction() {
     let temp_dir = tempdir().expect("tempdir");
@@ -172,9 +239,9 @@ async fn fenced_writer_stays_fenced_after_namespace_lru_eviction() {
         .expect("live writer is not fenced back");
 }
 
-/// With runtime caches disabled every publish gets a throwaway engine, but
-/// the session's epoch and fencing come from the registry, which no cache
-/// configuration disables. Before this fix, cache-disabled runs never kept
+/// With runtime caches disabled the publisher's engine still carries the
+/// session's epoch and fencing: no cache configuration disables the
+/// publication service. Before this fix, cache-disabled runs never kept
 /// fencing at all: a superseded writer re-acquired the epoch on every
 /// publish and the two writers fenced each other back and forth.
 #[tokio::test]
@@ -215,7 +282,7 @@ async fn fenced_writer_stays_fenced_with_runtime_caches_disabled() {
         writer_a
             .put_file_bytes(&namespace_id, "/a3.txt", b"a", PutFileOptions::default())
             .await,
-        "fenced session stays fenced across throwaway engines",
+        "fenced session stays fenced with caches disabled",
     );
     assert_eq!(
         counting.count(OperationClass::CompareAndSwap),

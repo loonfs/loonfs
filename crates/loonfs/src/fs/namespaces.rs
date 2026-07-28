@@ -71,30 +71,26 @@ impl FsCore {
     }
 
     /// The delete itself, run by the publication service once the barrier
-    /// admits it. Only the service calls this; everything else must go
-    /// through [`Self::delete_namespace`] so the barrier holds.
-    pub(crate) async fn delete_namespace_unqueued(
+    /// admits it, through the publisher's own commit engine: the session
+    /// epoch and fencing that govern this namespace's publications govern
+    /// its tombstone swap too. Only the service calls this; everything else
+    /// must go through [`Self::delete_namespace`] so the barrier holds.
+    pub(crate) async fn delete_namespace_with_engine(
         &self,
         namespace_id: &NamespaceId,
+        engine: &mut loonfs_core::publish::NamespaceCommitEngine,
         options: DeleteNamespaceOptions,
     ) -> Result<DeleteNamespaceResponse> {
-        // Serialize with any engine holder so the delete takes its turn
-        // behind an in-flight publication for the namespace.
-        let engine = self.commit_engine(namespace_id);
-        let result = {
-            let _engine = engine.lock().await;
-            self.namespace_engine(namespace_id)
-                .delete_namespace(options)
-                .await
-                .map_err(RuntimeError::from)
-        };
+        let result = engine
+            .delete_namespace(self.store(), options, &self.mutation_context()?)
+            .await
+            .map_err(RuntimeError::from);
         if result.is_ok() {
-            // Only a namespace that is actually gone releases its session
-            // state: a failed delete (a fenced deleter, say) must not erase
-            // the fencing record and hand the session a fresh epoch.
-            self.inner.writer_sessions.remove(namespace_id);
+            // Only a namespace that is actually gone drops its cached state:
+            // a failed delete (a fenced deleter, say) leaves the namespace
+            // live, and its cached reads valid.
+            self.invalidate_namespace_cache_for_delete(namespace_id);
         }
-        self.invalidate_namespace_cache_for_delete(namespace_id);
         result
     }
 }

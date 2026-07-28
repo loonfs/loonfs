@@ -6,7 +6,6 @@ use crate::cache::{RuntimeCacheStatsInner, RuntimeControlCache};
 use crate::config::{validate_config, FsConfig};
 use crate::publisher::{PublishObserver, PublisherRegistry};
 use crate::time::current_time_ms;
-use crate::writer_session::WriterSessionRegistry;
 use crate::{
     ChangeSeq, CoreError, ErrorCode, InodeId, ListFileRevisionsResponse, NamespaceId, ObjectStore,
     RuntimeCacheStats,
@@ -53,12 +52,11 @@ pub(crate) struct FsInner {
     /// advances a namespace. Callers promise that it does not block.
     pub(crate) publish_observer: Option<PublishObserver>,
     /// The core's publication service: every mutation — direct handle
-    /// calls and server submissions alike — publishes through it. It holds
-    /// this core weakly, so the ownership does not cycle.
+    /// calls and server submissions alike — publishes through it. Its
+    /// per-namespace publishers own the commit engines and writer sessions,
+    /// deliberately outside every rebuildable cache. It holds this core
+    /// weakly, so the ownership does not cycle.
     pub(crate) publisher: PublisherRegistry,
-    /// Session-owned writer state (acquired epochs, fencing), deliberately
-    /// outside every rebuildable cache; see [`crate::writer_session`].
-    pub(crate) writer_sessions: WriterSessionRegistry,
 }
 
 /// Lock accessors for the runtime caches.
@@ -126,7 +124,6 @@ impl FsCore {
                     trace_mode,
                     trace_store_kind,
                 ),
-                writer_sessions: WriterSessionRegistry::default(),
             }),
         })
     }

@@ -21,6 +21,23 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use tempfile::tempdir;
 
+/// Publishes already-classified candidates through the publication
+/// service. Every candidate is admitted before the publisher's worker can
+/// take any of them, so they coalesce into one publication.
+async fn publish_candidates(
+    writer: &FsWriter,
+    namespace_id: &NamespaceId,
+    candidates: Vec<loonfs::publish::NamespaceMutationCandidate>,
+) {
+    let publisher = writer.publisher();
+    let submissions = candidates
+        .into_iter()
+        .map(|candidate| publisher.submit_candidate(namespace_id.clone(), candidate));
+    for outcome in futures::future::join_all(submissions).await {
+        outcome.expect("publish batch member");
+    }
+}
+
 #[tokio::test]
 async fn cold_stat_pays_no_per_run_filter_fetches() {
     let temp_dir = tempdir().expect("tempdir");
@@ -90,12 +107,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
                 vec![prepared],
             ));
         }
-        for outcome in writer
-            .publish_namespace_mutations_batch(&namespace_id, candidates)
-            .await
-        {
-            outcome.expect("publish batch member");
-        }
+        publish_candidates(&writer, &namespace_id, candidates).await;
         admin
             .maintenance_step_namespace(
                 &namespace_id,

@@ -477,7 +477,19 @@ impl RuntimeTestExt for TestRuntime {
         namespace_id: &NamespaceId,
         requests: Vec<CommitRequest>,
     ) -> Vec<loonfs::Result<CommitResponse>> {
-        block_on(self.writer.commit_operations_batch(namespace_id, requests))
+        let publisher = self.writer.publisher();
+        block_on(async move {
+            // Admitted in one pass, before the publisher's worker can take
+            // any of them, so the requests coalesce into one publication.
+            let submissions = requests
+                .into_iter()
+                .map(|request| publisher.submit_commit(namespace_id.clone(), request));
+            futures::future::join_all(submissions)
+                .await
+                .into_iter()
+                .map(|result| result.map_err(RuntimeError::Core))
+                .collect()
+        })
     }
 
     fn list_changes_blocking(

@@ -6,7 +6,7 @@ use crate::commit_engine::NamespaceMutationCandidate;
 use crate::context::MutationContext;
 use crate::error::Result;
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
-use crate::namespace::{bootstrap, delete, fork, BootstrapNamespaceError};
+use crate::namespace::{bootstrap, fork, BootstrapNamespaceError};
 use crate::options::{BootstrapOptions, DeleteNamespaceOptions};
 use crate::path::read::{load_metadata_view, LoadedMetadataView, ReadLoadContext};
 use crate::storage::content_admission::PreparedContent;
@@ -161,7 +161,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         &self,
         options: DeleteNamespaceOptions,
     ) -> Result<DeleteNamespaceResponse> {
-        delete::delete_namespace(
+        crate::commit_engine::delete_namespace(
             &self.store,
             &self.namespace_id,
             options,
