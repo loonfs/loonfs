@@ -412,24 +412,6 @@ impl FsWriter {
         .await
     }
 
-    /// Submits explicit semantic commit requests, returning one result per
-    /// request in order. Requests admitted together usually publish
-    /// together, batched by the publication service.
-    pub async fn commit_operations_batch(
-        &self,
-        namespace_id: &NamespaceId,
-        requests: Vec<CommitRequest>,
-    ) -> Vec<Result<CommitResponse>> {
-        self.publish_through_publisher(
-            namespace_id,
-            requests
-                .into_iter()
-                .map(NamespaceMutationCandidate::commit)
-                .collect(),
-        )
-        .await
-    }
-
     async fn publish_path_intent(
         &self,
         namespace_id: &NamespaceId,
@@ -439,55 +421,36 @@ impl FsWriter {
             .await
     }
 
+    /// Publishes one candidate through the core's publication service (see
+    /// [`crate::publisher`]): batching is adaptive, every submitter receives
+    /// its own durable result, and admitted work is owned by the service's
+    /// worker — a cancelled caller abandons only its result delivery, never
+    /// the publication.
     async fn publish_candidate(
         &self,
         namespace_id: &NamespaceId,
         candidate: NamespaceMutationCandidate,
     ) -> Result<CommitResponse> {
-        self.publish_through_publisher(namespace_id, vec![candidate])
+        self.core
+            .inner
+            .publisher
+            .submit_candidate(namespace_id.clone(), candidate)
             .await
-            .into_iter()
-            .next()
-            .unwrap_or_else(|| {
-                Err(RuntimeError::Core(CoreError::Internal(
-                    "empty publication batch".to_owned(),
-                )))
-            })
+            .map_err(RuntimeError::Core)
     }
 
-    /// Publishes direct submissions through the core's publication service
-    /// (see [`crate::publisher`]): batching is adaptive, every submitter
-    /// receives its own durable result, and admitted work is owned by the
-    /// service's tasks — a cancelled caller abandons only its result
-    /// delivery, never the publication. Candidates are admitted in order,
-    /// so one call's requests usually publish as one batch.
-    async fn publish_through_publisher(
-        &self,
-        namespace_id: &NamespaceId,
-        candidates: Vec<NamespaceMutationCandidate>,
-    ) -> Vec<Result<CommitResponse>> {
-        let submissions = candidates.into_iter().map(|candidate| {
-            self.core
-                .inner
-                .publisher
-                .submit_candidate(namespace_id.clone(), candidate)
-        });
-        futures::future::join_all(submissions)
-            .await
-            .into_iter()
-            .map(|result| result.map_err(RuntimeError::Core))
-            .collect()
-    }
-
-    /// Publishes already-classified namespace mutation candidates as one
-    /// batch: one WAL segment, one head compare-and-swap.
+    /// Publishes already-classified candidates as one batch — one WAL
+    /// segment, one head compare-and-swap — through the namespace
+    /// publisher's own commit engine, and settles the runtime state the
+    /// batch produced: read caches, publish observer, maintenance.
     ///
-    /// This is the engine-level publish the publication service's tasks
-    /// drive; results match candidates in order. Everything else submits
-    /// through [`Self::publish_through_publisher`].
-    pub async fn publish_namespace_mutations_batch(
+    /// Only the publication service calls this: it owns the engine, and
+    /// borrowing it here keeps engine construction and locking in that one
+    /// place. Results match candidates in order.
+    pub(crate) async fn publish_batch_with_engine(
         &self,
         namespace_id: &NamespaceId,
+        engine: &mut loonfs_core::publish::NamespaceCommitEngine,
         candidates: Vec<NamespaceMutationCandidate>,
     ) -> Vec<Result<CommitResponse>> {
         let batch_size = u64::try_from(candidates.len()).unwrap_or(u64::MAX);
@@ -496,88 +459,22 @@ impl FsWriter {
             Ok(context) => context,
             Err(error) => return candidates.iter().map(|_| Err(error.clone())).collect(),
         };
-        if self.core.control_cache_enabled() {
-            // Warm the immutable catalog through the control cache so a
-            // recreated engine starts seeded; a load failure here surfaces
-            // as the publish view's own, properly shaped error instead.
-            self.core
-                .load_namespace_catalog_cached(namespace_id)
-                .await
-                .ok();
-            let engine = self.core.commit_engine(namespace_id);
-            let mut publish = {
-                let cache_config = &self.core.inner.config.runtime_cache;
-                // Boxing erases the engine's deeply nested publish future;
-                // without it, callers awaiting a put or commit (CLI, server,
-                // embedding crates) exceed rustc's type-recursion depth.
-                let tail_options = loonfs_core::publish::PublishTailOptions {
-                    max_tail_rows: cache_config.max_cached_wal_tail_projection_rows,
-                    max_tail_decoded_bytes: cache_config
-                        .max_cached_wal_tail_projection_decoded_bytes,
-                };
-                Box::pin(async {
-                    let mut engine = engine.lock().await;
-                    engine
-                        .publish_batch(&store, candidates, &context, &tail_options)
-                        .await
-                })
-                .await
-            };
-            {
-                let _span = tracing::info_span!(
-                    "loonfs.phase",
-                    phase = "batch_update_cache",
-                    mode = self.core.inner.config.trace_mode.as_str(),
-                    store_kind = self.core.inner.config.trace_store_kind.as_str(),
-                    batch_size
-                )
-                .entered();
-                match publish.resulting_read_state.take() {
-                    // A landed publish hands the caches exactly the state a
-                    // rebuild would recompute; use it instead of dropping.
-                    Some(state) => self.core.seed_namespace_read_cache(namespace_id, state),
-                    None => {
-                        let runtime_results = publish
-                            .results
-                            .iter()
-                            .map(|result| result.clone().map_err(RuntimeError::Core))
-                            .collect::<Vec<_>>();
-                        self.core
-                            .invalidate_namespace_cache_after_batch(namespace_id, &runtime_results);
-                    }
-                }
-            }
-            let wal_tail_segments = publish.wal_tail_segments;
-            let results = publish
-                .results
-                .into_iter()
-                .map(|result| result.map_err(RuntimeError::Core))
-                .collect::<Vec<_>>();
-            self.notify_publish_observer(namespace_id, &results);
-            self.maybe_auto_step_after_publish(namespace_id, wal_tail_segments);
-            return results;
+        let cache_config = &self.core.inner.config.runtime_cache;
+        let tail_options = loonfs_core::publish::PublishTailOptions {
+            max_tail_rows: cache_config.max_cached_wal_tail_projection_rows,
+            max_tail_decoded_bytes: cache_config.max_cached_wal_tail_projection_decoded_bytes,
+        };
+        // Boxing erases the engine's deeply nested publish future; without
+        // it, callers awaiting a put or commit (CLI, server, embedding
+        // crates) exceed rustc's type-recursion depth.
+        let mut publish =
+            Box::pin(engine.publish_batch(&store, candidates, &context, &tail_options)).await;
+        if !self.core.control_cache_enabled() {
+            // Diagnostic mode: the publisher's engine outlives the publish
+            // even with caches off, so drop the tail projection it just
+            // built. Every publish then reads what a cold engine reads.
+            engine.invalidate();
         }
-
-        // Cache-disabled diagnostic mode: a throwaway engine per publish,
-        // but the session's epoch and fencing still come from the registry —
-        // cache configuration disables neither session state nor
-        // maintenance scheduling.
-        let mut engine = loonfs_core::publish::NamespaceCommitEngine::new(namespace_id.clone())
-            .writer_session(self.core.inner.writer_sessions.state(namespace_id));
-        // Boxed for the same type-recursion reason as the cached-engine path.
-        let publish = Box::pin(engine.publish_batch(
-            &store,
-            candidates,
-            &context,
-            &loonfs_core::publish::PublishTailOptions::default(),
-        ))
-        .await;
-        let wal_tail_segments = publish.wal_tail_segments;
-        let results: Vec<_> = publish
-            .results
-            .into_iter()
-            .map(|result| result.map_err(RuntimeError::Core))
-            .collect();
         {
             let _span = tracing::info_span!(
                 "loonfs.phase",
@@ -587,9 +484,27 @@ impl FsWriter {
                 batch_size
             )
             .entered();
-            self.core
-                .invalidate_namespace_cache_after_batch(namespace_id, &results);
+            match publish.resulting_read_state.take() {
+                // A landed publish hands the caches exactly the state a
+                // rebuild would recompute; use it instead of dropping.
+                Some(state) => self.core.seed_namespace_read_cache(namespace_id, state),
+                None => {
+                    let runtime_results = publish
+                        .results
+                        .iter()
+                        .map(|result| result.clone().map_err(RuntimeError::Core))
+                        .collect::<Vec<_>>();
+                    self.core
+                        .invalidate_namespace_cache_after_batch(namespace_id, &runtime_results);
+                }
+            }
         }
+        let wal_tail_segments = publish.wal_tail_segments;
+        let results = publish
+            .results
+            .into_iter()
+            .map(|result| result.map_err(RuntimeError::Core))
+            .collect::<Vec<_>>();
         self.notify_publish_observer(namespace_id, &results);
         self.maybe_auto_step_after_publish(namespace_id, wal_tail_segments);
         results

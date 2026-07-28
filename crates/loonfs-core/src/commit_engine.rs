@@ -11,13 +11,16 @@ use crate::error::{
 use crate::metadata::MetadataState;
 use crate::namespace::catalog::{load_namespace_catalog_entry, VerifiedNamespaceCatalogEntry};
 use crate::namespace::writer_epoch::acquire_writer_epoch;
+use crate::options::DeleteNamespaceOptions;
 use crate::path::write::{path_intent_fingerprint, PathMutationIntent};
 use crate::protocol::{load_publish_metadata_view, PublishTailOptions, PublishTailProjection};
 use crate::storage::content_admission::{ContentAdmission, ContentTokenError, PreparedContent};
 use crate::timing::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_api::v0::{CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse};
 use loonfs_api::wire::control::{AcquiredWriter, HeadState};
-use loonfs_api::{ChangeSeq, CommitId, ManifestId, ManifestObjectId, NamespaceId};
+use loonfs_api::{
+    ChangeSeq, CommitId, DeleteNamespaceResponse, ManifestId, ManifestObjectId, NamespaceId,
+};
 use loonfs_objectstore::ObjectStore;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -343,6 +346,70 @@ impl NamespaceCommitEngine {
         self.publish_tail_projection = None;
     }
 
+    /// This session's writer epoch for the namespace, acquired on first use
+    /// and reused afterwards.
+    ///
+    /// Fencing is checked first and answered terminally: a superseded session
+    /// never touches the store again, and never reacquires on its own.
+    async fn session_writer_epoch<S: ObjectStore + ?Sized>(
+        &self,
+        store: &S,
+        context: &MutationContext,
+    ) -> Result<AcquiredWriter> {
+        let already_acquired = {
+            let session = self.lock_session();
+            if let Some(fence) = &session.fenced {
+                return Err(CoreError::WriterFenced(fence.clone()));
+            }
+            session.acquired_writer.clone()
+        };
+        if let Some(acquired_writer) = already_acquired {
+            return Ok(acquired_writer);
+        }
+        let acquired_writer = acquire_writer_epoch(store, &self.namespace_id, context)
+            .await
+            .map_err(CoreError::WriterEpoch)?;
+        let mut session = self.lock_session();
+        if let Some(fence) = session.fenced.clone() {
+            // Another engine sharing this session observed fencing while we
+            // were acquiring; the session stays fenced.
+            return Err(CoreError::WriterFenced(fence));
+        }
+        session.acquired_writer = Some(acquired_writer.clone());
+        Ok(acquired_writer)
+    }
+
+    /// Deletes the namespace through this session (format spec, "Tombstones
+    /// and deletion").
+    ///
+    /// Deletion is a head-advancing write, so it takes the same session gate
+    /// as [`Self::publish_batch`]: a fenced session is refused terminally
+    /// without touching the store, and the epoch acquired for publishing is
+    /// the epoch the tombstone swap is fenced by. A takeover observed by the
+    /// swap fences this session for good.
+    pub async fn delete_namespace<S: ObjectStore + ?Sized>(
+        &mut self,
+        store: &S,
+        options: DeleteNamespaceOptions,
+        context: &MutationContext,
+    ) -> Result<DeleteNamespaceResponse> {
+        let acquired_writer = self.session_writer_epoch(store, context).await?;
+        let deleted = crate::namespace::delete::delete_namespace(
+            store,
+            &self.namespace_id,
+            options,
+            context,
+            acquired_writer,
+        )
+        .await;
+        if let Err(CoreError::WriterFenced(fence)) = &deleted {
+            let mut session = self.lock_session();
+            session.fenced = Some(fence.clone());
+            session.acquired_writer = None;
+        }
+        deleted
+    }
+
     pub async fn publish_batch<S: ObjectStore + ?Sized>(
         &mut self,
         store: &S,
@@ -359,50 +426,15 @@ impl NamespaceCommitEngine {
         }
 
         let candidate_count = candidates.len();
-        let already_acquired = {
-            let session = self.lock_session();
-            if let Some(fence) = &session.fenced {
-                let fence = fence.clone();
-                drop(session);
+        let acquired_writer = match self.session_writer_epoch(store, context).await {
+            Ok(value) => value,
+            Err(error) => {
                 return NamespaceCommitEnginePublishResult {
-                    results: repeated_error(candidate_count, CoreError::WriterFenced(fence)),
+                    results: repeated_error(candidate_count, error),
                     wal_tail_segments: 0,
                     resulting_read_state: None,
                 };
             }
-            session.acquired_writer.clone()
-        };
-        let acquired_writer = match already_acquired {
-            Some(value) => value,
-            None => match acquire_writer_epoch(store, &self.namespace_id, context).await {
-                Ok(value) => {
-                    let mut session = self.lock_session();
-                    if let Some(fence) = session.fenced.clone() {
-                        // Another engine sharing this session observed
-                        // fencing while we were acquiring; the session
-                        // stays fenced.
-                        drop(session);
-                        return NamespaceCommitEnginePublishResult {
-                            results: repeated_error(
-                                candidate_count,
-                                CoreError::WriterFenced(fence),
-                            ),
-                            wal_tail_segments: 0,
-                            resulting_read_state: None,
-                        };
-                    }
-                    session.acquired_writer = Some(value.clone());
-                    drop(session);
-                    value
-                }
-                Err(error) => {
-                    return NamespaceCommitEnginePublishResult {
-                        results: repeated_error(candidate_count, CoreError::WriterEpoch(error)),
-                        wal_tail_segments: 0,
-                        resulting_read_state: None,
-                    };
-                }
-            },
         };
 
         let catalog_entry = match &self.catalog_entry {
@@ -555,6 +587,19 @@ pub(crate) async fn publish_namespace_mutations_batch<S: ObjectStore + ?Sized>(
         .publish_batch(store, candidates, context, &PublishTailOptions::default())
         .await
         .results
+}
+
+/// Deletes a namespace through a fresh, uncached commit engine: a one-shot
+/// session that acquires its own epoch, exactly like a one-shot publish.
+pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    options: DeleteNamespaceOptions,
+    context: &MutationContext,
+) -> Result<DeleteNamespaceResponse> {
+    NamespaceCommitEngine::new(namespace_id.clone())
+        .delete_namespace(store, options, context)
+        .await
 }
 
 #[cfg(test)]

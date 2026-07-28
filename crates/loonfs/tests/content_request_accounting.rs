@@ -902,16 +902,15 @@ async fn rejected_preparation_replays_durable_receipt_without_content_operations
 
     let replay = harness
         .writer
-        .publish_namespace_mutations_batch(
-            &harness.namespace_id,
-            vec![NamespaceMutationCandidate::rejected(
+        .publisher()
+        .submit_candidate(
+            harness.namespace_id.clone(),
+            NamespaceMutationCandidate::rejected(
                 NamespaceMutation::Path(intent),
                 ContentPreparationError::ContentToken(ContentTokenError::Expired),
-            )],
+            ),
         )
         .await
-        .pop()
-        .expect("one replay result")
         .expect("rejected preparation must replay the durable receipt");
 
     assert_eq!(replay, original);
@@ -931,24 +930,16 @@ async fn new_rejected_preparation_fails_before_path_planning_without_content_ope
 
     let error = harness
         .writer
-        .publish_namespace_mutations_batch(
-            &harness.namespace_id,
-            vec![NamespaceMutationCandidate::rejected(
+        .publisher()
+        .submit_candidate(
+            harness.namespace_id.clone(),
+            NamespaceMutationCandidate::rejected(
                 NamespaceMutation::Path(intent),
                 ContentPreparationError::ContentToken(ContentTokenError::Expired),
-            )],
+            ),
         )
         .await
-        .pop()
-        .expect("one rejected result")
         .expect_err("new rejected preparation must fail");
-    assert!(
-        matches!(error, loonfs::Error::Core(_)),
-        "expected core content-preparation error"
-    );
-    let loonfs::Error::Core(error) = error else {
-        return;
-    };
 
     assert_eq!(error.code(), ErrorCode::ContentNotPrepared);
     assert!(matches!(

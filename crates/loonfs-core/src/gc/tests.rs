@@ -24,8 +24,8 @@ use loonfs_objectstore::ObjectStore;
 use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 
+use crate::commit_engine::delete_namespace;
 use crate::namespace::bootstrap::bootstrap_namespace;
-use crate::namespace::delete::delete_namespace;
 use crate::namespace::fork::fork_namespace;
 use crate::options::DeleteNamespaceOptions;
 use crate::path::read::{load_metadata_view, ReadLoadContext};

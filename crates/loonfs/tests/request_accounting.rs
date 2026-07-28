@@ -98,6 +98,23 @@ fn report(phase: &str, gets: &[RecordedGet], tables: &TableMap) {
     }
 }
 
+/// Publishes already-classified candidates through the publication
+/// service. Every candidate is admitted before the publisher's worker can
+/// take any of them, so they coalesce into one publication.
+async fn publish_candidates(
+    writer: &FsWriter,
+    namespace_id: &NamespaceId,
+    candidates: Vec<loonfs::publish::NamespaceMutationCandidate>,
+) {
+    let publisher = writer.publisher();
+    let submissions = candidates
+        .into_iter()
+        .map(|candidate| publisher.submit_candidate(namespace_id.clone(), candidate));
+    for outcome in futures::future::join_all(submissions).await {
+        outcome.expect("publish batch member");
+    }
+}
+
 #[allow(clippy::print_stdout)]
 #[tokio::test]
 #[ignore = "diagnostic: prints warm-phase request accounting"]
@@ -169,12 +186,7 @@ async fn warm_phase_request_accounting() {
             ));
             index += 1;
         }
-        for outcome in writer
-            .publish_namespace_mutations_batch(&namespace_id, candidates)
-            .await
-        {
-            outcome.expect("publish batch member");
-        }
+        publish_candidates(&writer, &namespace_id, candidates).await;
         if (index / BATCH) % STEP_EVERY_BATCHES == 0 {
             admin
                 .maintenance_step_namespace(

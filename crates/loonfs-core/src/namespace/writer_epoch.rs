@@ -160,7 +160,7 @@ mod tests {
     use crate::error::ErrorCode;
     use crate::namespace::bootstrap::bootstrap_namespace;
     use crate::namespace::control::read_head_object;
-    use crate::namespace::delete::delete_namespace;
+    use crate::commit_engine::delete_namespace;
     use crate::options::DeleteNamespaceOptions;
 
     async fn commit_operations<S: loonfs_objectstore::ObjectStore + ?Sized>(
@@ -500,12 +500,20 @@ mod tests {
             head_reads: AtomicUsize::new(0),
         };
 
+        // The deleting session supplies its own acquired epoch (in
+        // production the commit engine's), so the interleaving is explicit:
+        // acquire (head read #1), takeover, delete-loop reload (head read
+        // #2).
         let delete_attempt = context("writer-a", "session-a", 2_000);
-        let error = delete_namespace(
+        let acquired = acquire_writer_epoch(&store, &namespace_id, &delete_attempt)
+            .await
+            .expect("acquire before the takeover");
+        let error = crate::namespace::delete::delete_namespace(
             &store,
             &namespace_id,
             DeleteNamespaceOptions::default(),
             &delete_attempt,
+            acquired,
         )
         .await
         .expect_err("stale-epoch delete must be fenced");

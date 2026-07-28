@@ -37,7 +37,6 @@ mod options;
 pub mod publisher;
 mod time;
 mod trace;
-mod writer_session;
 
 use thiserror::Error;
 
@@ -74,7 +73,7 @@ pub use publisher::PublishObserver;
 /// Integration seam: the vocabulary for handing classified mutation work to
 /// the runtime's batch publication surface. The server's filesystem
 /// handlers build [`publish::PathMutationIntent`]s for the [`publisher`]
-/// front-end, and [`FsWriter::publish_namespace_mutations_batch`] accepts
+/// front-end, which also accepts
 /// [`publish::NamespaceMutationCandidate`]s directly. Most embedded users
 /// never need this module.
 pub mod publish {
