@@ -17,7 +17,6 @@ use loonfs::{
 use loonfs_api::ErrorCode;
 use loonfs_api::{
     ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior, GrepRequest, NamespaceId,
-    RepairNamespaceOutcome,
 };
 use loonfs_client::{
     Client, ClientConfig, ClientError, DeleteOptions as ClientDeleteOptions, MutationOptions,
@@ -26,7 +25,7 @@ use loonfs_client::{
 use loonfs_grep::keyspace::{manifest_key as grep_manifest_key, root_key as grep_root_key};
 use loonfs_grep::root::{encode_grep_root, GrepManifestId, GrepRootEnvelope, GrepRootPointer};
 use loonfs_grep::{GrepDriverParked, GrepWorker};
-use loonfs_objectstore::keys::{metadata_root, namespace_config, wal_head};
+use loonfs_objectstore::keys::wal_head;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
@@ -100,7 +99,7 @@ fn error_status_mapping_matches_the_api_spec_table() {
 }
 use loonfs_test_support::http::raw_agent;
 use loonfs_test_support::ids::namespace_id;
-use loonfs_test_support::stores::{BlockingStore, KeyPredicate, MetadataMapStore, OperationClass};
+use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationClass};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -771,83 +770,6 @@ async fn http_missing_namespace_reads_return_namespace_not_found() {
     );
 
     harness.server.abort();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_admin_repair_reports_completed_already_complete_in_flight_and_not_found() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
-    let shared = store.clone() as SharedObjectStore;
-    let partial = namespace_id("partial");
-    bootstrap_namespace(&shared, "seed-writer", &partial).await;
-    store
-        .delete(&namespace_config(partial.as_str()))
-        .await
-        .expect("remove completion descriptor");
-    let young = namespace_id("young");
-    store
-        .put_if_absent(
-            &metadata_root(young.as_str()),
-            Bytes::from_static(b"pre-head debris"),
-        )
-        .await
-        .expect("write young debris");
-    let harness = start_server(shared, temp_dir.path(), "server-writer").await;
-
-    let completed = harness
-        .client
-        .repair_namespace(&partial)
-        .await
-        .expect("repair partial namespace");
-    assert_eq!(completed.outcome, RepairNamespaceOutcome::Completed);
-    let already = harness
-        .client
-        .repair_namespace(&partial)
-        .await
-        .expect("repeat repair");
-    assert_eq!(already.outcome, RepairNamespaceOutcome::AlreadyComplete);
-    let in_flight = harness
-        .client
-        .repair_namespace(&young)
-        .await
-        .expect("repair young debris");
-    assert_eq!(in_flight.outcome, RepairNamespaceOutcome::InFlight);
-    assert_api_error(
-        harness
-            .client
-            .repair_namespace(&namespace_id("absent"))
-            .await,
-        404,
-        "namespace_not_found",
-        Some("namespace `absent` does not exist"),
-    );
-    harness.server.abort();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_admin_repair_reports_reaped_for_aged_debris() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(MetadataMapStore::aged(
-        LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyPredicate::any(),
-    ));
-    let namespace_id = namespace_id("aged");
-    let root_key = metadata_root(namespace_id.as_str());
-    store
-        .put_if_absent(&root_key, Bytes::from_static(b"pre-head debris"))
-        .await
-        .expect("write aged debris");
-    let shared = store.clone() as SharedObjectStore;
-    let harness = start_server(shared, temp_dir.path(), "server-writer").await;
-
-    let reaped = harness
-        .client
-        .repair_namespace(&namespace_id)
-        .await
-        .expect("repair aged debris");
-    assert_eq!(reaped.outcome, RepairNamespaceOutcome::Reaped);
-    harness.server.abort();
-    assert!(store.head(&root_key).await.expect("head debris").is_none());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

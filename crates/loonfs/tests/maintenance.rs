@@ -12,7 +12,7 @@ use loonfs::{
     SharedObjectStore, WalFlushStepOutcome,
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
-use loonfs_objectstore::keys::{metadata_manifest_object, namespace_config, wal_segment_prefix};
+use loonfs_objectstore::keys::{metadata_manifest_object, wal_head, wal_segment_prefix};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::block_on::block_on;
@@ -38,7 +38,9 @@ fn namespace_status_reports_wal_tail_segments() {
         .expect("status for new namespace");
     assert_eq!(status.namespace_id, namespace_id);
     assert_eq!(status.head_seq, ChangeSeq(0));
-    assert_eq!(status.current_manifest_id, Some(ManifestId(0)));
+    // A namespace that has never flushed has published no manifest of its
+    // own; it reads from the built-in genesis state.
+    assert_eq!(status.current_manifest_id, None);
     assert_eq!(status.wal_tail_segments, 0);
     assert_eq!(status.retention_floor_seq, ChangeSeq(0));
 
@@ -55,7 +57,7 @@ fn namespace_status_reports_wal_tail_segments() {
         .namespace_status_blocking(&namespace_id)
         .expect("status after commit");
     assert_eq!(status.head_seq, ChangeSeq(1));
-    assert_eq!(status.current_manifest_id, Some(ManifestId(0)));
+    assert_eq!(status.current_manifest_id, None);
     assert_eq!(status.wal_tail_segments, 1);
     assert_eq!(status.retention_floor_seq, ChangeSeq(0));
     assert_eq!(store.count(OperationClass::List), 0);
@@ -109,8 +111,10 @@ fn namespace_status_and_step_reject_missing_namespace() {
     );
 }
 
+/// A namespace whose head is gone is a namespace that does not exist:
+/// there is no third answer between present and absent.
 #[test]
-fn namespace_status_and_step_reject_partial_namespace() {
+fn namespace_status_and_step_reject_a_namespace_whose_head_is_gone() {
     let temp_dir = tempdir().expect("tempdir");
     let raw_store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("create local-fs store"));
     let object_store: SharedObjectStore = raw_store.clone();
@@ -119,16 +123,15 @@ fn namespace_status_and_step_reject_partial_namespace() {
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    block_on(raw_store.delete(&namespace_config(namespace_id.as_str())))
-        .expect("delete namespace descriptor");
+    block_on(raw_store.delete(&wal_head(namespace_id.as_str()))).expect("delete head");
 
     assert_core_error_kind(
         fs.namespace_status_blocking(&namespace_id),
-        ErrorCode::NamespacePartial,
+        ErrorCode::NamespaceNotFound,
     );
     assert_core_error_kind(
         fs.maintenance_step_namespace_blocking(&namespace_id, MaintenanceStepOptions::default()),
-        ErrorCode::NamespacePartial,
+        ErrorCode::NamespaceNotFound,
     );
 }
 
@@ -371,9 +374,9 @@ fn maintenance_step_after_existing_manifest_writes_l0_manifest() {
         .expect("read namespace manifest")
         .expect("namespace manifest exists");
     let manifest = decode_namespace_manifest_json(&manifest_bytes).expect("decode manifest");
-    // A WAL flush only appends: the base marker stays the seed's until
-    // reorganization folds the delta runs.
-    assert_eq!(manifest.payload.base_seq, ChangeSeq(0));
+    // A WAL flush only appends: the base marker stays where the first
+    // published manifest put it until reorganization folds the delta runs.
+    assert_eq!(manifest.payload.base_seq, ChangeSeq(1));
     let l0_files = manifest
         .payload
         .metadata_files
@@ -571,7 +574,7 @@ fn maintenance_step_treats_metadata_root_cas_loss_as_benign_race() {
     let status = fs
         .namespace_status_blocking(&namespace_id)
         .expect("status after lost race");
-    assert_eq!(status.current_manifest_id, Some(ManifestId(0)));
+    assert_eq!(status.current_manifest_id, None);
     assert_eq!(status.wal_tail_segments, 1);
 }
 

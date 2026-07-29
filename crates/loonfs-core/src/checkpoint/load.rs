@@ -13,12 +13,17 @@ use super::error::ManifestLoadError;
 use super::runs::{runs_in_materialization_order, runs_in_scan_order};
 use super::scan::{ordered_manifest_tables, VerifiedMetadataTables};
 use super::validate::{validate_manifest_materialization_ranges, validate_namespace_manifest};
-use crate::error::CoreError;
-use loonfs_api::wire::control::{HeadState, MetadataRootState};
+use crate::error::{CoreError, MetadataProjectionLoadError};
+use crate::metadata::MetadataState;
+use crate::namespace::basis::{genesis_next_inode_id, MetadataBasis};
+use crate::namespace::bootstrap::bootstrap_metadata_state;
+use loonfs_api::wire::control::{genesis_commit_id, HeadState, MetadataRootState};
 use loonfs_api::wire::manifest::{
-    decode_namespace_manifest_json, MetadataFileRef, MetadataTableFamily, NamespaceManifestEnvelope,
+    decode_namespace_manifest_json, MetadataFileRef, MetadataTableFamily,
+    NamespaceManifestEnvelope, NamespaceManifestKind, NamespaceManifestPayload,
+    NAMESPACE_MANIFEST_FORMAT_VERSION,
 };
-use loonfs_api::{ManifestObjectId, NamespaceId};
+use loonfs_api::{ChangeSeq, ManifestId, ManifestObjectId, NamespaceId, WriterEpoch};
 use loonfs_objectstore::keys::{metadata_manifest_object, metadata_table};
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
@@ -53,6 +58,93 @@ pub(super) fn ensure_root_matches_manifest(
         )));
     }
     Ok(())
+}
+
+/// The genesis basis: one root-inode row and no metadata files.
+///
+/// A created namespace publishes no manifest, so reads before its first
+/// flush replay the WAL over this synthesized state. The object id is a
+/// sentinel that no generator produces and that nothing ever writes; it
+/// exists because the manifest payload shape requires one.
+const GENESIS_MANIFEST_OBJECT_ID: &str = "00000000000000000000-0000000000000000";
+
+fn genesis_basis_manifest(namespace_id: &NamespaceId) -> NamespaceManifestEnvelope {
+    NamespaceManifestEnvelope {
+        kind: NamespaceManifestKind::NamespaceManifest,
+        format_version: NAMESPACE_MANIFEST_FORMAT_VERSION,
+        writer_version: String::new(),
+        payload_checksum: String::new(),
+        payload: NamespaceManifestPayload {
+            namespace_id: namespace_id.clone(),
+            manifest_id: ManifestId(0),
+            manifest_object_id: ManifestObjectId::parse(GENESIS_MANIFEST_OBJECT_ID)
+                .expect("genesis manifest object id is valid"),
+            head_seq: ChangeSeq(0),
+            head_commit_id: genesis_commit_id(),
+            base_seq: ChangeSeq(0),
+            writer_epoch: WriterEpoch(0),
+            next_inode_id: genesis_next_inode_id(),
+            retention_floor_seq: ChangeSeq(0),
+            metadata_files: Vec::new(),
+        },
+    }
+}
+
+/// The materialized tables a basis resolves to, plus the in-memory rows the
+/// WAL tail replays over.
+pub(crate) struct BasisMetadataTables<'a, S: ObjectStore + ?Sized> {
+    pub(crate) tables: VerifiedMetadataTables<'a, S>,
+    /// Rows the basis contributes outside any SST: the genesis root inode,
+    /// and nothing at all once a manifest exists.
+    pub(crate) base_state: MetadataState,
+}
+
+/// Loads the tables a resolved basis names.
+///
+/// A genesis basis loads nothing: its single row is synthesized. A manifest
+/// basis is loaded under its owner's prefix — this namespace's own root, or
+/// the fork source the head authorizes — and is validated against the
+/// checksum the authorizing object recorded. A mismatch is corruption; there
+/// is no second attempt against another basis.
+pub(crate) async fn load_basis_metadata_tables<'a, S: ObjectStore + ?Sized>(
+    store: &'a S,
+    table_cache: Option<&'a MetadataTableCache>,
+    namespace_id: &NamespaceId,
+    basis: &MetadataBasis,
+) -> crate::error::Result<BasisMetadataTables<'a, S>> {
+    let Some(manifest) = basis.manifest() else {
+        return Ok(BasisMetadataTables {
+            tables: VerifiedMetadataTables::synthesized(
+                store,
+                genesis_basis_manifest(namespace_id),
+            ),
+            base_state: bootstrap_metadata_state(),
+        });
+    };
+    let tables = load_verified_manifest_tables_with_cache(
+        store,
+        table_cache,
+        &manifest.owner_namespace_id,
+        &manifest.manifest_object_id,
+    )
+    .await
+    .map_err(|error| {
+        CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
+    })?;
+    if tables.manifest().payload_checksum != manifest.manifest_payload_checksum {
+        return Err(CoreError::NamespaceCorrupt(format!(
+            "namespace `{namespace_id}` resolves its metadata basis to manifest `{}` in namespace \
+             `{}` with checksum `{}`, but the manifest carries `{}`",
+            manifest.manifest_object_id,
+            manifest.owner_namespace_id,
+            manifest.manifest_payload_checksum,
+            tables.manifest().payload_checksum,
+        )));
+    }
+    Ok(BasisMetadataTables {
+        tables,
+        base_state: MetadataState::default(),
+    })
 }
 
 /// Loads and validates only the manifest envelope, without fetching its
@@ -180,6 +272,9 @@ pub(crate) fn head_from_manifest(
 ) -> HeadState {
     HeadState {
         namespace_id: current_head.namespace_id.clone(),
+        content_store_id: current_head.content_store_id.clone(),
+        name_policy: current_head.name_policy,
+        fork_basis: current_head.fork_basis.clone(),
         seq: manifest.payload.head_seq,
         head_commit_id: manifest.payload.head_commit_id.clone(),
         // The manifest records the manifest-time writer epoch. That may lag the

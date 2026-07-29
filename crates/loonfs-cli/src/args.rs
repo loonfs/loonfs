@@ -606,8 +606,6 @@ pub(crate) enum AdminCommand {
     Step(AdminStepArgs),
     /// Run a mark-and-sweep garbage-collection pass.
     Gc(AdminGcArgs),
-    /// Repair one incomplete namespace installation explicitly.
-    Repair(AdminNamespaceArgs),
     /// Enable the gram content index and start its backfill.
     IndexEnable(AdminNamespaceArgs),
     /// Disable the gram content index.
@@ -740,7 +738,6 @@ pub(crate) enum CommandKind {
     AdminRetentionAdvance,
     AdminStep,
     AdminGc,
-    AdminRepair,
     AdminIndexEnable,
     AdminIndexDisable,
     ConfigPath,
@@ -784,7 +781,6 @@ impl CommandKind {
             CommandKind::AdminRetentionAdvance => "admin_retention_advance",
             CommandKind::AdminStep => "admin_step",
             CommandKind::AdminGc => "admin_gc",
-            CommandKind::AdminRepair => "admin_repair",
             CommandKind::AdminIndexEnable => "admin_index_enable",
             CommandKind::AdminIndexDisable => "admin_index_disable",
             CommandKind::ConfigPath => "config_path",
@@ -839,7 +835,6 @@ impl Cli {
                 AdminCommand::RetentionAdvance(_) => CommandKind::AdminRetentionAdvance,
                 AdminCommand::Step(_) => CommandKind::AdminStep,
                 AdminCommand::Gc(_) => CommandKind::AdminGc,
-                AdminCommand::Repair(_) => CommandKind::AdminRepair,
                 AdminCommand::IndexEnable(_) => CommandKind::AdminIndexEnable,
                 AdminCommand::IndexDisable(_) => CommandKind::AdminIndexDisable,
             },

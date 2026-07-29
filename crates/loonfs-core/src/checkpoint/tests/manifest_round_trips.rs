@@ -146,13 +146,13 @@ async fn manifest_round_trip_supports_empty_namespace() {
     let checkpoint = create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("create checkpoint");
-    // The bootstrap manifest already covers the head: pinning writes a
+    // The published manifest already covers the head: pinning writes a
     // record against it instead of materializing a new manifest.
-    assert_eq!(checkpoint.manifest_id, ManifestId(0));
+    assert_eq!(checkpoint.manifest_id, ManifestId(1));
     let materialization = load_current_projection(&store, &namespace_id)
         .await
         .expect("materialization");
-    assert_eq!(materialization.root.manifest_id, ManifestId(0));
+    assert_eq!(materialization.root.manifest_id, ManifestId(1));
     let record = read_checkpoint_record(&store, &namespace_id, &checkpoint.checkpoint_id)
         .await
         .expect("read checkpoint record")
@@ -160,7 +160,7 @@ async fn manifest_round_trip_supports_empty_namespace() {
         .state;
     assert!(CheckpointId::parse(record.checkpoint_id.as_str()).is_ok());
     assert_eq!(record.manifest_head_seq, ChangeSeq(0));
-    assert_eq!(record.manifest_id, ManifestId(0));
+    assert_eq!(record.manifest_id, ManifestId(1));
 }
 
 #[tokio::test]
@@ -208,7 +208,7 @@ async fn create_checkpoint_surfaces_conflicting_invalid_manifest() {
     let manifest_key = format!(
         "{}{:020}-",
         metadata_manifest_prefix(namespace_id.as_str()),
-        1
+        2
     );
     let store = ConflictOnManifestCreateStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
@@ -239,7 +239,7 @@ async fn create_checkpoint_surfaces_conflicting_invalid_manifest() {
     let materialization = load_current_projection(&store, &namespace_id)
         .await
         .expect("materialization");
-    assert_eq!(materialization.root.manifest_id, ManifestId(0));
+    assert_eq!(materialization.root.manifest_id, ManifestId(1));
 }
 
 #[tokio::test]
@@ -765,7 +765,6 @@ async fn manifest_run_rejects_rows_after_run_seq() {
             writer_epoch: materialization.head.writer_epoch,
             next_inode_id: materialization.head.next_inode_id,
             retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
-            fork: None,
             metadata_files,
         },
     )
@@ -801,11 +800,11 @@ async fn manifest_l0_runs_chain_across_successive_manifests() {
     }
 
     let materialized =
-        load_manifest_materialization_for_inspection(&store, &namespace_id, ManifestId(4))
+        load_manifest_materialization_for_inspection(&store, &namespace_id, ManifestId(5))
             .await
             .expect("load chained manifest");
-    // Always-append checkpoints keep the seed base (seq 0) and chain one
-    // L0 run per checkpoint, the first included.
+    // Always-append checkpoints keep the first published base (seq 0) and
+    // chain one L0 run per checkpoint, the first included.
     assert_eq!(materialized.manifest.payload.base_seq, ChangeSeq(0));
     let l0_runs = l0_runs(&materialized.manifest);
     assert_eq!(l0_runs.len(), 4);
@@ -1021,7 +1020,7 @@ async fn create_checkpoint_pins_a_current_basis_without_building_a_new_manifest(
         &store,
         &namespace_id,
         &manifest_without_checkpoint,
-        &materialization.root.manifest_object_id,
+        Some(materialization.root.manifest_object_id.clone()),
         context.now_ms,
         &context.writer_version,
     )

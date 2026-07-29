@@ -131,7 +131,6 @@ error_codes! {
     NamespaceNotFound => "namespace_not_found",
     NamespaceDeleted => "namespace_deleted",
     NamespaceExists => "namespace_exists",
-    NamespacePartial => "namespace_partial",
     ContentNotPrepared => "content_not_prepared",
     PathNotFound => "path_not_found",
     RevisionNotFound => "revision_not_found",
@@ -202,8 +201,7 @@ impl ErrorCode {
             // (`stale_revision`, `stale_head`, `commit_id_reuse_conflict`) as
             // 409 resource-state conflicts, not 412 (api.md, "Standard error
             // contract").
-            ErrorCode::NamespacePartial
-            | ErrorCode::ContentNotPrepared
+            ErrorCode::ContentNotPrepared
             | ErrorCode::PathConflict
             | ErrorCode::DirectoryNotEmpty
             | ErrorCode::StaleHead

@@ -5,13 +5,12 @@ use crate::checkpoint::record::{encode_checkpoint_record, set_checkpoint_record_
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
 use crate::namespace::control::{read_head_object, ControlObjectLoadError};
-use futures::StreamExt;
 use loonfs_api::wire::control::{
     decode_control_object, CheckpointOwner, CheckpointRecordLifecycle, CheckpointRecordState,
     ControlObjectKind, NamespaceState,
 };
 use loonfs_api::NamespaceId;
-use loonfs_objectstore::keys::{metadata_manifest_object, namespace_prefix};
+use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::ObjectStore;
 
 pub(super) enum ForkCheckpointSweep {
@@ -157,11 +156,15 @@ pub(super) async fn maybe_release_fork_checkpoint<S: ObjectStore + ?Sized>(
 }
 
 /// Proves a fork target namespace is gone (rule 10's fork arm). Either its
-/// head object says the namespace is terminally deleted, or nothing exists
-/// under the target prefix at all and the record has aged past the reap
-/// window. The age matters because a live fork retry would have freshened
-/// the record; an old record over an empty tree means the fork was
-/// abandoned or its partial bootstrap was already reaped.
+/// head says the namespace is terminally deleted, or the head is absent —
+/// and since the head is the target's only installation write, an absent
+/// head means the fork never landed.
+///
+/// The absent case is still age-gated: a fork in flight right now has not
+/// written its head yet, and a live retry would have freshened this record.
+/// An old record with no target head means the fork was abandoned. Other
+/// objects under the target prefix prove nothing either way, because no
+/// installation writes any before the head.
 pub(super) async fn fork_target_proven_gone<S: ObjectStore + ?Sized>(
     store: &S,
     target_namespace_id: &NamespaceId,
@@ -172,14 +175,6 @@ pub(super) async fn fork_target_proven_gone<S: ObjectStore + ?Sized>(
     match read_head_object(store, target_namespace_id).await {
         Ok(loaded) => Ok(loaded.envelope.state.state == NamespaceState::Deleted),
         Err(ControlObjectLoadError::MissingObject { .. }) => {
-            let target_prefix = namespace_prefix(target_namespace_id);
-            let mut tree = store.list_prefix_stream(&target_prefix);
-            if let Some(item) = tree.next().await {
-                item.map_err(|error| CoreError::store(&target_prefix, &error))?;
-                // Either a bootstrap is in progress or rule 10 has not
-                // reaped the partial tree yet; ambiguity retains.
-                return Ok(false);
-            }
             Ok(context.now_ms.saturating_sub(record_last_modified_ms) >= config.reap_window_ms)
         }
         // An unreadable target head is not verifiably deleted; retain.

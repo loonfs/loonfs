@@ -186,8 +186,6 @@ pub enum CoreError {
     NamespaceExists { namespace_id: NamespaceId },
     #[error("namespace `{namespace_id}` is deleted")]
     NamespaceDeleted { namespace_id: NamespaceId },
-    #[error("namespace `{namespace_id}` is partially initialized; run admin repair explicitly")]
-    NamespacePartial { namespace_id: NamespaceId },
 }
 
 /// Failures specific to manifest-plus-tail metadata views.
@@ -217,14 +215,8 @@ pub enum MetadataViewError {
 ///
 /// These variants name durable/control failure cases without implying that a
 /// full namespace state was reconstructed.
-// Four Load* variants share ControlObjectLoadError; only the head load (the
-// dominant path) gets `#[from]`, the others stay explicit conversions.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum MetadataProjectionLoadError {
-    #[error("failed to load namespace descriptor: {0}")]
-    LoadNamespaceDescriptor(ControlObjectLoadError),
-    #[error("failed to load content store descriptor: {0}")]
-    LoadContentStoreDescriptor(ControlObjectLoadError),
     #[error(transparent)]
     LoadHead(#[from] ControlObjectLoadError),
     #[error("missing head etag for `{object_key}`")]
@@ -257,12 +249,7 @@ pub enum MetadataProjectionLoadError {
 impl From<NamespaceCatalogLoadError> for MetadataProjectionLoadError {
     fn from(value: NamespaceCatalogLoadError) -> Self {
         match value {
-            NamespaceCatalogLoadError::LoadNamespaceDescriptor(error) => {
-                Self::LoadNamespaceDescriptor(error)
-            }
-            NamespaceCatalogLoadError::LoadContentStoreDescriptor(error) => {
-                Self::LoadContentStoreDescriptor(error)
-            }
+            NamespaceCatalogLoadError::LoadHead(error) => Self::LoadHead(error),
         }
     }
 }
@@ -375,7 +362,6 @@ impl CoreError {
             CoreError::ContentTooLarge { .. } => ErrorCode::ContentTooLarge,
             CoreError::NamespaceExists { .. } => ErrorCode::NamespaceExists,
             CoreError::NamespaceDeleted { .. } => ErrorCode::NamespaceDeleted,
-            CoreError::NamespacePartial { .. } => ErrorCode::NamespacePartial,
             CoreError::CommitIdReuseConflict(_) => ErrorCode::CommitIdReuseConflict,
             CoreError::ContentPreparation(_) => ErrorCode::ContentNotPrepared,
             CoreError::CommitQueueFull => ErrorCode::CommitQueueFull,
@@ -546,18 +532,9 @@ fn classify_metadata_view_error(error: &MetadataViewError) -> ErrorCode {
 fn classify_metadata_projection_load_error(error: &MetadataProjectionLoadError) -> ErrorCode {
     match error {
         MetadataProjectionLoadError::NamespaceDeleted { .. } => ErrorCode::NamespaceDeleted,
-        MetadataProjectionLoadError::LoadNamespaceDescriptor(error) => {
-            classify_control_object_load_error(error)
-        }
-        MetadataProjectionLoadError::LoadContentStoreDescriptor(error) => match error {
-            ControlObjectLoadError::Store { .. } => ErrorCode::ServerError,
-            _ => ErrorCode::NamespaceCorrupt,
-        },
-        MetadataProjectionLoadError::LoadHead(error) => match error {
-            ControlObjectLoadError::MissingObject { .. }
-            | ControlObjectLoadError::MissingObjectAfterHead { .. } => ErrorCode::NamespaceCorrupt,
-            _ => classify_control_object_load_error(error),
-        },
+        // The head is the namespace: an absent head is the one and only
+        // "this namespace does not exist" signal.
+        MetadataProjectionLoadError::LoadHead(error) => classify_control_object_load_error(error),
         MetadataProjectionLoadError::WalChainLoad(error) => classify_wal_chain_load_error(error),
         MetadataProjectionLoadError::WalReplay(_)
         | MetadataProjectionLoadError::ReplayedHeadMismatch { .. } => ErrorCode::NamespaceCorrupt,
@@ -572,11 +549,9 @@ fn classify_metadata_projection_load_error(error: &MetadataProjectionLoadError) 
 
 fn classify_control_object_load_error(error: &ControlObjectLoadError) -> ErrorCode {
     match error {
-        ControlObjectLoadError::MissingObject { .. }
-        | ControlObjectLoadError::MissingObjectAfterHead { .. } => ErrorCode::NamespaceNotFound,
+        ControlObjectLoadError::MissingObject { .. } => ErrorCode::NamespaceNotFound,
         ControlObjectLoadError::RootAheadOfHead { .. } => ErrorCode::StaleHead,
         ControlObjectLoadError::NamespaceMismatch { .. }
-        | ControlObjectLoadError::ContentStoreMismatch { .. }
         | ControlObjectLoadError::ChecksumMismatch { .. }
         | ControlObjectLoadError::Codec { .. } => ErrorCode::NamespaceCorrupt,
         ControlObjectLoadError::Store { .. } => ErrorCode::ServerError,
@@ -731,6 +706,7 @@ fn classify_head_publish_error(error: &CommitHeadPublishError) -> ErrorCode {
         | CommitHeadPublishError::WalSegmentStartSeqMismatch { .. }
         | CommitHeadPublishError::WalSegmentEndSeqMismatch { .. }
         | CommitHeadPublishError::EmptyWalSegment
+        | CommitHeadPublishError::HeadIdentityDrift(_)
         | CommitHeadPublishError::SeqOverflow
         | CommitHeadPublishError::Codec { .. }
         | CommitHeadPublishError::Store { .. } => ErrorCode::ServerError,

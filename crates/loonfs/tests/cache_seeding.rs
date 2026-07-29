@@ -477,6 +477,16 @@ fn repeated_materialized_stat_uses_metadata_table_cache() {
     .expect("put file");
     fs.create_checkpoint_blocking(&namespace_id)
         .expect("checkpoint");
+    // The checkpoint published the namespace's first manifest. One more
+    // write moves the head, so the next read resolves its anchor against
+    // that manifest instead of the genesis basis it had pinned.
+    fs.put_file_bytes_blocking(
+        &namespace_id,
+        "/docs/second.txt",
+        b"second",
+        PutFileOptions::default(),
+    )
+    .expect("put second file");
 
     fs.stat_path_blocking(&namespace_id, "/docs/file.txt")
         .expect("first materialized stat");

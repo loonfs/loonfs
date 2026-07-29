@@ -111,8 +111,8 @@ pub use v0::{
     FlushWalResponse, ForkNamespaceRequest, GcRequest, GcResponse, GrepMatch, GrepRequest,
     GrepResponse, ListFileRevisionsResponse, ListPathEntriesResponse, ListTrashResponse,
     MaintenanceStepKind, MaintenanceStepRequest, MaintenanceStepResponse, NamespaceStatusResponse,
-    NamespaceSummary, ReleaseCheckpointResponse, ReorganizeStepOutcome, RepairNamespaceOutcome,
-    TrashEntry, WalFlushStepOutcome,
+    NamespaceSummary, ReleaseCheckpointResponse, ReorganizeStepOutcome, TrashEntry,
+    WalFlushStepOutcome,
 };
 
 #[cfg(test)]
@@ -139,6 +139,9 @@ mod tests {
     fn durable_protocol_types_are_available_under_wire() {
         let _head = wire::control::HeadState::initial(
             NamespaceId::parse("demo").expect("valid namespace id"),
+            ContentStoreId::parse("cs_0123456789abcdef0123456789abcdef")
+                .expect("valid content store id"),
+            NamePolicy::default(),
         );
         let _wal_delta = wire::wal::WalDelta::TombstoneSubtree {
             delta_index: 0,

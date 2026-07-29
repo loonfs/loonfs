@@ -1,20 +1,14 @@
-//! Read-only namespace status: summarizes the head, root manifest, WAL
-//! tail, and retention floor.
+//! Read-only namespace status: summarizes the head, its materialized
+//! basis, the WAL tail, and the retention floor.
 
 use crate::checkpoint::load_namespace_manifest_envelope;
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
-use crate::namespace::catalog::{
-    map_namespace_initialization_error_to_core, namespace_initialization_state,
-    NamespaceInitializationState,
-};
-use crate::namespace::control::{
-    read_head_and_metadata_root, read_wal_floor_seq_or_zero, ControlObjectLoadError,
-};
+use crate::namespace::basis::{read_head_and_metadata_basis, resolve_retention_floor_seq};
 use crate::wal::{count_visible_wal_tail_segments, WalChainLoadRequest};
 use loonfs_api::wire::control::NamespaceState;
 use loonfs_api::{ChangeSeq, ManifestId, NamespaceId};
-use loonfs_objectstore::{keys::namespace_config, ObjectStore};
+use loonfs_objectstore::ObjectStore;
 use serde::{Deserialize, Serialize};
 
 /// Lightweight namespace head status.
@@ -22,6 +16,9 @@ use serde::{Deserialize, Serialize};
 pub struct NamespaceHeadSummary {
     pub namespace_id: NamespaceId,
     pub head_seq: ChangeSeq,
+    /// Manifest this namespace has materialized for itself, or `None` when
+    /// it has published none yet: a fresh namespace reads from the genesis
+    /// state, and a fresh fork target reads from its source's manifest.
     pub current_manifest_id: Option<ManifestId>,
     /// Number of visible WAL segments after the current manifest.
     ///
@@ -38,48 +35,43 @@ pub async fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
 ) -> Result<NamespaceHeadSummary> {
-    match namespace_initialization_state(store, expected_namespace_id).await {
-        Ok(NamespaceInitializationState::Complete) => {}
-        Ok(NamespaceInitializationState::Absent) => {
-            return Err(CoreError::MetadataProjection(
-                MetadataProjectionLoadError::LoadNamespaceDescriptor(
-                    ControlObjectLoadError::MissingObject {
-                        object_key: namespace_config(expected_namespace_id.as_str()),
-                    },
-                ),
-            ));
-        }
-        Ok(NamespaceInitializationState::Partial | NamespaceInitializationState::PreHeadDebris) => {
-            return Err(CoreError::NamespacePartial {
-                namespace_id: expected_namespace_id.clone(),
-            });
-        }
-        Err(error) => return Err(map_namespace_initialization_error_to_core(error)),
-    }
-
-    let (loaded_head, loaded_root) = read_head_and_metadata_root(store, expected_namespace_id)
+    let loaded = read_head_and_metadata_basis(store, expected_namespace_id)
         .await
         .map_err(|error| {
             CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
         })?;
-    if loaded_head.envelope.state.state == NamespaceState::Deleted {
+    let head = loaded.head.envelope.state;
+    if head.state == NamespaceState::Deleted {
         return Err(CoreError::NamespaceDeleted {
             namespace_id: expected_namespace_id.clone(),
         });
     }
-    let head = loaded_head.envelope.state;
-    let root = loaded_root.envelope.state;
-    let manifest =
-        load_namespace_manifest_envelope(store, expected_namespace_id, &root.manifest_object_id)
+    // The tail is counted from the basis manifest's coverage, whoever owns
+    // it: a fork target that has not flushed counts from its fork point.
+    let (current_manifest_id, basis_head_seq) = match loaded.basis.manifest() {
+        Some(basis) => {
+            let manifest = load_namespace_manifest_envelope(
+                store,
+                &basis.owner_namespace_id,
+                &basis.manifest_object_id,
+            )
             .await
             .map_err(|error| {
                 CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
             })?;
+            let own_manifest_id = loaded
+                .basis
+                .is_owned_by(expected_namespace_id)
+                .then_some(basis.manifest_id);
+            (own_manifest_id, manifest.payload.head_seq)
+        }
+        None => (None, ChangeSeq(0)),
+    };
     let wal_tail_segments = count_visible_wal_tail_segments(
         store,
         WalChainLoadRequest {
             namespace_id: expected_namespace_id,
-            chain_base_seq: manifest.payload.head_seq,
+            chain_base_seq: basis_head_seq,
             head_seq: head.seq,
             visible_tip: head.visible_wal_tip.clone(),
             stop_after_seq: None,
@@ -90,7 +82,7 @@ pub async fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
     .map_err(|error| {
         CoreError::MetadataProjection(MetadataProjectionLoadError::WalChainLoad(error))
     })?;
-    let retention_floor_seq = read_wal_floor_seq_or_zero(store, expected_namespace_id)
+    let retention_floor_seq = resolve_retention_floor_seq(store, &head)
         .await
         .map_err(|error| {
             CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
@@ -98,7 +90,7 @@ pub async fn load_namespace_head_summary<S: ObjectStore + ?Sized>(
     Ok(NamespaceHeadSummary {
         namespace_id: head.namespace_id,
         head_seq: head.seq,
-        current_manifest_id: Some(root.manifest_id),
+        current_manifest_id,
         wal_tail_segments,
         retention_floor_seq,
     })
@@ -115,18 +107,19 @@ pub async fn load_deleted_namespace_head_summary<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
 ) -> Result<NamespaceHeadSummary> {
-    let (loaded_head, _loaded_root) = read_head_and_metadata_root(store, expected_namespace_id)
+    let head = crate::namespace::control::read_head_object(store, expected_namespace_id)
         .await
         .map_err(|error| {
             CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
-        })?;
-    let head = loaded_head.envelope.state;
+        })?
+        .envelope
+        .state;
     if head.state != NamespaceState::Deleted {
         return Err(CoreError::Internal(format!(
             "namespace `{expected_namespace_id}` is not deleted; the live head summary serves it"
         )));
     }
-    let retention_floor_seq = read_wal_floor_seq_or_zero(store, expected_namespace_id)
+    let retention_floor_seq = resolve_retention_floor_seq(store, &head)
         .await
         .map_err(|error| {
             CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))

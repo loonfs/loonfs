@@ -22,9 +22,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use loonfs_api::{
-    v0::{
-        ChangesResponse, DisableGrepIndexResponse, EnableGrepIndexResponse, RepairNamespaceResponse,
-    },
+    v0::{ChangesResponse, DisableGrepIndexResponse, EnableGrepIndexResponse},
     AuthoritativePathEntry, ChangeSeq, CheckpointId, CommitResponse, CreateCheckpointRequest,
     CreateCheckpointResponse, DeleteNamespaceResponse, DestinationBehavior, ErrorCode,
     ErrorDetails, GrepRequest, GrepResponse, InodeId, ListFileRevisionsResponse, ListTrashResponse,
@@ -296,11 +294,6 @@ pub trait Backend {
         namespace_id: &NamespaceId,
         request: MaintenanceStepRequest,
     ) -> Result<MaintenanceStepResponse, BackendError>;
-    /// Explicitly repairs one incomplete namespace installation.
-    async fn repair_namespace(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<RepairNamespaceResponse, BackendError>;
     /// Reads the ordered change feed after the `after_seq` cursor.
     async fn list_changes(
         &self,
@@ -578,16 +571,6 @@ impl Backend for RemoteBackend {
     ) -> Result<MaintenanceStepResponse, BackendError> {
         self.client
             .maintenance_step(namespace_id, &request)
-            .await
-            .map_err(BackendError::from)
-    }
-
-    async fn repair_namespace(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<RepairNamespaceResponse, BackendError> {
-        self.client
-            .repair_namespace(namespace_id)
             .await
             .map_err(BackendError::from)
     }

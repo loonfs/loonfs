@@ -11,7 +11,7 @@
 //!   the writer schedules non-destructive maintenance after writes.
 //! - [`FsReader`] for read-only latest views.
 //! - [`FsAdmin`] for explicit maintenance: status, checkpoints, retention,
-//!   garbage collection, and incomplete-installation repair.
+//!   and garbage collection.
 //!
 //! ```no_run
 //! # async fn open(store_config: loonfs::StoreConfig) -> loonfs::Result<()> {
@@ -46,7 +46,7 @@ pub use loonfs_api::v0::{
     BeginUploadRequest, BeginUploadResponse, ChangesResponse, CommitOp, CommitPrecondition,
     CommitRequest, CommitResponse, CommittedChange, CompleteUploadRequest, CompleteUploadResponse,
     DirectPutUpload, DisableGrepIndexResponse, EnableGrepIndexResponse, FilesystemChange,
-    ObjectTransferAccess, RepairNamespaceResponse, UploadContentResponse, UploadMode,
+    ObjectTransferAccess, UploadContentResponse, UploadMode,
 };
 pub use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, CapabilityDocument,
@@ -57,11 +57,10 @@ pub use loonfs_api::{
     GrepRequest, GrepResponse, InodeId, InodeKind, ListFileRevisionsResponse,
     ListPathEntriesResponse, MaintenanceStepKind, MaintenanceStepRequest, MaintenanceStepResponse,
     ManifestId, NameKey, NamespaceId, NamespaceStatusResponse, NamespaceSummary, Page, PageRequest,
-    PaginationPolicy, ReleaseCheckpointResponse, ReorganizeStepOutcome, RepairNamespaceOutcome,
-    RevisionNo, UploadId, WalFlushStepOutcome, FEATURE_NAMESPACES_CREATE,
-    FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK, FEATURE_QUERY_GREP,
-    FEATURE_UPLOADS_DIRECT_PUT, PROFILE_ADMIN_V0, PROFILE_CORE_V0, PROFILE_QUERY_V0,
-    PROTOCOL_VERSION,
+    PaginationPolicy, ReleaseCheckpointResponse, ReorganizeStepOutcome, RevisionNo, UploadId,
+    WalFlushStepOutcome, FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE,
+    FEATURE_NAMESPACES_FORK, FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_PUT, PROFILE_ADMIN_V0,
+    PROFILE_CORE_V0, PROFILE_QUERY_V0, PROTOCOL_VERSION,
 };
 pub use loonfs_core::cache::MetadataTableCacheConfig;
 pub use loonfs_core::limits::DEFAULT_GC_MAX_OBJECTS;

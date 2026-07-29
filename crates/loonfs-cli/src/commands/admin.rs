@@ -1,5 +1,5 @@
-//! `loon admin` commands: checkpoints, retention, GC, namespace repair,
-//! indexes, and the change feed.
+//! `loon admin` commands: checkpoints, retention, GC, indexes, and the
+//! change feed.
 
 use super::context::resolve_command_context;
 use super::output::{CommandData, CommandFailure, CommandOutput};
@@ -25,30 +25,9 @@ pub(crate) async fn run_admin_command(
         AdminCommand::RetentionAdvance(args) => run_admin_retention_advance(kind, args).await,
         AdminCommand::Step(args) => run_admin_step(kind, args).await,
         AdminCommand::Gc(args) => run_admin_gc(kind, args).await,
-        AdminCommand::Repair(args) => run_admin_repair(kind, args).await,
         AdminCommand::IndexEnable(args) => run_admin_index_enable(kind, args).await,
         AdminCommand::IndexDisable(args) => run_admin_index_disable(kind, args).await,
     }
-}
-
-async fn run_admin_repair(
-    kind: CommandKind,
-    args: AdminNamespaceArgs,
-) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, &args.target).await?;
-    let response = context
-        .target
-        .backend()
-        .repair_namespace(&context.namespace)
-        .await
-        .map_err(|error| context.fail(kind, error))?;
-
-    Ok(CommandOutput {
-        kind,
-        profile: Some(context.profile_name),
-        mode: Some(context.mode),
-        data: CommandData::NamespaceRepaired(response),
-    })
 }
 
 async fn run_admin_step(
@@ -137,7 +116,6 @@ fn accumulate_gc_response(total: &mut loonfs_api::GcResponse, pass: loonfs_api::
     total.released_missing_basis_checkpoints += pass.released_missing_basis_checkpoints;
     total.retained_candidates += pass.retained_candidates;
     total.degraded_retention |= pass.degraded_retention;
-    total.incomplete_namespace_ignored |= pass.incomplete_namespace_ignored;
     total.next_cursor = pass.next_cursor;
 }
 

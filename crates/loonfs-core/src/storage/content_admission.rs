@@ -201,22 +201,18 @@ mod tests {
     use super::{mint_content_token, verify_content_token};
     use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
     use loonfs_api::v0::ValidatedContentToken;
-    use loonfs_api::wire::control::NamespaceConfigState;
+    use loonfs_api::wire::control::HeadState;
     use loonfs_api::{ContentRef, ContentStoreId, NamePolicy, NamespaceId};
 
     fn catalog_entry(
         namespace_id: NamespaceId,
         content_store: &str,
     ) -> VerifiedNamespaceCatalogEntry {
-        let content_store_id = ContentStoreId::parse(content_store).expect("content store id");
-        VerifiedNamespaceCatalogEntry {
-            namespace_config: NamespaceConfigState {
-                namespace_id,
-                content_store_id: content_store_id.clone(),
-                name_policy: NamePolicy::default(),
-            },
-            content_store_id,
-        }
+        VerifiedNamespaceCatalogEntry::from_head(&HeadState::initial(
+            namespace_id,
+            ContentStoreId::parse(content_store).expect("content store id"),
+            NamePolicy::default(),
+        ))
     }
 
     #[test]

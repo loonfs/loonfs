@@ -8,15 +8,13 @@ use crate::fs::{should_invalidate_after_result, ReadCore};
 use crate::{CommitResponse, CoreError, NamespaceId};
 use crate::{Result, RuntimeError};
 use loonfs_api::wire::control::HeadState;
-use loonfs_api::{ManifestId, ManifestObjectId};
 use loonfs_core::cache::{MetadataTableCacheStats, WalTailProjectionCacheStats};
 use loonfs_core::control::{
-    load_namespace_catalog_entry, load_namespace_read_anchor, ControlObjectIdentity,
-    ControlObjectLoadError, LoadedHeadControl, LoadedMetadataRootControl,
-    VerifiedNamespaceCatalogEntry,
+    load_namespace_read_anchor, ControlObjectIdentity, ControlObjectLoadError, LoadedHeadControl,
+    MetadataBasis, VerifiedNamespaceCatalogEntry,
 };
 use loonfs_core::{MetadataProjectionLoadError, RuntimeReadContext, StoreFailureClass};
-use loonfs_objectstore::keys::{namespace_config, wal_head};
+use loonfs_objectstore::keys::wal_head;
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -30,9 +28,6 @@ pub(crate) struct RuntimeControlCache {
 #[derive(Debug, Default)]
 struct NamespaceControlCacheEntry {
     head: Option<CachedNamespaceAnchor>,
-    /// The namespace's spec-immutable catalog pair (config plus content-store
-    /// binding): loaded once, never revalidated.
-    catalog: Option<VerifiedNamespaceCatalogEntry>,
 }
 
 #[derive(Debug, Clone)]
@@ -41,15 +36,14 @@ pub(crate) struct CachedControl<T> {
     pub(crate) state: T,
 }
 
-/// Head snapshot pinned together with the manifest the metadata root
-/// referenced when it was taken. The pair stays consistent even when
-/// compaction moves the live root past this head; reads at the pin replay a
-/// little more WAL until the cache refreshes.
+/// Head snapshot pinned together with the metadata basis it authorized when
+/// the snapshot was taken. The pair stays consistent even when compaction
+/// moves the live root past this head; reads at the pin replay a little
+/// more WAL until the cache refreshes.
 #[derive(Debug, Clone)]
 pub(crate) struct CachedNamespaceAnchor {
     pub(crate) head: CachedControl<HeadState>,
-    pub(crate) manifest_id: ManifestId,
-    pub(crate) manifest_object_id: ManifestObjectId,
+    pub(crate) basis: MetadataBasis,
 }
 
 /// Snapshot of runtime cache counters.
@@ -160,29 +154,8 @@ impl RuntimeControlCache {
             .head = Some(head);
     }
 
-    fn catalog(&mut self, namespace_id: &NamespaceId) -> Option<VerifiedNamespaceCatalogEntry> {
-        let catalog = self.namespaces.get(namespace_id)?.catalog.clone()?;
-        self.touch_namespace(namespace_id);
-        Some(catalog)
-    }
-
-    fn insert_catalog(
-        &mut self,
-        namespace_id: &NamespaceId,
-        catalog: VerifiedNamespaceCatalogEntry,
-        max_cached_namespaces: usize,
-    ) {
-        if max_cached_namespaces == 0 {
-            return;
-        }
-        self.namespace_entry(namespace_id, max_cached_namespaces)
-            .catalog = Some(catalog);
-    }
-
     fn invalidate_namespace(&mut self, namespace_id: &NamespaceId) {
-        // The head anchor goes stale on every mutation; the catalog pair is
-        // immutable for the namespace's lifetime (a deleted namespace id
-        // never rebinds).
+        // The head anchor goes stale on every mutation.
         if let Some(entry) = self.namespaces.get_mut(namespace_id) {
             entry.head = None;
         }
@@ -273,52 +246,19 @@ impl ReadCore {
         Ok(head)
     }
 
+    /// Loads the read anchor, mapping an absent head to the one answer it
+    /// can mean: the namespace does not exist.
     pub(crate) async fn head_for_metadata_read(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<CachedNamespaceAnchor> {
-        match self.load_namespace_head_cached(namespace_id).await {
-            Ok(head) => Ok(head),
-            Err(ControlObjectLoadError::MissingObject { object_key }) => {
-                Err(self.missing_head_read_error(namespace_id, object_key).await)
-            }
-            Err(error) => Err(RuntimeError::Core(CoreError::MetadataProjection(
-                MetadataProjectionLoadError::LoadHead(error),
-            ))),
-        }
-    }
-
-    async fn missing_head_read_error(
-        &self,
-        namespace_id: &NamespaceId,
-        head_key: String,
-    ) -> RuntimeError {
-        let descriptor_key = namespace_config(namespace_id.as_str());
-        let descriptor_exists = match self.store().head(&descriptor_key).await {
-            Ok(value) => value.is_some(),
-            Err(error) => {
-                return RuntimeError::Core(CoreError::Store {
-                    object_key: descriptor_key,
-                    message: error.message(),
-                    class: StoreFailureClass::of(&error),
-                })
-            }
-        };
-        if descriptor_exists {
-            RuntimeError::Core(CoreError::MetadataProjection(
-                MetadataProjectionLoadError::LoadHead(ControlObjectLoadError::MissingObject {
-                    object_key: head_key,
-                }),
-            ))
-        } else {
-            RuntimeError::Core(CoreError::MetadataProjection(
-                MetadataProjectionLoadError::LoadNamespaceDescriptor(
-                    ControlObjectLoadError::MissingObject {
-                        object_key: descriptor_key,
-                    },
-                ),
-            ))
-        }
+        self.load_namespace_head_cached(namespace_id)
+            .await
+            .map_err(|error| {
+                RuntimeError::Core(CoreError::MetadataProjection(
+                    MetadataProjectionLoadError::LoadHead(error),
+                ))
+            })
     }
 
     async fn cached_control_identity_matches(
@@ -355,26 +295,21 @@ impl ReadCore {
     pub(crate) fn runtime_read_context(
         &self,
         anchor: &CachedNamespaceAnchor,
-        catalog: Option<VerifiedNamespaceCatalogEntry>,
     ) -> RuntimeReadContext {
         RuntimeReadContext {
             head: anchor.head.state.clone(),
             head_etag: anchor.head.identity.etag.clone(),
-            manifest_id: anchor.manifest_id,
-            manifest_object_id: anchor.manifest_object_id.clone(),
+            basis: anchor.basis.clone(),
             table_cache: Arc::clone(&self.inner.metadata_table_cache),
             tail_cache: Arc::clone(&self.inner.wal_tail_projection_cache),
-            catalog,
         }
     }
 
     /// The shared preamble of every pinned read: revalidate or load the head
-    /// anchor, pin the read context to it, and hand back the engine. The
-    /// context's `head` is the anchor the read is pinned to. The anchor and
-    /// the namespace's immutable catalog pair are independent objects, so a
-    /// cold read overlaps the two loads instead of paying the catalog's
-    /// descriptor chain as extra round-trips; the head's result is inspected
-    /// first so error reporting matches the serial order.
+    /// anchor and pin the read context to it. The context's `head` is the
+    /// anchor the read is pinned to, and the namespace's immutable identity
+    /// travels inside it, so a read resolves everything it needs from one
+    /// object.
     pub(crate) async fn pinned_read(
         &self,
         namespace_id: &NamespaceId,
@@ -382,41 +317,19 @@ impl ReadCore {
         loonfs_core::NamespaceEngine<crate::SharedObjectStore>,
         RuntimeReadContext,
     )> {
-        let (head, catalog) = futures::join!(
-            self.head_for_metadata_read(namespace_id),
-            self.load_namespace_catalog_cached(namespace_id)
-        );
-        let head = head?;
-        let read_context = self.runtime_read_context(&head, catalog?);
+        let anchor = self.head_for_metadata_read(namespace_id).await?;
+        let read_context = self.runtime_read_context(&anchor);
         Ok((self.reader_engine(namespace_id), read_context))
     }
 
-    /// Returns the namespace's immutable catalog pair through the control
-    /// cache, loading it once per cached namespace. With the control cache
-    /// disabled this returns `None` and view loads read it per operation.
+    /// Returns the namespace's immutable identity, read off the cached head
+    /// anchor.
     pub(crate) async fn load_namespace_catalog_cached(
         &self,
         namespace_id: &NamespaceId,
-    ) -> Result<Option<VerifiedNamespaceCatalogEntry>> {
-        if !self.control_cache_enabled() {
-            return Ok(None);
-        }
-        if let Some(catalog) = self.inner.control_cache().catalog(namespace_id) {
-            return Ok(Some(catalog));
-        }
-        let loaded = load_namespace_catalog_entry(self.store(), namespace_id)
-            .await
-            .map_err(|error| {
-                RuntimeError::Core(CoreError::MetadataProjection(
-                    MetadataProjectionLoadError::from(error),
-                ))
-            })?;
-        self.inner.control_cache().insert_catalog(
-            namespace_id,
-            loaded.clone(),
-            self.inner.config.runtime_cache.max_cached_namespaces,
-        );
-        Ok(Some(loaded))
+    ) -> Result<VerifiedNamespaceCatalogEntry> {
+        let anchor = self.head_for_metadata_read(namespace_id).await?;
+        Ok(VerifiedNamespaceCatalogEntry::from_head(&anchor.head.state))
     }
 
     /// Namespace-terminal invalidation: the whole entry is removed, because
@@ -452,8 +365,7 @@ impl ReadCore {
                     },
                     state: state.head,
                 },
-                manifest_id: state.manifest_id,
-                manifest_object_id: state.manifest_object_id,
+                basis: state.basis,
             },
             max_cached_namespaces,
         );
@@ -503,15 +415,12 @@ impl ReadCore {
     }
 }
 
-fn cached_anchor(
-    (head, root): (LoadedHeadControl, LoadedMetadataRootControl),
-) -> CachedNamespaceAnchor {
+fn cached_anchor((head, basis): (LoadedHeadControl, MetadataBasis)) -> CachedNamespaceAnchor {
     CachedNamespaceAnchor {
         head: CachedControl {
             identity: head.identity,
             state: head.state,
         },
-        manifest_id: root.state.manifest_id,
-        manifest_object_id: root.state.manifest_object_id,
+        basis,
     }
 }

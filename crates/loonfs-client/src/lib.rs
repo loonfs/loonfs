@@ -18,7 +18,7 @@ use loonfs_api::{
         BeginUploadRequest, BeginUploadResponse, ChangesResponse,
         CommitResponse as ApiCommitResponse, CompleteUploadRequest, CompleteUploadResponse,
         DisableGrepIndexResponse, EnableGrepIndexResponse, GrepGcResponse, ObjectTransferAccess,
-        RepairNamespaceResponse, UploadContentResponse, UploadMode, ValidatedContentToken,
+        UploadContentResponse, UploadMode, ValidatedContentToken,
     },
     AbsolutePath, AuthoritativePathEntry, CapabilityDocument, ChangeSeq, CheckpointId, CommitId,
     ContentRef, CreateCheckpointRequest, CreateCheckpointResponse, CreateNamespaceRequest,
@@ -546,21 +546,6 @@ impl Client {
         self.request_json(self.post(&url), Some(request)).await
     }
 
-    /// Explicitly repairs one incomplete namespace installation.
-    pub async fn repair_namespace(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<RepairNamespaceResponse> {
-        let url = format!(
-            "{}/v0/admin/namespaces/{namespace_id}/repair",
-            self.base_url
-        );
-        // Repair can reap a namespace, so a lost success cannot be replayed
-        // into the same outcome without a durable request identity.
-        self.request_json_once::<(), RepairNamespaceResponse>(self.post(&url), None)
-            .await
-    }
-
     /// Content search over the namespace's grep index (query plane).
     /// Gate on the `query.grep` capability before calling against unknown
     /// deployments; the namespace must also have a materialized steady-state
@@ -1075,10 +1060,6 @@ mod tests {
                 .await,
             &transport,
         );
-        drop(transport);
-
-        let (transport, client) = single_attempt_probe();
-        assert_single_attempt(client.repair_namespace(&namespace_id).await, &transport);
     }
 
     #[tokio::test]

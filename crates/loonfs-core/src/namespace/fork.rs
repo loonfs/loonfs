@@ -1,33 +1,20 @@
-//! Namespace forking: bootstraps a target namespace from a fork-owned
-//! source checkpoint, sharing content bytes and copying metadata
-//! references.
+//! Namespace forking: installs a target namespace whose head points at a
+//! fork-owned source checkpoint, sharing content bytes and reading the
+//! source's metadata until the target flushes its own.
 
 use crate::checkpoint::{
     create_checkpoint, freshen_fork_checkpoint, load_namespace_manifest_envelope,
-    load_verified_manifest_tables, read_checkpoint_record, write_namespace_manifest,
-    ManifestLoadFailureClass,
+    read_checkpoint_record,
 };
 use crate::context::MutationContext;
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
-use crate::namespace::catalog::{
-    load_namespace_descriptor, map_namespace_initialization_error_to_core,
-    namespace_initialization_state, put_completion_descriptor, put_namespace_install_gate,
-    put_target_namespace_control_object, NamespaceInitializationState, NamespaceInstallGate,
-};
-use crate::namespace::control::{
-    map_store_load_error_or_else, read_head_object, read_metadata_root_object,
-};
+use crate::namespace::bootstrap::{install_namespace_head, NamespaceHeadInstall};
+use crate::options::DeleteNamespaceOptions;
 use loonfs_api::wire::control::{
-    encode_control_object, CheckpointOwner, CheckpointRecordState, ControlObjectKind, HeadState,
-    HeadStateEnvelope, MetadataRootEnvelope, MetadataRootState, NamespaceConfigEnvelope,
-    NamespaceConfigState, NamespaceState, WalFloorEnvelope, WalFloorState, WriterBlock,
+    CheckpointOwner, CheckpointRecordLifecycle, ForkBasis, HeadState, NamespaceState, WriterBlock,
 };
-use loonfs_api::wire::manifest::{
-    NamespaceManifestEnvelope, NamespaceManifestFork, NamespaceManifestPayload,
-};
-use loonfs_api::{ManifestId, ManifestObjectId, NamespaceId, NamespaceSummary, WriterEpoch};
-use loonfs_objectstore::keys::{metadata_root, namespace_config};
+use loonfs_api::{NamespaceId, NamespaceSummary, WriterEpoch};
 use loonfs_objectstore::ObjectStore;
 
 pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
@@ -36,31 +23,6 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     new_namespace_id: &NamespaceId,
     context: &MutationContext,
 ) -> Result<NamespaceSummary> {
-    match namespace_initialization_state(store, new_namespace_id)
-        .await
-        .map_err(map_namespace_initialization_error_to_core)?
-    {
-        NamespaceInitializationState::Absent => {}
-        NamespaceInitializationState::Complete => {
-            let head = read_head_object(store, new_namespace_id)
-                .await
-                .map_err(|error| CoreError::MetadataProjection(error.into()))?;
-            if head.envelope.state.state == NamespaceState::Deleted {
-                return Err(CoreError::NamespaceDeleted {
-                    namespace_id: new_namespace_id.clone(),
-                });
-            }
-            return Err(CoreError::NamespaceExists {
-                namespace_id: new_namespace_id.clone(),
-            });
-        }
-        NamespaceInitializationState::Partial | NamespaceInitializationState::PreHeadDebris => {
-            return Err(CoreError::NamespacePartial {
-                namespace_id: new_namespace_id.clone(),
-            });
-        }
-    }
-
     // Fork routes through a fork-owned source checkpoint: the record is the
     // reachability root protecting every source-owned metadata file the
     // target will reference, for as long as the target lives.
@@ -84,28 +46,37 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
                 ))
             })?
             .state;
-    let source_tables = load_verified_manifest_tables(
+    let source_manifest = load_namespace_manifest_envelope(
         store,
         source_namespace_id,
         &source_record.manifest_object_id,
     )
     .await
     .map_err(|err| CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(err)))?;
-    let source_manifest = source_tables.manifest();
-    let fork_seq = source_record.manifest_head_seq;
-    let source_head_commit_id = source_record.head_commit_id.clone();
-    let source_checkpoint_id = source_record.checkpoint_id.clone();
-    let source_config = load_namespace_descriptor(store, source_namespace_id)
+    let source_head = crate::namespace::control::read_head_object(store, source_namespace_id)
         .await
-        .map_err(MetadataProjectionLoadError::from)?;
-    let source_content_store_id = source_config.content_store_id.clone();
-    let target_manifest_id = ManifestId(fork_seq.0);
-    let target_manifest_object_id = ManifestObjectId::generate(target_manifest_id);
+        .map_err(CoreError::load_head)?
+        .envelope
+        .state;
+    let fork_seq = source_record.manifest_head_seq;
 
-    let initial_head = HeadState {
+    // The target head is the whole installation: it carries the source's
+    // content store (the fork shares content bytes copy-on-write), the
+    // source's name policy, and the basis that authorizes reading the
+    // source's manifest until the target publishes its own.
+    let head = HeadState {
         namespace_id: new_namespace_id.clone(),
+        content_store_id: source_head.content_store_id.clone(),
+        name_policy: source_head.name_policy,
+        fork_basis: Some(ForkBasis {
+            source_namespace_id: source_namespace_id.clone(),
+            source_manifest_object_id: source_record.manifest_object_id.clone(),
+            source_manifest_checksum: source_manifest.payload_checksum.clone(),
+            source_checkpoint_id: source_record.checkpoint_id.clone(),
+            fork_seq,
+        }),
         seq: fork_seq,
-        head_commit_id: source_head_commit_id.clone(),
+        head_commit_id: source_record.head_commit_id.clone(),
         writer_epoch: WriterEpoch(0),
         writer: Some(WriterBlock {
             writer_id: context.writer_id.clone(),
@@ -117,325 +88,94 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         recent_segments: Vec::new(),
         state: NamespaceState::Active,
     };
-    let namespace_descriptor_envelope = NamespaceConfigEnvelope::from_state(
-        ControlObjectKind::NamespaceConfig,
-        &context.writer_version,
-        NamespaceConfigState {
-            namespace_id: new_namespace_id.clone(),
-            content_store_id: source_content_store_id,
-            name_policy: source_config.name_policy,
-        },
-    )
-    .map_err(|err| CoreError::Internal(format!("failed to build fork control envelope: {err}")))?;
-    let head = HeadStateEnvelope::from_state(
-        ControlObjectKind::WalHead,
-        &context.writer_version,
-        initial_head,
-    )
-    .map_err(|err| CoreError::Internal(format!("failed to build fork control envelope: {err}")))?;
-    let descriptor_key = namespace_config(new_namespace_id.as_str());
-    let target_manifest = NamespaceManifestEnvelope::from_payload(
-        &context.writer_version,
-        fork_target_manifest_payload(
-            new_namespace_id,
-            target_manifest_id,
-            target_manifest_object_id,
-            source_namespace_id,
-            source_manifest,
-            &source_record,
-        ),
-    )
-    .map_err(|err| CoreError::Internal(format!("failed to build fork control envelope: {err}")))?;
-    // Freshen the record before the first target write: the compare-and-swap
+    // Freshen the record before the target head lands: the compare-and-swap
     // serializes this fork against a concurrent GC release, and the fresh
     // provider timestamp keeps the abandoned-fork age rule from firing under
     // a live retry.
     freshen_fork_checkpoint(
         store,
         source_namespace_id,
-        &source_checkpoint_id,
+        &source_record.checkpoint_id,
         new_namespace_id,
         &context.writer_version,
     )
     .await?;
-    write_namespace_manifest(store, &target_manifest)
-        .await
-        .map_err(CoreError::MetadataProjection)?;
-    // The target head is the first fixed-key conditional install write. Once
-    // it lands, the grace window protects this attempt while it writes root
-    // and floor; if repair condemned it first, no fixed-key prerequisite write
-    // may follow.
-    let head_bytes = encode_control_object(&head)
-        .map_err(|err| CoreError::Internal(format!("failed to encode head object: {err}")))?;
-    let gate = put_namespace_install_gate(store, new_namespace_id, &head_bytes).await?;
-    let target_root = MetadataRootEnvelope::from_state(
-        ControlObjectKind::MetadataRoot,
-        &context.writer_version,
-        MetadataRootState {
-            namespace_id: new_namespace_id.clone(),
-            manifest_id: target_manifest_id,
-            manifest_object_id: target_manifest.payload.manifest_object_id.clone(),
-            manifest_head_seq: fork_seq,
-            manifest_payload_checksum: target_manifest.payload_checksum.clone(),
-            updated_at_ms: context.now_ms,
-        },
-    )
-    .map_err(|err| CoreError::Internal(format!("failed to build metadata root envelope: {err}")))?;
-    put_target_namespace_control_object(
-        store,
-        new_namespace_id,
-        &metadata_root(new_namespace_id.as_str()),
-        &encode_control_object(&target_root).map_err(|err| {
-            CoreError::Internal(format!("failed to encode metadata root object: {err}"))
-        })?,
-    )
-    .await?;
-    let target_floor = WalFloorEnvelope::from_state(
-        ControlObjectKind::WalFloor,
-        &context.writer_version,
-        WalFloorState {
-            namespace_id: new_namespace_id.clone(),
-            floor_seq: fork_seq,
-            verified_at_ms: context.now_ms,
-            updated_at_ms: context.now_ms,
-        },
-    )
-    .map_err(|err| CoreError::Internal(format!("failed to build wal floor envelope: {err}")))?;
-    put_target_namespace_control_object(
-        store,
-        new_namespace_id,
-        &loonfs_objectstore::keys::wal_floor(new_namespace_id.as_str()),
-        &encode_control_object(&target_floor).map_err(|err| {
-            CoreError::Internal(format!("failed to encode wal floor object: {err}"))
-        })?,
-    )
-    .await?;
-    if gate == NamespaceInstallGate::ExistingPartial {
-        return Err(CoreError::NamespacePartial {
-            namespace_id: new_namespace_id.clone(),
-        });
-    }
-    put_target_namespace_control_object(
-        store,
-        new_namespace_id,
-        &descriptor_key,
-        &encode_control_object(&namespace_descriptor_envelope).map_err(|err| {
-            CoreError::Internal(format!(
-                "failed to encode namespace descriptor object: {err}"
-            ))
-        })?,
-    )
-    .await?;
 
-    Ok(NamespaceSummary {
-        namespace_id: new_namespace_id.clone(),
-    })
-}
-
-/// Finishes a fork that crashed after its target head write when explicit
-/// admin repair invokes it. The missing descriptor is derived from the
-/// immutable parts of the source config. The guard is the target root
-/// manifest's fork block naming that source; any other tree answers partial.
-pub(super) async fn complete_post_head_fork<S: ObjectStore + ?Sized>(
-    store: &S,
-    source_namespace_id: &NamespaceId,
-    new_namespace_id: &NamespaceId,
-    context: &MutationContext,
-) -> Result<NamespaceSummary> {
-    // Best-effort, like the create-side completion: any target object that
-    // fails to load or validate answers partial, never a server error.
-    let partial = || CoreError::NamespacePartial {
-        namespace_id: new_namespace_id.clone(),
-    };
-    let head = read_head_object(store, new_namespace_id)
-        .await
-        .map_err(|error| map_store_load_error_or_else(error, partial))?
-        .envelope
-        .state;
-    if head.state == NamespaceState::Deleted {
-        return Err(CoreError::NamespaceDeleted {
-            namespace_id: new_namespace_id.clone(),
-        });
-    }
-    if head.state != NamespaceState::Active {
-        return Err(partial());
-    }
-    let root = read_metadata_root_object(store, new_namespace_id)
-        .await
-        .map_err(|error| map_store_load_error_or_else(error, partial))?
-        .envelope
-        .state;
-    let manifest =
-        load_namespace_manifest_envelope(store, new_namespace_id, &root.manifest_object_id)
-            .await
-            .map_err(|error| match error.failure_class() {
-                ManifestLoadFailureClass::Store => {
-                    CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
-                }
-                ManifestLoadFailureClass::Corrupt => partial(),
-            })?;
-    let names_this_source = manifest
-        .payload
-        .fork
-        .as_ref()
-        .is_some_and(|fork| fork.source_namespace_id == *source_namespace_id);
-    if !names_this_source {
-        return Err(CoreError::NamespacePartial {
-            namespace_id: new_namespace_id.clone(),
-        });
-    }
-    let source_config = load_namespace_descriptor(store, source_namespace_id)
-        .await
-        .map_err(MetadataProjectionLoadError::from)?;
-    let namespace_descriptor_envelope = NamespaceConfigEnvelope::from_state(
-        ControlObjectKind::NamespaceConfig,
-        &context.writer_version,
-        NamespaceConfigState {
-            namespace_id: new_namespace_id.clone(),
-            content_store_id: source_config.content_store_id.clone(),
-            name_policy: source_config.name_policy,
-        },
-    )
-    .map_err(|err| CoreError::Internal(format!("failed to build fork control envelope: {err}")))?;
-    let descriptor_bytes =
-        encode_control_object(&namespace_descriptor_envelope).map_err(|err| {
-            CoreError::Internal(format!(
-                "failed to encode namespace descriptor object: {err}"
-            ))
-        })?;
-    put_completion_descriptor(store, new_namespace_id, &descriptor_bytes).await?;
-    Ok(NamespaceSummary {
-        namespace_id: new_namespace_id.clone(),
-    })
-}
-
-/// Builds the fork target's manifest payload from the pinned source
-/// checkpoint. The target adopts the source's metadata file references
-/// verbatim.
-fn fork_target_manifest_payload(
-    new_namespace_id: &NamespaceId,
-    target_manifest_id: ManifestId,
-    target_manifest_object_id: ManifestObjectId,
-    source_namespace_id: &NamespaceId,
-    source_manifest: &NamespaceManifestEnvelope,
-    source_record: &CheckpointRecordState,
-) -> NamespaceManifestPayload {
-    let fork_seq = source_record.manifest_head_seq;
-    NamespaceManifestPayload {
-        namespace_id: new_namespace_id.clone(),
-        manifest_id: target_manifest_id,
-        manifest_object_id: target_manifest_object_id,
-        head_seq: fork_seq,
-        head_commit_id: source_record.head_commit_id.clone(),
-        base_seq: source_manifest.payload.base_seq,
-        writer_epoch: WriterEpoch(0),
-        next_inode_id: source_manifest.payload.next_inode_id,
-        retention_floor_seq: fork_seq,
-        fork: Some(NamespaceManifestFork {
-            source_namespace_id: source_namespace_id.clone(),
-            fork_seq,
-            source_checkpoint_id: source_record.checkpoint_id.clone(),
-            source_manifest_id: source_record.manifest_id,
-            source_manifest_object_id: source_record.manifest_object_id.clone(),
-            source_head_seq: source_record.manifest_head_seq,
-        }),
-        metadata_files: source_manifest.payload.metadata_files.clone(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::fork_target_manifest_payload;
-    use loonfs_api::wire::control::{
-        CheckpointOwner, CheckpointRecordLifecycle, CheckpointRecordState,
-    };
-    use loonfs_api::wire::manifest::{NamespaceManifestEnvelope, NamespaceManifestPayload};
-    use loonfs_api::{
-        ChangeSeq, CheckpointId, CommitId, InodeId, ManifestId, ManifestObjectId, NamespaceId,
-        WriterEpoch,
-    };
-
-    fn manifest_object_id(manifest_id: ManifestId) -> ManifestObjectId {
-        ManifestObjectId::parse(format!("{:020}-0123456789abcdef", manifest_id.0))
-            .expect("valid manifest object id")
-    }
-
-    fn source_checkpoint_record(
-        checkpoint_id: &str,
-        manifest_id: ManifestId,
-        head_seq: ChangeSeq,
-        head_commit_id: &str,
-    ) -> CheckpointRecordState {
-        CheckpointRecordState {
-            checkpoint_id: CheckpointId::parse(checkpoint_id).expect("checkpoint id"),
-            namespace_id: NamespaceId::parse("source").expect("source namespace"),
-            manifest_id,
-            manifest_object_id: manifest_object_id(manifest_id),
-            manifest_head_seq: head_seq,
-            manifest_payload_checksum: "sha256:test".to_owned(),
-            head_commit_id: CommitId::parse(head_commit_id).expect("commit id"),
-            created_at_ms: 1_000,
-            expires_at_ms: None,
-            owner: CheckpointOwner::Fork {
-                target_namespace_id: NamespaceId::parse("target").expect("target namespace"),
-            },
-            state: CheckpointRecordLifecycle::Active,
+    match install_namespace_head(store, new_namespace_id, &head, &context.writer_version).await? {
+        NamespaceHeadInstall::Landed => {}
+        NamespaceHeadInstall::Exists => {
+            return Err(CoreError::NamespaceExists {
+                namespace_id: new_namespace_id.clone(),
+            })
+        }
+        NamespaceHeadInstall::Deleted => {
+            return Err(CoreError::NamespaceDeleted {
+                namespace_id: new_namespace_id.clone(),
+            })
         }
     }
 
-    fn source_namespace_manifest(
-        manifest_id: ManifestId,
-        head_seq: ChangeSeq,
-        head_commit_id: &str,
-    ) -> NamespaceManifestEnvelope {
-        let namespace_id = NamespaceId::parse("source").expect("source namespace");
-        let commit_id = CommitId::parse(head_commit_id).expect("commit id");
-        NamespaceManifestEnvelope::from_payload(
-            "test-writer/0.1.0",
-            NamespaceManifestPayload {
-                namespace_id,
-                manifest_id,
-                manifest_object_id: manifest_object_id(manifest_id),
-                head_seq,
-                head_commit_id: commit_id.clone(),
-                base_seq: head_seq,
-                writer_epoch: WriterEpoch(1),
-                next_inode_id: InodeId(2),
-                retention_floor_seq: head_seq,
-                fork: None,
-                metadata_files: Vec::new(),
-            },
+    // A forker that stalled between freshening the record and publishing
+    // the target could have slept past a garbage-collection pass that
+    // released the pin, leaving a target whose basis nothing protects.
+    // Re-reading the record after the head lands closes that window
+    // conservatively: an inactive record means this target must not exist,
+    // so it is deleted through the ordinary delete path and the checkpoint
+    // failure is what the caller sees. The lasting fix is a monotonic
+    // checkpoint lifecycle, not a wider retry here.
+    if let Err(error) = ensure_fork_checkpoint_still_active(
+        store,
+        source_namespace_id,
+        &source_record.checkpoint_id,
+        new_namespace_id,
+    )
+    .await
+    {
+        if let Err(delete_error) = crate::commit_engine::delete_namespace(
+            store,
+            new_namespace_id,
+            DeleteNamespaceOptions::default(),
+            context,
         )
-        .expect("manifest")
+        .await
+        {
+            // Both halves failed. The caller hears why the fork failed,
+            // which is the actionable half; the target that could not be
+            // deleted is left for an operator, named here.
+            tracing::error!(
+                namespace_id = %new_namespace_id,
+                source_namespace_id = %source_namespace_id,
+                %delete_error,
+                "fork could not delete the target it published after losing its source checkpoint",
+            );
+        }
+        return Err(error);
     }
 
-    #[test]
-    fn fork_target_manifest_preserves_source_tables() {
-        let source = source_namespace_manifest(
-            ManifestId(7),
-            ChangeSeq(7),
-            "c_00000000000000000000000000000009",
-        );
-        let source_checkpoint = source_checkpoint_record(
-            "chk_00000000000000000000000000000002",
-            ManifestId(7),
-            ChangeSeq(7),
-            "c_00000000000000000000000000000009",
-        );
+    Ok(NamespaceSummary {
+        namespace_id: new_namespace_id.clone(),
+    })
+}
 
-        let target = fork_target_manifest_payload(
-            &NamespaceId::parse("target").expect("target namespace"),
-            ManifestId(7),
-            manifest_object_id(ManifestId(7)),
-            &NamespaceId::parse("source").expect("source namespace"),
-            &source,
-            &source_checkpoint,
-        );
-
-        assert_eq!(target.metadata_files, source.payload.metadata_files);
-        assert_eq!(target.head_seq, source_checkpoint.manifest_head_seq);
-        let fork = target.fork.expect("fork provenance");
-        assert_eq!(fork.source_checkpoint_id, source_checkpoint.checkpoint_id);
-        assert_eq!(fork.source_manifest_id, source_checkpoint.manifest_id);
+async fn ensure_fork_checkpoint_still_active<S: ObjectStore + ?Sized>(
+    store: &S,
+    source_namespace_id: &NamespaceId,
+    checkpoint_id: &loonfs_api::CheckpointId,
+    new_namespace_id: &NamespaceId,
+) -> Result<()> {
+    let record = read_checkpoint_record(store, source_namespace_id, checkpoint_id)
+        .await?
+        .map(|loaded| loaded.state);
+    match record {
+        Some(record) if record.state == CheckpointRecordLifecycle::Active => Ok(()),
+        Some(record) => Err(CoreError::CheckpointUnavailable(format!(
+            "fork of `{source_namespace_id}` into `{new_namespace_id}` lost its source \
+             checkpoint `{checkpoint_id}`: the record is `{}`",
+            record.state
+        ))),
+        None => Err(CoreError::CheckpointUnavailable(format!(
+            "fork of `{source_namespace_id}` into `{new_namespace_id}` lost its source \
+             checkpoint `{checkpoint_id}`: the record is gone"
+        ))),
     }
 }

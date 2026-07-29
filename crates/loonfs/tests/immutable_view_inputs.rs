@@ -1,7 +1,6 @@
-//! A namespace's immutable view inputs — its config, its content-store
-//! descriptor, and the manifest object — are loaded once per handle, not
-//! once per operation. These tests pin that a warm handle stops re-fetching
-//! them entirely.
+//! A namespace's immutable view input — the manifest object its head
+//! resolves to — is loaded once per handle, not once per operation. These
+//! tests pin that a warm handle stops re-fetching it entirely.
 
 use loonfs::{
     CreateNamespaceOptions, FsAdmin, FsReader, FsWriter, MaintenanceStepOptions, NamespaceId,
@@ -14,11 +13,7 @@ use tempfile::tempdir;
 
 fn immutable_input_gets(gets: &[String]) -> Vec<String> {
     gets.iter()
-        .filter(|key| {
-            key.ends_with("/namespace.json")
-                || key.ends_with("/descriptor.json")
-                || key.ends_with(".manifest.json")
-        })
+        .filter(|key| key.ends_with(".manifest.json"))
         .cloned()
         .collect()
 }

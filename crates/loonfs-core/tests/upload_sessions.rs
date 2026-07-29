@@ -20,7 +20,7 @@ use loonfs_core::content::store_bytes_as_content;
 use loonfs_core::{
     BeginDirectPutUploadTargetResponse, Error as CoreError, ErrorCode, MutationContext,
 };
-use loonfs_objectstore::keys::{namespace_config, upload_session, upload_session_prefix};
+use loonfs_objectstore::keys::{upload_session, upload_session_prefix};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::stores::{FailStore, InjectedError, KeyPredicate, OperationClass};
@@ -87,8 +87,10 @@ fn replay_read_guard_store(root: impl AsRef<Path>, namespace: &str) -> FailStore
     store
 }
 
+/// Upload admission is exactly the head: absent means the namespace was
+/// never created, and the deletion tombstone refuses.
 #[tokio::test]
-async fn begin_upload_rejects_missing_and_partial_namespace() {
+async fn begin_upload_rejects_missing_and_deleted_namespaces() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -102,15 +104,23 @@ async fn begin_upload_rejects_missing_and_partial_namespace() {
     bootstrap_namespace(&store, &namespace_id, &context, false)
         .await
         .expect("bootstrap");
-    store
-        .delete(&namespace_config(namespace_id.as_str()))
+    begin_upload(&store, &namespace_id, &context)
         .await
-        .expect("delete descriptor");
+        .expect("a live namespace admits uploads");
 
-    let partial_error = begin_upload(&store, &namespace_id, &context)
+    loonfs_core::NamespaceEngine::builder(LocalFsStore::new(temp_dir.path()).expect("store"))
+        .namespace_id(namespace_id.clone())
+        .writer_id("writer-a")
+        .build()
+        .expect("engine")
+        .delete_namespace(loonfs_core::DeleteNamespaceOptions::default())
         .await
-        .expect_err("partial namespace");
-    assert_eq!(partial_error.code(), ErrorCode::NamespacePartial);
+        .expect("delete namespace");
+
+    let deleted_error = begin_upload(&store, &namespace_id, &context)
+        .await
+        .expect_err("deleted namespace");
+    assert_eq!(deleted_error.code(), ErrorCode::NamespaceDeleted);
 }
 
 #[tokio::test]

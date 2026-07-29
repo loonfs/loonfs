@@ -94,13 +94,12 @@ pub mod control {
         load_namespace_catalog_entry, NamespaceCatalogLoadError, VerifiedNamespaceCatalogEntry,
     };
     pub use crate::namespace::control::{
-        load_content_store_descriptor_control, load_namespace_checkpoint_record_control,
-        load_namespace_descriptor_control, load_namespace_head_control,
+        load_namespace_checkpoint_record_control, load_namespace_head_control,
         load_namespace_metadata_root_control, load_namespace_read_anchor,
         load_namespace_wal_floor_control, ControlObjectIdentity, ControlObjectLoadError,
-        LoadedContentStoreDescriptorControl, LoadedHeadControl, LoadedMetadataRootControl,
-        LoadedNamespaceDescriptorControl, LoadedWalFloorControl,
+        LoadedHeadControl, LoadedMetadataRootControl, LoadedWalFloorControl,
     };
+    pub use crate::namespace::{BasisManifest, MetadataBasis};
 }
 
 /// Commit publication types for runtime integrations.
@@ -126,7 +125,7 @@ pub use error::{
     StoreFailureClass, WriterFence,
 };
 pub use gc::{gc_namespace, GcConfig};
-pub use namespace::{repair_namespace, BootstrapNamespaceError};
+pub use namespace::BootstrapNamespaceError;
 pub use options::{BootstrapOptions, DeleteNamespaceOptions, WriteOptions};
 pub use timing::{MonotonicTimer, StdMonotonicTimer};
 

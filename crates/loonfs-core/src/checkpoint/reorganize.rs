@@ -40,7 +40,8 @@ use super::scan::VerifiedMetadataTables;
 use crate::context::MutationContext;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::limits::CONTENTION_RETRY_LIMIT;
-use crate::namespace::control::{read_metadata_root_object, read_wal_floor_seq_or_zero};
+use crate::namespace::basis::resolve_retention_floor_seq;
+use crate::namespace::control::{read_head_object, read_metadata_root_object_if_present};
 use crate::timing::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_api::wire::manifest::{
     MetadataFileRef, MetadataRow, MetadataTableFamily, NamespaceManifestEnvelope,
@@ -136,11 +137,18 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
     // before any table object is written and gates the root
     // compare-and-swap below.
     let publication_started_ms = timer.monotonic_now_ms();
-    let root = read_metadata_root_object(store, namespace_id)
+    // A namespace that has published no manifest of its own has no runs to
+    // fold: reorganization has nothing to do until its first flush.
+    let Some(root) = read_metadata_root_object_if_present(store, namespace_id)
         .await
         .map_err(CoreError::load_head)?
-        .envelope
-        .state;
+        .map(|loaded| loaded.envelope.state)
+    else {
+        return Ok(MetadataReorganizeReport {
+            namespace_id: namespace_id.clone(),
+            outcome: MetadataReorganizeOutcome::NotNeeded { l0_runs: 0 },
+        });
+    };
     let tables = load_verified_manifest_tables(store, namespace_id, &root.manifest_object_id)
         .await
         .map_err(|error| {
@@ -222,7 +230,12 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
             CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
         })?;
     }
-    let floor_seq = read_wal_floor_seq_or_zero(store, namespace_id)
+    let head = read_head_object(store, namespace_id)
+        .await
+        .map_err(CoreError::load_head)?
+        .envelope
+        .state;
+    let floor_seq = resolve_retention_floor_seq(store, &head)
         .await
         .map_err(CoreError::load_head)?;
     drop_rows_below_retention_floor(&mut rows_by_family, floor_seq)?;
@@ -284,7 +297,7 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
         store,
         namespace_id,
         &manifest,
-        &root.manifest_object_id,
+        Some(root.manifest_object_id.clone()),
         context.now_ms,
         &context.writer_version,
     )
@@ -518,7 +531,6 @@ async fn write_reorganized_manifest<S: ObjectStore + ?Sized>(
                 writer_epoch: previous.payload.writer_epoch,
                 next_inode_id: previous.payload.next_inode_id,
                 retention_floor_seq,
-                fork: previous.payload.fork.clone(),
                 metadata_files: metadata_files.clone(),
             },
         )

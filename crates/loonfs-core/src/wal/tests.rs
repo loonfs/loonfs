@@ -178,7 +178,11 @@ fn canonical_replay_advances_head_and_applies_metadata_rows() {
         "test-writer",
     )
     .expect("prepare wal segment");
-    let mut base_head = loonfs_api::wire::control::HeadState::initial(namespace_id.clone());
+    let mut base_head = loonfs_api::wire::control::HeadState::initial(
+        namespace_id.clone(),
+        loonfs_api::ContentStoreId::generate(),
+        loonfs_api::NamePolicy::default(),
+    );
     base_head.writer_epoch = WriterEpoch(1);
     let record = segment
         .envelope
@@ -235,7 +239,11 @@ fn canonical_replay_rejects_writer_epoch_above_expected_bound() {
         "test-writer",
     )
     .expect("prepare wal segment");
-    let mut base_head = loonfs_api::wire::control::HeadState::initial(namespace_id.clone());
+    let mut base_head = loonfs_api::wire::control::HeadState::initial(
+        namespace_id.clone(),
+        loonfs_api::ContentStoreId::generate(),
+        loonfs_api::NamePolicy::default(),
+    );
     base_head.writer_epoch = WriterEpoch(1);
     let record = segment
         .envelope

@@ -2,22 +2,17 @@
 //! over the manifest, with head-etag freshness checks against concurrent
 //! publishers.
 
-use crate::checkpoint::{
-    head_from_manifest, load_verified_manifest_tables_with_cache, MetadataTableCache,
-    VerifiedMetadataTables,
-};
+use crate::checkpoint::VerifiedMetadataTables;
+use crate::checkpoint::{head_from_manifest, load_basis_metadata_tables, MetadataTableCache};
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result, StoreFailureClass};
 use crate::metadata::{CommitReceiptRecord, MetadataState, MetadataView};
-use crate::namespace::catalog::{load_namespace_catalog_entry, VerifiedNamespaceCatalogEntry};
-use crate::namespace::control::{
-    read_head_and_metadata_root, read_head_object, ControlObjectLoadError,
-};
+use crate::namespace::basis::{read_head_and_metadata_basis, MetadataBasis};
+use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
+use crate::namespace::control::{read_head_object, ControlObjectLoadError};
 use crate::wal::{load_validated_wal_chain, project_validated_wal_tail, WalChainLoadRequest};
 use loonfs_api::wire::control::{AcquiredWriter, HeadState, NamespaceState};
-use loonfs_api::{
-    ChangeSeq, CommitId, ContentStoreId, ManifestId, ManifestObjectId, NamePolicy, NamespaceId,
-};
+use loonfs_api::{ChangeSeq, CommitId, ContentStoreId, ManifestId, NamePolicy, NamespaceId};
 use loonfs_objectstore::keys::wal_head;
 use loonfs_objectstore::ObjectStore;
 
@@ -80,8 +75,10 @@ pub(crate) struct PublishTailProjection {
     pub(crate) namespace_id: NamespaceId,
     pub(crate) head_etag: String,
     pub(crate) head_seq: ChangeSeq,
+    /// The basis this projection replayed over, so a caller seeding a read
+    /// anchor from a landed publish pins the same one.
+    pub(crate) basis: MetadataBasis,
     pub(crate) manifest_id: ManifestId,
-    pub(crate) manifest_object_id: ManifestObjectId,
     pub(crate) manifest_head_seq: ChangeSeq,
     pub(crate) manifest_payload_checksum: String,
     pub(crate) wal_tail_segments: u64,
@@ -115,32 +112,22 @@ impl PublishTailProjection {
 pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
     table_cache: Option<&'a MetadataTableCache>,
-    catalog: Option<VerifiedNamespaceCatalogEntry>,
     namespace_id: &NamespaceId,
     acquired_writer: Option<AcquiredWriter>,
     cached_projection: Option<&PublishTailProjection>,
     options: &PublishTailOptions,
 ) -> Result<(PublishMetadataView<'a, S>, PublishTailProjection)> {
-    let catalog_entry = match catalog {
-        Some(entry) => entry,
-        None => load_namespace_catalog_entry(store, namespace_id)
-            .await
-            .map_err(|error| {
-                CoreError::MetadataProjection(MetadataProjectionLoadError::from(error))
-            })?,
-    };
-    let (loaded_head, loaded_root) = read_head_and_metadata_root(store, namespace_id)
+    let loaded = read_head_and_metadata_basis(store, namespace_id)
         .await
         .map_err(|error| {
             CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
         })?;
-    let head_etag = loaded_head.metadata.etag.clone().ok_or_else(|| {
+    let head_etag = loaded.head.metadata.etag.clone().ok_or_else(|| {
         CoreError::MetadataProjection(MetadataProjectionLoadError::MissingHeadEtag {
-            object_key: loaded_head.object_key.clone(),
+            object_key: loaded.head.object_key.clone(),
         })
     })?;
-    let head = loaded_head.envelope.state;
-    let root = loaded_root.envelope.state;
+    let head = loaded.head.envelope.state;
     if head.state == NamespaceState::Deleted {
         return Err(CoreError::MetadataProjection(
             MetadataProjectionLoadError::NamespaceDeleted {
@@ -151,26 +138,10 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
     if let Some(acquired_writer) = &acquired_writer {
         ensure_publish_head_matches_acquired_writer(&head, acquired_writer)?;
     }
-    let manifest_tables = load_verified_manifest_tables_with_cache(
-        store,
-        table_cache,
-        namespace_id,
-        &root.manifest_object_id,
-    )
-    .await
-    .map_err(|error| {
-        CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
-    })?;
-    if manifest_tables.manifest().payload_checksum != root.manifest_payload_checksum {
-        return Err(CoreError::NamespaceCorrupt(format!(
-            "metadata root for `{}` references manifest {:?} with checksum {} but the manifest carries {}",
-            namespace_id.as_str(),
-            root.manifest_id,
-            root.manifest_payload_checksum,
-            manifest_tables.manifest().payload_checksum,
-        )));
-    }
-    let manifest_id = root.manifest_id;
+    let catalog_entry = VerifiedNamespaceCatalogEntry::from_head(&head);
+    let basis = load_basis_metadata_tables(store, table_cache, namespace_id, &loaded.basis).await?;
+    let manifest_tables = basis.tables;
+    let manifest_id = loaded.basis.manifest_id();
     let manifest_head = head_from_manifest(&head, manifest_tables.manifest());
     let manifest_payload_checksum = manifest_tables.manifest().payload_checksum.clone();
     let projection = if let Some(cached) = cached_projection.filter(|cached| {
@@ -190,9 +161,9 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
             namespace_id,
             &head,
             &head_etag,
-            manifest_id,
-            root.manifest_object_id.clone(),
+            loaded.basis.clone(),
             &manifest_head,
+            &basis.base_state,
             manifest_payload_checksum,
         )
         .await?
@@ -209,8 +180,8 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
 
     Ok((
         PublishMetadataView {
-            name_policy: catalog_entry.namespace_config.name_policy,
-            content_store_id: catalog_entry.content_store_id,
+            name_policy: catalog_entry.name_policy(),
+            content_store_id: catalog_entry.content_store_id().clone(),
             head,
             head_etag,
             acquired_writer,
@@ -246,9 +217,9 @@ async fn load_publish_tail_projection<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     head: &HeadState,
     head_etag: &str,
-    manifest_id: ManifestId,
-    manifest_object_id: ManifestObjectId,
+    basis: MetadataBasis,
     manifest_head: &HeadState,
+    base_state: &MetadataState,
     manifest_payload_checksum: String,
 ) -> Result<PublishTailProjection> {
     let wal_chain = load_validated_wal_chain(
@@ -268,7 +239,7 @@ async fn load_publish_tail_projection<S: ObjectStore + ?Sized>(
     })?;
     let replayed = project_validated_wal_tail(
         manifest_head,
-        &MetadataState::default(),
+        base_state,
         Some(head.writer_epoch),
         &wal_chain,
     )
@@ -281,8 +252,8 @@ async fn load_publish_tail_projection<S: ObjectStore + ?Sized>(
         namespace_id: namespace_id.clone(),
         head_etag: head_etag.to_owned(),
         head_seq: head.seq,
-        manifest_id,
-        manifest_object_id,
+        manifest_id: basis.manifest_id(),
+        basis,
         manifest_head_seq: manifest_head.seq,
         manifest_payload_checksum,
         wal_tail_segments,

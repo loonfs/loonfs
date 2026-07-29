@@ -7,14 +7,13 @@
 //! version for retention is a separate concern layered on top by
 //! [`create`](super::create).
 
-use super::build::build_manifest_l0_run_tables;
+use super::build::{build_manifest_l0_run_tables, build_manifest_tables};
 use super::error::ManifestLoadError;
 use super::load::{
-    ensure_root_matches_manifest, head_from_manifest, load_namespace_manifest_envelope_if_present,
-    load_verified_manifest_tables,
+    head_from_manifest, load_basis_metadata_tables, load_namespace_manifest_envelope_if_present,
 };
 use super::publish::{publish_metadata_root, write_namespace_manifest, ManifestPublicationOutcome};
-use super::runs::flatten_manifest_tables;
+use super::runs::{flatten_manifest_tables, MetadataLsmPolicy, CHECKPOINT_BASE_RUN_LEVEL};
 use super::scan::VerifiedMetadataTables;
 use crate::commit::CommitHeadPublishError;
 use crate::context::MutationContext;
@@ -23,11 +22,13 @@ use crate::error::MetadataProjectionLoadError;
 use crate::error::Result;
 use crate::limits::{CONTENTION_RETRY_LIMIT, METADATA_PUBLICATION_BUDGET_MS};
 use crate::metadata::MetadataState;
-use crate::namespace::catalog::load_namespace_catalog_entry;
-use crate::namespace::control::{read_head_and_metadata_root, read_wal_floor_seq_or_zero};
+use crate::namespace::basis::{
+    advanced_floor_without_root, namespace_birth_seq, read_head_and_metadata_basis,
+    resolve_retention_floor_seq, MetadataBasis,
+};
 use crate::timing::{MonotonicTimer, StdMonotonicTimer};
 use crate::wal::{load_validated_wal_chain, project_validated_wal_tail, WalChainLoadRequest};
-use loonfs_api::wire::control::{HeadState, MetadataRootState, NamespaceState};
+use loonfs_api::wire::control::{HeadState, NamespaceState};
 use loonfs_api::wire::manifest::{NamespaceManifestEnvelope, NamespaceManifestPayload};
 use loonfs_api::{
     ChangeSeq, CommitId, FlushWalOutcome, FlushWalResponse, ManifestId, ManifestObjectId,
@@ -124,24 +125,33 @@ pub(super) async fn try_flush_wal<S: ObjectStore + ?Sized>(
         ))
         .await?;
     let head_seq = projection.head.seq;
-    let root_manifest_id_at_load = projection.root.manifest_id;
+    let basis_manifest_id = projection.basis.manifest_id();
+    let root_manifest_id_at_load = basis_manifest_id;
 
-    if projection.root.manifest_head_seq == head_seq {
+    // Only a manifest this namespace published can already cover the head.
+    // A genesis or fork basis must be materialized here even at an
+    // unchanged head, because the namespace owns no manifest yet and a
+    // checkpoint record can pin only its own.
+    let basis_manifest = projection.basis.manifest();
+    if projection.basis.is_owned_by(namespace_id)
+        && projection.manifest_tables.manifest().payload.head_seq == head_seq
+    {
+        let basis_manifest = basis_manifest.expect("an owned basis names a manifest");
         return Ok(TryFlushWal::Flushed(Box::new(FlushedBasis {
-            manifest_id: projection.root.manifest_id,
-            manifest_object_id: projection.root.manifest_object_id.clone(),
-            manifest_head_seq: projection.root.manifest_head_seq,
-            manifest_payload_checksum: projection.root.manifest_payload_checksum.clone(),
+            manifest_id: basis_manifest.manifest_id,
+            manifest_object_id: basis_manifest.manifest_object_id.clone(),
+            manifest_head_seq: head_seq,
+            manifest_payload_checksum: basis_manifest.manifest_payload_checksum.clone(),
             head_commit_id: projection.head.head_commit_id.clone(),
             target_head_seq: head_seq,
             root_manifest_id_at_load,
-            root_after_manifest_id: projection.root.manifest_id,
-            root_after_head_seq: projection.root.manifest_head_seq,
+            root_after_manifest_id: basis_manifest.manifest_id,
+            root_after_head_seq: head_seq,
             outcome: FlushWalOutcome::AlreadyCurrent,
         })));
     }
 
-    let manifest_id = next_manifest_id_after(projection.root.manifest_id)?;
+    let manifest_id = next_manifest_id_after(basis_manifest_id)?;
     let mut written_manifest = None;
     for _allocation_attempt in 0..CONTENTION_RETRY_LIMIT {
         let manifest_object_id = ManifestObjectId::generate(manifest_id);
@@ -209,11 +219,14 @@ pub(super) async fn try_flush_wal<S: ObjectStore + ?Sized>(
         store,
         namespace_id,
         &manifest,
-        &projection
-            .manifest_tables
-            .manifest()
-            .payload
-            .manifest_object_id,
+        projection.basis.is_owned_by(namespace_id).then(|| {
+            projection
+                .manifest_tables
+                .manifest()
+                .payload
+                .manifest_object_id
+                .clone()
+        }),
         context.now_ms,
         &context.writer_version,
     )
@@ -249,9 +262,11 @@ pub(super) async fn try_flush_wal<S: ObjectStore + ?Sized>(
 
 pub(super) struct RootProjection<'a, S: ObjectStore + ?Sized> {
     pub(super) head: HeadState,
-    pub(super) root: MetadataRootState,
+    pub(super) basis: MetadataBasis,
     pub(super) floor_seq: ChangeSeq,
     pub(super) manifest_tables: VerifiedMetadataTables<'a, S>,
+    /// Rows that are not in any SST yet: the genesis root inode when the
+    /// basis is genesis, plus the replayed WAL tail.
     pub(super) tail_state: MetadataState,
 }
 
@@ -259,17 +274,10 @@ pub(super) async fn load_root_projection<'a, S: ObjectStore + ?Sized>(
     store: &'a S,
     namespace_id: &NamespaceId,
 ) -> Result<RootProjection<'a, S>> {
-    load_namespace_catalog_entry(store, namespace_id)
-        .await
-        .map_err(|error| CoreError::MetadataProjection(error.into()))?;
-    let (loaded_head, loaded_root) = read_head_and_metadata_root(store, namespace_id)
+    let loaded = read_head_and_metadata_basis(store, namespace_id)
         .await
         .map_err(CoreError::load_head)?;
-    let floor_seq = read_wal_floor_seq_or_zero(store, namespace_id)
-        .await
-        .map_err(CoreError::load_head)?;
-    let head = loaded_head.envelope.state;
-    let root = loaded_root.envelope.state;
+    let head = loaded.head.envelope.state;
     if head.state == NamespaceState::Deleted {
         return Err(CoreError::MetadataProjection(
             MetadataProjectionLoadError::NamespaceDeleted {
@@ -277,13 +285,17 @@ pub(super) async fn load_root_projection<'a, S: ObjectStore + ?Sized>(
             },
         ));
     }
-    let manifest_tables =
-        load_verified_manifest_tables(store, namespace_id, &root.manifest_object_id)
-            .await
-            .map_err(|error| {
-                CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
-            })?;
-    ensure_root_matches_manifest(namespace_id, &root, manifest_tables.manifest())?;
+    let floor_seq = resolve_retention_floor_seq(store, &head)
+        .await
+        .map_err(CoreError::load_head)?;
+    // The floor never advances past the materialized root, so a floor above
+    // the namespace's birth sequence with no root of its own means the root
+    // was lost.
+    if !loaded.basis.is_owned_by(namespace_id) && floor_seq > namespace_birth_seq(&head) {
+        return Err(advanced_floor_without_root(namespace_id, floor_seq));
+    }
+    let basis = load_basis_metadata_tables(store, None, namespace_id, &loaded.basis).await?;
+    let manifest_tables = basis.tables;
     let manifest_head = head_from_manifest(&head, manifest_tables.manifest());
     let wal_chain = load_validated_wal_chain(
         store,
@@ -304,7 +316,7 @@ pub(super) async fn load_root_projection<'a, S: ObjectStore + ?Sized>(
         let _span = tracing::info_span!("loonfs.phase", phase = "project_metadata_state").entered();
         project_validated_wal_tail(
             &manifest_head,
-            &MetadataState::default(),
+            &basis.base_state,
             Some(head.writer_epoch),
             &wal_chain,
         )
@@ -314,7 +326,7 @@ pub(super) async fn load_root_projection<'a, S: ObjectStore + ?Sized>(
     ensure_reconstructed_head_matches(&head, &replayed.resulting_head)?;
     Ok(RootProjection {
         head,
-        root,
+        basis: loaded.basis,
         floor_seq,
         manifest_tables,
         tail_state: replayed.resulting_metadata_state,
@@ -390,20 +402,42 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
     // unchanged and the WAL delta lands as one new L0 run, so the cost
     // follows the delta, never the namespace. Folding L0 runs back into the
     // base is reorganization's job (`reorganize.rs`), off this path.
-    let base_seq = previous_manifest.payload.base_seq;
-    let mut metadata_files = previous_manifest.payload.metadata_files.clone();
-    if previous_manifest.payload.head_seq < head_seq {
-        metadata_files.extend(flatten_manifest_tables(
-            build_manifest_l0_run_tables(
-                store,
-                namespace_id,
-                head_seq,
-                previous_manifest.payload.head_seq,
-                &projection.tail_state,
-            )
-            .await?,
-        ));
-    }
+    //
+    // The genesis basis is the exception: it has no run to extend and its
+    // one root-inode row sits at sequence zero, which no delta run above
+    // that sequence would carry. The namespace's first manifest is
+    // therefore one complete base run over the whole projected state.
+    let (base_seq, metadata_files) = if matches!(projection.basis, MetadataBasis::Genesis) {
+        (
+            head_seq,
+            flatten_manifest_tables(
+                build_manifest_tables(
+                    store,
+                    namespace_id,
+                    head_seq,
+                    CHECKPOINT_BASE_RUN_LEVEL,
+                    &projection.tail_state,
+                    MetadataLsmPolicy::default().max_rows_per_segment,
+                )
+                .await?,
+            ),
+        )
+    } else {
+        let mut metadata_files = previous_manifest.payload.metadata_files.clone();
+        if previous_manifest.payload.head_seq < head_seq {
+            metadata_files.extend(flatten_manifest_tables(
+                build_manifest_l0_run_tables(
+                    store,
+                    namespace_id,
+                    head_seq,
+                    previous_manifest.payload.head_seq,
+                    &projection.tail_state,
+                )
+                .await?,
+            ));
+        }
+        (previous_manifest.payload.base_seq, metadata_files)
+    };
 
     NamespaceManifestEnvelope::from_payload(
         writer_version,
@@ -417,7 +451,6 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
             writer_epoch: projection.head.writer_epoch,
             next_inode_id: projection.head.next_inode_id,
             retention_floor_seq: projection.floor_seq,
-            fork: None,
             metadata_files,
         },
     )

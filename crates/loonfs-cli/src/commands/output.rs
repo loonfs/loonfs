@@ -4,9 +4,7 @@ use crate::args::CommandKind;
 use crate::config::{CliConfig, ProfileConfig};
 use crate::error::CliError;
 use crate::profiles::ProfileSummary;
-use loonfs_api::v0::{
-    ChangesResponse, DisableGrepIndexResponse, EnableGrepIndexResponse, RepairNamespaceResponse,
-};
+use loonfs_api::v0::{ChangesResponse, DisableGrepIndexResponse, EnableGrepIndexResponse};
 use loonfs_api::{
     AuthoritativePathEntry, ChangeSeq, CommitId, CreateCheckpointResponse, DeleteNamespaceResponse,
     FileRevision, GcResponse, GrepMatch, InodeId, MaintenanceStepResponse, NamespaceId,
@@ -65,7 +63,6 @@ pub(crate) enum CommandData {
     CheckpointReleased(ReleaseCheckpointResponse),
     MaintenanceStepped(MaintenanceStepResponse),
     GarbageCollected(GcResponse),
-    NamespaceRepaired(RepairNamespaceResponse),
     GrepIndexEnabled(EnableGrepIndexResponse),
     GrepIndexDisabled(DisableGrepIndexResponse),
     Changes(ChangesResponse),

@@ -73,21 +73,19 @@ fn worker(store: &SharedObjectStore) -> GrepWorker<SharedObjectStore> {
 }
 
 async fn read_context(store: &SharedObjectStore, namespace_id: &NamespaceId) -> RuntimeReadContext {
-    let (head, root) = load_namespace_read_anchor(&**store, namespace_id)
+    let (head, basis) = load_namespace_read_anchor(&**store, namespace_id)
         .await
         .expect("load read anchor");
     RuntimeReadContext {
         head: head.state,
         head_etag: head.identity.etag,
-        manifest_id: root.state.manifest_id,
-        manifest_object_id: root.state.manifest_object_id,
+        basis,
         table_cache: Arc::new(MetadataTableCache::new(MetadataTableCacheConfig::default())),
         tail_cache: Arc::new(WalTailProjectionCache::new(WalTailProjectionCacheConfig {
             max_entries: 4,
             max_rows: DEFAULT_WAL_TAIL_PROJECTION_ROWS,
             max_decoded_bytes: DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES,
         })),
-        catalog: None,
     }
 }
 
@@ -633,9 +631,13 @@ async fn planless_scan_covers_wal_revisions_at_or_below_index_watermark() {
         .expect("write WAL-only file");
     drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
 
-    let (head, metadata_root) = load_namespace_read_anchor(&*store, &namespace_id)
+    let (head, _basis) = load_namespace_read_anchor(&*store, &namespace_id)
         .await
         .expect("read anchor");
+    let metadata_root =
+        loonfs_core::control::load_namespace_metadata_root_control(&*store, &namespace_id)
+            .await
+            .expect("metadata root");
     assert!(
         metadata_root.state.manifest_head_seq < head.state.seq,
         "the WAL-only revision must sit past metadata materialization"
@@ -896,12 +898,17 @@ async fn fork_of_grep_enabled_namespace_starts_unmaterialized_without_manifest_s
         target_reader.grep(&target, &request("needle")).await,
     );
 
-    let (_, target_metadata_root) = load_namespace_read_anchor(&*store, &target)
+    // A fresh fork target has published no manifest of its own: its basis
+    // is the source manifest its head authorizes.
+    let (_, target_basis) = load_namespace_read_anchor(&*store, &target)
         .await
         .expect("load target read anchor");
+    let basis_manifest = target_basis
+        .manifest()
+        .expect("a fork target has a basis manifest");
     let manifest_key = metadata_manifest_object(
-        target.as_str(),
-        &target_metadata_root.state.manifest_object_id,
+        basis_manifest.owner_namespace_id.as_str(),
+        &basis_manifest.manifest_object_id,
     );
     let manifest_bytes = store
         .get(&manifest_key, None)

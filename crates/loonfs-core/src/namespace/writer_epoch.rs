@@ -120,6 +120,12 @@ fn head_with_writer(
 ) -> HeadState {
     HeadState {
         namespace_id: current_head.namespace_id.clone(),
+        // Epoch acquisition rewrites the head, so it carries the
+        // namespace's immutable identity forward like every other
+        // successor.
+        content_store_id: current_head.content_store_id.clone(),
+        name_policy: current_head.name_policy,
+        fork_basis: current_head.fork_basis.clone(),
         seq: current_head.seq,
         head_commit_id: current_head.head_commit_id.clone(),
         writer_epoch,
@@ -216,7 +222,11 @@ mod tests {
         writer_session_id: &str,
         writer_epoch: WriterEpoch,
     ) -> HeadState {
-        let mut head = HeadState::initial(namespace_id.clone());
+        let mut head = HeadState::initial(
+            namespace_id.clone(),
+            loonfs_api::ContentStoreId::generate(),
+            loonfs_api::NamePolicy::default(),
+        );
         head.writer_epoch = writer_epoch;
         head.writer = Some(WriterBlock {
             writer_id: writer_id.to_owned(),

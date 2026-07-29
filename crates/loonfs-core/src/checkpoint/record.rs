@@ -11,7 +11,8 @@
 
 use super::load::load_namespace_manifest_envelope;
 use crate::error::{CoreError, Result};
-use crate::namespace::control::read_wal_floor_seq_or_zero;
+use crate::namespace::basis::resolve_retention_floor_seq;
+use crate::namespace::control::read_head_object;
 use bytes::Bytes;
 use loonfs_api::wire::control::{
     decode_control_object, encode_control_object, CheckpointOwner, CheckpointRecordEnvelope,
@@ -326,7 +327,12 @@ pub(crate) async fn verify_checkpoint_basis<S: ObjectStore + ?Sized>(
     store: &S,
     record: &CheckpointRecordState,
 ) -> Result<bool> {
-    let floor_seq = read_wal_floor_seq_or_zero(store, &record.namespace_id)
+    let head = read_head_object(store, &record.namespace_id)
+        .await
+        .map_err(CoreError::load_head)?
+        .envelope
+        .state;
+    let floor_seq = resolve_retention_floor_seq(store, &head)
         .await
         .map_err(CoreError::load_head)?;
     if floor_seq > record.manifest_head_seq {

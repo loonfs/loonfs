@@ -7,7 +7,8 @@ pub use super::scan::string_prefix_upper_bound;
 use super::scan::VerifiedMetadataTables;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::metadata::RevisionRecord;
-use crate::namespace::control::{load_namespace_head_control, read_wal_floor_seq_or_zero};
+use crate::namespace::basis::resolve_retention_floor_seq;
+use crate::namespace::control::load_namespace_head_control;
 use crate::wal::{load_validated_wal_chain, WalChainLoadRequest};
 use loonfs_api::wire::control::{CheckpointRecordLifecycle, NamespaceState};
 use loonfs_api::wire::manifest::{MetadataRow, MetadataTableFamily};
@@ -61,7 +62,7 @@ pub async fn load_grep_change_feed<S: ObjectStore + ?Sized>(
             namespace_id: namespace_id.clone(),
         });
     }
-    let floor_seq = read_wal_floor_seq_or_zero(store, namespace_id)
+    let floor_seq = resolve_retention_floor_seq(store, &head)
         .await
         .map_err(CoreError::load_head)?;
     if after_seq < floor_seq {

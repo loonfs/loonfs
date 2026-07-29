@@ -40,6 +40,11 @@ pub enum CommitHeadPublishError {
     },
     #[error("WAL segment contains no records")]
     EmptyWalSegment,
+    /// The successor head this publish built does not carry the
+    /// namespace's immutable identity forward. A construction bug, caught
+    /// before the compare-and-swap so it can never become durable.
+    #[error("{0}")]
+    HeadIdentityDrift(loonfs_api::wire::control::HeadIdentityDrift),
     #[error("sequence counter overflow")]
     SeqOverflow,
     #[error("namespace head changed since the publish view was loaded")]

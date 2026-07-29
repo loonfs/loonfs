@@ -440,22 +440,6 @@ impl FsAdmin {
         Ok(report)
     }
 
-    /// Explicitly completes or reaps one incomplete namespace installation.
-    pub async fn repair_namespace(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<crate::RepairNamespaceResponse> {
-        let response = loonfs_core::repair_namespace(
-            self.core.store(),
-            namespace_id,
-            &self.actor.mutation_context()?,
-        )
-        .await
-        .map_err(RuntimeError::Core)?;
-        self.invalidate_namespace(namespace_id);
-        Ok(response)
-    }
-
     /// Creates or reuses a checkpoint for the current namespace head.
     ///
     /// A checkpoint pins a manifest version for retention and provenance. If

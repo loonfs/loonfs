@@ -18,7 +18,7 @@ use loonfs_api::wire::control::{
 use loonfs_api::{ContentRef, ContentStoreId, NamespaceId, UploadId};
 use loonfs_objectstore::keys::{
     checkpoint_prefix, metadata_manifest_object, metadata_manifest_prefix, metadata_table,
-    metadata_table_prefix, namespace_config, wal_head, wal_segment, wal_segment_prefix,
+    metadata_table_prefix, wal_segment, wal_segment_prefix,
 };
 use loonfs_objectstore::ObjectStore;
 use std::collections::BTreeSet;
@@ -274,7 +274,6 @@ async fn gc_reaps_below_floor_segments_after_the_grace_window() {
     // The only segment sits at the floor with no replay gap above it.
     assert_eq!(report.deleted_wal_segments, 1);
     assert!(!report.degraded_retention);
-    assert!(!report.incomplete_namespace_ignored);
     stat_root(&store, &namespace_id).await;
 }
 
@@ -481,11 +480,12 @@ async fn deleted_namespace_reclaims_down_to_its_tombstone() {
             "prefix `{prefix}` must be empty after reclamation"
         );
     }
+    // The tombstone is the head; the root and floor survive alongside it
+    // wherever the namespace published them, because neither is ever a
+    // collection candidate.
     for key in [
         loonfs_objectstore::keys::wal_head(namespace_id.as_str()),
-        namespace_config(namespace_id.as_str()),
         loonfs_objectstore::keys::metadata_root(namespace_id.as_str()),
-        loonfs_objectstore::keys::wal_floor(namespace_id.as_str()),
     ] {
         assert!(
             store.head(&key).await.expect("head").is_some(),
@@ -936,10 +936,10 @@ async fn gc_reclaims_manifests_superseded_by_wal_flushes() {
         .await
         .expect("gc pass");
 
-    // Three flushes superseded the bootstrap manifest and two
-    // intermediates; only the root's manifest is reachable. Its tables
-    // are all still referenced (a flush only appends L0 runs).
-    assert_eq!(report.deleted_manifests, 3);
+    // The first flush materialized the namespace's first manifest and the
+    // next two superseded it; only the root's manifest is reachable. Its
+    // tables are all still referenced (a flush only appends L0 runs).
+    assert_eq!(report.deleted_manifests, 2);
     assert!(!report.degraded_retention);
     let manifests_left = store
         .list_prefix(&metadata_manifest_prefix(namespace_id.as_str()))
@@ -1809,20 +1809,14 @@ async fn gc_sweep_reverification_chunks_preserve_outcomes() {
     stat_root(&store, &namespace_id).await;
 }
 
+/// A namespace with no head does not exist, so the pass lists nothing and
+/// deletes nothing: the head is every installation's first and only write,
+/// so nothing can be under the prefix without it.
 #[tokio::test]
-async fn gc_ignores_incomplete_namespace_without_listing_or_deleting() {
+async fn gc_of_an_absent_namespace_lists_and_deletes_nothing() {
     let temp_dir = tempdir().expect("tempdir");
     let inner = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("orphan").expect("namespace id");
-    // A partial tree: a head object but no namespace.json completion
-    // marker.
-    inner
-        .put_if_absent(
-            &format!("namespaces/{}/wal/head.json", namespace_id.as_str()),
-            bytes::Bytes::from_static(b"{}"),
-        )
-        .await
-        .expect("write partial head");
     let store = IncompleteGcAccountingStore {
         inner,
         deletes: AtomicUsize::new(0),
@@ -1831,15 +1825,10 @@ async fn gc_ignores_incomplete_namespace_without_listing_or_deleting() {
 
     let report = gc_namespace(&store, &namespace_id, &config(), &context(u64::MAX))
         .await
-        .expect("gc incomplete tree");
-    assert!(report.incomplete_namespace_ignored);
+        .expect("gc absent namespace");
+    assert_eq!(report, GcResponse::empty(namespace_id.clone()));
     assert_eq!(store.lists.load(Ordering::SeqCst), 0);
     assert_eq!(store.deletes.load(Ordering::SeqCst), 0);
-    assert!(store
-        .head(&wal_head(namespace_id.as_str()))
-        .await
-        .expect("head partial object")
-        .is_some());
 }
 
 #[tokio::test]
@@ -1973,7 +1962,6 @@ fn accumulate_report(total: &mut GcResponse, pass: &GcResponse) {
     total.released_missing_basis_checkpoints += pass.released_missing_basis_checkpoints;
     total.retained_candidates += pass.retained_candidates;
     total.degraded_retention |= pass.degraded_retention;
-    total.incomplete_namespace_ignored |= pass.incomplete_namespace_ignored;
 }
 
 #[tokio::test]

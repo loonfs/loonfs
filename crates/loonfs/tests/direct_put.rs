@@ -13,7 +13,7 @@ use loonfs::{
     ContentRef, CreateDirectoryOptions, CreateNamespaceOptions, DestinationBehavior, ErrorCode,
     InodeId, NamespaceId, PutFileOptions, RuntimeCacheConfig, SharedObjectStore,
 };
-use loonfs_objectstore::keys::{namespace_config, wal_head};
+use loonfs_objectstore::keys::wal_head;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::block_on::block_on;
@@ -586,8 +586,10 @@ fn begin_upload_validates_controls_without_replay_reads() {
     assert_eq!(raw_store.manifest_get_count(), 0);
 }
 
+/// Upload admission is the head: absent means the namespace was never
+/// created, and an unreadable head is corruption, not absence.
 #[test]
-fn begin_upload_rejects_missing_and_partial_namespace() {
+fn begin_upload_rejects_missing_and_unreadable_namespaces() {
     let temp_dir = tempdir().expect("tempdir");
     let raw_store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("create local-fs store"));
     let object_store: SharedObjectStore = raw_store.clone();
@@ -601,52 +603,13 @@ fn begin_upload_rejects_missing_and_partial_namespace() {
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    block_on(raw_store.delete(&namespace_config(namespace_id.as_str())))
-        .expect("delete namespace descriptor");
+    fs.begin_upload_blocking(&namespace_id)
+        .expect("a live namespace admits uploads");
 
+    block_on(raw_store.delete(&wal_head(namespace_id.as_str()))).expect("delete head");
     assert_core_error_kind(
         fs.begin_upload_blocking(&namespace_id),
-        ErrorCode::NamespacePartial,
-    );
-}
-
-#[test]
-fn begin_upload_rejects_malformed_descriptors() {
-    let temp_dir = tempdir().expect("tempdir");
-    let raw_store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("create local-fs store"));
-    let object_store: SharedObjectStore = raw_store.clone();
-    let fs = open_runtime(object_store, "begin-upload-malformed-test");
-    let namespace_id = namespace_id("demo");
-
-    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
-        .expect("create namespace");
-    block_on(raw_store.put_overwrite(
-        &namespace_config(namespace_id.as_str()),
-        Bytes::from_static(br#"{"not":"a namespace descriptor"}"#),
-    ))
-    .expect("corrupt namespace descriptor");
-    assert_core_error_kind(
-        fs.begin_upload_blocking(&namespace_id),
-        ErrorCode::NamespaceCorrupt,
-    );
-
-    let content_bad = NamespaceId::parse("content-bad").expect("valid namespace id");
-    fs.create_namespace_blocking(&content_bad, CreateNamespaceOptions::default())
-        .expect("create content-bad namespace");
-    for key in block_on(raw_store.list_prefix("content-stores/"))
-        .expect("list content stores")
-        .into_iter()
-        .filter(|key| key.ends_with("/descriptor.json"))
-    {
-        block_on(raw_store.put_overwrite(
-            &key,
-            Bytes::from_static(br#"{"not":"a content store descriptor"}"#),
-        ))
-        .expect("corrupt content store descriptor");
-    }
-    assert_core_error_kind(
-        fs.begin_upload_blocking(&content_bad),
-        ErrorCode::NamespaceCorrupt,
+        ErrorCode::NamespaceNotFound,
     );
 }
 

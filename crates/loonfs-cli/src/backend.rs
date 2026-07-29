@@ -10,7 +10,7 @@ use loonfs::{
     PutFileOptions, RestoreRevisionOptions, RuntimeError, UndeleteOptions,
 };
 use loonfs_api::{
-    v0::{DisableGrepIndexResponse, EnableGrepIndexResponse, RepairNamespaceResponse},
+    v0::{DisableGrepIndexResponse, EnableGrepIndexResponse},
     AuthoritativePathEntry, ChangeSeq, CheckpointId, CommitResponse, CreateCheckpointRequest,
     CreateCheckpointResponse, DestinationBehavior, EffectiveLimit, ErrorCode, GrepRequest,
     GrepResponse, InodeId, ListFileRevisionsResponse, ListTrashResponse, MaintenanceStepRequest,
@@ -455,16 +455,6 @@ impl Backend for EmbeddedBackend {
         let options = MaintenanceStepOptions::from_request(request);
         self.admin
             .maintenance_step_namespace(namespace_id, options)
-            .await
-            .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
-    }
-
-    async fn repair_namespace(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<RepairNamespaceResponse, BackendError> {
-        self.admin
-            .repair_namespace(namespace_id)
             .await
             .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
     }

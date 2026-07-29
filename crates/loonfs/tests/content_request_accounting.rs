@@ -11,11 +11,9 @@ use loonfs::{
     CreateDirectoryOptions, CreateNamespaceOptions, DestinationBehavior, ErrorCode, FsWriter,
     InodeId, NamespaceId, PutFileOptions, RevisionNo, RuntimeError, SharedObjectStore,
 };
-use loonfs_api::wire::control::{
-    encode_control_object, ControlObjectKind, NamespaceConfigEnvelope, NamespaceConfigState,
-};
-use loonfs_api::{ContentStoreId, NamePolicy};
-use loonfs_objectstore::keys::namespace_config;
+use loonfs_api::wire::control::{encode_control_object, ControlObjectKind, HeadStateEnvelope};
+use loonfs_api::ContentStoreId;
+use loonfs_objectstore::keys::wal_head;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::stores::{
     BlockingStore, CountingStore, FailStore, InjectedError, KeyPredicate, OperationClass,
@@ -165,28 +163,32 @@ async fn build_initialized_writer(
     writer
 }
 
+/// Points a namespace at another namespace's content store, standing in for
+/// a deployment that provisioned both against one shared keyspace. The
+/// binding lives in the head, so this rewrites the head.
 async fn bind_namespace_to_content_store(
     store: &SharedObjectStore,
     namespace_id: &NamespaceId,
     content_store_id: ContentStoreId,
 ) {
-    let descriptor = NamespaceConfigEnvelope::from_state(
-        ControlObjectKind::NamespaceConfig,
+    let mut head = loonfs_core::control::load_namespace_head_control(store, namespace_id)
+        .await
+        .expect("load namespace head")
+        .state;
+    head.content_store_id = content_store_id;
+    let envelope = HeadStateEnvelope::from_state(
+        ControlObjectKind::WalHead,
         "content-request-accounting/0.1",
-        NamespaceConfigState {
-            namespace_id: namespace_id.clone(),
-            content_store_id,
-            name_policy: NamePolicy::default(),
-        },
+        head,
     )
-    .expect("build namespace descriptor");
+    .expect("build namespace head");
     store
         .put_overwrite(
-            &namespace_config(namespace_id.as_str()),
-            Bytes::from(encode_control_object(&descriptor).expect("encode namespace descriptor")),
+            &wal_head(namespace_id.as_str()),
+            Bytes::from(encode_control_object(&envelope).expect("encode namespace head")),
         )
         .await
-        .expect("replace namespace descriptor");
+        .expect("rebind the namespace head to the shared content store");
 }
 
 /// Full external preparation performs one content HEAD and one full GET.
@@ -492,15 +494,16 @@ async fn proxied_upload_completion_proof_publishes_without_additional_content_io
         .await
         .expect("upload content");
     let upload_counts = harness.recording.snapshot();
+    // One blob PUT and nothing else: the namespace's content store is a
+    // field in its head, so staging never reads the content-store keyspace.
     assert_eq!(
         upload_counts.operations(KeyClass::Content),
         OperationCounts {
             head: 0,
-            get: 1,
+            get: 0,
             put: 1,
         }
     );
-    assert!(upload_counts.content_get_bytes > 0);
     harness.recording.reset();
 
     let (completed, prepared) = harness

@@ -61,14 +61,12 @@ pub use self::grep_read::{
 pub use self::reorganize::{MetadataReorganizeOutcome, MetadataReorganizeReport};
 pub(crate) use self::runs::MetadataLsmPolicy;
 
-pub(crate) use self::create::{build_initial_namespace_manifest, create_checkpoint};
+pub(crate) use self::create::create_checkpoint;
 pub(crate) use self::flush::flush_wal;
 pub(crate) use self::load::{
-    head_from_manifest, load_namespace_manifest_envelope,
-    load_namespace_manifest_envelope_if_present, load_verified_manifest_tables,
-    load_verified_manifest_tables_with_cache,
+    head_from_manifest, load_basis_metadata_tables, load_namespace_manifest_envelope,
+    load_namespace_manifest_envelope_if_present,
 };
-pub(crate) use self::publish::write_namespace_manifest;
 pub(crate) use self::record::{freshen_fork_checkpoint, read_checkpoint_record};
 pub(crate) use self::release::release_checkpoint;
 pub(crate) use self::reorganize::reorganize_metadata_step;

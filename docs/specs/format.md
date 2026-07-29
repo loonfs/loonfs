@@ -35,7 +35,7 @@ A conforming object-store layer must provide the following behavior.
 | **Compare-and-swap update** for small mutable objects | The namespace head and similar control objects must be advanced safely in the presence of concurrent writers. |
 | **Full-object reads with identity metadata** | Mutable control-object readers must receive object bytes and the opaque compare token for those same bytes from one read operation, so one observation's payload cannot be paired with another observation's compare token. |
 | **Strong consistency** | A successful put/delete operation must become authoritative immediately after it succeeds. |
-| **Prefix enumeration** | Manifest discovery, WAL segment discovery for repair and cleanup, and general namespace inspection need a reliable way to enumerate objects by prefix. Listings return keys in ascending lexicographic order; the conformance probes assert this. |
+| **Prefix enumeration** | Manifest discovery, WAL segment discovery for reclamation, and general namespace inspection need a reliable way to enumerate objects by prefix. Listings return keys in ascending lexicographic order; the conformance probes assert this. |
 | **Deterministic key scoping** | Providers must not allow objects outside the configured namespace or tenant prefix to leak into operations. |
 | **Consistent error signaling for failed preconditions** | Higher layers need one generic way to detect stale writes and retry or fail safely. |
 
@@ -57,14 +57,12 @@ The required durable object families and standard key patterns are:
 
 | Family | Mutability | Purpose | Standard object key pattern |
 | --- | --- | --- | --- |
-| **Namespace config** | Immutable | Stable namespace identity and immutable configuration, including the content-store binding; written last at creation as the completion marker. | `namespaces/{namespace_id}/namespace.json` |
-| **WAL head** | Mutable | Hot head of the semantic commit stream: current visible boundary, writer epoch, writer liveness metadata, replay hints, and visible WAL tip. | `namespaces/{namespace_id}/wal/head.json` |
+| **WAL head** | Mutable | The namespace itself. Carries its immutable identity — content store, name policy, and fork provenance — together with the hot head of the semantic commit stream: current visible boundary, writer epoch, writer liveness metadata, replay hints, and visible WAL tip. | `namespaces/{namespace_id}/wal/head.json` |
 | **WAL segments** | Immutable | Record one or more logical commits with a contiguous sequence range. | `namespaces/{namespace_id}/wal/segments/{start_seq:020}-{suffix}.wal.zst` |
-| **Namespace manifests** | Immutable | Record one namespace file-set version, including metadata table references, head summary, and fork references. | `namespaces/{namespace_id}/metadata/manifests/{manifest_object_id}.manifest.json` |
+| **Namespace manifests** | Immutable | Record one namespace file-set version: its metadata table references and a head summary. Table references carry their own owner, so a fork target's manifest names source-owned tables without recording anything about the fork. | `namespaces/{namespace_id}/metadata/manifests/{manifest_object_id}.manifest.json` |
 | **Checkpoint records** | Mutable lifecycle | Durable stable-view pins to a metadata manifest, each carrying a required owner (user or fork target); active records may release or revive, and GC conditionally condemns them before deletion. | `namespaces/{namespace_id}/checkpoints/{checkpoint_id}.json` |
 | **Metadata tables** | Immutable | Store metadata rows referenced by manifests. Files may be owned by the namespace itself or by a fork source namespace. | `namespaces/{owner_namespace_id}/metadata/tables/{table_id}.sst.zst` |
 | **Upload sessions** | Mutable lifecycle | Track one staged-content upload from begin to completion; GC conditionally condemns abandoned active sessions before deletion. | `namespaces/{namespace_id}/uploads/{upload_id}.json` |
-| **Content-store descriptor** | Immutable | Record content-store identity. | `content-stores/{content_store_id}/descriptor.json` |
 | **Metadata root** | Mutable | Cold pointer to the best known materialized metadata root; monotonic CAS. | `namespaces/{namespace_id}/metadata/root.json` |
 | **WAL floor** | Mutable | Cold lower bound of retained WAL/change history; monotonic CAS. | `namespaces/{namespace_id}/wal/floor.json` |
 | **Content objects** | Immutable | Store whole-file v0 bytes. | `content-stores/{content_store_id}/blobs/sha256/{hex[0..2]}/{hex[2..4]}/{hex}` |
@@ -86,10 +84,18 @@ interoperable state.
 
 Namespace object keys are built through the central object layout API in
 `loonfs-objectstore`. The namespace root remains `namespaces/{namespace_id}/`.
-Forks are copy-on-write: the target manifest may reference source-owned
-metadata tables through a source checkpoint-backed manifest, and the source
-holds a fork-owned checkpoint record protecting that basis for the target's
-lifetime.
+Forks are copy-on-write: the target's head names a source-owned manifest as
+its starting basis, later target manifests may go on referencing source-owned
+metadata tables, and the source holds a fork-owned checkpoint record
+protecting that basis for the target's lifetime.
+
+The content-store keyspace holds blobs and nothing else. A content store has
+no descriptor object and no durable record of its own: its id is minted by
+random generation when a namespace is created and recorded in that
+namespace's head. Uniqueness rests on the generated id's randomness, so no
+object has to be claimed, read, or verified before bytes may be written under
+it, and a content store is shared exactly by the namespaces whose heads name
+it.
 
 WAL segment names sort by history position (section 1.3); recovery still
 follows `head.visible_wal_tip` and the predecessor links inside verified WAL
@@ -122,23 +128,17 @@ The namespace tree's lifecycle can be read off its grammar:
   validate namespace id, object id, family, checksum, and sequence fields;
   the same fact is never encoded twice (table family lives in the manifest
   and table envelope, not the path).
-- **`namespace.json` is the existence marker**: written last at creation as
-  the completion marker, kept forever after deletion as half of the
-  tombstone pair that retires the namespace id.
-- **Creation and forking never repair partial namespace state.** After the
-  immutable target manifest is prepared, the head create-if-absent is the
-  first fixed-key conditional install write and the admission gate; root and
-  floor are written only after it lands. A normal create or fork that finds pre-head
-  debris or a head without a descriptor answers `namespace_partial` without
-  writing or deleting anything, regardless of age. Explicit per-namespace
-  admin repair owns recovery: it completes a
-  genesis create or fork target whose immutable tree proves the missing
-  descriptor, or reaps non-completable debris only after the derived safety
-  floor. Before reaping it conditionally installs `state: condemned` in the
-  head using the state it inspected, deletes the subtree, and deletes that
-  gate last. A racing installer therefore either owns the head first (repair
-  reports `in_flight`) or fails its own create-if-absent as
-  `namespace_partial`.
+- **`wal/head.json` is the namespace.** The head exists, or the namespace does
+  not. It is the existence marker, and after deletion it is kept forever as
+  the tombstone that retires the namespace id.
+- **Creation and forking are one conditional write.** Create and fork both
+  build a complete active head in memory and install it with create-if-absent.
+  Nothing under the new namespace's prefix is written before that write, so
+  there is no partial namespace to classify, complete, or reap, and no
+  ordering rule to get wrong. A create or fork that loses the conditional
+  write answers `namespace_exists`, or `namespace_deleted` against a
+  tombstone, unless the head it finds is its own earlier attempt, which
+  succeeds idempotently (section 3.9.3).
 
 Names are never authority anywhere — recovery follows the head and its
 references.
@@ -152,9 +152,9 @@ The load-bearing invariants of this layout, in one place:
 > **Fencing authority is writer epoch plus CAS.** Wall-clock time never
 > gates commit validity, and fenced sessions never reacquire on their own.
 
-> **Nothing correct depends on listing.** GC, floor advancement, and explicit
-> namespace repair alone list — under a safety window, with delete-time
-> re-verification, and with retention winning every ambiguous race.
+> **Nothing correct depends on listing.** GC and floor advancement alone
+> list — under a safety window, with delete-time re-verification, and with
+> retention winning every ambiguous race.
 
 > **Throughput is group commit; deadlines are local monotonic budgets a
 > writer applies to itself.** No validator ever compares clocks, and
@@ -237,8 +237,8 @@ ETags remain opaque compare tokens. They may be used for object freshness or
 compare-and-swap, but they are not content digests unless a provider-specific
 behavior is separately exposed and verified through this contract.
 
-A reader or writer resolves content through the namespace descriptor:
-`namespace_id -> content_store_id -> content-stores/{content_store_id}/...`.
+A reader or writer resolves content through the namespace head:
+`namespace_id -> head.content_store_id -> content-stores/{content_store_id}/...`.
 File revisions and change-feed payloads store only `content_ref`; they do not
 store content-store ids or object-store paths.
 
@@ -248,13 +248,16 @@ Small mutable objects such as the namespace head must use compare-and-swap
 semantics. These objects must remain small enough that guarded rewrite is
 practical.
 
+Five control-object kinds are registered: `wal_head`, `wal_floor`,
+`metadata_root`, `checkpoint_record`, and `upload_session`. A control-object
+envelope carrying any other kind string is rejected, not skipped.
+
 Mutable control-object decoders reject unknown fields in both the envelope and
 the complete nested payload. Otherwise, an older binary could tolerate a
 newer field, erase it during read-modify-write, and still report a successful
-guarded update. Namespace configuration and content-store descriptors use the
-same strict control-object decoder; immutable WAL segments, metadata segments,
-namespace manifests, grep segments, and grep manifests remain tolerant of
-additive fields.
+guarded update. All five registered kinds use that strict decoder; immutable
+WAL segments, metadata segments, namespace manifests, grep segments, and grep
+manifests remain tolerant of additive fields.
 
 Readers of small mutable control objects must use a full-object read that
 returns bytes and the object identity metadata for those same bytes. This does
@@ -307,23 +310,29 @@ user-facing names may be reused only if they map to a new `namespace_id`.
 
 Each namespace has:
 
-- a descriptor that records its namespace id and content-store id
-- a current head
+- a head that records its namespace id, content-store id, name policy, and
+  fork provenance, and that carries its current visible boundary
 - an ordered WAL of logical commits stored in immutable segments
 - immutable namespace manifests that describe recoverable file-set versions
 - zero or more checkpoints
 - a retention policy
+
+The head is the whole of a namespace's durable identity. Nothing else records
+which content store holds its bytes, which name policy compares its sibling
+names, or which namespace it was forked from, so a head that is missing or
+unreadable is not a namespace with a lost accessory: it is not a namespace.
 
 The head also carries the next monotonic inode id for that namespace. New
 inode ids are allocated from the head as part of commit publication.
 
 The canonical identity of an item is `(namespace_id, inode_id)`.
 
-Each namespace has exactly one immutable `content_store_id`. The content store
-is an immutable pool for file bytes and may be referenced by many namespaces.
-A new root namespace receives a new content store; a forked namespace reuses
-the source namespace's content store while starting an independent namespace
-metadata history.
+Each namespace has exactly one immutable `content_store_id`, recorded in its
+head. The content store is an immutable pool for file bytes and may be
+referenced by many namespaces. A new root namespace mints a fresh content
+store id by random generation; a forked namespace copies the source
+namespace's id while starting an independent namespace metadata history,
+which is what makes forks copy-on-write over the same bytes.
 
 Two consequences follow:
 
@@ -469,7 +478,11 @@ archive, or through a sync client.
 #### 2.3.1 NamePolicy
 
 Sibling-name comparison is governed by a versioned `NamePolicy`. A namespace
-has exactly one active name policy.
+has exactly one active name policy, chosen at creation and recorded in the
+head. The head is the single authority for name-key computation on both the
+read and the write path: a stored name key means nothing except under the
+policy that produced it, so there is nowhere else for the policy to live and
+no default to fall back on.
 
 The v0 policy is `nfc_casefold_v0`, which defines sibling-name comparison by
 Unicode NFC normalization plus case folding. Future policies may exist, but
@@ -482,11 +495,11 @@ A file is represented by one inode and a sequence of immutable revisions.
 Each revision stores exactly one immutable `content_ref`. In v0, that
 reference names one whole-file object containing the complete plaintext file
 bytes. Revisions do not store object-store paths or `content_store_id`;
-readers resolve those through the namespace descriptor when bytes are needed.
+readers resolve those through the namespace head when bytes are needed.
 
 Content objects belong to the namespace's content store. A file revision may
 reference only content that is durable under the content store named by that
-namespace descriptor.
+namespace's head.
 
 LoonFS therefore uses a two-stage write model:
 
@@ -513,7 +526,7 @@ The core rules are:
 - the object key leaf is the raw 64-character hex digest, while JSON keeps the
   full `sha256:<hex>` digest string;
 - all content-object access resolves `namespace_id` through the namespace
-  descriptor to its `content_store_id`;
+  head to its `content_store_id`;
 - future content strategies must use a new `content_ref.kind` and name their
   durability and validation rules before revisions may reference them.
 
@@ -553,18 +566,15 @@ exact generation is the active one, so a stale recovery request can never
 cancel a later deletion. Only the root of a deletion can be undeleted —
 descendants are covered by the root's tombstone, not their own.
 
-A namespace head has three recorded states: `active` (the default; an absent
-field reads as active), terminal `deleted`, and repair-only `condemned`.
-Ordinary initialization progress is still expressed by object presence: a
-namespace is complete when its descriptor exists and partial when only the
-earlier install objects exist. `condemned` is the temporary exception and an
-absorbing deletion gate: explicit repair conditionally writes it before
-physical reaping and removes the head last. A crash between those operations
-leaves the name blocked as `namespace_partial`; the next repair pass resumes
-the reap without waiting for the age window again. Deletion is terminal and
-keeps its head and descriptor forever as the tombstone that retires its
-`namespace_id`. Readers MUST refuse to serve a namespace whose head state
-they do not recognize, and MUST treat `condemned` as partial rather than live.
+A namespace head has exactly two recorded states: `active` (the default; an
+absent field reads as active) and terminal `deleted`. There is no
+initialization state and no intermediate state of any kind, because there is
+no initialization to observe: the head is published complete by one
+conditional write, so a namespace either has a head or does not exist.
+Deletion is the one transition the head must record, and it keeps that head
+forever as the tombstone that retires its `namespace_id`. Readers MUST refuse
+to serve a namespace whose head state they do not recognize; decoding is
+fail-closed, never best-effort.
 
 Deleting a namespace is a fenced control-plane transition, not a logical
 commit: the deleting writer acquires the namespace writer epoch and
@@ -580,24 +590,31 @@ deletion and destructive content garbage collection are unsupported
 operator-only work. Metadata is reclaimed by garbage collection: on a
 terminally deleted namespace a GC pass reaps the WAL chain, metadata tables,
 manifests, and non-protecting checkpoint records under the usual windows,
-leaving the head, descriptor, root, and floor objects as the
-id-retiring tombstone (section 6, rule 4). Objects protected by fork-owned
-checkpoint records survive, so clones of a deleted source stay readable.
+leaving the head as the id-retiring tombstone, together with the root and
+floor objects if the namespace ever wrote them (section 6, rule 4). Objects
+protected by fork-owned checkpoint records survive, so clones of a deleted
+source stay readable.
 
 ### 2.6 Forks
 
 Forking a namespace creates a new namespace with independent metadata history
 and the same `content_store_id` as the source namespace. The fork point is the
 source namespace's current head. The implementation creates or reuses a
-verified fork-owned source checkpoint at that head, freshens that record by
-compare-and-swap, then initializes the target namespace with a manifest that
-references immutable metadata files owned by the source namespace. The target
-descriptor is written last as the publish/list marker.
+verified fork-owned source checkpoint at that head and freshens that record by
+compare-and-swap, then installs the complete target head with one
+create-if-absent. The target writes no manifest, no root, and no floor: the
+head's `fork_basis` names the source manifest the target starts from, and the
+fork-owned checkpoint record is what keeps that manifest and its tables alive
+for as long as the target may still need them.
 
-Fork provenance is stored in the target namespace manifest. Normal reads and
-recovery use the target descriptor, head, manifest, and WAL only. After fork, the clone must remain readable even
-if the source namespace metadata is deleted or corrupted. Source writes after
-the fork do not affect the clone, and clone writes do not affect the source.
+Fork provenance lives in the target head and stays there for the namespace's
+life. Reads and recovery use the target head, its own manifests once it has
+written any, and its WAL; the one exception is the source manifest the head
+itself authorizes, before the target's first flush (section 2.9.1). After
+fork, the clone must remain readable even if the source namespace's later
+metadata is deleted or corrupted, because the source checkpoint roots the
+exact objects the clone depends on. Source writes after the fork do not
+affect the clone, and clone writes do not affect the source.
 
 ### 2.7 Mounts
 
@@ -638,16 +655,44 @@ boundary.
 Readers reconstruct authoritative state from:
 
 1. the current head and the metadata root, fetched concurrently;
-2. the namespace manifest named by `metadata/root.json`; and
-3. the visible WAL segment chain after that manifest through `head.seq`,
+2. the materialized metadata basis: the namespace manifest named by
+   `metadata/root.json`, or, when that pointer is absent, the basis the head
+   itself resolves (section 2.9.1); and
+3. the visible WAL segment chain after that basis through `head.seq`,
    replayed as logical commits in ascending `seq` order.
 
-The head summarizes the current visible boundary and replay hints, including
-at minimum:
+The head records the namespace's immutable identity:
+
+- `content_store_id`, required: where the namespace's file bytes live
+- `name_policy`, required: the single authority for name-key computation
+- `fork_basis`, optional: present in every head of a fork target, absent in
+  every head of a created namespace
+
+`fork_basis` records five facts: `source_namespace_id`,
+`source_manifest_object_id`, `source_manifest_checksum`,
+`source_checkpoint_id`, and `fork_seq` — the source sequence at which the
+target's own history begins. Section 2.9.1 says what a reader may do with
+them.
+
+Every successor head the publisher writes carries those three fields forward
+verbatim, along with `namespace_id`. They are the namespace's identity, not
+its state, and a namespace cannot change which content store holds its bytes,
+which policy compares its names, or where it came from. A publisher that
+builds a successor differing in any of them has a construction bug, and the
+difference is caught before the compare-and-swap rather than persisted.
+
+Decoding is strict. A head whose `content_store_id` or `name_policy` is
+missing is malformed and is hard-rejected, never defaulted: nothing else
+records those facts, so a default would silently invent a namespace's content
+store or rewrite how its names compare. A head carrying an unknown field is
+rejected the same way, under the mutable control-object rules (section 1.7).
+
+The head also summarizes the current visible boundary and replay hints,
+including at minimum:
 
 - `seq`
 - `head_commit_id`
-- `state` (absent or `active`, terminal `deleted`, or repair-only `condemned`)
+- `state` (absent or `active`, or terminal `deleted`)
 - `next_inode_id`
 - `visible_wal_tip` and the bounded `recent_segments` accelerator
 
@@ -659,6 +704,12 @@ touches the WAL head, so the head changes only when commits land. A missing,
 stale, or unverifiable floor means "retain more history", never less, and the
 floor never affects live commit visibility.
 
+Create and fork write no floor. An absent floor means "retain from the
+namespace's birth sequence": 0 for a created namespace, and
+`fork_basis.fork_seq` for a fork target, which is the sequence its own history
+begins at and below which it never had WAL history to retain. The object is
+created by the first retention-floor advance and not before.
+
 `metadata/root.json` is the live read/recovery pointer. It is updated only by
 monotonic compare-and-swap on its own etag: a replacement must not decrease
 `manifest_head_seq`, a same-seq replacement may reference a different manifest
@@ -668,6 +719,12 @@ The root never defines live visibility, and a stale root only costs extra WAL
 replay. A reader that observes `root.manifest_head_seq > head.seq` reloads
 the head — the root can only reference published state, so a fresh head read
 observes at least the root's seq; this race is not corruption.
+
+Create and fork write no root either. `metadata/root.json` is created by the
+namespace's first flush or reorganization, which is the first moment there is
+a materialized file set worth pointing at. Until then the head resolves the
+basis on its own. Once the root exists it is the basis, and `fork_basis`
+becomes provenance only.
 
 A checkpoint is a durable pin to a namespace manifest version, stored as a
 first-class record under `checkpoints/` — never inside a manifest, and never
@@ -723,6 +780,57 @@ bind/unbind, file revision append, and subtree tombstone rows. Validation
 inputs and operation results are not persisted in the WAL. Checkpoints keep
 replay bounded as history grows.
 
+#### 2.9.1 Resolving the metadata basis
+
+The basis is the materialized starting point every read and every flush
+builds on. A namespace publishes `metadata/root.json` at its first flush, not
+at creation, so the basis is resolved from the head plus that root when the
+root exists. There are exactly three cases, and none of them is a fallback
+for another.
+
+1. **`metadata/root.json` is present: the basis is the manifest it names**,
+   under this namespace's own prefix. This is the steady state, and the two
+   rules below no longer run.
+2. **The root is absent and the head carries no `fork_basis`: the basis is
+   the built-in genesis state.** It is exactly one root-inode row, at
+   sequence zero. No manifest object is loaded, and none was ever written —
+   create publishes a head and nothing else, so a created namespace with no
+   manifest is the expected shape rather than a missing object.
+3. **The root is absent and the head carries a `fork_basis`: the basis is the
+   source namespace's manifest.** The head names it:
+   `fork_basis.source_manifest_object_id`, read under
+   `fork_basis.source_namespace_id`'s prefix.
+
+Case 3 is the only cross-namespace read in the format, and the head is the
+only thing that may authorize one. Call this rule the **head-authorized
+foreign basis**: no manifest, root, checkpoint, or table may send a reader
+into another namespace's prefix on its own say-so, because only the head is
+carried forward verbatim by every publication and so only the head can be
+trusted to still mean what it said when the fork happened.
+
+The foreign basis is hard-validated on every load. The manifest that comes
+back must carry a `namespace_id` equal to `fork_basis.source_namespace_id`,
+and a `payload_checksum` equal to `fork_basis.source_manifest_checksum`. Both
+must hold. Either mismatch is `namespace_corrupt` and the load stops there.
+The two checks are what make a cross-namespace read safe, so a failed check
+can never be answered by reading something else instead: there is no fallback
+path, no search for a nearby manifest, and no dropping back to the genesis
+basis.
+
+`fork_basis.source_checkpoint_id` names the fork-owned checkpoint record on
+the source that keeps the basis manifest and its tables alive. That record,
+not the fork basis itself, is the reachability root; the fork basis only says
+which objects to read.
+
+Once the target's own first flush publishes a root, case 1 takes over and
+`fork_basis` is provenance from then on.
+
+The retention floor never advances past the materialized root (section 3.8),
+so a namespace that got where it is by following this specification cannot
+have an absent root and a floor advanced past its birth sequence. Basis
+resolution reports that combination honestly as `namespace_corrupt` instead
+of guessing which of the two readings is the true one.
+
 ## 3. Write and read protocol
 
 ### 3.1 Write protocol
@@ -739,7 +847,7 @@ reference it. A metadata change becomes visible only after the head advances.
 Content must be durable before any metadata change can reference it.
 
 1. Compute the `sha256` digest of the complete plaintext file bytes.
-2. Resolve the namespace descriptor to its `content_store_id`.
+2. Read the namespace head for its `content_store_id`.
 3. Upload the complete byte sequence to
    `content-stores/{content_store_id}/blobs/sha256/{hex[0..2]}/{hex[2..4]}/{hex}`
    with create-if-absent semantics.
@@ -864,15 +972,17 @@ correctness; everything needed is in the object store.
 The reader builds an in-memory metadata state from two kinds of durable
 object:
 
-1. Read the namespace descriptor and content-store descriptor to learn the
-   namespace's immutable content-store relationship.
-2. Read the namespace **head** object (current `seq` and visible WAL tip)
-   and `metadata/root.json` (the manifest pointer), concurrently.
-3. Load and verify the manifest the root references; its payload checksum
+1. Read the namespace **head** object (the namespace's identity, current
+   `seq`, and visible WAL tip) and `metadata/root.json` (the manifest
+   pointer), concurrently. The head also supplies the `content_store_id` and
+   `name_policy` every later step needs.
+2. Load and verify the manifest the root references; its payload checksum
    must match the root's `manifest_payload_checksum`. The manifest references
-   one or more materialized metadata runs through its `head_seq`.
-4. Use the visible WAL tip named by the head to identify the visible segment
-   chain after the manifest `head_seq`, then replay the logical commit records in ascending
+   one or more materialized metadata runs through its `head_seq`. When the
+   root is absent, resolve the basis from the head instead (section 2.9.1):
+   the genesis state, or the head-authorized source manifest.
+3. Use the visible WAL tip named by the head to identify the visible segment
+   chain after the basis `head_seq`, then replay the logical commit records in ascending
    `seq` order through `head.seq`. Each logical commit appends normalized rows
    to the same metadata tables.
 
@@ -881,8 +991,9 @@ The result is a metadata view pinned to one `seq`.
 For latest path `stat` and directory `list`, an implementation may avoid
 hydrating a complete metadata state. The reader may query verified metadata run tables and the visible WAL tail
 overlay directly, provided it applies the same visibility rules and treats
-missing or corrupt manifest/WAL objects as hard errors. If no current manifest
-is published for a complete namespace, the namespace is corrupt.
+missing or corrupt manifest/WAL objects as hard errors. An absent
+`metadata/root.json` is not one of those errors: it resolves through the head
+under section 2.9.1 like any other basis load.
 
 #### 3.2.2 Visibility rules
 
@@ -914,7 +1025,7 @@ To resolve an absolute path at seq N:
 Given a visible file inode at seq N:
 
 1. Look up the file's latest revision at N to obtain `content_ref`.
-2. Resolve the namespace descriptor to its `content_store_id`.
+2. Read the namespace head for its `content_store_id`.
 3. Verify that `content_ref.kind` is supported by the reader.
 4. For `whole_file_v0`, fetch the object at
    `content-stores/{content_store_id}/blobs/sha256/{hex[0..2]}/{hex[2..4]}/{hex}`,
@@ -1117,9 +1228,13 @@ collection") — but a segment that already disappeared must block the floor
 while replay can still rebuild the lost state. Corruption discovered after
 advancement is caught by read-path checksum validation.
 
-Advancement then CASes only `wal/floor.json`, recording the new `floor_seq`
-together with its verification stamp. Floor updates
-are monotonic: a replacement never decreases `floor_seq`, and
+A namespace with no `metadata/root.json` has nothing to derive a target from,
+so its floor never advances; it retains from its birth sequence until a flush
+publishes a root (section 2.9).
+
+Advancement then CASes only `wal/floor.json` — creating it on the first
+advance — recording the new `floor_seq` together with its verification stamp.
+Floor updates are monotonic: a replacement never decreases `floor_seq`, and
 `floor_seq <= metadata/root.manifest_head_seq` holds. The floor is necessary
 but not sufficient for deletion — being below it makes an object a deletion
 candidate; actual deletion additionally requires delete-time re-verification,
@@ -1153,44 +1268,106 @@ after the write, flipping the record to released on failure. A live manifest
 does not need to be checkpoint-pinned; checkpoint records explain why a
 manifest version must be retained after the root moves on.
 
-### 3.9 Namespace forks
+### 3.9 Namespace creation and forks
+
+A namespace has one lifecycle, and both ways of starting one share it:
+
+```text
+Absent
+  -- one create-if-absent of a complete active wal/head.json -->
+Active
+  -- guarded terminal compare-and-swap -->
+Deleted
+```
+
+There is no state between absent and active. The head object is the
+namespace, so publishing it complete in one conditional write is the entire
+installation protocol: nothing under the new namespace's prefix is written
+before it, and everything written after it is ordinary namespace history.
+
+#### 3.9.1 Creating a namespace
+
+The request supplies only the new namespace id; the server supplies the
+mutation context. The protocol is one step: build the complete active genesis
+head — sequence 0, the genesis commit id, writer epoch 0, the next inode id
+after the root inode, a freshly minted content store id, the namespace's name
+policy, and no fork basis — and write it with create-if-absent.
+
+That write is the whole protocol. No manifest, root, or floor is prepared
+before it, and none is written after it: the genesis basis is built in
+(section 2.9.1), and the root and floor objects appear when the namespace's
+first flush and first retention advance need them.
+
+#### 3.9.2 Forking a namespace
 
 A fork creates a new namespace from the source namespace's current head. The
 request supplies only the new namespace id; the server supplies the mutation
-context.
+context. The protocol is:
 
-The fork protocol is:
-
-1. Check the target namespace initialization state. A complete target is
-   rejected as existing, and a partial target is rejected as partially
-   initialized.
-2. Resolve and verify the source namespace descriptor, content-store
-   descriptor, head, checkpoint, and WAL visibility chain.
-3. Create or reuse a verified fork-owned source checkpoint at the current
-   source head (owner: the target namespace id).
-4. Build the target head, target manifest, and descriptor using the source
-   namespace's `content_store_id`.
-5. Freshen the fork-owned record by compare-and-swap before any target
-   write: the rewrite re-stamps the record's provider timestamp so the
+1. Read and verify the source head and its WAL visibility chain.
+2. Create or reuse a verified fork-owned source checkpoint at that head
+   (owner: the target namespace id). This record is the reachability root
+   that keeps the source's basis manifest and tables alive for as long as the
+   target lives; nothing under the target's prefix protects them.
+3. Freshen the fork-owned record by compare-and-swap before writing the
+   target: the rewrite re-stamps the record's provider timestamp so the
    abandoned-fork rule cannot fire under a live retry, and it serializes the
    fork against a concurrent GC release — whichever compare-and-swap lands
    second fails, so a released record is observed (and revived, re-verifying
    the basis) rather than raced.
-6. Write a target namespace manifest that references the source-owned
-   immutable metadata files for the source checkpoint.
-7. Write the target `head.json` as the first fixed-key conditional install
-   write and admission gate that explicit repair can condemn.
-8. Prepare the target metadata root and retention floor only after owning the
-   gate.
-9. Write the target `namespace.json` last as the publish/list marker.
-10. Start the new namespace WAL independently at `fork_seq + 1`.
+4. Read the manifest that record pins for the target's fork sequence and next
+   inode id, then build the complete active target head: the source's
+   `content_store_id` and `name_policy` copied verbatim from the source head,
+   and a `fork_basis` naming the source namespace, that manifest's object id
+   and payload checksum, the source checkpoint id, and the fork sequence.
+   Write it with create-if-absent.
+5. Re-read the source checkpoint record. If it is no longer active, delete
+   the target through the ordinary namespace-delete path and return the
+   checkpoint failure.
 
-The fork does not copy content-store blobs or source metadata SSTs. If
-initialization fails after the target head exists but before the descriptor is
-published, the target is partial. A successful fork has independent namespace
-history from the fork point. Future target WAL, checkpoints, and metadata SSTs
-are written under the target namespace root. The target manifest records where
-the namespace came from.
+The target copies the source's `content_store_id` because a fork shares file
+bytes copy-on-write, and its `name_policy` because it inherits the source's
+materialized name keys, which mean nothing under a different policy.
+
+Step 5 exists because steps 3 and 4 are two separate writes to two different
+objects. A forker that stalls between them can have its freshened record
+released underneath it, and without the re-read the target would survive with
+an unprotected basis — a namespace that reads correctly today and reports
+corruption after the next GC pass. Deleting the target through the ordinary
+delete path, rather than erasing the head, keeps the failure inside the one
+lifecycle every other operation already understands.
+
+The fork does not copy content-store blobs or source metadata SSTs, and
+writes no target manifest, root, or floor. A successful fork has independent
+namespace history from the fork point, starting its own WAL at
+`fork_seq + 1`. Future target WAL, checkpoints, and metadata SSTs are written
+under the target namespace root. Until the target's first flush publishes a
+root, its head resolves the basis (section 2.9.1).
+
+#### 3.9.3 Conflicting installs
+
+Create and fork answer a lost create-if-absent the same way, because they
+write the same object under the same conditions.
+
+The loser reads the head back. An active head means the id is taken and the
+answer is `namespace_exists`; a deleted head answers `namespace_deleted`; a
+head that cannot be decoded is corruption and is reported as such — never
+overwritten, and never taken as an empty slot. There is no fourth answer,
+because there is no state between absent and complete.
+
+The loser is not told whether the winner was its own earlier attempt.
+Nothing durable can say so: the head's writer block names one writer
+session, and a server holds one session across every caller it serves, so
+"written by my session" does not mean "written by this attempt" — two
+callers of one server would otherwise both be told they created the same
+namespace. An embedded caller that wants a retry after a lost
+acknowledgment to succeed asks for that explicitly, with its
+create-if-not-exists option.
+
+This is a strictly better answer than the previous protocol gave. The
+namespace named by `namespace_exists` is complete and usable; the multi-object
+install could leave a namespace that existed, could not be used, and could
+only be finished by an explicit repair.
 
 ### 3.10 Long-running operations
 
@@ -1237,9 +1414,8 @@ the registry of stable error codes and HTTP statuses, and of the rule that
 clients must ignore unknown JSON response fields and tolerate unknown error
 codes.
 
-The durable namespace descriptor and content-store descriptor are
-storage-format objects. The namespace descriptor is authoritative for the
-namespace-to-content-store relationship.
+The namespace head is a storage-format object, and it is authoritative for
+the namespace-to-content-store relationship.
 
 ### 4.1 Durable envelope layout
 
@@ -1276,7 +1452,7 @@ Two rules make these envelopes evolvable:
 | Grep manifest | `grep_manifest` | JSON, uncompressed | `v1` |
 | Grep segment | none (section 4.2.2) | block sections, per-block zstd + CRC32C | `v1` (via the grep manifest) |
 | Namespace manifest | `namespace_manifest` | JSON, uncompressed | 1 |
-| Control objects (head, descriptors, roots, floors) | per-kind snake_case names | JSON, uncompressed | 1 (tracked per kind) |
+| Control objects (head, metadata root, WAL floor) | per-kind snake_case names | JSON, uncompressed | 1 (tracked per kind) |
 | Checkpoint record | `checkpoint_record` | JSON, uncompressed | 1 |
 | Upload session | `upload_session` | JSON, uncompressed | 1 |
 
@@ -1532,10 +1708,12 @@ maintenance step that requested it).
 
 Delete is tombstone-first. Garbage collection is the separate process that
 eventually reclaims content or metadata that is no longer reachable and no
-longer protected by retention policy. GC, floor advancement, and explicit
-namespace repair are the only consumers of listing, and nothing sweeps by
-default: a pass runs only through the admin endpoint or an explicit
-maintenance-step opt-in.
+longer protected by retention policy. GC and floor advancement are the only
+consumers of listing, and nothing sweeps by default: a pass runs only through
+the admin endpoint or an explicit maintenance-step opt-in.
+
+A pass reads the namespace head first. An absent head means the namespace
+does not exist, so there is nothing to collect and nothing to ignore.
 
 v1 GC is listing mark-and-sweep. Its inputs are `wal/head.json`,
 `wal/floor.json`, `metadata/root.json`, and the `metadata/manifests/`,
@@ -1592,12 +1770,16 @@ publishing CAS) — under these rules:
 4. Roots: `metadata/root.json`; active, non-expired checkpoint records whose
    owner still stands (a fork-owned record stops rooting once its target is
    provably gone); and the visible chain from
-   `wal/head.json.visible_wal_tip` down to the floor. On a terminally
+   `wal/head.json.visible_wal_tip` down to the floor. A namespace with no
+   root of its own has no manifest or table to protect under its own prefix;
+   its basis, if it has a foreign one, is protected on the source side by
+   the fork-owned checkpoint record. On a terminally
    deleted namespace the root set shrinks to fork-owned records protecting
    a live target (and their bases): reads are impossible and the tombstone
    is immutable, so user pins, the final replay chain, and the last
-   manifest protect nothing and age out. The head, descriptor, root, and
-   floor objects survive as the id-retiring tombstone.
+   manifest protect nothing and age out. The head survives as the
+   id-retiring tombstone, together with the root and floor objects if the
+   namespace ever wrote them.
 5. Missing, corrupt, or ambiguous roots cause retention, not deletion — an
    unreadable checkpoint record suppresses manifest and table deletion for
    the whole pass.
@@ -1615,21 +1797,14 @@ publishing CAS) — under these rules:
    recreate identical, still-unreferenced bytes for a later pass. Content-blob
    GC remains unsupported in v0, but the same immutability argument governs a
    future sweep.
-10. **Incomplete namespaces and abandoned forks.** Core GC ignores a namespace
-   without a complete head-and-descriptor pair: it performs no listing or
-   deletion and reports that the incomplete namespace was ignored. Explicit
-   per-namespace repair first attempts guarded create/fork completion, then
-   may reap a non-completable tree whose newest object is older than the
-   derived safety floor `T`. It conditionally swaps the WAL head — the first
-   fixed-key conditional install admission write and thus the true gate — to
-   `condemned` under the etag it inspected (or creates that condemned gate if
-   pre-head debris has no head). A conflict reports `in_flight`; success
-   permits unconditional subtree deletion with the condemned head last.
-   Younger debris is reported as `in_flight` without condemnation.
-   A fork-owned checkpoint record whose target tree is completely gone remains
-   GC-owned and is released under the reap window `R` (`R >= T`): the record
-   must be older than `R`, since a live fork retry freshens it before writing
-   any target object.
+10. **Abandoned forks.** A fork that crashes after freshening its source
+   checkpoint record but before installing its target head leaves that
+   record with no target at all. Such a record remains GC-owned and is
+   released under the reap window `R` (`R >= T`): the record must be older
+   than `R`, since a live fork retry freshens it before writing the target
+   head. This is the only debris an interrupted install can leave, and it
+   lives on the source, never under the target's prefix — the target either
+   has a complete head or has nothing.
 
 Deletion proceeds data first, records last, so a crash mid-sweep leaves
 orphaned data for the next pass rather than a record whose data vanished.

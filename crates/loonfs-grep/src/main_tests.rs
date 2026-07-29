@@ -245,21 +245,19 @@ async fn assert_searchable(store: &SharedObjectStore, namespace_id: &NamespaceId
         .writer_id("standalone-poll-query")
         .build()
         .expect("query engine");
-    let (head, root) = load_namespace_read_anchor(&**store, namespace_id)
+    let (head, basis) = load_namespace_read_anchor(&**store, namespace_id)
         .await
         .expect("load read anchor");
     let context = RuntimeReadContext {
         head: head.state,
         head_etag: head.identity.etag,
-        manifest_id: root.state.manifest_id,
-        manifest_object_id: root.state.manifest_object_id,
+        basis,
         table_cache: Arc::new(MetadataTableCache::new(MetadataTableCacheConfig::default())),
         tail_cache: Arc::new(WalTailProjectionCache::new(WalTailProjectionCacheConfig {
             max_entries: 4,
             max_rows: DEFAULT_WAL_TAIL_PROJECTION_ROWS,
             max_decoded_bytes: DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES,
         })),
-        catalog: None,
     };
     let view = engine
         .load_grep_view(&context)

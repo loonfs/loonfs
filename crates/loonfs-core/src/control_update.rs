@@ -279,7 +279,11 @@ mod tests {
         let envelope = HeadStateEnvelope::from_state(
             ControlObjectKind::WalHead,
             WRITER_VERSION,
-            HeadState::initial(namespace_id.clone()),
+            HeadState::initial(
+                namespace_id.clone(),
+                loonfs_api::ContentStoreId::generate(),
+                loonfs_api::NamePolicy::default(),
+            ),
         )
         .expect("head envelope");
         let bytes = encode_control_object(&envelope).expect("head bytes");

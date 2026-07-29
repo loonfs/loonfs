@@ -41,21 +41,19 @@ fn request(pattern: &str) -> GrepRequest {
 }
 
 async fn read_context(store: &SharedObjectStore, namespace_id: &NamespaceId) -> RuntimeReadContext {
-    let (head, root) = load_namespace_read_anchor(&**store, namespace_id)
+    let (head, basis) = load_namespace_read_anchor(&**store, namespace_id)
         .await
         .expect("load read anchor");
     RuntimeReadContext {
         head: head.state,
         head_etag: head.identity.etag,
-        manifest_id: root.state.manifest_id,
-        manifest_object_id: root.state.manifest_object_id,
+        basis,
         table_cache: Arc::new(MetadataTableCache::new(MetadataTableCacheConfig::default())),
         tail_cache: Arc::new(WalTailProjectionCache::new(WalTailProjectionCacheConfig {
             max_entries: 4,
             max_rows: DEFAULT_WAL_TAIL_PROJECTION_ROWS,
             max_decoded_bytes: DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES,
         })),
-        catalog: None,
     }
 }
 
@@ -274,9 +272,12 @@ async fn planless_scan_returns_exact_materialized_and_wal_boundary_revisions_onc
         .flush_wal(&fixture.namespace_id)
         .await
         .expect("flush materialized commit");
-    let (_, materialized_root) = load_namespace_read_anchor(&*fixture.store, &fixture.namespace_id)
-        .await
-        .expect("load materialized root");
+    let materialized_root = loonfs_core::control::load_namespace_metadata_root_control(
+        &*fixture.store,
+        &fixture.namespace_id,
+    )
+    .await
+    .expect("load materialized root");
     assert_eq!(
         materialized_root.state.manifest_head_seq,
         materialized_head.state.seq
@@ -292,9 +293,15 @@ async fn planless_scan_returns_exact_materialized_and_wal_boundary_revisions_onc
         )
         .await
         .expect("write WAL-only file");
-    let (head, root) = load_namespace_read_anchor(&*fixture.store, &fixture.namespace_id)
+    let (head, _basis) = load_namespace_read_anchor(&*fixture.store, &fixture.namespace_id)
         .await
         .expect("load boundary");
+    let root = loonfs_core::control::load_namespace_metadata_root_control(
+        &*fixture.store,
+        &fixture.namespace_id,
+    )
+    .await
+    .expect("load boundary root");
     assert_eq!(root.state.manifest_head_seq, materialized_head.state.seq);
     assert_eq!(
         head.state.seq.0,

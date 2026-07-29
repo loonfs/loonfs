@@ -6,8 +6,7 @@ use loonfs_api::ManifestObjectId;
 use loonfs_objectstore::abs::{AzureAbsStore, AzureAbsStoreConfig};
 use loonfs_objectstore::gcs::{GcpGcsStore, GcpGcsStoreConfig};
 use loonfs_objectstore::keys::{
-    content_blob, content_store_descriptor, metadata_manifest_object, metadata_table,
-    namespace_config, upload_session, wal_head, wal_segment,
+    content_blob, metadata_manifest_object, metadata_table, upload_session, wal_head, wal_segment,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::s3_compatible::{
@@ -28,12 +27,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
 fn key_builders_cover_locked_object_families() {
-    assert_eq!(namespace_config("ns-1"), "namespaces/ns-1/namespace.json");
     assert_eq!(wal_head("ns-1"), "namespaces/ns-1/wal/head.json");
-    assert_eq!(
-        content_store_descriptor("cs_00000000000000000000000000000001"),
-        "content-stores/cs_00000000000000000000000000000001/descriptor.json"
-    );
     assert_eq!(
         content_blob(
             "cs_00000000000000000000000000000001",

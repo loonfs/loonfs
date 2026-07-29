@@ -30,7 +30,7 @@ use self::handlers_filesystem::{
 };
 use self::handlers_namespace::{
     create_checkpoint, create_namespace, delete_namespace, fork_namespace, maintenance_step,
-    namespace_status, release_checkpoint, repair_namespace,
+    namespace_status, release_checkpoint,
 };
 use self::handlers_query::{
     disable_grep_index, enable_grep_index, gc_grep_index, grep, grep_not_supported,
@@ -167,10 +167,6 @@ fn router(state: AppState) -> Router {
         .route(
             "/v0/admin/namespaces/:namespace/maintenance/step",
             post(maintenance_step),
-        )
-        .route(
-            "/v0/admin/namespaces/:namespace/repair",
-            post(repair_namespace),
         )
         // Unmatched paths and wrong methods answer inside the error
         // contract instead of axum's empty default bodies.

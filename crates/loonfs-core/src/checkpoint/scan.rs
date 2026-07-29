@@ -51,6 +51,28 @@ pub(crate) struct VerifiedMetadataTables<'a, S: ObjectStore + ?Sized> {
     pub(super) block_memo: SessionBlockMemo,
 }
 
+impl<'a, S: ObjectStore + ?Sized> VerifiedMetadataTables<'a, S> {
+    /// Wraps a manifest that was synthesized rather than loaded: the
+    /// genesis basis of a namespace that has published none. It names no
+    /// metadata files, so no scan it backs ever reaches the store, and its
+    /// object key is never read or written.
+    pub(crate) fn synthesized(store: &'a S, manifest: NamespaceManifestEnvelope) -> Self {
+        debug_assert!(
+            manifest.payload.metadata_files.is_empty(),
+            "a synthesized manifest must name no durable metadata files"
+        );
+        let scan_runs = Arc::new(Vec::new());
+        Self {
+            store,
+            table_cache: None,
+            manifest_object_key: String::new(),
+            manifest: Arc::new(manifest),
+            scan_runs,
+            block_memo: SessionBlockMemo::default(),
+        }
+    }
+}
+
 impl<S: ObjectStore + ?Sized> VerifiedMetadataTables<'_, S> {
     pub(crate) fn manifest(&self) -> &NamespaceManifestEnvelope {
         self.manifest.as_ref()
