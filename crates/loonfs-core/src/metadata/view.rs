@@ -160,6 +160,34 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         }
     }
 
+    /// A view of exactly one manifest's tables at the sequence they
+    /// materialize, with nothing layered over them.
+    ///
+    /// [`Self::from_loaded_head`] answers "the namespace as of its live
+    /// head" by replaying the WAL tail over a basis; this answers "the
+    /// namespace exactly as this manifest recorded it". Callers that pin an
+    /// immutable manifest — a checkpoint's basis — read through this, so no
+    /// row committed after the manifest can leak into the answer.
+    pub(crate) fn over_manifest_tables(
+        tables: &'a VerifiedMetadataTables<'store, S>,
+        materialized_seq: ChangeSeq,
+        name_policy: NamePolicy,
+    ) -> Self {
+        Self {
+            snapshot: MetadataSnapshot {
+                visible_seq: materialized_seq,
+                name_policy,
+            },
+            sources: MetadataSourceStack {
+                overlay: None,
+                wal_tail: None,
+                manifest: Some(tables),
+                in_memory_base: None,
+                durable_cache: None,
+            },
+        }
+    }
+
     pub(crate) fn name_policy(&self) -> NamePolicy {
         self.snapshot.name_policy
     }

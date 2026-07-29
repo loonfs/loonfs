@@ -405,11 +405,26 @@ pub mod lookup_keys {
     use super::hex_encode_row_key_component;
     use crate::{ChangeSeq, InodeId, RevisionNo};
 
+    /// The prefix every inode row key starts with. Inode ids are
+    /// zero-padded to a fixed width after it, so a range scan over this
+    /// prefix walks the inode family in ascending inode-id order.
+    ///
+    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
+    pub const INODE_ROW_PREFIX: &str = "inode-";
+
     /// Builds the exact point-lookup key for an inode row.
     ///
     /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
     pub fn inode_key(inode_id: InodeId) -> String {
-        format!("inode-{:020}", inode_id.0)
+        format!("{INODE_ROW_PREFIX}{:020}", inode_id.0)
+    }
+
+    /// Builds the resume bound for a scan that must continue strictly after
+    /// `inode_id`'s row.
+    ///
+    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
+    pub fn inode_key_after(inode_id: InodeId) -> String {
+        format!("{}\0", inode_key(inode_id))
     }
 
     /// Builds the range prefix selecting directory bindings under one parent.
@@ -695,6 +710,38 @@ mod tests {
         ChangeSeq, CommitId, InodeId, ManifestId, ManifestObjectId, MetadataTableId, NameKey,
         NamespaceId, WriterEpoch,
     };
+
+    #[test]
+    fn inode_row_keys_sort_by_ascending_inode_id() {
+        // The inode family's durable order IS ascending inode id, which is
+        // what lets a whole-namespace file walk resume from one bound.
+        let ids = [9_u64, 1, 100, 10, 2];
+        let key_of = |id: u64| super::lookup_keys::inode_key(InodeId(id));
+        let mut keys: Vec<String> = ids.iter().copied().map(key_of).collect();
+        keys.sort();
+
+        let mut ascending_ids = ids;
+        ascending_ids.sort_unstable();
+        assert_eq!(
+            keys,
+            ascending_ids
+                .iter()
+                .copied()
+                .map(key_of)
+                .collect::<Vec<_>>(),
+            "row-key order must agree with inode-id order"
+        );
+        assert!(keys
+            .iter()
+            .all(|key| key.starts_with(super::lookup_keys::INODE_ROW_PREFIX)));
+    }
+
+    #[test]
+    fn the_inode_resume_bound_skips_its_own_row_and_nothing_after_it() {
+        let resume = super::lookup_keys::inode_key_after(InodeId(7));
+        assert!(resume > super::lookup_keys::inode_key(InodeId(7)));
+        assert!(resume < super::lookup_keys::inode_key(InodeId(8)));
+    }
 
     #[test]
     fn namespace_manifest_kind_string_matches_serde() {

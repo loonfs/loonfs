@@ -827,7 +827,10 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
 /// Refuses a buffered content read whose resolved size exceeds the caller's
 /// budget. The check runs on metadata, before any content fetch, so an
 /// over-limit read costs no object-store traffic and allocates nothing.
-fn ensure_within_read_limit(size_bytes: u64, max_content_bytes: Option<u64>) -> Result<()> {
+pub(crate) fn ensure_within_read_limit(
+    size_bytes: u64,
+    max_content_bytes: Option<u64>,
+) -> Result<()> {
     match max_content_bytes {
         Some(max_bytes) if size_bytes > max_bytes => Err(CoreError::ContentTooLarge {
             size_bytes,

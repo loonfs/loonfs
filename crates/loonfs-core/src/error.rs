@@ -87,6 +87,10 @@ pub enum CoreError {
          this deployment buffers for one read"
     )]
     ContentTooLarge { size_bytes: u64, max_bytes: u64 },
+    /// A batch read asked for more items than one call answers. The caller
+    /// splits the batch; nothing was read.
+    #[error("asked for {requested} items, over the {max} one batch answers")]
+    BatchTooLarge { requested: usize, max: usize },
     #[error("expected file at `{path}` but found `{kind}`")]
     ExpectedFile { path: String, kind: InodeKind },
     #[error("expected directory at `{path}` but found `{kind}`")]
@@ -356,6 +360,7 @@ impl CoreError {
             | CoreError::InvalidQuery(_)
             | CoreError::InvalidUploadContent(_)
             | CoreError::InvalidCursor(_)
+            | CoreError::BatchTooLarge { .. }
             | CoreError::NonDirectoryPathComponent(_) => ErrorCode::InvalidRequest,
             CoreError::PathNotFound(_) => ErrorCode::PathNotFound,
             CoreError::RevisionNotFound { .. } => ErrorCode::RevisionNotFound,

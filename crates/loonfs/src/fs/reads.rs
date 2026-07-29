@@ -1,13 +1,15 @@
 //! [`FsReader`]'s read operations: stat, list, content, grep, revision
-//! reads, and the change feed.
+//! reads, the change feed, and the whole-namespace reads a consumer that
+//! derives its own data from the filesystem walks.
 
 use super::core::{default_page_limit, file_revisions_page_response};
 use crate::FsReader;
 use crate::Result;
 use crate::{
-    AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq, ChangesResponse, CoreError,
-    ListChangesOptions, ListFileRevisionsResponse, ListPathEntriesResponse, NamespaceId,
-    RevisionNo, RuntimeError,
+    AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq, ChangesResponse,
+    CheckpointFilesPage, CheckpointFilesPageCursor, CheckpointId, ContentRef, CoreError,
+    CurrentFileState, InodeId, ListChangesOptions, ListFileRevisionsResponse,
+    ListPathEntriesResponse, NamespaceId, RevisionNo, RuntimeError,
 };
 use loonfs_api::{
     encode_cursor, AbsolutePath, DirectoryPageCursor, FileRevisionsPageCursor, GrepRequest,
@@ -190,6 +192,79 @@ impl FsReader {
             .cache_stats
             .record_latest_metadata_view_read();
         Ok(response)
+    }
+
+    /// Reads one page of the files visible in the state a checkpoint pins,
+    /// in ascending inode-id order.
+    ///
+    /// The checkpoint's pinned manifest is the whole answer: no WAL is
+    /// replayed over it, so a commit landing mid-enumeration changes
+    /// nothing a consumer sees, and everything after
+    /// [`CheckpointFilesPage::checkpoint_seq`] is what
+    /// [`Self::list_changes`] reports. Directories are not returned.
+    ///
+    /// A checkpoint that was released, expired, or reaped answers
+    /// `checkpoint_unavailable`; the enumeration never silently falls back
+    /// to current state. A consumer that loses its checkpoint takes a new
+    /// one and starts over.
+    pub async fn list_checkpoint_files_page(
+        &self,
+        namespace_id: &NamespaceId,
+        checkpoint_id: &CheckpointId,
+        request: PageRequest<CheckpointFilesPageCursor>,
+    ) -> Result<CheckpointFilesPage> {
+        let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
+        Ok(engine
+            .list_checkpoint_files_page(checkpoint_id, request, &read_context)
+            .await?)
+    }
+
+    /// Answers, for each inode id, what it looks like right now: whether it
+    /// is visible, its current revision, and its current path.
+    ///
+    /// One pinned read serves the batch, so every answer describes the same
+    /// state, and answers come back in input order. Ids that name nothing
+    /// answer `visible: false` instead of failing — a consumer holding ids
+    /// from an earlier enumeration routinely holds stale ones. A directory
+    /// id answers visible with a path and no revision.
+    ///
+    /// At most [`MAX_RESOLVE_CURRENT_FILES`](crate::MAX_RESOLVE_CURRENT_FILES)
+    /// ids per call; a larger batch is refused with `invalid_request`
+    /// before anything is read.
+    pub async fn resolve_current_files(
+        &self,
+        namespace_id: &NamespaceId,
+        inode_ids: &[InodeId],
+    ) -> Result<Vec<CurrentFileState>> {
+        let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
+        let states = engine
+            .resolve_current_files(inode_ids, &read_context)
+            .await?;
+        self.core
+            .inner
+            .cache_stats
+            .record_latest_metadata_view_read();
+        Ok(states)
+    }
+
+    /// Reads one immutable content object by reference.
+    ///
+    /// `max_bytes` is this caller's own budget, checked against the
+    /// reference's declared size before any fetch, and deliberately
+    /// independent of the deployment's configured download limit — a
+    /// consumer that streams work through a fixed buffer says so here. The
+    /// fetched bytes are verified against the reference's size and digest,
+    /// and a mismatch fails the read.
+    pub async fn read_content_ref(
+        &self,
+        namespace_id: &NamespaceId,
+        content_ref: &ContentRef,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>> {
+        let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
+        Ok(engine
+            .read_content_ref(content_ref, max_bytes, &read_context)
+            .await?)
     }
 
     /// Lists one page of the namespace's recoverable deletions, ascending
