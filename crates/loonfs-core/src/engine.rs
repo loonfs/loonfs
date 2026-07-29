@@ -2,6 +2,7 @@
 //! uploads, checkpoints, and maintenance.
 
 use crate::cache::{MetadataTableCache, WalTailProjectionCache};
+use crate::checkpoint::{CheckpointFilesPage, CheckpointFilesPageCursor};
 use crate::commit_engine::NamespaceMutationCandidate;
 use crate::context::MutationContext;
 use crate::error::Result;
@@ -9,14 +10,16 @@ use crate::namespace::basis::MetadataBasis;
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::namespace::{bootstrap, fork, BootstrapNamespaceError};
 use crate::options::{BootstrapOptions, DeleteNamespaceOptions};
-use crate::path::read::{load_metadata_view, LoadedMetadataView, ReadLoadContext};
+use crate::path::read::{
+    load_metadata_view, CurrentFileState, LoadedMetadataView, ReadLoadContext,
+};
 use crate::storage::content_admission::PreparedContent;
 use loonfs_api::generated_id;
 use loonfs_api::v0::{
     BeginUploadRequest, BeginUploadResponse, ChangesResponse, CommitResponse,
     CompleteUploadRequest, CompleteUploadResponse, UploadContentResponse,
 };
-use loonfs_api::wire::control::{CheckpointOwner, HeadState};
+use loonfs_api::wire::control::{CheckpointOwner, HeadState, NamespaceState};
 use loonfs_api::EffectiveLimit;
 use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq,
@@ -250,6 +253,99 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     ) -> Result<Page<TrashEntry, TrashPageCursor>> {
         let view = self.load_read_view(context).await?;
         view.list_trash_page(request).await
+    }
+
+    /// Reads one page of the files visible in the state `checkpoint_id`
+    /// pins, in ascending inode-id order.
+    ///
+    /// The checkpoint's pinned manifest is the only state enumerated: the
+    /// context's own basis and WAL tail are deliberately not read, so a
+    /// commit landing while a consumer pages through changes nothing it
+    /// sees. Everything after the pinned sequence is the change feed's job.
+    /// The context supplies the namespace's immutable identity and proves
+    /// the namespace is still live.
+    pub async fn list_checkpoint_files_page(
+        &self,
+        checkpoint_id: &CheckpointId,
+        request: PageRequest<CheckpointFilesPageCursor>,
+        context: &RuntimeReadContext,
+    ) -> Result<CheckpointFilesPage> {
+        let catalog = self.live_catalog(context)?;
+        crate::checkpoint::list_checkpoint_files_page(
+            &self.store,
+            Some(context.table_cache.as_ref()),
+            &self.namespace_id,
+            checkpoint_id,
+            catalog.name_policy(),
+            current_time_ms()?,
+            request,
+        )
+        .await
+    }
+
+    /// Answers, for each inode id, what it looks like in the namespace's
+    /// current state: whether it is visible, its current revision, and its
+    /// current path.
+    ///
+    /// One pinned read serves the whole batch, so every answer describes the
+    /// same state, and answers come back in input order. Ids that name
+    /// nothing are answered as not visible rather than refused — a consumer
+    /// holding ids from an earlier enumeration routinely holds stale ones.
+    /// At most [`MAX_RESOLVE_CURRENT_FILES`](crate::MAX_RESOLVE_CURRENT_FILES)
+    /// ids per call; a larger batch is refused before anything is read.
+    pub async fn resolve_current_files(
+        &self,
+        inode_ids: &[InodeId],
+        context: &RuntimeReadContext,
+    ) -> Result<Vec<CurrentFileState>> {
+        crate::path::read::ensure_resolve_batch_within_cap(inode_ids.len())?;
+        let view = self.load_read_view(context).await?;
+        crate::path::read::resolve_current_files(&view, inode_ids).await
+    }
+
+    /// Reads one immutable content object by reference.
+    ///
+    /// `max_bytes` is the caller's own budget for this read, checked against
+    /// the reference's declared size before any fetch; it is independent of
+    /// any deployment-wide download limit, so a consumer sizes its own
+    /// buffers. After the fetch the bytes are verified against the
+    /// reference's size and digest, and a mismatch fails the read — there is
+    /// no partial answer and no second attempt against another key.
+    pub async fn read_content_ref(
+        &self,
+        content_ref: &ContentRef,
+        max_bytes: u64,
+        context: &RuntimeReadContext,
+    ) -> Result<Vec<u8>> {
+        let catalog = self.live_catalog(context)?;
+        crate::path::read::ensure_within_read_limit(content_ref.size_bytes, Some(max_bytes))?;
+        let read = crate::storage::content::read_durable_content_bytes(
+            &self.store,
+            catalog.content_store_id(),
+            content_ref,
+        )
+        .await?;
+        Ok(read.bytes)
+    }
+
+    /// The namespace's immutable identity, read off the pinned head after
+    /// refusing a head that is not this namespace's or that is a tombstone.
+    ///
+    /// Reads that load a metadata view get both checks from the view load;
+    /// this is for the reads that deliberately do not load one.
+    fn live_catalog(&self, context: &RuntimeReadContext) -> Result<VerifiedNamespaceCatalogEntry> {
+        if context.head.namespace_id != self.namespace_id {
+            return Err(crate::error::CoreError::NamespaceCorrupt(format!(
+                "head namespace `{}` does not match requested namespace `{}`",
+                context.head.namespace_id, self.namespace_id
+            )));
+        }
+        if context.head.state == NamespaceState::Deleted {
+            return Err(crate::error::CoreError::NamespaceDeleted {
+                namespace_id: self.namespace_id.clone(),
+            });
+        }
+        Ok(VerifiedNamespaceCatalogEntry::from_head(&context.head))
     }
 
     /// Lists one revision page for an inode against the pinned runtime read context.

@@ -115,7 +115,10 @@ pub mod publish {
     pub use crate::storage::content_admission::PreparedContent;
 }
 
-pub use checkpoint::{MetadataReorganizeOutcome, MetadataReorganizeReport};
+pub use checkpoint::{
+    CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor, MetadataReorganizeOutcome,
+    MetadataReorganizeReport,
+};
 pub use context::MutationContext;
 pub use engine::RuntimeReadContext;
 pub use engine::{BeginDirectPutUploadTargetResponse, DirectPutUploadTarget};
@@ -127,6 +130,7 @@ pub use error::{
 pub use gc::{gc_namespace, GcConfig};
 pub use namespace::BootstrapNamespaceError;
 pub use options::{BootstrapOptions, DeleteNamespaceOptions, WriteOptions};
+pub use path::read::{CurrentFileState, MAX_RESOLVE_CURRENT_FILES};
 pub use timing::{MonotonicTimer, StdMonotonicTimer};
 
 /// Concrete read-view types consumed by `loonfs-grep`.
