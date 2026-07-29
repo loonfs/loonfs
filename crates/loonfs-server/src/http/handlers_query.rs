@@ -13,7 +13,9 @@ use loonfs_api::v0::{
 use loonfs_api::ApiError;
 use loonfs_api::FEATURE_QUERY_GREP;
 use loonfs_grep::root::{load_grep_root, GrepLifecycle};
-use loonfs_grep::{GrepDisableOutcome, GrepEnableOutcome, GrepError};
+use loonfs_grep::{
+    GrepDisableOutcome, GrepEnableOutcome, GrepError, GrepIndexSnapshot, NamespaceReads,
+};
 
 const GREP_INDEX_FEATURE: &str = "grep.index";
 
@@ -47,11 +49,20 @@ pub(super) async fn grep(
 ) -> Result<Json<GrepResponse>, ApiResponseError> {
     let namespace_id = namespace.into_id()?;
     start_driver_for_query_if_needed(&state, &namespace_id).await;
-    let response = state
-        .reader
-        .grep(&namespace_id, &request)
+    let service = state
+        .grep_service
+        .as_ref()
+        .expect("grep routes should carry a grep service");
+    // Grep's own segments come off the instrumented store every LoonFS
+    // request in this process is measured on; its filesystem reads go
+    // through the same reader handle the core planes serve from.
+    let store = state.writer.object_store();
+    let reads = NamespaceReads::new(&state.reader, &namespace_id);
+    let snapshot = GrepIndexSnapshot::from_grep_root(&*store, &namespace_id, service).await;
+    let response = service
+        .query(&request, &snapshot, &reads, &store)
         .await
-        .map_err(|error| map_runtime_grep_error(&namespace_id, error))?;
+        .map_err(|error| map_grep_error(&namespace_id, error))?;
     Ok(Json(response))
 }
 
@@ -230,25 +241,13 @@ pub(super) async fn gc_grep_index(
     }))
 }
 
-fn map_runtime_grep_error(
-    namespace_id: &loonfs_api::NamespaceId,
-    error: loonfs::RuntimeError,
-) -> ApiResponseError {
-    match error {
-        loonfs::RuntimeError::Grep(error) => map_grep_error(namespace_id, error),
-        error => ApiResponseError::runtime_for_namespace(namespace_id, error),
-    }
-}
-
 fn map_grep_error(namespace_id: &loonfs_api::NamespaceId, error: GrepError) -> ApiResponseError {
     let code = error.code();
     match error {
         error @ (GrepError::NotEnabled | GrepError::Backfilling) => {
             ApiResponseError::not_supported(GREP_INDEX_FEATURE, &error.to_string())
         }
-        GrepError::Core(error) => {
-            ApiResponseError::runtime_for_namespace(namespace_id, loonfs::RuntimeError::Core(error))
-        }
+        GrepError::Runtime(error) => ApiResponseError::runtime_for_namespace(namespace_id, error),
         error => ApiResponseError::new(status_for_core_error_code(code), code, &error.to_string()),
     }
 }

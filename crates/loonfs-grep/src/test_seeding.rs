@@ -1,60 +1,51 @@
-use loonfs_api::{AbsolutePath, CommitId, DestinationBehavior, NamespaceId};
-use loonfs_core::content::{prepare_stored_content, store_bytes_as_content};
-use loonfs_core::publish::{NamespaceMutationCandidate, PathMutationIntent};
-use loonfs_core::{BootstrapOptions, NamespaceEngine};
-use loonfs_objectstore::ObjectStore;
+//! Namespace seeding for the standalone binary's own tests, through the
+//! same public writer any embedded host uses.
 
-pub(crate) async fn bootstrap<S: ObjectStore + Clone>(
-    store: S,
+use loonfs::{
+    CreateNamespaceOptions, DestinationBehavior, FsWriter, PutFileOptions, SharedObjectStore,
+};
+use loonfs_api::{CommitId, NamespaceId};
+
+pub(crate) async fn writer(
+    store: SharedObjectStore,
     namespace_id: &NamespaceId,
     writer_id: String,
-    writer_session_id: String,
     writer_version: &str,
-) -> NamespaceEngine<S> {
-    let engine = NamespaceEngine::builder(store)
-        .namespace_id(namespace_id.clone())
+) -> FsWriter {
+    let writer = FsWriter::builder_with_store(store)
         .writer_id(writer_id)
-        .writer_session_id(writer_session_id)
         .writer_version(writer_version)
+        // A seeded namespace is published one file at a time and read back
+        // immediately, so the commit window only adds delay.
+        .min_publish_interval_ms(0)
         .build()
-        .expect("engine");
-    engine
-        .bootstrap_namespace(BootstrapOptions::default())
         .await
-        .expect("bootstrap namespace");
-    engine
+        .expect("build seeding writer");
+    writer
+        .create_namespace(namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
+    writer
 }
 
-pub(crate) async fn put_file<S: ObjectStore + Clone>(
-    store: &S,
-    engine: &NamespaceEngine<S>,
+pub(crate) async fn put_file(
+    writer: &FsWriter,
     namespace_id: &NamespaceId,
     bytes: &'static [u8],
     path: &str,
     commit_id: &str,
 ) {
-    let stored = store_bytes_as_content(store, namespace_id, bytes)
-        .await
-        .expect("store content");
-    let content_ref = stored.content_ref.clone();
-    let catalog = loonfs_core::control::load_namespace_catalog_entry(store, namespace_id)
-        .await
-        .expect("load namespace catalog");
-    let prepared = prepare_stored_content(&catalog, stored).expect("prepare stored content");
-    engine
-        .publish_namespace_mutations_batch(vec![NamespaceMutationCandidate::path_prepared(
-            PathMutationIntent::PutFile {
-                commit_id: CommitId::parse(commit_id).expect("commit id"),
-                message: None,
-                absolute_path: AbsolutePath::parse(path).expect("path"),
-                content_ref,
+    writer
+        .put_file_bytes(
+            namespace_id,
+            path,
+            bytes,
+            PutFileOptions {
+                commit_id: Some(CommitId::parse(commit_id).expect("commit id")),
                 behavior: DestinationBehavior::NoReplace,
-                expected_revision_no: None,
+                ..PutFileOptions::default()
             },
-            vec![prepared],
-        )])
+        )
         .await
-        .pop()
-        .expect("one result")
         .expect("publish file");
 }

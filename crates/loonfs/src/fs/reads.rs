@@ -1,6 +1,6 @@
-//! [`FsReader`]'s read operations: stat, list, content, grep, revision
-//! reads, the change feed, and the whole-namespace reads a consumer that
-//! derives its own data from the filesystem walks.
+//! [`FsReader`]'s read operations: stat, list, content, revision reads, the
+//! change feed, and the whole-namespace reads a consumer that derives its
+//! own data from the filesystem walks.
 
 use super::core::{default_page_limit, file_revisions_page_response};
 use crate::FsReader;
@@ -12,10 +12,9 @@ use crate::{
     ListPathEntriesResponse, NamespaceId, RevisionNo, RuntimeError,
 };
 use loonfs_api::{
-    encode_cursor, AbsolutePath, DirectoryPageCursor, FileRevisionsPageCursor, GrepRequest,
-    GrepResponse, PageRequest, PaginationPolicy,
+    encode_cursor, AbsolutePath, DirectoryPageCursor, FileRevisionsPageCursor, PageRequest,
+    PaginationPolicy,
 };
-use loonfs_grep::{GrepIndexSnapshot, NamespaceReads};
 
 impl FsReader {
     /// Resolves an absolute path to its authoritative entry at the current
@@ -165,35 +164,6 @@ impl FsReader {
             .cache_stats
             .record_latest_metadata_view_read();
         Ok(read)
-    }
-
-    /// Content search over the namespace's grep index.
-    pub async fn grep(
-        &self,
-        namespace_id: &NamespaceId,
-        request: &GrepRequest,
-    ) -> Result<GrepResponse> {
-        let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
-        // Grep runs its filesystem reads through this request's own pinned
-        // snapshot, so the query shares the caches every other read uses.
-        let reads = NamespaceReads::pinned(&engine, read_context);
-        let snapshot = GrepIndexSnapshot::from_grep_root(
-            self.core.store(),
-            namespace_id,
-            &self.core.inner.grep_service,
-        )
-        .await;
-        let response = self
-            .core
-            .inner
-            .grep_service
-            .query(request, &snapshot, &reads, &self.core.inner.store)
-            .await?;
-        self.core
-            .inner
-            .cache_stats
-            .record_latest_metadata_view_read();
-        Ok(response)
     }
 
     /// Reads one page of the files visible in the state a checkpoint pins,

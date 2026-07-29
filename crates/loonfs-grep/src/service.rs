@@ -16,6 +16,7 @@ use crate::root::{
 };
 use crate::{GrepError, Result};
 use futures::future::{join_all, try_join_all};
+use loonfs::{CoreError, CurrentFileState, MetadataViewError};
 use loonfs_api::wire::hex::hex_decode_bytes;
 use loonfs_api::wire::sst_blocks::{
     decode_filter_block, index_blocks_for_key_range, string_prefix_upper_bound, BlockHandle,
@@ -25,7 +26,6 @@ use loonfs_api::{
     GrepMatch, GrepPageCursor, GrepRequest, GrepResponse, InodeId, InodeKind, NamespaceId,
     RevisionNo,
 };
-use loonfs_core::{CurrentFileState, Error as CoreError, MetadataViewError};
 use loonfs_objectstore::ObjectStore;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
@@ -470,10 +470,7 @@ async fn segment_postings_for_gram<S: ObjectStore + ?Sized>(
 /// Paging stops as soon as the tail exceeds the query's tail budget: past
 /// that the query either fails as lagging or serves the index's cut, and
 /// neither needs the rest of the feed enumerated.
-async fn tail_revisions<S: ObjectStore>(
-    reads: &NamespaceReads<'_, S>,
-    resume: ChangeFeedResume,
-) -> Result<TailScan> {
+async fn tail_revisions(reads: &NamespaceReads<'_>, resume: ChangeFeedResume) -> Result<TailScan> {
     let mut inodes = BTreeSet::new();
     let mut after_seq = resume.after_seq();
     loop {
@@ -635,8 +632,8 @@ enum CandidateContent {
 /// path walked up from an inode is only a match's path if walking back down
 /// reaches the same inode. It also supplies the content reference, so the
 /// oversized skip stays a decision on declared size, before any fetch.
-async fn candidate_content<S: ObjectStore>(
-    reads: &NamespaceReads<'_, S>,
+async fn candidate_content(
+    reads: &NamespaceReads<'_>,
     candidate: &GrepContentCandidate,
 ) -> CandidateContent {
     let entry = match reads.resolve_path(&candidate.path).await {
@@ -683,10 +680,10 @@ impl GrepService {
         &self,
         request: &GrepRequest,
         snapshot: &GrepIndexSnapshot,
-        reads: &NamespaceReads<'_, S>,
+        reads: &NamespaceReads<'_>,
         store: &S,
     ) -> Result<GrepResponse> {
-        let head_seq = reads.head_seq();
+        let head_seq = reads.head_seq().await?;
         let limit = match request.limit {
             None => DEFAULT_GREP_PAGE_LIMIT,
             Some(0) => {
@@ -1028,8 +1025,8 @@ impl GrepService {
 /// bounds directories as well as files: a namespace deep enough to exhaust
 /// it is past what a plan-less query serves either way, and the count is
 /// also what stops a walk if bindings ever formed a cycle.
-async fn scan_candidate_inodes<S: ObjectStore>(
-    reads: &NamespaceReads<'_, S>,
+async fn scan_candidate_inodes(
+    reads: &NamespaceReads<'_>,
     scope: &Option<AuthoritativePathEntry>,
 ) -> Result<BTreeSet<InodeId>> {
     let mut inodes = BTreeSet::new();

@@ -1,8 +1,8 @@
 //! The explicitly assigned `loonfs-grep` per-namespace maintenance binary.
 
 use clap::Parser;
+use loonfs::{FsAdmin, FsReader, ListChangesOptions};
 use loonfs_api::{ChangeSeq, EffectiveLimit, ErrorCode, NamespaceId};
-use loonfs_core::NamespaceEngine;
 use loonfs_grep::root::{load_grep_root, GrepLifecycle};
 use loonfs_grep::{
     GrepDriver, GrepDriverParked, GrepDriverState, GrepDriverTask, GrepStepLimiter, GrepWorker,
@@ -76,8 +76,10 @@ enum StandaloneError {
     StoreConfig(#[from] loonfs_objectstore::StoreConfigError),
     #[error("failed to open configured store: {0}")]
     OpenStore(#[from] loonfs_objectstore::ObjectStoreError),
-    #[error("grep maintenance failed: {0}")]
-    Maintenance(#[from] loonfs_core::Error),
+    #[error("failed to open the LoonFS runtime: {0}")]
+    Runtime(#[from] loonfs::RuntimeError),
+    #[error("system clock before unix epoch: {0}")]
+    Clock(String),
     #[error("grep operation failed: {0}")]
     Grep(#[from] loonfs_grep::GrepError),
     #[error("grep driver for namespace `{namespace_id}` stopped before parking")]
@@ -133,12 +135,16 @@ async fn run() -> Result<(), StandaloneError> {
     let step_limit = config.grep.concurrent_step_limit()?;
     let build_policy = config.grep.build_policy()?;
     let store = Arc::new(config.store.configured_object_store()?) as SharedObjectStore;
-    let worker = GrepWorker::new(
-        store.clone(),
-        "loonfs-grep",
-        loonfs_api::generated_id("wrs"),
-        format!("loonfs-grep/{}", env!("CARGO_PKG_VERSION")),
-    );
+    // One process, one provider client: the runtime handles grep reads and
+    // checkpoints through share the client grep writes its own keyspace with.
+    let writer_version = format!("loonfs-grep/{}", env!("CARGO_PKG_VERSION"));
+    let reader = FsReader::builder_with_store(store.clone()).build().await?;
+    let admin = FsAdmin::builder_with_store(store.clone())
+        .actor_id("loonfs-grep")
+        .actor_version(writer_version.clone())
+        .build()
+        .await?;
+    let worker = GrepWorker::new(store.clone(), reader.clone(), admin, writer_version);
     let namespace_ids: BTreeSet<_> = args.namespace.into_iter().collect();
 
     if args.gc {
@@ -170,6 +176,7 @@ async fn run() -> Result<(), StandaloneError> {
     for (namespace_id, driver) in &drivers {
         poll_tasks.push(runtime.spawn(poll_namespace(
             store.clone(),
+            reader.clone(),
             namespace_id.clone(),
             driver.handle(),
             Duration::from_millis(config.poll_interval_ms),
@@ -237,6 +244,7 @@ async fn shutdown_drivers(
 
 async fn poll_namespace(
     store: SharedObjectStore,
+    reader: FsReader,
     namespace_id: NamespaceId,
     driver: loonfs_grep::GrepDriverHandle,
     poll_interval: Duration,
@@ -249,7 +257,7 @@ async fn poll_namespace(
             _ = interval.tick() => {
                 let should_nudge = match driver.state() {
                     GrepDriverState::Parked(GrepDriverParked::CaughtUp { built_through_seq }) => {
-                        has_changes_after(&store, &namespace_id, built_through_seq).await
+                        has_changes_after(&reader, &namespace_id, built_through_seq).await
                     }
                     GrepDriverState::Parked(GrepDriverParked::NotEnabled) => {
                         // Assigned namespaces are an explicit, small operator-chosen set,
@@ -292,28 +300,18 @@ async fn poll_namespace(
 /// commit is enough to know there is work — so the poller reads what it acts
 /// on instead of comparing sequence numbers off a control object.
 async fn has_changes_after(
-    store: &SharedObjectStore,
+    reader: &FsReader,
     namespace_id: &NamespaceId,
     built_through_seq: ChangeSeq,
 ) -> bool {
-    let engine = match NamespaceEngine::builder(store.clone())
-        .namespace_id(namespace_id.clone())
-        .build_reader()
-    {
-        Ok(engine) => engine,
-        Err(error) => {
-            tracing::warn!(
-                namespace_id = %namespace_id,
-                phase = "grep_namespace_poll",
-                result = "error",
-                error = %error,
-                "grep namespace poll could not build a reader"
-            );
-            return false;
-        }
-    };
-    match engine
-        .list_changes_after(built_through_seq, one_change())
+    match reader
+        .list_changes(
+            namespace_id,
+            built_through_seq,
+            ListChangesOptions {
+                limit: Some(one_change()),
+            },
+        )
         .await
     {
         Ok(changes) => !changes.changes.is_empty(),
@@ -364,7 +362,7 @@ const fn default_poll_interval_ms() -> u64 {
 
 fn init_tracing() -> Result<(), StandaloneError> {
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("loonfs_grep=info,loonfs_core=info"));
+        .unwrap_or_else(|_| EnvFilter::new("loonfs_grep=info,loonfs=info"));
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
@@ -394,14 +392,12 @@ async fn shutdown_signal() {
 }
 
 #[allow(clippy::disallowed_methods)]
-fn current_time_ms() -> Result<u64, loonfs_core::Error> {
+fn current_time_ms() -> Result<u64, StandaloneError> {
     // Standalone explicit GC enters wall time at the command boundary; durable replay stays deterministic.
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_millis() as u64)
-        .map_err(|error| {
-            loonfs_core::Error::Internal(format!("system clock before unix epoch: {error}"))
-        })
+        .map_err(|error| StandaloneError::Clock(error.to_string()))
 }
 
 #[cfg(test)]

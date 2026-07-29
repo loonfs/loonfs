@@ -16,8 +16,8 @@ path = "src/main.rs"
 bytes.workspace = true
 clap.workspace = true
 futures.workspace = true
+loonfs = { path = "../loonfs" }
 loonfs-api = { path = "../loonfs-api" }
-loonfs-core = { path = "../loonfs-core" }
 loonfs-objectstore = { path = "../loonfs-objectstore" }
 regex.workspace = true
 regex-syntax.workspace = true

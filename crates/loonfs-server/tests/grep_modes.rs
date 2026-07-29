@@ -5,11 +5,12 @@ use axum::body::{to_bytes, Body};
 use axum::http::{Method, Request, StatusCode};
 use axum::Router;
 use loonfs::{CreateNamespaceOptions, FsWriter, PutFileOptions};
+use loonfs::{FsAdmin, FsReader};
 use loonfs_api::v0::GrepGcResponse;
 use loonfs_api::{
     ApiError, CapabilityDocument, GrepRequest, GrepResponse, NamespaceId, FEATURE_QUERY_GREP,
-    LIMIT_QUERY_GREP_DEFAULT, LIMIT_QUERY_GREP_MAX, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES,
-    LIMIT_QUERY_GREP_TAIL_BUDGET_FILES,
+    FEATURE_UPLOADS_DIRECT_PUT, LIMIT_QUERY_GREP_DEFAULT, LIMIT_QUERY_GREP_MAX,
+    LIMIT_QUERY_GREP_SCAN_BUDGET_FILES, LIMIT_QUERY_GREP_TAIL_BUDGET_FILES, PROFILE_QUERY_V0,
 };
 use loonfs_grep::root::{load_grep_root, GrepLifecycle};
 use loonfs_grep::{GramIndexBuildPolicy, GrepBuildOutcome, GrepDriverParked, GrepWorker};
@@ -36,6 +37,11 @@ async fn disabled_mode_returns_not_supported_and_omits_grep_capabilities() {
     let capabilities: CapabilityDocument =
         response_json(send(&router, Method::GET, "/v0/capabilities", None).await).await;
     assert!(!capabilities.features.contains_key(FEATURE_QUERY_GREP));
+    assert!(
+        !capabilities.profiles.iter().any(|p| p == PROFILE_QUERY_V0),
+        "a deployment that answers `not_supported` on every query route must not advertise \
+         the plane"
+    );
     for limit in grep_limits() {
         assert!(!capabilities.limits.contains_key(limit));
     }
@@ -83,9 +89,11 @@ async fn embedded_mode_enable_query_nudge_disable_and_reenable_are_per_namespace
     let capabilities: CapabilityDocument =
         response_json(send(&router, Method::GET, "/v0/capabilities", None).await).await;
     assert!(capabilities.supports(FEATURE_QUERY_GREP));
+    assert!(capabilities.profiles.iter().any(|p| p == PROFILE_QUERY_V0));
     for limit in grep_limits() {
         assert!(capabilities.limits.contains_key(limit));
     }
+    assert_served_document_covers_the_spec_example(&capabilities);
 
     let response = grep(&router, &namespace_id, "automatic needle").await;
     assert_eq!(response.matches.len(), 1);
@@ -172,12 +180,7 @@ async fn first_query_after_restart_resumes_stale_and_mid_backfill_namespaces() {
             .expect("write backfill file");
     }
 
-    let worker = GrepWorker::new(
-        store.clone(),
-        "restart-worker",
-        "restart-worker-session",
-        "restart-worker/0.1",
-    );
+    let worker = grep_worker(&store, "restart-worker").await;
     worker.enable(&stale).await.expect("enable stale namespace");
     drive_worker_to_current(&worker, &stale, GramIndexBuildPolicy::default()).await;
     writer
@@ -286,12 +289,7 @@ async fn serve_only_mode_requires_an_external_worker_to_advance_the_watermark() 
         GrepLifecycle::Backfilling { .. }
     ));
 
-    let worker = GrepWorker::new(
-        store,
-        "external-grep-worker",
-        "external-grep-worker-session",
-        "external-grep-worker/0.1",
-    );
+    let worker = grep_worker(&store, "external-grep-worker").await;
     drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
 
     let response = grep(&router, &namespace_id, "external needle").await;
@@ -448,6 +446,74 @@ async fn response_json<T: DeserializeOwned>(response: axum::response::Response) 
         .await
         .expect("read response body");
     serde_json::from_slice(&bytes).expect("decode response JSON")
+}
+
+const API_SPEC_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/specs/api.md");
+
+/// A grep worker over the same handles the server composes.
+async fn grep_worker(store: &SharedObjectStore, actor: &str) -> GrepWorker<SharedObjectStore> {
+    let version = format!("{actor}/0.1");
+    let reader = FsReader::builder_with_store(store.clone())
+        .build()
+        .await
+        .expect("build reader");
+    let admin = FsAdmin::builder_with_store(store.clone())
+        .actor_id(actor)
+        .actor_version(version.clone())
+        .build()
+        .await
+        .expect("build admin");
+    GrepWorker::new(store.clone(), reader, admin, version)
+}
+
+/// The api.md section 2.1 example describes a reference deployment: the
+/// runtime's core and admin planes plus the query plane the server composes
+/// from `loonfs-grep`. `loonfs`'s `capability_conformance` pins the
+/// runtime's half; this pins the merged document a served deployment
+/// answers with. A deployment adds its own limits on top, so the example is
+/// a subset rather than an equality.
+fn assert_served_document_covers_the_spec_example(served: &CapabilityDocument) {
+    let spec = std::fs::read_to_string(API_SPEC_PATH).expect("read docs/specs/api.md");
+    let example = spec
+        .split("### 2.1")
+        .nth(1)
+        .expect("api.md section 2.1")
+        .split("### 2.2")
+        .next()
+        .expect("section end")
+        .split("```json")
+        .nth(1)
+        .expect("capability example block")
+        .split("```")
+        .next()
+        .expect("fenced block end");
+    let mut expected: CapabilityDocument =
+        serde_json::from_str(example).expect("spec capability example parses");
+    // Direct put is a property of the configured store, not of what this
+    // process composes: a store that cannot presign has the key removed
+    // rather than advertised `false`. This deployment's local-fs store
+    // cannot, so the key is out of scope for this comparison.
+    let mut served_features = served.features.clone();
+    expected.features.remove(FEATURE_UPLOADS_DIRECT_PUT);
+    served_features.remove(FEATURE_UPLOADS_DIRECT_PUT);
+
+    served.validate().expect("served document is well-formed");
+    assert_eq!(served.protocol_version, expected.protocol_version);
+    assert_eq!(
+        served.profiles, expected.profiles,
+        "the served profiles drifted from the api.md section 2.1 example"
+    );
+    assert_eq!(
+        served_features, expected.features,
+        "the served features drifted from the api.md section 2.1 example"
+    );
+    for (limit, value) in &expected.limits {
+        assert_eq!(
+            served.limits.get(limit),
+            Some(value),
+            "the served `{limit}` limit drifted from the api.md section 2.1 example"
+        );
+    }
 }
 
 fn grep_limits() -> [&'static str; 4] {

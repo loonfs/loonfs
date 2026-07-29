@@ -1,99 +1,69 @@
-//! Every filesystem read grep performs, pinned to one namespace snapshot.
+//! Every filesystem read grep performs, as calls on a runtime read handle.
 //!
 //! Grep owns an index, not a filesystem: it learns what to index from the
 //! checkpointed file enumeration and the semantic change feed, and it
 //! verifies query candidates against current state — resolving inodes,
 //! paths, directories, and content by reference. Every one of those is a
-//! supported read any consumer could make, and this module is the one place
-//! grep calls them, so the surface it depends on stays countable.
+//! published [`FsReader`] operation any consumer could call, and this module
+//! is the one place grep calls them, so the surface it depends on stays
+//! countable.
 //!
 //! Reads of grep's own durable state (segments, manifests, the root
 //! pointer, all under `namespaces/{namespace}/extensions/grep/`) do not come
 //! through here: that keyspace is grep's, and it reads it directly.
-//!
-//! Pinning is the one thing this module does that a consumer of the runtime
-//! handles would not: a detached worker has no request to borrow a snapshot
-//! from, so [`NamespaceReads::pin`] takes its own read anchor.
 
 use crate::{GrepError, Result};
+use loonfs::{
+    CheckpointFilesPage, CheckpointFilesPageCursor, CoreError, CurrentFileState, FsReader,
+    ListChangesOptions, MAX_RESOLVE_CURRENT_FILES,
+};
 use loonfs_api::v0::{ChangesResponse, FilesystemChange};
 use loonfs_api::{
-    AbsolutePath, AuthoritativePathEntry, ChangeSeq, CheckpointId, ContentRef, DirectoryPageCursor,
-    EffectiveLimit, InodeId, NamespaceId, Page, PageRequest, RevisionNo, DEFAULT_MAX_PAGE_LIMIT,
+    decode_cursor, AbsolutePath, AuthoritativePathEntry, ChangeSeq, CheckpointId, ContentRef,
+    DirectoryPageCursor, EffectiveLimit, InodeId, NamespaceId, Page, PageRequest, RevisionNo,
+    DEFAULT_MAX_PAGE_LIMIT,
 };
-use loonfs_core::cache::{
-    MetadataTableCache, MetadataTableCacheConfig, WalTailProjectionCache,
-    WalTailProjectionCacheConfig, DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES,
-    DEFAULT_WAL_TAIL_PROJECTION_ROWS,
-};
-use loonfs_core::control::load_namespace_read_anchor;
-use loonfs_core::{
-    CheckpointFilesPage, CheckpointFilesPageCursor, CurrentFileState, Error as CoreError,
-    MetadataProjectionLoadError, NamespaceEngine, RuntimeReadContext, MAX_RESOLVE_CURRENT_FILES,
-};
-use loonfs_objectstore::ObjectStore;
 use std::num::NonZeroU32;
-use std::sync::Arc;
 
-/// Snapshots one grep worker keeps in its own read caches. A worker step
-/// pins one snapshot and never revisits an earlier one, so a handful of
-/// entries covers a step with room for the manifest it is walking.
-const WORKER_CACHED_WAL_TAIL_PROJECTIONS: usize = 4;
-
-/// One namespace's reads, all answered from one pinned snapshot.
+/// One namespace's filesystem reads, borrowed from a reader handle.
 ///
-/// The snapshot is the coherence guarantee: a page of checkpoint files, a
-/// batch of resolved inodes, and the content read that follows them observe
-/// the same namespace state, so a commit landing mid-query cannot make a
-/// page contradict itself.
-pub struct NamespaceReads<'a, S: ObjectStore> {
-    engine: &'a NamespaceEngine<S>,
-    context: RuntimeReadContext,
+/// Each call is its own internally-consistent read: the runtime pins a
+/// snapshot per call, so a page of checkpoint files, a batch of resolved
+/// inodes, and the content read that follows them may observe different
+/// heads. The verification model already tolerates that — a query treats
+/// index and feed output as candidates and re-verifies every one against
+/// current state before emitting a match, and the worker keys postings by
+/// durable `(inode_id, revision_no)` — so nothing here needs a snapshot
+/// held across calls.
+pub struct NamespaceReads<'a> {
+    reader: &'a FsReader,
+    namespace_id: &'a NamespaceId,
 }
 
-impl<'a, S: ObjectStore> NamespaceReads<'a, S> {
-    /// Adopts a snapshot the caller already pinned, sharing its read caches.
-    pub fn pinned(engine: &'a NamespaceEngine<S>, context: RuntimeReadContext) -> Self {
-        Self { engine, context }
-    }
-
-    /// Pins a fresh snapshot for one bounded unit of grep work.
-    ///
-    /// A worker running outside a serving runtime has no pinned request to
-    /// borrow, so it takes its own anchor and its own caches; the caches
-    /// live exactly as long as the step that pinned them.
-    pub async fn pin(store: &S, engine: &'a NamespaceEngine<S>) -> Result<Self> {
-        let (head, basis) = load_namespace_read_anchor(store, engine.namespace_id())
-            .await
-            .map_err(|error| {
-                GrepError::Core(CoreError::MetadataProjection(
-                    MetadataProjectionLoadError::LoadHead(error),
-                ))
-            })?;
-        Ok(Self {
-            engine,
-            context: RuntimeReadContext {
-                head: head.state,
-                head_etag: head.identity.etag,
-                basis,
-                table_cache: Arc::new(MetadataTableCache::new(MetadataTableCacheConfig::default())),
-                tail_cache: Arc::new(WalTailProjectionCache::new(WalTailProjectionCacheConfig {
-                    max_entries: WORKER_CACHED_WAL_TAIL_PROJECTIONS,
-                    max_rows: DEFAULT_WAL_TAIL_PROJECTION_ROWS,
-                    max_decoded_bytes: DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES,
-                })),
-            },
-        })
+impl<'a> NamespaceReads<'a> {
+    /// Borrows a reader for one namespace. Performs no I/O.
+    pub fn new(reader: &'a FsReader, namespace_id: &'a NamespaceId) -> Self {
+        Self {
+            reader,
+            namespace_id,
+        }
     }
 
     /// The namespace every read here answers for.
     pub fn namespace_id(&self) -> &NamespaceId {
-        self.engine.namespace_id()
+        self.namespace_id
     }
 
-    /// The sequence this snapshot is pinned to.
-    pub fn head_seq(&self) -> ChangeSeq {
-        self.context.head.seq
+    /// The namespace's current head sequence.
+    ///
+    /// The change feed answers this with one head read: asking for changes
+    /// after the last possible sequence reports the head it was evaluated
+    /// against and no history.
+    pub async fn head_seq(&self) -> Result<ChangeSeq> {
+        Ok(self
+            .list_changes_after(ChangeSeq(u64::MAX), 1)
+            .await?
+            .through_seq)
     }
 
     /// Reads one page of the files a checkpoint pins, in ascending inode-id
@@ -110,14 +80,14 @@ impl<'a, S: ObjectStore> NamespaceReads<'a, S> {
         limit: usize,
     ) -> Result<CheckpointFilesPage> {
         Ok(self
-            .engine
+            .reader
             .list_checkpoint_files_page(
+                self.namespace_id,
                 checkpoint_id,
                 PageRequest {
                     limit: page_limit(limit),
                     cursor,
                 },
-                &self.context,
             )
             .await?)
     }
@@ -133,8 +103,14 @@ impl<'a, S: ObjectStore> NamespaceReads<'a, S> {
         limit: usize,
     ) -> Result<ChangesResponse> {
         Ok(self
-            .engine
-            .list_changes_after(after_seq, page_limit(limit))
+            .reader
+            .list_changes(
+                self.namespace_id,
+                after_seq,
+                ListChangesOptions {
+                    limit: Some(page_limit(limit)),
+                },
+            )
             .await?)
     }
 
@@ -148,40 +124,56 @@ impl<'a, S: ObjectStore> NamespaceReads<'a, S> {
         inode_ids: &[InodeId],
     ) -> Result<Vec<CurrentFileState>> {
         Ok(self
-            .engine
-            .resolve_current_files(inode_ids, &self.context)
+            .reader
+            .resolve_current_files(self.namespace_id, inode_ids)
             .await?)
     }
 
-    /// Resolves one path to its authoritative entry at the pinned head.
+    /// Resolves one path to its authoritative entry at the current head.
     pub async fn resolve_path(
         &self,
         absolute_path: &AbsolutePath,
     ) -> Result<AuthoritativePathEntry> {
         Ok(self
-            .engine
-            .resolve_path(absolute_path.as_str(), &self.context)
+            .reader
+            .stat_path(self.namespace_id, absolute_path.as_str())
             .await?)
     }
 
-    /// Lists one page of a directory at the pinned head.
+    /// Lists one page of a directory at the current head.
     pub async fn list_path_page(
         &self,
         absolute_path: &AbsolutePath,
         cursor: Option<DirectoryPageCursor>,
         limit: usize,
     ) -> Result<Page<AuthoritativePathEntry, DirectoryPageCursor>> {
-        Ok(self
-            .engine
-            .list_path_page(
+        let page = self
+            .reader
+            .list_path_entries_page(
+                self.namespace_id,
                 absolute_path.as_str(),
                 PageRequest {
                     limit: page_limit(limit),
                     cursor,
                 },
-                &self.context,
             )
-            .await?)
+            .await?;
+        // The handle hands back the wire cursor every client resumes with;
+        // the walk resumes with the same value, decoded.
+        let next_cursor = page
+            .next_cursor
+            .as_deref()
+            .map(decode_cursor)
+            .transpose()
+            .map_err(|error| {
+                GrepError::from(CoreError::InvalidCursor(format!(
+                    "the directory listing cursor did not decode: {error}"
+                )))
+            })?;
+        Ok(Page {
+            items: page.entries,
+            next_cursor,
+        })
     }
 
     /// Reads one immutable content object by reference, under grep's own
@@ -192,8 +184,8 @@ impl<'a, S: ObjectStore> NamespaceReads<'a, S> {
         max_bytes: u64,
     ) -> Result<Vec<u8>> {
         Ok(self
-            .engine
-            .read_content_ref(content_ref, max_bytes, &self.context)
+            .reader
+            .read_content_ref(self.namespace_id, content_ref, max_bytes)
             .await?)
     }
 }
@@ -259,8 +251,8 @@ fn page_limit(limit: usize) -> EffectiveLimit {
 #[cfg(test)]
 mod tests {
     use super::{page_limit, resolve_batch_size};
+    use loonfs::MAX_RESOLVE_CURRENT_FILES;
     use loonfs_api::DEFAULT_MAX_PAGE_LIMIT;
-    use loonfs_core::MAX_RESOLVE_CURRENT_FILES;
 
     #[test]
     fn page_limits_clamp_into_the_pagination_policy() {

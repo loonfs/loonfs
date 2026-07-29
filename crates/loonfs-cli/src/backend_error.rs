@@ -3,6 +3,7 @@
 use loonfs::RuntimeError;
 use loonfs_api::{ErrorCode, NamespaceId};
 use loonfs_client::backend::BackendError;
+use loonfs_grep::GrepError;
 
 pub(crate) fn map_runtime_error(error: RuntimeError) -> BackendError {
     match error {
@@ -24,4 +25,17 @@ pub(crate) fn map_namespace_scoped_runtime_error(
     }
 
     map_runtime_error(error)
+}
+
+/// Grep's own failures carry registry codes of their own; everything it
+/// surfaces from the filesystem handles is shaped like any other runtime
+/// error, so embedded and remote report one code per condition.
+pub(crate) fn map_namespace_scoped_grep_error(
+    namespace_id: &NamespaceId,
+    error: GrepError,
+) -> BackendError {
+    match error {
+        GrepError::Runtime(error) => map_namespace_scoped_runtime_error(namespace_id, error),
+        error => BackendError::new(error.code().as_str(), error.to_string()),
+    }
 }

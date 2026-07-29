@@ -7,8 +7,8 @@ mod test_seeding;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
+use loonfs::{DeleteNamespaceOptions, FsAdmin, FsReader, FsWriter, SharedObjectStore};
 use loonfs_api::{IndexSegmentId, NamespaceId};
-use loonfs_core::{DeleteNamespaceOptions, NamespaceEngine};
 use loonfs_grep::keyspace::{root_key, segment_key};
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepDriver, GrepDriverParked, GrepDriverState, GrepStepLimiter,
@@ -34,17 +34,12 @@ async fn poisoned_driver_backs_off_while_sibling_catches_up_and_gc_stays_explici
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
     let poisoned = NamespaceId::parse("poisoned").expect("namespace id");
     let healthy = NamespaceId::parse("healthy").expect("namespace id");
-    let poisoned_engine = bootstrap(store.clone(), &poisoned).await;
-    let healthy_engine = bootstrap(store.clone(), &healthy).await;
-    put_file(&store, &poisoned_engine, &poisoned, "poisoned-put").await;
-    put_file(&store, &healthy_engine, &healthy, "healthy-put").await;
+    let poisoned_writer = seed(store.clone(), &poisoned).await;
+    let healthy_writer = seed(store.clone(), &healthy).await;
+    put_file(&poisoned_writer, &poisoned, "poisoned-put").await;
+    put_file(&healthy_writer, &healthy, "healthy-put").await;
 
-    let worker = GrepWorker::new(
-        store.clone(),
-        "driver-test-worker",
-        "driver-test-session",
-        "driver-test/0.1",
-    );
+    let worker = worker(store.clone(), "driver-test-worker", "driver-test/0.1").await;
     worker.enable(&poisoned).await.expect("enable poisoned");
     worker.enable(&healthy).await.expect("enable healthy");
     let orphan = segment_key(&healthy, &IndexSegmentId::generate());
@@ -110,16 +105,11 @@ async fn tombstoned_namespace_driver_parks_as_not_enabled() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
     let namespace_id = NamespaceId::parse("deleted").expect("namespace id");
-    let engine = bootstrap(store.clone(), &namespace_id).await;
-    let worker = GrepWorker::new(
-        store,
-        "deleted-driver-worker",
-        "deleted-driver-session",
-        "deleted-driver/0.1",
-    );
+    let writer = seed(store.clone(), &namespace_id).await;
+    let worker = worker(store, "deleted-driver-worker", "deleted-driver/0.1").await;
     worker.enable(&namespace_id).await.expect("enable grep");
-    engine
-        .delete_namespace(DeleteNamespaceOptions::default())
+    writer
+        .delete_namespace(&namespace_id, DeleteNamespaceOptions::default())
         .await
         .expect("delete namespace");
 
@@ -147,24 +137,18 @@ async fn shared_step_limiter_caps_many_namespaces_and_every_driver_converges() {
 
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(StepConcurrencyStore::new(temp_dir.path()));
-    let worker = GrepWorker::new(
+    let worker = worker(
         store.clone(),
         "concurrency-driver-worker",
-        "concurrency-driver-session",
         "concurrency-driver/0.1",
-    );
+    )
+    .await;
     let mut namespace_ids = Vec::new();
     for index in 0..NAMESPACES {
         let namespace_id =
             NamespaceId::parse(format!("concurrency-{index}")).expect("namespace id");
-        let engine = bootstrap(store.clone(), &namespace_id).await;
-        put_file(
-            &store,
-            &engine,
-            &namespace_id,
-            &format!("concurrency-put-{index}"),
-        )
-        .await;
+        let writer = seed(store.clone(), &namespace_id).await;
+        put_file(&writer, &namespace_id, &format!("concurrency-put-{index}")).await;
         worker.enable(&namespace_id).await.expect("enable grep");
         namespace_ids.push(namespace_id);
     }
@@ -328,29 +312,41 @@ impl ObjectStore for StepConcurrencyStore {
     }
 }
 
-async fn bootstrap<S: ObjectStore + Clone>(
-    store: S,
-    namespace_id: &NamespaceId,
-) -> NamespaceEngine<S> {
-    test_seeding::bootstrap(
+/// A worker over one store: grep's own keyspace writes go straight to it,
+/// and the runtime handles it reads and checkpoints through are opened on
+/// the same client, so a fault-injecting store covers both.
+async fn worker<S: ObjectStore + 'static>(
+    store: Arc<S>,
+    actor: &str,
+    version: &str,
+) -> GrepWorker<Arc<S>> {
+    let shared: SharedObjectStore = store.clone();
+    let reader = FsReader::builder_with_store(shared.clone())
+        .build()
+        .await
+        .expect("build reader");
+    let admin = FsAdmin::builder_with_store(shared)
+        .actor_id(actor)
+        .actor_version(version)
+        .build()
+        .await
+        .expect("build admin");
+    GrepWorker::new(store, reader, admin, version)
+}
+
+async fn seed<S: ObjectStore + 'static>(store: Arc<S>, namespace_id: &NamespaceId) -> FsWriter {
+    test_seeding::writer(
         store,
         namespace_id,
         format!("seed-{namespace_id}"),
-        format!("seed-{namespace_id}-session"),
         "driver-test/0.1",
     )
     .await
 }
 
-async fn put_file<S: ObjectStore + Clone>(
-    store: &S,
-    engine: &NamespaceEngine<S>,
-    namespace_id: &NamespaceId,
-    commit_id: &str,
-) {
+async fn put_file(writer: &FsWriter, namespace_id: &NamespaceId, commit_id: &str) {
     test_seeding::put_file(
-        store,
-        engine,
+        writer,
         namespace_id,
         b"driver needle\n",
         "/note.txt",

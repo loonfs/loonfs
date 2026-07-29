@@ -13,7 +13,6 @@ bytes.workspace = true
 futures.workspace = true
 loonfs-api = { path = "../loonfs-api" }
 loonfs-core = { path = "../loonfs-core" }
-loonfs-grep = { path = "../loonfs-grep" }
 loonfs-objectstore = { path = "../loonfs-objectstore" }
 thiserror.workspace = true
 tokio.workspace = true
