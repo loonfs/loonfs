@@ -6,9 +6,7 @@ use super::row_decode::{
     direntry_unbind_from_manifest_row, inode_from_manifest_row, revision_from_manifest_row,
     tombstone_from_manifest_row,
 };
-use crate::checkpoint::{
-    string_prefix_upper_bound, ManifestLoadError, Readahead, VerifiedMetadataTables,
-};
+use crate::checkpoint::{ManifestLoadError, Readahead, VerifiedMetadataTables};
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
 use crate::metadata::{
@@ -17,6 +15,7 @@ use crate::metadata::{
 };
 use loonfs_api::wire::manifest::lookup_keys;
 use loonfs_api::wire::manifest::MetadataTableFamily;
+use loonfs_api::wire::sst_blocks::string_prefix_upper_bound;
 use loonfs_api::{ChangeSeq, CommitId, InodeId, NameKey, RevisionNo};
 use loonfs_objectstore::ObjectStore;
 

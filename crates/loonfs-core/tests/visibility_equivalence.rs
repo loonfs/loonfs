@@ -1,5 +1,8 @@
 #![allow(clippy::panic)]
-//! Differential coverage for tombstone visibility versus root reachability.
+//! Differential coverage for tombstone visibility versus root reachability:
+//! after every mutation shape, each tracked inode's reported visibility, its
+//! derived current path, and the forward resolution of that path must agree
+//! with one hand-written expectation.
 
 mod common;
 
@@ -10,15 +13,12 @@ use loonfs_api::{
     InodeId, NamespaceId, PageRequest, RevisionNo,
 };
 use loonfs_core::content::{prepare_stored_content, store_bytes_as_content};
-use loonfs_core::metadata::MetadataViewSession;
 use loonfs_core::publish::{NamespaceMutationCandidate, PathMutationIntent};
 use loonfs_core::{
     BootstrapOptions, Error as CoreError, ErrorCode, MetadataReorganizeOutcome, NamespaceEngine,
     RuntimeReadContext,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_objectstore::ObjectStore;
-use std::collections::HashSet;
 use std::sync::Arc;
 use tempfile::{tempdir, TempDir};
 
@@ -227,39 +227,45 @@ impl VisibilityHarness {
         checkpoint: &str,
         expected: &[ExpectedInode<'_>],
     ) {
-        let view = self
+        let inode_ids: Vec<InodeId> = expected
+            .iter()
+            .map(|expectation| expectation.inode_id)
+            .collect();
+        let states = self
             .engine
-            .load_grep_view(context)
+            .resolve_current_files(&inode_ids, context)
             .await
-            .expect("load grep visibility view");
+            .expect("resolve current state for the tracked inodes");
+        assert_eq!(
+            states.len(),
+            expected.len(),
+            "{checkpoint}: every requested inode must be answered"
+        );
 
-        for expectation in expected {
-            let mut visibility_session = view.grep_session();
-            let tombstone_visible = visibility_session
-                .visible_inode(expectation.inode_id)
-                .await
-                .expect("evaluate tombstone visibility")
-                .is_some();
-
-            let mut reachability_session = view.grep_session();
-            let derived_path = derive_root_path(&mut reachability_session, expectation.inode_id)
-                .await
-                .expect("derive active parent chain");
-            let root_reachable = derived_path.is_some();
-
+        for (expectation, state) in expected.iter().zip(states) {
             assert_eq!(
-                tombstone_visible, root_reachable,
-                "{checkpoint}: inode {} disagrees between tombstone visibility and root reachability",
+                state.inode_id, expectation.inode_id,
+                "{checkpoint}: answers must come back in request order"
+            );
+            // The two oracles meet here: an inode is reported visible
+            // exactly when the tombstone rules admit it and its bindings
+            // still reach the root, and the expectations below are written
+            // by hand, so a disagreement between the two shows up as a
+            // visible inode with no expected path or the reverse.
+            assert_eq!(
+                state.visible,
+                expectation.path.is_some(),
+                "{checkpoint}: inode {} visibility disagrees with its expected path",
                 expectation.inode_id
             );
             assert_eq!(
-                derived_path.as_deref(),
+                state.current_path.as_ref().map(AbsolutePath::as_str),
                 expectation.path,
                 "{checkpoint}: inode {} derived an unexpected root path",
                 expectation.inode_id
             );
 
-            if let Some(path) = derived_path {
+            if let Some(path) = state.current_path {
                 let resolved = self
                     .engine
                     .resolve_path(&path, context)
@@ -294,32 +300,6 @@ impl<'a> ExpectedInode<'a> {
             path: None,
         }
     }
-}
-
-async fn derive_root_path<S: ObjectStore + ?Sized>(
-    session: &mut MetadataViewSession<'_, '_, S>,
-    inode_id: InodeId,
-) -> Result<Option<String>, CoreError> {
-    if inode_id == InodeId(1) {
-        return Ok(Some("/".to_owned()));
-    }
-
-    let mut current = inode_id;
-    let mut components = Vec::new();
-    let mut visited = HashSet::new();
-    while current != InodeId(1) {
-        if !visited.insert(current) {
-            return Ok(None);
-        }
-        let Some(binding) = session.current_parent_binding_for_child(current).await? else {
-            return Ok(None);
-        };
-        assert_eq!(binding.child_inode_id, current);
-        components.push(binding.display_name);
-        current = binding.parent_inode_id;
-    }
-    components.reverse();
-    Ok(Some(format!("/{}", components.join("/"))))
 }
 
 #[tokio::test]

@@ -11,11 +11,11 @@ use super::cache::MetadataTableCache;
 use super::error::ManifestLoadError;
 use super::load::load_verified_manifest_tables_with_cache;
 use super::record::read_checkpoint_record;
-use super::scan::string_prefix_upper_bound;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
 use crate::metadata::MetadataView;
 use loonfs_api::wire::control::{CheckpointRecordLifecycle, CheckpointRecordState};
 use loonfs_api::wire::manifest::{lookup_keys, MetadataRow, MetadataTableFamily};
+use loonfs_api::wire::sst_blocks::string_prefix_upper_bound;
 use loonfs_api::{
     ChangeSeq, CheckpointId, ContentRef, InodeId, InodeKind, NamePolicy, NamespaceId, PageRequest,
     RevisionNo,

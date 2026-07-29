@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ValidatedDurableContent {
+pub(crate) struct ValidatedDurableContent {
     pub content_ref: ContentRef,
     pub object_key: String,
     pub file_size_bytes: u64,
@@ -22,7 +22,7 @@ pub struct ValidatedDurableContent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReadDurableContent {
+pub(crate) struct ReadDurableContent {
     pub validated: ValidatedDurableContent,
     pub bytes: Vec<u8>,
 }
@@ -147,7 +147,7 @@ pub(crate) async fn probe_durable_content_reference<S: ObjectStore + ?Sized>(
     validate_content_size(store, &object_key, content_ref).await
 }
 
-pub async fn read_durable_content_bytes<S: ObjectStore + ?Sized>(
+pub(crate) async fn read_durable_content_bytes<S: ObjectStore + ?Sized>(
     store: &S,
     content_store_id: &ContentStoreId,
     content_ref: &ContentRef,

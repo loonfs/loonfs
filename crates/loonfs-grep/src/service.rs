@@ -1,4 +1,5 @@
-//! [`GrepService`]: query planning and execution over a core read view.
+//! [`GrepService`]: query planning and execution over one pinned snapshot
+//! of a namespace.
 
 use crate::cache::{
     DecodedGrepBlock, GrepBlockCache, GrepBlockCacheKey, GrepBlockKind, MAX_CACHED_GREP_BLOCKS,
@@ -9,27 +10,24 @@ use crate::index_read::{
 };
 use crate::keyspace::{manifest_key, segment_key};
 use crate::query::{plan_pattern, GramPlanOutcome, GramQueryPlan};
+use crate::reads::{published_revision, resolve_batch_size, NamespaceReads};
 use crate::root::{
     load_grep_manifest, load_grep_root_pointer, ChangeFeedResume, GrepLifecycle, GrepRootState,
 };
 use crate::{GrepError, Result};
 use futures::future::{join_all, try_join_all};
 use loonfs_api::wire::hex::hex_decode_bytes;
-use loonfs_api::wire::sst_blocks::{decode_filter_block, index_blocks_for_key_range, BlockHandle};
-use loonfs_api::wire::wal::WalDelta;
+use loonfs_api::wire::sst_blocks::{
+    decode_filter_block, index_blocks_for_key_range, string_prefix_upper_bound, BlockHandle,
+};
 use loonfs_api::{
-    decode_cursor, encode_cursor, AbsolutePath, ChangeSeq, ErrorCode, GrepMatch, GrepPageCursor,
-    GrepRequest, GrepResponse, InodeId, NamespaceId, RevisionNo,
+    decode_cursor, encode_cursor, AbsolutePath, AuthoritativePathEntry, ChangeSeq, ErrorCode,
+    GrepMatch, GrepPageCursor, GrepRequest, GrepResponse, InodeId, InodeKind, NamespaceId,
+    RevisionNo,
 };
-use loonfs_core::content::read_durable_content_bytes;
-use loonfs_core::grep::{
-    string_prefix_upper_bound, LeafRevisionPrefetch, LoadedMetadataView, MetadataViewSession,
-    REVISION_ROW_PREFIX,
-};
-use loonfs_core::metadata::RevisionRecord;
-use loonfs_core::{Error as CoreError, MetadataViewError};
+use loonfs_core::{CurrentFileState, Error as CoreError, MetadataViewError};
 use loonfs_objectstore::ObjectStore;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 
 /// Matches returned per page when the request names no limit.
@@ -65,6 +63,14 @@ pub(crate) const MAX_GREP_EXAMINED_CANDIDATES_PER_PAGE: usize = 4096;
 /// `MAX_MAINTENANCE_TABLE_IO` (`checkpoint/runs.rs`), which stays at its
 /// own value.
 pub(crate) const MAX_GREP_READ_IO: usize = 16;
+/// Commits one unindexed-tail page asks the change feed for. The tail is
+/// measured in files, not commits, so this is a transfer size rather than a
+/// budget: paging continues until the tail is exhausted or exceeds
+/// [`MAX_GREP_TAIL_FILES`].
+pub(crate) const TAIL_FEED_PAGE_COMMITS: usize = 256;
+/// Directory entries one plan-less scan page reads. The scan is bounded by
+/// [`MAX_GREP_SCAN_FILES`]; this only sizes the reads that reach it.
+pub(crate) const SCAN_DIRECTORY_PAGE_ENTRIES: usize = 1000;
 /// Concurrent candidate content reads one grep query issues at a time.
 /// Content verification is a whole-object GET of a small file (index
 /// eligibility caps candidates at `INDEX_GRAMS_MAX_FILE_BYTES`), so it
@@ -85,7 +91,7 @@ pub struct GrepIndexSnapshot {
 #[derive(Debug, Clone)]
 struct MaterializedGrepIndexSnapshot {
     built_through_seq: ChangeSeq,
-    next_delta_index: u32,
+    next_event_index: u32,
     segments: Vec<GrepQuerySegment>,
 }
 
@@ -198,7 +204,7 @@ impl GrepIndexSnapshot {
         Self {
             state: Ok(MaterializedGrepIndexSnapshot {
                 built_through_seq: root.index().built_through_seq,
-                next_delta_index: root.index().next_delta_index,
+                next_event_index: root.index().next_event_index,
                 segments,
             }),
         }
@@ -457,39 +463,60 @@ async fn segment_postings_for_gram<S: ObjectStore + ?Sized>(
     Ok(postings)
 }
 
-/// The file revisions after the index cursor, newest revision per inode, from
-/// WAL replay — the exhaustive-scan tail. A cursor within its watermark
-/// commit includes only that commit's remaining delta-vector suffix.
-async fn tail_revisions<S: ObjectStore + ?Sized>(
-    store: &S,
-    view: &LoadedMetadataView<'_, S>,
+/// The files whose content changed after the index cursor: the unindexed
+/// tail a query scans exhaustively. A cursor inside its watermark commit
+/// includes only that commit's remaining event suffix.
+///
+/// Paging stops as soon as the tail exceeds the query's tail budget: past
+/// that the query either fails as lagging or serves the index's cut, and
+/// neither needs the rest of the feed enumerated.
+async fn tail_revisions<S: ObjectStore>(
+    reads: &NamespaceReads<'_, S>,
     resume: ChangeFeedResume,
-) -> Result<BTreeSet<InodeId>> {
-    let mut tail = BTreeMap::new();
-    for record in view
-        .grep_wal_records_after(store, resume.after_seq())
-        .await?
-    {
-        let start_delta_index = resume.start_delta_index(record.seq).map_err(|_| {
-            CoreError::Internal("grep delta cursor does not fit in memory".to_owned())
-        })?;
-        if start_delta_index > record.deltas.len() {
-            let next_delta_index = resume.next_delta_index();
-            return Err(GrepError::CorruptIndex {
-                message: format!(
-                    "grep delta cursor `{next_delta_index}` exceeds commit `{}` length `{}`",
-                    record.seq,
-                    record.deltas.len()
-                ),
-            });
-        }
-        for delta in record.deltas.iter().skip(start_delta_index) {
-            if let WalDelta::AppendFileRevision { inode_id, .. } = &delta.delta {
-                tail.insert(*inode_id, ());
+) -> Result<TailScan> {
+    let mut inodes = BTreeSet::new();
+    let mut after_seq = resume.after_seq();
+    loop {
+        let feed = reads
+            .list_changes_after(after_seq, TAIL_FEED_PAGE_COMMITS)
+            .await?;
+        for change in &feed.changes {
+            let start_event_index = resume.start_event_index(change.seq).map_err(|_| {
+                CoreError::Internal("grep event cursor does not fit in memory".to_owned())
+            })?;
+            if start_event_index > change.events.len() {
+                let next_event_index = resume.next_event_index();
+                return Err(GrepError::CorruptIndex {
+                    message: format!(
+                        "grep event cursor `{next_event_index}` exceeds commit `{}` length `{}`",
+                        change.seq,
+                        change.events.len()
+                    ),
+                });
+            }
+            for event in change.events.iter().skip(start_event_index) {
+                if let Some(revision) = published_revision(event) {
+                    inodes.insert(revision.inode_id);
+                }
             }
         }
+        if inodes.len() > MAX_GREP_TAIL_FILES {
+            return Ok(TailScan::OverBudget);
+        }
+        match feed.next_after_seq {
+            Some(next_after_seq) => after_seq = next_after_seq,
+            None => return Ok(TailScan::Within(inodes)),
+        }
     }
-    Ok(tail.into_keys().collect())
+}
+
+/// The unindexed tail, or the fact that it is larger than one query scans.
+enum TailScan {
+    /// Every file whose content changed after the index watermark.
+    Within(BTreeSet<InodeId>),
+    /// More files changed after the watermark than the tail budget allows;
+    /// enumeration stopped there, so no set is carried.
+    OverBudget,
 }
 
 /// One verified line match inside a file.
@@ -540,55 +567,22 @@ fn line_matches(content: &[u8], pattern: &regex::bytes::Regex) -> Vec<LineMatch>
     matches
 }
 
-/// Derives the inode's visible absolute path by walking active parent
-/// bindings to the root, then verifies the derived path forward under the
-/// full visibility rules — tombstones, unbinds, kinds — by resolving it
-/// back to the same inode. `None` means the inode is not visible at the
-/// view's sequence. Runs over the page's session so candidates under the
-/// same directories share the ancestor lookups.
-async fn derive_visible_path<S: ObjectStore + ?Sized>(
-    session: &mut MetadataViewSession<'_, '_, S>,
-    inode_id: InodeId,
-) -> Result<Option<VisiblePathChain>> {
-    const MAX_PATH_DEPTH: usize = 4096;
-    let mut segments = Vec::new();
-    // The chain includes the inode itself and every ancestor up to the
-    // root, so scope filters test durable identity instead of comparing
-    // path strings (which would bypass name-policy folding and slash
-    // normalization).
-    let mut ancestors = vec![inode_id];
-    let mut current = inode_id;
-    while current != InodeId(1) {
-        if segments.len() >= MAX_PATH_DEPTH {
-            return Ok(None);
-        }
-        let Some(binding) = session.current_parent_binding_for_child(current).await? else {
-            return Ok(None);
-        };
-        segments.push(binding.display_name.clone());
-        current = binding.parent_inode_id;
-        ancestors.push(current);
+/// Whether a file's current path lies inside the requested scope.
+///
+/// Both spellings are rendered from the same stored display names — the
+/// candidate's by the current-state resolution, the scope's by resolving
+/// the requested prefix — so this compares durable names rather than caller
+/// input, and name-policy folding applies exactly as it does to every other
+/// read.
+fn path_within_scope(path: &AbsolutePath, scope: &AbsolutePath) -> bool {
+    if scope.is_root() {
+        return true;
     }
-    segments.reverse();
-    let path = format!("/{}", segments.join("/"));
-    let parsed = match AbsolutePath::parse(&path) {
-        Ok(parsed) => parsed,
-        // A display name the path grammar rejects cannot be served as a
-        // path result; the file is unreachable by path and skipped.
-        Err(_) => return Ok(None),
-    };
-    match session
-        .resolve_visible_path(&parsed, LeafRevisionPrefetch::Skip)
-        .await
-    {
-        Ok(resolved) if resolved.inode_id == inode_id => Ok(Some(VisiblePathChain {
-            path: parsed,
-            ancestors,
-        })),
-        Ok(_) => Ok(None),
-        Err(error) if error.code() == ErrorCode::PathNotFound => Ok(None),
-        Err(error) => Err(error.into()),
-    }
+    let (path, scope) = (path.as_str(), scope.as_str());
+    path == scope
+        || (path.len() > scope.len()
+            && path.starts_with(scope)
+            && path.as_bytes()[scope.len()] == b'/')
 }
 
 /// Folds the page's highest examined-and-rejected candidate into the resume
@@ -610,36 +604,74 @@ fn reorganize_rejected_frontier(
     }
 }
 
-/// A derived visible path plus the inode chain that produced it, root
-/// included.
-struct VisiblePathChain {
-    path: AbsolutePath,
-    ancestors: Vec<InodeId>,
-}
-
-/// One grep candidate that survived the cheap visibility checks and awaits
-/// its content read, carrying everything match emission needs so the
-/// fetched batch is processed without further metadata lookups.
+/// One grep candidate that survived the current-state checks and awaits its
+/// content read, carrying everything match emission needs so the fetched
+/// batch is processed without further metadata lookups.
 struct GrepContentCandidate {
     inode_id: InodeId,
-    revision: RevisionRecord,
+    revision_no: RevisionNo,
     path: AbsolutePath,
+}
+
+/// What one candidate's content fetch produced.
+enum CandidateContent {
+    /// The candidate's current path no longer names it at the pinned head:
+    /// the derived path and the forward resolution disagree. Treated as a
+    /// rejection, never as a match.
+    Superseded,
     /// The declared content size exceeds the index eligibility cap, so no
-    /// read is scheduled: the file could never pass the post-read text
-    /// check, and the walk skips it as fully scanned.
-    oversized: bool,
+    /// read was issued: the file could never pass the post-read text check,
+    /// and the walk counts it as fully scanned.
+    Oversized,
+    /// The content read's result, surfaced at this candidate's position in
+    /// the ordered walk rather than where the fan-out produced it.
+    Fetched(Result<Vec<u8>>),
+}
+
+/// Resolves the candidate's current path forward — proving it still names
+/// this inode at this revision — and reads the bytes that path publishes.
+///
+/// The forward resolution is what the derived path owes verification: a
+/// path walked up from an inode is only a match's path if walking back down
+/// reaches the same inode. It also supplies the content reference, so the
+/// oversized skip stays a decision on declared size, before any fetch.
+async fn candidate_content<S: ObjectStore>(
+    reads: &NamespaceReads<'_, S>,
+    candidate: &GrepContentCandidate,
+) -> CandidateContent {
+    let entry = match reads.resolve_path(&candidate.path).await {
+        Ok(entry) => entry,
+        Err(error) if error.code() == ErrorCode::PathNotFound => {
+            return CandidateContent::Superseded
+        }
+        Err(error) => return CandidateContent::Fetched(Err(error)),
+    };
+    if entry.inode_id != candidate.inode_id || entry.revision_no != Some(candidate.revision_no) {
+        return CandidateContent::Superseded;
+    }
+    let Some(content_ref) = entry.content_ref else {
+        return CandidateContent::Superseded;
+    };
+    if content_ref.size_bytes > INDEX_GRAMS_MAX_FILE_BYTES {
+        return CandidateContent::Oversized;
+    }
+    CandidateContent::Fetched(
+        reads
+            .read_content_ref(&content_ref, INDEX_GRAMS_MAX_FILE_BYTES)
+            .await,
+    )
 }
 
 impl GrepService {
-    /// Content search over the view: index-accelerated candidates through
-    /// the `grep.index` watermark, an exhaustive scan of the unindexed
-    /// tail, and real-pattern verification of every candidate. Matches
-    /// order by `(inode_id, byte_offset)`. Two budgets bound a page — the
-    /// match limit and a verified-candidate budget — and the cursor
-    /// resumes strictly after the last candidate the page finished
-    /// scanning, bound to the request that issued it. Each page is
-    /// evaluated against the view it runs on and reports that head in
-    /// `head_seq`.
+    /// Content search over one pinned snapshot: index-accelerated
+    /// candidates through the `grep.index` watermark, an exhaustive scan of
+    /// the unindexed tail, and real-pattern verification of every candidate
+    /// against current state. Matches order by `(inode_id, byte_offset)`.
+    /// Two budgets bound a page — the match limit and a verified-candidate
+    /// budget — and the cursor resumes strictly after the last candidate the
+    /// page finished scanning, bound to the request that issued it. Each
+    /// page is evaluated against the snapshot it runs on and reports that
+    /// head in `head_seq`.
     #[tracing::instrument(
         level = "info",
         name = "loonfs.phase",
@@ -647,13 +679,14 @@ impl GrepService {
         skip_all,
         fields(phase = "grep")
     )]
-    pub async fn query<S: ObjectStore + ?Sized>(
+    pub async fn query<S: ObjectStore>(
         &self,
         request: &GrepRequest,
         snapshot: &GrepIndexSnapshot,
-        view: &LoadedMetadataView<'_, S>,
+        reads: &NamespaceReads<'_, S>,
         store: &S,
     ) -> Result<GrepResponse> {
+        let head_seq = reads.head_seq();
         let limit = match request.limit {
             None => DEFAULT_GREP_PAGE_LIMIT,
             Some(0) => {
@@ -682,10 +715,10 @@ impl GrepService {
                     )
                     .into());
                 }
-                if cursor.head_seq > view.head().seq {
+                if cursor.head_seq > head_seq {
                     return Err(CoreError::from(MetadataViewError::SnapshotUnavailable {
                         requested_seq: cursor.head_seq,
-                        head_seq: view.head().seq,
+                        head_seq,
                     })
                     .into());
                 }
@@ -705,36 +738,26 @@ impl GrepService {
             .build()
             .map_err(|error| CoreError::InvalidQuery(error.to_string()))?;
 
-        // One view session serves the whole page: candidates in the same
-        // directory tree share ancestor bindings, tombstone checks, and
-        // path verifications, so the per-candidate metadata walks below hit
-        // the session caches instead of re-fetching per candidate.
-        let mut session = view.grep_session();
-        // The scope filter tests durable identity: resolve the prefix to
-        // its inode once, then require it among each candidate's ancestors,
-        // so name-policy folding and path normalization apply exactly as
-        // they do to every other read. A prefix that resolves to nothing
-        // has no matches.
-        let scope_root = match &request.path_prefix {
-            Some(prefix) => {
-                match session
-                    .resolve_visible_path(prefix, LeafRevisionPrefetch::Skip)
-                    .await
-                {
-                    Ok(resolved) => Some(resolved.inode_id),
-                    Err(error) if error.code() == ErrorCode::PathNotFound => {
-                        return Ok(GrepResponse {
-                            namespace_id: view.namespace_id().clone(),
-                            head_seq: view.head().seq,
-                            built_through_seq: snapshot.built_through_seq,
-                            tail_scanned: true,
-                            matches: Vec::new(),
-                            next_cursor: None,
-                        });
-                    }
-                    Err(error) => return Err(error.into()),
+        // The scope filter resolves the requested prefix once, to the path
+        // the namespace spells it as; every candidate is then tested against
+        // that spelling, so name-policy folding and path normalization apply
+        // exactly as they do to every other read. A prefix that resolves to
+        // nothing has no matches.
+        let scope = match &request.path_prefix {
+            Some(prefix) => match reads.resolve_path(prefix).await {
+                Ok(entry) => Some(entry),
+                Err(error) if error.code() == ErrorCode::PathNotFound => {
+                    return Ok(GrepResponse {
+                        namespace_id: reads.namespace_id().clone(),
+                        head_seq,
+                        built_through_seq: snapshot.built_through_seq,
+                        tail_scanned: true,
+                        matches: Vec::new(),
+                        next_cursor: None,
+                    });
                 }
-            }
+                Err(error) => return Err(error),
+            },
             None => None,
         };
 
@@ -745,7 +768,10 @@ impl GrepService {
             GramPlanOutcome::Indexable(plan) => {
                 candidates.indexed =
                     indexed_candidates(store, &self.block_cache, &snapshot.segments, &plan).await?;
-                ChangeFeedResume::new(snapshot.built_through_seq, snapshot.next_delta_index)
+                Some(ChangeFeedResume::new(
+                    snapshot.built_through_seq,
+                    snapshot.next_event_index,
+                ))
             }
             GramPlanOutcome::Unindexable => {
                 if !request.allow_scan {
@@ -756,28 +782,33 @@ impl GrepService {
                     )
                     .into());
                 }
-                candidates.unfiltered = scan_candidate_inodes(view).await?;
-                ChangeFeedResume::new(view.grep_materialized_through_seq(), 0)
+                // The walk enumerates current state, so a plan-less scan has
+                // no unindexed tail of its own: everything committed through
+                // this head is already a candidate.
+                candidates.unfiltered = scan_candidate_inodes(reads, &scope).await?;
+                None
             }
         };
 
-        let tail = tail_revisions(store, view, tail_resume).await?;
         let mut tail_scanned = true;
-        if tail.len() > MAX_GREP_TAIL_FILES {
-            if request.allow_stale {
-                tail_scanned = false;
-            } else {
-                return Err(CoreError::IndexLagging {
-                    behind_commits: view
-                        .head()
-                        .seq
-                        .0
-                        .saturating_sub(snapshot.built_through_seq.0),
+        if let Some(tail_resume) = tail_resume {
+            match tail_revisions(reads, tail_resume).await? {
+                TailScan::Within(inodes) => candidates.unfiltered.extend(inodes),
+                TailScan::OverBudget if request.allow_stale => {
+                    // Serve the index's cut and nothing newer. A candidate
+                    // whose current revision is past the watermark carries no
+                    // posting for that revision, so `admits` already refuses
+                    // it below — the skipped tail cannot leak a file verified
+                    // at an unindexed revision.
+                    tail_scanned = false;
                 }
-                .into());
+                TailScan::OverBudget => {
+                    return Err(CoreError::IndexLagging {
+                        behind_commits: head_seq.0.saturating_sub(snapshot.built_through_seq.0),
+                    }
+                    .into());
+                }
             }
-        } else {
-            candidates.unfiltered.extend(tail.iter().copied());
         }
 
         let mut matches: Vec<GrepMatch> = Vec::new();
@@ -794,68 +825,78 @@ impl GrepService {
         // rejections longer than a page budget would resume at the same
         // cursor and re-reject the same candidates forever.
         let mut rejected_frontier: Option<InodeId> = None;
-        let ordered_candidates = candidates.inodes().collect::<Vec<_>>();
+        // Candidates the cursor already covered never reach the walk, so
+        // they cost neither examination budget nor a resolution.
+        let ordered_candidates = candidates
+            .inodes()
+            .filter(|inode_id| match resume {
+                Some((last_inode, last_offset)) => {
+                    *inode_id > last_inode || (*inode_id == last_inode && last_offset != u64::MAX)
+                }
+                None => true,
+            })
+            .collect::<Vec<_>>();
         let mut next_candidate = 0usize;
+        // Current state for candidates this page has resolved but not yet
+        // walked: one resolution call serves many content batches.
+        let mut resolved: VecDeque<CurrentFileState> = VecDeque::new();
         'page: loop {
-            // Select the next fan-out batch: walk candidates in inode
-            // order through the cheap checks (metadata lookups served by
-            // the loaded view) until enough survivors need content, the
-            // verified-file budget fills, or the candidates run out. The
-            // content read is the only per-candidate store fetch, so it is
-            // the only stage that fans out — the design doc's "small fixed
-            // fan-out" for candidate reads.
+            // Select the next fan-out batch: walk candidates in inode order
+            // through the current-state checks until enough survivors need
+            // content, the verified-file budget fills, or the candidates run
+            // out. The content read is the only per-candidate store fetch,
+            // so it is the only stage that fans out — the design doc's
+            // "small fixed fan-out" for candidate reads.
             let mut batch: Vec<GrepContentCandidate> = Vec::new();
             let mut budget_exhausted = false;
-            while next_candidate < ordered_candidates.len() {
-                let inode_id = ordered_candidates[next_candidate];
-                if let Some((last_inode, last_offset)) = resume {
-                    if inode_id < last_inode || (inode_id == last_inode && last_offset == u64::MAX)
-                    {
-                        next_candidate += 1;
-                        continue;
+            while batch.len() < MAX_GREP_CONTENT_IO {
+                if resolved.is_empty() {
+                    if next_candidate == ordered_candidates.len() {
+                        break;
                     }
+                    // The examination budget bounds a page's metadata work
+                    // the way the verified budget bounds its content work: a
+                    // scope filter that rejects nearly every candidate would
+                    // otherwise resolve the entire candidate set in one
+                    // page. Resolutions are requested in batches, never past
+                    // what the budget still allows.
+                    let examinable =
+                        MAX_GREP_EXAMINED_CANDIDATES_PER_PAGE.saturating_sub(examined_candidates);
+                    if examinable == 0 {
+                        budget_exhausted = true;
+                        break;
+                    }
+                    let wanted = resolve_batch_size(
+                        examinable.min(ordered_candidates.len() - next_candidate),
+                    );
+                    let chunk = &ordered_candidates[next_candidate..next_candidate + wanted];
+                    resolved.extend(reads.resolve_current_files(chunk).await?);
+                    next_candidate += wanted;
                 }
-                // The examination budget bounds a page's metadata work the
-                // way the verified budget bounds its content work: a scope
-                // filter that rejects nearly every candidate would
-                // otherwise walk metadata for the entire candidate set in
-                // one page. The candidate at the boundary is left for the
-                // next page.
-                if examined_candidates == MAX_GREP_EXAMINED_CANDIDATES_PER_PAGE {
-                    budget_exhausted = true;
-                    break;
-                }
-                next_candidate += 1;
+                let Some(state) = resolved.pop_front() else {
+                    continue;
+                };
+                let inode_id = state.inode_id;
                 examined_candidates += 1;
-                if session.visible_inode(inode_id).await?.is_none() {
+                if !state.visible {
                     rejected_frontier = Some(inode_id);
                     continue;
                 }
-                let Some(revision) = session.latest_revision_head_of_visible(inode_id).await?
+                let (Some(revision_no), Some(path)) =
+                    (state.current_revision_no, state.current_path)
                 else {
+                    // A visible inode with no current revision is a
+                    // directory, or a file whose revisions are gone; neither
+                    // has content to match.
                     rejected_frontier = Some(inode_id);
                     continue;
                 };
-                if !candidates.admits(inode_id, revision.revision_no) {
+                if !candidates.admits(inode_id, revision_no) {
                     rejected_frontier = Some(inode_id);
                     continue;
                 }
-                // With the tail skipped (`allow_stale`), serve the index's
-                // cut and nothing newer: a candidate whose newest revision
-                // is past the watermark would otherwise be verified at an
-                // unindexed revision while tail-only files stay invisible
-                // — a mix of two snapshots rather than a stale-but-
-                // consistent one.
-                if !tail_scanned && tail.contains(&inode_id) {
-                    rejected_frontier = Some(inode_id);
-                    continue;
-                }
-                let Some(chain) = derive_visible_path(&mut session, inode_id).await? else {
-                    rejected_frontier = Some(inode_id);
-                    continue;
-                };
-                if let Some(scope_root) = scope_root {
-                    if !chain.ancestors.contains(&scope_root) {
+                if let Some(scope) = &scope {
+                    if !path_within_scope(&path, &scope.absolute_path) {
                         rejected_frontier = Some(inode_id);
                         continue;
                     }
@@ -865,25 +906,11 @@ impl GrepService {
                     break;
                 }
                 verified_files += 1;
-                // Content past the index eligibility cap can never be
-                // indexable text, so tail and scan candidates skip their
-                // doomed reads on the declared size alone — the same
-                // pre-fetch check the index builder applies
-                // (the `worker.rs` collection paths); index-supplied candidates
-                // are under the cap by construction. The candidate still
-                // rides the batch in inode order, so the budget and the
-                // resume cursor advance exactly as if its bytes had been
-                // fetched and refused.
-                let oversized = revision.content_ref.size_bytes > INDEX_GRAMS_MAX_FILE_BYTES;
                 batch.push(GrepContentCandidate {
                     inode_id,
-                    revision,
-                    path: chain.path,
-                    oversized,
+                    revision_no,
+                    path,
                 });
-                if batch.len() == MAX_GREP_CONTENT_IO {
-                    break;
-                }
             }
             if batch.is_empty() {
                 if budget_exhausted {
@@ -898,21 +925,12 @@ impl GrepService {
             // candidate — the position the serial loop surfaced it. A
             // failure the walk never reaches (the page filled first) is
             // discarded with the rest of the speculative batch; the next
-            // page re-issues that read and reports it then. An oversized
-            // candidate carries no read at all (`None`).
-            let contents = join_all(batch.iter().map(|candidate| async move {
-                if candidate.oversized {
-                    return None;
-                }
-                Some(
-                    read_durable_content_bytes(
-                        store,
-                        view.content_store_id(),
-                        &candidate.revision.content_ref,
-                    )
-                    .await,
-                )
-            }))
+            // page re-issues that read and reports it then.
+            let contents = join_all(
+                batch
+                    .iter()
+                    .map(|candidate| candidate_content(reads, candidate)),
+            )
             .await;
             // Emission stays strictly in candidate (inode) order: the batch
             // was selected in order and its results are consumed in order,
@@ -920,19 +938,20 @@ impl GrepService {
             // exactly as the serial walk advanced them.
             for (candidate, content) in batch.iter().zip(contents) {
                 let inode_id = candidate.inode_id;
-                let Some(content) = content else {
-                    // Skipped as oversized: scanned-and-refused without the
-                    // fetch, so the cursor moves past it like any other
-                    // ineligible file.
-                    resume_cursor = Some((inode_id, u64::MAX));
-                    continue;
+                let content = match content {
+                    // Scanned and refused without a fetch, so the cursor
+                    // moves past it like any other ineligible file.
+                    CandidateContent::Oversized | CandidateContent::Superseded => {
+                        resume_cursor = Some((inode_id, u64::MAX));
+                        continue;
+                    }
+                    CandidateContent::Fetched(content) => content?,
                 };
-                let content = content.map_err(CoreError::from)?;
-                if !is_indexable_text_content(&content.bytes) {
+                if !is_indexable_text_content(&content) {
                     resume_cursor = Some((inode_id, u64::MAX));
                     continue;
                 }
-                for found in line_matches(&content.bytes, &pattern) {
+                for found in line_matches(&content, &pattern) {
                     if let Some((last_inode, last_offset)) = resume {
                         if inode_id == last_inode && found.byte_offset <= last_offset {
                             continue;
@@ -950,7 +969,7 @@ impl GrepService {
                     matches.push(GrepMatch {
                         absolute_path: candidate.path.clone(),
                         inode_id,
-                        revision_no: candidate.revision.revision_no,
+                        revision_no: candidate.revision_no,
                         line_number: found.line_number,
                         byte_offset: found.byte_offset,
                         line: found.line,
@@ -978,7 +997,7 @@ impl GrepService {
             })?;
             Some(
                 encode_cursor(&GrepPageCursor {
-                    head_seq: view.head().seq,
+                    head_seq,
                     last_inode_id,
                     last_byte_offset,
                     fingerprint,
@@ -989,8 +1008,8 @@ impl GrepService {
             None
         };
         Ok(GrepResponse {
-            namespace_id: view.namespace_id().clone(),
-            head_seq: view.head().seq,
+            namespace_id: reads.namespace_id().clone(),
+            head_seq,
             built_through_seq: snapshot.built_through_seq,
             tail_scanned,
             matches,
@@ -999,40 +1018,60 @@ impl GrepService {
     }
 }
 
-/// Every inode holding any revision in the manifest tables, for plan-less
-/// scans; the WAL tail is collected separately. Refuses past the scan budget.
-async fn scan_candidate_inodes<S: ObjectStore + ?Sized>(
-    view: &LoadedMetadataView<'_, S>,
+/// Every visible file inside the query's scope, for plan-less scans.
+///
+/// A plan-less pattern has no gram filter, so the candidates are the files
+/// themselves: a bounded directory walk from the scope root — the namespace
+/// root when the request names no prefix — at the pinned head. The walk
+/// reads current state, so it covers revisions the index has not reached
+/// yet and needs no separate tail. Refuses past the scan budget, which
+/// bounds directories as well as files: a namespace deep enough to exhaust
+/// it is past what a plan-less query serves either way, and the count is
+/// also what stops a walk if bindings ever formed a cycle.
+async fn scan_candidate_inodes<S: ObjectStore>(
+    reads: &NamespaceReads<'_, S>,
+    scope: &Option<AuthoritativePathEntry>,
 ) -> Result<BTreeSet<InodeId>> {
     let mut inodes = BTreeSet::new();
-    let mut lower = REVISION_ROW_PREFIX.to_owned();
-    let upper = string_prefix_upper_bound(REVISION_ROW_PREFIX);
-    loop {
-        let page = view
-            .grep_revision_inode_page(
-                &lower,
-                upper.as_deref(),
-                MAX_GREP_SCAN_FILES.saturating_add(1),
-            )
-            .await?;
-        let Some((last_key, _)) = page.last() else {
-            break;
-        };
-        let last_key = last_key.clone();
-        let exhausted = page.len() <= MAX_GREP_SCAN_FILES;
-        inodes.extend(page.into_iter().map(|(_, inode_id)| inode_id));
-        if inodes.len() > MAX_GREP_SCAN_FILES {
-            return Err(CoreError::QueryUnindexable(format!(
-                "the namespace exceeds the {MAX_GREP_SCAN_FILES}-file scan budget; \
-                 give the pattern a run of at least 3 literal bytes so the \
-                 trigram index can narrow candidates"
-            ))
-            .into());
+    let root = match scope {
+        Some(entry) if entry.inode_kind == InodeKind::File => {
+            // A file-shaped scope names exactly one candidate.
+            inodes.insert(entry.inode_id);
+            return Ok(inodes);
         }
-        if exhausted {
-            break;
+        Some(entry) => entry.absolute_path.clone(),
+        None => AbsolutePath::root(),
+    };
+    let mut directories = vec![root];
+    let mut walked_directories = 0usize;
+    while let Some(directory) = directories.pop() {
+        walked_directories += 1;
+        let mut cursor = None;
+        loop {
+            let page = reads
+                .list_path_page(&directory, cursor, SCAN_DIRECTORY_PAGE_ENTRIES)
+                .await?;
+            for entry in page.items {
+                match entry.inode_kind {
+                    InodeKind::Directory => directories.push(entry.absolute_path),
+                    InodeKind::File => {
+                        inodes.insert(entry.inode_id);
+                    }
+                }
+            }
+            if inodes.len() > MAX_GREP_SCAN_FILES || walked_directories > MAX_GREP_SCAN_FILES {
+                return Err(CoreError::QueryUnindexable(format!(
+                    "the namespace exceeds the {MAX_GREP_SCAN_FILES}-file scan budget; \
+                     give the pattern a run of at least 3 literal bytes so the \
+                     trigram index can narrow candidates"
+                ))
+                .into());
+            }
+            cursor = page.next_cursor;
+            if cursor.is_none() {
+                break;
+            }
         }
-        lower = format!("{last_key}\0");
     }
     Ok(inodes)
 }
@@ -1085,5 +1124,23 @@ mod tests {
         cursor = Some((InodeId(12), 40));
         reorganize_rejected_frontier(&mut cursor, Some(InodeId(9)));
         assert_eq!(cursor, Some((InodeId(12), 40)));
+    }
+
+    #[test]
+    fn scope_containment_stops_at_component_boundaries() {
+        let path = |value: &str| AbsolutePath::parse(value).expect("valid path");
+        let scope = path("/docs");
+        assert!(path_within_scope(&scope, &scope), "the scope itself");
+        assert!(path_within_scope(&path("/docs/a.txt"), &scope));
+        assert!(path_within_scope(&path("/docs/deep/a.txt"), &scope));
+        assert!(
+            !path_within_scope(&path("/docsy/a.txt"), &scope),
+            "a longer sibling name is not inside the scope"
+        );
+        assert!(!path_within_scope(&path("/other/a.txt"), &scope));
+        assert!(
+            path_within_scope(&path("/anything"), &AbsolutePath::root()),
+            "the root scope holds everything"
+        );
     }
 }

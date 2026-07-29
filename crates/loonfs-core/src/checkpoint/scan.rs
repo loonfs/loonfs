@@ -14,6 +14,7 @@ use futures::future::try_join_all;
 use loonfs_api::wire::manifest::{
     MetadataFileRef, MetadataRow, MetadataTableFamily, NamespaceManifestEnvelope,
 };
+use loonfs_api::wire::sst_blocks::string_prefix_upper_bound;
 use loonfs_objectstore::ObjectStore;
 #[cfg(test)]
 use serde::{Deserialize, Serialize};
@@ -464,17 +465,4 @@ pub(super) fn descriptor_may_intersect_range(
         return false;
     }
     true
-}
-
-/// Returns the exclusive upper bound for all strings beginning with `prefix`.
-pub fn string_prefix_upper_bound(prefix: &str) -> Option<String> {
-    let mut bytes = prefix.as_bytes().to_vec();
-    for index in (0..bytes.len()).rev() {
-        if bytes[index] != u8::MAX {
-            bytes[index] += 1;
-            bytes.truncate(index + 1);
-            return String::from_utf8(bytes).ok();
-        }
-    }
-    None
 }

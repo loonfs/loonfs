@@ -12,13 +12,8 @@ use loonfs::{
 };
 use loonfs_api::wire::control::CheckpointRecordLifecycle;
 use loonfs_api::{sha256_digest, ChangeSeq, IndexSegmentId};
-use loonfs_core::cache::{
-    MetadataTableCache, MetadataTableCacheConfig, WalTailProjectionCache,
-    WalTailProjectionCacheConfig, DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES,
-    DEFAULT_WAL_TAIL_PROJECTION_ROWS,
-};
 use loonfs_core::control::{load_namespace_checkpoint_record_control, load_namespace_read_anchor};
-use loonfs_core::{NamespaceEngine, RuntimeReadContext};
+use loonfs_core::NamespaceEngine;
 use loonfs_grep::keyspace::{
     manifest_key, manifests_prefix, namespace_prefix, root_key, segment_key,
 };
@@ -29,7 +24,7 @@ use loonfs_grep::root::{
 };
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepBuildOutcome, GrepIndexSnapshot, GrepReorganizeOutcome, GrepService,
-    GrepWorker, GREP_GC_GRACE_WINDOW_MS,
+    GrepWorker, NamespaceReads, GREP_GC_GRACE_WINDOW_MS,
 };
 use loonfs_objectstore::keys::{
     checkpoint_prefix, metadata_manifest_object, metadata_manifest_prefix, metadata_table_prefix,
@@ -72,23 +67,6 @@ fn worker(store: &SharedObjectStore) -> GrepWorker<SharedObjectStore> {
     )
 }
 
-async fn read_context(store: &SharedObjectStore, namespace_id: &NamespaceId) -> RuntimeReadContext {
-    let (head, basis) = load_namespace_read_anchor(&**store, namespace_id)
-        .await
-        .expect("load read anchor");
-    RuntimeReadContext {
-        head: head.state,
-        head_etag: head.identity.etag,
-        basis,
-        table_cache: Arc::new(MetadataTableCache::new(MetadataTableCacheConfig::default())),
-        tail_cache: Arc::new(WalTailProjectionCache::new(WalTailProjectionCacheConfig {
-            max_entries: 4,
-            max_rows: DEFAULT_WAL_TAIL_PROJECTION_ROWS,
-            max_decoded_bytes: DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES,
-        })),
-    }
-}
-
 async fn drive_worker_to_current(
     worker: &GrepWorker<SharedObjectStore>,
     namespace_id: &NamespaceId,
@@ -122,11 +100,10 @@ async fn new_query(
         .writer_id("new-query")
         .build()
         .expect("new query engine");
-    let context = read_context(store, namespace_id).await;
-    let view = engine.load_grep_view(&context).await?;
+    let reads = NamespaceReads::pin(store, &engine).await?;
     let service = GrepService::new();
     let snapshot = GrepIndexSnapshot::from_grep_root(&**store, namespace_id, &service).await;
-    service.query(grep_request, &snapshot, &view, store).await
+    service.query(grep_request, &snapshot, &reads, store).await
 }
 
 #[derive(Debug)]
@@ -400,6 +377,8 @@ async fn retention_gap_and_vanished_checkpoint_restart_fresh_backfill() {
         .expect("advance retention");
     assert!(floor.retention_floor_seq > ChangeSeq(0));
 
+    // The feed can no longer reach the watermark, which the worker must
+    // read as "my basis is gone" and answer with a whole new attempt.
     let restart = worker
         .build_step(&namespace_id, GramIndexBuildPolicy::default())
         .await
@@ -408,15 +387,13 @@ async fn retention_gap_and_vanished_checkpoint_restart_fresh_backfill() {
         restart.outcome,
         GrepBuildOutcome::BackfillRestarted { .. }
     ));
-    let root = load_grep_root(&*store, &namespace_id)
-        .await
-        .expect("load restarted root")
-        .expect("root exists");
-    let GrepLifecycle::Backfilling { checkpoint_id, .. } = root.state().lifecycle() else {
-        panic!("gap must restart checkpointed backfill");
-    };
+    let gap_checkpoint_id = assert_fresh_backfill_attempt(&store, &namespace_id).await;
+
+    // The second trigger: the pinned checkpoint stops pinning its basis
+    // mid-backfill. The enumeration says so out loud instead of quietly
+    // answering current state, and the worker starts over again.
     admin
-        .release_checkpoint(&namespace_id, checkpoint_id)
+        .release_checkpoint(&namespace_id, &gap_checkpoint_id)
         .await
         .expect("remove checkpoint mid-backfill");
     let vanished = worker
@@ -427,11 +404,425 @@ async fn retention_gap_and_vanished_checkpoint_restart_fresh_backfill() {
         vanished.outcome,
         GrepBuildOutcome::BackfillRestarted { .. }
     ));
+    // Checkpoint ids are derived from the basis and the owner, so a
+    // rebootstrap at an unmoved head revives that same name — what makes it
+    // a new attempt is that the record pins its basis again and the walk
+    // starts from nothing.
+    let fresh_checkpoint_id = assert_fresh_backfill_attempt(&store, &namespace_id).await;
+    assert_eq!(fresh_checkpoint_id, gap_checkpoint_id);
+
     drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
     let response = new_query(&store, &namespace_id, &request("needle"))
         .await
         .expect("query after rebootstrap");
     assert_eq!(response.matches.len(), 1);
+    writer.shutdown_background().await.expect("shutdown");
+}
+
+/// Asserts the namespace's grep root is at the start of a backfill attempt
+/// — nothing indexed, nothing walked, an active checkpoint pinning its basis
+/// — and returns the checkpoint that attempt holds.
+async fn assert_fresh_backfill_attempt(
+    store: &SharedObjectStore,
+    namespace_id: &NamespaceId,
+) -> loonfs_api::CheckpointId {
+    let root = load_grep_root(&**store, namespace_id)
+        .await
+        .expect("load grep root")
+        .expect("grep root exists");
+    let GrepLifecycle::Backfilling {
+        backfill_cursor,
+        checkpoint_id,
+    } = root.state().lifecycle()
+    else {
+        panic!("expected a checkpointed backfill: {:?}", root.state());
+    };
+    assert_eq!(
+        *backfill_cursor, None,
+        "a rebootstrap restarts the walk from the beginning"
+    );
+    assert!(
+        root.state().segments().is_empty(),
+        "a rebootstrap discards the incomplete projection"
+    );
+    let record = load_namespace_checkpoint_record_control(&**store, namespace_id, checkpoint_id)
+        .await
+        .expect("load checkpoint record")
+        .expect("the new attempt's checkpoint record exists");
+    assert_eq!(
+        record.state,
+        CheckpointRecordLifecycle::Active,
+        "a fresh backfill attempt must hold a checkpoint that still pins its basis"
+    );
+    checkpoint_id.clone()
+}
+
+/// Every grep segment the namespace's root names, for asserting that an
+/// event changed no postings.
+async fn grep_segment_ids(
+    store: &SharedObjectStore,
+    namespace_id: &NamespaceId,
+) -> BTreeSet<IndexSegmentId> {
+    load_grep_root(&**store, namespace_id)
+        .await
+        .expect("load grep root")
+        .expect("grep root exists")
+        .state()
+        .segments()
+        .iter()
+        .map(|segment| segment.segment_id.clone())
+        .collect()
+}
+
+async fn grep_built_through_seq(
+    store: &SharedObjectStore,
+    namespace_id: &NamespaceId,
+) -> ChangeSeq {
+    load_grep_root(&**store, namespace_id)
+        .await
+        .expect("load grep root")
+        .expect("grep root exists")
+        .state()
+        .index()
+        .built_through_seq
+}
+
+fn matched_paths(response: &GrepResponse) -> Vec<String> {
+    response
+        .matches
+        .iter()
+        .map(|found| found.absolute_path.as_str().to_owned())
+        .collect()
+}
+
+/// A backfill of a populated namespace while commits keep landing: the
+/// checkpoint enumeration answers the state it pinned, the change feed
+/// answers everything after it, and the two phases neither miss a file nor
+/// index one twice.
+#[tokio::test]
+async fn commits_during_backfill_are_indexed_once_by_the_feed_phase() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store: SharedObjectStore =
+        Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
+    let namespace_id = NamespaceId::parse("backfill-overlap").expect("namespace id");
+    let writer = FsWriter::builder_with_store(store.clone())
+        .writer_id("overlap-writer")
+        .min_publish_interval_ms(0)
+        .build()
+        .await
+        .expect("writer");
+    writer
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
+    for index in 0..4u32 {
+        writer
+            .put_file_bytes(
+                &namespace_id,
+                &format!("/before-{index}.txt"),
+                format!("overlap needle before {index}\n").as_bytes(),
+                PutFileOptions::default(),
+            )
+            .await
+            .expect("write preexisting file");
+    }
+
+    let worker = worker(&store);
+    worker.enable(&namespace_id).await.expect("enable");
+    // One file per step, so the backfill is genuinely partway through the
+    // checkpointed file set when the commits below land.
+    let policy = GramIndexBuildPolicy {
+        max_files_per_step: NonZeroUsize::MIN,
+        ..GramIndexBuildPolicy::default()
+    };
+    let first = worker
+        .build_step(&namespace_id, policy)
+        .await
+        .expect("first backfill page");
+    assert!(
+        matches!(
+            first.outcome,
+            GrepBuildOutcome::Published {
+                indexed_revisions: 1,
+                materialized: false,
+                ..
+            }
+        ),
+        "one file per step must leave the backfill unfinished: {:?}",
+        first.outcome
+    );
+
+    // Commits strictly after the pinned sequence: one new file, and a
+    // replacement of a file the checkpoint already pinned.
+    writer
+        .put_file_bytes(
+            &namespace_id,
+            "/during.txt",
+            b"overlap needle during\n",
+            PutFileOptions::default(),
+        )
+        .await
+        .expect("write during backfill");
+    writer
+        .put_file_bytes(
+            &namespace_id,
+            "/before-0.txt",
+            b"overlap needle replaced\n",
+            PutFileOptions {
+                behavior: loonfs::DestinationBehavior::Replace,
+                ..PutFileOptions::default()
+            },
+        )
+        .await
+        .expect("replace a checkpointed file during backfill");
+
+    drive_worker_to_current(&worker, &namespace_id, policy).await;
+
+    let response = new_query(&store, &namespace_id, &request("overlap needle"))
+        .await
+        .expect("query after backfill and catch-up");
+    let paths = matched_paths(&response);
+    assert_eq!(
+        paths,
+        vec![
+            "/before-0.txt",
+            "/before-1.txt",
+            "/before-2.txt",
+            "/before-3.txt",
+            "/during.txt",
+        ],
+        "every file matches exactly once across both phases"
+    );
+
+    let replaced = new_query(&store, &namespace_id, &request("needle replaced"))
+        .await
+        .expect("query the replacing revision");
+    assert_eq!(matched_paths(&replaced), vec!["/before-0.txt"]);
+    let superseded = new_query(&store, &namespace_id, &request("needle before 0"))
+        .await
+        .expect("query the superseded revision");
+    assert!(
+        superseded.matches.is_empty(),
+        "a revision the checkpoint pinned but the feed replaced must not match"
+    );
+    writer.shutdown_background().await.expect("shutdown");
+}
+
+/// A move changes no content, so it changes no posting: the index is left
+/// exactly as it was and the query answers the file's new path because
+/// verification reads current state.
+#[tokio::test]
+async fn a_move_reindexes_nothing_and_answers_the_new_path() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store: SharedObjectStore =
+        Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
+    let namespace_id = NamespaceId::parse("move-no-reindex").expect("namespace id");
+    let writer = FsWriter::builder_with_store(store.clone())
+        .writer_id("move-writer")
+        .min_publish_interval_ms(0)
+        .build()
+        .await
+        .expect("writer");
+    writer
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
+    writer
+        .put_file_bytes(
+            &namespace_id,
+            "/docs/note.txt",
+            b"moved needle\n",
+            PutFileOptions::default(),
+        )
+        .await
+        .expect("write file");
+    let worker = worker(&store);
+    worker.enable(&namespace_id).await.expect("enable");
+    drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
+    let segments_before = grep_segment_ids(&store, &namespace_id).await;
+    let built_before = grep_built_through_seq(&store, &namespace_id).await;
+
+    let moved = writer
+        .move_path(
+            &namespace_id,
+            "/docs/note.txt",
+            "/docs/renamed.txt",
+            loonfs::MoveOptions::default(),
+        )
+        .await
+        .expect("move the indexed file");
+    drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
+
+    assert_eq!(
+        grep_segment_ids(&store, &namespace_id).await,
+        segments_before,
+        "a move must write no new postings"
+    );
+    let built_after = grep_built_through_seq(&store, &namespace_id).await;
+    assert!(
+        built_after > built_before && built_after >= moved.committed_seq,
+        "the watermark still advances past a move: {built_before:?} -> {built_after:?}"
+    );
+    let response = new_query(&store, &namespace_id, &request("moved needle"))
+        .await
+        .expect("query after the move");
+    assert_eq!(matched_paths(&response), vec!["/docs/renamed.txt"]);
+    writer.shutdown_background().await.expect("shutdown");
+}
+
+/// A recursive delete hides every match under it and an undelete brings
+/// them back, both without touching the index: verification against current
+/// state is what decides whether a posting can still produce a match.
+#[tokio::test]
+async fn a_recursive_delete_hides_matches_and_an_undelete_restores_them() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store: SharedObjectStore =
+        Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
+    let namespace_id = NamespaceId::parse("delete-undelete").expect("namespace id");
+    let writer = FsWriter::builder_with_store(store.clone())
+        .writer_id("delete-writer")
+        .min_publish_interval_ms(0)
+        .build()
+        .await
+        .expect("writer");
+    let reader = writer.reader();
+    writer
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
+    for name in ["a", "b"] {
+        writer
+            .put_file_bytes(
+                &namespace_id,
+                &format!("/docs/{name}.txt"),
+                format!("subtree needle {name}\n").as_bytes(),
+                PutFileOptions::default(),
+            )
+            .await
+            .expect("write file");
+    }
+    let worker = worker(&store);
+    worker.enable(&namespace_id).await.expect("enable");
+    drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
+    let segments_before = grep_segment_ids(&store, &namespace_id).await;
+    let docs_inode_id = reader
+        .stat_path(&namespace_id, "/docs")
+        .await
+        .expect("stat the directory")
+        .inode_id;
+    assert_eq!(
+        new_query(&store, &namespace_id, &request("subtree needle"))
+            .await
+            .expect("query before the delete")
+            .matches
+            .len(),
+        2
+    );
+
+    let deleted = writer
+        .delete_path(
+            &namespace_id,
+            "/docs",
+            loonfs::DeleteOptions {
+                behavior: loonfs::DeleteDirectoryBehavior::Recursive,
+                ..loonfs::DeleteOptions::default()
+            },
+        )
+        .await
+        .expect("delete the subtree");
+    drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
+
+    let hidden = new_query(&store, &namespace_id, &request("subtree needle"))
+        .await
+        .expect("query after the delete");
+    assert!(
+        hidden.matches.is_empty(),
+        "a deleted subtree's files must verify away: {:?}",
+        matched_paths(&hidden)
+    );
+    assert_eq!(
+        grep_segment_ids(&store, &namespace_id).await,
+        segments_before,
+        "a delete must write no new postings"
+    );
+
+    writer
+        .undelete(
+            &namespace_id,
+            docs_inode_id,
+            deleted.committed_seq,
+            "/docs",
+            loonfs::UndeleteOptions::default(),
+        )
+        .await
+        .expect("undelete the subtree");
+    drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
+
+    let restored = new_query(&store, &namespace_id, &request("subtree needle"))
+        .await
+        .expect("query after the undelete");
+    assert_eq!(
+        matched_paths(&restored),
+        vec!["/docs/a.txt", "/docs/b.txt"],
+        "an undelete makes the same postings eligible again"
+    );
+    assert_eq!(
+        grep_segment_ids(&store, &namespace_id).await,
+        segments_before,
+        "an undelete must write no new postings"
+    );
+    writer.shutdown_background().await.expect("shutdown");
+}
+
+/// Grep is a projection beside the filesystem, not inside it: a worker step
+/// that fails against unreadable grep state must not disturb a commit
+/// running at the same time.
+#[tokio::test]
+async fn a_failing_worker_step_never_blocks_a_concurrent_commit() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store: SharedObjectStore =
+        Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
+    let namespace_id = NamespaceId::parse("worker-isolation").expect("namespace id");
+    let writer = FsWriter::builder_with_store(store.clone())
+        .writer_id("isolation-writer")
+        .min_publish_interval_ms(0)
+        .build()
+        .await
+        .expect("writer");
+    let reader = writer.reader();
+    writer
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
+    let worker = worker(&store);
+    worker.enable(&namespace_id).await.expect("enable");
+    drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
+
+    store
+        .put_overwrite(
+            &root_key(&namespace_id),
+            Bytes::from_static(b"corrupt pointer"),
+        )
+        .await
+        .expect("poison the grep root");
+
+    let (build, commit) = tokio::join!(
+        worker.build_step(&namespace_id, GramIndexBuildPolicy::default()),
+        writer.put_file_bytes(
+            &namespace_id,
+            "/during-failure.txt",
+            b"isolated needle\n",
+            PutFileOptions::default(),
+        ),
+    );
+    let error = build.expect_err("an unreadable grep root fails the step");
+    assert_eq!(error.code(), ErrorCode::IndexCorrupt);
+    commit.expect("the filesystem commit is unaffected by grep");
+    let read = reader
+        .get_file_bytes(&namespace_id, "/during-failure.txt")
+        .await
+        .expect("the committed file is readable");
+    assert_eq!(read.bytes, b"isolated needle\n");
     writer.shutdown_background().await.expect("shutdown");
 }
 
@@ -1058,7 +1449,7 @@ async fn pointer_advance_heals_a_manifest_deleted_after_already_exists() {
         current_state.lifecycle().clone(),
         GrepIndexState::new(
             current_state.index().built_through_seq,
-            current_state.index().next_delta_index,
+            current_state.index().next_event_index,
             current_state.index().reorganize.clone(),
             current_state.index().next_run_ordinal + 1,
         ),

@@ -3,7 +3,7 @@
 use super::error::{GrepManifestIdError, GrepRootStateError};
 use loonfs_api::sha256_digest;
 use loonfs_api::wire::sst_blocks::BlockHandle;
-use loonfs_api::{ChangeSeq, CheckpointId, IndexSegmentId, NamespaceId};
+use loonfs_api::{ChangeSeq, CheckpointId, IndexSegmentId, InodeId, NamespaceId};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -150,10 +150,13 @@ impl GrepRootPointer {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum GrepLifecycle {
-    /// Initial materialization is walking existing revisions.
+    /// Initial materialization is walking the checkpointed file set.
     Backfilling {
-        /// Resume key for the next backfill step; empty means the start.
-        backfill_cursor: String,
+        /// Inode the next backfill step resumes strictly after; absent means
+        /// the start. Checkpoint file enumeration is ordered by ascending
+        /// inode id, so one id is the whole resume position.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        backfill_cursor: Option<InodeId>,
         /// User-checkpoint pin backing this immutable manifest walk.
         checkpoint_id: CheckpointId,
     },
@@ -185,13 +188,15 @@ pub struct GrepIndexState {
     pub format_version: u32,
     /// Sequence of the commit at the index cursor.
     pub built_through_seq: ChangeSeq,
-    /// Offset of the next delta within `built_through_seq`, or zero when the
-    /// cursor is at the commit boundary and the whole commit is represented.
+    /// Offset of the next change event within `built_through_seq`, or zero
+    /// when the cursor is at the commit boundary and the whole commit is
+    /// represented.
     ///
-    /// WAL commit deltas retain their durable vector order; incremental
-    /// indexing relies on that stable order when it resumes within a commit.
+    /// A commit's events are one per committed operation in request order,
+    /// derived from its durable delta vector; incremental indexing relies on
+    /// that stable order when a step's budget stops it inside a commit.
     #[serde(default, skip_serializing_if = "is_zero")]
-    pub next_delta_index: u32,
+    pub next_event_index: u32,
     /// One in-progress partitioned reorganize, if present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reorganize: Option<GrepReorganizeState>,
@@ -201,45 +206,45 @@ pub struct GrepIndexState {
 
 /// Change-feed resume point derived from the grep watermark pair.
 ///
-/// A commit-boundary cursor (`next_delta_index == 0`) resumes strictly after
+/// A commit-boundary cursor (`next_event_index == 0`) resumes strictly after
 /// `built_through_seq`. An in-commit cursor reloads that commit and skips the
-/// already represented delta prefix, keeping feed selection and delta
+/// already represented event prefix, keeping feed selection and event
 /// selection complementary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ChangeFeedResume {
     built_through_seq: ChangeSeq,
-    next_delta_index: u32,
+    next_event_index: u32,
 }
 
 impl ChangeFeedResume {
-    pub(crate) fn new(built_through_seq: ChangeSeq, next_delta_index: u32) -> Self {
+    pub(crate) fn new(built_through_seq: ChangeSeq, next_event_index: u32) -> Self {
         Self {
             built_through_seq,
-            next_delta_index,
+            next_event_index,
         }
     }
 
     pub(crate) fn after_seq(self) -> ChangeSeq {
-        if self.next_delta_index == 0 {
+        if self.next_event_index == 0 {
             self.built_through_seq
         } else {
             ChangeSeq(self.built_through_seq.0.saturating_sub(1))
         }
     }
 
-    pub(crate) fn start_delta_index(
+    pub(crate) fn start_event_index(
         self,
-        record_seq: ChangeSeq,
+        change_seq: ChangeSeq,
     ) -> std::result::Result<usize, std::num::TryFromIntError> {
-        if record_seq == self.built_through_seq {
-            usize::try_from(self.next_delta_index)
+        if change_seq == self.built_through_seq {
+            usize::try_from(self.next_event_index)
         } else {
             Ok(0)
         }
     }
 
-    pub(crate) fn next_delta_index(self) -> u32 {
-        self.next_delta_index
+    pub(crate) fn next_event_index(self) -> u32 {
+        self.next_event_index
     }
 }
 
@@ -247,14 +252,14 @@ impl GrepIndexState {
     /// Creates index bookkeeping in the current grep-owned format.
     pub fn new(
         built_through_seq: ChangeSeq,
-        next_delta_index: u32,
+        next_event_index: u32,
         reorganize: Option<GrepReorganizeState>,
         next_run_ordinal: u64,
     ) -> Self {
         Self {
             format_version: GREP_INDEX_FORMAT_VERSION,
             built_through_seq,
-            next_delta_index,
+            next_event_index,
             reorganize,
             next_run_ordinal,
         }

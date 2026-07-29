@@ -7,8 +7,12 @@
 //! steps for exactly one namespace, runs continuously until caught up, and
 //! then waits for an event-driven nudge.
 //!
-//! Core read and replay stay in `loonfs-core`, wire vocabulary stays in
-//! `loonfs-api`, and embedded scheduling stays in `loonfs`.
+//! Everything grep knows about the filesystem it learns through supported
+//! reads, collected in [`NamespaceReads`]: the files a checkpoint pins, the
+//! semantic change feed after it, current state for a batch of inodes, and
+//! content by reference. Core read and replay stay in `loonfs-core`, wire
+//! vocabulary stays in `loonfs-api`, and embedded scheduling stays in
+//! `loonfs`.
 
 mod cache;
 pub mod codec;
@@ -18,6 +22,7 @@ mod error;
 mod index_read;
 pub mod keyspace;
 mod query;
+mod reads;
 pub mod root;
 mod service;
 mod worker;
@@ -29,6 +34,7 @@ pub use driver::{
 };
 pub use error::GrepError as Error;
 pub use error::{GrepError, Result};
+pub use reads::NamespaceReads;
 pub use service::{
     GrepIndexSnapshot, GrepService, DEFAULT_GREP_PAGE_LIMIT, MAX_GREP_PAGE_LIMIT,
     MAX_GREP_SCAN_FILES, MAX_GREP_TAIL_FILES,

@@ -3,17 +3,12 @@
 
 use super::{poll_namespace, PollShutdown};
 use loonfs_api::{ChangeSeq, GrepRequest, NamespaceId};
-use loonfs_core::cache::{
-    MetadataTableCache, MetadataTableCacheConfig, WalTailProjectionCache,
-    WalTailProjectionCacheConfig, DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES,
-    DEFAULT_WAL_TAIL_PROJECTION_ROWS,
-};
-use loonfs_core::control::{load_namespace_head_control, load_namespace_read_anchor};
-use loonfs_core::{NamespaceEngine, RuntimeReadContext};
+use loonfs_core::control::load_namespace_head_control;
+use loonfs_core::NamespaceEngine;
 use loonfs_grep::root::{load_grep_root, GrepLifecycle};
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepDriver, GrepDriverParked, GrepDriverState, GrepDriverTask,
-    GrepIndexSnapshot, GrepService, GrepStepLimiter, GrepWorker,
+    GrepIndexSnapshot, GrepService, GrepStepLimiter, GrepWorker, NamespaceReads,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::SharedObjectStore;
@@ -245,24 +240,9 @@ async fn assert_searchable(store: &SharedObjectStore, namespace_id: &NamespaceId
         .writer_id("standalone-poll-query")
         .build()
         .expect("query engine");
-    let (head, basis) = load_namespace_read_anchor(&**store, namespace_id)
+    let reads = NamespaceReads::pin(store, &engine)
         .await
-        .expect("load read anchor");
-    let context = RuntimeReadContext {
-        head: head.state,
-        head_etag: head.identity.etag,
-        basis,
-        table_cache: Arc::new(MetadataTableCache::new(MetadataTableCacheConfig::default())),
-        tail_cache: Arc::new(WalTailProjectionCache::new(WalTailProjectionCacheConfig {
-            max_entries: 4,
-            max_rows: DEFAULT_WAL_TAIL_PROJECTION_ROWS,
-            max_decoded_bytes: DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES,
-        })),
-    };
-    let view = engine
-        .load_grep_view(&context)
-        .await
-        .expect("load grep view");
+        .expect("pin namespace reads");
     let service = GrepService::new();
     let snapshot = GrepIndexSnapshot::from_grep_root(&**store, namespace_id, &service).await;
     let response = service
@@ -277,7 +257,7 @@ async fn assert_searchable(store: &SharedObjectStore, namespace_id: &NamespaceId
                 allow_scan: false,
             },
             &snapshot,
-            &view,
+            &reads,
             store,
         )
         .await

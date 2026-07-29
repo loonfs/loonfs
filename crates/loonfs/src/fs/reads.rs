@@ -15,7 +15,7 @@ use loonfs_api::{
     encode_cursor, AbsolutePath, DirectoryPageCursor, FileRevisionsPageCursor, GrepRequest,
     GrepResponse, PageRequest, PaginationPolicy,
 };
-use loonfs_grep::GrepIndexSnapshot;
+use loonfs_grep::{GrepIndexSnapshot, NamespaceReads};
 
 impl FsReader {
     /// Resolves an absolute path to its authoritative entry at the current
@@ -174,7 +174,9 @@ impl FsReader {
         request: &GrepRequest,
     ) -> Result<GrepResponse> {
         let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
-        let view = engine.load_grep_view(&read_context).await?;
+        // Grep runs its filesystem reads through this request's own pinned
+        // snapshot, so the query shares the caches every other read uses.
+        let reads = NamespaceReads::pinned(&engine, read_context);
         let snapshot = GrepIndexSnapshot::from_grep_root(
             self.core.store(),
             namespace_id,
@@ -185,7 +187,7 @@ impl FsReader {
             .core
             .inner
             .grep_service
-            .query(request, &snapshot, &view, &self.core.inner.store)
+            .query(request, &snapshot, &reads, &self.core.inner.store)
             .await?;
         self.core
             .inner

@@ -1,5 +1,5 @@
 //! [`LoadedMetadataView`]: a verified, seq-pinned view of one namespace
-//! that answers core reads and exposes a narrow projection to `loonfs-grep`.
+//! that answers core reads.
 
 use super::listing::{invalid_cursor, validate_cursor_head, validate_directory_cursor};
 use crate::checkpoint::{
@@ -20,8 +20,6 @@ use crate::path::helpers::{map_path_error_to_core, parse_absolute_path_for_core}
 use crate::storage::content::read_durable_content_bytes;
 use crate::wal::{load_validated_wal_chain, project_validated_wal_tail, WalChainLoadRequest};
 use loonfs_api::wire::control::{HeadState, NamespaceState};
-use loonfs_api::wire::manifest::{MetadataRow, MetadataTableFamily};
-use loonfs_api::wire::wal::WalCommitPayload;
 use loonfs_api::{
     AbsolutePath, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq, ContentStoreId,
     DirectoryPageCursor, DisplayName, FileRevision, FileRevisionsPageCursor, InodeId, InodeKind,
@@ -113,9 +111,10 @@ pub(crate) async fn load_metadata_view<'a, S: ObjectStore + ?Sized>(
 
 /// A coherent, seq-pinned namespace read view.
 ///
-/// This is part of the read surface consumed by `loonfs-grep`; applications
-/// should continue to use the runtime handles.
-pub struct LoadedMetadataView<'a, S: ObjectStore + ?Sized> {
+/// Every read the engine answers for one pinned context runs over one of
+/// these; the view is crate-internal, and consumers reach it through the
+/// engine's read methods.
+pub(crate) struct LoadedMetadataView<'a, S: ObjectStore + ?Sized> {
     pub(super) namespace_id: NamespaceId,
     pub(super) content_store_id: ContentStoreId,
     name_policy: NamePolicy,
@@ -125,113 +124,6 @@ pub struct LoadedMetadataView<'a, S: ObjectStore + ?Sized> {
 }
 
 impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
-    /// Returns the namespace bound to this loaded view.
-    ///
-    /// This is part of the read surface consumed by `loonfs-grep`.
-    pub fn namespace_id(&self) -> &NamespaceId {
-        &self.namespace_id
-    }
-
-    /// Returns the coherent head bound to this loaded view.
-    ///
-    /// This is part of the read surface consumed by `loonfs-grep`.
-    pub fn head(&self) -> &HeadState {
-        &self.head
-    }
-
-    /// Returns the durable content-store identity for this namespace.
-    ///
-    /// This is part of the read surface consumed by `loonfs-grep`.
-    pub fn content_store_id(&self) -> &ContentStoreId {
-        &self.content_store_id
-    }
-
-    /// Returns the sequence through which this view's manifest tables are materialized.
-    ///
-    /// This is the plan-less scan boundary consumed by `loonfs-grep`: table
-    /// enumeration covers revisions at or below it, and WAL replay covers
-    /// revisions strictly above it.
-    pub fn grep_materialized_through_seq(&self) -> ChangeSeq {
-        self.tables.manifest().payload.head_seq
-    }
-
-    /// Opens the memoized visibility session used by one grep page.
-    ///
-    /// This is part of the read surface consumed by `loonfs-grep`.
-    pub fn grep_session(&self) -> MetadataViewSession<'_, '_, S> {
-        self.metadata_view().session()
-    }
-
-    /// Loads one ordered page of revision-family row keys and inode ids.
-    ///
-    /// This is the narrow revision scan surface consumed by `loonfs-grep` for
-    /// plan-less queries; no other metadata family or table primitive is
-    /// exposed.
-    pub async fn grep_revision_inode_page(
-        &self,
-        lower_bound: &str,
-        upper_bound: Option<&str>,
-        limit: usize,
-    ) -> Result<Vec<(String, InodeId)>> {
-        let page = self
-            .tables
-            .scan_range_page_with_keys(
-                MetadataTableFamily::Revisions,
-                lower_bound,
-                upper_bound,
-                limit,
-            )
-            .await
-            .map_err(|error| {
-                CoreError::MetadataProjection(MetadataProjectionLoadError::ManifestLoad(error))
-            })?;
-        Ok(page
-            .into_iter()
-            .filter_map(|(row_key, row)| match row {
-                MetadataRow::Revision { inode_id, .. } => Some((row_key, inode_id)),
-                _ => None,
-            })
-            .collect())
-    }
-
-    /// Loads the validated WAL commit records after a requested sequence.
-    ///
-    /// This is the narrow WAL-tail read surface consumed by `loonfs-grep`;
-    /// the service owns revision selection and all query policy while core
-    /// keeps WAL framing and validation private.
-    pub async fn grep_wal_records_after(
-        &self,
-        store: &S,
-        after_seq: ChangeSeq,
-    ) -> Result<Vec<WalCommitPayload>> {
-        if after_seq >= self.head.seq {
-            return Ok(Vec::new());
-        }
-        let manifest = self.tables.manifest();
-        let wal_chain = load_validated_wal_chain(
-            store,
-            WalChainLoadRequest {
-                namespace_id: &self.namespace_id,
-                chain_base_seq: manifest.payload.retention_floor_seq,
-                head_seq: self.head.seq,
-                visible_tip: self.head.visible_wal_tip.clone(),
-                stop_after_seq: Some(after_seq),
-                recent_segments: &self.head.recent_segments,
-            },
-        )
-        .await
-        .map_err(|error| {
-            CoreError::MetadataProjection(MetadataProjectionLoadError::WalChainLoad(error))
-        })?;
-        Ok(wal_chain
-            .segments()
-            .iter()
-            .flat_map(|segment| segment.records())
-            .filter(|record| record.seq > after_seq)
-            .cloned()
-            .collect())
-    }
-
     async fn load_at_head(
         store: &'a S,
         namespace_id: &NamespaceId,

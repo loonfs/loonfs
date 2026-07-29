@@ -32,7 +32,7 @@ use super::runs::{
 };
 use super::{
     create, flush, load, record, reorganize, reorganize_metadata_step, row, scan,
-    string_prefix_upper_bound, MetadataReorganizeOutcome,
+    MetadataReorganizeOutcome,
 };
 use crate::error::{CoreError, ErrorCode, MetadataProjectionLoadError};
 use crate::metadata::MetadataState;
@@ -60,7 +60,7 @@ use loonfs_api::wire::manifest::{
     MetadataRow, MetadataTableFamily as ApiMetadataTableFamily, NamespaceManifestEnvelope,
     NamespaceManifestPayload,
 };
-use loonfs_api::wire::sst_blocks::SegmentBlocksBuilder;
+use loonfs_api::wire::sst_blocks::{string_prefix_upper_bound, SegmentBlocksBuilder};
 use loonfs_api::{
     AbsolutePath, ChangeSeq, CheckpointId, CommitId, DestinationBehavior, EffectiveLimit, InodeId,
     ManifestId, ManifestObjectId, NameKey, NamespaceId, RevisionNo,
