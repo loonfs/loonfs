@@ -1,13 +1,15 @@
 //! Embedded implementation of the CLI's shared [`Backend`] seam.
 
-use crate::backend_error::{map_namespace_scoped_runtime_error, map_runtime_error};
+use crate::backend_error::{
+    map_namespace_scoped_grep_error, map_namespace_scoped_runtime_error, map_runtime_error,
+};
 use crate::render::write_stderr_warning;
 use async_trait::async_trait;
 use loonfs::{
     ChangesResponse, CopyOptions, CreateCheckpointOptions, CreateDirectoryOptions,
     CreateNamespaceOptions, DeleteNamespaceOptions, DeleteNamespaceResponse, DeleteOptions,
     FsAdmin, FsReader, FsWriter, ListChangesOptions, MaintenanceStepOptions, MoveOptions,
-    PutFileOptions, RestoreRevisionOptions, RuntimeError, UndeleteOptions,
+    PutFileOptions, RestoreRevisionOptions, RuntimeError, SharedObjectStore, UndeleteOptions,
 };
 use loonfs_api::{
     v0::{DisableGrepIndexResponse, EnableGrepIndexResponse},
@@ -20,6 +22,10 @@ use loonfs_api::{
 use loonfs_client::{
     CreateDirectoryOptions as ClientCreateDirectoryOptions, DeleteOptions as ClientDeleteOptions,
     MutationOptions, NamespacePath, PutFileOptions as ClientPutFileOptions,
+};
+use loonfs_grep::{
+    GramIndexBuildPolicy, GrepDisableOutcome, GrepEnableOutcome, GrepError, GrepIndexSnapshot,
+    GrepService, GrepWorker, NamespaceReads,
 };
 
 #[cfg(test)]
@@ -41,6 +47,13 @@ pub(crate) struct EmbeddedBackend {
     pub(super) writer: FsWriter,
     pub(super) reader: FsReader,
     pub(super) admin: FsAdmin,
+    /// Grep is composed here rather than by the runtime: this service owns
+    /// the query-side block cache for the length of the command, and the
+    /// worker below is built from the same handles the other commands use.
+    pub(super) grep: GrepService,
+    /// Stamped into every grep root this backend publishes; the same
+    /// version the writer and admin handles carry.
+    pub(super) writer_version: String,
 }
 
 /// How many times a gated publish resubmits after settling the maintenance
@@ -102,6 +115,18 @@ impl EmbeddedBackend {
         let result =
             result.map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error));
         self.settle_background_work_after(result).await
+    }
+
+    /// A grep worker over this backend's own handles: grep's keyspace rides
+    /// the writer's store client, its filesystem reads the reader, and its
+    /// backfill checkpoints the admin handle.
+    fn grep_worker(&self) -> GrepWorker<SharedObjectStore> {
+        GrepWorker::new(
+            self.writer.object_store(),
+            self.reader.clone(),
+            self.admin.clone(),
+            self.writer_version.clone(),
+        )
     }
 }
 
@@ -192,30 +217,69 @@ impl Backend for EmbeddedBackend {
         namespace_id: &NamespaceId,
         request: &GrepRequest,
     ) -> Result<GrepResponse, BackendError> {
-        self.reader
-            .grep(namespace_id, request)
+        let store = self.writer.object_store();
+        let reads = NamespaceReads::new(&self.reader, namespace_id);
+        let snapshot = GrepIndexSnapshot::from_grep_root(&*store, namespace_id, &self.grep).await;
+        self.grep
+            .query(request, &snapshot, &reads, &store)
             .await
-            .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
+            .map_err(|error| map_namespace_scoped_grep_error(namespace_id, error))
     }
 
     async fn enable_grep_index(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<EnableGrepIndexResponse, BackendError> {
-        self.admin
-            .enable_grep_index(namespace_id)
+        let worker = self.grep_worker();
+        let grep_error = |error| map_namespace_scoped_grep_error(namespace_id, error);
+        let already_enabled = match worker.enable(namespace_id).await.map_err(grep_error)? {
+            GrepEnableOutcome::Enabled { .. } => false,
+            GrepEnableOutcome::AlreadyEnabled { .. } => true,
+            GrepEnableOutcome::Superseded => {
+                return Err(grep_error(GrepError::PublicationConflict {
+                    object_key: loonfs_grep::keyspace::root_key(namespace_id),
+                }))
+            }
+        };
+        // A one-shot command has no driver runtime, so enable is the
+        // driver: without this the root would stay `Backfilling` and every
+        // query would answer `not_supported`. Re-running enable on an
+        // already-enabled namespace drives catch-up the same way, which is
+        // how an embedded operator advances a lagging index.
+        let built_through_seq = worker
+            .run_to_quiescence(namespace_id, GramIndexBuildPolicy::default())
             .await
-            .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
+            .map_err(grep_error)?;
+        Ok(EnableGrepIndexResponse {
+            namespace_id: namespace_id.clone(),
+            built_through_seq,
+            already_enabled,
+        })
     }
 
     async fn disable_grep_index(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<DisableGrepIndexResponse, BackendError> {
-        self.admin
-            .disable_grep_index(namespace_id)
+        let grep_error = |error| map_namespace_scoped_grep_error(namespace_id, error);
+        match self
+            .grep_worker()
+            .disable(namespace_id)
             .await
-            .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
+            .map_err(grep_error)?
+        {
+            GrepDisableOutcome::Disabled => Ok(DisableGrepIndexResponse {
+                namespace_id: namespace_id.clone(),
+                was_enabled: true,
+            }),
+            GrepDisableOutcome::NotEnabled => Ok(DisableGrepIndexResponse {
+                namespace_id: namespace_id.clone(),
+                was_enabled: false,
+            }),
+            GrepDisableOutcome::Superseded => Err(grep_error(GrepError::PublicationConflict {
+                object_key: loonfs_grep::keyspace::root_key(namespace_id),
+            })),
+        }
     }
 
     async fn get_file_revision_bytes(
@@ -488,11 +552,12 @@ fn resolve_cli_page_limit(limit: Option<u32>) -> Result<EffectiveLimit, BackendE
 #[cfg(test)]
 #[allow(clippy::panic)]
 mod tests {
-    use super::{map_runtime_error, resolve_cli_page_limit, Backend, EmbeddedTarget};
+    use super::{map_runtime_error, resolve_cli_page_limit, Backend, EmbeddedTarget, GrepError};
+    use crate::backend_error::map_namespace_scoped_grep_error;
     use crate::config::StoreConfig;
     use loonfs::{
         BootstrapNamespaceError, CoreError, CreateNamespaceOptions, FsBackgroundWork, FsWriter,
-        GrepError, PutFileOptions, RuntimeError, SharedObjectStore,
+        PutFileOptions, RuntimeError, SharedObjectStore,
     };
     use loonfs_api::{
         ChangeSeq, CreateCheckpointRequest, DestinationBehavior, ErrorCode, InodeId, NamespaceId,
@@ -542,7 +607,7 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                map_runtime_error(RuntimeError::Grep(error)).code,
+                map_namespace_scoped_grep_error(&namespace_id("demo"), error).code,
                 expected.as_str()
             );
         }

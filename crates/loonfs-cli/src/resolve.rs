@@ -9,6 +9,7 @@ use crate::profiles::{default_namespace, resolve_profile};
 use loonfs::{FsAdmin, FsBackgroundWork, FsWriter, SharedObjectStore, TraceStoreKind};
 use loonfs_api::{ErrorCode, NamespaceId};
 use loonfs_client::{Client, ClientConfig};
+use loonfs_grep::GrepService;
 use std::sync::Arc;
 
 pub(crate) struct LoadedConfig {
@@ -176,7 +177,7 @@ impl EmbeddedTarget {
         let reader = writer.reader();
         let admin = FsAdmin::builder_with_store(store)
             .actor_id(writer_id)
-            .actor_version(writer_version)
+            .actor_version(writer_version.clone())
             .trace_store_kind(trace_store_kind)
             .build()
             .await
@@ -185,6 +186,10 @@ impl EmbeddedTarget {
             writer,
             reader,
             admin,
+            // Embedded mode composes grep itself: the runtime handles above
+            // know nothing about it.
+            grep: GrepService::new(),
+            writer_version,
         };
         Ok(Self { backend })
     }

@@ -4,8 +4,8 @@
 #[path = "../src/test_seeding.rs"]
 mod test_seeding;
 
+use loonfs::{FsAdmin, FsReader, FsWriter, SharedObjectStore};
 use loonfs_api::NamespaceId;
-use loonfs_core::{BootstrapOptions, NamespaceEngine};
 use loonfs_grep::keyspace::{root_key, segments_prefix};
 use loonfs_grep::root::{load_grep_root, GrepLifecycle};
 use loonfs_grep::GrepWorker;
@@ -22,18 +22,8 @@ async fn standalone_once_after_external_enable_indexes_in_one_sweep_and_is_idemp
     let store_root = temp_dir.path().join("store");
     let store = Arc::new(LocalFsStore::new(&store_root).expect("store"));
     let namespace_id = NamespaceId::parse("standalone").expect("namespace id");
-    let engine = NamespaceEngine::builder(store.clone())
-        .namespace_id(namespace_id.clone())
-        .writer_id("standalone-seed")
-        .writer_session_id("standalone-seed-session")
-        .writer_version("standalone-test/0.1")
-        .build()
-        .expect("engine");
-    engine
-        .bootstrap_namespace(BootstrapOptions::default())
-        .await
-        .expect("bootstrap namespace");
-    put_file(&store, &engine, &namespace_id).await;
+    let writer = seed(&store, &namespace_id).await;
+    put_file(&writer, &namespace_id).await;
 
     let config_path = temp_dir.path().join("worker.toml");
     write_config(&config_path, &store_root, "", "");
@@ -51,15 +41,11 @@ async fn standalone_once_after_external_enable_indexes_in_one_sweep_and_is_idemp
         "a disabled one-shot must leave grep disabled"
     );
 
-    GrepWorker::new(
-        store.clone(),
-        "standalone-enable",
-        "standalone-enable-session",
-        "standalone-enable/0.1",
-    )
-    .enable(&namespace_id)
-    .await
-    .expect("enable grep");
+    worker(store.clone())
+        .await
+        .enable(&namespace_id)
+        .await
+        .expect("enable grep");
 
     let first = run_once(&config_path, &[&namespace_id]);
     assert!(
@@ -175,16 +161,11 @@ async fn standalone_namespace_list_is_exact_and_long_running_poll_catches_new_wr
     let store = Arc::new(LocalFsStore::new(&store_root).expect("store"));
     let assigned = NamespaceId::parse("assigned").expect("namespace id");
     let unassigned = NamespaceId::parse("unassigned").expect("namespace id");
-    let assigned_engine = bootstrap(&store, &assigned).await;
-    let unassigned_engine = bootstrap(&store, &unassigned).await;
-    put_file(&store, &assigned_engine, &assigned).await;
-    put_file(&store, &unassigned_engine, &unassigned).await;
-    let worker = GrepWorker::new(
-        store.clone(),
-        "standalone-enable",
-        "standalone-enable-session",
-        "standalone-enable/0.1",
-    );
+    let assigned_writer = seed(&store, &assigned).await;
+    let unassigned_writer = seed(&store, &unassigned).await;
+    put_file(&assigned_writer, &assigned).await;
+    put_file(&unassigned_writer, &unassigned).await;
+    let worker = worker(store.clone()).await;
     worker.enable(&assigned).await.expect("enable assigned");
     worker.enable(&unassigned).await.expect("enable unassigned");
 
@@ -224,8 +205,7 @@ async fn standalone_namespace_list_is_exact_and_long_running_poll_catches_new_wr
         .expect("start long-running worker");
     wait_for_process_poll().await;
     put_file_at(
-        &store,
-        &assigned_engine,
+        &assigned_writer,
         &assigned,
         "/second.txt",
         "standalone-put-second",
@@ -236,38 +216,38 @@ async fn standalone_namespace_list_is_exact_and_long_running_poll_catches_new_wr
     child.wait().expect("join long-running worker");
 }
 
-async fn bootstrap(
-    store: &Arc<LocalFsStore>,
-    namespace_id: &NamespaceId,
-) -> NamespaceEngine<Arc<LocalFsStore>> {
-    test_seeding::bootstrap(
+async fn worker(store: Arc<LocalFsStore>) -> GrepWorker<Arc<LocalFsStore>> {
+    let shared: SharedObjectStore = store.clone();
+    let reader = FsReader::builder_with_store(shared.clone())
+        .build()
+        .await
+        .expect("build reader");
+    let admin = FsAdmin::builder_with_store(shared)
+        .actor_id("standalone-enable")
+        .actor_version("standalone-enable/0.1")
+        .build()
+        .await
+        .expect("build admin");
+    GrepWorker::new(store, reader, admin, "standalone-enable/0.1")
+}
+
+async fn seed(store: &Arc<LocalFsStore>, namespace_id: &NamespaceId) -> FsWriter {
+    test_seeding::writer(
         store.clone(),
         namespace_id,
         format!("standalone-seed-{namespace_id}"),
-        format!("standalone-seed-{namespace_id}-session"),
         "standalone-test/0.1",
     )
     .await
 }
 
-async fn put_file(
-    store: &Arc<LocalFsStore>,
-    engine: &NamespaceEngine<Arc<LocalFsStore>>,
-    namespace_id: &NamespaceId,
-) {
-    put_file_at(store, engine, namespace_id, "/note.txt", "standalone-put").await;
+async fn put_file(writer: &FsWriter, namespace_id: &NamespaceId) {
+    put_file_at(writer, namespace_id, "/note.txt", "standalone-put").await;
 }
 
-async fn put_file_at(
-    store: &Arc<LocalFsStore>,
-    engine: &NamespaceEngine<Arc<LocalFsStore>>,
-    namespace_id: &NamespaceId,
-    path: &str,
-    commit_id: &str,
-) {
+async fn put_file_at(writer: &FsWriter, namespace_id: &NamespaceId, path: &str, commit_id: &str) {
     test_seeding::put_file(
-        store,
-        engine,
+        writer,
         namespace_id,
         b"standalone needle\n",
         path,

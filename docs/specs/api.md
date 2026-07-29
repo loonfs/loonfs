@@ -65,6 +65,11 @@ client fetches it from `GET /v0/capabilities` and caches it for the connection; 
 embedded engine exposes the same document as a constant. SDK gating logic is
 therefore identical for both backends.
 
+The example below is the reference deployment: the runtime's own `core/v0`
+and `admin/v0` planes plus the `query/v0` plane the server composes from the
+grep extension. A host that composes no extension advertises neither that
+profile nor its `query.*` keys — clients gate on the document either way.
+
 ```json
 {
   "protocol_version": "v0",

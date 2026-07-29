@@ -15,23 +15,20 @@ use crate::{Result, RuntimeError, SharedObjectStore};
 use loonfs_api::{
     encode_cursor, generated_id, CapabilityDocument, EffectiveLimit, FileRevision,
     FileRevisionsPageCursor, Page, PaginationPolicy, FEATURE_NAMESPACES_CREATE,
-    FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK, FEATURE_QUERY_GREP,
-    FEATURE_UPLOADS_DIRECT_PUT, LIMIT_GC_MIN_GRACE_WINDOW_MS, LIMIT_QUERY_GREP_DEFAULT,
-    LIMIT_QUERY_GREP_MAX, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES, LIMIT_QUERY_GREP_TAIL_BUDGET_FILES,
-    PROFILE_ADMIN_V0, PROFILE_CORE_V0, PROFILE_QUERY_V0, PROTOCOL_VERSION,
+    FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK, FEATURE_UPLOADS_DIRECT_PUT,
+    LIMIT_GC_MIN_GRACE_WINDOW_MS, PROFILE_ADMIN_V0, PROFILE_CORE_V0, PROTOCOL_VERSION,
 };
 use loonfs_core::cache::{
     MetadataTableCache, WalTailProjectionCache, WalTailProjectionCacheConfig,
 };
 use loonfs_core::{MutationContext, NamespaceEngine};
-use loonfs_grep::GrepService;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-/// Shared read-side runtime state: the object-store client, the read caches,
-/// and the grep service. [`FsWriter`](crate::FsWriter),
-/// [`FsReader`](crate::FsReader), and [`FsAdmin`](crate::FsAdmin) each hold
-/// one; handles built from the same core share its caches and store.
+/// Shared read-side runtime state: the object-store client and the read
+/// caches. [`FsWriter`](crate::FsWriter), [`FsReader`](crate::FsReader), and
+/// [`FsAdmin`](crate::FsAdmin) each hold one; handles built from the same
+/// core share its caches and store.
 ///
 /// A read core carries no actor identity, owns no publisher, and starts no
 /// background work — it is what a read needs and nothing more. `ReadCore` is
@@ -47,7 +44,6 @@ pub(crate) struct ReadCoreInner {
     pub(crate) control_cache: Mutex<RuntimeControlCache>,
     pub(crate) metadata_table_cache: Arc<MetadataTableCache>,
     pub(crate) wal_tail_projection_cache: Arc<WalTailProjectionCache>,
-    pub(crate) grep_service: GrepService,
     pub(crate) cache_stats: RuntimeCacheStatsInner,
 }
 
@@ -140,7 +136,6 @@ impl ReadCore {
                 control_cache: Mutex::new(RuntimeControlCache::default()),
                 metadata_table_cache,
                 wal_tail_projection_cache,
-                grep_service: GrepService::new(),
                 cache_stats: RuntimeCacheStatsInner::default(),
             }),
         }
@@ -168,43 +163,25 @@ impl ReadCore {
     /// Returns the capability document for this embedded build (API spec,
     /// "Capability discovery").
     ///
-    /// The embedded runtime implements every v0 plane, so the answer is a
-    /// constant. Callers should still gate on the document rather than on
-    /// the backend kind, so the same logic works against remote deployments
-    /// that implement less.
+    /// The runtime implements the core and admin planes, so the answer is a
+    /// constant. It describes this crate and nothing else: a host that
+    /// composes an extension — the reference server composing `loonfs-grep`,
+    /// for one — merges that extension's profile, features, and limits into
+    /// this document before serving it. Callers should still gate on the
+    /// document rather than on the backend kind, so the same logic works
+    /// against remote deployments that implement more or less.
     pub(crate) fn capabilities(&self) -> CapabilityDocument {
         CapabilityDocument {
             protocol_version: PROTOCOL_VERSION.to_owned(),
-            profiles: vec![
-                PROFILE_CORE_V0.to_owned(),
-                PROFILE_ADMIN_V0.to_owned(),
-                PROFILE_QUERY_V0.to_owned(),
-            ],
+            profiles: vec![PROFILE_CORE_V0.to_owned(), PROFILE_ADMIN_V0.to_owned()],
             features: BTreeMap::from([
                 (FEATURE_NAMESPACES_CREATE.to_owned(), true),
                 (FEATURE_NAMESPACES_FORK.to_owned(), true),
                 (FEATURE_NAMESPACES_DELETE.to_owned(), true),
                 (FEATURE_UPLOADS_DIRECT_PUT.to_owned(), false),
-                (FEATURE_QUERY_GREP.to_owned(), true),
             ]),
             limits: {
                 let mut limits = PaginationPolicy::default().capability_limits();
-                limits.insert(
-                    LIMIT_QUERY_GREP_DEFAULT.to_owned(),
-                    loonfs_grep::DEFAULT_GREP_PAGE_LIMIT as u64,
-                );
-                limits.insert(
-                    LIMIT_QUERY_GREP_MAX.to_owned(),
-                    loonfs_grep::MAX_GREP_PAGE_LIMIT as u64,
-                );
-                limits.insert(
-                    LIMIT_QUERY_GREP_SCAN_BUDGET_FILES.to_owned(),
-                    loonfs_grep::MAX_GREP_SCAN_FILES as u64,
-                );
-                limits.insert(
-                    LIMIT_QUERY_GREP_TAIL_BUDGET_FILES.to_owned(),
-                    loonfs_grep::MAX_GREP_TAIL_FILES as u64,
-                );
                 limits.insert(
                     LIMIT_GC_MIN_GRACE_WINDOW_MS.to_owned(),
                     loonfs_core::limits::GC_MIN_GRACE_WINDOW_MS,

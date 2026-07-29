@@ -16,7 +16,7 @@ use loonfs_api::{
     ReleaseCheckpointResponse, FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_PUT,
     LIMIT_DOWNLOAD_MAX_CONCURRENT, LIMIT_DOWNLOAD_MAX_CONTENT_BYTES, LIMIT_QUERY_GREP_DEFAULT,
     LIMIT_QUERY_GREP_MAX, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES, LIMIT_QUERY_GREP_TAIL_BUDGET_FILES,
-    LIMIT_UPLOAD_MAX_CONCURRENT, LIMIT_UPLOAD_MAX_CONTENT_BYTES,
+    LIMIT_UPLOAD_MAX_CONCURRENT, LIMIT_UPLOAD_MAX_CONTENT_BYTES, PROFILE_QUERY_V0,
 };
 
 #[derive(Debug, serde::Deserialize)]
@@ -69,16 +69,30 @@ pub(super) async fn capabilities(
         LIMIT_DOWNLOAD_MAX_CONCURRENT.to_owned(),
         state.config.max_concurrent_downloads as u64,
     );
-    if !state.config.grep.mode.serves_grep() {
-        capabilities.features.remove(FEATURE_QUERY_GREP);
-        for limit in [
-            LIMIT_QUERY_GREP_DEFAULT,
-            LIMIT_QUERY_GREP_MAX,
-            LIMIT_QUERY_GREP_SCAN_BUDGET_FILES,
-            LIMIT_QUERY_GREP_TAIL_BUDGET_FILES,
-        ] {
-            capabilities.limits.remove(limit);
-        }
+    // The runtime handles describe the core and admin planes. Grep is a
+    // composed extension, so this deployment — not the runtime — says
+    // whether the query plane exists and what it costs.
+    if state.config.grep.mode.serves_grep() {
+        capabilities.profiles.push(PROFILE_QUERY_V0.to_owned());
+        capabilities
+            .features
+            .insert(FEATURE_QUERY_GREP.to_owned(), true);
+        capabilities.limits.insert(
+            LIMIT_QUERY_GREP_DEFAULT.to_owned(),
+            loonfs_grep::DEFAULT_GREP_PAGE_LIMIT as u64,
+        );
+        capabilities.limits.insert(
+            LIMIT_QUERY_GREP_MAX.to_owned(),
+            loonfs_grep::MAX_GREP_PAGE_LIMIT as u64,
+        );
+        capabilities.limits.insert(
+            LIMIT_QUERY_GREP_SCAN_BUDGET_FILES.to_owned(),
+            loonfs_grep::MAX_GREP_SCAN_FILES as u64,
+        );
+        capabilities.limits.insert(
+            LIMIT_QUERY_GREP_TAIL_BUDGET_FILES.to_owned(),
+            loonfs_grep::MAX_GREP_TAIL_FILES as u64,
+        );
     }
     Ok(Json(capabilities))
 }

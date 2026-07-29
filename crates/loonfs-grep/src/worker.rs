@@ -1,7 +1,7 @@
 //! Explicit grep building, checkpointed backfill, reorganization, and
 //! garbage collection.
 //!
-//! Reorganization is the same idea as `loonfs-core`'s metadata
+//! Reorganization is the same idea as the runtime's own metadata
 //! reorganization and uses the same word: a bounded step merges older runs
 //! into a newer one and publishes the result. The grep index carries one
 //! more level than the metadata store — delta, mid, base, against the
@@ -27,6 +27,10 @@ use crate::root::{
 use crate::service::is_indexable_text_content;
 use crate::{GrepError, Result};
 use futures::future::try_join_all;
+use loonfs::{
+    CheckpointFilesPageCursor, CoreError, CreateCheckpointOptions, FsAdmin, FsReader, RuntimeError,
+    StoreFailureClass, METADATA_PUBLICATION_BUDGET_MS,
+};
 use loonfs_api::wire::hex::hex_encode_bytes;
 use loonfs_api::wire::sst_blocks::{
     index_blocks_for_key_range, DecodedDataBlock, SegmentBlocksBuilder, SegmentIndexEntry,
@@ -35,11 +39,7 @@ use loonfs_api::{
     sha256_digest, ChangeSeq, CheckpointId, ContentRef, ErrorCode, IndexSegmentId, InodeId,
     NamespaceId, RevisionNo,
 };
-use loonfs_core::limits::METADATA_PUBLICATION_BUDGET_MS;
-use loonfs_core::{
-    CheckpointFilesPageCursor, Error as CoreError, MonotonicTimer, NamespaceEngine,
-    StdMonotonicTimer, StoreFailureClass,
-};
+use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_objectstore::{ImmutableWriteError, ObjectStore, ObjectStoreError};
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::{NonZeroU64, NonZeroUsize};
@@ -175,30 +175,56 @@ pub struct GrepGcReport {
 ///
 /// Calls are explicit and bounded. Per-namespace drivers decide when to call
 /// them without changing the durable protocol.
-#[derive(Debug, Clone)]
+///
+/// The worker writes only grep's own keyspace, through `store`. Everything
+/// it needs from the filesystem it takes from the two runtime handles it
+/// borrows: reads through the reader, and the backfill checkpoint's
+/// creation and release through the admin handle — so the checkpoints grep
+/// pins are recorded under that handle's actor identity, like any other
+/// operator-created pin.
+#[derive(Clone)]
 pub struct GrepWorker<S> {
     store: S,
-    writer_id: String,
-    writer_session_id: String,
+    reader: FsReader,
+    admin: FsAdmin,
     writer_version: String,
     block_cache: Arc<GrepBlockCache>,
 }
 
+/// The runtime handles carry no debug representation — they are clones of a
+/// shared runtime, not state — so a worker prints what identifies its work.
+impl<S: std::fmt::Debug> std::fmt::Debug for GrepWorker<S> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GrepWorker")
+            .field("store", &self.store)
+            .field("writer_version", &self.writer_version)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<S: ObjectStore + Clone> GrepWorker<S> {
-    /// Creates a worker over one object-store handle and writer identity.
+    /// Creates a worker over one grep-keyspace store handle, the runtime
+    /// handles it reads and checkpoints through, and the version stamped
+    /// into every grep root it publishes.
     pub fn new(
         store: S,
-        writer_id: impl Into<String>,
-        writer_session_id: impl Into<String>,
+        reader: FsReader,
+        admin: FsAdmin,
         writer_version: impl Into<String>,
     ) -> Self {
         Self {
             store,
-            writer_id: writer_id.into(),
-            writer_session_id: writer_session_id.into(),
+            reader,
+            admin,
             writer_version: writer_version.into(),
             block_cache: Arc::new(GrepBlockCache::new(MAX_CACHED_GREP_BLOCKS)),
         }
+    }
+
+    /// This worker's filesystem reads for one namespace.
+    fn reads<'a>(&'a self, namespace_id: &'a NamespaceId) -> NamespaceReads<'a> {
+        NamespaceReads::new(&self.reader, namespace_id)
     }
 
     /// Enables grep by pinning a checkpoint and CAS-publishing a fresh
@@ -264,7 +290,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     /// Disables grep with one root CAS. Existing segments become grep-GC
     /// candidates and are never deleted synchronously.
     pub async fn disable(&self, namespace_id: &NamespaceId) -> Result<GrepDisableOutcome> {
-        ensure_live_namespace(&self.engine(namespace_id)?).await?;
+        ensure_live_namespace(&self.reads(namespace_id)).await?;
         let Some(current) = load_grep_root(&self.store, namespace_id)
             .await
             .map_err(GrepError::from)?
@@ -293,8 +319,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         match self.advance_root(&current, &next).await {
             Ok(_) => {
                 if let Some(checkpoint_id) = checkpoint_id {
-                    self.engine(namespace_id)?
-                        .release_checkpoint(&checkpoint_id)
+                    self.release_checkpoint(namespace_id, &checkpoint_id)
                         .await?;
                 }
                 Ok(GrepDisableOutcome::Disabled)
@@ -319,10 +344,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         if matches!(current.state().lifecycle(), GrepLifecycle::Disabled) {
             return Ok(build_report(namespace_id, GrepBuildOutcome::NotEnabled));
         }
-        // One pinned snapshot serves the whole step: the enumeration or feed
-        // read and every content read it plans observe the same namespace.
-        let engine = self.engine(namespace_id)?;
-        let reads = NamespaceReads::pin(&self.store, &engine).await?;
+        let reads = self.reads(namespace_id);
 
         let collected = match current.state().lifecycle() {
             GrepLifecycle::Backfilling {
@@ -377,16 +399,37 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             .await
     }
 
-    fn engine(&self, namespace_id: &NamespaceId) -> Result<NamespaceEngine<S>> {
-        Ok(NamespaceEngine::builder(self.store.clone())
-            .namespace_id(namespace_id.clone())
-            .writer_id(self.writer_id.clone())
-            .writer_session_id(self.writer_session_id.clone())
-            .writer_version(self.writer_version.clone())
-            .build()
-            .map_err(|error| {
-                CoreError::Internal(format!("failed to build grep worker engine: {error}"))
-            })?)
+    /// Runs bounded build and fold steps until this namespace's index is
+    /// caught up with nothing left to fold, and answers the watermark it
+    /// reached.
+    ///
+    /// This is what a host without a driver runtime — a one-shot command,
+    /// a test — calls where the reference server runs a [`GrepDriver`]: the
+    /// same pair loop, minus the driver's channel and backoff machinery, so
+    /// a synchronous caller surfaces the first error instead of retrying.
+    /// Every non-final outcome makes progress (a batch built or a unit
+    /// folded), so the loop terminates without an iteration cap.
+    ///
+    /// [`GrepDriver`]: crate::GrepDriver
+    pub async fn run_to_quiescence(
+        &self,
+        namespace_id: &NamespaceId,
+        policy: GramIndexBuildPolicy,
+    ) -> Result<ChangeSeq> {
+        loop {
+            let build = self.build_step(namespace_id, policy).await?;
+            let reorganize = self.reorganize_step(namespace_id, policy).await?;
+            if matches!(build.outcome, GrepBuildOutcome::NotEnabled)
+                || matches!(reorganize.outcome, GrepReorganizeOutcome::NotEnabled)
+            {
+                return Err(GrepError::NotEnabled);
+            }
+            if let GrepBuildOutcome::UpToDate { built_through_seq } = build.outcome {
+                if matches!(reorganize.outcome, GrepReorganizeOutcome::NotNeeded { .. }) {
+                    return Ok(built_through_seq);
+                }
+            }
+        }
     }
 
     async fn seed_root(
@@ -409,12 +452,26 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         namespace_id: &NamespaceId,
     ) -> Result<loonfs_api::CreateCheckpointResponse> {
         Ok(self
-            .engine(namespace_id)?
+            .admin
             .create_checkpoint(
-                GREP_BACKFILL_CHECKPOINT_NAME.to_owned(),
-                Some(GREP_BACKFILL_CHECKPOINT_TTL_MS),
+                namespace_id,
+                CreateCheckpointOptions {
+                    name: GREP_BACKFILL_CHECKPOINT_NAME.to_owned(),
+                    ttl_ms: Some(GREP_BACKFILL_CHECKPOINT_TTL_MS),
+                },
             )
             .await?)
+    }
+
+    async fn release_checkpoint(
+        &self,
+        namespace_id: &NamespaceId,
+        checkpoint_id: &CheckpointId,
+    ) -> Result<()> {
+        self.admin
+            .release_checkpoint(namespace_id, checkpoint_id)
+            .await?;
+        Ok(())
     }
 
     async fn release_checkpoint_if_unreferenced(
@@ -424,9 +481,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         root: &GrepRootState,
     ) -> Result<()> {
         if !root_names_checkpoint(root, checkpoint_id) {
-            self.engine(namespace_id)?
-                .release_checkpoint(checkpoint_id)
-                .await?;
+            self.release_checkpoint(namespace_id, checkpoint_id).await?;
         }
         Ok(())
     }
@@ -443,10 +498,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             self.release_checkpoint_if_unreferenced(namespace_id, checkpoint_id, winner.state())
                 .await
         } else {
-            self.engine(namespace_id)?
-                .release_checkpoint(checkpoint_id)
-                .await?;
-            Ok(())
+            self.release_checkpoint(namespace_id, checkpoint_id).await
         }
     }
 
@@ -470,8 +522,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             Ok(_) => {
                 if let Some(previous_checkpoint_id) = previous_checkpoint_id {
                     if previous_checkpoint_id != checkpoint.checkpoint_id {
-                        self.engine(namespace_id)?
-                            .release_checkpoint(&previous_checkpoint_id)
+                        self.release_checkpoint(namespace_id, &previous_checkpoint_id)
                             .await?;
                     }
                 }
@@ -550,8 +601,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         match self.advance_root(&current, &next).await {
             Ok(_) => {
                 if let Some(checkpoint_id) = completed_checkpoint_id {
-                    self.engine(namespace_id)?
-                        .release_checkpoint(&checkpoint_id)
+                    self.release_checkpoint(namespace_id, &checkpoint_id)
                         .await?;
                 }
                 Ok(build_report(
@@ -605,9 +655,9 @@ fn backfilling_root(
 fn rebootstrap_required(error: &GrepError) -> bool {
     matches!(
         error,
-        GrepError::Core(
+        GrepError::Runtime(RuntimeError::Core(
             CoreError::RebootstrapRequired { .. } | CoreError::CheckpointUnavailable(_)
-        )
+        ))
     )
 }
 
@@ -640,8 +690,8 @@ struct CollectedIndexUnit {
 /// `max_files_per_step` files examined, and content planning stops once
 /// `max_content_bytes_per_step` is reached (the file that crosses it is
 /// still included, exactly as the row walk did).
-async fn collect_backfill_unit<S: ObjectStore>(
-    reads: &NamespaceReads<'_, S>,
+async fn collect_backfill_unit(
+    reads: &NamespaceReads<'_>,
     checkpoint_id: &CheckpointId,
     target_seq: ChangeSeq,
     cursor: Option<InodeId>,
@@ -715,8 +765,8 @@ async fn collect_backfill_unit<S: ObjectStore>(
 /// Collects one incremental step from the semantic change feed.
 ///
 /// `Ok(None)` means the index is already at the namespace head.
-async fn collect_incremental_unit<S: ObjectStore>(
-    reads: &NamespaceReads<'_, S>,
+async fn collect_incremental_unit(
+    reads: &NamespaceReads<'_>,
     built_through_seq: ChangeSeq,
     next_event_index: u32,
     policy: GramIndexBuildPolicy,
@@ -817,8 +867,8 @@ struct PendingRevisionContent {
     content_ref: ContentRef,
 }
 
-async fn load_and_fold_revision_contents<S: ObjectStore>(
-    reads: &NamespaceReads<'_, S>,
+async fn load_and_fold_revision_contents(
+    reads: &NamespaceReads<'_>,
     pending: &[PendingRevisionContent],
     unit: &mut CollectedIndexUnit,
 ) -> Result<()> {
@@ -1148,8 +1198,8 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         now_ms: u64,
         report: &mut GrepGcReport,
     ) -> Result<()> {
-        let engine = self.engine(namespace_id)?;
-        match namespace_liveness(&engine).await {
+        let reads = self.reads(namespace_id);
+        match namespace_liveness(&reads).await {
             NamespaceLiveness::Gone => {
                 // A verified deleted namespace head is already the absorbing
                 // gate for this pointer: `enable` refuses that tombstone, so
@@ -1157,7 +1207,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 // liveness check. Pointer deletion needs no second state.
                 let mut deleted_any = false;
                 for key in keys {
-                    if namespace_liveness(&engine).await != NamespaceLiveness::Gone {
+                    if namespace_liveness(&reads).await != NamespaceLiveness::Gone {
                         report.retained_candidates += 1;
                         continue;
                     }
@@ -1443,8 +1493,8 @@ enum NamespaceLiveness {
 /// asking it for changes after the last possible sequence answers liveness
 /// with one head read and no history. Anything else is an unknown answer,
 /// and unknown never authorizes a delete.
-async fn namespace_liveness<S: ObjectStore>(engine: &NamespaceEngine<S>) -> NamespaceLiveness {
-    match live_namespace_probe(engine).await {
+async fn namespace_liveness(reads: &NamespaceReads<'_>) -> NamespaceLiveness {
+    match live_namespace_probe(reads).await {
         Ok(()) => NamespaceLiveness::Live,
         Err(error) => match error.code() {
             ErrorCode::NamespaceDeleted | ErrorCode::NamespaceNotFound => NamespaceLiveness::Gone,
@@ -1453,19 +1503,13 @@ async fn namespace_liveness<S: ObjectStore>(engine: &NamespaceEngine<S>) -> Name
     }
 }
 
-async fn ensure_live_namespace<S: ObjectStore>(engine: &NamespaceEngine<S>) -> Result<()> {
-    live_namespace_probe(engine).await
+async fn ensure_live_namespace(reads: &NamespaceReads<'_>) -> Result<()> {
+    live_namespace_probe(reads).await
 }
 
-async fn live_namespace_probe<S: ObjectStore>(engine: &NamespaceEngine<S>) -> Result<()> {
-    engine
-        .list_changes_after(ChangeSeq(u64::MAX), one_change())
-        .await?;
+async fn live_namespace_probe(reads: &NamespaceReads<'_>) -> Result<()> {
+    reads.head_seq().await?;
     Ok(())
-}
-
-fn one_change() -> loonfs_api::EffectiveLimit {
-    loonfs_api::EffectiveLimit::new(std::num::NonZeroU32::MIN)
 }
 
 fn live_grep_keys(root: &LoadedGrepRoot) -> BTreeSet<String> {

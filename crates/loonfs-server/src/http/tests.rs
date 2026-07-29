@@ -12,7 +12,8 @@ use async_trait::async_trait;
 use axum::body::Bytes;
 use futures::stream::BoxStream;
 use loonfs::{
-    CreateNamespaceOptions, DeleteOptions, FsWriter, PutFileOptions, TraceMode, TraceStoreKind,
+    CreateNamespaceOptions, DeleteOptions, FsAdmin, FsReader, FsWriter, PutFileOptions, TraceMode,
+    TraceStoreKind,
 };
 use loonfs_api::ErrorCode;
 use loonfs_api::{
@@ -24,7 +25,7 @@ use loonfs_client::{
 };
 use loonfs_grep::keyspace::{manifest_key as grep_manifest_key, root_key as grep_root_key};
 use loonfs_grep::root::{encode_grep_root, GrepManifestId, GrepRootEnvelope, GrepRootPointer};
-use loonfs_grep::{GrepDriverParked, GrepWorker};
+use loonfs_grep::{GrepDriverParked, GrepIndexSnapshot, GrepWorker, NamespaceReads};
 use loonfs_objectstore::keys::wal_head;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{
@@ -349,15 +350,11 @@ async fn embedded_shutdown_drains_an_active_grep_step() {
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
         .await
         .expect("create namespace");
-    GrepWorker::new(
-        store.clone(),
-        "grep-shutdown-enable",
-        "grep-shutdown-enable-session",
-        "grep-shutdown-enable/0.1",
-    )
-    .enable(&namespace_id)
-    .await
-    .expect("enable grep");
+    grep_worker(&store, "grep-shutdown-enable")
+        .await
+        .enable(&namespace_id)
+        .await
+        .expect("enable grep");
 
     blocking_store.block_next();
     let config = test_config(temp_dir.path(), "grep-shutdown-server");
@@ -435,20 +432,24 @@ async fn embedded_publish_observer_nudges_only_the_enabled_namespace_driver() {
             built_through_seq: ChangeSeq(1)
         })
     );
-    let response = state
-        .reader
-        .grep(
-            &namespace_id,
-            &GrepRequest {
-                pattern: "observer-driven needle".to_owned(),
-                case_insensitive: false,
-                path_prefix: None,
-                cursor: None,
-                limit: None,
-                allow_stale: false,
-                allow_scan: false,
-            },
-        )
+    let request = GrepRequest {
+        pattern: "observer-driven needle".to_owned(),
+        case_insensitive: false,
+        path_prefix: None,
+        cursor: None,
+        limit: None,
+        allow_stale: false,
+        allow_scan: false,
+    };
+    let service = state
+        .grep_service
+        .as_ref()
+        .expect("an embedded-mode app carries a grep service");
+    let store = state.writer.object_store();
+    let reads = NamespaceReads::new(&state.reader, &namespace_id);
+    let snapshot = GrepIndexSnapshot::from_grep_root(&*store, &namespace_id, service).await;
+    let response = service
+        .query(&request, &snapshot, &reads, &store)
         .await
         .expect("grep caught-up index");
     assert_eq!(response.matches.len(), 1);
@@ -461,7 +462,7 @@ async fn grep_error_disabled_root_is_not_materialized_and_core_reads_survive() {
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let namespace_id = namespace_id("grep-error-disabled");
     let writer = seed_grep_error_namespace(&store, &namespace_id).await;
-    let worker = grep_error_worker(&store);
+    let worker = grep_error_worker(&store).await;
     worker.enable(&namespace_id).await.expect("enable grep");
     worker.disable(&namespace_id).await.expect("disable grep");
     writer.shutdown_background().await.expect("shutdown writer");
@@ -489,6 +490,7 @@ async fn grep_error_mid_backfill_is_not_materialized_and_core_reads_survive() {
     let namespace_id = namespace_id("grep-error-backfill");
     let writer = seed_grep_error_namespace(&store, &namespace_id).await;
     grep_error_worker(&store)
+        .await
         .enable(&namespace_id)
         .await
         .expect("leave grep backfilling");
@@ -1651,13 +1653,26 @@ async fn seed_grep_error_namespace(
     writer
 }
 
-fn grep_error_worker(store: &SharedObjectStore) -> GrepWorker<SharedObjectStore> {
-    GrepWorker::new(
-        store.clone(),
-        "grep-error-worker",
-        "grep-error-worker-session",
-        "grep-error-worker/0.1",
-    )
+async fn grep_error_worker(store: &SharedObjectStore) -> GrepWorker<SharedObjectStore> {
+    grep_worker(store, "grep-error-worker").await
+}
+
+/// A worker composed the way the server composes its own: grep's keyspace
+/// on the given store, its filesystem reads and checkpoints on handles over
+/// the same store.
+async fn grep_worker(store: &SharedObjectStore, actor: &str) -> GrepWorker<SharedObjectStore> {
+    let version = format!("{actor}/0.1");
+    let reader = FsReader::builder_with_store(store.clone())
+        .build()
+        .await
+        .expect("build reader");
+    let admin = FsAdmin::builder_with_store(store.clone())
+        .actor_id(actor)
+        .actor_version(version.clone())
+        .build()
+        .await
+        .expect("build admin");
+    GrepWorker::new(store.clone(), reader, admin, version)
 }
 
 fn grep_error_request() -> GrepRequest {

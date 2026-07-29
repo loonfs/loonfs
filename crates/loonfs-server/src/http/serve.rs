@@ -12,11 +12,11 @@ use loonfs::{
     FsAdmin, FsBackgroundWork, FsReader, FsWriter, SharedObjectStore, TraceMode, TraceStoreKind,
 };
 use loonfs_api::NamespaceId;
-use loonfs_grep::{GrepDriverParked, GrepWorker};
+use loonfs_grep::{GrepDriverParked, GrepService, GrepWorker};
 use loonfs_objectstore::presign::ObjectTransferIssuer;
 use std::ffi::OsString;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use thiserror::Error;
 use tokio::sync::Semaphore;
 
@@ -37,6 +37,10 @@ pub(super) struct AppState {
     pub(super) admin: FsAdmin,
     pub(super) transfer_issuer: Option<Arc<dyn ObjectTransferIssuer>>,
     pub(super) grep_worker: Option<GrepWorker<SharedObjectStore>>,
+    /// The grep query service: one process-wide decoded-block cache for
+    /// grep's own segments, held here because grep is a composed extension
+    /// rather than part of the runtime the handles come from.
+    pub(super) grep_service: Option<Arc<GrepService>>,
     pub(super) grep_drivers: Option<GrepDrivers>,
     /// Bounds concurrently buffered proxied-upload bodies; with the
     /// per-request body limit this makes worst-case upload memory
@@ -156,14 +160,32 @@ pub(super) async fn app_with_store_and_transfer_issuer(
         store,
         std::env::var_os(OBJECT_STORE_METRICS_JSONL_ENV),
     )?;
+    // Grep reads and checkpoints through the same handles the HTTP planes
+    // use, so it has to be composed after them. The drivers close the loop:
+    // the writer nudges them on every publish, and they own a worker built
+    // from that writer's own handles. The observer therefore resolves its
+    // target through a slot filled before the router is served — nothing
+    // publishes until then.
+    let driver_slot: Arc<OnceLock<GrepDrivers>> = Arc::new(OnceLock::new());
+    let (writer, reader, admin) = build_handles(
+        &config,
+        store.clone(),
+        config.grep.mode.runs_worker().then(|| driver_slot.clone()),
+    )
+    .await?;
     let grep_worker = config.grep.mode.serves_grep().then(|| {
         GrepWorker::new(
             store.clone(),
-            format!("{}-grep", config.writer_id),
-            loonfs_api::generated_id("wrs"),
+            reader.clone(),
+            admin.clone(),
             config.writer_version.clone(),
         )
     });
+    let grep_service = config
+        .grep
+        .mode
+        .serves_grep()
+        .then(|| Arc::new(GrepService::new()));
     let grep_drivers = if config.grep.mode.runs_worker() {
         let worker_config = config.grep.worker_config();
         let grep_config_error =
@@ -171,7 +193,7 @@ pub(super) async fn app_with_store_and_transfer_issuer(
                 field: "grep",
                 reason: error.to_string(),
             };
-        Some(GrepDrivers::new(
+        let drivers = GrepDrivers::new(
             grep_worker
                 .as_ref()
                 .expect("driver-running grep mode should serve grep")
@@ -180,11 +202,12 @@ pub(super) async fn app_with_store_and_transfer_issuer(
             worker_config
                 .concurrent_step_limit()
                 .map_err(grep_config_error)?,
-        )?)
+        )?;
+        let _ = driver_slot.set(drivers.clone());
+        Some(drivers)
     } else {
         None
     };
-    let (writer, reader, admin) = build_handles(&config, store, grep_drivers.clone()).await?;
     let config = Arc::new(config);
     let lifecycle = ServerLifecycle {
         writer: writer.clone(),
@@ -204,6 +227,7 @@ pub(super) async fn app_with_store_and_transfer_issuer(
         admin,
         transfer_issuer,
         grep_worker,
+        grep_service,
         grep_drivers,
     };
     Ok((router(state.clone()), lifecycle, state))
@@ -240,7 +264,7 @@ pub(super) async fn build_handles_with_metrics_jsonl_path(
 async fn build_handles(
     config: &ServerConfig,
     store: SharedObjectStore,
-    grep_drivers: Option<GrepDrivers>,
+    grep_drivers: Option<Arc<OnceLock<GrepDrivers>>>,
 ) -> Result<(FsWriter, FsReader, FsAdmin), ServerConfigError> {
     let trace_store_kind = TraceStoreKind::from(config.store.kind());
     let runtime_error = |error: loonfs::RuntimeError| ServerConfigError::InvalidField {
@@ -266,7 +290,9 @@ async fn build_handles(
         .trace_store_kind(trace_store_kind);
     if let Some(drivers) = grep_drivers {
         writer_builder = writer_builder.publish_observer(move |namespace_id, _committed_seq| {
-            drivers.nudge_existing(namespace_id);
+            if let Some(drivers) = drivers.get() {
+                drivers.nudge_existing(namespace_id);
+            }
         });
     }
     let writer = writer_builder.build().await.map_err(runtime_error)?;

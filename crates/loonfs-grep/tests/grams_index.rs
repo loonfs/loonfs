@@ -1,18 +1,22 @@
 #![allow(clippy::panic)]
 // Lifecycle assertions use panic for precise failure diagnostics.
 
-//! Handle lifecycle plus direct `GrepWorker` building and folding.
+//! Host-composed grep over the runtime handles, plus direct `GrepWorker`
+//! building and folding.
+
+mod common;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use common::GrepHost;
 use futures::stream::BoxStream;
 use loonfs::{
-    ChangeSeq, CommitId, CommitOp, CommitRequest, CreateNamespaceOptions, ErrorCode, FsAdmin,
-    FsReader, FsWriter, GrepRequest, InodeId, NamespaceId, PutFileOptions, SharedObjectStore,
+    ChangeSeq, CommitId, CommitOp, CommitRequest, CreateNamespaceOptions, ErrorCode, FsWriter,
+    InodeId, NamespaceId, PutFileOptions, SharedObjectStore,
 };
-use loonfs_api::{decode_cursor, GrepPageCursor};
+use loonfs_api::{decode_cursor, GrepPageCursor, GrepRequest};
 use loonfs_grep::codec::INDEX_GRAMS_MAX_FILE_BYTES;
-use loonfs_grep::{GramIndexBuildPolicy, GrepBuildOutcome, GrepWorker};
+use loonfs_grep::{GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepWorker};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
@@ -49,14 +53,7 @@ async fn content_blob_keys(store: &SharedObjectStore) -> BTreeSet<String> {
         .collect()
 }
 
-fn worker(store: &SharedObjectStore) -> GrepWorker<SharedObjectStore> {
-    GrepWorker::new(
-        store.clone(),
-        "grep-worker-tests",
-        "grep-worker-tests-session",
-        "grep-worker-tests/0.1",
-    )
-}
+const GRAMS_TEST_VERSION: &str = "grep-worker-tests/0.1";
 
 async fn drive_worker_step(
     worker: &GrepWorker<SharedObjectStore>,
@@ -100,16 +97,7 @@ async fn grep_worker_builds_the_gram_index_once_enabled() {
         .build()
         .await
         .expect("build writer");
-    let admin = FsAdmin::builder_with_store(store.clone())
-        .actor_id("grams-admin")
-        .build()
-        .await
-        .expect("build admin");
-    let reader = FsReader::builder_with_store(store.clone())
-        .build()
-        .await
-        .expect("build reader");
-    let grep_worker = worker(&store);
+    let host = GrepHost::new(&store, "grams-admin", GRAMS_TEST_VERSION).await;
 
     writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
@@ -138,32 +126,26 @@ async fn grep_worker_builds_the_gram_index_once_enabled() {
     // construction must preserve that error ordering.
     let mut invalid_limit = request("needle");
     invalid_limit.limit = Some(0);
-    let error = reader
+    let error = host
         .grep(&namespace_id, &invalid_limit)
         .await
         .expect_err("invalid limit must win before the missing feature");
-    let loonfs::Error::Grep(loonfs::GrepError::Core(core)) = &error else {
+    let GrepError::Runtime(core) = &error else {
         panic!("expected a grep core passthrough, got {error:?}");
     };
     assert_eq!(core.code(), ErrorCode::InvalidRequest);
 
     // Before enablement, grep names the missing data half.
-    let error = reader
+    let error = host
         .grep(&namespace_id, &request("needle"))
         .await
         .expect_err("grep without the feature must be refused");
-    let loonfs::Error::Grep(grep) = &error else {
-        panic!("expected a grep error, got {error:?}");
-    };
-    assert!(matches!(grep, loonfs::GrepError::NotEnabled));
-    assert_eq!(grep.code(), ErrorCode::NotSupported);
+    assert!(matches!(error, GrepError::NotEnabled));
+    assert_eq!(error.code(), ErrorCode::NotSupported);
 
-    let enabled = admin
-        .enable_grep_index(&namespace_id)
-        .await
-        .expect("enable");
+    let enabled = host.enable_grep_index(&namespace_id).await.expect("enable");
     assert!(!enabled.already_enabled);
-    let again = admin
+    let again = host
         .enable_grep_index(&namespace_id)
         .await
         .expect("re-enable");
@@ -171,10 +153,10 @@ async fn grep_worker_builds_the_gram_index_once_enabled() {
 
     // Explicit worker steps run the backfill and keep the watermark current.
     for _ in 0..2 {
-        drive_worker_step(&grep_worker, &namespace_id, GramIndexBuildPolicy::default()).await;
+        drive_worker_step(&host.worker, &namespace_id, GramIndexBuildPolicy::default()).await;
     }
 
-    let response = reader
+    let response = host
         .grep(&namespace_id, &request("needle"))
         .await
         .expect("grep after steps");
@@ -192,33 +174,30 @@ async fn grep_worker_builds_the_gram_index_once_enabled() {
         )
         .await
         .expect("write charlie");
-    let response = reader
+    let response = host
         .grep(&namespace_id, &request("needle"))
         .await
         .expect("grep with tail");
     assert_eq!(response.matches.len(), 2);
-    drive_worker_step(&grep_worker, &namespace_id, GramIndexBuildPolicy::default()).await;
-    let response = reader
+    drive_worker_step(&host.worker, &namespace_id, GramIndexBuildPolicy::default()).await;
+    let response = host
         .grep(&namespace_id, &request("needle"))
         .await
         .expect("grep after catch-up step");
     assert_eq!(response.matches.len(), 2);
     assert!(response.built_through_seq.0 > 0);
 
-    let disabled = admin
+    let disabled = host
         .disable_grep_index(&namespace_id)
         .await
         .expect("disable");
     assert!(disabled.was_enabled);
-    let error = reader
+    let error = host
         .grep(&namespace_id, &request("needle"))
         .await
         .expect_err("grep after disable must be refused");
-    let loonfs::Error::Grep(grep) = &error else {
-        panic!("expected a grep error, got {error:?}");
-    };
-    assert!(matches!(grep, loonfs::GrepError::NotEnabled));
-    assert_eq!(grep.code(), ErrorCode::NotSupported);
+    assert!(matches!(error, GrepError::NotEnabled));
+    assert_eq!(error.code(), ErrorCode::NotSupported);
 
     writer.shutdown_background().await.expect("writer shutdown");
 }
@@ -238,20 +217,16 @@ async fn a_publish_below_the_wal_threshold_does_not_schedule_grep_work() {
         .build()
         .await
         .expect("build writer");
-    let reader = FsReader::builder_with_store(store.clone())
-        .build()
-        .await
-        .expect("build reader");
-    let grep_worker = worker(&store);
+    let host = GrepHost::new(&store, "grams-auto-admin", GRAMS_TEST_VERSION).await;
 
     writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
         .await
         .expect("create namespace");
     // Worker-level enable publishes the backfilling root without driving
-    // it (the admin surface drives to quiescence), so the test can observe
-    // that nothing else drives it either.
-    match grep_worker.enable(&namespace_id).await.expect("enable") {
+    // it (a host drives it to quiescence), so the test can observe that
+    // nothing else drives it either.
+    match host.worker.enable(&namespace_id).await.expect("enable") {
         loonfs_grep::GrepEnableOutcome::Enabled { .. } => {}
         outcome => panic!("expected fresh enable, got {outcome:?}"),
     }
@@ -278,24 +253,21 @@ async fn a_publish_below_the_wal_threshold_does_not_schedule_grep_work() {
         root.state().lifecycle(),
         loonfs_grep::root::GrepLifecycle::Backfilling { .. }
     ));
-    let error = reader
+    let error = host
         .grep(&namespace_id, &request("needle"))
         .await
         .expect_err("background metadata work must not materialize grep");
-    let loonfs::Error::Grep(grep) = error else {
-        panic!("expected grep error, got {error:?}");
-    };
-    assert!(matches!(grep, loonfs::GrepError::Backfilling));
-    assert_eq!(grep.code(), ErrorCode::NotSupported);
+    assert!(matches!(error, GrepError::Backfilling));
+    assert_eq!(error.code(), ErrorCode::NotSupported);
 
-    drive_worker_step(&grep_worker, &namespace_id, GramIndexBuildPolicy::default()).await;
-    drive_worker_step(&grep_worker, &namespace_id, GramIndexBuildPolicy::default()).await;
+    drive_worker_step(&host.worker, &namespace_id, GramIndexBuildPolicy::default()).await;
+    drive_worker_step(&host.worker, &namespace_id, GramIndexBuildPolicy::default()).await;
 
     // A stale grep serves from the index alone, proving only the explicit
     // worker advanced the watermark past the publish.
     let mut stale = request("needle");
     stale.allow_stale = true;
-    let response = reader
+    let response = host
         .grep(&namespace_id, &stale)
         .await
         .expect("stale grep after explicit worker catch-up");
@@ -325,12 +297,7 @@ async fn a_worker_policy_bounds_each_build_step() {
         .build()
         .await
         .expect("build writer");
-    let admin = FsAdmin::builder_with_store(store.clone())
-        .actor_id("grams-config-admin")
-        .build()
-        .await
-        .expect("build admin");
-    let grep_worker = worker(&store);
+    let host = GrepHost::new(&store, "grams-config-admin", GRAMS_TEST_VERSION).await;
     let policy = GramIndexBuildPolicy {
         max_files_per_step: nonzero_usize(3),
         ..GramIndexBuildPolicy::default()
@@ -340,13 +307,10 @@ async fn a_worker_policy_bounds_each_build_step() {
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
         .await
         .expect("create namespace");
-    admin
-        .enable_grep_index(&namespace_id)
-        .await
-        .expect("enable");
+    host.enable_grep_index(&namespace_id).await.expect("enable");
     // Materialize the empty backfill so the steps below run pure WAL
     // catch-up, where the file budget maps one-to-one onto the puts.
-    drive_worker_step(&grep_worker, &namespace_id, policy).await;
+    drive_worker_step(&host.worker, &namespace_id, policy).await;
 
     let mut put_seqs = Vec::new();
     for index in 0..5u32 {
@@ -362,7 +326,7 @@ async fn a_worker_policy_bounds_each_build_step() {
         put_seqs.push(result.committed_seq);
     }
 
-    drive_worker_step(&grep_worker, &namespace_id, policy).await;
+    drive_worker_step(&host.worker, &namespace_id, policy).await;
     let after_first = grams_built_through_seq(&store, &namespace_id).await;
     assert_eq!(
         after_first, put_seqs[2],
@@ -370,7 +334,7 @@ async fn a_worker_policy_bounds_each_build_step() {
          third put's commit"
     );
 
-    drive_worker_step(&grep_worker, &namespace_id, policy).await;
+    drive_worker_step(&host.worker, &namespace_id, policy).await;
     let after_second = grams_built_through_seq(&store, &namespace_id).await;
     assert_eq!(
         after_second, put_seqs[4],
@@ -399,25 +363,14 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
         .build()
         .await
         .expect("build writer");
-    let admin = FsAdmin::builder_with_store(store.clone())
-        .actor_id("grams-thousand-admin")
-        .build()
-        .await
-        .expect("build admin");
-    let reader = FsReader::builder_with_store(store.clone())
-        .build()
-        .await
-        .expect("build reader");
-    let first_worker = worker(&store);
+    let host = GrepHost::new(&store, "grams-thousand-admin", GRAMS_TEST_VERSION).await;
+    let first_worker = &host.worker;
 
     writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
         .await
         .expect("create namespace");
-    admin
-        .enable_grep_index(&namespace_id)
-        .await
-        .expect("enable");
+    host.enable_grep_index(&namespace_id).await.expect("enable");
     first_worker
         .build_step(&namespace_id, GramIndexBuildPolicy::default())
         .await
@@ -503,21 +456,21 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
         .collect();
 
     assert_grep_paths(
-        &reader,
+        &host,
         &namespace_id,
         "file 0000",
         BTreeSet::from(["/bounded-0000.txt".to_owned()]),
     )
     .await;
     assert_grep_paths(
-        &reader,
+        &host,
         &namespace_id,
         "file 0999",
         BTreeSet::from(["/bounded-0999.txt".to_owned()]),
     )
     .await;
     assert_eq!(
-        collect_grep_paths(&reader, &namespace_id, "bounded needle")
+        collect_grep_paths(&host, &namespace_id, "bounded needle")
             .await
             .len(),
         FILES,
@@ -526,12 +479,8 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
 
     // Simulate a crash: the fresh worker has no in-memory collection state and
     // can resume only from the published manifest cursor.
-    let resumed_worker = GrepWorker::new(
-        store.clone(),
-        "grams-resumed-worker",
-        "grams-resumed-session",
-        "grams-test/0.1",
-    );
+    let resumed_host = GrepHost::new(&store, "grams-resumed-worker", GRAMS_TEST_VERSION).await;
+    let resumed_worker = &resumed_host.worker;
     raw_store.reset_content_reads();
     let second = resumed_worker
         .build_step(&namespace_id, policy)
@@ -579,7 +528,7 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
         "resume must retain the prefix segments instead of replacing them"
     );
     assert_eq!(
-        collect_grep_paths(&reader, &namespace_id, "bounded needle")
+        collect_grep_paths(&host, &namespace_id, "bounded needle")
             .await
             .len(),
         FILES
@@ -589,19 +538,19 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
 }
 
 async fn assert_grep_paths(
-    reader: &FsReader,
+    host: &GrepHost,
     namespace_id: &NamespaceId,
     pattern: &str,
     expected: BTreeSet<String>,
 ) {
     assert_eq!(
-        collect_grep_paths(reader, namespace_id, pattern).await,
+        collect_grep_paths(host, namespace_id, pattern).await,
         expected
     );
 }
 
 async fn collect_grep_paths(
-    reader: &FsReader,
+    host: &GrepHost,
     namespace_id: &NamespaceId,
     pattern: &str,
 ) -> BTreeSet<String> {
@@ -609,7 +558,7 @@ async fn collect_grep_paths(
     request.limit = Some(1_000);
     let mut paths = BTreeSet::new();
     loop {
-        let response = reader
+        let response = host
             .grep(namespace_id, &request)
             .await
             .expect("grep bounded atomic commit");
@@ -648,25 +597,13 @@ async fn grep_answers_identically_across_tiered_folds() {
         .build()
         .await
         .expect("build writer");
-    let admin = FsAdmin::builder_with_store(store.clone())
-        .actor_id("grams-tiered-admin")
-        .build()
-        .await
-        .expect("build admin");
-    let reader = FsReader::builder_with_store(store.clone())
-        .build()
-        .await
-        .expect("build reader");
-    let grep_worker = worker(&store);
+    let host = GrepHost::new(&store, "grams-tiered-admin", GRAMS_TEST_VERSION).await;
 
     writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
         .await
         .expect("create namespace");
-    admin
-        .enable_grep_index(&namespace_id)
-        .await
-        .expect("enable");
+    host.enable_grep_index(&namespace_id).await.expect("enable");
 
     let mut expected_paths = Vec::new();
     for round in 0..10u32 {
@@ -680,10 +617,10 @@ async fn grep_answers_identically_across_tiered_folds() {
             )
             .await
             .expect("write file");
-        drive_worker_step(&grep_worker, &namespace_id, GramIndexBuildPolicy::default()).await;
+        drive_worker_step(&host.worker, &namespace_id, GramIndexBuildPolicy::default()).await;
         expected_paths.push(path);
 
-        let response = reader
+        let response = host
             .grep(&namespace_id, &request("needle"))
             .await
             .expect("grep");
@@ -883,7 +820,6 @@ async fn repeated_grep_serves_posting_blocks_from_the_grep_cache() {
     let raw_store = Arc::new(IndexSegmentGetCountingStore::new(temp_dir.path()));
     let store: loonfs::SharedObjectStore = raw_store.clone();
     let namespace_id = NamespaceId::parse("grams-cache").expect("namespace id");
-    let grep_worker = worker(&store);
 
     let writer = FsWriter::builder_with_store(store.clone())
         .writer_id("grams-cache-writer")
@@ -891,15 +827,7 @@ async fn repeated_grep_serves_posting_blocks_from_the_grep_cache() {
         .build()
         .await
         .expect("build writer");
-    let admin = FsAdmin::builder_with_store(store.clone())
-        .actor_id("grams-cache-admin")
-        .build()
-        .await
-        .expect("build admin");
-    let reader = FsReader::builder_with_store(store.clone())
-        .build()
-        .await
-        .expect("build reader");
+    let host = GrepHost::new(&store, "grams-cache-admin", GRAMS_TEST_VERSION).await;
 
     writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
@@ -924,16 +852,13 @@ async fn repeated_grep_serves_posting_blocks_from_the_grep_cache() {
         .await
         .expect("write bravo");
 
-    admin
-        .enable_grep_index(&namespace_id)
-        .await
-        .expect("enable");
+    host.enable_grep_index(&namespace_id).await.expect("enable");
     for _ in 0..2 {
-        drive_worker_step(&grep_worker, &namespace_id, GramIndexBuildPolicy::default()).await;
+        drive_worker_step(&host.worker, &namespace_id, GramIndexBuildPolicy::default()).await;
     }
 
     let before_first = raw_store.index_segment_get_count();
-    let first = reader
+    let first = host
         .grep(&namespace_id, &request("needle"))
         .await
         .expect("first grep");
@@ -944,7 +869,7 @@ async fn repeated_grep_serves_posting_blocks_from_the_grep_cache() {
         "the first grep must read posting blocks from the store"
     );
 
-    let second = reader
+    let second = host
         .grep(&namespace_id, &request("needle"))
         .await
         .expect("second grep");
@@ -952,7 +877,7 @@ async fn repeated_grep_serves_posting_blocks_from_the_grep_cache() {
     let after_second = raw_store.index_segment_get_count();
     assert_eq!(
         after_second, after_first,
-        "an identical grep through the same reader must serve every \
+        "an identical grep through the same service must serve every \
          posting block from the decoded-block cache"
     );
 
@@ -976,16 +901,7 @@ async fn a_failed_candidate_read_surfaces_in_traversal_order() {
         .build()
         .await
         .expect("build writer");
-    let admin = FsAdmin::builder_with_store(store.clone())
-        .actor_id("grams-fault-admin")
-        .build()
-        .await
-        .expect("build admin");
-    let reader = FsReader::builder_with_store(store.clone())
-        .build()
-        .await
-        .expect("build reader");
-    let grep_worker = worker(&store);
+    let host = GrepHost::new(&store, "grams-fault-admin", GRAMS_TEST_VERSION).await;
 
     writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
@@ -1021,14 +937,11 @@ async fn a_failed_candidate_read_surfaces_in_traversal_order() {
         panic!("bravo must add exactly one content blob, got {new_blobs:?}");
     };
 
-    admin
-        .enable_grep_index(&namespace_id)
-        .await
-        .expect("enable");
+    host.enable_grep_index(&namespace_id).await.expect("enable");
     for _ in 0..2 {
-        drive_worker_step(&grep_worker, &namespace_id, GramIndexBuildPolicy::default()).await;
+        drive_worker_step(&host.worker, &namespace_id, GramIndexBuildPolicy::default()).await;
     }
-    let healthy = reader
+    let healthy = host
         .grep(&namespace_id, &request("needle"))
         .await
         .expect("grep before the fault");
@@ -1042,11 +955,11 @@ async fn a_failed_candidate_read_surfaces_in_traversal_order() {
 
     // An unlimited page walks past alpha into bravo, so the failed read
     // fails that page, exactly as the serial scan did.
-    let error = reader
+    let error = host
         .grep(&namespace_id, &request("needle"))
         .await
         .expect_err("a reached candidate's failed read must fail its page");
-    let loonfs::Error::Grep(loonfs::GrepError::Core(core)) = &error else {
+    let GrepError::Runtime(core) = &error else {
         panic!("expected a grep core passthrough, got {error:?}");
     };
     assert_eq!(core.code(), ErrorCode::NamespaceCorrupt);
@@ -1056,7 +969,7 @@ async fn a_failed_candidate_read_surfaces_in_traversal_order() {
     // the full page comes back with a cursor.
     let mut first_page = request("needle");
     first_page.limit = Some(1);
-    let response = reader
+    let response = host
         .grep(&namespace_id, &first_page)
         .await
         .expect("a page that fills before the failed candidate must succeed");
@@ -1072,11 +985,11 @@ async fn a_failed_candidate_read_surfaces_in_traversal_order() {
     let mut second_page = request("needle");
     second_page.limit = Some(1);
     second_page.cursor = Some(cursor);
-    let error = reader
+    let error = host
         .grep(&namespace_id, &second_page)
         .await
         .expect_err("the deferred read error must surface on the next page");
-    let loonfs::Error::Grep(loonfs::GrepError::Core(core)) = &error else {
+    let GrepError::Runtime(core) = &error else {
         panic!("expected a grep core passthrough, got {error:?}");
     };
     assert_eq!(core.code(), ErrorCode::NamespaceCorrupt);
@@ -1175,16 +1088,7 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
         .build()
         .await
         .expect("build writer");
-    let admin = FsAdmin::builder_with_store(store.clone())
-        .actor_id("grams-oversized-admin")
-        .build()
-        .await
-        .expect("build admin");
-    let reader = FsReader::builder_with_store(store.clone())
-        .build()
-        .await
-        .expect("build reader");
-    let grep_worker = worker(&store);
+    let host = GrepHost::new(&store, "grams-oversized-admin", GRAMS_TEST_VERSION).await;
 
     writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
@@ -1199,12 +1103,9 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
         )
         .await
         .expect("write alpha");
-    admin
-        .enable_grep_index(&namespace_id)
-        .await
-        .expect("enable");
+    host.enable_grep_index(&namespace_id).await.expect("enable");
     for _ in 0..2 {
-        drive_worker_step(&grep_worker, &namespace_id, GramIndexBuildPolicy::default()).await;
+        drive_worker_step(&host.worker, &namespace_id, GramIndexBuildPolicy::default()).await;
     }
 
     // Oversized and full of matches: were it ever fetched and scanned, it
@@ -1245,7 +1146,7 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
 
     let mut first_page = request("needle");
     first_page.limit = Some(1);
-    let page_one = reader
+    let page_one = host
         .grep(&namespace_id, &first_page)
         .await
         .expect("first page");
@@ -1268,7 +1169,7 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
     let mut second_page = request("needle");
     second_page.limit = Some(1);
     second_page.cursor = Some(cursor_token);
-    let page_two = reader
+    let page_two = host
         .grep(&namespace_id, &second_page)
         .await
         .expect("second page");
@@ -1317,32 +1218,23 @@ async fn a_fold_does_not_reuse_grep_private_index_blocks() {
         .build()
         .await
         .expect("build writer");
-    // The derived reader shares the runtime grep service, while the worker
-    // retains a separate folding cache.
-    let reader = writer.reader();
-    let admin = FsAdmin::builder_with_store(store.clone())
-        .actor_id("grams-fold-admin")
-        .build()
-        .await
-        .expect("build admin");
-    let grep_worker = worker(&store);
+    // The host's query service and the worker keep separate block caches:
+    // one warms on posting probes, the other on folding.
+    let host = GrepHost::new(&store, "grams-fold-admin", GRAMS_TEST_VERSION).await;
 
     writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
         .await
         .expect("create namespace");
-    admin
-        .enable_grep_index(&namespace_id)
-        .await
-        .expect("enable");
-    drive_worker_step(&grep_worker, &namespace_id, GramIndexBuildPolicy::default()).await;
+    host.enable_grep_index(&namespace_id).await.expect("enable");
+    drive_worker_step(&host.worker, &namespace_id, GramIndexBuildPolicy::default()).await;
 
     // One delta segment per round; the explicit fold step tiers the deltas
     // into a mid run on the eighth round.
     let put_round = |round: u32| {
         let writer = writer.clone();
         let namespace_id = namespace_id.clone();
-        let grep_worker = &grep_worker;
+        let grep_worker = &host.worker;
         async move {
             writer
                 .put_file_bytes(
@@ -1373,7 +1265,7 @@ async fn a_fold_does_not_reuse_grep_private_index_blocks() {
     }
     // The warm-up: one grep that matches every file decodes the pending
     // delta segments' index and posting blocks into the shared cache.
-    let warm = reader
+    let warm = host
         .grep(&namespace_id, &request("needle"))
         .await
         .expect("warming grep");
@@ -1516,7 +1408,6 @@ async fn a_cold_fold_fans_out_its_segment_opens_within_the_io_cap() {
     let raw_store = Arc::new(InFlightIndexGetProbeStore::new(temp_dir.path()));
     let store: loonfs::SharedObjectStore = raw_store.clone();
     let namespace_id = NamespaceId::parse("grams-fold-fan-out").expect("namespace id");
-    let grep_worker = worker(&store);
 
     let writer = FsWriter::builder_with_store(store.clone())
         .writer_id("grams-fan-out-writer")
@@ -1524,20 +1415,13 @@ async fn a_cold_fold_fans_out_its_segment_opens_within_the_io_cap() {
         .build()
         .await
         .expect("build writer");
-    let admin = FsAdmin::builder_with_store(store.clone())
-        .actor_id("grams-fan-out-admin")
-        .build()
-        .await
-        .expect("build admin");
+    let host = GrepHost::new(&store, "grams-fan-out-admin", GRAMS_TEST_VERSION).await;
 
     writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
         .await
         .expect("create namespace");
-    admin
-        .enable_grep_index(&namespace_id)
-        .await
-        .expect("enable");
+    host.enable_grep_index(&namespace_id).await.expect("enable");
 
     // Each round writes one file and runs one bounded build step plus
     // one bounded fold step; the first gram-segment GET is, by
@@ -1559,7 +1443,7 @@ async fn a_cold_fold_fans_out_its_segment_opens_within_the_io_cap() {
             )
             .await
             .expect("write file");
-        drive_worker_step(&grep_worker, &namespace_id, GramIndexBuildPolicy::default()).await;
+        drive_worker_step(&host.worker, &namespace_id, GramIndexBuildPolicy::default()).await;
     }
 
     let peak = raw_store.peak_in_flight();

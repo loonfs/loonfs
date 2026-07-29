@@ -45,31 +45,28 @@ use thiserror::Error;
 pub use loonfs_api::v0::{
     BeginUploadRequest, BeginUploadResponse, ChangesResponse, CommitOp, CommitPrecondition,
     CommitRequest, CommitResponse, CommittedChange, CompleteUploadRequest, CompleteUploadResponse,
-    DirectPutUpload, DisableGrepIndexResponse, EnableGrepIndexResponse, FilesystemChange,
-    ObjectTransferAccess, UploadContentResponse, UploadMode,
+    DirectPutUpload, FilesystemChange, ObjectTransferAccess, UploadContentResponse, UploadMode,
 };
 pub use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, CapabilityDocument,
     ChangeSeq, CheckpointId, CommitId, ContentRef, ContentRefKind, CreateCheckpointRequest,
     CreateCheckpointResponse, DeleteDirectoryBehavior, DeleteNamespaceResponse,
     DestinationBehavior, DirectoryPageCursor, EffectiveLimit, FileRevision,
-    FileRevisionsPageCursor, FlushWalOutcome, FlushWalResponse, GcRequest, GcResponse, GrepMatch,
-    GrepRequest, GrepResponse, InodeId, InodeKind, ListFileRevisionsResponse,
-    ListPathEntriesResponse, MaintenanceStepKind, MaintenanceStepRequest, MaintenanceStepResponse,
-    ManifestId, NameKey, NamespaceId, NamespaceStatusResponse, NamespaceSummary, Page, PageRequest,
-    PaginationPolicy, ReleaseCheckpointResponse, ReorganizeStepOutcome, RevisionNo, UploadId,
-    WalFlushStepOutcome, FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE,
-    FEATURE_NAMESPACES_FORK, FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_PUT, PROFILE_ADMIN_V0,
-    PROFILE_CORE_V0, PROFILE_QUERY_V0, PROTOCOL_VERSION,
+    FileRevisionsPageCursor, FlushWalOutcome, FlushWalResponse, GcRequest, GcResponse, InodeId,
+    InodeKind, ListFileRevisionsResponse, ListPathEntriesResponse, MaintenanceStepKind,
+    MaintenanceStepRequest, MaintenanceStepResponse, ManifestId, NameKey, NamespaceId,
+    NamespaceStatusResponse, NamespaceSummary, Page, PageRequest, PaginationPolicy,
+    ReleaseCheckpointResponse, ReorganizeStepOutcome, RevisionNo, UploadId, WalFlushStepOutcome,
+    FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK,
+    FEATURE_UPLOADS_DIRECT_PUT, PROFILE_ADMIN_V0, PROFILE_CORE_V0, PROTOCOL_VERSION,
 };
 pub use loonfs_core::cache::MetadataTableCacheConfig;
-pub use loonfs_core::limits::DEFAULT_GC_MAX_OBJECTS;
+pub use loonfs_core::limits::{DEFAULT_GC_MAX_OBJECTS, METADATA_PUBLICATION_BUDGET_MS};
 pub use loonfs_core::{
     BootstrapNamespaceError, CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor,
     CurrentFileState, DeleteNamespaceOptions, Error as CoreError, ErrorCode, ErrorKind, GcConfig,
-    WriterFence, MAX_RESOLVE_CURRENT_FILES,
+    MetadataViewError, StoreFailureClass, WriterFence, MAX_RESOLVE_CURRENT_FILES,
 };
-pub use loonfs_grep::GrepError;
 pub use publisher::PublishObserver;
 
 /// Integration seam: the vocabulary for handing classified mutation work to
@@ -135,9 +132,6 @@ pub enum RuntimeError {
     /// Bootstrapping a namespace failed.
     #[error(transparent)]
     Bootstrap(#[from] BootstrapNamespaceError),
-    /// A grep query or grep-owned maintenance operation failed.
-    #[error(transparent)]
-    Grep(#[from] GrepError),
     /// The runtime configuration is invalid.
     #[error("invalid runtime config: {0}")]
     Config(String),
@@ -152,7 +146,6 @@ impl RuntimeError {
         match self {
             Self::Core(error) => error.code(),
             Self::Bootstrap(error) => error.code(),
-            Self::Grep(error) => error.code(),
             Self::Config(_) => ErrorCode::InvalidRequest,
             Self::RuntimeTask(_) => ErrorCode::ServerError,
         }

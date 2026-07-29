@@ -1,8 +1,8 @@
 //! Public grep failures and their wire-code classification.
 
 use crate::root::GrepRootError;
+use loonfs::{CoreError, RuntimeError, StoreFailureClass};
 use loonfs_api::{ErrorCode, ErrorKind};
-use loonfs_core::{Error as CoreError, StoreFailureClass};
 use thiserror::Error;
 
 /// Failure returned by grep queries or maintenance.
@@ -43,9 +43,19 @@ pub enum GrepError {
         /// Mutable grep root whose publication raced.
         object_key: String,
     },
-    /// A genuine core namespace failure encountered while grep read core state.
+    /// A genuine runtime failure encountered while grep read or wrote
+    /// through the filesystem handles.
     #[error(transparent)]
-    Core(#[from] CoreError),
+    Runtime(#[from] RuntimeError),
+}
+
+/// Grep names the runtime's own error vocabulary for the conditions it
+/// shares with every other reader — an invalid query, an unusable cursor, a
+/// lost basis — so one code means one thing whoever produced it.
+impl From<CoreError> for GrepError {
+    fn from(error: CoreError) -> Self {
+        Self::Runtime(RuntimeError::Core(error))
+    }
 }
 
 impl GrepError {
@@ -64,7 +74,7 @@ impl GrepError {
             },
             Self::CorruptIndex { .. } => ErrorCode::IndexCorrupt,
             Self::PublicationConflict { .. } => ErrorCode::StaleHead,
-            Self::Core(error) => error.code(),
+            Self::Runtime(error) => error.code(),
         }
     }
 }

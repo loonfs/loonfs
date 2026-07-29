@@ -1,6 +1,9 @@
 //! [`FsAdmin`]'s explicit maintenance: steps, GC, checkpoints, WAL
-//! flushes, and retention. Grep building and collection live in
-//! `loonfs-grep`.
+//! flushes, and retention.
+//!
+//! Derived indexes are not here and not in this crate: `loonfs-grep`
+//! builds and collects its own state through this handle's public
+//! checkpoint calls, and its hosts drive it.
 
 use crate::FsAdmin;
 use crate::NamespaceStatusResponse;
@@ -11,7 +14,6 @@ use crate::{
     SharedObjectStore, WalFlushStepOutcome,
 };
 use crate::{Result, RuntimeError};
-use loonfs_api::v0::{DisableGrepIndexResponse, EnableGrepIndexResponse};
 use loonfs_core::cache::load_namespace_head_summary;
 
 impl FsAdmin {
@@ -300,120 +302,6 @@ impl FsAdmin {
             return Ok(None);
         };
         Ok(Some(self.gc_namespace(namespace_id, config).await?))
-    }
-
-    /// Enables the independent grep root and drives its checkpointed
-    /// backfill to quiescence.
-    ///
-    /// The reference server runs the backfill in per-namespace drivers; an
-    /// embedded host has no driver runtime, so the enable call is the
-    /// driver — without this the root would stay `Backfilling` forever and
-    /// every query would answer `not_supported`. Re-running enable on an
-    /// already-enabled namespace drives catch-up the same way, which is how
-    /// an embedded operator advances a lagging index.
-    pub async fn enable_grep_index(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<EnableGrepIndexResponse> {
-        let outcome = self
-            .grep_worker()
-            .enable(namespace_id)
-            .await
-            .map_err(RuntimeError::Grep)?;
-        let already_enabled = match outcome {
-            loonfs_grep::GrepEnableOutcome::Enabled { .. } => false,
-            loonfs_grep::GrepEnableOutcome::AlreadyEnabled { .. } => true,
-            loonfs_grep::GrepEnableOutcome::Superseded => {
-                return Err(RuntimeError::Grep(
-                    loonfs_grep::GrepError::PublicationConflict {
-                        object_key: loonfs_grep::keyspace::root_key(namespace_id),
-                    },
-                ))
-            }
-        };
-        let built_through_seq = self.drive_grep_index_to_quiescence(namespace_id).await?;
-        Ok(EnableGrepIndexResponse {
-            namespace_id: namespace_id.clone(),
-            built_through_seq,
-            already_enabled,
-        })
-    }
-
-    /// Runs bounded build and fold steps until the grep index reports
-    /// caught-up and nothing left to fold — the same pair loop the server's
-    /// driver runs, minus its channel and backoff machinery: a synchronous
-    /// caller surfaces the first error instead of retrying. Every non-final
-    /// outcome makes progress (a batch built or a unit folded), so the loop
-    /// terminates without an iteration cap.
-    async fn drive_grep_index_to_quiescence(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<loonfs_api::ChangeSeq> {
-        let worker = self.grep_worker();
-        let policy = loonfs_grep::GramIndexBuildPolicy::default();
-        loop {
-            let build = worker
-                .build_step(namespace_id, policy)
-                .await
-                .map_err(RuntimeError::Grep)?;
-            let reorganize = worker
-                .reorganize_step(namespace_id, policy)
-                .await
-                .map_err(RuntimeError::Grep)?;
-            if matches!(build.outcome, loonfs_grep::GrepBuildOutcome::NotEnabled)
-                || matches!(
-                    reorganize.outcome,
-                    loonfs_grep::GrepReorganizeOutcome::NotEnabled
-                )
-            {
-                return Err(RuntimeError::Grep(loonfs_grep::GrepError::NotEnabled));
-            }
-            if let loonfs_grep::GrepBuildOutcome::UpToDate { built_through_seq } = build.outcome {
-                if matches!(
-                    reorganize.outcome,
-                    loonfs_grep::GrepReorganizeOutcome::NotNeeded { .. }
-                ) {
-                    return Ok(built_through_seq);
-                }
-            }
-        }
-    }
-
-    /// Disables the independent grep root; its segments become grep-GC
-    /// candidates.
-    pub async fn disable_grep_index(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<DisableGrepIndexResponse> {
-        let outcome = self
-            .grep_worker()
-            .disable(namespace_id)
-            .await
-            .map_err(RuntimeError::Grep)?;
-        match outcome {
-            loonfs_grep::GrepDisableOutcome::Disabled => Ok(DisableGrepIndexResponse {
-                namespace_id: namespace_id.clone(),
-                was_enabled: true,
-            }),
-            loonfs_grep::GrepDisableOutcome::NotEnabled => Ok(DisableGrepIndexResponse {
-                namespace_id: namespace_id.clone(),
-                was_enabled: false,
-            }),
-            loonfs_grep::GrepDisableOutcome::Superseded => Err(RuntimeError::Grep(
-                loonfs_grep::GrepError::PublicationConflict {
-                    object_key: loonfs_grep::keyspace::root_key(namespace_id),
-                },
-            )),
-        }
-    }
-
-    fn grep_worker(&self) -> loonfs_grep::GrepWorker<crate::SharedObjectStore> {
-        loonfs_grep::GrepWorker::new(
-            self.core.shared_store(),
-            self.actor.writer_id.clone(),
-            self.actor.writer_session_id.clone(),
-            self.actor.writer_version.clone(),
-        )
     }
 
     /// Runs the v1 mark-and-sweep garbage collector for one namespace.

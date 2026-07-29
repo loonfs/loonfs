@@ -3,21 +3,19 @@
 
 //! Frozen full-pipeline `GrepService` query semantics and budgets.
 
+mod common;
+
+use common::{control, grep_with, GrepHost};
+use loonfs::publish::{NamespaceMutationCandidate, PathMutationIntent};
 use loonfs::{
     CommitId, CoreError, CreateDirectoryOptions, CreateNamespaceOptions, DeleteOptions,
-    DestinationBehavior, FsAdmin, FsWriter, GrepRequest, GrepResponse, MoveOptions, NamespaceId,
-    PutFileOptions, SharedObjectStore,
+    DestinationBehavior, FsAdmin, FsReader, FsWriter, MoveOptions, NamespaceId, PutFileOptions,
+    SharedObjectStore,
 };
-use loonfs_api::AbsolutePath;
-use loonfs_core::control::load_namespace_read_anchor;
-use loonfs_core::publish::{NamespaceMutationCandidate, PathMutationIntent};
-use loonfs_core::NamespaceEngine;
+use loonfs_api::{AbsolutePath, GrepRequest, GrepResponse};
 use loonfs_grep::root::load_grep_root;
 use loonfs_grep::GramIndexBuildPolicy;
-use loonfs_grep::{
-    GrepBuildOutcome, GrepIndexSnapshot, GrepReorganizeOutcome, GrepService, GrepWorker,
-    NamespaceReads,
-};
+use loonfs_grep::{GrepBuildOutcome, GrepReorganizeOutcome, GrepService, GrepWorker};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::nonzero_usize;
 use std::collections::BTreeSet;
@@ -36,36 +34,38 @@ fn request(pattern: &str) -> GrepRequest {
     }
 }
 
+/// The query half of a host's composition: one service and one reader over
+/// the namespace under test.
 struct ServiceHarness {
     store: SharedObjectStore,
     namespace_id: NamespaceId,
-    engine: NamespaceEngine<SharedObjectStore>,
+    reader: FsReader,
     service: GrepService,
 }
 
 impl ServiceHarness {
-    fn new(store: SharedObjectStore, namespace_id: NamespaceId) -> Self {
-        let engine = NamespaceEngine::builder(store.clone())
-            .namespace_id(namespace_id.clone())
-            .writer_id("grep-service-query")
+    async fn new(store: SharedObjectStore, namespace_id: NamespaceId) -> Self {
+        let reader = FsReader::builder_with_store(store.clone())
             .build()
-            .expect("build query engine");
+            .await
+            .expect("build query reader");
         Self {
             store,
             namespace_id,
-            engine,
+            reader,
             service: GrepService::new(),
         }
     }
 
     async fn result(&self, grep_request: &GrepRequest) -> loonfs_grep::Result<GrepResponse> {
-        let reads = NamespaceReads::pin(&self.store, &self.engine).await?;
-        let snapshot =
-            GrepIndexSnapshot::from_grep_root(&*self.store, &self.namespace_id, &self.service)
-                .await;
-        self.service
-            .query(grep_request, &snapshot, &reads, &self.store)
-            .await
+        grep_with(
+            &self.service,
+            &self.reader,
+            &self.store,
+            &self.namespace_id,
+            grep_request,
+        )
+        .await
     }
 
     async fn success(&self, case: &str, grep_request: &GrepRequest) -> GrepResponse {
@@ -127,13 +127,10 @@ async fn publish_same_content_files(
     }
 }
 
-fn worker(store: &SharedObjectStore) -> GrepWorker<SharedObjectStore> {
-    GrepWorker::new(
-        store.clone(),
-        "grep-worker-tests",
-        "grep-worker-tests-session",
-        "grep-worker-tests/0.1",
-    )
+async fn worker(store: &SharedObjectStore) -> GrepWorker<SharedObjectStore> {
+    GrepHost::new(store, "grep-worker-tests", "grep-worker-tests/0.1")
+        .await
+        .worker
 }
 
 async fn drive_worker_step(
@@ -202,7 +199,7 @@ async fn planless_boundary_fixture(namespace: &str) -> PlanlessBoundaryFixture {
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
         .await
         .expect("create namespace");
-    let worker = worker(&store);
+    let worker = worker(&store).await;
     worker.enable(&namespace_id).await.expect("enable grep");
     drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
     PlanlessBoundaryFixture {
@@ -242,24 +239,14 @@ async fn planless_scan_returns_exact_materialized_and_wal_boundary_revisions_onc
         )
         .await
         .expect("write materialized file");
-    let (materialized_head, _) = load_namespace_read_anchor(&*fixture.store, &fixture.namespace_id)
-        .await
-        .expect("load materialized head");
+    let materialized_head = control::head(&fixture.store, &fixture.namespace_id).await;
     fixture
         .admin
         .flush_wal(&fixture.namespace_id)
         .await
         .expect("flush materialized commit");
-    let materialized_root = loonfs_core::control::load_namespace_metadata_root_control(
-        &*fixture.store,
-        &fixture.namespace_id,
-    )
-    .await
-    .expect("load materialized root");
-    assert_eq!(
-        materialized_root.state.manifest_head_seq,
-        materialized_head.state.seq
-    );
+    let materialized_root = control::metadata_root(&fixture.store, &fixture.namespace_id).await;
+    assert_eq!(materialized_root.manifest_head_seq, materialized_head.seq);
 
     fixture
         .writer
@@ -271,23 +258,16 @@ async fn planless_scan_returns_exact_materialized_and_wal_boundary_revisions_onc
         )
         .await
         .expect("write WAL-only file");
-    let (head, _basis) = load_namespace_read_anchor(&*fixture.store, &fixture.namespace_id)
-        .await
-        .expect("load boundary");
-    let root = loonfs_core::control::load_namespace_metadata_root_control(
-        &*fixture.store,
-        &fixture.namespace_id,
-    )
-    .await
-    .expect("load boundary root");
-    assert_eq!(root.state.manifest_head_seq, materialized_head.state.seq);
+    let head = control::head(&fixture.store, &fixture.namespace_id).await;
+    let root = control::metadata_root(&fixture.store, &fixture.namespace_id).await;
+    assert_eq!(root.manifest_head_seq, materialized_head.seq);
     assert_eq!(
-        head.state.seq.0,
-        root.state.manifest_head_seq.0 + 1,
+        head.seq.0,
+        root.manifest_head_seq.0 + 1,
         "the WAL-only file must be committed immediately after the materialized boundary"
     );
 
-    let harness = ServiceHarness::new(fixture.store.clone(), fixture.namespace_id.clone());
+    let harness = ServiceHarness::new(fixture.store.clone(), fixture.namespace_id.clone()).await;
     let mut scan = request("x");
     scan.allow_scan = true;
     let response = harness
@@ -355,7 +335,7 @@ async fn planless_scan_deduplicates_an_inode_revised_across_materialization() {
         .await
         .expect("write WAL revision");
 
-    let harness = ServiceHarness::new(fixture.store.clone(), fixture.namespace_id.clone());
+    let harness = ServiceHarness::new(fixture.store.clone(), fixture.namespace_id.clone()).await;
     let mut scan = request("x");
     scan.allow_scan = true;
     let response = harness.success("overlapping inode sources", &scan).await;
@@ -388,7 +368,7 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
         max_mid_runs: nonzero_usize(2),
         ..GramIndexBuildPolicy::default()
     };
-    let worker = worker(&store);
+    let worker = worker(&store).await;
 
     writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
@@ -477,7 +457,7 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
         .await
         .expect("move indexed file");
 
-    let harness = ServiceHarness::new(store.clone(), namespace_id.clone());
+    let harness = ServiceHarness::new(store.clone(), namespace_id.clone()).await;
 
     let indexed = harness
         .success("indexed hits", &request("indexed-needle"))

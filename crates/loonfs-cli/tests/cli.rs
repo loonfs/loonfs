@@ -2453,9 +2453,10 @@ fn sorted_object_keys(value: &Value) -> Vec<String> {
     keys
 }
 
-/// The embedded capability document: the registry of advertised profiles and
-/// feature keys (`crates/loonfs/tests/capability_conformance.rs` pins it to
-/// the spec text).
+/// What an embedded profile serves: the runtime's own capability document
+/// (`crates/loonfs/tests/capability_conformance.rs` pins it to the spec
+/// text) plus the query plane the CLI composes from `loonfs-grep`, which is
+/// how `loon grep` and `loon admin index-*` reach a store at all.
 fn embedded_capability_document() -> loonfs::CapabilityDocument {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let store = std::sync::Arc::new(
@@ -2467,7 +2468,14 @@ fn embedded_capability_document() -> loonfs::CapabilityDocument {
         .expect("test runtime")
         .block_on(loonfs::FsReader::builder_with_store(store).build())
         .expect("build reader");
-    reader.capabilities()
+    let mut document = reader.capabilities();
+    document
+        .profiles
+        .push(loonfs_api::PROFILE_QUERY_V0.to_owned());
+    document
+        .features
+        .insert(loonfs_api::FEATURE_QUERY_GREP.to_owned(), true);
+    document
 }
 
 fn assert_cli_command_path_exists(harness: &Harness, command_path: &[&str]) {

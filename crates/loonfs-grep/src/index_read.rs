@@ -3,11 +3,11 @@
 use crate::cache::{DecodedGrepBlock, GrepBlockCache, GrepBlockCacheKey, GrepBlockKind};
 use crate::codec::IndexRow;
 use crate::{GrepError, Result};
+use loonfs::StoreFailureClass;
 use loonfs_api::wire::sst_blocks::{
     decode_data_block_rows, decode_filter_block, decode_index_block, BlockHandle, DecodedDataBlock,
     SegmentFilter, SegmentIndexEntry,
 };
-use loonfs_core::StoreFailureClass;
 use loonfs_objectstore::{ByteRange, ObjectStore};
 use std::sync::Arc;
 

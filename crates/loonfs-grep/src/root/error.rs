@@ -1,7 +1,7 @@
 //! Typed failures for grep root state, encoding, loading, and publication.
 
+use loonfs::StoreFailureClass;
 use loonfs_api::{IndexSegmentId, NamespaceId};
-use loonfs_core::StoreFailureClass;
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]

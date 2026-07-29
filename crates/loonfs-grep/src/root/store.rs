@@ -13,8 +13,8 @@ use super::error::{GrepRootError, Result};
 use super::state::{GrepManifestId, GrepRootPointer, GrepRootState};
 use crate::keyspace::{manifest_key, root_key};
 use bytes::Bytes;
+use loonfs::StoreFailureClass;
 use loonfs_api::NamespaceId;
-use loonfs_core::StoreFailureClass;
 use loonfs_objectstore::{
     ImmutableWriteError, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
 };
