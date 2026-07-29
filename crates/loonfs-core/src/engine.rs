@@ -224,16 +224,6 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             .await
     }
 
-    /// Loads the coherent read view passed to `loonfs-grep`.
-    ///
-    /// This is part of the read surface consumed by `loonfs-grep`.
-    pub async fn load_grep_view<'a>(
-        &'a self,
-        context: &'a RuntimeReadContext,
-    ) -> Result<LoadedMetadataView<'a, S>> {
-        self.load_read_view(context).await
-    }
-
     /// Lists one revision page for a path against the pinned runtime read context.
     pub async fn list_file_revisions_page(
         &self,

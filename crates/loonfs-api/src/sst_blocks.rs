@@ -455,6 +455,23 @@ impl SegmentFilter {
     }
 }
 
+/// The exclusive upper bound for every row key beginning with `prefix`.
+///
+/// Row keys are ordered as byte strings, so a prefix scan is the range
+/// `[prefix, string_prefix_upper_bound(prefix))`. `None` means the prefix is
+/// all `0xff` bytes and nothing sorts above it, so the scan runs to the end.
+pub fn string_prefix_upper_bound(prefix: &str) -> Option<String> {
+    let mut bytes = prefix.as_bytes().to_vec();
+    for index in (0..bytes.len()).rev() {
+        if bytes[index] != u8::MAX {
+            bytes[index] += 1;
+            bytes.truncate(index + 1);
+            return String::from_utf8(bytes).ok();
+        }
+    }
+    None
+}
+
 /// Index positions of the blocks that can hold keys in
 /// `[lower_bound, upper_bound)`; `None` bounds the range at the last block.
 pub fn index_blocks_for_key_range(

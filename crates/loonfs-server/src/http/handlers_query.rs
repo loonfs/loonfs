@@ -271,7 +271,7 @@ async fn start_driver_for_query_if_needed(
                 .namespace_status(namespace_id)
                 .await
                 .is_ok_and(|status| {
-                    root.state().index().next_delta_index != 0
+                    root.state().index().next_event_index != 0
                         || root.state().index().built_through_seq < status.head_seq
                 })
         }

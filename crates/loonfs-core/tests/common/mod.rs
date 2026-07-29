@@ -70,7 +70,7 @@ pub(crate) mod mutation_split_support {
     use futures::stream::BoxStream;
     use loonfs_api::{
         sha256_digest,
-        v0::{CommitOp as ApiCommitOp, CommitRequest as ApiCommitRequest},
+        v0::{CommitOp as ApiCommitOp, CommitRequest as ApiCommitRequest, FilesystemChange},
         AbsolutePath, ChangeSeq, CommitId, ContentRef, ContentRefKind, DestinationBehavior,
         DisplayName, InodeId, NameKey, NamespaceId,
     };
@@ -367,34 +367,72 @@ pub(crate) mod mutation_split_support {
     }
 
     /// Reads the child's active parent binding, with the generation identity
-    /// (`bind_seq`, `bind_delta_index`) a `BindingIs` precondition pins. The
-    /// change feed reports semantic events without delta positions, so tests
-    /// capture the observed binding from the metadata view like the embedded
-    /// planner does.
+    /// (`bind_seq`, `bind_delta_index`) a `BindingIs` precondition pins.
+    ///
+    /// The change feed names the binding — which directory, under which
+    /// spelling, committed at which sequence — but reports semantic events
+    /// without delta positions, so the harness supplies the one position the
+    /// reducer fixes: every binding operation materializes its
+    /// `BindDirentry` as the second delta of its operation group (create is
+    /// allocate + bind [+ first revision], rename is unbind + bind, undelete
+    /// is revoke + bind). These fixtures publish one operation per commit,
+    /// so that is also the position within the commit.
     pub(crate) async fn current_binding_for_child<S: ObjectStore + ?Sized>(
         store: &S,
         namespace_id: &NamespaceId,
         target_child_inode_id: InodeId,
     ) -> BindingIdentity {
-        let context = read_context(store, namespace_id).await;
-        let engine = namespace_engine(store, namespace_id, &mutation_context());
-        let view = engine
-            .load_grep_view(&context)
+        const BIND_DELTA_INDEX: u32 = 1;
+
+        let name_policy = loonfs_core::control::load_namespace_catalog_entry(store, namespace_id)
             .await
-            .expect("load metadata view");
-        let binding = view
-            .grep_session()
-            .current_parent_binding_for_child(target_child_inode_id)
+            .expect("load namespace catalog")
+            .name_policy();
+        let changes = list_changes_after(store, namespace_id, ChangeSeq(0))
             .await
-            .expect("read current binding")
-            .expect("binding exists");
-        BindingIdentity {
-            parent_inode_id: binding.parent_inode_id,
-            name_key: binding.name_key,
-            child_inode_id: binding.child_inode_id,
-            bind_seq: binding.bind_seq,
-            bind_delta_index: binding.bind_delta_index,
+            .expect("read the change feed");
+        let mut binding = None;
+        for change in changes.changes {
+            for event in change.events {
+                let bound = match event {
+                    FilesystemChange::Created {
+                        inode_id,
+                        parent_inode_id,
+                        name,
+                        ..
+                    }
+                    | FilesystemChange::Undeleted {
+                        inode_id,
+                        parent_inode_id,
+                        name,
+                        ..
+                    } => Some((inode_id, parent_inode_id, name)),
+                    FilesystemChange::Moved {
+                        inode_id,
+                        to_parent_inode_id,
+                        to_name,
+                        ..
+                    } => Some((inode_id, to_parent_inode_id, to_name)),
+                    FilesystemChange::ContentChanged { .. } | FilesystemChange::Deleted { .. } => {
+                        None
+                    }
+                };
+                let Some((inode_id, parent_inode_id, name)) = bound else {
+                    continue;
+                };
+                if inode_id != target_child_inode_id {
+                    continue;
+                }
+                binding = Some(BindingIdentity {
+                    parent_inode_id,
+                    name_key: NameKey::for_display_name(name_policy, &name),
+                    child_inode_id: inode_id,
+                    bind_seq: change.seq,
+                    bind_delta_index: BIND_DELTA_INDEX,
+                });
+            }
         }
+        binding.expect("the tracked child has an active binding")
     }
 
     #[derive(Debug)]

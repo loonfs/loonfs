@@ -492,7 +492,7 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
         commit.committed_seq
     );
     assert!(
-        partial.state().index().next_delta_index > 0,
+        partial.state().index().next_event_index > 0,
         "the first step must stop within the atomic commit"
     );
     let prefix_segment_ids: BTreeSet<_> = partial
@@ -567,7 +567,7 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
         complete.state().index().built_through_seq,
         commit.committed_seq
     );
-    assert_eq!(complete.state().index().next_delta_index, 0);
+    assert_eq!(complete.state().index().next_event_index, 0);
     let complete_segment_ids: BTreeSet<_> = complete
         .state()
         .segments()

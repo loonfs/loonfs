@@ -9,18 +9,14 @@ use loonfs::{
     PutFileOptions, SharedObjectStore,
 };
 use loonfs_api::AbsolutePath;
-use loonfs_core::cache::{
-    MetadataTableCache, MetadataTableCacheConfig, WalTailProjectionCache,
-    WalTailProjectionCacheConfig, DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES,
-    DEFAULT_WAL_TAIL_PROJECTION_ROWS,
-};
 use loonfs_core::control::load_namespace_read_anchor;
 use loonfs_core::publish::{NamespaceMutationCandidate, PathMutationIntent};
-use loonfs_core::{NamespaceEngine, RuntimeReadContext};
+use loonfs_core::NamespaceEngine;
 use loonfs_grep::root::load_grep_root;
 use loonfs_grep::GramIndexBuildPolicy;
 use loonfs_grep::{
     GrepBuildOutcome, GrepIndexSnapshot, GrepReorganizeOutcome, GrepService, GrepWorker,
+    NamespaceReads,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::ids::nonzero_usize;
@@ -37,23 +33,6 @@ fn request(pattern: &str) -> GrepRequest {
         limit: None,
         allow_stale: false,
         allow_scan: false,
-    }
-}
-
-async fn read_context(store: &SharedObjectStore, namespace_id: &NamespaceId) -> RuntimeReadContext {
-    let (head, basis) = load_namespace_read_anchor(&**store, namespace_id)
-        .await
-        .expect("load read anchor");
-    RuntimeReadContext {
-        head: head.state,
-        head_etag: head.identity.etag,
-        basis,
-        table_cache: Arc::new(MetadataTableCache::new(MetadataTableCacheConfig::default())),
-        tail_cache: Arc::new(WalTailProjectionCache::new(WalTailProjectionCacheConfig {
-            max_entries: 4,
-            max_rows: DEFAULT_WAL_TAIL_PROJECTION_ROWS,
-            max_decoded_bytes: DEFAULT_WAL_TAIL_PROJECTION_DECODED_BYTES,
-        })),
     }
 }
 
@@ -80,13 +59,12 @@ impl ServiceHarness {
     }
 
     async fn result(&self, grep_request: &GrepRequest) -> loonfs_grep::Result<GrepResponse> {
-        let context = read_context(&self.store, &self.namespace_id).await;
-        let view = self.engine.load_grep_view(&context).await?;
+        let reads = NamespaceReads::pin(&self.store, &self.engine).await?;
         let snapshot =
             GrepIndexSnapshot::from_grep_root(&*self.store, &self.namespace_id, &self.service)
                 .await;
         self.service
-            .query(grep_request, &snapshot, &view, &self.store)
+            .query(grep_request, &snapshot, &reads, &self.store)
             .await
     }
 

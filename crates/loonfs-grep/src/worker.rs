@@ -18,6 +18,7 @@ use crate::index_read::{load_data_block, load_index_block};
 use crate::keyspace::{
     manifest_key, namespace_prefix, parse_key, root_key, segment_key, GrepKeyKind,
 };
+use crate::reads::{published_revision, NamespaceReads};
 use crate::root::{
     advance_grep_root, load_grep_root, seed_grep_root, ChangeFeedResume, GrepIndexState,
     GrepLifecycle, GrepReorganizeState, GrepRootError, GrepRootState, GrepSegmentRef,
@@ -26,33 +27,23 @@ use crate::root::{
 use crate::service::is_indexable_text_content;
 use crate::{GrepError, Result};
 use futures::future::try_join_all;
-use loonfs_api::wire::control::NamespaceState;
 use loonfs_api::wire::hex::hex_encode_bytes;
 use loonfs_api::wire::sst_blocks::{
     index_blocks_for_key_range, DecodedDataBlock, SegmentBlocksBuilder, SegmentIndexEntry,
 };
-use loonfs_api::wire::wal::WalDelta;
 use loonfs_api::{
-    sha256_digest, ChangeSeq, CheckpointId, ContentRef, ContentStoreId, IndexSegmentId, InodeId,
+    sha256_digest, ChangeSeq, CheckpointId, ContentRef, ErrorCode, IndexSegmentId, InodeId,
     NamespaceId, RevisionNo,
-};
-use loonfs_core::content::read_durable_content_bytes;
-use loonfs_core::control::{
-    load_namespace_catalog_entry, load_namespace_head_control, ControlObjectLoadError,
-};
-use loonfs_core::grep::{
-    load_grep_change_feed, load_grep_checkpoint_revision_page, GrepChangeFeed,
 };
 use loonfs_core::limits::METADATA_PUBLICATION_BUDGET_MS;
 use loonfs_core::{
-    Error as CoreError, MetadataProjectionLoadError, MonotonicTimer, NamespaceEngine,
+    CheckpointFilesPageCursor, Error as CoreError, MonotonicTimer, NamespaceEngine,
     StdMonotonicTimer, StoreFailureClass,
 };
 use loonfs_objectstore::{ImmutableWriteError, ObjectStore, ObjectStoreError};
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// User-checkpoint lifetime used by one backfill attempt. An expired attempt
 /// is safely replaced by a fresh checkpoint and a cursor reset.
@@ -273,7 +264,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     /// Disables grep with one root CAS. Existing segments become grep-GC
     /// candidates and are never deleted synchronously.
     pub async fn disable(&self, namespace_id: &NamespaceId) -> Result<GrepDisableOutcome> {
-        ensure_live_namespace(&self.store, namespace_id).await?;
+        ensure_live_namespace(&self.engine(namespace_id)?).await?;
         let Some(current) = load_grep_root(&self.store, namespace_id)
             .await
             .map_err(GrepError::from)?
@@ -328,68 +319,58 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         if matches!(current.state().lifecycle(), GrepLifecycle::Disabled) {
             return Ok(build_report(namespace_id, GrepBuildOutcome::NotEnabled));
         }
-        let content_store_id = load_namespace_catalog_entry(&self.store, namespace_id)
-            .await
-            .map_err(CoreError::from)?
-            .content_store_id()
-            .clone();
+        // One pinned snapshot serves the whole step: the enumeration or feed
+        // read and every content read it plans observe the same namespace.
+        let engine = self.engine(namespace_id)?;
+        let reads = NamespaceReads::pin(&self.store, &engine).await?;
 
-        let unit = match current.state().lifecycle() {
+        let collected = match current.state().lifecycle() {
             GrepLifecycle::Backfilling {
                 backfill_cursor,
                 checkpoint_id,
             } => {
-                let page = load_grep_checkpoint_revision_page(
-                    &self.store,
-                    namespace_id,
-                    checkpoint_id,
-                    current_time_ms()?,
-                    backfill_cursor,
-                    policy.max_files_per_step,
-                )
-                .await?;
-                let Some(page) = page else {
-                    return self.restart_backfill(namespace_id, &current).await;
-                };
-                if page.checkpoint_seq != current.state().index().built_through_seq {
-                    return self.restart_backfill(namespace_id, &current).await;
-                }
                 collect_backfill_unit(
-                    &self.store,
-                    &content_store_id,
+                    &reads,
+                    checkpoint_id,
                     current.state().index().built_through_seq,
-                    backfill_cursor,
-                    page,
+                    *backfill_cursor,
                     policy,
                 )
-                .await?
+                .await
             }
             GrepLifecycle::Steady => {
-                match collect_incremental_unit(
-                    &self.store,
-                    namespace_id,
-                    &content_store_id,
+                collect_incremental_unit(
+                    &reads,
                     current.state().index().built_through_seq,
-                    current.state().index().next_delta_index,
+                    current.state().index().next_event_index,
                     policy,
                 )
-                .await?
-                {
-                    IncrementalCollection::Unit(unit) => unit,
-                    IncrementalCollection::UpToDate => {
-                        return Ok(build_report(
-                            namespace_id,
-                            GrepBuildOutcome::UpToDate {
-                                built_through_seq: current.state().index().built_through_seq,
-                            },
-                        ));
-                    }
-                    IncrementalCollection::RebootstrapRequired => {
-                        return self.restart_backfill(namespace_id, &current).await;
-                    }
-                }
+                .await
             }
             GrepLifecycle::Disabled => unreachable!("disabled returned above"),
+        };
+
+        let unit = match collected {
+            Ok(Some(unit)) => unit,
+            Ok(None) => {
+                return Ok(build_report(
+                    namespace_id,
+                    GrepBuildOutcome::UpToDate {
+                        built_through_seq: current.state().index().built_through_seq,
+                    },
+                ));
+            }
+            // The projection's basis is gone. Either the change feed no
+            // longer retains history back to the watermark, or the pinned
+            // checkpoint stopped pinning its manifest. The old checkpoint
+            // reader answered the second case with `Ok(None)` and restarted
+            // silently; both are explicit now, and both mean the same thing:
+            // discard the incomplete projection and start a fresh backfill
+            // from a new checkpoint.
+            Err(error) if rebootstrap_required(&error) => {
+                return self.restart_backfill(namespace_id, &current).await;
+            }
+            Err(error) => return Err(error),
         };
 
         self.publish_build_unit(namespace_id, current, unit, policy)
@@ -540,9 +521,9 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             current.state().index().next_run_ordinal + u64::from(segments_written > 0);
         let (lifecycle, completed_checkpoint_id) = match current.state().lifecycle() {
             GrepLifecycle::Backfilling { checkpoint_id, .. } => match unit.backfill_cursor {
-                Some(backfill_cursor) => (
+                Some(after_inode_id) => (
                     GrepLifecycle::Backfilling {
-                        backfill_cursor,
+                        backfill_cursor: Some(after_inode_id),
                         checkpoint_id: checkpoint_id.clone(),
                     },
                     None,
@@ -558,7 +539,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             lifecycle,
             GrepIndexState::new(
                 unit.built_through_seq,
-                unit.next_delta_index,
+                unit.next_event_index,
                 current.state().index().reorganize.clone(),
                 next_run_ordinal,
             ),
@@ -608,13 +589,26 @@ fn backfilling_root(
     GrepRootState::new(
         namespace_id.clone(),
         GrepLifecycle::Backfilling {
-            backfill_cursor: String::new(),
+            backfill_cursor: None,
             checkpoint_id,
         },
         GrepIndexState::new(target_seq, 0, None, next_run_ordinal),
         Vec::new(),
     )
     .map_err(core_state_error)
+}
+
+/// The two answers that mean "the state this projection was built from is
+/// gone": the change feed's cursor fell below the retention floor, and the
+/// checkpoint enumeration's record no longer pins its manifest. Every other
+/// failure is a failure.
+fn rebootstrap_required(error: &GrepError) -> bool {
+    matches!(
+        error,
+        GrepError::Core(
+            CoreError::RebootstrapRequired { .. } | CoreError::CheckpointUnavailable(_)
+        )
+    )
 }
 
 fn root_names_checkpoint(root: &GrepRootState, checkpoint_id: &CheckpointId) -> bool {
@@ -633,77 +627,106 @@ struct CollectedIndexUnit {
     skipped_revisions: u64,
     run_seq: ChangeSeq,
     built_through_seq: ChangeSeq,
-    next_delta_index: u32,
-    backfill_cursor: Option<String>,
+    next_event_index: u32,
+    backfill_cursor: Option<InodeId>,
 }
 
-enum IncrementalCollection {
-    Unit(CollectedIndexUnit),
-    UpToDate,
-    RebootstrapRequired,
-}
-
-async fn collect_backfill_unit<S: ObjectStore + ?Sized>(
-    store: &S,
-    content_store_id: &ContentStoreId,
+/// Collects one backfill step from the files the checkpoint pins.
+///
+/// The enumeration answers the checkpointed state directly — one current
+/// revision per visible file, in ascending inode order — so a step reads
+/// pages until one of its budgets is met and remembers the last inode it
+/// consumed. The budgets are the ones the step always had: at most
+/// `max_files_per_step` files examined, and content planning stops once
+/// `max_content_bytes_per_step` is reached (the file that crosses it is
+/// still included, exactly as the row walk did).
+async fn collect_backfill_unit<S: ObjectStore>(
+    reads: &NamespaceReads<'_, S>,
+    checkpoint_id: &CheckpointId,
     target_seq: ChangeSeq,
-    cursor: &str,
-    page: loonfs_core::grep::GrepCheckpointRevisionPage,
+    cursor: Option<InodeId>,
     policy: GramIndexBuildPolicy,
-) -> Result<CollectedIndexUnit> {
+) -> Result<Option<CollectedIndexUnit>> {
     let mut unit = CollectedIndexUnit {
         postings: BTreeMap::new(),
         indexed_revisions: 0,
         skipped_revisions: 0,
         run_seq: target_seq,
         built_through_seq: target_seq,
-        next_delta_index: 0,
-        backfill_cursor: Some(cursor.to_owned()),
+        next_event_index: 0,
+        backfill_cursor: cursor,
     };
     let mut pending = Vec::new();
     let mut planned_content_bytes = 0u64;
-    let mut budget_reached = false;
-    for (row_key, revision) in page.revisions {
-        if revision.committed_seq <= target_seq {
-            if revision.content_ref.size_bytes > INDEX_GRAMS_MAX_FILE_BYTES {
+    let mut files_remaining = policy.max_files_per_step.get();
+    let mut cursor = cursor.map(|after_inode_id| CheckpointFilesPageCursor { after_inode_id });
+    loop {
+        let page = reads
+            .list_checkpoint_files_page(checkpoint_id, cursor, files_remaining)
+            .await?;
+        if page.checkpoint_seq != target_seq {
+            // The root and its checkpoint disagree about which state is
+            // being walked; the walk cannot be resumed against either.
+            return Err(CoreError::CheckpointUnavailable(format!(
+                "checkpoint `{checkpoint_id}` pins sequence `{}` but the grep root is \
+                 backfilling sequence `{target_seq}`",
+                page.checkpoint_seq
+            ))
+            .into());
+        }
+        let page_exhausted_family = page.next_cursor.is_none();
+        let mut budget_reached = false;
+        for file in page.files {
+            files_remaining = files_remaining.saturating_sub(1);
+            if file.size_bytes > INDEX_GRAMS_MAX_FILE_BYTES {
                 unit.skipped_revisions += 1;
             } else {
-                planned_content_bytes += revision.content_ref.size_bytes;
+                planned_content_bytes += file.size_bytes;
                 pending.push(PendingRevisionContent {
-                    inode_id: revision.inode_id,
-                    revision_no: revision.revision_no,
-                    content_ref: revision.content_ref,
+                    inode_id: file.inode_id,
+                    revision_no: file.revision_no,
+                    content_ref: file.content_ref,
                 });
             }
+            unit.backfill_cursor = Some(file.inode_id);
+            if planned_content_bytes >= policy.max_content_bytes_per_step.get() {
+                budget_reached = true;
+                break;
+            }
         }
-        unit.backfill_cursor = Some(row_key);
-        if planned_content_bytes >= policy.max_content_bytes_per_step.get() {
-            budget_reached = true;
+        if budget_reached {
+            break;
+        }
+        if page_exhausted_family {
+            // Every file the checkpoint pins is indexed; the next published
+            // root leaves backfill for the change feed.
+            unit.backfill_cursor = None;
+            break;
+        }
+        cursor = page.next_cursor;
+        if files_remaining == 0 {
             break;
         }
     }
-    if page.exhausted && !budget_reached {
-        unit.backfill_cursor = None;
-    }
-    load_and_fold_revision_contents(store, content_store_id, &pending, &mut unit).await?;
-    Ok(unit)
+    load_and_fold_revision_contents(reads, &pending, &mut unit).await?;
+    Ok(Some(unit))
 }
 
-async fn collect_incremental_unit<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    content_store_id: &ContentStoreId,
+/// Collects one incremental step from the semantic change feed.
+///
+/// `Ok(None)` means the index is already at the namespace head.
+async fn collect_incremental_unit<S: ObjectStore>(
+    reads: &NamespaceReads<'_, S>,
     built_through_seq: ChangeSeq,
-    next_delta_index: u32,
+    next_event_index: u32,
     policy: GramIndexBuildPolicy,
-) -> Result<IncrementalCollection> {
-    let resume = ChangeFeedResume::new(built_through_seq, next_delta_index);
-    let feed = load_grep_change_feed(store, namespace_id, resume.after_seq()).await?;
-    let GrepChangeFeed::Records { records, .. } = feed else {
-        return Ok(IncrementalCollection::RebootstrapRequired);
-    };
-    if records.is_empty() {
-        return Ok(IncrementalCollection::UpToDate);
+) -> Result<Option<CollectedIndexUnit>> {
+    let resume = ChangeFeedResume::new(built_through_seq, next_event_index);
+    let feed = reads
+        .list_changes_after(resume.after_seq(), policy.max_files_per_step.get())
+        .await?;
+    if feed.changes.is_empty() {
+        return Ok(None);
     }
     let mut unit = CollectedIndexUnit {
         postings: BTreeMap::new(),
@@ -711,80 +734,81 @@ async fn collect_incremental_unit<S: ObjectStore + ?Sized>(
         skipped_revisions: 0,
         run_seq: built_through_seq,
         built_through_seq,
-        next_delta_index,
+        next_event_index,
         backfill_cursor: None,
     };
     let mut pending = Vec::new();
     let mut planned_content_bytes = 0u64;
     let mut examined_files = 0usize;
-    'records: for record in records {
-        let start_delta_index = resume.start_delta_index(record.seq).map_err(|_| {
-            CoreError::Internal("grep delta cursor does not fit in memory".to_owned())
+    'changes: for change in feed.changes {
+        let start_event_index = resume.start_event_index(change.seq).map_err(|_| {
+            CoreError::Internal("grep event cursor does not fit in memory".to_owned())
         })?;
-        if start_delta_index > record.deltas.len() {
-            return Ok(IncrementalCollection::RebootstrapRequired);
+        if start_event_index > change.events.len() {
+            return Err(GrepError::CorruptIndex {
+                message: format!(
+                    "grep event cursor `{}` exceeds commit `{}` length `{}`",
+                    resume.next_event_index(),
+                    change.seq,
+                    change.events.len()
+                ),
+            });
         }
-        for (delta_index, delta) in record.deltas.iter().enumerate().skip(start_delta_index) {
-            if let WalDelta::AppendFileRevision {
-                inode_id,
-                revision_no,
-                content_ref,
-                ..
-            } = &delta.delta
-            {
-                let would_exceed_content_budget = planned_content_bytes > 0
-                    && planned_content_bytes.saturating_add(content_ref.size_bytes)
-                        > policy.max_content_bytes_per_step.get();
-                if examined_files >= policy.max_files_per_step.get() || would_exceed_content_budget
-                {
-                    if delta_index > 0 {
-                        unit.built_through_seq = record.seq;
-                        unit.run_seq = record.seq;
-                        unit.next_delta_index = u32::try_from(delta_index).map_err(|_| {
-                            CoreError::Internal("grep delta cursor overflow".to_owned())
-                        })?;
-                    }
-                    break 'records;
-                }
-                examined_files += 1;
-                if content_ref.size_bytes > INDEX_GRAMS_MAX_FILE_BYTES {
-                    unit.skipped_revisions += 1;
-                } else {
-                    planned_content_bytes += content_ref.size_bytes;
-                    pending.push(PendingRevisionContent {
-                        inode_id: *inode_id,
-                        revision_no: *revision_no,
-                        content_ref: content_ref.clone(),
-                    });
-                }
-                if examined_files >= policy.max_files_per_step.get()
-                    || planned_content_bytes >= policy.max_content_bytes_per_step.get()
-                {
-                    unit.built_through_seq = record.seq;
-                    unit.run_seq = record.seq;
-                    let next_delta_index = delta_index.checked_add(1).ok_or_else(|| {
-                        CoreError::Internal("grep delta cursor overflow".to_owned())
+        for (event_index, event) in change.events.iter().enumerate().skip(start_event_index) {
+            let Some(revision) = published_revision(event) else {
+                continue;
+            };
+            let would_exceed_content_budget = planned_content_bytes > 0
+                && planned_content_bytes.saturating_add(revision.content_ref.size_bytes)
+                    > policy.max_content_bytes_per_step.get();
+            if examined_files >= policy.max_files_per_step.get() || would_exceed_content_budget {
+                if event_index > 0 {
+                    unit.built_through_seq = change.seq;
+                    unit.run_seq = change.seq;
+                    unit.next_event_index = u32::try_from(event_index).map_err(|_| {
+                        CoreError::Internal("grep event cursor overflow".to_owned())
                     })?;
-                    if next_delta_index < record.deltas.len() {
-                        unit.next_delta_index = u32::try_from(next_delta_index).map_err(|_| {
-                            CoreError::Internal("grep delta cursor overflow".to_owned())
-                        })?;
-                    } else {
-                        unit.next_delta_index = 0;
-                    }
-                    break 'records;
                 }
+                break 'changes;
+            }
+            examined_files += 1;
+            if revision.content_ref.size_bytes > INDEX_GRAMS_MAX_FILE_BYTES {
+                unit.skipped_revisions += 1;
+            } else {
+                planned_content_bytes += revision.content_ref.size_bytes;
+                pending.push(PendingRevisionContent {
+                    inode_id: revision.inode_id,
+                    revision_no: revision.revision_no,
+                    content_ref: revision.content_ref.clone(),
+                });
+            }
+            if examined_files >= policy.max_files_per_step.get()
+                || planned_content_bytes >= policy.max_content_bytes_per_step.get()
+            {
+                unit.built_through_seq = change.seq;
+                unit.run_seq = change.seq;
+                let next_event_index = event_index
+                    .checked_add(1)
+                    .ok_or_else(|| CoreError::Internal("grep event cursor overflow".to_owned()))?;
+                if next_event_index < change.events.len() {
+                    unit.next_event_index = u32::try_from(next_event_index).map_err(|_| {
+                        CoreError::Internal("grep event cursor overflow".to_owned())
+                    })?;
+                } else {
+                    unit.next_event_index = 0;
+                }
+                break 'changes;
             }
         }
-        unit.built_through_seq = record.seq;
-        unit.run_seq = record.seq;
-        unit.next_delta_index = 0;
+        unit.built_through_seq = change.seq;
+        unit.run_seq = change.seq;
+        unit.next_event_index = 0;
     }
-    if unit.built_through_seq == built_through_seq && unit.next_delta_index == next_delta_index {
-        return Ok(IncrementalCollection::UpToDate);
+    if unit.built_through_seq == built_through_seq && unit.next_event_index == next_event_index {
+        return Ok(None);
     }
-    load_and_fold_revision_contents(store, content_store_id, &pending, &mut unit).await?;
-    Ok(IncrementalCollection::Unit(unit))
+    load_and_fold_revision_contents(reads, &pending, &mut unit).await?;
+    Ok(Some(unit))
 }
 
 struct PendingRevisionContent {
@@ -793,20 +817,20 @@ struct PendingRevisionContent {
     content_ref: ContentRef,
 }
 
-async fn load_and_fold_revision_contents<S: ObjectStore + ?Sized>(
-    store: &S,
-    content_store_id: &ContentStoreId,
+async fn load_and_fold_revision_contents<S: ObjectStore>(
+    reads: &NamespaceReads<'_, S>,
     pending: &[PendingRevisionContent],
     unit: &mut CollectedIndexUnit,
 ) -> Result<()> {
     for chunk in pending.chunks(MAX_GREP_WORKER_IO) {
         let contents = try_join_all(chunk.iter().map(|revision| {
-            read_durable_content_bytes(store, content_store_id, &revision.content_ref)
+            // Index eligibility is the worker's own read budget: content
+            // past the cap was skipped before it was ever planned.
+            reads.read_content_ref(&revision.content_ref, INDEX_GRAMS_MAX_FILE_BYTES)
         }))
-        .await
-        .map_err(CoreError::from)?;
+        .await?;
         for (revision, content) in chunk.iter().zip(contents) {
-            if !is_indexable_text_content(&content.bytes) {
+            if !is_indexable_text_content(&content) {
                 unit.skipped_revisions += 1;
                 continue;
             }
@@ -814,7 +838,7 @@ async fn load_and_fold_revision_contents<S: ObjectStore + ?Sized>(
                 inode_id: revision.inode_id,
                 revision_no: revision.revision_no,
             };
-            for gram in extract_grams(&content.bytes) {
+            for gram in extract_grams(&content) {
                 unit.postings.entry(gram).or_default().push(posting);
             }
             unit.indexed_revisions += 1;
@@ -1072,7 +1096,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             current.state().lifecycle().clone(),
             GrepIndexState::new(
                 current.state().index().built_through_seq,
-                current.state().index().next_delta_index,
+                current.state().index().next_event_index,
                 reorganize,
                 next_run_ordinal,
             ),
@@ -1124,7 +1148,8 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         now_ms: u64,
         report: &mut GrepGcReport,
     ) -> Result<()> {
-        match namespace_liveness(&self.store, namespace_id).await {
+        let engine = self.engine(namespace_id)?;
+        match namespace_liveness(&engine).await {
             NamespaceLiveness::Gone => {
                 // A verified deleted namespace head is already the absorbing
                 // gate for this pointer: `enable` refuses that tombstone, so
@@ -1132,9 +1157,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 // liveness check. Pointer deletion needs no second state.
                 let mut deleted_any = false;
                 for key in keys {
-                    if namespace_liveness(&self.store, namespace_id).await
-                        != NamespaceLiveness::Gone
-                    {
+                    if namespace_liveness(&engine).await != NamespaceLiveness::Gone {
                         report.retained_candidates += 1;
                         continue;
                     }
@@ -1413,34 +1436,36 @@ enum NamespaceLiveness {
     Unknown,
 }
 
-async fn namespace_liveness<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-) -> NamespaceLiveness {
-    match load_namespace_head_control(store, namespace_id).await {
-        Ok(head) if head.state.state == NamespaceState::Deleted => NamespaceLiveness::Gone,
-        Ok(_) => NamespaceLiveness::Live,
-        Err(ControlObjectLoadError::MissingObject { .. }) => NamespaceLiveness::Gone,
-        Err(_) => NamespaceLiveness::Unknown,
+/// Whether the namespace grep holds state for still exists.
+///
+/// The feed is the oracle: it refuses a deleted namespace with
+/// `namespace_deleted` and an absent one with `namespace_not_found`, so
+/// asking it for changes after the last possible sequence answers liveness
+/// with one head read and no history. Anything else is an unknown answer,
+/// and unknown never authorizes a delete.
+async fn namespace_liveness<S: ObjectStore>(engine: &NamespaceEngine<S>) -> NamespaceLiveness {
+    match live_namespace_probe(engine).await {
+        Ok(()) => NamespaceLiveness::Live,
+        Err(error) => match error.code() {
+            ErrorCode::NamespaceDeleted | ErrorCode::NamespaceNotFound => NamespaceLiveness::Gone,
+            _ => NamespaceLiveness::Unknown,
+        },
     }
 }
 
-async fn ensure_live_namespace<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-) -> Result<()> {
-    let head = load_namespace_head_control(store, namespace_id)
-        .await
-        .map_err(|error| {
-            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
-        })?;
-    if head.state.state == NamespaceState::Deleted {
-        return Err(CoreError::NamespaceDeleted {
-            namespace_id: namespace_id.clone(),
-        }
-        .into());
-    }
+async fn ensure_live_namespace<S: ObjectStore>(engine: &NamespaceEngine<S>) -> Result<()> {
+    live_namespace_probe(engine).await
+}
+
+async fn live_namespace_probe<S: ObjectStore>(engine: &NamespaceEngine<S>) -> Result<()> {
+    engine
+        .list_changes_after(ChangeSeq(u64::MAX), one_change())
+        .await?;
     Ok(())
+}
+
+fn one_change() -> loonfs_api::EffectiveLimit {
+    loonfs_api::EffectiveLimit::new(std::num::NonZeroU32::MIN)
 }
 
 fn live_grep_keys(root: &LoadedGrepRoot) -> BTreeSet<String> {
@@ -1540,15 +1565,4 @@ fn grep_immutable_write_error(error: ImmutableWriteError) -> GrepError {
             message: format!("index segment `{object_key}`: {error}"),
         },
     }
-}
-
-#[allow(clippy::disallowed_methods)]
-fn current_time_ms() -> Result<u64> {
-    // Worker checkpoint expiry is resolved at this API boundary; durable replay remains deterministic.
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_millis() as u64)
-        .map_err(|error| {
-            CoreError::Internal(format!("system clock before unix epoch: {error}")).into()
-        })
 }

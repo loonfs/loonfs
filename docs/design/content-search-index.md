@@ -114,12 +114,13 @@ Segments live under
 `extensions/grep/root.json` pointer names an immutable, content-derived
 manifest under `extensions/grep/manifests/`; that manifest records the
 query-visible segments, the incremental
-`(built_through_seq, next_delta_index)` cursor, lifecycle, run-ordinal
+`(built_through_seq, next_event_index)` cursor, lifecycle, run-ordinal
 allocation, and any in-progress reorganization snapshot, outputs, and cursor. A zero
-or absent `next_delta_index` is the commit boundary; a nonzero value resumes
-at that offset in the watermark commit's durably ordered delta vector. The
-pointer and manifests are independent of the namespace manifest, so core
-never has to understand grep state to read the filesystem.
+or absent `next_event_index` is the commit boundary; a nonzero value resumes
+at that offset in the watermark commit's ordered change events, one per
+committed operation. The pointer and manifests are independent of the
+namespace manifest, so core never has to understand grep state to read the
+filesystem.
 
 Publication writes the immutable manifest first and installs the pointer by
 one etag CAS. A CAS loser's manifest and segments are unreachable derived
@@ -138,10 +139,11 @@ unmaterialized and can be enabled independently.
 `GrepWorker` is driven through explicit bounded steps, independently of
 core metadata maintenance. Enablement first creates an expiring user
 checkpoint at the namespace head, then CAS-publishes a backfilling root
-that records the checkpoint id, target sequence, and empty cursor. Build
-steps walk that checkpoint's immutable manifest, read eligible revision
-content, write delta segments, and publish the cursor and segment set in
-one root CAS. The completing step changes the lifecycle to `steady` and
+that records the checkpoint id, target sequence, and no cursor. Build
+steps enumerate the files that checkpoint pins — one current revision per
+visible file, in ascending inode order — read eligible content, write delta
+segments, and publish the cursor (the last inode consumed) and segment set
+in one root CAS. The completing step changes the lifecycle to `steady` and
 releases the checkpoint.
 
 One per-namespace driver owns those steps. Starting a driver immediately
@@ -172,16 +174,20 @@ exhaustive tail scan within its budget.
 
 Detached maintenance is explicitly assigned with repeatable
 `loonfs-grep --namespace <id>` flags. `--once` catches up only those namespaces
-and exits. The long-running form polls each assigned namespace's own head at
-`poll_interval_ms` (default 1000, zero rejected), the manifest-poll analog for
-this derived index. It never lists a namespace prefix.
+and exits. The long-running form asks each assigned namespace's change feed
+for anything after that driver's watermark at `poll_interval_ms` (default
+1000, zero rejected), the manifest-poll analog for this derived index. It
+never lists a namespace prefix.
 
-Steady-state build steps replay the validated change feed after
-`built_through_seq`, collect the file revisions that appeared, read each
-eligible revision's content, extract grams, and write new delta-level
-segments. Work per step is budgeted by files and bytes (defaults 256 files
-or 64 MiB), and every watermark advance shares one root CAS with the
-segment set that implements it.
+Steady-state build steps read the change feed after `built_through_seq` as
+semantic events, collect the file revisions those events published, read
+each eligible revision's content, extract grams, and write new delta-level
+segments. Moves, deletes, and undeletes publish no content, so they index
+nothing: the index is keyed by durable `(inode_id, revision_no)` and every
+query verifies candidates against current state, so those events change
+what a query returns without changing a posting. Work per step is budgeted
+by files and bytes (defaults 256 files or 64 MiB), and every watermark
+advance shares one root CAS with the segment set that implements it.
 
 Two rules keep the cycle honest:
 
@@ -259,12 +265,14 @@ invisible to reads:
 
 Enabling the index on a namespace that already has data starts a
 backfill: the worker creates an expiring user checkpoint and a root cursor
-walks the checkpoint manifest's revisions family in key order across steps,
-indexing as it goes. While lifecycle is `backfilling` the index is not yet
+walks the files that checkpoint pins, in inode order across steps, indexing
+as it goes. While lifecycle is `backfilling` the index is not yet
 materialized and queries are refused with the feature named; when the walk
 completes, lifecycle becomes `steady`, the checkpoint is released, and the
-watermark takes over. If the checkpoint expires or vanishes, the worker
-starts again from a fresh checkpoint.
+watermark takes over. Two answers mean the basis is gone — the enumeration
+reporting its checkpoint no longer pins a manifest, and the feed reporting
+the watermark below the retention floor — and both discard the incomplete
+projection and start again from a fresh checkpoint.
 
 Grep garbage collection is also explicit and per namespace. The standalone
 binary runs it only when passed `--gc`; the server exposes
@@ -327,13 +335,15 @@ Execution, in the read order segments are built for:
 2. Stream posting batches for each required gram; postings
    within a gram arrive in inode order, so AND and OR nodes are
    sorted stream intersections and unions.
-3. Filter candidates to the pinned snapshot: the newest visible
-   revision of each live inode (point lookups on the
-   revisions-by-inode index plus the standard visibility walk),
-   and the path-prefix scope via child-binding ancestry.
-4. Read each surviving candidate's content — server-side,
-   verified whole-object reads, a small fixed fan-out — and run
-   the real pattern, emitting line-oriented matches.
+3. Filter candidates to the pinned snapshot: resolve them in
+   batches to their current state — visible or not, current
+   revision, current path — keep those whose current revision the
+   index actually points at, and apply the path-prefix scope to
+   the resolved path.
+4. Read each surviving candidate's content by reference —
+   server-side, verified whole-object reads, a small fixed
+   fan-out — and run the real pattern, emitting line-oriented
+   matches.
 
 A match reports inode id, revision number, derived absolute
 path, line number, byte offset, and the matching line (truncated
@@ -356,9 +366,9 @@ already exist.
 **Freshness.** The index trails the head by design, so a query at
 a pinned sequence is answered in two parts: the index covers
 commits at or below `built_through_seq`, and the revisions that
-landed in between — enumerable from the same WAL-tail replay
-every read already performs — are scanned exhaustively with the
-same eligibility rule and the same verifier. Steady-state
+landed in between — enumerable from the change feed after that
+watermark — are scanned exhaustively with the same eligibility
+rule and the same verifier. Steady-state
 maintenance keeps that tail small, and write backpressure bounds
 it outright. If maintenance has been off long enough that the gap
 exceeds the query's tail budget, the query fails with a typed

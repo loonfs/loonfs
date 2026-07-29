@@ -18,9 +18,8 @@
 //! - [`load`] and [`validate`] provide envelope-only loading and
 //!   descriptor-only table verification (full-row inspection
 //!   materialization is test-only).
-//! - [`scan`] answers verified row scans over loaded manifest tables.
-//! - [`grep_read`] exposes checkpoint-backed grep reads, while [`row`]
-//!   handles manifest-row encoding.
+//! - [`scan`] answers verified row scans over loaded manifest tables, while
+//!   [`row`] handles manifest-row encoding.
 //! - [`reorganize`] compacts bounded family groups into new base runs.
 //! - [`retention`] advances the retention floor behind verified progress.
 //! - [`runs`] models the LSM run layout shared by all of the above, and
@@ -35,7 +34,6 @@ mod data_block_load;
 mod error;
 mod files;
 mod flush;
-mod grep_read;
 mod load;
 mod publish;
 pub(crate) mod record;
@@ -57,10 +55,6 @@ pub use self::cache::{
 };
 pub use self::error::{ManifestLoadError, ManifestLoadFailureClass};
 pub use self::files::{CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor};
-pub use self::grep_read::{
-    load_grep_change_feed, load_grep_checkpoint_revision_page, string_prefix_upper_bound,
-    GrepChangeFeed, GrepCheckpointRevisionPage, REVISION_ROW_PREFIX,
-};
 pub use self::reorganize::{MetadataReorganizeOutcome, MetadataReorganizeReport};
 pub(crate) use self::runs::MetadataLsmPolicy;
 

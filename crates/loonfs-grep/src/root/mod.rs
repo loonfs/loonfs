@@ -1,7 +1,7 @@
 //! The atomic grep root pointer, immutable manifests, and publication boundary.
 //!
 //! One immutable manifest pairs the query-visible segment set with its
-//! `(built_through_seq, next_delta_index)` cursor, lifecycle, in-progress
+//! `(built_through_seq, next_event_index)` cursor, lifecycle, in-progress
 //! reorganization, and run ordinal allocation. Publication writes that manifest
 //! create-if-absent, then installs a tiny pointer in one object-store
 //! compare-and-swap, so a reader never observes a cursor without the segments

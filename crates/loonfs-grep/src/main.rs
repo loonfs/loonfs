@@ -1,8 +1,8 @@
 //! The explicitly assigned `loonfs-grep` per-namespace maintenance binary.
 
 use clap::Parser;
-use loonfs_api::NamespaceId;
-use loonfs_core::control::load_namespace_head_control;
+use loonfs_api::{ChangeSeq, EffectiveLimit, ErrorCode, NamespaceId};
+use loonfs_core::NamespaceEngine;
 use loonfs_grep::root::{load_grep_root, GrepLifecycle};
 use loonfs_grep::{
     GrepDriver, GrepDriverParked, GrepDriverState, GrepDriverTask, GrepStepLimiter, GrepWorker,
@@ -21,6 +21,11 @@ use tokio::sync::Notify;
 use tracing_subscriber::EnvFilter;
 
 const DEFAULT_POLL_INTERVAL_MS: u64 = 1_000;
+
+/// One commit is all the poller needs to see to know there is work.
+fn one_change() -> EffectiveLimit {
+    EffectiveLimit::new(std::num::NonZeroU32::MIN)
+}
 
 #[derive(Debug, Parser)]
 #[command(about = "Drive grep maintenance for explicitly assigned LoonFS namespaces")]
@@ -242,52 +247,88 @@ async fn poll_namespace(
     loop {
         tokio::select! {
             _ = interval.tick() => {
-                match load_namespace_head_control(&*store, &namespace_id).await {
-                    Ok(head) => {
-                        let should_nudge = match driver.state() {
-                            GrepDriverState::Parked(GrepDriverParked::CaughtUp {
-                                built_through_seq,
-                            }) => built_through_seq < head.state.seq,
-                            GrepDriverState::Parked(GrepDriverParked::NotEnabled) => {
-                                // Assigned namespaces are an explicit, small operator-chosen set,
-                                // so one small conditional read per existing poll interval is
-                                // cheaper than introducing a second cadence concept.
-                                match load_grep_root(&*store, &namespace_id).await {
-                                    Ok(Some(root)) => matches!(
-                                        root.state().lifecycle(),
-                                        GrepLifecycle::Backfilling { .. } | GrepLifecycle::Steady
-                                    ),
-                                    Ok(None) => false,
-                                    Err(error) => {
-                                        tracing::warn!(
-                                            namespace_id = %namespace_id,
-                                            phase = "grep_root_poll",
-                                            result = "error",
-                                            error = %error,
-                                            "grep namespace root poll failed"
-                                        );
-                                        false
-                                    }
-                                }
+                let should_nudge = match driver.state() {
+                    GrepDriverState::Parked(GrepDriverParked::CaughtUp { built_through_seq }) => {
+                        has_changes_after(&store, &namespace_id, built_through_seq).await
+                    }
+                    GrepDriverState::Parked(GrepDriverParked::NotEnabled) => {
+                        // Assigned namespaces are an explicit, small operator-chosen set,
+                        // so one small conditional read per existing poll interval is
+                        // cheaper than introducing a second cadence concept.
+                        match load_grep_root(&*store, &namespace_id).await {
+                            Ok(Some(root)) => matches!(
+                                root.state().lifecycle(),
+                                GrepLifecycle::Backfilling { .. } | GrepLifecycle::Steady
+                            ),
+                            Ok(None) => false,
+                            Err(error) => {
+                                tracing::warn!(
+                                    namespace_id = %namespace_id,
+                                    phase = "grep_root_poll",
+                                    result = "error",
+                                    error = %error,
+                                    "grep namespace root poll failed"
+                                );
+                                false
                             }
-                            GrepDriverState::Active
-                            | GrepDriverState::BackingOff { .. }
-                            | GrepDriverState::Stopped => false,
-                        };
-                        if should_nudge {
-                            driver.nudge();
                         }
                     }
-                    Err(error) => tracing::warn!(
-                        namespace_id = %namespace_id,
-                        phase = "grep_namespace_poll",
-                        result = "error",
-                        error = %error,
-                        "grep namespace head poll failed"
-                    ),
+                    GrepDriverState::Active
+                    | GrepDriverState::BackingOff { .. }
+                    | GrepDriverState::Stopped => false,
+                };
+                if should_nudge {
+                    driver.nudge();
                 }
             }
             () = shutdown.wait() => return,
+        }
+    }
+}
+
+/// Whether the namespace has committed anything the driver has not indexed.
+///
+/// The change feed answers the poller's question directly — one page of one
+/// commit is enough to know there is work — so the poller reads what it acts
+/// on instead of comparing sequence numbers off a control object.
+async fn has_changes_after(
+    store: &SharedObjectStore,
+    namespace_id: &NamespaceId,
+    built_through_seq: ChangeSeq,
+) -> bool {
+    let engine = match NamespaceEngine::builder(store.clone())
+        .namespace_id(namespace_id.clone())
+        .build_reader()
+    {
+        Ok(engine) => engine,
+        Err(error) => {
+            tracing::warn!(
+                namespace_id = %namespace_id,
+                phase = "grep_namespace_poll",
+                result = "error",
+                error = %error,
+                "grep namespace poll could not build a reader"
+            );
+            return false;
+        }
+    };
+    match engine
+        .list_changes_after(built_through_seq, one_change())
+        .await
+    {
+        Ok(changes) => !changes.changes.is_empty(),
+        // The watermark fell behind retention: the worker rebuilds from a
+        // fresh checkpoint, which is work, so wake it.
+        Err(error) if error.code() == ErrorCode::RebootstrapRequired => true,
+        Err(error) => {
+            tracing::warn!(
+                namespace_id = %namespace_id,
+                phase = "grep_namespace_poll",
+                result = "error",
+                error = %error,
+                "grep namespace change poll failed"
+            );
+            false
         }
     }
 }
