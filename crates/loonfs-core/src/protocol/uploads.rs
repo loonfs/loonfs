@@ -9,14 +9,8 @@ use crate::engine::{BeginDirectPutUploadTargetResponse, DirectPutUploadTarget};
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
 use crate::limits::CONTENTION_RETRY_LIMIT;
-use crate::namespace::catalog::{
-    load_namespace_content_store_id, map_namespace_initialization_error_to_core,
-    namespace_initialization_state, NamespaceInitializationState,
-};
-use crate::namespace::control::{
-    load_content_store_descriptor_control, load_namespace_descriptor_control,
-    load_namespace_head_control,
-};
+use crate::namespace::catalog::load_namespace_content_store_id;
+use crate::namespace::control::load_namespace_head_control;
 use crate::storage::content::probe_durable_content_reference;
 use crate::storage::content_admission::{ContentAdmission, PreparedContent};
 use bytes::Bytes;
@@ -25,11 +19,11 @@ use loonfs_api::v0::{
     UploadContentResponse, UploadMode,
 };
 use loonfs_api::wire::control::{
-    encode_control_object, CompletedUpload, ControlObjectKind, UploadSessionEnvelope,
-    UploadSessionLifecycle, UploadSessionState,
+    encode_control_object, CompletedUpload, ControlObjectKind, NamespaceState,
+    UploadSessionEnvelope, UploadSessionLifecycle, UploadSessionState,
 };
 use loonfs_api::{ContentRef, ContentRefKind, ContentStoreId, NamespaceId, UploadId};
-use loonfs_objectstore::keys::{content_blob, namespace_config, upload_session};
+use loonfs_objectstore::keys::{content_blob, upload_session};
 use loonfs_objectstore::ObjectStore;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,47 +136,25 @@ async fn create_upload_session<S: ObjectStore + ?Sized>(
     Ok(upload_id)
 }
 
+/// Admits an upload session only for a namespace that exists and still
+/// serves writes. The head is the whole existence check: absent means the
+/// namespace was never created, and the tombstone refuses.
 async fn ensure_upload_namespace_available<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> Result<()> {
-    match namespace_initialization_state(store, namespace_id).await {
-        Ok(NamespaceInitializationState::Complete) => {
-            let descriptor = load_namespace_descriptor_control(store, namespace_id)
-                .await
-                .map_err(|error| {
-                    CoreError::MetadataProjection(
-                        MetadataProjectionLoadError::LoadNamespaceDescriptor(error),
-                    )
-                })?;
-            load_content_store_descriptor_control(store, &descriptor.state.content_store_id)
-                .await
-                .map_err(|error| {
-                    CoreError::MetadataProjection(
-                        MetadataProjectionLoadError::LoadContentStoreDescriptor(error),
-                    )
-                })?;
-            load_namespace_head_control(store, namespace_id)
-                .await
-                .map_err(|error| {
-                    CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
-                })?;
-            Ok(())
-        }
-        Ok(NamespaceInitializationState::Absent) => Err(CoreError::MetadataProjection(
-            MetadataProjectionLoadError::LoadNamespaceDescriptor(
-                crate::namespace::control::ControlObjectLoadError::MissingObject {
-                    object_key: namespace_config(namespace_id.as_str()),
-                },
-            ),
-        )),
-        Ok(NamespaceInitializationState::Partial | NamespaceInitializationState::PreHeadDebris) => {
-            Err(CoreError::NamespacePartial {
-                namespace_id: namespace_id.clone(),
-            })
-        }
-        Err(error) => Err(map_namespace_initialization_error_to_core(error)),
+    let head = load_namespace_head_control(store, namespace_id)
+        .await
+        .map_err(|error| {
+            CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))
+        })?
+        .state;
+    if head.state == NamespaceState::Deleted {
+        return Err(CoreError::NamespaceDeleted {
+            namespace_id: namespace_id.clone(),
+        });
     }
+    Ok(())
 }
 
 pub(crate) async fn upload_content<S: ObjectStore + ?Sized>(

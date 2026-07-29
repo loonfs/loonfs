@@ -30,8 +30,7 @@ pub use operations::{
     ErrorDetails, FileRevision, FilesystemOperation, FilesystemOperationRequest, FlushWalOutcome,
     FlushWalResponse, ForkNamespaceRequest, GcRequest, GcResponse, ListFileRevisionsResponse,
     MaintenanceStepKind, MaintenanceStepRequest, MaintenanceStepResponse, NamespaceStatusResponse,
-    NamespaceSummary, ReleaseCheckpointResponse, ReorganizeStepOutcome, RepairNamespaceOutcome,
-    RepairNamespaceResponse, WalFlushStepOutcome,
+    NamespaceSummary, ReleaseCheckpointResponse, ReorganizeStepOutcome, WalFlushStepOutcome,
 };
 pub use reads::{
     AuthoritativeFileBytes, AuthoritativePathEntry, ListPathEntriesResponse, ListTrashResponse,

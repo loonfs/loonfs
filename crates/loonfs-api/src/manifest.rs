@@ -6,8 +6,8 @@ use crate::envelope::EnvelopeCodecError;
 use crate::sst_blocks::BlockHandle;
 use crate::WriterEpoch;
 use crate::{
-    ChangeSeq, CheckpointId, CommitId, ContentRef, DisplayName, InodeId, InodeKind, ManifestId,
-    ManifestObjectId, MetadataTableId, NameKey, NamespaceId, RevisionNo,
+    ChangeSeq, CommitId, ContentRef, DisplayName, InodeId, InodeKind, ManifestId, ManifestObjectId,
+    MetadataTableId, NameKey, NamespaceId, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
 
@@ -100,25 +100,6 @@ pub struct MetadataFileRef {
     /// The ranged read path verifies per-block CRCs instead; this digest is
     /// the segment's identity in the decoded-block cache.
     pub payload_checksum: String,
-}
-
-/// Records the immutable source snapshot inherited by a forked namespace.
-///
-/// See [namespace forks](../../../docs/specs/format.md#39-namespace-forks).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NamespaceManifestFork {
-    /// Namespace that owns the inherited metadata objects.
-    pub source_namespace_id: NamespaceId,
-    /// Destination sequence corresponding to the fork's initial snapshot.
-    pub fork_seq: ChangeSeq,
-    /// Released source checkpoint that pins the inherited state.
-    pub source_checkpoint_id: CheckpointId,
-    /// Logical source manifest position selected by that checkpoint.
-    pub source_manifest_id: ManifestId,
-    /// Immutable source-manifest object selected by the checkpoint record.
-    pub source_manifest_object_id: ManifestObjectId,
-    /// Source namespace sequence frozen into the fork snapshot.
-    pub source_head_seq: ChangeSeq,
 }
 
 /// Stores one materialized metadata event in an SST segment.
@@ -615,9 +596,6 @@ pub struct NamespaceManifestPayload {
     pub next_inode_id: InodeId,
     /// Earliest sequence for which retained history remains readable.
     pub retention_floor_seq: ChangeSeq,
-    /// Immutable source snapshot metadata, or `None` when the namespace was not forked.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fork: Option<NamespaceManifestFork>,
     /// Complete ordered set of metadata segments required to reconstruct the snapshot.
     pub metadata_files: Vec<MetadataFileRef>,
 }
@@ -711,12 +689,11 @@ pub fn decode_namespace_manifest_json(
 mod tests {
     use super::{
         decode_namespace_manifest_json, encode_namespace_manifest_json, BlockHandle,
-        MetadataFileRef, MetadataTableFamily, NamespaceManifestEnvelope, NamespaceManifestFork,
-        NamespaceManifestPayload,
+        MetadataFileRef, MetadataTableFamily, NamespaceManifestEnvelope, NamespaceManifestPayload,
     };
     use crate::{
-        ChangeSeq, CheckpointId, CommitId, InodeId, ManifestId, ManifestObjectId, MetadataTableId,
-        NameKey, NamespaceId, WriterEpoch,
+        ChangeSeq, CommitId, InodeId, ManifestId, ManifestObjectId, MetadataTableId, NameKey,
+        NamespaceId, WriterEpoch,
     };
 
     #[test]
@@ -744,7 +721,6 @@ mod tests {
                 writer_epoch: WriterEpoch(2),
                 next_inode_id: InodeId(42),
                 retention_floor_seq: ChangeSeq(0),
-                fork: None,
                 metadata_files: vec![metadata_file_ref(
                     "demo",
                     "tbl_00000000000000000000000000000001",
@@ -765,8 +741,11 @@ mod tests {
         assert_eq!(decoded.payload.metadata_files[0].run_seq, ChangeSeq(10));
     }
 
+    /// A fork target's first own manifest keeps referencing the source's
+    /// metadata objects: ownership travels with each file reference, not
+    /// with the manifest.
     #[test]
-    fn namespace_manifest_codec_round_trips_fork_materialization() {
+    fn namespace_manifest_codec_round_trips_inherited_source_tables() {
         let envelope = NamespaceManifestEnvelope::from_payload(
             "test-writer",
             NamespaceManifestPayload {
@@ -783,20 +762,6 @@ mod tests {
                 writer_epoch: WriterEpoch(2),
                 next_inode_id: InodeId(42),
                 retention_floor_seq: ChangeSeq(0),
-                fork: Some(NamespaceManifestFork {
-                    source_namespace_id: NamespaceId::parse("source").expect("valid namespace id"),
-                    fork_seq: ChangeSeq(12),
-                    source_checkpoint_id: CheckpointId::parse(
-                        "chk_00000000000000000000000000000002",
-                    )
-                    .expect("checkpoint id"),
-                    source_manifest_id: ManifestId(10),
-                    source_manifest_object_id: ManifestObjectId::parse(
-                        "00000000000000000010-0123456789abcdef",
-                    )
-                    .expect("valid manifest object id"),
-                    source_head_seq: ChangeSeq(12),
-                }),
                 metadata_files: vec![
                     metadata_file_ref(
                         "source",
@@ -825,13 +790,8 @@ mod tests {
         assert_eq!(decoded.payload.metadata_files[1].level, 0);
         assert_eq!(decoded.payload.metadata_files[1].run_seq, ChangeSeq(12));
         assert_eq!(
-            decoded
-                .payload
-                .fork
-                .as_ref()
-                .expect("fork")
-                .source_manifest_id,
-            ManifestId(10)
+            decoded.payload.metadata_files[0].owner_namespace_id,
+            NamespaceId::parse("source").expect("valid namespace id")
         );
     }
 

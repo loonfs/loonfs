@@ -7,7 +7,6 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
 use loonfs::{CreateNamespaceOptions, DeleteNamespaceOptions};
-use loonfs_api::v0::RepairNamespaceResponse;
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
 use loonfs_api::ChangeSeq;
@@ -222,38 +221,6 @@ pub(super) async fn fork_namespace(
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&source_namespace_id, error))?;
     Ok(Json(summary))
-}
-
-#[cfg_attr(
-    feature = "openapi",
-    utoipa::path(
-        post,
-        path = "/v0/admin/namespaces/{namespace}/repair",
-        tag = "admin",
-        summary = "Repair namespace",
-        description = "Explicitly completes a recoverable partial namespace, or reaps non-completable installation debris after the fixed safety window. Younger debris is left untouched and reported as in flight.",
-        params(("namespace" = String, Path, description = "Namespace id")),
-        responses(
-            (status = 200, description = "Namespace repair inspected or changed the namespace", body = RepairNamespaceResponse),
-            (status = 400, description = "Invalid namespace id", body = ApiError),
-            (status = 401, description = "Unauthorized", body = ApiError),
-            (status = 404, description = "Namespace not found", body = ApiError)
-        )
-    )
-)]
-pub(super) async fn repair_namespace(
-    State(state): State<AppState>,
-    namespace: NamespaceIdPath,
-    headers: HeaderMap,
-) -> Result<Json<RepairNamespaceResponse>, ApiResponseError> {
-    authorize(&state.config, &headers)?;
-    let namespace_id = namespace.into_id()?;
-    let response = state
-        .admin
-        .repair_namespace(&namespace_id)
-        .await
-        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
-    Ok(Json(response))
 }
 
 #[cfg_attr(

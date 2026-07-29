@@ -803,7 +803,7 @@ impl NamespacePublisher {
     ) -> Vec<CommitResult> {
         let registry = self.registry();
         let mut slot = self.engine.lock().await;
-        let engine = self.engine_for(&mut slot).await;
+        let engine = self.engine_for(&mut slot);
         crate::fs::publish_batch_with_engine(
             &self.read_core,
             writer,
@@ -818,32 +818,15 @@ impl NamespacePublisher {
         .collect()
     }
 
-    /// The publisher's engine, built on first use. A new engine starts from
-    /// the namespace's immutable catalog pair when the control cache can
-    /// supply it, so the first publication does not walk the descriptor
-    /// chain twice.
-    async fn engine_for<'slot>(
-        &self,
-        slot: &'slot mut EngineSlot,
-    ) -> &'slot mut NamespaceCommitEngine {
-        if slot.engine.is_none() {
-            let catalog = self
-                .read_core
-                .load_namespace_catalog_cached(&self.namespace_id)
-                .await
-                .ok()
-                .flatten();
-            let mut engine = NamespaceCommitEngine::new(self.namespace_id.clone())
+    /// The publisher's engine, built on first use. The namespace's
+    /// immutable identity travels in the head every publish already loads,
+    /// so the engine needs nothing seeded but its caches and session.
+    fn engine_for<'slot>(&self, slot: &'slot mut EngineSlot) -> &'slot mut NamespaceCommitEngine {
+        slot.engine.get_or_insert_with(|| {
+            NamespaceCommitEngine::new(self.namespace_id.clone())
                 .table_cache(self.read_core.metadata_table_cache())
-                .writer_session(Arc::clone(&slot.session));
-            if let Some(catalog) = catalog {
-                engine = engine.catalog_entry(catalog);
-            }
-            slot.engine = Some(engine);
-        }
-        slot.engine
-            .as_mut()
-            .expect("engine is present once installed")
+                .writer_session(Arc::clone(&slot.session))
+        })
     }
 
     /// Runs the delete barrier. Returns true when the publisher is now
@@ -909,7 +892,7 @@ impl NamespacePublisher {
             return Err(CoreError::ShuttingDown);
         };
         let mut slot = self.engine.lock().await;
-        let engine = self.engine_for(&mut slot).await;
+        let engine = self.engine_for(&mut slot);
         crate::fs::delete_namespace_with_engine(
             &self.read_core,
             &writer.identity,

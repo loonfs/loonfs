@@ -564,10 +564,12 @@ impl RuntimeStoreProbe {
             OperationClass::CompareAndSwap,
             InjectedError::PreconditionFailed,
         ));
+        // Any conditional publication of the root: create-if-absent for a
+        // namespace that has never flushed, compare-and-swap after that.
         let fail_root_cas = Arc::new(FailStore::new(
             fail_head_cas.clone() as SharedObjectStore,
             KeyPredicate::metadata_root(namespace),
-            OperationClass::CompareAndSwap,
+            OperationClass::Put,
             InjectedError::PreconditionFailed,
         ));
         Self {

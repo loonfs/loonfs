@@ -12,10 +12,7 @@ use super::reap::{
 };
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
-use crate::namespace::catalog::{
-    map_namespace_initialization_error_to_core, namespace_initialization_state,
-    NamespaceInitializationState,
-};
+use crate::namespace::control::{read_head_object, ControlObjectLoadError};
 use crate::protocol::{condemn_upload_session_if_aged, UploadSessionSweep};
 use futures::StreamExt;
 use loonfs_api::v0::GcResponse;
@@ -46,14 +43,15 @@ pub(super) async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
     reverify_chunk: usize,
 ) -> Result<GcResponse> {
     config.validate()?;
-    let initialization_state = namespace_initialization_state(store, namespace_id)
-        .await
-        .map_err(map_namespace_initialization_error_to_core)?;
-    if initialization_state != NamespaceInitializationState::Complete {
-        return Ok(GcResponse {
-            incomplete_namespace_ignored: true,
-            ..GcResponse::empty(namespace_id.clone())
-        });
+    // The head is the namespace: without one there is nothing to collect,
+    // and nothing could have been written under the prefix either, because
+    // the head is every installation's first and only write.
+    match read_head_object(store, namespace_id).await {
+        Ok(_) => {}
+        Err(ControlObjectLoadError::MissingObject { .. }) => {
+            return Ok(GcResponse::empty(namespace_id.clone()))
+        }
+        Err(error) => return Err(CoreError::load_head(error)),
     }
 
     let resume = match config.cursor.as_deref() {

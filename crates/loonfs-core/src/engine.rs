@@ -5,6 +5,7 @@ use crate::cache::{MetadataTableCache, WalTailProjectionCache};
 use crate::commit_engine::NamespaceMutationCandidate;
 use crate::context::MutationContext;
 use crate::error::Result;
+use crate::namespace::basis::MetadataBasis;
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::namespace::{bootstrap, fork, BootstrapNamespaceError};
 use crate::options::{BootstrapOptions, DeleteNamespaceOptions};
@@ -21,8 +22,8 @@ use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq,
     CheckpointId, ContentRef, CreateCheckpointResponse, DeleteNamespaceResponse,
     DirectoryPageCursor, FileRevision, FileRevisionsPageCursor, FlushWalResponse, InodeId,
-    ManifestId, ManifestObjectId, NamespaceId, NamespaceSummary, Page, PageRequest,
-    ReleaseCheckpointResponse, RevisionNo, TrashEntry, TrashPageCursor, UploadId,
+    NamespaceId, NamespaceSummary, Page, PageRequest, ReleaseCheckpointResponse, RevisionNo,
+    TrashEntry, TrashPageCursor, UploadId,
 };
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
@@ -43,22 +44,21 @@ use thiserror::Error;
 pub struct RuntimeReadContext {
     pub head: HeadState,
     pub head_etag: String,
-    pub manifest_id: ManifestId,
-    pub manifest_object_id: ManifestObjectId,
+    /// The materialized basis the head authorized when the anchor was
+    /// taken. It carries the namespace's own root when it has one, and the
+    /// genesis or fork basis until then.
+    pub basis: MetadataBasis,
     pub table_cache: Arc<MetadataTableCache>,
     pub tail_cache: Arc<WalTailProjectionCache>,
-    pub catalog: Option<VerifiedNamespaceCatalogEntry>,
 }
 
 fn runtime_read_load_context(context: &RuntimeReadContext) -> ReadLoadContext<'_> {
     ReadLoadContext::pinned_head(
         &context.head,
         Some(context.head_etag.as_str()),
-        context.manifest_id,
-        &context.manifest_object_id,
+        &context.basis,
         Some(&context.table_cache),
         Some(&context.tail_cache),
-        context.catalog.as_ref(),
     )
 }
 

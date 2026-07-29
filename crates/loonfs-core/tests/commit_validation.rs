@@ -154,6 +154,9 @@ fn validation_context(
 ) -> CommitValidationContext<'_> {
     let namespace_id = namespace_id("demo");
     let head = HeadState {
+        content_store_id: loonfs_api::ContentStoreId::generate(),
+        name_policy: loonfs_api::NamePolicy::default(),
+        fork_basis: None,
         namespace_id: namespace_id.clone(),
         seq,
         head_commit_id: CommitId::parse("c_00000000000000000000000000000000").expect("commit id"),
@@ -1178,7 +1181,7 @@ async fn metadata_only_commit_does_not_validate_content_store_refs() {
         .expect("resolve seeded file")
         .inode_id;
 
-    let guarded_store = ContentStoreAccessLimitStore::new(temp_dir.path(), 1);
+    let guarded_store = ContentStoreAccessLimitStore::new(temp_dir.path(), 0);
     let response = commit_operations(
         &guarded_store,
         &namespace_id("demo"),
@@ -1196,8 +1199,8 @@ async fn metadata_only_commit_does_not_validate_content_store_refs() {
     assert_eq!(response.committed_seq, ChangeSeq(2));
     assert_eq!(
         guarded_store.content_store_access_count(),
-        1,
-        "materialization loading performs one content-store descriptor full read; metadata-only validation must not add another lookup",
+        0,
+        "the namespace's content store is a field in its head; metadata-only validation must not touch the content-store keyspace at all",
     );
 }
 
@@ -1210,7 +1213,7 @@ async fn explicit_create_file_fails_unprepared_before_parent_validation_without_
         .await
         .expect("bootstrap namespace");
 
-    let guarded_store = ContentStoreAccessLimitStore::new(temp_dir.path(), 1);
+    let guarded_store = ContentStoreAccessLimitStore::new(temp_dir.path(), 0);
     let missing_content = content_ref("missing-content");
     let error = publish_namespace_mutations_batch(
         &guarded_store,
@@ -1241,7 +1244,7 @@ async fn explicit_create_file_fails_unprepared_before_parent_validation_without_
             }
         ) if content_ref_digest == missing_content.digest
     ));
-    assert_eq!(guarded_store.content_store_access_count(), 1);
+    assert_eq!(guarded_store.content_store_access_count(), 0);
 }
 
 #[tokio::test]
@@ -1267,7 +1270,7 @@ async fn explicit_replace_file_fails_unprepared_before_revision_validation_witho
         .expect("resolve path")
         .inode_id;
 
-    let guarded_store = ContentStoreAccessLimitStore::new(temp_dir.path(), 1);
+    let guarded_store = ContentStoreAccessLimitStore::new(temp_dir.path(), 0);
     let missing_content = content_ref("missing-content");
     let error = publish_namespace_mutations_batch(
         &guarded_store,
@@ -1297,7 +1300,7 @@ async fn explicit_replace_file_fails_unprepared_before_revision_validation_witho
             }
         ) if content_ref_digest == missing_content.digest
     ));
-    assert_eq!(guarded_store.content_store_access_count(), 1);
+    assert_eq!(guarded_store.content_store_access_count(), 0);
 }
 
 #[tokio::test]

@@ -535,11 +535,9 @@ fn classify_key(key: &str) -> KeyClass {
             KeyClass::GcControl
         }
         DurableObjectFamily::MetadataRoot => KeyClass::NamespaceManifest,
-        DurableObjectFamily::NamespaceConfig
-        | DurableObjectFamily::WalIndex
+        DurableObjectFamily::WalIndex
         | DurableObjectFamily::WalIndexRun
-        | DurableObjectFamily::UploadSession
-        | DurableObjectFamily::ContentStoreDescriptor => KeyClass::Metadata,
+        | DurableObjectFamily::UploadSession => KeyClass::Metadata,
     }
 }
 

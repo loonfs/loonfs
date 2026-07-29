@@ -5,11 +5,9 @@
 use crate::checkpoint::MetadataTableCache;
 use crate::commit::{core_commit_fingerprint_for_v0_request, SemanticMutationIdentity};
 use crate::context::MutationContext;
-use crate::error::{
-    CoreError, MetadataProjectionLoadError, MetadataViewError, Result, WriterFence,
-};
+use crate::error::{CoreError, MetadataViewError, Result, WriterFence};
 use crate::metadata::MetadataState;
-use crate::namespace::catalog::{load_namespace_catalog_entry, VerifiedNamespaceCatalogEntry};
+use crate::namespace::basis::MetadataBasis;
 use crate::namespace::writer_epoch::acquire_writer_epoch;
 use crate::options::DeleteNamespaceOptions;
 use crate::path::write::{path_intent_fingerprint, PathMutationIntent};
@@ -18,9 +16,7 @@ use crate::storage::content_admission::{ContentAdmission, ContentTokenError, Pre
 use crate::timing::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_api::v0::{CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse};
 use loonfs_api::wire::control::{AcquiredWriter, HeadState};
-use loonfs_api::{
-    ChangeSeq, CommitId, DeleteNamespaceResponse, ManifestId, ManifestObjectId, NamespaceId,
-};
+use loonfs_api::{ChangeSeq, CommitId, DeleteNamespaceResponse, ManifestId, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -244,8 +240,10 @@ pub struct NamespaceCommitEnginePublishResult {
 pub struct ResultingReadState {
     pub head: HeadState,
     pub head_etag: String,
+    /// Basis the publish replayed over; the landed head still resolves to
+    /// it, so a seeded anchor pins the same pair the next read would.
+    pub basis: MetadataBasis,
     pub manifest_id: ManifestId,
-    pub manifest_object_id: ManifestObjectId,
     pub manifest_head_seq: ChangeSeq,
     pub tail_rows: Arc<MetadataState>,
 }
@@ -289,9 +287,6 @@ pub struct NamespaceCommitEngine {
     /// content-addressed by segment digest, so cached entries can never
     /// serve stale state; freshness stays enforced by the head etag check.
     table_cache: Option<Arc<MetadataTableCache>>,
-    /// The namespace's immutable catalog pair, loaded on this session's
-    /// first publish and reused for its lifetime.
-    catalog_entry: Option<VerifiedNamespaceCatalogEntry>,
 }
 
 impl NamespaceCommitEngine {
@@ -302,7 +297,6 @@ impl NamespaceCommitEngine {
             session: SharedWriterSessionState::default(),
             timer: Arc::new(StdMonotonicTimer::default()),
             table_cache: None,
-            catalog_entry: None,
         }
     }
 
@@ -330,11 +324,6 @@ impl NamespaceCommitEngine {
 
     pub fn table_cache(mut self, table_cache: Arc<MetadataTableCache>) -> Self {
         self.table_cache = Some(table_cache);
-        self
-    }
-
-    pub fn catalog_entry(mut self, catalog_entry: VerifiedNamespaceCatalogEntry) -> Self {
-        self.catalog_entry = Some(catalog_entry);
         self
     }
 
@@ -437,30 +426,9 @@ impl NamespaceCommitEngine {
             }
         };
 
-        let catalog_entry = match &self.catalog_entry {
-            Some(value) => value.clone(),
-            None => match load_namespace_catalog_entry(store, &self.namespace_id).await {
-                Ok(value) => {
-                    self.catalog_entry = Some(value.clone());
-                    value
-                }
-                Err(error) => {
-                    return NamespaceCommitEnginePublishResult {
-                        results: repeated_error(
-                            candidate_count,
-                            CoreError::MetadataProjection(MetadataProjectionLoadError::from(error)),
-                        ),
-                        wal_tail_segments: 0,
-                        resulting_read_state: None,
-                    };
-                }
-            },
-        };
-
         let (publish_view, projection) = match load_publish_metadata_view(
             store,
             self.table_cache.as_deref(),
-            Some(catalog_entry),
             &self.namespace_id,
             Some(acquired_writer),
             self.publish_tail_projection.as_ref(),
@@ -520,8 +488,8 @@ impl NamespaceCommitEngine {
                 Some(ResultingReadState {
                     head,
                     head_etag: projection.head_etag.clone(),
+                    basis: projection.basis.clone(),
                     manifest_id: projection.manifest_id,
-                    manifest_object_id: projection.manifest_object_id.clone(),
                     manifest_head_seq: projection.manifest_head_seq,
                     tail_rows: Arc::new(projection.tail_state.clone()),
                 })

@@ -2,8 +2,8 @@
 //! commit's durable WAL deltas mapped to semantic filesystem events.
 
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
-use crate::namespace::catalog::load_namespace_catalog_entry;
-use crate::namespace::control::{load_namespace_head_control, read_wal_floor_seq_or_zero};
+use crate::namespace::basis::resolve_retention_floor_seq;
+use crate::namespace::control::load_namespace_head_control;
 use crate::wal::{load_validated_wal_chain, WalChainLoadRequest};
 use loonfs_api::v0::{ChangesResponse, CommittedChange, FilesystemChange};
 use loonfs_api::wire::control::NamespaceState;
@@ -17,7 +17,6 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
     after_seq: ChangeSeq,
     limit: EffectiveLimit,
 ) -> Result<ChangesResponse> {
-    load_namespace_catalog_entry(store, namespace_id).await?;
     let head = load_namespace_head_control(store, namespace_id)
         .await
         .map_err(|error| {
@@ -30,7 +29,7 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
         });
     }
 
-    let retention_floor_seq = read_wal_floor_seq_or_zero(store, namespace_id)
+    let retention_floor_seq = resolve_retention_floor_seq(store, &head)
         .await
         .map_err(|error| {
             CoreError::MetadataProjection(MetadataProjectionLoadError::LoadHead(error))

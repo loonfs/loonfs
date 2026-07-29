@@ -13,10 +13,6 @@ pub(crate) struct ObjectLayout;
 /// [durable object key grammar]: ../../../docs/specs/format.md#12-durable-object-families
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DurableObjectFamily {
-    /// Classifies an immutable namespace-completion descriptor.
-    ///
-    /// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
-    NamespaceConfig,
     /// Classifies the mutable visibility and fencing head.
     ///
     /// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
@@ -57,10 +53,6 @@ pub enum DurableObjectFamily {
     ///
     /// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
     UploadSession,
-    /// Classifies an immutable content-store descriptor.
-    ///
-    /// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
-    ContentStoreDescriptor,
     /// Classifies immutable whole-file content bytes.
     ///
     /// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
@@ -95,12 +87,6 @@ impl ObjectLayout {
 
     pub(crate) fn namespace_root_prefix(&self, namespace: &str) -> String {
         format!("namespaces/{namespace}/")
-    }
-
-    /// Stable namespace identity and immutable configuration; written last
-    /// during bootstrap as the namespace completion marker.
-    pub(crate) fn namespace_config(&self, namespace: &str) -> String {
-        format!("namespaces/{namespace}/namespace.json")
     }
 
     /// Hot head of the semantic commit stream: the only object whose CAS
@@ -182,10 +168,6 @@ impl ObjectLayout {
         format!("namespaces/{namespace}/uploads/")
     }
 
-    pub(crate) fn content_store_descriptor(&self, content_store: &str) -> String {
-        format!("content-stores/{content_store}/descriptor.json")
-    }
-
     pub(crate) fn content_blob(&self, content_store: &str, digest: &str) -> Result<String> {
         let hex = sha256_hex_from_digest(digest)?;
         Ok(format!(
@@ -204,14 +186,8 @@ impl ObjectLayout {
 pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
     let segments: Vec<_> = key.split('/').collect();
     match segments.as_slice() {
-        ["content-stores", _, "descriptor.json"] => {
-            parsed(DurableObjectFamily::ContentStoreDescriptor, None)
-        }
         ["content-stores", _, "blobs", "sha256", _, _, _] => {
             parsed(DurableObjectFamily::ContentBlob, None)
-        }
-        ["namespaces", namespace, "namespace.json"] => {
-            parsed(DurableObjectFamily::NamespaceConfig, Some(namespace))
         }
         ["namespaces", namespace, "wal", "head.json"] => {
             parsed(DurableObjectFamily::WalHead, Some(namespace))
@@ -300,10 +276,6 @@ mod tests {
 
         assert_eq!(layout.namespace_root_prefix("ns-1"), "namespaces/ns-1/");
         assert_eq!(
-            layout.namespace_config("ns-1").as_str(),
-            "namespaces/ns-1/namespace.json"
-        );
-        assert_eq!(
             layout.wal_head("ns-1").as_str(),
             "namespaces/ns-1/wal/head.json"
         );
@@ -349,12 +321,6 @@ mod tests {
         );
         assert_eq!(
             layout
-                .content_store_descriptor("cs_00000000000000000000000000000001")
-                .as_str(),
-            "content-stores/cs_00000000000000000000000000000001/descriptor.json"
-        );
-        assert_eq!(
-            layout
                 .content_blob(
                     "cs_00000000000000000000000000000001",
                     "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
@@ -384,10 +350,6 @@ mod tests {
     fn parse_build_round_trips_for_namespace_key_families() {
         let layout = ObjectLayout::new();
         let cases = [
-            (
-                layout.namespace_config("ns-1"),
-                DurableObjectFamily::NamespaceConfig,
-            ),
             (layout.wal_head("ns-1"), DurableObjectFamily::WalHead),
             (layout.wal_floor("ns-1"), DurableObjectFamily::WalFloor),
             (
@@ -480,13 +442,7 @@ mod tests {
                 "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
             )
             .expect("content key");
-        let cases = [
-            (
-                layout.content_store_descriptor("cs_00000000000000000000000000000001"),
-                DurableObjectFamily::ContentStoreDescriptor,
-            ),
-            (content_key, DurableObjectFamily::ContentBlob),
-        ];
+        let cases = [(content_key, DurableObjectFamily::ContentBlob)];
 
         for (key, family) in cases {
             let parsed = parse_object_key(&key).expect("known global key parses");

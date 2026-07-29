@@ -1058,6 +1058,9 @@ async fn checkpoints_chain_l0_runs_past_the_default_cap() {
     assert_eq!(appended.manifest.payload.base_seq, ChangeSeq(0));
 }
 
+/// A created namespace writes no floor object at all, and its absence
+/// reads as "retain from the namespace's birth sequence", which for a
+/// created namespace is genesis.
 #[tokio::test]
 async fn a_missing_floor_reads_as_retain_everything() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1067,12 +1070,21 @@ async fn a_missing_floor_reads_as_retain_everything() {
     bootstrap_namespace(&store, &namespace_id, &context, false)
         .await
         .expect("bootstrap");
-    store
-        .delete(&loonfs_objectstore::keys::wal_floor(namespace_id.as_str()))
-        .await
-        .expect("delete floor");
+    assert!(
+        store
+            .head(&loonfs_objectstore::keys::wal_floor(namespace_id.as_str()))
+            .await
+            .expect("probe floor")
+            .is_none(),
+        "creation writes no floor object"
+    );
 
-    let floor = crate::namespace::control::read_wal_floor_seq_or_zero(&store, &namespace_id)
+    let head = crate::namespace::control::read_head_object(&store, &namespace_id)
+        .await
+        .expect("head")
+        .envelope
+        .state;
+    let floor = crate::namespace::basis::resolve_retention_floor_seq(&store, &head)
         .await
         .expect("missing floor defaults");
     assert_eq!(floor, ChangeSeq(0));

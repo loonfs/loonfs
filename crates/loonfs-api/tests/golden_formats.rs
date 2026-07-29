@@ -20,15 +20,14 @@
 
 use loonfs_api::wire::control::{
     decode_control_object, encode_control_object, CheckpointOwner, CheckpointRecordLifecycle,
-    CheckpointRecordState, CompletedUpload, ContentStoreDescriptorState, ControlObjectEnvelope,
-    ControlObjectKind, HeadState, MetadataRootState, NamespaceConfigState, NamespaceState,
-    UploadSessionLifecycle, UploadSessionState, WalFloorState, WalSegmentPointer, WriterBlock,
+    CheckpointRecordState, CompletedUpload, ControlObjectEnvelope, ControlObjectKind, ForkBasis,
+    HeadState, MetadataRootState, NamespaceState, UploadSessionLifecycle, UploadSessionState,
+    WalFloorState, WalSegmentPointer, WriterBlock,
 };
 use loonfs_api::wire::envelope::EnvelopeCodecError;
 use loonfs_api::wire::manifest::{
     decode_namespace_manifest_json, encode_namespace_manifest_json, MetadataFileRef, MetadataRow,
-    MetadataTableFamily, NamespaceManifestEnvelope, NamespaceManifestFork,
-    NamespaceManifestPayload, TombstoneRowAction,
+    MetadataTableFamily, NamespaceManifestEnvelope, NamespaceManifestPayload, TombstoneRowAction,
 };
 use loonfs_api::wire::wal::{
     decode_wal_segment_envelope_zstd, encode_wal_segment_envelope_zstd, WalCommitDelta,
@@ -237,14 +236,6 @@ fn sample_manifest_envelope() -> NamespaceManifestEnvelope {
             writer_epoch: WriterEpoch(3),
             next_inode_id: InodeId(10),
             retention_floor_seq: ChangeSeq(0),
-            fork: Some(NamespaceManifestFork {
-                source_namespace_id: NamespaceId::parse("source").expect("valid namespace id"),
-                fork_seq: ChangeSeq(2),
-                source_checkpoint_id: checkpoint_id("chk_00000000000000000000000000000001"),
-                source_manifest_id: ManifestId(1),
-                source_manifest_object_id: manifest_object_id(1, "0123456789abcdef"),
-                source_head_seq: ChangeSeq(2),
-            }),
             metadata_files: vec![MetadataFileRef {
                 owner_namespace_id: namespace_id(),
                 table_id: table_id(),
@@ -283,6 +274,9 @@ fn sample_manifest_envelope() -> NamespaceManifestEnvelope {
 fn sample_head_state() -> HeadState {
     HeadState {
         namespace_id: namespace_id(),
+        content_store_id: content_store_id(),
+        name_policy: NamePolicy::default(),
+        fork_basis: None,
         seq: ChangeSeq(2),
         head_commit_id: commit_id(),
         writer_epoch: WriterEpoch(3),
@@ -305,9 +299,18 @@ fn sample_deleted_head_state() -> HeadState {
     }
 }
 
-fn sample_condemned_head_state() -> HeadState {
+/// A fork target's head: the same shape plus the permanent fork basis that
+/// authorizes reading the source's manifest before the target's first flush.
+fn sample_fork_head_state() -> HeadState {
     HeadState {
-        state: NamespaceState::Condemned,
+        fork_basis: Some(ForkBasis {
+            source_namespace_id: NamespaceId::parse("source").expect("valid namespace id"),
+            source_manifest_object_id: manifest_object_id(2, "0123456789abcdef"),
+            source_manifest_checksum:
+                "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_owned(),
+            source_checkpoint_id: checkpoint_id("chk_00000000000000000000000000000002"),
+            fork_seq: ChangeSeq(2),
+        }),
         ..sample_head_state()
     }
 }
@@ -419,9 +422,6 @@ fn head_state_reading_is_fail_closed_on_unknown_lifecycle_states() {
 
     let deleted = serde_json::to_string(&sample_deleted_head_state()).expect("encode deleted");
     assert!(deleted.contains("\"state\":\"deleted\""));
-    let condemned =
-        serde_json::to_string(&sample_condemned_head_state()).expect("encode condemned");
-    assert!(condemned.contains("\"state\":\"condemned\""));
 }
 
 #[test]
@@ -437,18 +437,9 @@ fn control_objects_match_golden_bytes() {
         sample_deleted_head_state(),
     );
     check_control_golden(
-        "control_namespace_head.condemned.v1.json",
+        "control_namespace_head.fork.v1.json",
         ControlObjectKind::WalHead,
-        sample_condemned_head_state(),
-    );
-    check_control_golden(
-        "control_namespace_config.v1.json",
-        ControlObjectKind::NamespaceConfig,
-        NamespaceConfigState {
-            namespace_id: namespace_id(),
-            content_store_id: content_store_id(),
-            name_policy: NamePolicy::default(),
-        },
+        sample_fork_head_state(),
     );
     check_control_golden(
         "control_wal_floor.v1.json",
@@ -471,13 +462,6 @@ fn control_objects_match_golden_bytes() {
             manifest_payload_checksum:
                 "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_owned(),
             updated_at_ms: 3_000,
-        },
-    );
-    check_control_golden(
-        "control_content_store_descriptor.v1.json",
-        ControlObjectKind::ContentStoreDescriptor,
-        ContentStoreDescriptorState {
-            content_store_id: content_store_id(),
         },
     );
     check_control_golden(
@@ -643,14 +627,9 @@ fn every_mutable_control_payload_rejects_unknown_fields_as_corruption() {
         ControlObjectKind::UploadSession,
         add_unknown,
     );
-    assert_control_payload_edit_is_corrupt::<NamespaceConfigState>(
-        "control_namespace_config.v1.json",
-        ControlObjectKind::NamespaceConfig,
-        add_unknown,
-    );
-    assert_control_payload_edit_is_corrupt::<ContentStoreDescriptorState>(
-        "control_content_store_descriptor.v1.json",
-        ControlObjectKind::ContentStoreDescriptor,
+    assert_control_payload_edit_is_corrupt::<HeadState>(
+        "control_namespace_head.fork.v1.json",
+        ControlObjectKind::WalHead,
         add_unknown,
     );
 }
@@ -668,6 +647,11 @@ fn mutable_control_nested_structs_reject_unknown_fields_as_corruption() {
         |payload| {
             payload["visible_wal_tip"]["field_from_the_future"] = serde_json::Value::from(true);
         },
+    );
+    assert_control_payload_edit_is_corrupt::<HeadState>(
+        "control_namespace_head.fork.v1.json",
+        ControlObjectKind::WalHead,
+        |payload| payload["fork_basis"]["field_from_the_future"] = serde_json::Value::from(true),
     );
     assert_control_payload_edit_is_corrupt::<CheckpointRecordState>(
         "control_checkpoint_record.v1.json",

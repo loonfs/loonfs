@@ -257,26 +257,13 @@ impl FsWriter {
         ))
     }
 
-    /// Loads the namespace catalog used to bind prepared content to its
-    /// verified content store.
+    /// Loads the namespace identity used to bind prepared content to its
+    /// content store.
     pub(crate) async fn load_namespace_catalog_for_content_preparation(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<loonfs_core::control::VerifiedNamespaceCatalogEntry> {
-        match self
-            .core
-            .load_namespace_catalog_cached(namespace_id)
-            .await?
-        {
-            Some(catalog) => Ok(catalog),
-            None => loonfs_core::control::load_namespace_catalog_entry(
-                &self.core.inner.store,
-                namespace_id,
-            )
-            .await
-            .map_err(CoreError::from)
-            .map_err(RuntimeError::from),
-        }
+        self.core.load_namespace_catalog_cached(namespace_id).await
     }
 
     /// Creates a directory at an absolute path.

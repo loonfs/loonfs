@@ -138,31 +138,6 @@ pub struct NamespaceStatusResponse {
     pub retention_floor_seq: ChangeSeq,
 }
 
-/// How an explicit namespace repair resolved the namespace's durable state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[serde(rename_all = "snake_case")]
-pub enum RepairNamespaceOutcome {
-    /// The namespace already carried its completion descriptor.
-    AlreadyComplete,
-    /// The missing completion descriptor was reconstructed and published.
-    Completed,
-    /// Aged, non-completable namespace debris was removed.
-    Reaped,
-    /// Non-completable debris is still inside the repair safety window.
-    InFlight,
-}
-
-/// Result of explicitly repairing one namespace.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct RepairNamespaceResponse {
-    /// Namespace the repair inspected.
-    pub namespace_id: NamespaceId,
-    /// What the repair did, or why it left the namespace untouched.
-    pub outcome: RepairNamespaceOutcome,
-}
-
 /// Result of deleting a namespace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -473,9 +448,6 @@ pub struct GcResponse {
     pub retained_candidates: u64,
     /// True when ambiguous roots suppressed manifest/table deletion.
     pub degraded_retention: bool,
-    /// True when the namespace lacks a complete head-and-descriptor pair, so
-    /// the pass deliberately performed no listing or deletion.
-    pub incomplete_namespace_ignored: bool,
     /// Opaque resume token when more candidates remain. Resuming rebuilds
     /// every safety proof; the token carries enumeration position only and
     /// is valid only against the same namespace.
@@ -497,7 +469,6 @@ impl GcResponse {
             released_missing_basis_checkpoints: 0,
             retained_candidates: 0,
             degraded_retention: false,
-            incomplete_namespace_ignored: false,
             next_cursor: None,
         }
     }

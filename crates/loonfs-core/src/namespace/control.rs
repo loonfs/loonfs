@@ -1,17 +1,15 @@
 //! Typed loaders for the namespace's control objects: head, metadata root,
-//! WAL floor, and the descriptor pair.
+//! and WAL floor.
 
-use crate::error::{CoreError, StoreFailureClass};
+use crate::error::StoreFailureClass;
+use crate::namespace::basis::{read_head_and_metadata_basis, MetadataBasis};
 use loonfs_api::wire::control::{
-    decode_control_object, ContentStoreDescriptorEnvelope, ContentStoreDescriptorState,
-    ControlObjectKind, HeadState, HeadStateEnvelope, MetadataRootEnvelope, MetadataRootState,
-    NamespaceConfigEnvelope, NamespaceConfigState, WalFloorEnvelope,
+    decode_control_object, ControlObjectKind, HeadState, HeadStateEnvelope, MetadataRootEnvelope,
+    MetadataRootState, WalFloorEnvelope,
 };
 use loonfs_api::wire::envelope::EnvelopeCodecError;
-use loonfs_api::{ContentStoreId, NamespaceId};
-use loonfs_objectstore::keys::{
-    content_store_descriptor, metadata_root, namespace_config, wal_floor, wal_head,
-};
+use loonfs_api::NamespaceId;
+use loonfs_objectstore::keys::{metadata_root, wal_floor, wal_head};
 use loonfs_objectstore::ObjectStoreError;
 use loonfs_objectstore::{ObjectMetadata, ObjectStore};
 use serde::{Deserialize, Serialize};
@@ -39,36 +37,8 @@ pub(crate) struct LoadedWalFloorObject {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct LoadedNamespaceDescriptorObject {
-    pub(crate) object_key: String,
-    pub(crate) metadata: ObjectMetadata,
-    pub(crate) envelope: NamespaceConfigEnvelope,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct LoadedContentStoreDescriptorObject {
-    pub(crate) object_key: String,
-    pub(crate) metadata: ObjectMetadata,
-    pub(crate) envelope: ContentStoreDescriptorEnvelope,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ControlObjectIdentity {
     pub etag: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LoadedNamespaceDescriptorControl {
-    pub object_key: String,
-    pub identity: ControlObjectIdentity,
-    pub state: NamespaceConfigState,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LoadedContentStoreDescriptorControl {
-    pub object_key: String,
-    pub identity: ControlObjectIdentity,
-    pub state: ContentStoreDescriptorState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,8 +66,6 @@ pub struct LoadedHeadControl {
 pub enum ControlObjectLoadError {
     #[error("missing control object `{object_key}`")]
     MissingObject { object_key: String },
-    #[error("missing control object after head `{object_key}`")]
-    MissingObjectAfterHead { object_key: String },
     #[error(
         "metadata root references seq `{root_manifest_head_seq}` beyond the reloaded head seq `{head_seq}`"
     )]
@@ -112,14 +80,6 @@ pub enum ControlObjectLoadError {
         object_key: String,
         expected: NamespaceId,
         actual: NamespaceId,
-    },
-    #[error(
-        "control object content store mismatch for `{object_key}`: expected `{expected}`, actual `{actual}`"
-    )]
-    ContentStoreMismatch {
-        object_key: String,
-        expected: ContentStoreId,
-        actual: ContentStoreId,
     },
     #[error(
         "control object checksum mismatch for `{object_key}`: expected `{expected}`, actual `{actual}`"
@@ -137,66 +97,6 @@ pub enum ControlObjectLoadError {
         message: String,
         class: StoreFailureClass,
     },
-}
-
-pub(super) fn map_store_load_error_or_else<E>(
-    error: ControlObjectLoadError,
-    otherwise: impl FnOnce() -> E,
-) -> E
-where
-    E: From<CoreError>,
-{
-    if matches!(&error, ControlObjectLoadError::Store { .. }) {
-        CoreError::load_head(error).into()
-    } else {
-        otherwise()
-    }
-}
-
-pub(crate) async fn read_namespace_descriptor_object<S: ObjectStore + ?Sized>(
-    store: &S,
-    expected_namespace_id: &NamespaceId,
-) -> Result<LoadedNamespaceDescriptorObject, ControlObjectLoadError> {
-    let object_key = namespace_config(expected_namespace_id.as_str());
-    let (metadata, encoded_bytes) = read_control_object_bytes(store, &object_key).await?;
-    let envelope: NamespaceConfigEnvelope =
-        decode_control_object(&encoded_bytes, ControlObjectKind::NamespaceConfig)
-            .map_err(|err| map_control_codec_error(&object_key, err))?;
-    validate_expected_namespace(
-        &object_key,
-        expected_namespace_id,
-        &envelope.state.namespace_id,
-    )?;
-
-    Ok(LoadedNamespaceDescriptorObject {
-        object_key,
-        metadata,
-        envelope,
-    })
-}
-
-pub(crate) async fn read_content_store_descriptor_object<S: ObjectStore + ?Sized>(
-    store: &S,
-    expected_content_store: &ContentStoreId,
-) -> Result<LoadedContentStoreDescriptorObject, ControlObjectLoadError> {
-    let object_key = content_store_descriptor(expected_content_store.as_str());
-    let (metadata, encoded_bytes) = read_control_object_bytes(store, &object_key).await?;
-    let envelope: ContentStoreDescriptorEnvelope =
-        decode_control_object(&encoded_bytes, ControlObjectKind::ContentStoreDescriptor)
-            .map_err(|err| map_control_codec_error(&object_key, err))?;
-    if envelope.state.content_store_id != *expected_content_store {
-        return Err(ControlObjectLoadError::ContentStoreMismatch {
-            object_key,
-            expected: expected_content_store.clone(),
-            actual: envelope.state.content_store_id.clone(),
-        });
-    }
-
-    Ok(LoadedContentStoreDescriptorObject {
-        object_key,
-        metadata,
-        envelope,
-    })
 }
 
 pub(crate) async fn read_wal_floor_object<S: ObjectStore + ?Sized>(
@@ -221,19 +121,6 @@ pub(crate) async fn read_wal_floor_object<S: ObjectStore + ?Sized>(
     })
 }
 
-/// Reads the floor, treating a missing object as seq 0: a lost floor means
-/// "retain more history", never less.
-pub(crate) async fn read_wal_floor_seq_or_zero<S: ObjectStore + ?Sized>(
-    store: &S,
-    expected_namespace_id: &NamespaceId,
-) -> Result<loonfs_api::ChangeSeq, ControlObjectLoadError> {
-    match read_wal_floor_object(store, expected_namespace_id).await {
-        Ok(loaded) => Ok(loaded.envelope.state.floor_seq),
-        Err(ControlObjectLoadError::MissingObject { .. }) => Ok(loonfs_api::ChangeSeq(0)),
-        Err(error) => Err(error),
-    }
-}
-
 pub(crate) async fn read_metadata_root_object<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
@@ -256,27 +143,43 @@ pub(crate) async fn read_metadata_root_object<S: ObjectStore + ?Sized>(
     })
 }
 
-/// Reads the WAL head and metadata root together (concurrently).
-///
-/// The root can only ever reference published state, so observing
-/// `root.manifest_head_seq > head.seq` means the head read raced an
-/// in-flight commit CAS; a fresh head read observes at least the root's
-/// seq. Bounded reloads resolve the race without treating it as corruption
-/// (format spec, "metadata/root.json").
-pub(crate) async fn read_head_and_metadata_root<S: ObjectStore + ?Sized>(
+pub(crate) async fn read_metadata_root_object_if_present<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
-) -> Result<(LoadedHeadObject, LoadedMetadataRootObject), ControlObjectLoadError> {
+) -> Result<Option<LoadedMetadataRootObject>, ControlObjectLoadError> {
+    match read_metadata_root_object(store, expected_namespace_id).await {
+        Ok(loaded) => Ok(Some(loaded)),
+        Err(ControlObjectLoadError::MissingObject { .. }) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Reads the WAL head and metadata root together (concurrently), tolerating
+/// a namespace that has not materialized a root yet.
+///
+/// The root is published by the first flush, so its absence is ordinary for
+/// a young namespace and the caller resolves the basis from the head
+/// instead. When the root is there it can only ever reference published
+/// state, so observing `root.manifest_head_seq > head.seq` means the head
+/// read raced an in-flight commit CAS; a fresh head read observes at least
+/// the root's seq. Bounded reloads resolve the race without treating it as
+/// corruption (format spec, "metadata/root.json").
+pub(crate) async fn read_head_and_metadata_root_if_present<S: ObjectStore + ?Sized>(
+    store: &S,
+    expected_namespace_id: &NamespaceId,
+) -> Result<(LoadedHeadObject, Option<LoadedMetadataRootObject>), ControlObjectLoadError> {
     const ROOT_AHEAD_HEAD_RELOADS: usize = 3;
     let (head, root) = futures::join!(
         read_head_object(store, expected_namespace_id),
-        read_metadata_root_object(store, expected_namespace_id)
+        read_metadata_root_object_if_present(store, expected_namespace_id)
     );
     let mut head = head?;
-    let root = root?;
+    let Some(root) = root? else {
+        return Ok((head, None));
+    };
     for _reload in 0..=ROOT_AHEAD_HEAD_RELOADS {
         if root.envelope.state.manifest_head_seq <= head.envelope.state.seq {
-            return Ok((head, root));
+            return Ok((head, Some(root)));
         }
         head = read_head_object(store, expected_namespace_id).await?;
     }
@@ -305,32 +208,6 @@ pub(crate) async fn read_head_object<S: ObjectStore + ?Sized>(
         object_key,
         metadata,
         envelope,
-    })
-}
-
-pub async fn load_namespace_descriptor_control<S: ObjectStore + ?Sized>(
-    store: &S,
-    expected_namespace_id: &NamespaceId,
-) -> Result<LoadedNamespaceDescriptorControl, ControlObjectLoadError> {
-    let loaded = read_namespace_descriptor_object(store, expected_namespace_id).await?;
-    let identity = control_identity(&loaded.object_key, &loaded.metadata)?;
-    Ok(LoadedNamespaceDescriptorControl {
-        object_key: loaded.object_key,
-        identity,
-        state: loaded.envelope.state,
-    })
-}
-
-pub async fn load_content_store_descriptor_control<S: ObjectStore + ?Sized>(
-    store: &S,
-    expected_content_store: &ContentStoreId,
-) -> Result<LoadedContentStoreDescriptorControl, ControlObjectLoadError> {
-    let loaded = read_content_store_descriptor_object(store, expected_content_store).await?;
-    let identity = control_identity(&loaded.object_key, &loaded.metadata)?;
-    Ok(LoadedContentStoreDescriptorControl {
-        object_key: loaded.object_key,
-        identity,
-        state: loaded.envelope.state,
     })
 }
 
@@ -372,26 +249,22 @@ pub async fn load_namespace_metadata_root_control<S: ObjectStore + ?Sized>(
     })
 }
 
-/// Loads the head and metadata root together as a consistent read anchor
-/// (see [`read_head_and_metadata_root`] for the race rule).
+/// Loads the head together with the metadata basis it authorizes, as one
+/// consistent read anchor (see [`read_head_and_metadata_root_if_present`]
+/// for the race rule).
 pub async fn load_namespace_read_anchor<S: ObjectStore + ?Sized>(
     store: &S,
     expected_namespace_id: &NamespaceId,
-) -> Result<(LoadedHeadControl, LoadedMetadataRootControl), ControlObjectLoadError> {
-    let (head, root) = read_head_and_metadata_root(store, expected_namespace_id).await?;
-    let head_identity = control_identity(&head.object_key, &head.metadata)?;
-    let root_identity = control_identity(&root.object_key, &root.metadata)?;
+) -> Result<(LoadedHeadControl, MetadataBasis), ControlObjectLoadError> {
+    let loaded = read_head_and_metadata_basis(store, expected_namespace_id).await?;
+    let head_identity = control_identity(&loaded.head.object_key, &loaded.head.metadata)?;
     Ok((
         LoadedHeadControl {
-            object_key: head.object_key,
+            object_key: loaded.head.object_key,
             identity: head_identity,
-            state: head.envelope.state,
+            state: loaded.head.envelope.state,
         },
-        LoadedMetadataRootControl {
-            object_key: root.object_key,
-            identity: root_identity,
-            state: root.envelope.state,
-        },
+        loaded.basis,
     ))
 }
 

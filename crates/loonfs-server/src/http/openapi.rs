@@ -11,14 +11,14 @@ use loonfs_api::{
     v0::{
         BeginUploadRequest, BeginUploadResponse, ChangesResponse,
         CommitResponse as ApiCommitResponse, CompleteUploadRequest, CompleteUploadResponse,
-        DirectPutUpload, ObjectTransferAccess, RepairNamespaceResponse, UploadContentResponse,
-        UploadMode, ValidatedContentToken,
+        DirectPutUpload, ObjectTransferAccess, UploadContentResponse, UploadMode,
+        ValidatedContentToken,
     },
     ApiError, ContentRef, CreateCheckpointRequest, CreateCheckpointResponse,
     CreateNamespaceRequest, FilesystemOperation, FilesystemOperationRequest, ForkNamespaceRequest,
     GcRequest, GcResponse, InodeId, ListFileRevisionsResponse, ListTrashResponse,
-    MaintenanceStepRequest, MaintenanceStepResponse, ReleaseCheckpointResponse,
-    RepairNamespaceOutcome, RevisionNo, TrashEntry, WalFlushStepOutcome,
+    MaintenanceStepRequest, MaintenanceStepResponse, ReleaseCheckpointResponse, RevisionNo,
+    TrashEntry, WalFlushStepOutcome,
 };
 
 pub fn openapi_document() -> utoipa::openapi::OpenApi {
@@ -57,7 +57,6 @@ pub fn openapi_json_pretty() -> Result<String, serde_json::Error> {
         crate::http::handlers_namespace::create_checkpoint,
         crate::http::handlers_namespace::release_checkpoint,
         crate::http::handlers_namespace::maintenance_step,
-        crate::http::handlers_namespace::repair_namespace,
         crate::http::handlers_query::grep,
         crate::http::handlers_query::enable_grep_index,
         crate::http::handlers_query::disable_grep_index,
@@ -89,8 +88,6 @@ pub fn openapi_json_pretty() -> Result<String, serde_json::Error> {
         MaintenanceStepResponse,
         GcRequest,
         GcResponse,
-        RepairNamespaceOutcome,
-        RepairNamespaceResponse,
         ContentRef,
         loonfs_api::NamespaceId,
         loonfs_api::ContentStoreId,

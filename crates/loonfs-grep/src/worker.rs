@@ -1419,8 +1419,7 @@ async fn namespace_liveness<S: ObjectStore + ?Sized>(
 ) -> NamespaceLiveness {
     match load_namespace_head_control(store, namespace_id).await {
         Ok(head) if head.state.state == NamespaceState::Deleted => NamespaceLiveness::Gone,
-        Ok(head) if head.state.state == NamespaceState::Active => NamespaceLiveness::Live,
-        Ok(_) => NamespaceLiveness::Unknown,
+        Ok(_) => NamespaceLiveness::Live,
         Err(ControlObjectLoadError::MissingObject { .. }) => NamespaceLiveness::Gone,
         Err(_) => NamespaceLiveness::Unknown,
     }
@@ -1437,12 +1436,6 @@ async fn ensure_live_namespace<S: ObjectStore + ?Sized>(
         })?;
     if head.state.state == NamespaceState::Deleted {
         return Err(CoreError::NamespaceDeleted {
-            namespace_id: namespace_id.clone(),
-        }
-        .into());
-    }
-    if head.state.state != NamespaceState::Active {
-        return Err(CoreError::NamespacePartial {
             namespace_id: namespace_id.clone(),
         }
         .into());

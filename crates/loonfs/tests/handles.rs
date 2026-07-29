@@ -94,10 +94,14 @@ fn a_threshold_crossing_during_an_active_step_still_bounds_the_tail() {
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     block_on(async {
+        // The root is published by whichever step gets there first: a
+        // create-if-absent for a namespace that has never flushed, a
+        // compare-and-swap after that. Both are the publication this test
+        // holds.
         let blocking = Arc::new(BlockingStore::new(
             LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
             KeyPredicate::metadata_root(namespace_id.as_str()),
-            OperationClass::CompareAndSwap,
+            OperationClass::Put,
         ));
         let store: SharedObjectStore = blocking.clone();
         let writer = FsWriter::builder_with_store(store)
@@ -163,10 +167,14 @@ fn a_step_queued_at_the_global_cap_runs_without_another_publish() {
     let active_namespace = namespace_id("active");
     let queued_namespace = namespace_id("queued");
     block_on(async {
+        // The root is published by whichever step gets there first: a
+        // create-if-absent for a namespace that has never flushed, a
+        // compare-and-swap after that. Both are the publication this test
+        // holds.
         let blocking = Arc::new(BlockingStore::new(
             LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
             KeyPredicate::metadata_root(active_namespace.as_str()),
-            OperationClass::CompareAndSwap,
+            OperationClass::Put,
         ));
         let store: SharedObjectStore = blocking.clone();
         let writer = FsWriter::builder_with_store(store)
@@ -220,10 +228,14 @@ fn a_write_stopped_namespace_queued_at_the_global_cap_unblocks_itself() {
     let active_namespace = namespace_id("active");
     let write_stopped_namespace = namespace_id("write-stopped");
     block_on(async {
+        // The root is published by whichever step gets there first: a
+        // create-if-absent for a namespace that has never flushed, a
+        // compare-and-swap after that. Both are the publication this test
+        // holds.
         let blocking = Arc::new(BlockingStore::new(
             LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
             KeyPredicate::metadata_root(active_namespace.as_str()),
-            OperationClass::CompareAndSwap,
+            OperationClass::Put,
         ));
         let store: SharedObjectStore = blocking.clone();
         let writer = FsWriter::builder_with_store(store)
@@ -296,10 +308,14 @@ fn shutdown_clears_a_non_empty_maintenance_queue_without_spawning_it() {
     let active_namespace = namespace_id("active");
     let queued_namespace = namespace_id("queued");
     block_on(async {
+        // The root is published by whichever step gets there first: a
+        // create-if-absent for a namespace that has never flushed, a
+        // compare-and-swap after that. Both are the publication this test
+        // holds.
         let blocking = Arc::new(BlockingStore::new(
             LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
             KeyPredicate::metadata_root(active_namespace.as_str()),
-            OperationClass::CompareAndSwap,
+            OperationClass::Put,
         ));
         let store: SharedObjectStore = blocking.clone();
         let writer = FsWriter::builder_with_store(store)
@@ -342,8 +358,7 @@ fn shutdown_clears_a_non_empty_maintenance_queue_without_spawning_it() {
             .await
             .expect("queued namespace status after shutdown");
         assert_eq!(
-            status.current_manifest_id,
-            Some(ManifestId(0)),
+            status.current_manifest_id, None,
             "shutdown must clear queued work before the active step releases its permit"
         );
 
@@ -365,8 +380,7 @@ fn shutdown_clears_a_non_empty_maintenance_queue_without_spawning_it() {
             .await
             .expect("queued namespace status after post-close write");
         assert_eq!(
-            status.current_manifest_id,
-            Some(ManifestId(0)),
+            status.current_manifest_id, None,
             "post-close threshold crossings must not spawn maintenance"
         );
     });
@@ -535,7 +549,7 @@ fn admin_over_writer_core_invalidates_shared_caches() {
             .await
             .expect("status after the scheduled step");
         assert!(
-            status.current_manifest_id > Some(ManifestId(0)),
+            status.current_manifest_id.is_some(),
             "the scheduled step should have published a manifest: {status:?}"
         );
         assert!(
@@ -661,8 +675,7 @@ fn manual_only_writer_never_schedules_maintenance() {
             .await
             .expect("status after writes");
         assert_eq!(
-            status.current_manifest_id,
-            Some(ManifestId(0)),
+            status.current_manifest_id, None,
             "manual-only writer must not publish checkpoints: {status:?}"
         );
         assert!(
@@ -685,7 +698,7 @@ fn manual_only_writer_never_schedules_maintenance() {
             .await
             .expect("status after explicit step");
         assert!(
-            status.current_manifest_id > Some(ManifestId(0)),
+            status.current_manifest_id.is_some(),
             "explicit step should publish a manifest: {status:?}"
         );
         assert!(
@@ -721,7 +734,7 @@ fn enabled_writer_schedules_maintenance_on_its_owning_runtime() {
             .await
             .expect("status after auto step");
         assert!(
-            status.current_manifest_id > Some(ManifestId(0)),
+            status.current_manifest_id.is_some(),
             "auto step should have published a manifest: {status:?}"
         );
         assert!(
@@ -812,8 +825,7 @@ fn shut_down_writer_rejects_new_background_work_but_keeps_writing() {
             .await
             .expect("status after post-shutdown writes");
         assert_eq!(
-            status.current_manifest_id,
-            Some(ManifestId(0)),
+            status.current_manifest_id, None,
             "shut-down writer must not schedule checkpoints: {status:?}"
         );
         assert!(
@@ -919,12 +931,14 @@ fn admin_checkpoint_and_retention_are_explicit_one_shot_calls() {
     });
 }
 
-/// Eight threshold crossings with background work enabled must both bound
-/// the WAL tail and drain the reorganization backlog: the eighth crossing's
-/// checkpoint reaches the fold trigger (eight L0 runs), and the writer's own
-/// background step then folds every family group — no admin involvement.
-/// Before the drain, background steps folded at most one unit per crossing,
-/// so fold debt outlived the burst that created it.
+/// Threshold crossings with background work enabled must both bound the
+/// WAL tail and drain the reorganization backlog. The first crossing
+/// publishes the namespace's first manifest as one base run; the next
+/// eight chain one L0 run each, and the last of them reaches the fold
+/// trigger (eight L0 runs). The writer's own background step then folds
+/// every family group — no admin involvement. Before the drain, background
+/// steps folded at most one unit per crossing, so fold debt outlived the
+/// burst that created it.
 #[test]
 fn enabled_writer_drains_reorganization_backlog_without_admin() {
     let temp_dir = tempdir().expect("tempdir");
@@ -935,7 +949,7 @@ fn enabled_writer_drains_reorganization_backlog_without_admin() {
             .create_namespace(&namespace_id, CreateNamespaceOptions::default())
             .await
             .expect("create namespace");
-        for round in 0..8u32 {
+        for round in 0..9u32 {
             for file in 0..writes_past_wal_tail_threshold() {
                 writer
                     .put_file_bytes(

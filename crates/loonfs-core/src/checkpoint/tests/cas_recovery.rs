@@ -126,10 +126,17 @@ struct FloorRaiseOnCasConflictStore {
 
 impl FloorRaiseOnCasConflictStore {
     async fn install_higher_floor(&self) {
-        let loaded = read_wal_floor_object(&self.inner, &self.namespace_id)
-            .await
-            .expect("read floor for raise");
-        let mut floor = loaded.envelope.state;
+        // The namespace may not have published a floor yet: create and fork
+        // write none, so the competitor may be the first writer too.
+        let mut floor = match read_wal_floor_object(&self.inner, &self.namespace_id).await {
+            Ok(loaded) => loaded.envelope.state,
+            Err(_) => loonfs_api::wire::control::WalFloorState {
+                namespace_id: self.namespace_id.clone(),
+                floor_seq: ChangeSeq(0),
+                verified_at_ms: 1_000,
+                updated_at_ms: 1_000,
+            },
+        };
         floor.floor_seq = ChangeSeq(5);
         let envelope = loonfs_api::wire::control::WalFloorEnvelope::from_state(
             loonfs_api::wire::control::ControlObjectKind::WalFloor,
@@ -174,6 +181,19 @@ impl ObjectStore for FloorRaiseOnCasConflictStore {
         bytes: Bytes,
         mode: PutMode,
     ) -> Result<ObjectMetadata, ObjectStoreError> {
+        use std::sync::atomic::Ordering;
+        // The first advance creates the floor object, so the competing
+        // writer has to be able to win that race too.
+        if mode == PutMode::CreateIfAbsent
+            && key == loonfs_objectstore::keys::wal_floor(self.namespace_id.as_str())
+            && self.remaining_conflicts.load(Ordering::SeqCst) > 0
+        {
+            self.remaining_conflicts.fetch_sub(1, Ordering::SeqCst);
+            self.install_higher_floor().await;
+            return Err(ObjectStoreError::PreconditionFailed {
+                object_key: key.to_owned(),
+            });
+        }
         self.inner.put(key, bytes, mode).await
     }
 
@@ -504,7 +524,7 @@ async fn create_checkpoint_retries_same_id_different_payload_allocation_race() {
         format!(
             "{}{:020}-",
             metadata_manifest_prefix(namespace_id.as_str()),
-            1
+            2
         ),
     );
 
@@ -512,13 +532,13 @@ async fn create_checkpoint_retries_same_id_different_payload_allocation_race() {
         .await
         .expect("create checkpoint should retry allocation");
 
-    assert_eq!(checkpoint.manifest_id, ManifestId(1));
+    assert_eq!(checkpoint.manifest_id, ManifestId(2));
     let record = read_checkpoint_record(&store, &namespace_id, &checkpoint.checkpoint_id)
         .await
         .expect("read checkpoint record")
         .expect("record exists")
         .state;
-    assert_eq!(record.manifest_id, ManifestId(1));
+    assert_eq!(record.manifest_id, ManifestId(2));
     let manifest_objects = store
         .list_prefix(&metadata_manifest_prefix(namespace_id.as_str()))
         .await
@@ -526,12 +546,12 @@ async fn create_checkpoint_retries_same_id_different_payload_allocation_race() {
     assert_eq!(
         manifest_objects.len(),
         3,
-        "bootstrap, injected conflict, and retried checkpoint manifests should all be immutable"
+        "first-flush, injected conflict, and retried checkpoint manifests should all be immutable"
     );
     let materialization_after = load_current_projection(&store, &namespace_id)
         .await
         .expect("materialization");
-    assert_eq!(materialization_after.root.manifest_id, ManifestId(1));
+    assert_eq!(materialization_after.root.manifest_id, ManifestId(2));
 }
 
 #[tokio::test]
@@ -593,7 +613,7 @@ async fn same_root_checkpoint_builders_write_distinct_manifest_objects_and_loser
         &store,
         &namespace_id,
         &first_manifest,
-        &materialization.root.manifest_object_id,
+        Some(materialization.root.manifest_object_id.clone()),
         context.now_ms,
         &context.writer_version,
     )
@@ -613,7 +633,7 @@ async fn same_root_checkpoint_builders_write_distinct_manifest_objects_and_loser
         &store,
         &namespace_id,
         &second_manifest,
-        &materialization.root.manifest_object_id,
+        Some(materialization.root.manifest_object_id.clone()),
         context.now_ms + 1,
         &context.writer_version,
     )
@@ -685,7 +705,6 @@ async fn lower_seq_root_publication_yields_to_the_newer_root() {
             writer_epoch: materialization_before.head.writer_epoch,
             next_inode_id: materialization_before.head.next_inode_id,
             retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
-            fork: None,
             metadata_files: flatten_manifest_tables(tables),
         },
     )
@@ -713,7 +732,7 @@ async fn lower_seq_root_publication_yields_to_the_newer_root() {
         &store,
         &namespace_id,
         &manifest,
-        &materialization_before.root.manifest_object_id,
+        Some(materialization_before.root.manifest_object_id.clone()),
         context.now_ms,
         &context.writer_version,
     )
@@ -779,7 +798,7 @@ async fn current_manifest_cas_retry_exhaustion_reports_head_race() {
         &store,
         &namespace_id,
         &manifest,
-        &materialization.root.manifest_object_id,
+        Some(materialization.root.manifest_object_id.clone()),
         context.now_ms,
         &context.writer_version,
     )
@@ -838,7 +857,7 @@ async fn root_cas_transport_error_recovers_when_candidate_was_published() {
         &store,
         &namespace_id,
         &manifest,
-        &materialization.root.manifest_object_id,
+        Some(materialization.root.manifest_object_id.clone()),
         context.now_ms,
         &context.writer_version,
     )
@@ -919,7 +938,7 @@ async fn root_cas_transport_error_recovers_when_newer_root_was_published() {
         &store,
         &namespace_id,
         &candidate_manifest,
-        &materialization.root.manifest_object_id,
+        Some(materialization.root.manifest_object_id.clone()),
         context.now_ms,
         &context.writer_version,
     )
@@ -1036,7 +1055,7 @@ async fn same_seq_root_replacement_publishes_a_compacted_manifest() {
         &store,
         &namespace_id,
         &compacted,
-        &materialization.root.manifest_object_id,
+        Some(materialization.root.manifest_object_id.clone()),
         context.now_ms,
         &context.writer_version,
     )
@@ -1167,7 +1186,7 @@ async fn stale_basis_publication_cannot_clobber_a_sibling_root() {
         &store,
         &namespace_id,
         &sibling,
-        &sibling_basis.root.manifest_object_id,
+        Some(sibling_basis.root.manifest_object_id.clone()),
         context.now_ms,
         &context.writer_version,
     )
@@ -1182,7 +1201,7 @@ async fn stale_basis_publication_cannot_clobber_a_sibling_root() {
         &store,
         &namespace_id,
         &stale_higher_head,
-        &stale_basis.root.manifest_object_id,
+        Some(stale_basis.root.manifest_object_id.clone()),
         context.now_ms + 1,
         &context.writer_version,
     )

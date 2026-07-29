@@ -36,7 +36,6 @@ use super::{
 };
 use crate::error::{CoreError, ErrorCode, MetadataProjectionLoadError};
 use crate::metadata::MetadataState;
-use crate::namespace::bootstrap::bootstrap_namespace;
 use crate::namespace::catalog::load_namespace_catalog_entry;
 use crate::namespace::control::{
     read_head_object, read_metadata_root_object, read_wal_floor_object,
@@ -161,16 +160,45 @@ struct CurrentProjection {
     metadata_state: MetadataState,
 }
 
+/// Creates a namespace and publishes its first manifest.
+///
+/// Creation itself writes only the head; these tests are about manifest,
+/// root, and floor mechanics, so they start from a namespace that has
+/// flushed once — the durable shape the tests were written against.
+async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    context: &MutationContext,
+    allow_existing: bool,
+) -> Result<loonfs_api::NamespaceSummary, crate::namespace::BootstrapNamespaceError> {
+    let summary = crate::namespace::bootstrap::bootstrap_namespace(
+        store,
+        namespace_id,
+        context,
+        allow_existing,
+    )
+    .await?;
+    flush::flush_wal(store, namespace_id, context)
+        .await
+        .expect("publish the first manifest");
+    Ok(summary)
+}
+
+/// The namespace's effective retention floor: the floor object when it
+/// exists, and the namespace's birth sequence until the first advance
+/// publishes one.
 async fn read_floor_seq<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
 ) -> ChangeSeq {
-    read_wal_floor_object(store, namespace_id)
+    let head = read_head_object(store, namespace_id)
         .await
-        .expect("read wal floor")
+        .expect("read head")
         .envelope
-        .state
-        .floor_seq
+        .state;
+    crate::namespace::basis::resolve_retention_floor_seq(store, &head)
+        .await
+        .expect("resolve retention floor")
 }
 
 /// Checkpoints, then folds every L0 run into the base through
@@ -546,7 +574,6 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
             writer_epoch: head.writer_epoch,
             next_inode_id: head.next_inode_id,
             retention_floor_seq: source.retention_floor_seq,
-            fork: None,
             metadata_files,
         },
     )
@@ -559,5 +586,5 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
 
 #[cfg(test)]
 fn is_bootstrap_seed_manifest(payload: &NamespaceManifestPayload) -> bool {
-    payload.head_seq == ChangeSeq(0) && payload.base_seq == ChangeSeq(0) && payload.fork.is_none()
+    payload.head_seq == ChangeSeq(0) && payload.base_seq == ChangeSeq(0)
 }

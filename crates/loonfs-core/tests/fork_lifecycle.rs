@@ -1,4 +1,8 @@
-//! Namespace creation, fork installation, repair, and terminal lifecycle guards.
+//! Namespace creation, fork installation, and terminal lifecycle guards.
+//!
+//! Create and fork are one conditional write of a complete head, so these
+//! tests are mostly about what that single write does under contention and
+//! what a namespace looks like before it has published anything of its own.
 
 #![allow(clippy::panic)]
 // These integration tests use panic in unexpected match arms for precise diagnostics.
@@ -9,31 +13,27 @@ use bytes::Bytes;
 use common::mutation_split_support::*;
 use common::namespace_engine;
 use loonfs_api::{
-    sha256_digest,
     wire::control::{
-        decode_control_object, encode_control_object, CheckpointOwner,
-        ContentStoreDescriptorEnvelope, ContentStoreDescriptorState, ControlObjectKind,
-        NamespaceConfigEnvelope, NamespaceConfigState,
+        decode_control_object, encode_control_object, CheckpointOwner, CheckpointRecordLifecycle,
+        ControlObjectKind, HeadState, HeadStateEnvelope,
     },
     wire::manifest::{
         decode_namespace_manifest_json, encode_namespace_manifest_json, MetadataTableFamily,
         NamespaceManifestEnvelope,
     },
-    AbsolutePath, ChangeSeq, CommitId, ContentStoreId, DestinationBehavior, ManifestId,
-    NamespaceId, RepairNamespaceOutcome,
+    AbsolutePath, ChangeSeq, CommitId, DestinationBehavior, ManifestId, NamespaceId,
 };
 use loonfs_core::content::store_bytes_as_content;
 use loonfs_core::control::load_namespace_head_control;
 use loonfs_core::publish::PathMutationIntent;
-use loonfs_core::{repair_namespace, Error as CoreError, ErrorCode, MutationContext};
-use loonfs_objectstore::keys::{
-    content_store_descriptor, metadata_manifest_object, namespace_config, wal_head,
-};
+use loonfs_core::{Error as CoreError, ErrorCode, MutationContext};
+use loonfs_objectstore::keys::{metadata_manifest_object, metadata_root, wal_floor, wal_head};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{CountingStore, KeyPredicate, OperationClass};
 use std::path::Path;
+use std::sync::Arc;
 use tempfile::tempdir;
 
 async fn fork_namespace<S: ObjectStore + ?Sized>(
@@ -45,21 +45,6 @@ async fn fork_namespace<S: ObjectStore + ?Sized>(
     namespace_engine(store, source_namespace_id, context)
         .fork_namespace(new_namespace_id)
         .await
-}
-
-async fn load_namespace_descriptor_state<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-) -> NamespaceConfigState {
-    let descriptor_key = namespace_config(namespace_id.as_str());
-    let descriptor_bytes = store
-        .get(&descriptor_key, None)
-        .await
-        .expect("read namespace descriptor")
-        .expect("namespace descriptor exists");
-    decode_control_object(&descriptor_bytes, ControlObjectKind::NamespaceConfig)
-        .expect("decode namespace descriptor")
-        .state
 }
 
 async fn seed_source_namespace_for_fork<S: ObjectStore + ?Sized>(
@@ -82,18 +67,24 @@ async fn seed_source_namespace_for_fork<S: ObjectStore + ?Sized>(
     .expect("seed shared file");
 }
 
-async fn assert_namespace_partial<S: ObjectStore + ?Sized>(
+async fn head_state<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    context: &MutationContext,
-) {
-    let partial_error = bootstrap_namespace(store, namespace_id, context, false)
+) -> loonfs_api::wire::control::HeadState {
+    load_namespace_head_control(store, namespace_id)
         .await
-        .expect_err("partial namespace");
-    assert!(matches!(
-        partial_error,
-        loonfs_core::BootstrapNamespaceError::NamespacePartiallyInitialized { .. }
-    ));
+        .expect("load head")
+        .state
+}
+
+async fn namespace_keys<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+) -> Vec<String> {
+    store
+        .list_prefix(&format!("namespaces/{}/", namespace_id.as_str()))
+        .await
+        .expect("list namespace prefix")
 }
 
 fn metadata_table_counting_store(root: impl AsRef<Path>) -> CountingStore<LocalFsStore> {
@@ -103,8 +94,11 @@ fn metadata_table_counting_store(root: impl AsRef<Path>) -> CountingStore<LocalF
     )
 }
 
+/// A created namespace is exactly one object. It serves reads and accepts
+/// writes with no root, no floor, and no manifest anywhere; the first flush
+/// is what publishes a root.
 #[tokio::test]
-async fn namespace_creation_writes_descriptors_and_rejects_partial_recreation() {
+async fn a_created_namespace_is_one_object_until_its_first_flush() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
@@ -113,380 +107,217 @@ async fn namespace_creation_writes_descriptors_and_rejects_partial_recreation() 
     bootstrap_namespace(&store, &namespace_id, &context, false)
         .await
         .expect("bootstrap namespace");
-    let duplicate_error = bootstrap_namespace(&store, &namespace_id, &context, false)
-        .await
-        .expect_err("complete namespace id reuse should be rejected");
-    assert!(matches!(
-        duplicate_error,
-        loonfs_core::BootstrapNamespaceError::NamespaceAlreadyExists { .. }
-    ));
-    let existing = bootstrap_namespace(&store, &namespace_id, &context, true)
-        .await
-        .expect("allow existing");
-    assert_eq!(existing.namespace_id, namespace_id);
-
-    let descriptor_key = namespace_config(namespace_id.as_str());
-    let descriptor_bytes = store
-        .get(&descriptor_key, None)
-        .await
-        .expect("read namespace descriptor")
-        .expect("namespace descriptor exists");
-    let descriptor: NamespaceConfigEnvelope =
-        decode_control_object(&descriptor_bytes, ControlObjectKind::NamespaceConfig)
-            .expect("decode namespace descriptor");
-    assert_eq!(descriptor.state.namespace_id, namespace_id);
-    assert!(store
-        .head(&content_store_descriptor(
-            descriptor.state.content_store_id.as_str()
-        ))
-        .await
-        .expect("content store descriptor head")
-        .is_some());
-    let manifest_root =
-        loonfs_core::control::load_namespace_metadata_root_control(&store, &namespace_id)
-            .await
-            .expect("metadata root");
-    let manifest_bytes = store
-        .get(
-            &metadata_manifest_object(
-                namespace_id.as_str(),
-                &manifest_root.state.manifest_object_id,
-            ),
-            None,
-        )
-        .await
-        .expect("read manifest")
-        .expect("manifest exists");
-    let manifest =
-        decode_namespace_manifest_json(&manifest_bytes).expect("decode namespace manifest");
-    assert!(
-        manifest.payload.fork.is_none(),
-        "root namespace creation must not write fork provenance"
-    );
-
-    let content_descriptor_key =
-        content_store_descriptor(descriptor.state.content_store_id.as_str());
-    let content_descriptor_bytes = store
-        .get(&content_descriptor_key, None)
-        .await
-        .expect("read content-store descriptor")
-        .expect("content-store descriptor exists");
-    let content_descriptor: ContentStoreDescriptorEnvelope = decode_control_object(
-        &content_descriptor_bytes,
-        ControlObjectKind::ContentStoreDescriptor,
-    )
-    .expect("decode content-store descriptor");
     assert_eq!(
-        content_descriptor.state.content_store_id,
-        descriptor.state.content_store_id
+        namespace_keys(&store, &namespace_id).await,
+        vec![wal_head(namespace_id.as_str())],
+        "creation writes the head and nothing else"
     );
-
-    let content_store_descriptors = store
-        .list_prefix("content-stores/")
-        .await
-        .expect("list content stores");
-    assert_eq!(
-        content_store_descriptors,
-        vec![content_descriptor_key],
-        "new root namespace should create exactly one content store descriptor"
-    );
-
-    store
-        .put_if_absent(
-            &wal_head("partial"),
-            Bytes::from_static(br#"{"not":"a descriptor"}"#),
-        )
-        .await
-        .expect("write partial namespace key");
-
-    let partial_error = bootstrap_namespace(
-        &store,
-        &NamespaceId::parse("partial").expect("valid namespace id"),
-        &context,
-        false,
-    )
-    .await
-    .expect_err("partial namespace should be rejected");
-    assert!(matches!(
-        partial_error,
-        loonfs_core::BootstrapNamespaceError::NamespacePartiallyInitialized { .. }
-    ));
-}
-
-#[tokio::test]
-async fn bootstrap_head_lost_ack_stays_partial_until_explicit_repair() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace_id("demo");
-    let context = mutation_context();
-    let store = InjectCreateFailureStore::new(
-        LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyMatcher::Exact(wal_head(namespace_id.as_str())),
-        InjectedCreateFailure::PreconditionFailed {
-            write_attempted_object: true,
-            additional_writes: Vec::new(),
-        },
-    );
-
-    let error = bootstrap_namespace(&store, &namespace_id, &context, false)
-        .await
-        .expect_err("target head precondition should re-check partial namespace");
-    // The lost ack left the head written and the descriptor absent, so the
-    // shared install re-check answers partial — the same policy fork pins.
-    assert!(matches!(
-        &error,
-        loonfs_core::BootstrapNamespaceError::Core(CoreError::NamespacePartial { .. })
-    ));
-    assert_eq!(error.code(), ErrorCode::NamespacePartial);
     assert!(
         store
             .list_prefix("content-stores/")
             .await
             .expect("list content stores")
             .is_empty(),
-        "content-store descriptor must not be allocated before namespace head reservation"
-    );
-    // The injected failure wrote the head before reporting the lost ack.
-    // Normal create retries are classification-only and leave it untouched.
-    let retry = bootstrap_namespace(&store, &namespace_id, &context, false)
-        .await
-        .expect_err("retry preserves the ack-lost partial tree");
-    assert_eq!(retry.code(), ErrorCode::NamespacePartial);
-    let report = repair_namespace(&store, &namespace_id, &context)
-        .await
-        .expect("explicit repair completes the ack-lost create");
-    assert_eq!(report.outcome, RepairNamespaceOutcome::Completed);
-}
-
-#[tokio::test]
-async fn bootstrap_head_conflict_rechecks_complete_namespace() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = namespace_id("demo");
-    let context = mutation_context();
-    // The injected conflict simulates a racing create that completed the
-    // namespace: its head wins the reservation and its descriptor pair is
-    // already published when this attempt re-checks.
-    let content_store_id = ContentStoreId::generate();
-    let content_store_descriptor_envelope = ContentStoreDescriptorEnvelope::from_state(
-        ControlObjectKind::ContentStoreDescriptor,
-        &context.writer_version,
-        ContentStoreDescriptorState {
-            content_store_id: content_store_id.clone(),
-        },
-    )
-    .expect("content store descriptor envelope");
-    let descriptor = NamespaceConfigEnvelope::from_state(
-        ControlObjectKind::NamespaceConfig,
-        &context.writer_version,
-        NamespaceConfigState {
-            namespace_id: namespace_id.clone(),
-            content_store_id: content_store_id.clone(),
-            name_policy: loonfs_api::NamePolicy::default(),
-        },
-    )
-    .expect("descriptor envelope");
-    let store = InjectCreateFailureStore::new(
-        LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyMatcher::Exact(wal_head(namespace_id.as_str())),
-        InjectedCreateFailure::PreconditionFailed {
-            write_attempted_object: true,
-            additional_writes: vec![
-                (
-                    content_store_descriptor(content_store_id.as_str()),
-                    encode_control_object(&content_store_descriptor_envelope)
-                        .expect("content store descriptor bytes"),
-                ),
-                (
-                    namespace_config(namespace_id.as_str()),
-                    encode_control_object(&descriptor).expect("descriptor bytes"),
-                ),
-            ],
-        },
+        "the content store is an id in the head, not an object"
     );
 
-    let error = bootstrap_namespace(&store, &namespace_id, &context, false)
+    // Reads work against the built-in genesis state.
+    let root_entry = resolve_path(&store, &namespace_id, "/")
         .await
-        .expect_err("target head conflict should re-check complete namespace");
-    assert!(matches!(
-        &error,
-        loonfs_core::BootstrapNamespaceError::Core(CoreError::NamespaceExists { .. })
-    ));
-    assert_eq!(error.code(), ErrorCode::NamespaceExists);
-}
+        .expect("a fresh namespace serves reads");
+    assert_eq!(root_entry.inode_kind, loonfs_api::InodeKind::Directory);
+    let status = loonfs_core::cache::load_namespace_head_summary(&store, &namespace_id)
+        .await
+        .expect("status");
+    assert_eq!(status.current_manifest_id, None);
+    assert_eq!(status.retention_floor_seq, ChangeSeq(0));
 
-#[tokio::test]
-async fn namespace_delete_is_terminal_for_reads_writes_creation_and_forks() {
-    let temp_dir = tempdir().expect("tempdir");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = mutation_context();
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    bootstrap_namespace(&store, &namespace_id, &context, false)
-        .await
-        .expect("bootstrap");
-    let content = store_bytes_as_content(&store, &namespace_id, b"will vanish")
-        .await
-        .expect("stage content");
-    submit_intent_async(
+    // And so do writes.
+    write_file_bytes(
         &store,
         &namespace_id,
-        PathMutationIntent::PutFile {
-            commit_id: CommitId::parse("before-delete").expect("valid commit id"),
-            message: None,
-            absolute_path: AbsolutePath::parse("/keep.txt").expect("path"),
-            content_ref: content.content_ref.clone(),
-            behavior: DestinationBehavior::NoReplace,
-            expected_revision_no: None,
-        },
+        "/docs/first.txt",
+        b"hello",
         &context,
+        Some("first-write"),
     )
     .await
-    .expect("commit before delete");
-
-    // A stale precondition deletes nothing.
-    let engine = namespace_engine(&store, &namespace_id, &context);
-    let stale = engine
-        .delete_namespace(loonfs_core::DeleteNamespaceOptions {
-            expected_head_seq: Some(ChangeSeq(0)),
-        })
-        .await
-        .expect_err("stale precondition");
-    assert_eq!(stale.code(), ErrorCode::StaleHead);
-
-    let response = engine
-        .delete_namespace(loonfs_core::DeleteNamespaceOptions::default())
-        .await
-        .expect("delete namespace");
-    assert_eq!(response.head_seq, ChangeSeq(1));
-
-    // Terminal: reads, commits, status, repeat deletes, re-creation, and forks
-    // all observe the deleted head.
-    let read = resolve_path(&store, &namespace_id, "/")
-        .await
-        .expect_err("read after delete");
-    assert_eq!(read.code(), ErrorCode::NamespaceDeleted);
-    let commit = submit_intent_async(
-        &store,
-        &namespace_id,
-        PathMutationIntent::PutFile {
-            commit_id: CommitId::parse("after-delete").expect("valid commit id"),
-            message: None,
-            absolute_path: AbsolutePath::parse("/late.txt").expect("path"),
-            content_ref: content.content_ref.clone(),
-            behavior: DestinationBehavior::NoReplace,
-            expected_revision_no: None,
-        },
-        &context,
-    )
-    .await
-    .expect_err("commit after delete");
-    assert_eq!(commit.code(), ErrorCode::NamespaceDeleted);
-    let again = engine
-        .delete_namespace(loonfs_core::DeleteNamespaceOptions::default())
-        .await
-        .expect_err("repeat delete");
-    assert_eq!(again.code(), ErrorCode::NamespaceDeleted);
-    let recreate = bootstrap_namespace(&store, &namespace_id, &context, false).await;
-    assert!(matches!(
-        recreate,
-        Err(loonfs_core::BootstrapNamespaceError::NamespaceDeleted { .. })
-    ));
-    let fork_target = NamespaceId::parse("fork-of-deleted").expect("valid namespace id");
-    let fork = fork_namespace(&store, &namespace_id, &fork_target, &context).await;
+    .expect("a fresh namespace accepts writes");
     assert_eq!(
-        fork.expect_err("fork of deleted source").code(),
-        ErrorCode::NamespaceDeleted
+        read_file_bytes(&store, &namespace_id, "/docs/first.txt")
+            .await
+            .expect("read back")
+            .bytes,
+        b"hello"
+    );
+    let keys = namespace_keys(&store, &namespace_id).await;
+    assert!(
+        keys.iter()
+            .all(|key| key == &wal_head(namespace_id.as_str())
+                || key.starts_with(&format!(
+                    "namespaces/{}/wal/segments/",
+                    namespace_id.as_str()
+                ))),
+        "before the first flush a namespace is a head plus its WAL: {keys:?}"
+    );
+
+    // The first flush materializes the root.
+    namespace_engine(&store, &namespace_id, &context)
+        .flush_wal()
+        .await
+        .expect("flush");
+    assert!(
+        store
+            .head(&metadata_root(namespace_id.as_str()))
+            .await
+            .expect("probe root")
+            .is_some(),
+        "the first flush publishes metadata/root.json"
+    );
+    assert_eq!(
+        read_file_bytes(&store, &namespace_id, "/docs/first.txt")
+            .await
+            .expect("read after flush")
+            .bytes,
+        b"hello"
+    );
+    let status = loonfs_core::cache::load_namespace_head_summary(&store, &namespace_id)
+        .await
+        .expect("status after flush");
+    assert_eq!(status.current_manifest_id, Some(ManifestId(1)));
+}
+
+/// Exactly one of two concurrent creates of the same id wins; the loser is
+/// told the id is taken.
+#[tokio::test]
+async fn concurrent_creates_of_one_id_leave_exactly_one_winner() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let namespace_id = namespace_id("demo");
+    let first = mutation_context();
+    let mut second = mutation_context();
+    second.writer_session_id = "wrs_second_session".to_owned();
+
+    let (left, right) = tokio::join!(
+        bootstrap_namespace(store.as_ref(), &namespace_id, &first, false),
+        bootstrap_namespace(store.as_ref(), &namespace_id, &second, false),
+    );
+    let outcomes = [left, right];
+    let winners = outcomes.iter().filter(|result| result.is_ok()).count();
+    assert_eq!(winners, 1, "exactly one create may win: {outcomes:?}");
+    let loser = outcomes
+        .into_iter()
+        .find_map(|result| result.err())
+        .expect("one loser");
+    assert_eq!(loser.code(), ErrorCode::NamespaceExists);
+    assert_eq!(
+        namespace_keys(store.as_ref(), &namespace_id).await,
+        vec![wal_head(namespace_id.as_str())]
     );
 }
 
+/// A create retry after a lost acknowledgment answers `namespace_exists`,
+/// whoever made the namespace, and leaves the landed head untouched. The
+/// namespace it names is complete and usable, which is the whole point: the
+/// old protocol answered this case with a partial namespace nobody could
+/// use. A caller that wants the retry to succeed asks for that.
 #[tokio::test]
-async fn fork_clone_survives_source_delete() {
-    let temp_dir = tempdir().expect("tempdir");
-    let source = NamespaceId::parse("source").expect("valid namespace id");
-    let clone = NamespaceId::parse("clone").expect("valid namespace id");
-    let context = mutation_context();
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    bootstrap_namespace(&store, &source, &context, false)
-        .await
-        .expect("bootstrap");
-    let content = store_bytes_as_content(&store, &source, b"shared bytes")
-        .await
-        .expect("stage content");
-    submit_intent_async(
-        &store,
-        &source,
-        PathMutationIntent::PutFile {
-            commit_id: CommitId::parse("seed-clone").expect("valid commit id"),
-            message: None,
-            absolute_path: AbsolutePath::parse("/shared.txt").expect("path"),
-            content_ref: content.content_ref,
-            behavior: DestinationBehavior::NoReplace,
-            expected_revision_no: None,
-        },
-        &context,
-    )
-    .await
-    .expect("seed source");
-    fork_namespace(&store, &source, &clone, &context)
-        .await
-        .expect("fork");
-
-    namespace_engine(&store, &source, &context)
-        .delete_namespace(loonfs_core::DeleteNamespaceOptions::default())
-        .await
-        .expect("delete source");
-
-    // The spec promise: the clone keeps reading through the source-owned
-    // immutable metadata its manifest pins.
-    let clone_head = load_namespace_head_control(&store, &clone)
-        .await
-        .expect("clone head survives source delete");
-    assert_eq!(clone_head.state.seq, ChangeSeq(1));
-    resolve_path(&store, &clone, "/shared.txt")
-        .await
-        .expect("clone reads forked file");
-}
-
-#[tokio::test]
-async fn namespace_descriptor_checksum_is_validated() {
+async fn a_create_retry_after_a_lost_acknowledgment_reports_the_id_as_taken() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let context = mutation_context();
     let namespace_id = namespace_id("demo");
+    let context = mutation_context();
 
     bootstrap_namespace(&store, &namespace_id, &context, false)
         .await
-        .expect("bootstrap namespace");
+        .expect("first create lands");
+    let head_before = head_state(&store, &namespace_id).await;
 
-    let descriptor_key = namespace_config(namespace_id.as_str());
-    let descriptor_bytes = store
-        .get(&descriptor_key, None)
+    let mut retry_context = context.clone();
+    retry_context.now_ms += 5_000;
+    let conflict = bootstrap_namespace(&store, &namespace_id, &retry_context, false)
         .await
-        .expect("read namespace descriptor")
-        .expect("namespace descriptor exists");
-    let descriptor: NamespaceConfigEnvelope =
-        decode_control_object(&descriptor_bytes, ControlObjectKind::NamespaceConfig)
-            .expect("decode namespace descriptor");
-    // Corrupt the durable document at the byte level: swap the stored
-    // checksum for a syntactically valid but wrong digest.
-    let corrupted = String::from_utf8(descriptor_bytes.to_vec())
-        .expect("descriptor is utf8")
-        .replace(
-            &descriptor.payload_checksum,
-            &sha256_digest(b"not-the-payload"),
-        );
-    store
-        .put_overwrite(&descriptor_key, Bytes::from(corrupted))
-        .await
-        .expect("overwrite descriptor");
+        .expect_err("the id is taken, whoever took it");
+    assert_eq!(conflict.code(), ErrorCode::NamespaceExists);
 
-    let error = resolve_path(&store, &namespace_id, "/")
+    let mut other_session = context.clone();
+    other_session.writer_session_id = "wrs_other_session".to_owned();
+    let conflict = bootstrap_namespace(&store, &namespace_id, &other_session, false)
         .await
-        .expect_err("descriptor checksum");
-    assert!(
-        error.to_string().contains("checksum mismatch"),
-        "unexpected error: {error}"
+        .expect_err("another session may not adopt this namespace either");
+    assert_eq!(conflict.code(), ErrorCode::NamespaceExists);
+
+    // Opting in makes the retry succeed, and the namespace it returns is
+    // the one that landed.
+    let adopted = bootstrap_namespace(&store, &namespace_id, &retry_context, true)
+        .await
+        .expect("allow_existing adopts the landed namespace");
+    assert_eq!(adopted.namespace_id, namespace_id);
+    assert_eq!(
+        head_state(&store, &namespace_id).await,
+        head_before,
+        "no retry may rewrite the landed head"
     );
 }
 
+/// The same one-winner rule covers two forks racing for one target, and a
+/// create racing a fork for the same id.
+#[tokio::test]
+async fn concurrent_installs_of_one_target_leave_exactly_one_winner() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let context = mutation_context();
+    let source = namespace_id("source");
+    let target = NamespaceId::parse("target").expect("valid namespace id");
+    seed_source_namespace_for_fork(store.as_ref(), &source, &context).await;
+
+    let mut second = context.clone();
+    second.writer_session_id = "wrs_second_session".to_owned();
+    let (left, right) = tokio::join!(
+        fork_namespace(store.as_ref(), &source, &target, &context),
+        fork_namespace(store.as_ref(), &source, &target, &second),
+    );
+    let outcomes = [left, right];
+    assert_eq!(
+        outcomes.iter().filter(|result| result.is_ok()).count(),
+        1,
+        "exactly one fork may install the target: {outcomes:?}"
+    );
+    assert_eq!(
+        outcomes
+            .into_iter()
+            .find_map(|result| result.err())
+            .expect("one loser")
+            .code(),
+        ErrorCode::NamespaceExists
+    );
+
+    // A create racing a fork for a fresh id: same rule, and the loser never
+    // sees a half-installed namespace.
+    let contested = NamespaceId::parse("contested").expect("valid namespace id");
+    let (created, forked) = tokio::join!(
+        bootstrap_namespace(store.as_ref(), &contested, &context, false),
+        fork_namespace(store.as_ref(), &source, &contested, &second),
+    );
+    assert_eq!(
+        usize::from(created.is_ok()) + usize::from(forked.is_ok()),
+        1,
+        "exactly one of create and fork may win: {created:?} {forked:?}"
+    );
+    let head = head_state(store.as_ref(), &contested).await;
+    assert_eq!(
+        head.state,
+        loonfs_api::wire::control::NamespaceState::Active
+    );
+    if created.is_ok() {
+        assert!(head.fork_basis.is_none(), "the create won");
+    } else {
+        assert!(head.fork_basis.is_some(), "the fork won");
+    }
+}
+
+/// A fork target is one object too: it reads through the source's manifest
+/// until it flushes, and it never copies content or metadata.
 #[tokio::test]
 async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     let temp_dir = tempdir().expect("tempdir");
@@ -495,31 +326,15 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     let source_namespace_id = namespace_id("demo");
     let clone_namespace_id = NamespaceId::parse("clone").expect("valid namespace id");
 
-    bootstrap_namespace(&store, &source_namespace_id, &context, false)
-        .await
-        .expect("bootstrap source namespace");
-    write_file_bytes(
-        &store,
-        &source_namespace_id,
-        "/docs/shared.txt",
-        b"base",
-        &context,
-        Some("seed-shared"),
-    )
-    .await
-    .expect("seed shared file");
+    seed_source_namespace_for_fork(&store, &source_namespace_id, &context).await;
     namespace_engine(&store, &source_namespace_id, &context)
         .create_checkpoint("test-pin".to_owned(), None)
         .await
         .expect("create source checkpoint before fork");
 
-    let source_head = load_namespace_head_control(&store, &source_namespace_id)
-        .await
-        .expect("source head");
-    assert_eq!(source_head.state.seq, ChangeSeq(1));
-    let content_store_id = load_namespace_descriptor_state(&store, &source_namespace_id)
-        .await
-        .content_store_id;
+    let source_head = head_state(&store, &source_namespace_id).await;
+    assert_eq!(source_head.seq, ChangeSeq(1));
+    let content_store_id = source_head.content_store_id.clone();
     let blobs_before = store
         .list_prefix(&format!(
             "content-stores/{}/blobs/",
@@ -546,78 +361,38 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
         .await
         .expect("list blobs after fork");
     assert_eq!(blobs_after, blobs_before, "fork must not copy content");
-
-    let clone_descriptor = load_namespace_descriptor_state(&store, &clone_namespace_id).await;
-    assert_eq!(clone_descriptor.content_store_id, content_store_id);
-    let clone_head = load_namespace_head_control(&store, &clone_namespace_id)
-        .await
-        .expect("clone head");
-    assert_eq!(clone_head.state.seq, ChangeSeq(1));
-    let clone_root =
-        loonfs_core::control::load_namespace_metadata_root_control(&store, &clone_namespace_id)
-            .await
-            .expect("clone metadata root");
-    assert_eq!(clone_root.state.manifest_id, ManifestId(1));
-    let clone_floor =
-        loonfs_core::control::load_namespace_wal_floor_control(&store, &clone_namespace_id)
-            .await
-            .expect("clone wal floor");
-    assert_eq!(clone_floor.state.floor_seq, ChangeSeq(1));
-
-    let target_manifest_key = metadata_manifest_object(
-        clone_namespace_id.as_str(),
-        &clone_root.state.manifest_object_id,
+    assert_eq!(
+        namespace_keys(&store, &clone_namespace_id).await,
+        vec![wal_head(clone_namespace_id.as_str())],
+        "a fork target is its head and nothing else"
     );
-    let target_manifest_bytes = store
-        .get(&target_manifest_key, None)
-        .await
-        .expect("read target manifest")
-        .expect("target manifest exists");
-    let target_manifest =
-        decode_namespace_manifest_json(&target_manifest_bytes).expect("decode target manifest");
-    let fork_provenance = target_manifest
-        .payload
-        .fork
-        .as_ref()
-        .expect("fork provenance lives in target manifest");
-    assert_eq!(fork_provenance.source_namespace_id, source_namespace_id);
-    assert_eq!(fork_provenance.fork_seq, ChangeSeq(1));
-    assert!(fork_provenance
-        .source_checkpoint_id
-        .as_str()
-        .starts_with("chk_"));
-    assert_eq!(fork_provenance.source_manifest_id, ManifestId(1));
-    assert_eq!(fork_provenance.source_head_seq, ChangeSeq(1));
+
+    let clone_head = head_state(&store, &clone_namespace_id).await;
+    assert_eq!(clone_head.content_store_id, content_store_id);
+    assert_eq!(clone_head.name_policy, source_head.name_policy);
+    assert_eq!(clone_head.seq, ChangeSeq(1));
+    let fork_basis = clone_head.fork_basis.clone().expect("fork basis");
+    assert_eq!(fork_basis.source_namespace_id, source_namespace_id);
+    assert_eq!(fork_basis.fork_seq, ChangeSeq(1));
+    assert!(fork_basis.source_checkpoint_id.as_str().starts_with("chk_"));
+
     let source_record = loonfs_core::control::load_namespace_checkpoint_record_control(
         &store,
         &source_namespace_id,
-        &fork_provenance.source_checkpoint_id,
+        &fork_basis.source_checkpoint_id,
     )
     .await
     .expect("read source checkpoint record")
     .expect("source checkpoint record exists");
     assert_eq!(source_record.manifest_head_seq, ChangeSeq(1));
-    assert_eq!(source_record.manifest_id, ManifestId(1));
-    assert!(
-        target_manifest
-            .payload
-            .metadata_files
-            .iter()
-            .all(|metadata_file| metadata_file.owner_namespace_id == source_namespace_id),
-        "fork target manifest should reference source-owned metadata SSTs"
+    assert_eq!(
+        source_record.manifest_object_id,
+        fork_basis.source_manifest_object_id
     );
-    assert!(
-        store
-            .list_prefix(&format!(
-                "namespaces/{}/metadata/tables/",
-                clone_namespace_id.as_str()
-            ))
-            .await
-            .expect("list target metadata SSTs")
-            .is_empty(),
-        "COW fork should not copy metadata SSTs into the target namespace"
+    assert_eq!(
+        source_record.manifest_payload_checksum,
+        fork_basis.source_manifest_checksum
     );
-
     assert!(
         matches!(
             &source_record.owner,
@@ -626,12 +401,6 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
         ),
         "fork record is owned by its target namespace"
     );
-    let referenced_metadata_files = target_manifest
-        .payload
-        .metadata_files
-        .iter()
-        .map(|metadata_file| metadata_file.object_key.clone())
-        .collect::<Vec<_>>();
 
     let duplicate_error =
         fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
@@ -712,44 +481,208 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
     assert_eq!(clone_changes.changes.len(), 1);
     assert_eq!(clone_changes.changes[0].seq, ChangeSeq(2));
 
-    for prefix in [
-        format!("namespaces/{}/wal/head.json", source_namespace_id.as_str()),
-        format!("namespaces/{}/wal/", source_namespace_id.as_str()),
-        format!(
-            "namespaces/{}/metadata/manifests/",
-            source_namespace_id.as_str()
-        ),
-    ] {
-        for key in store
-            .list_prefix(&prefix)
+    // The target's own first flush inherits the source's tables by
+    // reference and adds only its own delta run.
+    namespace_engine(&store, &clone_namespace_id, &context)
+        .flush_wal()
+        .await
+        .expect("flush clone");
+    let clone_root =
+        loonfs_core::control::load_namespace_metadata_root_control(&store, &clone_namespace_id)
             .await
-            .expect("list source mutable keys")
-        {
-            store.delete(&key).await.expect("delete source mutable key");
-        }
-    }
+            .expect("clone metadata root");
+    let clone_manifest_bytes = store
+        .get(
+            &metadata_manifest_object(
+                clone_namespace_id.as_str(),
+                &clone_root.state.manifest_object_id,
+            ),
+            None,
+        )
+        .await
+        .expect("read clone manifest")
+        .expect("clone manifest exists");
+    let clone_manifest =
+        decode_namespace_manifest_json(&clone_manifest_bytes).expect("decode clone manifest");
+    assert!(
+        clone_manifest
+            .payload
+            .metadata_files
+            .iter()
+            .any(|metadata_file| metadata_file.owner_namespace_id == source_namespace_id),
+        "the target keeps referencing source-owned metadata SSTs"
+    );
     assert_eq!(
         read_file_bytes(&store, &clone_namespace_id, "/docs/shared.txt")
             .await
-            .expect("clone remains readable")
+            .expect("read clone after its own flush")
             .bytes,
         b"clone-after-fork"
     );
-
-    let referenced_sst = referenced_metadata_files
-        .first()
-        .expect("fork should reference source metadata SST")
-        .clone();
-    store
-        .delete(&referenced_sst)
-        .await
-        .expect("delete referenced source metadata SST");
-    let corrupt_target = read_file_bytes(&store, &clone_namespace_id, "/docs/shared.txt")
-        .await
-        .expect_err("target should fail when referenced source SST is missing");
-    assert_eq!(corrupt_target.code(), ErrorCode::NamespaceCorrupt);
 }
 
+/// The fork target keeps reading after the source namespace is deleted: the
+/// pinned basis and the source-owned tables it names both survive.
+#[tokio::test]
+async fn fork_clone_survives_source_delete() {
+    let temp_dir = tempdir().expect("tempdir");
+    let source = NamespaceId::parse("source").expect("valid namespace id");
+    let clone = NamespaceId::parse("clone").expect("valid namespace id");
+    let context = mutation_context();
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    seed_source_namespace_for_fork(&store, &source, &context).await;
+    fork_namespace(&store, &source, &clone, &context)
+        .await
+        .expect("fork");
+
+    namespace_engine(&store, &source, &context)
+        .delete_namespace(loonfs_core::DeleteNamespaceOptions::default())
+        .await
+        .expect("delete source");
+
+    let clone_head = head_state(&store, &clone).await;
+    assert_eq!(clone_head.seq, ChangeSeq(1));
+    assert_eq!(
+        read_file_bytes(&store, &clone, "/docs/shared.txt")
+            .await
+            .expect("clone reads forked file")
+            .bytes,
+        b"base"
+    );
+}
+
+/// The head authorizes the foreign basis and nothing else does: a recorded
+/// checksum that disagrees with the manifest is corruption, never a
+/// fallback to some other basis.
+#[tokio::test]
+async fn a_fork_basis_checksum_mismatch_is_corruption() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let context = mutation_context();
+    let source = namespace_id("source");
+    let clone = NamespaceId::parse("clone").expect("valid namespace id");
+    seed_source_namespace_for_fork(&store, &source, &context).await;
+    fork_namespace(&store, &source, &clone, &context)
+        .await
+        .expect("fork");
+    read_file_bytes(&store, &clone, "/docs/shared.txt")
+        .await
+        .expect("the clone reads through its recorded basis");
+
+    let mut head = head_state(&store, &clone).await;
+    let fork_basis = head.fork_basis.as_mut().expect("fork basis");
+    fork_basis.source_manifest_checksum =
+        loonfs_api::sha256_digest(b"not-the-source-manifest-payload");
+    let envelope =
+        HeadStateEnvelope::from_state(ControlObjectKind::WalHead, &context.writer_version, head)
+            .expect("head envelope");
+    store
+        .put_overwrite(
+            &wal_head(clone.as_str()),
+            Bytes::from(encode_control_object(&envelope).expect("encode head")),
+        )
+        .await
+        .expect("rewrite clone head");
+
+    let error = read_file_bytes(&store, &clone, "/docs/shared.txt")
+        .await
+        .expect_err("a basis that fails its recorded checksum is corruption");
+    assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
+}
+
+/// Checkpointing a fork target that has never flushed materializes its
+/// first own manifest, because a checkpoint record can only pin a manifest
+/// of its own namespace.
+#[tokio::test]
+async fn checkpointing_an_unflushed_fork_materializes_its_first_manifest() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let context = mutation_context();
+    let source = namespace_id("source");
+    let clone = NamespaceId::parse("clone").expect("valid namespace id");
+    seed_source_namespace_for_fork(&store, &source, &context).await;
+    fork_namespace(&store, &source, &clone, &context)
+        .await
+        .expect("fork");
+    assert!(
+        store
+            .head(&metadata_root(clone.as_str()))
+            .await
+            .expect("probe clone root")
+            .is_none(),
+        "a fresh fork target has published no manifest"
+    );
+
+    let checkpoint = namespace_engine(&store, &clone, &context)
+        .create_checkpoint("clone-pin".to_owned(), None)
+        .await
+        .expect("checkpoint the unflushed fork target");
+    let record = loonfs_core::control::load_namespace_checkpoint_record_control(
+        &store,
+        &clone,
+        &checkpoint.checkpoint_id,
+    )
+    .await
+    .expect("read record")
+    .expect("record exists");
+    let manifest_key = metadata_manifest_object(clone.as_str(), &record.manifest_object_id);
+    assert!(
+        store
+            .head(&manifest_key)
+            .await
+            .expect("probe pinned manifest")
+            .is_some(),
+        "the pinned basis is a manifest under the target's own prefix"
+    );
+    assert!(
+        store
+            .head(&metadata_root(clone.as_str()))
+            .await
+            .expect("probe clone root")
+            .is_some(),
+        "materializing the first manifest publishes the target's root"
+    );
+    assert_eq!(
+        read_file_bytes(&store, &clone, "/docs/shared.txt")
+            .await
+            .expect("the target still reads its inherited file")
+            .bytes,
+        b"base"
+    );
+}
+
+/// A fork that loses its source checkpoint after the target head lands
+/// deletes the target it just created, rather than leaving a namespace
+/// whose basis nothing protects.
+#[tokio::test]
+async fn a_fork_whose_source_pin_is_released_deletes_its_own_target() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = ReleasePinAfterHeadStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        NamespaceId::parse("clone").expect("valid namespace id"),
+    );
+    let context = mutation_context();
+    let source = namespace_id("source");
+    let clone = NamespaceId::parse("clone").expect("valid namespace id");
+    seed_source_namespace_for_fork(&store, &source, &context).await;
+
+    let error = fork_namespace(&store, &source, &clone, &context)
+        .await
+        .expect_err("a released source pin fails the fork");
+    assert_eq!(error.code(), ErrorCode::CheckpointUnavailable);
+    assert_eq!(
+        head_state(&store, &clone).await.state,
+        loonfs_api::wire::control::NamespaceState::Deleted,
+        "the fork deletes the target it published"
+    );
+    let retry = fork_namespace(&store, &source, &clone, &context)
+        .await
+        .expect_err("the deleted id is retired");
+    assert_eq!(retry.code(), ErrorCode::NamespaceDeleted);
+}
+
+/// A source manifest that no longer validates blocks the fork before any
+/// target object exists.
 #[tokio::test]
 async fn fork_namespace_rejects_corrupt_source_manifest_descriptors() {
     let temp_dir = tempdir().expect("tempdir");
@@ -758,19 +691,7 @@ async fn fork_namespace_rejects_corrupt_source_manifest_descriptors() {
     let source_namespace_id = namespace_id("demo");
     let clone_namespace_id = NamespaceId::parse("clone").expect("valid namespace id");
 
-    bootstrap_namespace(&store, &source_namespace_id, &context, false)
-        .await
-        .expect("bootstrap source namespace");
-    write_file_bytes(
-        &store,
-        &source_namespace_id,
-        "/docs/shared.txt",
-        b"base",
-        &context,
-        Some("seed-shared"),
-    )
-    .await
-    .expect("seed shared file");
+    seed_source_namespace_for_fork(&store, &source_namespace_id, &context).await;
     let checkpoint = namespace_engine(&store, &source_namespace_id, &context)
         .create_checkpoint("test-pin".to_owned(), None)
         .await
@@ -811,68 +732,15 @@ async fn fork_namespace_rejects_corrupt_source_manifest_descriptors() {
     let error = fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
         .await
         .expect_err("corrupt source manifest should block fork");
-
     assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
     assert!(
-        store
-            .head(&namespace_config(clone_namespace_id.as_str()))
-            .await
-            .expect("head clone descriptor")
-            .is_none(),
-        "failed fork must not publish target descriptor"
+        namespace_keys(&store, &clone_namespace_id).await.is_empty(),
+        "a failed fork leaves the target absent"
     );
 }
 
-#[tokio::test]
-async fn fork_target_head_reservation_failure_keeps_descriptor_unpublished() {
-    let temp_dir = tempdir().expect("tempdir");
-    let source_namespace_id = namespace_id("demo");
-    let clone_namespace_id = NamespaceId::parse("clone").expect("valid namespace id");
-    let context = mutation_context();
-    let store = InjectCreateFailureStore::new(
-        LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyMatcher::Exact(wal_head(clone_namespace_id.as_str())),
-        InjectedCreateFailure::PreconditionFailed {
-            write_attempted_object: true,
-            additional_writes: Vec::new(),
-        },
-    );
-    seed_source_namespace_for_fork(&store, &source_namespace_id, &context).await;
-
-    let error = fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
-        .await
-        .expect_err("target head precondition should re-check partial namespace");
-    assert_eq!(error.code(), ErrorCode::NamespacePartial);
-    assert!(
-        !store
-            .list_prefix(&format!(
-                "namespaces/{}/metadata/manifests/",
-                clone_namespace_id.as_str()
-            ))
-            .await
-            .expect("list target manifests")
-            .is_empty(),
-        "target manifest should be written before target head reservation"
-    );
-    assert!(
-        store
-            .head(&namespace_config(clone_namespace_id.as_str()))
-            .await
-            .expect("head target descriptor")
-            .is_none(),
-        "descriptor must remain unpublished"
-    );
-    assert_namespace_partial(&store, &clone_namespace_id, &context).await;
-    let retry = fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
-        .await
-        .expect_err("normal fork retry preserves the raced partial target");
-    assert_eq!(retry.code(), ErrorCode::NamespacePartial);
-    let report = repair_namespace(&store, &clone_namespace_id, &context)
-        .await
-        .expect("explicit repair completes the raced fork target");
-    assert_eq!(report.outcome, RepairNamespaceOutcome::Completed);
-}
-
+/// A source checkpoint that cannot be written aborts the fork before the
+/// target exists at all.
 #[tokio::test]
 async fn fork_source_checkpoint_failure_leaves_target_namespace_absent() {
     let temp_dir = tempdir().expect("tempdir");
@@ -896,202 +764,336 @@ async fn fork_source_checkpoint_failure_leaves_target_namespace_absent() {
         .expect_err("source checkpoint failure should abort fork before target publication");
     assert_eq!(error.code(), ErrorCode::ServerError);
     assert!(
-        store
-            .head(&wal_head(clone_namespace_id.as_str()))
-            .await
-            .expect("head target head")
-            .is_none(),
-        "target head must not be reserved before source retention is pinned"
+        namespace_keys(&store, &clone_namespace_id).await.is_empty(),
+        "the target must not be installed before the source basis is pinned"
     );
     assert!(
         store
-            .head(&namespace_config(clone_namespace_id.as_str()))
+            .head(&wal_head(source_namespace_id.as_str()))
             .await
-            .expect("head target descriptor")
-            .is_none(),
-        "target descriptor must remain unpublished"
-    );
-    assert!(
-        store
-            .list_prefix(&format!(
-                "namespaces/{}/metadata/manifests/",
-                clone_namespace_id.as_str()
-            ))
-            .await
-            .expect("list target manifests")
-            .is_empty(),
-        "target manifest must not be written before source retention is pinned"
-    );
-    assert!(
-        store
-            .head(&namespace_config(source_namespace_id.as_str()))
-            .await
-            .expect("head source descriptor")
+            .expect("head source head")
             .is_some(),
-        "source descriptor should remain published"
+        "the source is untouched"
     );
 }
 
+/// A create that loses its conditional write to an unrelated namespace
+/// reports the id as taken, and leaves that namespace alone.
 #[tokio::test]
-async fn fork_target_manifest_failure_leaves_target_namespace_absent() {
+async fn a_create_losing_to_a_foreign_head_reports_the_id_as_taken() {
     let temp_dir = tempdir().expect("tempdir");
-    let source_namespace_id = namespace_id("demo");
-    let clone_namespace_id = NamespaceId::parse("clone").expect("valid namespace id");
-    let context = mutation_context();
-    let store = InjectCreateFailureStore::new(
-        LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyMatcher::Prefix(format!(
-            "namespaces/{}/metadata/manifests/",
-            clone_namespace_id.as_str()
-        )),
-        InjectedCreateFailure::Transport {
-            message: "injected target manifest failure",
-        },
-    );
-    seed_source_namespace_for_fork(&store, &source_namespace_id, &context).await;
-
-    let error = fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
-        .await
-        .expect_err("target manifest write should fail");
-    assert_eq!(error.code(), ErrorCode::ServerError);
-    assert!(
-        store
-            .head(&wal_head(clone_namespace_id.as_str()))
-            .await
-            .expect("head target head")
-            .is_none(),
-        "target head must not be reserved before target manifest exists"
-    );
-    assert!(
-        store
-            .head(&namespace_config(clone_namespace_id.as_str()))
-            .await
-            .expect("head target descriptor")
-            .is_none(),
-        "descriptor must remain unpublished"
-    );
-    assert!(
-        store
-            .list_prefix(&format!(
-                "namespaces/{}/metadata/manifests/",
-                clone_namespace_id.as_str()
-            ))
-            .await
-            .expect("list target manifests")
-            .is_empty(),
-        "target manifest should not exist after injected manifest write failure"
-    );
-    assert!(
-        store
-            .head(&namespace_config(source_namespace_id.as_str()))
-            .await
-            .expect("head source descriptor")
-            .is_some(),
-        "source descriptor should remain published"
-    );
-}
-
-#[tokio::test]
-async fn fork_failure_after_target_head_before_descriptor_remains_partial() {
-    let temp_dir = tempdir().expect("tempdir");
-    let source_namespace_id = namespace_id("demo");
-    let clone_namespace_id = NamespaceId::parse("clone").expect("valid namespace id");
-    let context = mutation_context();
-    let store = InjectCreateFailureStore::new(
-        LocalFsStore::new(temp_dir.path()).expect("store"),
-        KeyMatcher::Exact(namespace_config(clone_namespace_id.as_str())),
-        InjectedCreateFailure::Transport {
-            message: "injected target descriptor failure",
-        },
-    );
-    seed_source_namespace_for_fork(&store, &source_namespace_id, &context).await;
-
-    let error = fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
-        .await
-        .expect_err("target descriptor write should fail");
-    assert_eq!(error.code(), ErrorCode::ServerError);
-    assert!(
-        store
-            .head(&wal_head(clone_namespace_id.as_str()))
-            .await
-            .expect("head target head")
-            .is_some(),
-        "target head should still reserve namespace"
-    );
-    assert!(
-        store
-            .head(&namespace_config(clone_namespace_id.as_str()))
-            .await
-            .expect("head target descriptor")
-            .is_none(),
-        "descriptor must remain unpublished"
-    );
-    let target_manifest_keys = store
-        .list_prefix(&format!(
-            "namespaces/{}/metadata/manifests/",
-            clone_namespace_id.as_str()
-        ))
-        .await
-        .expect("list target manifests");
-    assert!(
-        !target_manifest_keys.is_empty(),
-        "target manifest should have been written before descriptor failure"
-    );
-    assert_namespace_partial(&store, &clone_namespace_id, &context).await;
-}
-
-#[tokio::test]
-async fn fork_target_control_conflict_rechecks_complete_namespace() {
-    let temp_dir = tempdir().expect("tempdir");
-    let source_namespace_id = namespace_id("demo");
-    let clone_namespace_id = NamespaceId::parse("clone").expect("valid namespace id");
+    let namespace_id = namespace_id("demo");
     let context = mutation_context();
     let inner = LocalFsStore::new(temp_dir.path()).expect("store");
-    seed_source_namespace_for_fork(&inner, &source_namespace_id, &context).await;
-    let content_store_id = load_namespace_descriptor_state(&inner, &source_namespace_id)
-        .await
-        .content_store_id;
-    let descriptor = NamespaceConfigEnvelope::from_state(
-        ControlObjectKind::NamespaceConfig,
-        &context.writer_version,
-        NamespaceConfigState {
-            namespace_id: clone_namespace_id.clone(),
-            content_store_id,
-            name_policy: loonfs_api::NamePolicy::default(),
-        },
+    // Another writer's complete head for the same id, already durable.
+    let foreign = HeadState::initial(
+        namespace_id.clone(),
+        loonfs_api::ContentStoreId::generate(),
+        loonfs_api::NamePolicy::default(),
+    );
+    let foreign_bytes = encode_control_object(
+        &HeadStateEnvelope::from_state(
+            ControlObjectKind::WalHead,
+            &context.writer_version,
+            foreign,
+        )
+        .expect("foreign head envelope"),
     )
-    .expect("descriptor envelope");
+    .expect("encode foreign head");
     let store = InjectCreateFailureStore::new(
         inner,
-        KeyMatcher::Exact(wal_head(clone_namespace_id.as_str())),
+        KeyMatcher::Exact(wal_head(namespace_id.as_str())),
         InjectedCreateFailure::PreconditionFailed {
-            write_attempted_object: true,
-            additional_writes: vec![(
-                namespace_config(clone_namespace_id.as_str()),
-                loonfs_api::wire::control::encode_control_object(&descriptor)
-                    .expect("descriptor bytes"),
-            )],
+            write_attempted_object: false,
+            additional_writes: vec![(wal_head(namespace_id.as_str()), foreign_bytes.clone())],
         },
     );
 
-    let error = fork_namespace(&store, &source_namespace_id, &clone_namespace_id, &context)
+    let error = bootstrap_namespace(&store, &namespace_id, &context, false)
         .await
-        .expect_err("target head conflict should re-check complete namespace");
+        .expect_err("another namespace owns the id");
     assert_eq!(error.code(), ErrorCode::NamespaceExists);
-    assert!(
+    assert_eq!(
         store
-            .head(&namespace_config(source_namespace_id.as_str()))
+            .get(&wal_head(namespace_id.as_str()), None)
             .await
-            .expect("head source descriptor")
-            .is_some(),
-        "source descriptor should remain published"
+            .expect("read head")
+            .expect("head exists")
+            .to_vec(),
+        foreign_bytes,
+        "the losing create must not touch the winner's head"
     );
-    assert!(
-        store
-            .head(&namespace_config(clone_namespace_id.as_str()))
+}
+
+#[tokio::test]
+async fn namespace_delete_is_terminal_for_reads_writes_creation_and_forks() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = mutation_context();
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    let content = store_bytes_as_content(&store, &namespace_id, b"will vanish")
+        .await
+        .expect("stage content");
+    submit_intent_async(
+        &store,
+        &namespace_id,
+        PathMutationIntent::PutFile {
+            commit_id: CommitId::parse("before-delete").expect("valid commit id"),
+            message: None,
+            absolute_path: AbsolutePath::parse("/keep.txt").expect("path"),
+            content_ref: content.content_ref.clone(),
+            behavior: DestinationBehavior::NoReplace,
+            expected_revision_no: None,
+        },
+        &context,
+    )
+    .await
+    .expect("commit before delete");
+
+    // A stale precondition deletes nothing.
+    let engine = namespace_engine(&store, &namespace_id, &context);
+    let stale = engine
+        .delete_namespace(loonfs_core::DeleteNamespaceOptions {
+            expected_head_seq: Some(ChangeSeq(0)),
+        })
+        .await
+        .expect_err("stale precondition");
+    assert_eq!(stale.code(), ErrorCode::StaleHead);
+
+    let response = engine
+        .delete_namespace(loonfs_core::DeleteNamespaceOptions::default())
+        .await
+        .expect("delete namespace");
+    assert_eq!(response.head_seq, ChangeSeq(1));
+
+    // Terminal: reads, commits, status, repeat deletes, re-creation, and forks
+    // all observe the deleted head.
+    let read = resolve_path(&store, &namespace_id, "/")
+        .await
+        .expect_err("read after delete");
+    assert_eq!(read.code(), ErrorCode::NamespaceDeleted);
+    let commit = submit_intent_async(
+        &store,
+        &namespace_id,
+        PathMutationIntent::PutFile {
+            commit_id: CommitId::parse("after-delete").expect("valid commit id"),
+            message: None,
+            absolute_path: AbsolutePath::parse("/late.txt").expect("path"),
+            content_ref: content.content_ref.clone(),
+            behavior: DestinationBehavior::NoReplace,
+            expected_revision_no: None,
+        },
+        &context,
+    )
+    .await
+    .expect_err("commit after delete");
+    assert_eq!(commit.code(), ErrorCode::NamespaceDeleted);
+    let again = engine
+        .delete_namespace(loonfs_core::DeleteNamespaceOptions::default())
+        .await
+        .expect_err("repeat delete");
+    assert_eq!(again.code(), ErrorCode::NamespaceDeleted);
+    let recreate = bootstrap_namespace(&store, &namespace_id, &context, false).await;
+    assert!(matches!(
+        recreate,
+        Err(loonfs_core::BootstrapNamespaceError::NamespaceDeleted { .. })
+    ));
+    // Even `allow_existing` cannot revive a retired id.
+    let adopt = bootstrap_namespace(&store, &namespace_id, &context, true).await;
+    assert!(matches!(
+        adopt,
+        Err(loonfs_core::BootstrapNamespaceError::NamespaceDeleted { .. })
+    ));
+    let fork_target = NamespaceId::parse("fork-of-deleted").expect("valid namespace id");
+    let fork = fork_namespace(&store, &namespace_id, &fork_target, &context).await;
+    assert_eq!(
+        fork.expect_err("fork of deleted source").code(),
+        ErrorCode::NamespaceDeleted
+    );
+}
+
+/// A namespace with no root of its own is still a legal garbage-collection
+/// subject: it roots its WAL from birth and nothing else, and a later
+/// deleted namespace reclaims down to its tombstone.
+#[tokio::test]
+async fn gc_handles_a_namespace_with_no_root_and_then_its_tombstone() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let context = mutation_context();
+    let namespace_id = namespace_id("demo");
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/keep.txt",
+        b"keep me",
+        &context,
+        Some("keep"),
+    )
+    .await
+    .expect("write");
+
+    let mut aged = context.clone();
+    aged.now_ms = u64::MAX / 2;
+    let report = loonfs_core::gc_namespace(
+        &store,
+        &namespace_id,
+        &loonfs_core::GcConfig::default(),
+        &aged,
+    )
+    .await
+    .expect("gc a namespace with no root");
+    assert_eq!(report.deleted_wal_segments, 0, "{report:?}");
+    assert!(!report.degraded_retention);
+    assert_eq!(
+        read_file_bytes(&store, &namespace_id, "/keep.txt")
             .await
-            .expect("head clone descriptor")
-            .is_some(),
-        "clone descriptor should be present for the simulated complete target"
+            .expect("still readable after gc")
+            .bytes,
+        b"keep me"
     );
+
+    namespace_engine(&store, &namespace_id, &context)
+        .delete_namespace(loonfs_core::DeleteNamespaceOptions::default())
+        .await
+        .expect("delete");
+    let report = loonfs_core::gc_namespace(
+        &store,
+        &namespace_id,
+        &loonfs_core::GcConfig::default(),
+        &aged,
+    )
+    .await
+    .expect("gc the tombstone");
+    assert!(report.deleted_wal_segments >= 1, "{report:?}");
+    let surviving = namespace_keys(&store, &namespace_id).await;
+    assert_eq!(
+        surviving,
+        vec![wal_head(namespace_id.as_str())],
+        "reclamation leaves the tombstone head and nothing else"
+    );
+    assert!(store
+        .head(&wal_floor(namespace_id.as_str()))
+        .await
+        .expect("probe floor")
+        .is_none());
+}
+
+/// A store that releases the fork's source checkpoint the moment the target
+/// head lands, standing in for a garbage-collection pass that ran while a
+/// stalled forker slept.
+#[derive(Debug)]
+struct ReleasePinAfterHeadStore {
+    inner: LocalFsStore,
+    target_head_key: String,
+}
+
+impl ReleasePinAfterHeadStore {
+    fn new(inner: LocalFsStore, target_namespace_id: NamespaceId) -> Self {
+        Self {
+            inner,
+            target_head_key: wal_head(target_namespace_id.as_str()),
+        }
+    }
+
+    async fn release_every_fork_pin(&self) {
+        for key in self
+            .inner
+            .list_prefix("namespaces/")
+            .await
+            .expect("list namespaces")
+            .into_iter()
+            .filter(|key| key.contains("/checkpoints/"))
+        {
+            let Some(bytes) = self.inner.get(&key, None).await.expect("read record") else {
+                continue;
+            };
+            let Ok(envelope) = decode_control_object::<
+                loonfs_api::wire::control::CheckpointRecordState,
+            >(&bytes, ControlObjectKind::CheckpointRecord) else {
+                continue;
+            };
+            let mut record = envelope.state;
+            if !matches!(record.owner, CheckpointOwner::Fork { .. }) {
+                continue;
+            }
+            record.state = CheckpointRecordLifecycle::Released;
+            let released = loonfs_api::wire::control::CheckpointRecordEnvelope::from_state(
+                ControlObjectKind::CheckpointRecord,
+                "test-writer",
+                record,
+            )
+            .expect("released record envelope");
+            self.inner
+                .put_overwrite(
+                    &key,
+                    Bytes::from(encode_control_object(&released).expect("encode record")),
+                )
+                .await
+                .expect("release record");
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ObjectStore for ReleasePinAfterHeadStore {
+    async fn head(
+        &self,
+        key: &str,
+    ) -> Result<Option<loonfs_objectstore::ObjectMetadata>, loonfs_objectstore::ObjectStoreError>
+    {
+        self.inner.head(key).await
+    }
+
+    async fn get(
+        &self,
+        key: &str,
+        range: Option<loonfs_objectstore::ByteRange>,
+    ) -> Result<Option<Bytes>, loonfs_objectstore::ObjectStoreError> {
+        self.inner.get(key, range).await
+    }
+
+    async fn get_with_metadata(
+        &self,
+        key: &str,
+    ) -> Result<Option<loonfs_objectstore::ObjectBody>, loonfs_objectstore::ObjectStoreError> {
+        self.inner.get_with_metadata(key).await
+    }
+
+    async fn put(
+        &self,
+        key: &str,
+        bytes: Bytes,
+        mode: loonfs_objectstore::PutMode,
+    ) -> Result<loonfs_objectstore::ObjectMetadata, loonfs_objectstore::ObjectStoreError> {
+        let metadata = self.inner.put(key, bytes, mode).await?;
+        if key == self.target_head_key {
+            self.release_every_fork_pin().await;
+        }
+        Ok(metadata)
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), loonfs_objectstore::ObjectStoreError> {
+        self.inner.delete(key).await
+    }
+
+    async fn list_prefix(
+        &self,
+        prefix: &str,
+    ) -> Result<Vec<String>, loonfs_objectstore::ObjectStoreError> {
+        self.inner.list_prefix(prefix).await
+    }
+
+    fn list_prefix_stream(
+        &self,
+        prefix: &str,
+    ) -> futures::stream::BoxStream<'static, Result<String, loonfs_objectstore::ObjectStoreError>>
+    {
+        self.inner.list_prefix_stream(prefix)
+    }
 }

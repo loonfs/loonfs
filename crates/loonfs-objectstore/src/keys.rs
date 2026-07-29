@@ -11,13 +11,6 @@ pub fn namespace_prefix(namespace_id: &NamespaceId) -> String {
     ObjectLayout::new().namespace_root_prefix(namespace_id.as_str())
 }
 
-/// Builds the immutable configuration key for one namespace.
-///
-/// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
-pub fn namespace_config(namespace: &str) -> String {
-    ObjectLayout::new().namespace_config(namespace)
-}
-
 /// Builds the authoritative WAL head key for one namespace.
 ///
 /// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
@@ -117,13 +110,6 @@ pub fn upload_session(namespace: &str, upload_id: &str) -> String {
     ObjectLayout::new().upload_session(namespace, upload_id)
 }
 
-/// Builds the immutable descriptor key for one content store.
-///
-/// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
-pub fn content_store_descriptor(content_store: &str) -> String {
-    ObjectLayout::new().content_store_descriptor(content_store)
-}
-
 /// Builds the immutable content-object key for a whole-file digest.
 ///
 /// The operation fails when `digest` is not the canonical whole-file SHA-256
@@ -135,9 +121,9 @@ pub fn content_blob(content_store: &str, digest: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        checkpoint_record, content_blob, content_store_descriptor, metadata_manifest_object,
-        metadata_root, metadata_table, namespace_config, namespace_prefix, upload_session,
-        wal_floor, wal_head, wal_segment, wal_segment_id_from_key, wal_segment_prefix,
+        checkpoint_record, content_blob, metadata_manifest_object, metadata_root, metadata_table,
+        namespace_prefix, upload_session, wal_floor, wal_head, wal_segment,
+        wal_segment_id_from_key, wal_segment_prefix,
     };
     use crate::layout::ObjectLayout;
     use loonfs_api::{ManifestObjectId, NamespaceId};
@@ -213,7 +199,6 @@ mod tests {
         };
 
         let built = [
-            ("Namespace config", namespace_config("ns-1")),
             ("WAL head", wal_head("ns-1")),
             (
                 "WAL segments",
@@ -230,7 +215,6 @@ mod tests {
             ("Checkpoint records", checkpoint_record("ns-1", "chk-1")),
             ("Metadata tables", metadata_table("ns-1", "tbl-1")),
             ("Upload sessions", upload_session("ns-1", "up-1")),
-            ("Content-store descriptor", content_store_descriptor("cs-1")),
             ("Metadata root", metadata_root("ns-1")),
             ("WAL floor", wal_floor("ns-1")),
             (
@@ -256,13 +240,8 @@ mod tests {
 
     #[test]
     fn key_builders_match_spec_examples() {
-        assert_eq!(namespace_config("ns-1"), "namespaces/ns-1/namespace.json");
         assert_eq!(wal_head("ns-1"), "namespaces/ns-1/wal/head.json");
         assert_eq!(wal_floor("ns-1"), "namespaces/ns-1/wal/floor.json");
-        assert_eq!(
-            content_store_descriptor("cs_00000000000000000000000000000001"),
-            "content-stores/cs_00000000000000000000000000000001/descriptor.json"
-        );
         assert_eq!(
             wal_segment("ns-1", "seg_00000000000000000000000000000001"),
             "namespaces/ns-1/wal/segments/seg_00000000000000000000000000000001.wal.zst"

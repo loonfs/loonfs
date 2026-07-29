@@ -63,6 +63,12 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
         .await
         .expect("create namespace");
+    // Publish the namespace's first manifest up front, so each maintenance
+    // step below adds exactly one L0 run to it.
+    admin
+        .flush_wal(&namespace_id)
+        .await
+        .expect("publish first manifest");
     let catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &namespace_id)
         .await
         .expect("load namespace catalog");

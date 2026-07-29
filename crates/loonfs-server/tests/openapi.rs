@@ -55,7 +55,6 @@ fn openapi_documents_current_server_paths() {
         ("/v0/namespaces/{namespace}/changes", "get"),
         ("/v0/admin/namespaces/{namespace}/checkpoints", "post"),
         ("/v0/admin/namespaces/{namespace}/maintenance/step", "post"),
-        ("/v0/admin/namespaces/{namespace}/repair", "post"),
         ("/v0/admin/namespaces/{namespace}/grep/index/enable", "post"),
         (
             "/v0/admin/namespaces/{namespace}/grep/index/disable",

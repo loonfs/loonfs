@@ -1,7 +1,6 @@
 //! Checkpoint creation: advance the metadata root to cover the current head,
 //! then pin the resulting manifest under one durable checkpoint record.
 
-use super::build::{build_manifest_tables, debug_assert_manifest_table_segments_do_not_overlap};
 use super::flush::{try_flush_wal, TryFlushWal};
 use super::record::{
     deterministic_checkpoint_id, renew_checkpoint_record, set_checkpoint_record_state,
@@ -11,20 +10,18 @@ use super::record::{
 use super::row::manifest_rows_for_family;
 #[cfg(test)]
 use super::runs::CHECKPOINT_TABLE_FAMILIES;
-use super::runs::{flatten_manifest_tables, MetadataLsmPolicy, CHECKPOINT_BASE_RUN_LEVEL};
 use crate::commit::CommitHeadPublishError;
 use crate::context::MutationContext;
 use crate::error::CoreError;
 use crate::error::Result;
 use crate::limits::CONTENTION_RETRY_LIMIT;
-use crate::namespace::bootstrap::bootstrap_metadata_state;
 use crate::timing::{MonotonicTimer, StdMonotonicTimer};
+#[cfg(test)]
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::control::{
     CheckpointOwner, CheckpointRecordLifecycle, CheckpointRecordState,
 };
-use loonfs_api::wire::manifest::{NamespaceManifestEnvelope, NamespaceManifestPayload};
-use loonfs_api::{ChangeSeq, CreateCheckpointResponse, ManifestId, ManifestObjectId, NamespaceId};
+use loonfs_api::{CreateCheckpointResponse, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 
 #[cfg(test)]
@@ -196,49 +193,4 @@ pub(super) async fn load_checkpoint_projection_metadata_state<S: ObjectStore + ?
             })?;
     }
     Ok((projection.head, metadata_state.finish()))
-}
-
-pub(crate) async fn build_initial_namespace_manifest<S: ObjectStore + ?Sized>(
-    store: &S,
-    namespace_id: &NamespaceId,
-    initial_head: &HeadState,
-    writer_version: &str,
-) -> Result<NamespaceManifestEnvelope> {
-    let manifest_id = ManifestId(initial_head.seq.0);
-    let manifest_object_id = ManifestObjectId::generate(manifest_id);
-    let metadata_state = bootstrap_metadata_state();
-    let run_tables = build_manifest_tables(
-        store,
-        namespace_id,
-        initial_head.seq,
-        CHECKPOINT_BASE_RUN_LEVEL,
-        &metadata_state,
-        MetadataLsmPolicy::default().max_rows_per_segment,
-    )
-    .await?;
-    debug_assert_manifest_table_segments_do_not_overlap(&run_tables);
-
-    NamespaceManifestEnvelope::from_payload(
-        writer_version,
-        NamespaceManifestPayload {
-            namespace_id: namespace_id.clone(),
-            manifest_id,
-            manifest_object_id,
-            head_seq: initial_head.seq,
-            head_commit_id: initial_head.head_commit_id.clone(),
-            base_seq: initial_head.seq,
-            writer_epoch: initial_head.writer_epoch,
-            next_inode_id: initial_head.next_inode_id,
-            // Bootstrap precedes the floor object; nothing is retained
-            // below the genesis seq.
-            retention_floor_seq: ChangeSeq(0),
-            fork: None,
-            metadata_files: flatten_manifest_tables(run_tables),
-        },
-    )
-    .map_err(|err| {
-        CoreError::Internal(format!(
-            "failed to build namespace manifest envelope: {err}"
-        ))
-    })
 }

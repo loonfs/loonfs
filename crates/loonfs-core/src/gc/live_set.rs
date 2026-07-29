@@ -6,16 +6,14 @@ use super::fork_checkpoints::fork_target_proven_gone;
 use crate::checkpoint::load_namespace_manifest_envelope_if_present;
 use crate::context::MutationContext;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
-use crate::namespace::control::{
-    read_head_object, read_metadata_root_object, read_wal_floor_object, ControlObjectLoadError,
-};
+use crate::namespace::basis::{read_head_and_metadata_basis, resolve_retention_floor_seq};
 use crate::wal::{load_validated_wal_chain, WalChainLoadRequest};
 use futures::StreamExt;
 use loonfs_api::wire::control::{
     decode_control_object, CheckpointOwner, CheckpointRecordLifecycle, CheckpointRecordState,
     ControlObjectKind, NamespaceState,
 };
-use loonfs_api::{ChangeSeq, ManifestObjectId, NamespaceId};
+use loonfs_api::{ManifestObjectId, NamespaceId};
 use loonfs_objectstore::keys::{checkpoint_prefix, metadata_manifest_object};
 use loonfs_objectstore::ObjectStore;
 use std::collections::{BTreeMap, BTreeSet};
@@ -82,21 +80,27 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
     context: &MutationContext,
 ) -> Result<LiveSet> {
     let now_ms = context.now_ms;
-    let loaded_head = read_head_object(store, namespace_id)
+    let loaded = read_head_and_metadata_basis(store, namespace_id)
         .await
         .map_err(CoreError::load_head)?;
-    let head = loaded_head.envelope.state;
-    let root = read_metadata_root_object(store, namespace_id)
+    let head = loaded.head.envelope.state;
+    // A namespace with no root of its own roots no manifest here: the
+    // genesis basis has none, and a fork target's basis is a source-prefix
+    // object that the source's own pass protects through the fork-owned
+    // checkpoint record. Neither is ever a candidate of this pass.
+    let root_manifest_object_id = loaded.basis.is_owned_by(namespace_id).then(|| {
+        loaded
+            .basis
+            .manifest()
+            .expect("owned basis")
+            .manifest_object_id
+            .clone()
+    });
+    // A missing floor means retain from the namespace's birth sequence
+    // (format spec, "WAL floor").
+    let floor_seq = resolve_retention_floor_seq(store, &head)
         .await
-        .map_err(CoreError::load_head)?
-        .envelope
-        .state;
-    let floor_seq = match read_wal_floor_object(store, namespace_id).await {
-        Ok(loaded) => loaded.envelope.state.floor_seq,
-        // A missing floor means retain everything (format spec, "WAL floor").
-        Err(ControlObjectLoadError::MissingObject { .. }) => ChangeSeq(0),
-        Err(error) => return Err(CoreError::load_head(error)),
-    };
+        .map_err(CoreError::load_head)?;
 
     let namespace_deleted = head.state == NamespaceState::Deleted;
     let mut live = LiveSet {
@@ -115,7 +119,7 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
     // acquire refuses the tombstone), so user pins and the final replay
     // chain protect nothing.
     if !namespace_deleted {
-        live.manifests.insert(root.manifest_object_id.clone());
+        live.manifests.extend(root_manifest_object_id.clone());
     }
     let mut active_record_bases: BTreeMap<ManifestObjectId, Vec<String>> = BTreeMap::new();
 
@@ -251,7 +255,7 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
             // zombies — the crash window between record write and verify —
             // and the pass releases them below instead of degrading forever.
             Ok(None) => {
-                if manifest_object_id == root.manifest_object_id {
+                if Some(&manifest_object_id) == root_manifest_object_id.as_ref() {
                     live.degraded = true;
                 } else if let Some(record_keys) = active_record_bases.get(&manifest_object_id) {
                     live.missing_basis_records

@@ -90,6 +90,12 @@ pub fn prepare_commit_head_publish(
     let new_tip = wal.envelope.pointer(wal.object_key.clone());
     let resulting_head = HeadState {
         namespace_id: current_head.namespace_id.clone(),
+        // The head is the only durable home of the namespace's content
+        // store, name policy, and fork provenance: every successor carries
+        // them forward verbatim, and the assertion below proves it did.
+        content_store_id: current_head.content_store_id.clone(),
+        name_policy: current_head.name_policy,
+        fork_basis: current_head.fork_basis.clone(),
         seq: plan.assigned_seq,
         head_commit_id: plan.commit_id.clone(),
         writer_epoch: current_head.writer_epoch,
@@ -99,6 +105,9 @@ pub fn prepare_commit_head_publish(
         visible_wal_tip: Some(new_tip),
         state: current_head.state,
     };
+    current_head
+        .ensure_successor_identity(&resulting_head)
+        .map_err(CommitHeadPublishError::HeadIdentityDrift)?;
     let envelope = HeadStateEnvelope::from_state(
         ControlObjectKind::WalHead,
         writer_version,
@@ -227,6 +236,12 @@ mod tests {
     fn head(namespace_id: NamespaceId, seq: ChangeSeq) -> HeadState {
         HeadState {
             namespace_id,
+            content_store_id: loonfs_api::ContentStoreId::parse(
+                "cs_0123456789abcdef0123456789abcdef",
+            )
+            .expect("content store id"),
+            name_policy: loonfs_api::NamePolicy::default(),
+            fork_basis: None,
             seq,
             head_commit_id: CommitId::parse("c_00000000000000000000000000000000")
                 .expect("commit id"),

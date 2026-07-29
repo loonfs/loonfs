@@ -25,7 +25,7 @@ within a plane is expressed as **named features** (section 2).
 | Profile | Plane | Ops | Status |
 | --- | --- | --- | --- |
 | `core/v0` | Data plane | Path reads and mutations (stat, list, content, revisions, path operations), staged uploads, the change feed, namespace status by id, `GET /v0/capabilities`, and the standard error contract. Namespace `list`, `create`, `fork`, and `delete` are **features** within this profile. | **Mandatory** for any conforming deployment |
-| `admin/v0` | Maintenance plane | Create and release checkpoints; run one-shot maintenance steps (WAL flush, metadata reorganization, retention-floor advancement, and garbage collection, together or one at a time); repair incomplete namespace installations. Future maintenance triggers (index builds) arrive as features in this plane. | Optional |
+| `admin/v0` | Maintenance plane | Create and release checkpoints; run one-shot maintenance steps (WAL flush, metadata reorganization, retention-floor advancement, and garbage collection, together or one at a time). Future maintenance triggers (index builds) arrive as features in this plane. | Optional |
 | `query/v0` | Query plane | Content search over derived indexes (`POST /v0/namespaces/{namespace}/query/grep`). Grep-index search is the `query.grep` **feature** within this profile; using it also requires a materialized steady-state grep root for the namespace. | Optional |
 | `acl/v0` | Authorization plane | — | **Reserved name only.** Do not specify ops yet. Clients must tolerate unknown error codes, so authorization errors can land with this plane without breaking anyone. |
 
@@ -218,13 +218,12 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `content_too_large` | 413 | The request body exceeds the deployment's limit: `upload.max_content_bytes` for proxied uploads. Served file content past `download.max_content_bytes` reports it too. For uploads, send a smaller payload or use `direct_put` when that feature is advertised; for reads, the deployment limit must be raised. |
 | `route_not_found` | 404 | No route matches the request path. |
 | `method_not_allowed` | 405 | The path exists but does not serve this HTTP method. |
-| `namespace_not_found` | 404 | The namespace does not exist. |
-| `namespace_deleted` | 410 | The namespace existed and was deleted. The id is permanently retired. |
+| `namespace_not_found` | 404 | The namespace has no head, so it does not exist. |
+| `namespace_deleted` | 410 | The namespace's head records the terminal deleted state. The id is permanently retired, so a create or fork against it fails here rather than as a conflict. |
 | `path_not_found` | 404 | No visible entry at the path. |
 | `revision_not_found` | 404 | The file has no such revision. |
 | `upload_not_found` | 404 | No upload session with this id. |
-| `namespace_exists` | 409 | The create target already exists. |
-| `namespace_partial` | 409 | The namespace is partially initialized and unusable; run explicit admin repair. |
+| `namespace_exists` | 409 | The create or fork target already exists: another namespace holds the id. |
 | `content_not_prepared` | 409 | A path put or explicit create/replace operation references external content without a matching admission, or carries a rejected relevant token. Prepare the content and retry with its proof. |
 | `path_conflict` | 409 | The destination path is already bound. |
 | `directory_not_empty` | 409 | The directory has children and the operation is not recursive. |
@@ -427,7 +426,6 @@ A representative v0 binding is shown below.
 | Create a checkpoint | `POST /v0/admin/namespaces/{ns}/checkpoints` (body carries the required `name` and optional `ttl_ms`; the record is user-owned and a GC root until released or expired) |
 | Release a checkpoint | `POST /v0/admin/namespaces/{ns}/checkpoints/{checkpoint_id}/release` (idempotent; fork-owned records are rejected) |
 | Run a maintenance step | `POST /v0/admin/namespaces/{ns}/maintenance/step` (the one maintenance entry point; see below) |
-| Repair an incomplete namespace | `POST /v0/admin/namespaces/{ns}/repair` (no body or options; reports `already_complete`, `completed`, `reaped`, or `in_flight`; an absent namespace reports `namespace_not_found`) |
 | Content search | `POST /v0/namespaces/{ns}/query/grep` (feature `query.grep`; requires a materialized steady-state grep root) |
 | Enable the grep index | `POST /v0/admin/namespaces/{ns}/grep/index/enable` (CAS-publishes the independent grep root into checkpointed backfill; embedded mode starts that namespace's event-driven driver; idempotent) |
 | Disable the grep index | `POST /v0/admin/namespaces/{ns}/grep/index/disable` (CAS-publishes the grep root as disabled; grep-owned garbage collection later reclaims unreferenced segments; idempotent) |
@@ -479,17 +477,6 @@ deletion. If the namespace advances or keys disappear between calls, a stale
 cursor may re-examine work or defer a newly inserted key that sorts before its
 position until the next full pass; it can never make a newly live object
 deletable.
-
-Namespace repair is deterministic and takes no request body. Its response is
-`{"namespace_id":"...","outcome":"..."}`: `already_complete` is a no-op,
-`completed` published a derivable create/fork completion descriptor, `reaped`
-removed aged non-completable install debris, and `in_flight` left younger or
-concurrently changed debris untouched. Reaping first conditionally marks the
-WAL head — the create/fork admission gate — `condemned`, removes the subtree,
-and deletes that gate last. A create racing the reap therefore reports the
-existing `namespace_partial` code until cleanup finishes, then may create the
-name afresh. An absent namespace returns `namespace_not_found` instead of a
-report.
 
 For `direct_put`, the client requests a presigned upload capability:
 
@@ -612,6 +599,24 @@ such as `{ns}`, `{source_ns}`, or an implementation-internal `:namespace` are
 only path parameter names for the same namespace id value; v0 does not accept
 or emit a namespace `name` alias.
 
+Create and fork both install one object — the namespace head — with a single
+conditional write (`format.md`, "Namespace creation and forks"), so they
+answer conflicts the same way. A create or fork that loses that write to
+another namespace answers `namespace_exists` (409). A create or fork against
+a deleted id answers `namespace_deleted` (410): the id is retired and never
+comes back. There is no partially created namespace, so there is no third
+answer and nothing to repair.
+
+A create whose first acknowledgment was lost answers `namespace_exists` on
+the retry, like any other lost race. Nothing durable can tell the two apart:
+a server holds one writer session across every caller it serves, so the
+head's writer block cannot prove which request wrote it, and answering
+success would tell two callers they each created the same namespace. The
+409 is still actionable, which is the point — the namespace it names is
+complete and usable, so a caller that does not care who created it reads it
+and proceeds. The previous protocol answered this case with a namespace that
+existed, could not be used, and needed an explicit repair.
+
 The examples below are representative, not exhaustive. Responses may gain
 fields within v0; clients must ignore JSON fields they do not recognize.
 
@@ -622,8 +627,10 @@ The capability document of section 2.1.
 ### 6.2 `GET /v0/namespaces/{ns}`
 
 The namespace status read answers "does this namespace exist, and where is
-its head?" without listing every namespace. A missing namespace is `404` with
-code `namespace_not_found`.
+its head?" without listing every namespace. Existence is exactly the head
+object: a namespace with no head is `404` with code `namespace_not_found`,
+and a namespace whose head records the terminal deleted state is `410` with
+code `namespace_deleted`.
 
 ```json
 {
@@ -648,8 +655,8 @@ Deletion itself reclaims nothing, but a deleted namespace's derived state —
 WAL segments, metadata tables and manifests, and checkpoint records that
 protect nothing live — becomes garbage once the tombstone is in place. A
 maintenance step restricted to `gc` runs against the tombstone and ages
-that state out under the normal grace rules; the tombstone (descriptor and
-head) survives so the id stays retired. Content blobs live in a shared
+that state out under the normal grace rules; the head survives as the
+tombstone so the id stays retired. Content blobs live in a shared
 content store outside the namespace prefix and are not reclaimed in v0.
 
 The optional `expected_head_seq` query parameter deletes only if the head is
@@ -1057,9 +1064,12 @@ Representative response:
 
 The server forks from the source namespace's current head. The new namespace
 shares the source namespace's content store and starts with independent future
-namespace metadata. The fork records provenance and a fork-owned source
-checkpoint so source-owned immutable metadata files remain available while
-the target manifest references them.
+namespace metadata. The fork creates a fork-owned source checkpoint so the
+source-owned immutable metadata files stay available for as long as the
+target may still read them, then installs the target namespace's head in one
+conditional write. That head carries the fork provenance for the target's
+whole life. A fork answers `namespace_exists` and `namespace_deleted` on the
+target id exactly as create does.
 
 ### 6.12 `POST /query/grep`
 
@@ -1148,7 +1158,7 @@ A conforming server must:
 3. validate that referenced content is already durable before publish;
 4. preserve `(namespace_id, inode_id)` as canonical identity;
 5. resolve namespace content through the immutable `content_store_id` in the
-   namespace descriptor;
+   namespace head;
 6. implement tombstone-first delete;
 7. serve replay from the current verified manifest named by
    `metadata/root.json`, plus the visible WAL segment chain, replayed as

@@ -15,9 +15,8 @@ use std::sync::Arc;
 ///
 /// `FsAdmin` owns the explicit maintenance surface: namespace status and
 /// inspection, checkpoint creation, retention advancement, garbage
-/// collection, incomplete-installation repair, and one-shot maintenance
-/// steps. Every call runs in the caller's async task — the admin handle starts
-/// no workers of its own.
+/// collection, and one-shot maintenance steps. Every call runs in the
+/// caller's async task — the admin handle starts no workers of its own.
 ///
 /// Admin operations that mutate durable control state carry the builder's
 /// `actor_id` for tracing, reports, and auditability.

@@ -579,69 +579,6 @@
         }
       }
     },
-    "/v0/admin/namespaces/{namespace}/repair": {
-      "post": {
-        "tags": [
-          "admin"
-        ],
-        "summary": "Repair namespace",
-        "description": "Explicitly completes a recoverable partial namespace, or reaps non-completable installation debris after the fixed safety window. Younger debris is left untouched and reported as in flight.",
-        "operationId": "repair_namespace",
-        "parameters": [
-          {
-            "name": "namespace",
-            "in": "path",
-            "description": "Namespace id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Namespace repair inspected or changed the namespace",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/RepairNamespaceResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid namespace id",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Namespace not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/v0/capabilities": {
       "get": {
         "tags": [
@@ -3456,8 +3393,7 @@
           "deleted_checkpoint_records",
           "released_fork_checkpoints",
           "retained_candidates",
-          "degraded_retention",
-          "incomplete_namespace_ignored"
+          "degraded_retention"
         ],
         "properties": {
           "degraded_retention": {
@@ -3493,10 +3429,6 @@
             "format": "int64",
             "description": "Unreferenced WAL segments deleted.",
             "minimum": 0
-          },
-          "incomplete_namespace_ignored": {
-            "type": "boolean",
-            "description": "True when the namespace lacks a complete head-and-descriptor pair, so\nthe pass deliberately performed no listing or deletion."
           },
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
@@ -4134,34 +4066,6 @@
           }
         ],
         "description": "What the metadata-reorganization part of a maintenance step did.\n\nDeliberately coarse: the run counts and byte budgets a reorganization\nconsumes are engine policy, not a wire contract."
-      },
-      "RepairNamespaceOutcome": {
-        "type": "string",
-        "description": "How an explicit namespace repair resolved the namespace's durable state.",
-        "enum": [
-          "already_complete",
-          "completed",
-          "reaped",
-          "in_flight"
-        ]
-      },
-      "RepairNamespaceResponse": {
-        "type": "object",
-        "description": "Result of explicitly repairing one namespace.",
-        "required": [
-          "namespace_id",
-          "outcome"
-        ],
-        "properties": {
-          "namespace_id": {
-            "$ref": "#/components/schemas/NamespaceId",
-            "description": "Namespace the repair inspected."
-          },
-          "outcome": {
-            "$ref": "#/components/schemas/RepairNamespaceOutcome",
-            "description": "What the repair did, or why it left the namespace untouched."
-          }
-        }
       },
       "RevisionNo": {
         "type": "integer",
