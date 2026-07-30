@@ -113,12 +113,11 @@ impl FsWriter {
         self.bits.background.drain().await
     }
 
-    /// Shuts down writer-scheduled background work: settles admitted
-    /// publications whose callers are gone, then rejects new maintenance
-    /// scheduling and waits for in-flight maintenance tasks to settle,
-    /// surfacing panics. Work that claimed its maintenance slot but has not
-    /// started when the shutdown lands is refused, never left running
-    /// unobserved.
+    /// Shuts down writer-scheduled background work: rejects new maintenance
+    /// scheduling, then settles admitted publications whose callers are gone
+    /// and waits for in-flight maintenance tasks to settle, surfacing panics.
+    /// Work that claimed its maintenance slot but has not started when the
+    /// shutdown lands is refused, never left running unobserved.
     ///
     /// Foreground calls remain usable afterward; this settles only
     /// handle-owned background work, and with
@@ -130,12 +129,19 @@ impl FsWriter {
     /// Dropping the handle without calling this is best-effort cleanup,
     /// not the documented graceful shutdown path.
     pub async fn shutdown_background(&self) -> Result<()> {
-        // Publications first — they can schedule the maintenance the second
-        // step settles. Draining without closing admission keeps the
-        // handle usable; a caller that keeps submitting concurrently just
-        // keeps the drain waiting.
-        self.publisher.drain().await?;
+        // Closing maintenance admission has to come first, and has to happen
+        // before this future's first await. A maintenance step parked in its
+        // own publication only finishes once the drain below settles it, and
+        // a step that finishes while the queue is still open hands its slot
+        // straight to a queued namespace — spawning the exact work the
+        // shutdown decided to drop. Closing first makes that transfer
+        // impossible for the whole drain.
         self.bits.background.shut_down();
+        // Publications second: an in-flight step still has one to settle, and
+        // settling it is what lets that step's task end. Draining without
+        // closing admission keeps the handle usable; a caller that keeps
+        // submitting concurrently just keeps the drain waiting.
+        self.publisher.drain().await?;
         self.bits.background.drain().await
     }
 }
@@ -310,5 +316,78 @@ impl FsWriterBuilder {
             bits,
             publisher,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{CreateNamespaceOptions, FsBackgroundWork, FsWriter, PutFileOptions};
+    use loonfs_objectstore::local_fs_store::LocalFsStore;
+    use loonfs_test_support::ids::namespace_id;
+    use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationClass};
+    use std::sync::Arc;
+    use tempfile::tempdir;
+
+    /// Maintenance admission must close on the shutdown's first poll, before
+    /// it starts draining publications. A step parked in its own publication
+    /// only finishes once that drain settles it, so a queue still open here
+    /// lets the finishing step hand its slot on and spawn work the shutdown
+    /// already decided to drop. Asserting on the first poll pins the order
+    /// on every machine; the integration coverage in `tests/it/handles.rs`
+    /// only loses the race on some.
+    #[tokio::test]
+    async fn shutdown_closes_maintenance_admission_before_draining_publications() {
+        let temp_dir = tempdir().expect("tempdir");
+        let namespace_id = namespace_id("parked");
+        let blocking = Arc::new(BlockingStore::new(
+            LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
+            KeyPredicate::wal_head(namespace_id.as_str()),
+            OperationClass::CompareAndSwap,
+        ));
+        let writer = FsWriter::builder_with_store(blocking.clone())
+            .writer_id("shutdown-order-writer")
+            .background_work(FsBackgroundWork::Enabled)
+            .build()
+            .await
+            .expect("build writer");
+        writer
+            .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+            .await
+            .expect("create namespace");
+
+        // Park a publication so the shutdown's publication drain is still
+        // pending when the first poll returns.
+        blocking.block_next();
+        let put = tokio::spawn({
+            let writer = writer.clone();
+            let namespace_id = namespace_id.clone();
+            async move {
+                writer
+                    .put_file_bytes(
+                        &namespace_id,
+                        "/parked.txt",
+                        b"body",
+                        PutFileOptions::default(),
+                    )
+                    .await
+            }
+        });
+        blocking.wait_until_blocked().await;
+
+        let mut shutdown = Box::pin(writer.shutdown_background());
+        assert!(
+            futures::poll!(shutdown.as_mut()).is_pending(),
+            "the parked publication must keep the shutdown pending"
+        );
+        assert!(
+            !writer.bits.background.try_claim(&namespace_id),
+            "maintenance admission must already be closed while publications drain"
+        );
+
+        blocking.release();
+        put.await
+            .expect("join the parked put")
+            .expect("the released put succeeds");
+        shutdown.await.expect("shut down writer background work");
     }
 }
