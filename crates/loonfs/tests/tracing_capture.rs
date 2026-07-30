@@ -3,7 +3,8 @@
 
 //! Asserts background maintenance conclusions are observable at debug level.
 //!
-//! This lives in its own test binary — its own process — on purpose.
+//! This stays out of the crate's `tests/it` harness and keeps its own test
+//! binary — its own process — on purpose.
 //! Tracing caches per-callsite interest process-globally, and a callsite
 //! first exercised on a thread with no subscriber can race the interest
 //! rebuild that `set_default` performs. Sibling tests that drive background
