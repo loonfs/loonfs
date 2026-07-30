@@ -1,4 +1,4 @@
-//! A bounded async gate for selected object-store operations.
+//! An async gate for selected object-store operations.
 
 use super::{KeyPredicate, OperationClass, OperationContext, OperationKind};
 use async_trait::async_trait;
@@ -9,12 +9,38 @@ use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
 };
 use std::fmt;
+use std::pin::pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::Notify;
-use tokio::time::{timeout, Duration};
 
 type Predicate = dyn for<'a> Fn(&OperationContext<'a>) -> bool + Send + Sync;
+
+/// Waits for a latch flag that the other side sets before notifying.
+///
+/// The waits here are deliberately unbounded. Whoever is on the other side
+/// of a gate is either the test itself or work the test just started, so a
+/// wall-clock deadline inside this helper is a race with the machine rather
+/// than a check on the code under test: the whole `loonfs` integration
+/// suite shares one binary and one runtime, and a deadline that holds on an
+/// idle laptop starts firing once the rest of the suite is competing for
+/// CPU. A gate nobody opens is a hang, and the harness timeout is what
+/// reports it.
+///
+/// `Notified` only registers with the `Notify` on its first poll, so
+/// checking the flag and then awaiting would drop a notification landing in
+/// between. `enable` registers up front, which makes check-then-wait
+/// race-free without polling.
+async fn wait_for_latch(flag: &AtomicBool, notify: &Notify) {
+    loop {
+        let mut notified = pin!(notify.notified());
+        notified.as_mut().enable();
+        if flag.load(Ordering::SeqCst) {
+            return;
+        }
+        notified.await;
+    }
+}
 
 #[derive(Debug)]
 struct Gate {
@@ -84,19 +110,7 @@ impl<S> BlockingStore<S> {
 
     /// Waits until a selected operation has parked.
     pub async fn wait_until_blocked(&self) {
-        timeout(Duration::from_secs(10), async {
-            while !self.gate.blocked.load(Ordering::SeqCst) {
-                let notified = self.gate.blocked_notify.notified();
-                if self.gate.blocked.load(Ordering::SeqCst) {
-                    break;
-                }
-                // Bounded wait: `notified` registers on first poll, so a notify
-                // between the flag check and the await would otherwise be lost.
-                let _ = timeout(Duration::from_millis(50), notified).await;
-            }
-        })
-        .await
-        .expect("a selected store operation must reach the block");
+        wait_for_latch(&self.gate.blocked, &self.gate.blocked_notify).await;
     }
 
     /// Releases all parked operations and disarms a level-triggered gate.
@@ -108,19 +122,7 @@ impl<S> BlockingStore<S> {
 
     /// Waits until the most recently blocked operation finishes forwarding.
     pub async fn wait_until_completed(&self) {
-        timeout(Duration::from_secs(10), async {
-            while !self.gate.completed.load(Ordering::SeqCst) {
-                let notified = self.gate.completed_notify.notified();
-                if self.gate.completed.load(Ordering::SeqCst) {
-                    break;
-                }
-                // Bounded wait: `notified` registers on first poll, so a notify
-                // between the flag check and the await would otherwise be lost.
-                let _ = timeout(Duration::from_millis(50), notified).await;
-            }
-        })
-        .await
-        .expect("a released store operation must finish");
+        wait_for_latch(&self.gate.completed, &self.gate.completed_notify).await;
     }
 
     /// Returns a reference to the wrapped store.
@@ -157,19 +159,7 @@ impl<S> BlockingStore<S> {
 
         self.gate.blocked.store(true, Ordering::SeqCst);
         self.gate.blocked_notify.notify_waiters();
-        timeout(Duration::from_secs(10), async {
-            while !self.gate.released.load(Ordering::SeqCst) {
-                let notified = self.gate.release_notify.notified();
-                if self.gate.released.load(Ordering::SeqCst) {
-                    break;
-                }
-                // Bounded wait: `notified` registers on first poll, so a notify
-                // between the flag check and the await would otherwise be lost.
-                let _ = timeout(Duration::from_millis(50), notified).await;
-            }
-        })
-        .await
-        .expect("a blocked store operation must be released");
+        wait_for_latch(&self.gate.released, &self.gate.release_notify).await;
         self.gate.blocked.store(false, Ordering::SeqCst);
         true
     }
@@ -302,19 +292,7 @@ impl<S: ObjectStore> ObjectStore for BlockingStore<S> {
                 if level_triggered || one_shot {
                     gate.blocked.store(true, Ordering::SeqCst);
                     gate.blocked_notify.notify_waiters();
-                    timeout(Duration::from_secs(10), async {
-                        while !gate.released.load(Ordering::SeqCst) {
-                            let notified = gate.release_notify.notified();
-                            if gate.released.load(Ordering::SeqCst) {
-                                break;
-                            }
-                            // Bounded wait: `notified` registers on first poll, so a notify
-                            // between the flag check and the await would otherwise be lost.
-                            let _ = timeout(Duration::from_millis(50), notified).await;
-                        }
-                    })
-                    .await
-                    .expect("a blocked store operation must be released");
+                    wait_for_latch(&gate.released, &gate.release_notify).await;
                     gate.blocked.store(false, Ordering::SeqCst);
                     gate.completed.store(true, Ordering::SeqCst);
                     gate.completed_notify.notify_waiters();
@@ -323,5 +301,51 @@ impl<S: ObjectStore> ObjectStore for BlockingStore<S> {
             })
             .flatten(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::stores::{KeyPredicate, OperationClass};
+    use loonfs_objectstore::local_fs_store::LocalFsStore;
+    use std::time::Duration;
+    use tempfile::tempdir;
+
+    /// The gate carries no wall-clock budget of its own: a parked operation
+    /// waits for the release however long the test takes to reach it. Time is
+    /// paused, so the hold below costs nothing to run while being longer than
+    /// any deadline this helper could plausibly have carried.
+    #[tokio::test(start_paused = true)]
+    async fn a_parked_operation_waits_for_the_release_however_long_it_takes() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = Arc::new(BlockingStore::new(
+            LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
+            KeyPredicate::exact("parked"),
+            OperationClass::Put,
+        ));
+
+        store.block_next();
+        let put = tokio::spawn({
+            let store = Arc::clone(&store);
+            async move {
+                store
+                    .put("parked", Bytes::from_static(b"body"), PutMode::Overwrite)
+                    .await
+            }
+        });
+        store.wait_until_blocked().await;
+
+        tokio::time::advance(Duration::from_secs(3_600)).await;
+        assert!(
+            !put.is_finished(),
+            "the gate must still hold the operation after a long test-side pause"
+        );
+
+        store.release();
+        store.wait_until_completed().await;
+        put.await
+            .expect("join the parked put")
+            .expect("the released put succeeds");
     }
 }
