@@ -103,6 +103,21 @@ pub mod uploads {
     pub use loonfs_core::{BeginDirectPutUploadTargetResponse, DirectPutUploadTarget};
 }
 
+/// White-box seam over the durable control plane: typed loaders for a
+/// namespace's head, metadata root, and catalog entry.
+///
+/// These read durable control objects directly rather than going through a
+/// handle, which is what makes them useful for asserting on layout in tests
+/// and for operational inspection. Normal reads and writes go through
+/// [`FsReader`] and [`FsWriter`]; nothing here is needed to use the runtime.
+pub mod control {
+    pub use loonfs_core::control::{
+        load_namespace_catalog_entry, load_namespace_head_control,
+        load_namespace_metadata_root_control, ControlObjectLoadError, LoadedHeadControl,
+        LoadedMetadataRootControl, NamespaceCatalogLoadError, VerifiedNamespaceCatalogEntry,
+    };
+}
+
 pub use loonfs_objectstore::metrics;
 pub use loonfs_objectstore::{ObjectStore, ObjectStoreError, SharedObjectStore, StoreConfig};
 

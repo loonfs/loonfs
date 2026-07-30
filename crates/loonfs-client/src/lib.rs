@@ -5,10 +5,13 @@
 //! pass a [`NamespacePath`] for filesystem operations and use explicit commit
 //! helpers when you need retry control.
 //!
-//! Hosts that want to stay transport-agnostic should program against the
-//! [`backend::Backend`] trait instead of [`Client`] directly.
+//! The public surface is [`Client`] and the values it takes: [`ClientConfig`],
+//! [`ClientError`], [`NamespacePath`], and the per-operation option structs
+//! re-exported below. There is no transport abstraction to implement — a
+//! process that wants the runtime in-process uses the `loonfs` crate instead,
+//! and the two surfaces share one definition of every option struct (they
+//! live in `loonfs-api`) so their arguments cannot drift apart.
 
-pub mod backend;
 mod config;
 mod error;
 mod transport;
@@ -22,11 +25,11 @@ use loonfs_api::{
     },
     AbsolutePath, AuthoritativePathEntry, CapabilityDocument, ChangeSeq, CheckpointId, CommitId,
     ContentRef, CreateCheckpointRequest, CreateCheckpointResponse, CreateNamespaceRequest,
-    DeleteDirectoryBehavior, DeleteNamespaceResponse, DestinationBehavior, FilesystemOperation,
-    FilesystemOperationRequest, ForkNamespaceRequest, GrepRequest, GrepResponse, InodeId,
-    ListFileRevisionsResponse, ListPathEntriesResponse, ListTrashResponse, MaintenanceStepRequest,
-    MaintenanceStepResponse, NamespaceId, NamespaceStatusResponse, NamespaceSummary,
-    ReleaseCheckpointResponse, RevisionNo, UploadId,
+    DeleteNamespaceResponse, DestinationBehavior, FilesystemOperation, FilesystemOperationRequest,
+    ForkNamespaceRequest, GrepRequest, GrepResponse, InodeId, ListFileRevisionsResponse,
+    ListPathEntriesResponse, ListTrashResponse, MaintenanceStepRequest, MaintenanceStepResponse,
+    NamespaceId, NamespaceStatusResponse, NamespaceSummary, ReleaseCheckpointResponse, RevisionNo,
+    UploadId,
 };
 use std::sync::{Arc, OnceLock};
 
@@ -34,6 +37,10 @@ pub use config::ClientConfig;
 pub use error::ClientError;
 use transport::{WireRequest, IO_INACTIVITY_TIMEOUT};
 pub use ClientError as Error;
+
+/// Per-operation options, defined once in `loonfs-api` and shared with the
+/// embedded `loonfs` runtime so the two surfaces cannot drift a field apart.
+pub use loonfs_api::options::{CreateDirectoryOptions, DeleteOptions, PutFileOptions};
 
 /// Result type returned by the client.
 pub type Result<T> = std::result::Result<T, ClientError>;
@@ -87,67 +94,6 @@ pub struct MutationOptions {
 impl MutationOptions {
     fn resolve_commit_id(&self) -> CommitId {
         self.commit_id.clone().unwrap_or_else(CommitId::generate)
-    }
-}
-
-/// Options for writing a file path.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PutFileOptions {
-    /// Create-only or replace-existing behavior.
-    pub behavior: DestinationBehavior,
-    /// Optional idempotency key.
-    pub commit_id: Option<CommitId>,
-    /// Annotation recorded on the commit; part of the commit's identity.
-    pub message: Option<String>,
-    /// Replace only while the file's current revision is still this one.
-    /// Requires `Replace` behavior; a raced write fails instead of
-    /// stacking a revision on state the caller never saw.
-    pub expected_revision_no: Option<RevisionNo>,
-}
-
-impl Default for PutFileOptions {
-    fn default() -> Self {
-        Self {
-            behavior: DestinationBehavior::NoReplace,
-            commit_id: None,
-            message: None,
-            expected_revision_no: None,
-        }
-    }
-}
-
-/// Options for creating a directory.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct CreateDirectoryOptions {
-    /// Optional idempotency key.
-    pub commit_id: Option<CommitId>,
-    /// Annotation recorded on the commit; part of the commit's identity.
-    pub message: Option<String>,
-    /// Also create missing ancestor directories.
-    pub parents: bool,
-}
-
-/// Options for deleting a path.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeleteOptions {
-    /// Directory delete behavior.
-    pub behavior: DeleteDirectoryBehavior,
-    /// Optional idempotency key.
-    pub commit_id: Option<CommitId>,
-    /// Annotation recorded on the commit; part of the commit's identity.
-    pub message: Option<String>,
-    /// Delete only while the path still resolves to this inode.
-    pub expected_inode_id: Option<InodeId>,
-}
-
-impl Default for DeleteOptions {
-    fn default() -> Self {
-        Self {
-            behavior: DeleteDirectoryBehavior::NonRecursive,
-            commit_id: None,
-            message: None,
-            expected_inode_id: None,
-        }
     }
 }
 

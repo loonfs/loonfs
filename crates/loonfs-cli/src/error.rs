@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 ///   whichever backend produced them, so embedded and remote profiles surface
 ///   the same code for the same failure. Never restate a registry code as a
 ///   string literal; use `ErrorCode::X.as_str()` or an error's `code()`.
-/// - **Backend-local codes** ([`loonfs_client::backend::BackendError`]) pass
+/// - **Backend-local codes** ([`crate::backend_error::BackendError`]) pass
 ///   through verbatim from the backend seam: `invalid_config`,
 ///   `invalid_input`, `client_error`, `io_error`, and `runtime_error`.
 /// - **CLI-local codes** cover failures that never reach a backend. The
@@ -37,11 +37,11 @@ pub(crate) struct CliError {
     pub details: Option<Box<loonfs_api::ErrorDetails>>,
 }
 
-impl From<loonfs_client::backend::BackendError> for CliError {
+impl From<crate::backend_error::BackendError> for CliError {
     /// Backend failures pass through verbatim: the seam already carries the
     /// registry or backend-local code, message, and any server diagnostics
     /// this CLI reports.
-    fn from(error: loonfs_client::backend::BackendError) -> Self {
+    fn from(error: crate::backend_error::BackendError) -> Self {
         Self {
             code: error.code,
             message: error.message,

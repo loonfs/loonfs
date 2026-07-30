@@ -1,9 +1,121 @@
-//! Runtime-error message and registry-code shaping for CLI backends.
+//! [`BackendError`] and the runtime-error shaping the CLI's backends share.
 
 use loonfs::RuntimeError;
-use loonfs_api::{ErrorCode, NamespaceId};
-use loonfs_client::backend::BackendError;
+use loonfs_api::{ErrorCode, ErrorDetails, NamespaceId};
+use loonfs_client::ClientError;
 use loonfs_grep::GrepError;
+use thiserror::Error;
+
+/// Failure surfaced by a [`crate::backend::Backend`], as a `(code, message)`
+/// pair.
+///
+/// `code` draws from exactly two namespaces:
+///
+/// - **Registry codes** ([`loonfs_api::ErrorCode`]) pass through verbatim
+///   from whichever transport produced them, so embedded and remote backends
+///   surface the same code for the same failure. Never restate a registry
+///   code as a string literal; use `ErrorCode::X.as_str()` or an error's
+///   `code()`.
+/// - **Backend-local codes** cover failures that never produce a registry
+///   code — a server cannot see a caller's local profile or store
+///   configuration, so these deliberately live outside the registry. The
+///   complete list, each owned by a constructor below, is: `invalid_config`,
+///   `invalid_input`, `client_error`, `io_error`, and `runtime_error`.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("{code}: {message}")]
+pub(crate) struct BackendError {
+    /// Registry or backend-local error code.
+    pub code: String,
+    /// Human-readable description of the failure.
+    pub message: String,
+    /// Correlation id the server assigned to the failed request. Always
+    /// `None` for embedded and local failures, which have no server hop.
+    pub request_id: Option<String>,
+    /// Structured context for the code, when the transport carried any.
+    pub details: Option<Box<ErrorDetails>>,
+}
+
+impl BackendError {
+    /// Builds an error carrying a registry code verbatim.
+    pub(crate) fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            request_id: None,
+            details: None,
+        }
+    }
+
+    /// A backend configuration that could not be loaded or used.
+    pub(crate) fn invalid_config(message: impl Into<String>) -> Self {
+        Self::new("invalid_config", message)
+    }
+
+    /// Caller input rejected before it reached a backend.
+    pub(crate) fn invalid_input(message: impl Into<String>) -> Self {
+        Self::new("invalid_input", message)
+    }
+
+    /// Transport failure between a client and a remote server.
+    pub(crate) fn client_error(message: impl Into<String>) -> Self {
+        Self::new("client_error", message)
+    }
+
+    /// Local i/o failure while moving bytes for a backend call.
+    pub(crate) fn io_error(message: impl Into<String>) -> Self {
+        Self::new("io_error", message)
+    }
+
+    /// Embedded-runtime failure without a registry code.
+    pub(crate) fn runtime_error(message: impl Into<String>) -> Self {
+        Self::new("runtime_error", message)
+    }
+}
+
+impl From<ClientError> for BackendError {
+    fn from(error: ClientError) -> Self {
+        match error {
+            ClientError::ConfigIo(message) | ClientError::ConfigDecode(message) => {
+                Self::invalid_config(message)
+            }
+            ClientError::MissingConfigField { field } => {
+                Self::invalid_config(format!("missing `{field}`"))
+            }
+            ClientError::ConfigValidation { field, reason } => {
+                Self::invalid_config(format!("invalid `{field}`: {reason}"))
+            }
+            ClientError::InvalidNamespacePath(message) => Self::invalid_input(message),
+            ClientError::InvalidCommitId(message) | ClientError::InvalidCheckpointId(message) => {
+                // The registry code core and server report for a malformed
+                // id, so pre-flight client validation matches backend
+                // behavior.
+                Self::new(ErrorCode::InvalidRequest.as_str(), message)
+            }
+            ClientError::Http(message) | ClientError::Json(message) => Self::client_error(message),
+            ClientError::Api {
+                code,
+                message,
+                request_id,
+                details,
+                ..
+            } => Self {
+                code,
+                message,
+                request_id,
+                details,
+            },
+            ClientError::Io(message) => Self::io_error(format!("i/o error: {message}")),
+            // Every variant `loonfs-client` defines today has an explicit arm
+            // above, so this one is unreachable and the mapping is unchanged
+            // from when it lived inside that crate. It is required because
+            // `ClientError` is `#[non_exhaustive]`, which only binds across a
+            // crate boundary — a variant added later lands here as a generic
+            // transport failure instead of failing this build. Give any new
+            // variant its own arm rather than letting it fall through.
+            other => Self::client_error(other.to_string()),
+        }
+    }
+}
 
 pub(crate) fn map_runtime_error(error: RuntimeError) -> BackendError {
     match error {
@@ -37,5 +149,41 @@ pub(crate) fn map_namespace_scoped_grep_error(
     match error {
         GrepError::Runtime(error) => map_namespace_scoped_runtime_error(namespace_id, error),
         error => BackendError::new(error.code().as_str(), error.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BackendError, ClientError};
+
+    #[test]
+    fn api_errors_pass_their_code_and_message_through_verbatim() {
+        let error = BackendError::from(ClientError::Api {
+            status: 404,
+            code: "namespace_not_found".to_owned(),
+            feature: None,
+            message: "namespace `demo` does not exist".to_owned(),
+            request_id: None,
+            details: None,
+        });
+
+        assert_eq!(error.code, "namespace_not_found");
+        assert_eq!(error.message, "namespace `demo` does not exist");
+    }
+
+    #[test]
+    fn config_and_transport_errors_map_to_backend_local_codes() {
+        let error = BackendError::from(ClientError::MissingConfigField {
+            field: "server_url",
+        });
+        assert_eq!(error.code, "invalid_config");
+        assert_eq!(error.message, "missing `server_url`");
+
+        let error = BackendError::from(ClientError::Http("connection refused".to_owned()));
+        assert_eq!(error.code, "client_error");
+
+        let error = BackendError::from(ClientError::Io("read failed".to_owned()));
+        assert_eq!(error.code, "io_error");
+        assert_eq!(error.message, "i/o error: read failed");
     }
 }

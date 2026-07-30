@@ -684,9 +684,9 @@ mod tests {
             kind: CommandKind::ConfigShow,
             profile: Some("default".to_owned()),
             mode: Some("remote".to_owned()),
-            error: Box::new(CliError::from(crate::backend::BackendError::client_error(
-                "connection refused",
-            ))),
+            error: Box::new(CliError::from(
+                crate::backend_error::BackendError::client_error("connection refused"),
+            )),
         };
         assert_json_snapshot!(serde_json::from_str::<serde_json::Value>(
             &json_error(&failure).expect("json error renders")

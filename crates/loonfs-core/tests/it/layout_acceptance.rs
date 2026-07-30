@@ -9,10 +9,10 @@ use loonfs_api::v0::BeginUploadRequest;
 use loonfs_api::AbsolutePath;
 use loonfs_api::{ChangeSeq, NamespaceId};
 use loonfs_core::content::{prepare_existing_content_ref, store_bytes_as_content};
-use loonfs_core::gc::{gc_namespace, GcConfig};
 use loonfs_core::publish::{
     NamespaceCommitEngine, NamespaceMutationCandidate, PathMutationIntent, PublishTailOptions,
 };
+use loonfs_core::{gc_namespace, GcConfig};
 use loonfs_core::{BootstrapOptions, MutationContext};
 use loonfs_objectstore::keys::{wal_head, wal_segment_prefix};
 use loonfs_objectstore::local_fs_store::LocalFsStore;

@@ -428,7 +428,7 @@ async fn http_checkpoint_manifest_consumption_is_strict_when_manifest_is_corrupt
 
     let store = ConfiguredObjectStore::local_fs(&store_root, store_key_prefix.as_deref())
         .expect("construct store");
-    let root = loonfs_core::control::load_namespace_metadata_root_control(&store, &namespace)
+    let root = loonfs::control::load_namespace_metadata_root_control(&store, &namespace)
         .await
         .expect("metadata root");
     store

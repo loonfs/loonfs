@@ -8,7 +8,6 @@ description = "Async HTTP client for a LoonFS server."
 repository.workspace = true
 
 [dependencies]
-async-trait.workspace = true
 http.workspace = true
 loonfs-api = { path = "../loonfs-api" }
 reqwest.workspace = true

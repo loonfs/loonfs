@@ -1,7 +1,9 @@
-//! Embedded implementation of the CLI's shared [`Backend`] seam.
+//! Embedded implementation of the CLI's [`Backend`] seam.
 
+use super::Backend;
 use crate::backend_error::{
     map_namespace_scoped_grep_error, map_namespace_scoped_runtime_error, map_runtime_error,
+    BackendError,
 };
 use crate::render::write_stderr_warning;
 use async_trait::async_trait;
@@ -19,19 +21,11 @@ use loonfs_api::{
     MaintenanceStepResponse, NamespaceId, NamespaceStatusResponse, NamespaceSummary,
     PaginationPolicy, ReleaseCheckpointResponse, RevisionNo,
 };
-use loonfs_client::{
-    CreateDirectoryOptions as ClientCreateDirectoryOptions, DeleteOptions as ClientDeleteOptions,
-    MutationOptions, NamespacePath, PutFileOptions as ClientPutFileOptions,
-};
+use loonfs_client::{MutationOptions, NamespacePath};
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepDisableOutcome, GrepEnableOutcome, GrepError, GrepIndexSnapshot,
     GrepService, GrepWorker, NamespaceReads,
 };
-
-#[cfg(test)]
-pub(crate) use crate::resolve::EmbeddedTarget;
-pub(crate) use crate::resolve::ResolvedTarget;
-pub(crate) use loonfs_client::backend::{Backend, BackendError, RemoteBackend};
 
 /// Purpose-specific handles over one shared store client: reads go through
 /// the reader, mutations through the writer, and maintenance through the
@@ -44,16 +38,16 @@ pub(crate) use loonfs_client::backend::{Backend, BackendError, RemoteBackend};
 /// instead of hard-stopping. `loon admin` commands remain the explicit path
 /// for everything else (GC, retention, forced steps).
 pub(crate) struct EmbeddedBackend {
-    pub(super) writer: FsWriter,
-    pub(super) reader: FsReader,
-    pub(super) admin: FsAdmin,
+    pub(crate) writer: FsWriter,
+    pub(crate) reader: FsReader,
+    pub(crate) admin: FsAdmin,
     /// Grep is composed here rather than by the runtime: this service owns
     /// the query-side block cache for the length of the command, and the
     /// worker below is built from the same handles the other commands use.
-    pub(super) grep: GrepService,
+    pub(crate) grep: GrepService,
     /// Stamped into every grep root this backend publishes; the same
     /// version the writer and admin handles carry.
-    pub(super) writer_version: String,
+    pub(crate) writer_version: String,
 }
 
 /// How many times a gated publish resubmits after settling the maintenance
@@ -341,19 +335,14 @@ impl Backend for EmbeddedBackend {
         &self,
         spec: &NamespacePath,
         bytes: &[u8],
-        options: &ClientPutFileOptions,
+        options: &PutFileOptions,
     ) -> Result<CommitResponse, BackendError> {
         self.publish_with_maintenance_recovery(spec.namespace(), || {
             self.writer.put_file_bytes(
                 spec.namespace(),
                 spec.absolute_path().as_str(),
                 bytes,
-                PutFileOptions {
-                    behavior: options.behavior,
-                    commit_id: options.commit_id.clone(),
-                    message: options.message.clone(),
-                    expected_revision_no: options.expected_revision_no,
-                },
+                options.clone(),
             )
         })
         .await
@@ -362,18 +351,13 @@ impl Backend for EmbeddedBackend {
     async fn delete_path(
         &self,
         spec: &NamespacePath,
-        options: &ClientDeleteOptions,
+        options: &DeleteOptions,
     ) -> Result<CommitResponse, BackendError> {
         self.publish_with_maintenance_recovery(spec.namespace(), || {
             self.writer.delete_path(
                 spec.namespace(),
                 spec.absolute_path().as_str(),
-                DeleteOptions {
-                    behavior: options.behavior,
-                    commit_id: options.commit_id.clone(),
-                    message: options.message.clone(),
-                    expected_inode_id: options.expected_inode_id,
-                },
+                options.clone(),
             )
         })
         .await
@@ -382,17 +366,13 @@ impl Backend for EmbeddedBackend {
     async fn create_directory(
         &self,
         spec: &NamespacePath,
-        options: &ClientCreateDirectoryOptions,
+        options: &CreateDirectoryOptions,
     ) -> Result<CommitResponse, BackendError> {
         self.publish_with_maintenance_recovery(spec.namespace(), || {
             self.writer.create_directory(
                 spec.namespace(),
                 spec.absolute_path().as_str(),
-                CreateDirectoryOptions {
-                    commit_id: options.commit_id.clone(),
-                    message: options.message.clone(),
-                    parents: options.parents,
-                },
+                options.clone(),
             )
         })
         .await
@@ -552,9 +532,10 @@ fn resolve_cli_page_limit(limit: Option<u32>) -> Result<EffectiveLimit, BackendE
 #[cfg(test)]
 #[allow(clippy::panic)]
 mod tests {
-    use super::{map_runtime_error, resolve_cli_page_limit, Backend, EmbeddedTarget, GrepError};
+    use super::{map_runtime_error, resolve_cli_page_limit, Backend, GrepError};
     use crate::backend_error::map_namespace_scoped_grep_error;
     use crate::config::StoreConfig;
+    use crate::resolve::EmbeddedTarget;
     use loonfs::{
         BootstrapNamespaceError, CoreError, CreateNamespaceOptions, FsBackgroundWork, FsWriter,
         PutFileOptions, RuntimeError, SharedObjectStore,
@@ -563,7 +544,7 @@ mod tests {
         ChangeSeq, CreateCheckpointRequest, DestinationBehavior, ErrorCode, InodeId, NamespaceId,
         RevisionNo,
     };
-    use loonfs_client::{NamespacePath, PutFileOptions as ClientPutFileOptions};
+    use loonfs_client::NamespacePath;
     use std::sync::Arc;
     use tempfile::tempdir;
 
@@ -666,7 +647,7 @@ mod tests {
             .put_file_bytes(
                 &NamespacePath::parse("demo", "/file.txt").expect("namespace path"),
                 b"hello",
-                &ClientPutFileOptions::default(),
+                &PutFileOptions::default(),
             )
             .await
             .expect("put file");
@@ -741,7 +722,7 @@ mod tests {
                     &NamespacePath::parse("demo", &format!("/files/f{index}.txt"))
                         .expect("namespace path"),
                     b"payload",
-                    &ClientPutFileOptions::default(),
+                    &PutFileOptions::default(),
                 )
                 .await
                 .unwrap_or_else(|error| {
@@ -817,7 +798,7 @@ mod tests {
             .put_file_bytes(
                 &NamespacePath::parse("demo", "/recovered.txt").expect("namespace path"),
                 b"payload",
-                &ClientPutFileOptions::default(),
+                &PutFileOptions::default(),
             )
             .await
             .unwrap_or_else(|error| {
@@ -848,7 +829,7 @@ mod tests {
             .put_file_bytes(
                 &NamespacePath::parse("demo", "/one.txt").expect("namespace path"),
                 b"one",
-                &ClientPutFileOptions::default(),
+                &PutFileOptions::default(),
             )
             .await
             .expect("first put acquires the epoch");
@@ -861,7 +842,7 @@ mod tests {
             .put_file_bytes(
                 &NamespacePath::parse("demo", "/two.txt").expect("namespace path"),
                 b"two",
-                &ClientPutFileOptions::default(),
+                &PutFileOptions::default(),
             )
             .await
             .expect("rival put takes the epoch over");
@@ -875,7 +856,7 @@ mod tests {
             .put_file_bytes(
                 &NamespacePath::parse("demo", "/three.txt").expect("namespace path"),
                 b"three",
-                &ClientPutFileOptions::default(),
+                &PutFileOptions::default(),
             )
             .await
             .expect_err("a fenced session is terminal");

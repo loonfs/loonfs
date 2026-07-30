@@ -38,9 +38,6 @@ utoipa = { workspace = true, optional = true }
 async-trait.workspace = true
 futures.workspace = true
 loonfs-client = { path = "../loonfs-client" }
-# Test-only white-box access to the durable head-control plane
-# (`load_namespace_head_control`); production code depends on `loonfs` alone.
-loonfs-core = { path = "../loonfs-core" }
 loonfs-test-support = { path = "../loonfs-test-support" }
 tempfile.workspace = true
 tower = { version = "0.5", features = ["util"] }
