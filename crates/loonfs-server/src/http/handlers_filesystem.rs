@@ -4,7 +4,7 @@
 
 use super::error::ApiResponseError;
 use super::handlers_uploads::{
-    content_preparation_for_put, current_unix_ms, PutContentPreparation,
+    content_preparation_for_puts, current_unix_ms, PutContentPreparation,
 };
 use super::{authorize, AppJson, AppQuery, AppState, NamespaceIdPath};
 use axum::extract::State;
@@ -12,18 +12,21 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use loonfs::publish::{
-    ensure_mutation_path, ContentPreparationError, FilesystemOperation as MutationOperation,
-    MutationCandidate, MutationRequest,
+    ensure_mutation_path, CommitCandidate, CommitRequest, ContentPreparationError,
+    FilesystemOperation as CommitOperation,
 };
 use loonfs::{payload_class, ErrorCode, ListChangesOptions, TraceStoreKind};
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
+// The wire request and the core planner's request share one name across two
+// crates because they are the same language; the alias keeps both readable
+// in the handler that maps one onto the other.
 use loonfs_api::{
     decode_cursor,
     v0::{ChangesResponse, CommitResponse as ApiCommitResponse},
-    AbsolutePath, DirectoryPageCursor, FileRevisionsPageCursor, FilesystemOperation,
-    FilesystemOperationRequest, LimitError, ListFileRevisionsResponse, ListTrashResponse,
-    PageCursorError, PageRequest, PaginationPolicy, RevisionNo,
+    AbsolutePath, CommitRequest as ApiCommitRequest, DirectoryPageCursor, FileRevisionsPageCursor,
+    FilesystemOperation, LimitError, ListFileRevisionsResponse, ListTrashResponse, PageCursorError,
+    PageRequest, PaginationPolicy, RevisionNo,
 };
 use tracing::Instrument;
 
@@ -299,15 +302,15 @@ pub(super) async fn list_file_revisions(
     feature = "openapi",
     utoipa::path(
         post,
-        path = "/v0/namespaces/{namespace}/filesystem/operations",
+        path = "/v0/namespaces/{namespace}/commits",
         tag = "filesystem",
-        summary = "Run filesystem operation",
-        description = "Runs one path-oriented filesystem mutation, such as create directory, put file, move, copy, delete, or restore revision. The commit id makes retries idempotent.",
+        summary = "Apply a commit",
+        description = "Applies one commit: an ordered, non-empty list of path operations that commit together as one logical commit, under one commit id that makes retries idempotent. A single-operation call is the one-element case. The first operation that fails aborts the whole request and names its position in `details.operation_index`.",
         params(("namespace" = String, Path, description = "Namespace id")),
-        request_body = FilesystemOperationRequest,
+        request_body = ApiCommitRequest,
         responses(
-            (status = 200, description = "Filesystem operation committed", body = ApiCommitResponse),
-            (status = 400, description = "Invalid operation", body = ApiError),
+            (status = 200, description = "Commit applied", body = ApiCommitResponse),
+            (status = 400, description = "Invalid commit", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace or path not found", body = ApiError),
             (status = 409, description = "Operation conflict", body = ApiError),
@@ -316,40 +319,51 @@ pub(super) async fn list_file_revisions(
         )
     )
 )]
-pub(super) async fn apply_filesystem_operation(
+pub(super) async fn apply_commit(
     State(state): State<AppState>,
     namespace: NamespaceIdPath,
-    AppJson(request): AppJson<FilesystemOperationRequest>,
+    AppJson(request): AppJson<ApiCommitRequest>,
 ) -> Result<Json<ApiCommitResponse>, ApiResponseError> {
     let namespace_id = namespace.into_id()?;
-    let FilesystemOperationRequest {
+    let ApiCommitRequest {
         commit_id,
         message,
         content_tokens,
-        operation,
+        operations,
     } = request;
     // Failed and uncertain outcomes echo the idempotency key the caller can
-    // resubmit under (API spec, "Mutation responses and safe retry").
+    // resubmit under (API spec, "Commit responses and safe retry").
     let commit_id_for_errors = commit_id.clone();
-    let put_payload_class = match &operation {
-        FilesystemOperation::PutFile { content_ref, .. } => Some(payload_class(
-            usize::try_from(content_ref.size_bytes).unwrap_or(usize::MAX),
-        )),
-        _ => None,
-    };
-    let put_content_preparation = match &operation {
-        FilesystemOperation::PutFile { content_ref, .. } => Some(
-            content_preparation_for_put(
+    // Every put in the request shares one preparation pass: a proof belongs
+    // to the content, not to the operation that names it.
+    let put_content_refs = operations
+        .iter()
+        .filter_map(|operation| match operation {
+            FilesystemOperation::PutFile { content_ref, .. } => Some(content_ref),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    // A request that puts nothing skips both the preparation pass and the
+    // put span; one that puts is classified by the bytes it publishes.
+    let put_content_preparation = if put_content_refs.is_empty() {
+        None
+    } else {
+        let put_bytes = put_content_refs
+            .iter()
+            .map(|content_ref| content_ref.size_bytes)
+            .fold(0, u64::saturating_add);
+        Some((
+            payload_class(usize::try_from(put_bytes).unwrap_or(usize::MAX)),
+            content_preparation_for_puts(
                 &state.writer,
                 &state.config,
                 &namespace_id,
-                content_ref,
+                &put_content_refs,
                 &content_tokens,
                 current_unix_ms()?,
             )
             .await?,
-        ),
-        _ => None,
+        ))
     };
     // Absolute-path grammar was validated while decoding the wire body. The
     // root remains a valid read path but is not a legal mutation target.
@@ -360,70 +374,79 @@ pub(super) async fn apply_filesystem_operation(
         })?;
         Ok(path)
     };
-    // The batch endpoint is not open yet, so a request carries exactly one
-    // operation; the engine's language is the same either way.
-    let operation = match operation {
-        FilesystemOperation::CreateDirectory { path, parents } => MutationOperation::CreateDir {
-            absolute_path: validate_path(path)?,
-            parents,
-        },
-        FilesystemOperation::PutFile {
-            path,
-            content_ref,
-            behavior,
-            expected_revision_no,
-        } => MutationOperation::PutFile {
-            absolute_path: validate_path(path)?,
-            content_ref,
-            behavior,
-            expected_revision_no,
-        },
-        FilesystemOperation::DeletePath {
-            path,
-            behavior,
-            expected_inode_id,
-        } => MutationOperation::DeletePath {
-            absolute_path: validate_path(path)?,
-            behavior,
-            expected_inode_id,
-        },
-        FilesystemOperation::MovePath {
-            from_path,
-            to_path,
-            behavior,
-        } => MutationOperation::MovePath {
-            from_path: validate_path(from_path)?,
-            to_path: validate_path(to_path)?,
-            behavior,
-        },
-        FilesystemOperation::CopyPath {
-            from_path,
-            to_path,
-            behavior,
-        } => MutationOperation::CopyFilePath {
-            from_path: validate_path(from_path)?,
-            to_path: validate_path(to_path)?,
-            behavior,
-        },
-        FilesystemOperation::RestoreRevision {
-            path,
-            source_revision_no,
-        } => MutationOperation::RestoreRevision {
-            absolute_path: validate_path(path)?,
-            source_revision_no,
-        },
-        FilesystemOperation::Undelete {
-            inode_id,
-            deleted_at_seq,
-            path,
-        } => MutationOperation::Undelete {
-            inode_id,
-            deleted_at_seq,
-            absolute_path: validate_path(path)?,
-        },
+    let operations = operations
+        .into_iter()
+        .map(|operation| {
+            Ok(match operation {
+                FilesystemOperation::CreateDirectory { path, parents } => {
+                    CommitOperation::CreateDir {
+                        absolute_path: validate_path(path)?,
+                        parents,
+                    }
+                }
+                FilesystemOperation::PutFile {
+                    path,
+                    content_ref,
+                    behavior,
+                    expected_revision_no,
+                } => CommitOperation::PutFile {
+                    absolute_path: validate_path(path)?,
+                    content_ref,
+                    behavior,
+                    expected_revision_no,
+                },
+                FilesystemOperation::DeletePath {
+                    path,
+                    behavior,
+                    expected_inode_id,
+                } => CommitOperation::DeletePath {
+                    absolute_path: validate_path(path)?,
+                    behavior,
+                    expected_inode_id,
+                },
+                FilesystemOperation::MovePath {
+                    from_path,
+                    to_path,
+                    behavior,
+                } => CommitOperation::MovePath {
+                    from_path: validate_path(from_path)?,
+                    to_path: validate_path(to_path)?,
+                    behavior,
+                },
+                FilesystemOperation::CopyPath {
+                    from_path,
+                    to_path,
+                    behavior,
+                } => CommitOperation::CopyFilePath {
+                    from_path: validate_path(from_path)?,
+                    to_path: validate_path(to_path)?,
+                    behavior,
+                },
+                FilesystemOperation::RestoreRevision {
+                    path,
+                    source_revision_no,
+                } => CommitOperation::RestoreRevision {
+                    absolute_path: validate_path(path)?,
+                    source_revision_no,
+                },
+                FilesystemOperation::Undelete {
+                    inode_id,
+                    deleted_at_seq,
+                    path,
+                } => CommitOperation::Undelete {
+                    inode_id,
+                    deleted_at_seq,
+                    absolute_path: validate_path(path)?,
+                },
+            })
+        })
+        .collect::<Result<Vec<_>, ApiResponseError>>()?;
+    let request = CommitRequest {
+        commit_id,
+        message,
+        operations,
     };
-    let request = MutationRequest::single(commit_id, message, operation);
-    let response_result = if let Some(payload_class) = put_payload_class {
+    let response_result = if let Some((payload_class, preparation)) = put_content_preparation {
         let span = tracing::info_span!(
             "loonfs.put",
             operation = "put",
@@ -432,17 +455,14 @@ pub(super) async fn apply_filesystem_operation(
             payload_class,
         );
         async {
-            let candidate = match put_content_preparation
-                .expect("put payload class should carry content preparation")
-            {
-                PutContentPreparation::Absent => MutationCandidate::new(request),
+            let candidate = match preparation {
+                PutContentPreparation::Absent => CommitCandidate::new(request),
                 PutContentPreparation::Ready(prepared_content) => {
-                    MutationCandidate::prepared(request, prepared_content)
+                    CommitCandidate::prepared(request, prepared_content)
                 }
-                PutContentPreparation::Rejected(error) => MutationCandidate::rejected(
-                    request,
-                    ContentPreparationError::ContentToken(error),
-                ),
+                PutContentPreparation::Rejected(error) => {
+                    CommitCandidate::rejected(request, ContentPreparationError::ContentToken(error))
+                }
             };
             state
                 .writer
@@ -456,7 +476,7 @@ pub(super) async fn apply_filesystem_operation(
         state
             .writer
             .publisher()
-            .submit_mutation(namespace_id.clone(), request)
+            .submit_commit(namespace_id.clone(), request)
             .await
     };
     let response = response_result.map_err(|error| {

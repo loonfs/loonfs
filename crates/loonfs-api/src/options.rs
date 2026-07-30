@@ -18,7 +18,7 @@ pub struct PutFileOptions {
     /// Create-only or replace-existing behavior.
     pub behavior: DestinationBehavior,
     /// Idempotency key for the commit; retrying with the same id replays the
-    /// committed mutation instead of double-committing. A fresh id is
+    /// landed commit instead of double-committing. A fresh id is
     /// generated when absent.
     pub commit_id: Option<CommitId>,
     /// Annotation recorded on the commit; part of the commit's identity, so

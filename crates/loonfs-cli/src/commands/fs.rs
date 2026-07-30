@@ -541,7 +541,7 @@ pub(crate) async fn run_filesystem_restore(
         .restore_file_revision(
             &spec,
             RevisionNo(args.revision),
-            &loonfs_client::MutationOptions {
+            &loonfs_client::CommitOptions {
                 commit_id,
                 message: args.message.clone(),
             },
@@ -578,7 +578,7 @@ pub(crate) async fn run_filesystem_undelete(
             &spec,
             loonfs_api::InodeId(args.inode),
             loonfs_api::ChangeSeq(args.deleted_at),
-            &loonfs_client::MutationOptions {
+            &loonfs_client::CommitOptions {
                 commit_id,
                 message: args.message.clone(),
             },
@@ -742,7 +742,7 @@ async fn run_filesystem_transfer(
                 &from,
                 &to,
                 behavior,
-                &loonfs_client::MutationOptions {
+                &loonfs_client::CommitOptions {
                     commit_id,
                     message: args.message.clone(),
                 },
@@ -760,7 +760,7 @@ async fn run_filesystem_transfer(
                 &from,
                 &to,
                 behavior,
-                &loonfs_client::MutationOptions {
+                &loonfs_client::CommitOptions {
                     commit_id,
                     message: args.message.clone(),
                 },

@@ -47,8 +47,7 @@ use crate::path::write::ops::{
 };
 use crate::protocol::list_changes_after;
 use crate::publish::{
-    FilesystemOperation, MutationCandidate, MutationRequest, NamespaceCommitEngine,
-    PublishTailOptions,
+    CommitCandidate, CommitRequest, FilesystemOperation, NamespaceCommitEngine, PublishTailOptions,
 };
 use crate::storage::content::{prepare_stored_content, store_bytes_as_content};
 use crate::MutationContext;
@@ -126,8 +125,8 @@ pub(crate) async fn write_test_file<S: ObjectStore>(
     NamespaceCommitEngine::new(namespace_id.clone())
         .publish_batch(
             store,
-            vec![MutationCandidate::prepared(
-                MutationRequest::single(
+            vec![CommitCandidate::prepared(
+                CommitRequest::single(
                     CommitId::parse(commit_id).expect("commit id"),
                     None,
                     FilesystemOperation::PutFile {

@@ -27,7 +27,7 @@ use loonfs_api::{
     ReleaseCheckpointResponse, RevisionNo,
 };
 use loonfs_client::{
-    CreateDirectoryOptions, DeleteOptions, MutationOptions, NamespacePath, PutFileOptions,
+    CommitOptions, CreateDirectoryOptions, DeleteOptions, NamespacePath, PutFileOptions,
 };
 
 pub(crate) use embedded::EmbeddedBackend;
@@ -277,7 +277,7 @@ impl ResolvedTarget {
         from: &NamespacePath,
         to: &NamespacePath,
         behavior: DestinationBehavior,
-        options: &MutationOptions,
+        options: &CommitOptions,
     ) -> Result<CommitResponse, BackendError> {
         match self {
             Self::Embedded(target) => target.backend.move_path(from, to, behavior, options).await,
@@ -294,7 +294,7 @@ impl ResolvedTarget {
         from: &NamespacePath,
         to: &NamespacePath,
         behavior: DestinationBehavior,
-        options: &MutationOptions,
+        options: &CommitOptions,
     ) -> Result<CommitResponse, BackendError> {
         match self {
             Self::Embedded(target) => target.backend.copy_path(from, to, behavior, options).await,
@@ -309,7 +309,7 @@ impl ResolvedTarget {
         &self,
         spec: &NamespacePath,
         source_revision_no: RevisionNo,
-        options: &MutationOptions,
+        options: &CommitOptions,
     ) -> Result<CommitResponse, BackendError> {
         match self {
             Self::Embedded(target) => {
@@ -333,7 +333,7 @@ impl ResolvedTarget {
         spec: &NamespacePath,
         inode_id: InodeId,
         deleted_at_seq: ChangeSeq,
-        options: &MutationOptions,
+        options: &CommitOptions,
     ) -> Result<CommitResponse, BackendError> {
         match self {
             Self::Embedded(target) => {

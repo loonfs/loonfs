@@ -50,11 +50,11 @@ pub struct ApiError {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ErrorDetails {
-    /// Idempotency key of the mutation the error concerns.
+    /// Idempotency key of the commit the error concerns.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit_id: Option<CommitId>,
     /// Position, in the request's operation list, of the operation that
-    /// failed. A mutation commits all of its operations or none of them, so
+    /// failed. A commit applies all of its operations or none of them, so
     /// this names the one that stopped the whole request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation_index: Option<u32>,
@@ -268,23 +268,46 @@ pub enum FilesystemOperation {
     },
 }
 
-/// Request wrapper for one path-oriented operation.
+/// One commit: an idempotency key, an optional annotation, and an ordered
+/// list of path operations that commit together (API spec, section 5.1).
+///
+/// A one-operation request is the one-element case of this shape, not a
+/// different request: a convenience call and a batch produce the same commit
+/// and the same fingerprint.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct FilesystemOperationRequest {
-    /// Caller-supplied idempotency key for this operation.
+pub struct CommitRequest {
+    /// Caller-supplied idempotency key for the whole request.
     pub commit_id: CommitId,
     /// Caller annotation recorded on the commit and reported by the change
-    /// feed. Part of the operation's identity: reusing `commit_id` with a
+    /// feed. Part of the commit's identity: reusing `commit_id` with a
     /// different message is a `commit_id_reuse_conflict`, exactly as it is
     /// for an explicit commit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
-    /// Proofs for any new external content refs introduced by this operation.
+    /// Proofs for any new external content refs introduced by this request.
+    /// One proof covers every operation that names its content ref.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub content_tokens: Vec<ValidatedContentToken>,
-    /// Operation to apply.
-    pub operation: FilesystemOperation,
+    /// Ordered operations to apply. Must be non-empty; they commit all
+    /// together or not at all.
+    pub operations: Vec<FilesystemOperation>,
+}
+
+impl CommitRequest {
+    /// A request carrying exactly one operation.
+    pub fn single(
+        commit_id: CommitId,
+        message: Option<String>,
+        operation: FilesystemOperation,
+    ) -> Self {
+        Self {
+            commit_id,
+            message,
+            content_tokens: Vec::new(),
+            operations: vec![operation],
+        }
+    }
 }
 
 /// One immutable file revision.

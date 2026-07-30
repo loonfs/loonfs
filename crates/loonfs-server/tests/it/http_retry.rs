@@ -3,7 +3,7 @@
 use crate::common::http_split_support::*;
 use crate::common::start_server;
 use loonfs_api::{CommitId, DestinationBehavior};
-use loonfs_client::{ClientError, DeleteOptions, MutationOptions, NamespacePath, PutFileOptions};
+use loonfs_client::{ClientError, CommitOptions, DeleteOptions, NamespacePath, PutFileOptions};
 use loonfs_test_support::ids::namespace_id;
 use tempfile::tempdir;
 
@@ -184,7 +184,7 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
             &source,
             &copied,
             DestinationBehavior::NoReplace,
-            &MutationOptions {
+            &CommitOptions {
                 commit_id: Some(CommitId::parse("req-v1-copy").expect("valid commit id")),
                 message: None,
             },
@@ -197,7 +197,7 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
             &source,
             &copied,
             DestinationBehavior::NoReplace,
-            &MutationOptions {
+            &CommitOptions {
                 commit_id: Some(CommitId::parse("req-v1-copy").expect("valid commit id")),
                 message: None,
             },
@@ -225,7 +225,7 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
             &copied,
             &moved,
             DestinationBehavior::NoReplace,
-            &MutationOptions {
+            &CommitOptions {
                 commit_id: Some(CommitId::parse("req-v1-move").expect("valid commit id")),
                 message: None,
             },
@@ -238,7 +238,7 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
             &copied,
             &moved,
             DestinationBehavior::NoReplace,
-            &MutationOptions {
+            &CommitOptions {
                 commit_id: Some(CommitId::parse("req-v1-move").expect("valid commit id")),
                 message: None,
             },
@@ -323,7 +323,7 @@ async fn two_servers_share_one_store_with_last_writer_wins_fencing() {
             &host_a_target,
             &host_b_target,
             DestinationBehavior::NoReplace,
-            &MutationOptions::default(),
+            &CommitOptions::default(),
         )
         .await
         .expect("host b takes over on first write");

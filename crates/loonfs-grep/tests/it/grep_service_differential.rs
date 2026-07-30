@@ -4,7 +4,7 @@
 //! Frozen full-pipeline `GrepService` query semantics and budgets.
 
 use crate::common::{control, grep_with, GrepHost};
-use loonfs::publish::{FilesystemOperation, MutationCandidate, MutationRequest};
+use loonfs::publish::{CommitCandidate, CommitRequest, FilesystemOperation};
 use loonfs::{
     CommitId, CoreError, CreateDirectoryOptions, CreateNamespaceOptions, DeleteOptions,
     DestinationBehavior, FsAdmin, FsReader, FsWriter, MoveOptions, NamespaceId, PutFileOptions,
@@ -100,8 +100,8 @@ async fn publish_same_content_files(
     let content_ref = prepared.content_ref().clone();
     let candidates = (0..count)
         .map(|index| {
-            MutationCandidate::prepared(
-                MutationRequest::single(
+            CommitCandidate::prepared(
+                CommitRequest::single(
                     CommitId::generate(),
                     None,
                     FilesystemOperation::PutFile {

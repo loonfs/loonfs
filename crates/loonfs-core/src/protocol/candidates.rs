@@ -3,8 +3,8 @@
 //! and same-batch primaries.
 
 use super::publish_view::PublishMetadataView;
-use crate::commit::{CommitRequest as CoreCommitRequest, MutationFingerprint};
-use crate::commit_engine::{ContentPreparation, ContentPreparationError, MutationCandidate};
+use crate::commit::{CommitFingerprint, CommitIr as CoreCommitRequest};
+use crate::commit_engine::{CommitCandidate, ContentPreparation, ContentPreparationError};
 use crate::error::{CoreError, Result};
 use crate::metadata::CommitReceiptRecord;
 use crate::path::write::{FilesystemOperation, PublishPlanningSession};
@@ -16,7 +16,7 @@ use std::collections::HashMap;
 
 pub(super) struct CandidateCoreRequest {
     pub(super) request: CoreCommitRequest,
-    pub(super) semantic_identity: MutationFingerprint,
+    pub(super) semantic_identity: CommitFingerprint,
     /// The next free inode id the planner predicted for this request. The
     /// commit plan derives the same value from the operation list; the
     /// publish path checks that the two agree.
@@ -38,7 +38,7 @@ pub(super) enum CandidateAdmission {
 #[derive(Debug, Clone)]
 struct InBatchRequest {
     primary_index: usize,
-    semantic_identity: MutationFingerprint,
+    semantic_identity: CommitFingerprint,
 }
 
 /// Duplicate-commit-id bookkeeping for one publish batch.
@@ -63,7 +63,7 @@ impl BatchDedup {
         &mut self,
         index: usize,
         commit_id: &CommitId,
-        semantic_identity: &MutationFingerprint,
+        semantic_identity: &CommitFingerprint,
     ) -> Option<CandidateAdmission> {
         let Some(existing) = self.in_batch_requests.get(commit_id) else {
             self.in_batch_requests.insert(
@@ -124,7 +124,7 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     view: &PublishMetadataView<'_, S>,
     session: &PublishPlanningSession,
-    candidate: &MutationCandidate,
+    candidate: &CommitCandidate,
     index: usize,
     committed_at_ms: u64,
     dedup: &mut BatchDedup,
@@ -149,7 +149,7 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
     }
     validate_new_primary(candidate)?;
     let planned = session
-        .plan_mutation(mutation, view.metadata_view(), committed_at_ms)
+        .plan_commit(mutation, view.metadata_view(), committed_at_ms)
         .await?;
     Ok(CandidateAdmission::Prepared(CandidateCoreRequest {
         request: CoreCommitRequest {
@@ -164,13 +164,13 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
     }))
 }
 
-fn validate_new_primary(candidate: &MutationCandidate) -> Result<()> {
+fn validate_new_primary(candidate: &CommitCandidate) -> Result<()> {
     // For new primaries, request limits precede rejected content preparation.
     candidate.validate_request_limits()?;
     reject_failed_content_preparation(candidate)
 }
 
-fn reject_failed_content_preparation(candidate: &MutationCandidate) -> Result<()> {
+fn reject_failed_content_preparation(candidate: &CommitCandidate) -> Result<()> {
     match candidate.content_preparation() {
         ContentPreparation::Ready(_) => Ok(()),
         ContentPreparation::Rejected(error) => Err(error.clone().into()),
@@ -189,7 +189,7 @@ async fn resolve_commit_id_reuse<S: ObjectStore + ?Sized>(
     dedup: &mut BatchDedup,
     index: usize,
     commit_id: &CommitId,
-    semantic_identity: &MutationFingerprint,
+    semantic_identity: &CommitFingerprint,
 ) -> Result<Option<CandidateAdmission>> {
     if let Some(existing) = view.find_commit_receipt(commit_id).await? {
         return Ok(Some(CandidateAdmission::Settled(
@@ -232,7 +232,7 @@ impl CommitContentAdmissions<'_> {
 /// Copy and restore reuse content already retained by the namespace, whose
 /// durability is guaranteed; only a put introduces bytes that need proof.
 pub(super) fn validate_commit_content_references(
-    candidate: &MutationCandidate,
+    candidate: &CommitCandidate,
     content_store_id: &ContentStoreId,
 ) -> Result<()> {
     let admissions = CommitContentAdmissions {

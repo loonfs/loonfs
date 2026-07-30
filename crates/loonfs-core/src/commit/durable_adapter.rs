@@ -36,19 +36,19 @@ pub(crate) fn wal_payload_from_materialized_commit(
 mod tests {
     use super::*;
     use crate::commit::{
-        materialize_commit, CommitOp, CommitPlan, CommitRequest, MutationFingerprint, PlannedOp,
+        materialize_commit, CommitFingerprint, CommitIr, CommitOp, CommitPlan, PlannedOp,
         PreparedCommit, ValidatedOp,
     };
     use loonfs_api::{ChangeSeq, CommitId, InodeId, NameKey, NamespaceId, WriterEpoch};
 
-    fn test_fingerprint() -> MutationFingerprint {
-        MutationFingerprint::new_unchecked("v0:sha256:test".to_owned())
+    fn test_fingerprint() -> CommitFingerprint {
+        CommitFingerprint::new_unchecked("v0:sha256:test".to_owned())
     }
 
     #[test]
     fn durable_adapter_builds_expected_wal_payload() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let request = CommitRequest {
+        let request = CommitIr {
             namespace_id: namespace_id.clone(),
             commit_id: CommitId::parse("c_wal_payload").expect("valid commit id"),
             writer_epoch: WriterEpoch(1),

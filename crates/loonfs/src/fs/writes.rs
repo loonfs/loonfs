@@ -1,7 +1,7 @@
 //! [`FsWriter`]'s path mutations, commits, and the publication pipeline.
 
 use super::core::{BackgroundStepClaim, ReadCore, WriterBits};
-use crate::publish::{FilesystemOperation, MutationCandidate, MutationRequest, PreparedContent};
+use crate::publish::{CommitCandidate, CommitRequest, FilesystemOperation, PreparedContent};
 use crate::publisher::PublisherRegistry;
 use crate::FsWriter;
 use crate::{
@@ -144,9 +144,9 @@ impl FsWriter {
             ),
         );
         let content_ref = prepared_content.content_ref().clone();
-        self.mutate_prepared(
+        self.commit_prepared(
             namespace_id,
-            MutationRequest::single(
+            CommitRequest::single(
                 options.commit_id.unwrap_or_else(CommitId::generate),
                 options.message.clone(),
                 FilesystemOperation::PutFile {
@@ -273,9 +273,9 @@ impl FsWriter {
         absolute_path: &str,
         options: CreateDirectoryOptions,
     ) -> Result<CommitResponse> {
-        self.mutate(
+        self.commit(
             namespace_id,
-            MutationRequest::single(
+            CommitRequest::single(
                 options.commit_id.unwrap_or_else(CommitId::generate),
                 options.message.clone(),
                 FilesystemOperation::CreateDir {
@@ -299,9 +299,9 @@ impl FsWriter {
         absolute_path: &str,
         options: DeleteOptions,
     ) -> Result<CommitResponse> {
-        self.mutate(
+        self.commit(
             namespace_id,
-            MutationRequest::single(
+            CommitRequest::single(
                 options.commit_id.unwrap_or_else(CommitId::generate),
                 options.message.clone(),
                 FilesystemOperation::DeletePath {
@@ -322,9 +322,9 @@ impl FsWriter {
         to_path: &str,
         options: MoveOptions,
     ) -> Result<CommitResponse> {
-        self.mutate(
+        self.commit(
             namespace_id,
-            MutationRequest::single(
+            CommitRequest::single(
                 options.commit_id.unwrap_or_else(CommitId::generate),
                 options.message.clone(),
                 FilesystemOperation::MovePath {
@@ -346,9 +346,9 @@ impl FsWriter {
         to_path: &str,
         options: CopyOptions,
     ) -> Result<CommitResponse> {
-        self.mutate(
+        self.commit(
             namespace_id,
-            MutationRequest::single(
+            CommitRequest::single(
                 options.commit_id.unwrap_or_else(CommitId::generate),
                 options.message.clone(),
                 FilesystemOperation::CopyFilePath {
@@ -369,9 +369,9 @@ impl FsWriter {
         source_revision_no: RevisionNo,
         options: RestoreRevisionOptions,
     ) -> Result<CommitResponse> {
-        self.mutate(
+        self.commit(
             namespace_id,
-            MutationRequest::single(
+            CommitRequest::single(
                 options.commit_id.unwrap_or_else(CommitId::generate),
                 options.message.clone(),
                 FilesystemOperation::RestoreRevision {
@@ -394,9 +394,9 @@ impl FsWriter {
         absolute_path: &str,
         options: UndeleteOptions,
     ) -> Result<CommitResponse> {
-        self.mutate(
+        self.commit(
             namespace_id,
-            MutationRequest::single(
+            CommitRequest::single(
                 options.commit_id.unwrap_or_else(CommitId::generate),
                 options.message.clone(),
                 FilesystemOperation::Undelete {
@@ -409,7 +409,7 @@ impl FsWriter {
         .await
     }
 
-    /// Applies one mutation request: its operations commit together, in
+    /// Applies one commit request: its operations land together, in
     /// order, under one commit id.
     ///
     /// Each operation resolves against the namespace plus everything the
@@ -417,29 +417,29 @@ impl FsWriter {
     /// write into it. Nothing commits unless every operation does, and the
     /// error of a request that stops names the operation that stopped it.
     /// Operations that introduce new external content require
-    /// [`Self::mutate_prepared`].
-    pub async fn mutate(
+    /// [`Self::commit_prepared`].
+    pub async fn commit(
         &self,
         namespace_id: &NamespaceId,
-        request: MutationRequest,
+        request: CommitRequest,
     ) -> Result<CommitResponse> {
-        self.publish_candidate(namespace_id, MutationCandidate::new(request))
+        self.publish_candidate(namespace_id, CommitCandidate::new(request))
             .await
     }
 
-    /// Applies one mutation request with prepared content proofs.
+    /// Applies one commit request with prepared content proofs.
     ///
     /// Submission and publication perform no content I/O. One prepared value
     /// covers every operation that uses its content ref.
-    pub async fn mutate_prepared(
+    pub async fn commit_prepared(
         &self,
         namespace_id: &NamespaceId,
-        request: MutationRequest,
+        request: CommitRequest,
         prepared_content: Vec<PreparedContent>,
     ) -> Result<CommitResponse> {
         self.publish_candidate(
             namespace_id,
-            MutationCandidate::prepared(request, prepared_content),
+            CommitCandidate::prepared(request, prepared_content),
         )
         .await
     }
@@ -452,7 +452,7 @@ impl FsWriter {
     async fn publish_candidate(
         &self,
         namespace_id: &NamespaceId,
-        candidate: MutationCandidate,
+        candidate: CommitCandidate,
     ) -> Result<CommitResponse> {
         self.publisher
             .submit_candidate(namespace_id.clone(), candidate)
@@ -477,7 +477,7 @@ pub(crate) async fn publish_batch_with_engine(
     publisher: Option<&PublisherRegistry>,
     namespace_id: &NamespaceId,
     engine: &mut loonfs_core::publish::NamespaceCommitEngine,
-    candidates: Vec<MutationCandidate>,
+    candidates: Vec<CommitCandidate>,
 ) -> Vec<Result<CommitResponse>> {
     let batch_size = u64::try_from(candidates.len()).unwrap_or(u64::MAX);
     let store = core.store();

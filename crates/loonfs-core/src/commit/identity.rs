@@ -1,4 +1,4 @@
-//! Mutation identity fingerprints (format spec, "Commit identity
+//! Commit identity fingerprints (format spec, "Commit identity
 //! fingerprints"): a stable digest over a mutation's semantic content, used
 //! to decide whether a reused commit id carries the same mutation or a
 //! conflicting one.
@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
 
 /// Domain separator for the one mutation fingerprint preimage.
-pub(crate) const MUTATION_FINGERPRINT_DOMAIN: &str = "loonfs.mutation.semantic.v0";
+pub(crate) const COMMIT_FINGERPRINT_DOMAIN: &str = "loonfs.commit.semantic.v0";
 
 /// Scheme-and-algorithm tag carried by every stored fingerprint value.
 ///
@@ -45,9 +45,9 @@ fn fingerprint_bytes(bytes: &[u8]) -> String {
 /// The semantic identity of one mutation request: what a reused commit id is
 /// compared against.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct MutationFingerprint(String);
+pub struct CommitFingerprint(String);
 
-impl MutationFingerprint {
+impl CommitFingerprint {
     pub(crate) fn new_unchecked(value: String) -> Self {
         Self(value)
     }

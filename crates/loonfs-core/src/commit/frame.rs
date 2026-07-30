@@ -1,10 +1,10 @@
 //! Frame-level checks a commit request must pass before per-op validation.
 
-use super::{CommitRequest, CommitValidationError};
+use super::{CommitIr, CommitValidationError};
 use loonfs_api::wire::control::HeadState;
 
 pub(super) fn validate_commit_request_frame(
-    request: &CommitRequest,
+    request: &CommitIr,
     head: &HeadState,
 ) -> Result<(), CommitValidationError> {
     if request.ops.is_empty() {

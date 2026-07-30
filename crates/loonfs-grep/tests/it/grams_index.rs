@@ -8,7 +8,7 @@ use crate::common::GrepHost;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
-use loonfs::publish::{FilesystemOperation, MutationRequest};
+use loonfs::publish::{CommitRequest, FilesystemOperation};
 use loonfs::{
     ChangeSeq, CommitId, CreateNamespaceOptions, DestinationBehavior, ErrorCode, FsWriter,
     NamespaceId, PutFileOptions, SharedObjectStore,
@@ -401,9 +401,9 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
         prepared.push(content);
     }
     let commit = writer
-        .mutate_prepared(
+        .commit_prepared(
             &namespace_id,
-            MutationRequest {
+            CommitRequest {
                 commit_id: CommitId::parse("thousand-file-atomic").expect("commit id"),
                 message: None,
                 operations,

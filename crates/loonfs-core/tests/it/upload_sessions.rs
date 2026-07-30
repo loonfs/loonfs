@@ -3,7 +3,7 @@
 #![allow(clippy::panic)]
 // These integration tests use panic in unexpected match arms for precise diagnostics.
 
-use crate::common::mutation_split_support::*;
+use crate::common::commit_split_support::*;
 use crate::common::namespace_engine;
 use bytes::Bytes;
 use loonfs_api::{

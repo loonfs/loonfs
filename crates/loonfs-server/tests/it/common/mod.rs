@@ -87,7 +87,7 @@ pub(crate) mod http_split_support {
             BeginUploadRequest, CompleteUploadRequest, CompleteUploadResponse,
             ValidatedContentToken,
         },
-        DestinationBehavior, FilesystemOperationRequest, NamespaceId,
+        CommitRequest, DestinationBehavior, NamespaceId,
     };
     use loonfs_client::{Client, PutFileOptions};
 
@@ -120,22 +120,22 @@ pub(crate) mod http_split_support {
         )
     }
 
-    pub(crate) fn send_filesystem_operation(
+    pub(crate) fn send_commit(
         server_url: &str,
         namespace_id: &NamespaceId,
-        request: &FilesystemOperationRequest,
+        request: &CommitRequest,
     ) -> Result<ureq::Response, Box<ureq::Error>> {
-        send_filesystem_operation_json(server_url, namespace_id, request)
+        send_commit_json(server_url, namespace_id, request)
     }
 
-    pub(crate) fn send_filesystem_operation_json(
+    pub(crate) fn send_commit_json(
         server_url: &str,
         namespace_id: &NamespaceId,
         request: &impl serde::Serialize,
     ) -> Result<ureq::Response, Box<ureq::Error>> {
         raw_agent()
             .post(&format!(
-                "{server_url}/v0/namespaces/{namespace_id}/filesystem/operations"
+                "{server_url}/v0/namespaces/{namespace_id}/commits"
             ))
             .set("authorization", "Bearer test-token")
             .send_json(request)

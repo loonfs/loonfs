@@ -3,7 +3,7 @@
 
 use crate::cache::{MetadataTableCache, WalTailProjectionCache};
 use crate::checkpoint::{CheckpointFilesPage, CheckpointFilesPageCursor};
-use crate::commit_engine::MutationCandidate;
+use crate::commit_engine::CommitCandidate;
 use crate::context::MutationContext;
 use crate::error::Result;
 use crate::namespace::basis::MetadataBasis;
@@ -374,15 +374,15 @@ impl<S: ObjectStore> NamespaceEngine<S> {
 
     /// Publishes already-classified mutation candidates as one batch: one WAL
     /// segment, one head compare-and-swap, one result per candidate in order.
-    pub async fn publish_namespace_mutations_batch(
+    pub async fn publish_namespace_commits_batch(
         &self,
-        candidates: Vec<MutationCandidate>,
+        candidates: Vec<CommitCandidate>,
     ) -> Vec<Result<CommitResponse>> {
         let context = match self.mutation_context() {
             Ok(context) => context,
             Err(error) => return candidates.iter().map(|_| Err(error.clone())).collect(),
         };
-        crate::commit_engine::publish_namespace_mutations_batch(
+        crate::commit_engine::publish_namespace_commits_batch(
             &self.store,
             &self.namespace_id,
             candidates,

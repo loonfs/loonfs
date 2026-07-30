@@ -53,12 +53,12 @@
 //! drains without closing, so the handle stays usable.
 
 use crate::fs::{ReadCore, WriterBits};
-use crate::publish::{MutationCandidate, MutationRequest, PreparedContent};
+use crate::publish::{CommitCandidate, CommitRequest, PreparedContent};
 use crate::{CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, RuntimeError};
 use futures::FutureExt;
 use loonfs_api::v0::CommitResponse as ApiCommitResponse;
 use loonfs_api::{CommitId, NamespaceId};
-use loonfs_core::commit::{CommitHeadPublishError, MutationFingerprint};
+use loonfs_core::commit::{CommitFingerprint, CommitHeadPublishError};
 // Publisher head-CAS races use the core-wide bounded contention retry limit.
 use loonfs_core::limits::CONTENTION_RETRY_LIMIT;
 use loonfs_core::publish::{NamespaceCommitEngine, SharedWriterSessionState};
@@ -175,24 +175,24 @@ impl PublisherRegistry {
     }
 
     /// Submits one mutation request through the namespace's publisher.
-    pub async fn submit_mutation(
+    pub async fn submit_commit(
         &self,
         namespace_id: NamespaceId,
-        request: MutationRequest,
+        request: CommitRequest,
     ) -> CommitResult {
-        self.submit_candidate(namespace_id, MutationCandidate::new(request))
+        self.submit_candidate(namespace_id, CommitCandidate::new(request))
             .await
     }
 
     /// Submits one mutation request together with opaque proofs for its
     /// already-prepared content.
-    pub async fn submit_mutation_with_prepared_content(
+    pub async fn submit_commit_with_prepared_content(
         &self,
         namespace_id: NamespaceId,
-        request: MutationRequest,
+        request: CommitRequest,
         content: Vec<PreparedContent>,
     ) -> CommitResult {
-        self.submit_candidate(namespace_id, MutationCandidate::prepared(request, content))
+        self.submit_candidate(namespace_id, CommitCandidate::prepared(request, content))
             .await
     }
 
@@ -213,7 +213,7 @@ impl PublisherRegistry {
     pub async fn submit_candidate(
         &self,
         namespace_id: NamespaceId,
-        candidate: MutationCandidate,
+        candidate: CommitCandidate,
     ) -> CommitResult {
         let publisher = self.publisher_for(&namespace_id)?;
         publisher.submit(candidate).await
@@ -353,7 +353,7 @@ struct EngineSlot {
 }
 
 struct NamespacePublisherState {
-    /// Admitted work in admission order. Mutations coalesce into the tail
+    /// Admitted work in admission order. Commits coalesce into the tail
     /// batch, so a delete queued between them keeps its barrier position.
     queue: VecDeque<WorkItem>,
     in_flight: HashMap<CommitId, InFlightRequest>,
@@ -401,12 +401,12 @@ struct OpenBatch {
 #[derive(Clone)]
 struct BatchCandidate {
     commit_id: CommitId,
-    candidate: MutationCandidate,
+    candidate: CommitCandidate,
     enqueued_at: Instant,
 }
 
 struct InFlightRequest {
-    semantic_identity: MutationFingerprint,
+    semantic_identity: CommitFingerprint,
     waiters: Vec<oneshot::Sender<CommitResult>>,
 }
 
@@ -483,7 +483,7 @@ impl NamespacePublisher {
     /// either admits the candidate or fails, and only then parks on the
     /// result channel. Cancellation tests rely on this — after one poll of
     /// a submission, the publication is admitted and owned by the worker.
-    async fn submit(&self, candidate: MutationCandidate) -> CommitResult {
+    async fn submit(&self, candidate: CommitCandidate) -> CommitResult {
         let commit_id = candidate.commit_id().clone();
         let enqueued_at = Instant::now();
         let semantic_identity = candidate.semantic_identity(&self.namespace_id)?;
@@ -501,8 +501,8 @@ impl NamespacePublisher {
     fn admit(
         &self,
         commit_id: CommitId,
-        candidate: MutationCandidate,
-        semantic_identity: MutationFingerprint,
+        candidate: CommitCandidate,
+        semantic_identity: CommitFingerprint,
         waiter: oneshot::Sender<CommitResult>,
         enqueued_at: Instant,
     ) -> Result<(), CoreError> {
@@ -772,7 +772,7 @@ impl NamespacePublisher {
     async fn publish_through_engine(
         &self,
         writer: &Arc<WriterBits>,
-        candidates: Vec<MutationCandidate>,
+        candidates: Vec<CommitCandidate>,
     ) -> Vec<CommitResult> {
         let registry = self.registry();
         let mut slot = self.engine.lock().await;

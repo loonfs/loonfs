@@ -1,13 +1,13 @@
 //! Behavior tests for the runtime core.
 
-use crate::publish::{parse_mutation_path, FilesystemOperation, MutationRequest};
+use crate::publish::{parse_mutation_path, CommitRequest, FilesystemOperation};
 use crate::{CommitId, DestinationBehavior, RevisionNo};
 
 #[test]
 fn mutation_facade_exports_constructor_types() {
     // An embedded caller builds a whole multi-operation request from the
     // crate's own facade: nothing here reaches into loonfs-core.
-    let request = MutationRequest {
+    let request = CommitRequest {
         commit_id: CommitId::generate(),
         message: None,
         operations: vec![
@@ -33,7 +33,7 @@ fn single_operation_request_carries_exactly_one_operation() {
         absolute_path: parse_mutation_path("/docs").expect("valid mutation path"),
         parents: false,
     };
-    let request = MutationRequest::single(
+    let request = CommitRequest::single(
         CommitId::generate(),
         Some("create docs".to_owned()),
         operation.clone(),

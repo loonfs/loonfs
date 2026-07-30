@@ -41,7 +41,7 @@ fn openapi_documents_current_server_paths() {
         ("/v0/namespaces/{namespace}/filesystem/stat", "get"),
         ("/v0/namespaces/{namespace}/filesystem/content", "get"),
         ("/v0/namespaces/{namespace}/filesystem/revisions", "get"),
-        ("/v0/namespaces/{namespace}/filesystem/operations", "post"),
+        ("/v0/namespaces/{namespace}/commits", "post"),
         ("/v0/namespaces/{namespace}/uploads", "post"),
         (
             "/v0/namespaces/{namespace}/uploads/{upload_id}/content",

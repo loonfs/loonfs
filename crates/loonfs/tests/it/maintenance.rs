@@ -4,7 +4,7 @@
 // Runtime integration tests use panic in helper assertions for precise diagnostics.
 
 use crate::common::*;
-use loonfs::publish::{parse_mutation_path, FilesystemOperation, MutationRequest};
+use loonfs::publish::{parse_mutation_path, CommitRequest, FilesystemOperation};
 use loonfs::{
     ChangeSeq, CommitId, CreateNamespaceOptions, ErrorCode, MaintenanceStepKind,
     MaintenanceStepOptions, ManifestId, PutFileOptions, RuntimeError, SharedObjectStore,
@@ -388,8 +388,8 @@ fn maintenance_step_after_existing_manifest_writes_l0_manifest() {
         .any(|metadata_file| metadata_file.run_seq == ChangeSeq(2)));
 }
 
-fn create_directory_request(commit_id: &str, absolute_path: &str) -> MutationRequest {
-    MutationRequest::single(
+fn create_directory_request(commit_id: &str, absolute_path: &str) -> CommitRequest {
+    CommitRequest::single(
         CommitId::parse(commit_id).expect("valid commit id"),
         None,
         FilesystemOperation::CreateDir {

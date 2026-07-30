@@ -20,7 +20,7 @@ use loonfs_api::{
     MaintenanceStepResponse, NamespaceId, NamespaceStatusResponse, NamespaceSummary,
     PaginationPolicy, ReleaseCheckpointResponse, RevisionNo,
 };
-use loonfs_client::{MutationOptions, NamespacePath};
+use loonfs_client::{CommitOptions, NamespacePath};
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepDisableOutcome, GrepEnableOutcome, GrepError, GrepIndexSnapshot,
     GrepService, GrepWorker, NamespaceReads,
@@ -378,7 +378,7 @@ impl EmbeddedBackend {
         from: &NamespacePath,
         to: &NamespacePath,
         behavior: DestinationBehavior,
-        options: &MutationOptions,
+        options: &CommitOptions,
     ) -> Result<CommitResponse, BackendError> {
         self.publish_with_maintenance_recovery(from.namespace(), || {
             self.writer.move_path(
@@ -400,7 +400,7 @@ impl EmbeddedBackend {
         from: &NamespacePath,
         to: &NamespacePath,
         behavior: DestinationBehavior,
-        options: &MutationOptions,
+        options: &CommitOptions,
     ) -> Result<CommitResponse, BackendError> {
         self.publish_with_maintenance_recovery(from.namespace(), || {
             self.writer.copy_path(
@@ -421,7 +421,7 @@ impl EmbeddedBackend {
         &self,
         spec: &NamespacePath,
         source_revision_no: RevisionNo,
-        options: &MutationOptions,
+        options: &CommitOptions,
     ) -> Result<CommitResponse, BackendError> {
         self.publish_with_maintenance_recovery(spec.namespace(), || {
             self.writer.restore_file_revision(
@@ -442,7 +442,7 @@ impl EmbeddedBackend {
         spec: &NamespacePath,
         inode_id: InodeId,
         deleted_at_seq: ChangeSeq,
-        options: &MutationOptions,
+        options: &CommitOptions,
     ) -> Result<CommitResponse, BackendError> {
         self.publish_with_maintenance_recovery(spec.namespace(), || {
             self.writer.undelete(

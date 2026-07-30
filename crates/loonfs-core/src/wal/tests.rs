@@ -2,8 +2,8 @@
 
 use super::*;
 use crate::commit::{
-    materialize_commit, wal_payload_from_materialized_commit, CommitOp, CommitPlan, CommitRequest,
-    MaterializedCommit, MutationFingerprint, PlannedOp, PreparedCommit, ValidatedOp,
+    materialize_commit, wal_payload_from_materialized_commit, CommitFingerprint, CommitIr,
+    CommitOp, CommitPlan, MaterializedCommit, PlannedOp, PreparedCommit, ValidatedOp,
 };
 use bytes::Bytes;
 use loonfs_api::wire::control::WalSegmentPointer;
@@ -15,14 +15,14 @@ use loonfs_objectstore::ObjectStore;
 use std::borrow::Cow;
 use tempfile::tempdir;
 
-fn test_fingerprint() -> MutationFingerprint {
-    MutationFingerprint::new_unchecked("v0:sha256:test".to_owned())
+fn test_fingerprint() -> CommitFingerprint {
+    CommitFingerprint::new_unchecked("v0:sha256:test".to_owned())
 }
 
 #[tokio::test]
 async fn build_wal_record_payload_matches_segment_record_payload() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let request = CommitRequest {
+    let request = CommitIr {
         namespace_id: namespace_id.clone(),
         commit_id: CommitId::parse("c_wal_payload").expect("valid commit id"),
         writer_epoch: WriterEpoch(1),
@@ -425,7 +425,7 @@ fn materialized_create_directory(
     apply_after_seq: ChangeSeq,
     assigned_seq: ChangeSeq,
 ) -> MaterializedCommit {
-    let request = CommitRequest {
+    let request = CommitIr {
         namespace_id: namespace_id.clone(),
         commit_id: CommitId::parse(commit_id).expect("valid commit id"),
         writer_epoch: WriterEpoch(1),

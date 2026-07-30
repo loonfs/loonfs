@@ -4,7 +4,7 @@
 //! publication itself.
 
 use futures::future::BoxFuture;
-use loonfs::publish::{parse_mutation_path, FilesystemOperation, MutationRequest};
+use loonfs::publish::{parse_mutation_path, CommitRequest, FilesystemOperation};
 use loonfs::{
     BeginUploadRequest, CommitId, CommitResponse, CoreError, CreateNamespaceOptions,
     DestinationBehavior, FsWriter, NamespaceId, PutFileOptions, SharedObjectStore,
@@ -104,7 +104,7 @@ async fn park_two_puts(temp_dir: &Path) -> ParkedPuts {
     let registry = writer.publisher();
     let mut second: BoxFuture<'static, Result<CommitResponse, CoreError>> = {
         let namespace_id = namespace_id.clone();
-        let request = MutationRequest::single(
+        let request = CommitRequest::single(
             CommitId::parse("parked-second").expect("valid commit id"),
             None,
             FilesystemOperation::PutFile {
@@ -116,7 +116,7 @@ async fn park_two_puts(temp_dir: &Path) -> ParkedPuts {
         );
         Box::pin(async move {
             registry
-                .submit_mutation_with_prepared_content(namespace_id, request, vec![prepared])
+                .submit_commit_with_prepared_content(namespace_id, request, vec![prepared])
                 .await
         })
     };

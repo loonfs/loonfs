@@ -1,7 +1,7 @@
-//! Mutation fingerprinting and sequential resolution of a request's
+//! Commit fingerprinting and sequential resolution of a request's
 //! operations into one commit's operations.
 
-use super::intent::{FilesystemOperation, MutationRequest};
+use super::intent::{CommitRequest, FilesystemOperation};
 use super::plan_create::{
     plan_publish_create_directory, plan_publish_put_file_content_ref, plan_publish_undelete,
 };
@@ -10,8 +10,8 @@ use super::plan_restore::plan_publish_restore_revision;
 use super::plan_transfer::{plan_publish_copy_file_path, plan_publish_move_path};
 use super::planning_helpers::{PlannedOperation, PublishPathPlanningView};
 use crate::commit::{
-    allocates_inode, fingerprint_digest, validate_ops, CommitOp, MutationFingerprint,
-    OpValidationCursor, PlannedOp, PublishValidationView, MUTATION_FINGERPRINT_DOMAIN,
+    allocates_inode, fingerprint_digest, validate_ops, CommitFingerprint, CommitOp,
+    OpValidationCursor, PlannedOp, PublishValidationView, COMMIT_FINGERPRINT_DOMAIN,
 };
 use crate::error::{CoreError, Result};
 use crate::metadata::{MetadataState, MetadataView};
@@ -25,7 +25,7 @@ use serde::Serialize;
 
 /// One mutation request compiled into a commit's operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PlannedMutation {
+pub(crate) struct PlannedCommit {
     pub(crate) ops: Vec<PlannedOp>,
     /// The next free inode id the planner predicted while resolving. The
     /// commit plan recomputes it from the operation list; a disagreement
@@ -155,20 +155,20 @@ fn operation_fingerprint_input(operation: &FilesystemOperation) -> OperationFing
 /// A one-operation convenience call and a one-element batch are the same
 /// type, so they reach this function with the same shape and fingerprint
 /// identically; there is no separate single-operation form to keep in step.
-pub(crate) fn mutation_fingerprint(
+pub(crate) fn commit_fingerprint(
     namespace_id: &NamespaceId,
-    request: &MutationRequest,
-) -> Result<MutationFingerprint> {
+    request: &CommitRequest,
+) -> Result<CommitFingerprint> {
     #[derive(Serialize)]
-    struct CanonicalMutation<'a> {
+    struct CanonicalCommit<'a> {
         domain: &'static str,
         namespace_id: &'a str,
         operations: Vec<OperationFingerprintInput<'a>>,
         message: Option<&'a str>,
     }
 
-    fingerprint_digest(&CanonicalMutation {
-        domain: MUTATION_FINGERPRINT_DOMAIN,
+    fingerprint_digest(&CanonicalCommit {
+        domain: COMMIT_FINGERPRINT_DOMAIN,
         namespace_id: namespace_id.as_str(),
         operations: request
             .operations
@@ -177,7 +177,7 @@ pub(crate) fn mutation_fingerprint(
             .collect(),
         message: request.message.as_deref(),
     })
-    .map(MutationFingerprint::new_unchecked)
+    .map(CommitFingerprint::new_unchecked)
     .map_err(|err| CoreError::Internal(format!("failed to fingerprint mutation: {err}")))
 }
 
@@ -195,13 +195,13 @@ pub(crate) fn mutation_fingerprint(
 /// validates the whole operation list at once and has no request-level
 /// position to report. A one-operation request skips the extra pass — it has
 /// one place to fail, and the plan is the only validation it needs.
-pub(crate) async fn plan_mutation_against_publish_view<S: ObjectStore + ?Sized>(
-    request: &MutationRequest,
+pub(crate) async fn plan_commit_against_publish_view<S: ObjectStore + ?Sized>(
+    request: &CommitRequest,
     head: &HeadState,
     base_view: MetadataView<'_, '_, S>,
     accepted_rows: &MetadataState,
     committed_at_ms: u64,
-) -> Result<PlannedMutation> {
+) -> Result<PlannedCommit> {
     if request.operations.is_empty() {
         return Err(CoreError::InvalidCommitRequest(
             "mutation request carries no operations".to_owned(),
@@ -248,7 +248,7 @@ pub(crate) async fn plan_mutation_against_publish_view<S: ObjectStore + ?Sized>(
         ops.extend(unit_ops);
     }
 
-    Ok(PlannedMutation {
+    Ok(PlannedCommit {
         ops,
         resulting_next_inode_id: next_inode_id,
     })
@@ -388,8 +388,8 @@ mod tests {
         }
     }
 
-    fn request(operation: FilesystemOperation) -> MutationRequest {
-        MutationRequest::single(
+    fn request(operation: FilesystemOperation) -> CommitRequest {
+        CommitRequest::single(
             CommitId::parse("plan-request").expect("valid commit id"),
             None,
             operation,
@@ -410,16 +410,16 @@ mod tests {
     /// with recomputed ones, breaking retry idempotency across versions. Do
     /// not update the literal without bumping the fingerprint scheme tag.
     #[test]
-    fn mutation_fingerprint_value_is_pinned() {
+    fn commit_fingerprint_value_is_pinned() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let mut fixed = request(create_dir("/docs"));
         fixed.commit_id = CommitId::parse("c_00000000000000000000000000000042").expect("commit id");
 
-        let fingerprint = mutation_fingerprint(&namespace_id, &fixed).expect("fingerprint");
+        let fingerprint = commit_fingerprint(&namespace_id, &fixed).expect("fingerprint");
 
         assert_eq!(
             fingerprint.as_str(),
-            "v0:sha256:86733fff7c94ceddc8df941814b5f14dfa4ed444935117565cf622841a90dc98"
+            "v0:sha256:85894f53a16c2c0be95afc39b245280101f3e2a414f044c87be8eb9f1980dbcd"
         );
     }
 
@@ -434,11 +434,11 @@ mod tests {
         });
         fixed.commit_id = CommitId::parse("c_00000000000000000000000000000043").expect("commit id");
 
-        let fingerprint = mutation_fingerprint(&namespace_id, &fixed).expect("fingerprint");
+        let fingerprint = commit_fingerprint(&namespace_id, &fixed).expect("fingerprint");
 
         assert_eq!(
             fingerprint.as_str(),
-            "v0:sha256:14fc728b480d726b506d98ce300ccd315720ef78cf3f31c592a65a53e75b0d97"
+            "v0:sha256:edc8e06bd0a651e9470198875ec44c8fcd7d9b95f162fe1d7ca46011c27e2818"
         );
     }
 
@@ -449,33 +449,33 @@ mod tests {
         // joins the preimage.
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let build = |message: Option<&str>| {
-            MutationRequest::single(
+            CommitRequest::single(
                 CommitId::parse("mkdir-docs").expect("valid commit id"),
                 message.map(ToOwned::to_owned),
                 create_dir("/docs"),
             )
         };
-        let without = mutation_fingerprint(&namespace_id, &build(None)).expect("fingerprint");
+        let without = commit_fingerprint(&namespace_id, &build(None)).expect("fingerprint");
         let with =
-            mutation_fingerprint(&namespace_id, &build(Some("import batch"))).expect("fingerprint");
+            commit_fingerprint(&namespace_id, &build(Some("import batch"))).expect("fingerprint");
         assert_ne!(without.as_str(), with.as_str());
     }
 
     #[test]
-    fn mutation_fingerprint_is_stable_for_canonical_paths() {
+    fn commit_fingerprint_is_stable_for_canonical_paths() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let left = mutation_fingerprint(
+        let left = commit_fingerprint(
             &namespace_id,
-            &MutationRequest::single(
+            &CommitRequest::single(
                 CommitId::parse("mkdir-docs-a").expect("valid commit id"),
                 None,
                 create_dir("/docs/a"),
             ),
         )
         .expect("left fingerprint");
-        let right = mutation_fingerprint(
+        let right = commit_fingerprint(
             &namespace_id,
-            &MutationRequest::single(
+            &CommitRequest::single(
                 CommitId::parse("mkdir-docs-b").expect("valid commit id"),
                 None,
                 create_dir("/docs/a"),
@@ -487,12 +487,12 @@ mod tests {
     }
 
     #[test]
-    fn mutation_fingerprint_changes_when_logical_inputs_change() {
+    fn commit_fingerprint_changes_when_logical_inputs_change() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let baseline =
-            mutation_fingerprint(&namespace_id, &request(create_dir("/docs"))).expect("baseline");
+            commit_fingerprint(&namespace_id, &request(create_dir("/docs"))).expect("baseline");
         let changed =
-            mutation_fingerprint(&namespace_id, &request(create_dir("/drafts"))).expect("changed");
+            commit_fingerprint(&namespace_id, &request(create_dir("/drafts"))).expect("changed");
 
         assert_ne!(baseline, changed);
     }
@@ -503,16 +503,16 @@ mod tests {
     fn one_operation_request_and_one_element_batch_share_identity() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let commit_id = CommitId::parse("mkdir-docs").expect("valid commit id");
-        let convenience = MutationRequest::single(commit_id.clone(), None, create_dir("/docs"));
-        let batch = MutationRequest {
+        let convenience = CommitRequest::single(commit_id.clone(), None, create_dir("/docs"));
+        let batch = CommitRequest {
             commit_id,
             message: None,
             operations: vec![create_dir("/docs")],
         };
 
         assert_eq!(
-            mutation_fingerprint(&namespace_id, &convenience).expect("convenience fingerprint"),
-            mutation_fingerprint(&namespace_id, &batch).expect("batch fingerprint")
+            commit_fingerprint(&namespace_id, &convenience).expect("convenience fingerprint"),
+            commit_fingerprint(&namespace_id, &batch).expect("batch fingerprint")
         );
     }
 
@@ -522,20 +522,20 @@ mod tests {
     fn operation_order_changes_mutation_identity() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let commit_id = CommitId::parse("two-ops").expect("valid commit id");
-        let forward = MutationRequest {
+        let forward = CommitRequest {
             commit_id: commit_id.clone(),
             message: None,
             operations: vec![create_dir("/a"), create_dir("/b")],
         };
-        let reversed = MutationRequest {
+        let reversed = CommitRequest {
             commit_id,
             message: None,
             operations: vec![create_dir("/b"), create_dir("/a")],
         };
 
         assert_ne!(
-            mutation_fingerprint(&namespace_id, &forward).expect("forward fingerprint"),
-            mutation_fingerprint(&namespace_id, &reversed).expect("reversed fingerprint")
+            commit_fingerprint(&namespace_id, &forward).expect("forward fingerprint"),
+            commit_fingerprint(&namespace_id, &reversed).expect("reversed fingerprint")
         );
     }
 
@@ -558,8 +558,8 @@ mod tests {
     async fn try_plan_against_current_state(
         store: &LocalFsStore,
         namespace_id: &NamespaceId,
-        request: &MutationRequest,
-    ) -> Result<PlannedMutation> {
+        request: &CommitRequest,
+    ) -> Result<PlannedCommit> {
         let (view, _projection) = load_publish_metadata_view(
             store,
             None,
@@ -571,7 +571,7 @@ mod tests {
         .await
         .expect("publish view");
         let empty_overlay = MetadataState::default();
-        plan_mutation_against_publish_view(
+        plan_commit_against_publish_view(
             request,
             view.head(),
             view.metadata_view(),
@@ -584,8 +584,8 @@ mod tests {
     async fn plan_against_current_state(
         store: &LocalFsStore,
         namespace_id: &NamespaceId,
-        request: &MutationRequest,
-    ) -> PlannedMutation {
+        request: &CommitRequest,
+    ) -> PlannedCommit {
         try_plan_against_current_state(store, namespace_id, request)
             .await
             .expect("plan")
@@ -856,7 +856,7 @@ mod tests {
         let planned = plan_against_current_state(
             &store,
             &namespace_id,
-            &MutationRequest {
+            &CommitRequest {
                 commit_id: CommitId::parse("batch-create-then-put").expect("valid commit id"),
                 message: None,
                 operations: vec![
@@ -909,7 +909,7 @@ mod tests {
         let planned = plan_against_current_state(
             &store,
             &namespace_id,
-            &MutationRequest {
+            &CommitRequest {
                 commit_id: CommitId::parse("batch-delete-then-create").expect("valid commit id"),
                 message: None,
                 operations: vec![
@@ -946,7 +946,7 @@ mod tests {
         let error = try_plan_against_current_state(
             &store,
             &namespace_id,
-            &MutationRequest {
+            &CommitRequest {
                 commit_id: CommitId::parse("batch-with-a-bad-op").expect("valid commit id"),
                 message: None,
                 operations: vec![
@@ -978,7 +978,7 @@ mod tests {
         let error = try_plan_against_current_state(
             &store,
             &namespace_id,
-            &MutationRequest {
+            &CommitRequest {
                 commit_id: CommitId::parse("empty-request").expect("valid commit id"),
                 message: None,
                 operations: Vec::new(),

@@ -206,8 +206,8 @@ The codes that populate it:
 | `commit_id_reuse_conflict` | `commit_id` |
 | `rebootstrap_required` | `after_seq`, `retention_floor_seq` |
 | `not_deleted` | `inode_id`, plus `requested_deletion_seq` and `active_deletion_seq` when a live deletion exists at a different generation |
-| any failed mutation | `commit_id` — the idempotency key the request committed under, echoed so failed and uncertain outcomes carry the caller's reconciliation handle (section 5.2) |
-| any mutation carrying more than one operation | `operation_index` — the position of the operation that stopped the request (section 5.1) |
+| any failed commit | `commit_id` — the idempotency key the request committed under, echoed so failed and uncertain outcomes carry the caller's reconciliation handle (section 5.2) |
+| any commit carrying more than one operation | `operation_index` — the position of the operation that stopped the request (section 5.1) |
 
 One code exists specifically so capability handling is uniform from day one:
 
@@ -284,7 +284,7 @@ codebase.
   grouped (`core`, `admin`, and later), so the surface a deployment does not
   support is visibly absent instead of failing call by call.
 
-## 5. Minimal upload, mutation, and change-feed model
+## 5. Minimal upload, commit, and change-feed model
 
 The writer surface has three stages:
 
@@ -298,7 +298,7 @@ This split is deliberate:
 - WAL-segment durability is not visibility by itself; and
 - head advance is the visibility point.
 
-A mutation request may therefore be rejected immediately, or tentatively
+A commit request may therefore be rejected immediately, or tentatively
 accepted into a WAL batch, without yet being a committed or successful change.
 
 The embedded `loonfs::FsWriter` makes the first two stages independently
@@ -310,14 +310,14 @@ response together with the same evidence. These are embedded conveniences,
 not HTTP operations; hosted clients continue to carry validated content
 tokens on the existing wire requests.
 
-### 5.1 Mutation identity and race guards
+### 5.1 Commit identity and race guards
 
-A mutation is one request: a `commit_id` — a client-generated stable
+A commit is one request: a `commit_id` — a client-generated stable
 idempotency key that must be reused verbatim for safe retries — an optional
-`message` (a human-readable annotation that is part of the mutation's
+`message` (a human-readable annotation that is part of the commit's
 identity), and an ordered, non-empty list of path operations. A request with
 one operation is the same shape as a request with many, so a convenience
-call and a one-element list are the same mutation and fingerprint alike.
+call and a one-element list are the same commit and fingerprint alike.
 A `message` is at most 4096 bytes; a longer one is rejected with
 `invalid_request` before planning, on every transport.
 
@@ -368,26 +368,26 @@ the requested cursor is older than the retention floor, the caller must
 re-bootstrap instead of expecting older incremental history to remain
 available.
 
-### 5.2 Mutation responses and safe retry
+### 5.2 Commit responses and safe retry
 
-Every committed mutation returns the same response envelope: the `namespace_id` that changed, the
-`commit_id` the mutation committed under, and the `committed_seq` where it
+Every commit returns the same response envelope: the `namespace_id` that changed, the
+`commit_id` it committed under, and the `committed_seq` where it
 became visible. When the caller did not supply a commit id, the surface that
 accepted the request generates one and returns it, so every caller holds the
 identity it needs to reconcile an uncertain outcome.
 
 The retry rule has three cases:
 
-- Resubmitting the semantically identical mutation with the same `commit_id`
+- Resubmitting the semantically identical commit with the same `commit_id`
   is safe: if the original committed, the response replays the original
   `committed_seq` without committing again; if it never committed, the
   resubmission completes it.
-- Reusing a `commit_id` for a different mutation fails with
+- Reusing a `commit_id` for a different commit fails with
   `commit_id_reuse_conflict`.
-- Retrying with a new `commit_id` is a new logical mutation.
+- Retrying with a new `commit_id` is a new logical commit.
 
 Caller-supplied race guards (`expected_inode_id` on delete,
-`expected_revision_no` on put) are part of the mutation's semantic identity,
+`expected_revision_no` on put) are part of the commit's semantic identity,
 so changing, adding, or removing a guard while reusing a `commit_id` fails
 with `commit_id_reuse_conflict`.
 
@@ -396,12 +396,12 @@ commit-status lookup: after `commit_outcome_unknown`, a transport failure, or
 a process restart, resubmit the same request with the same `commit_id` and
 read the definitive answer from the response.
 
-The blocking Rust client automatically retries reads, commit-id mutations,
+The blocking Rust client automatically retries reads, commits,
 replay-safe upload stages, and idempotent maintenance calls, but makes one
 attempt for namespace create, fork, and delete, upload-session begin, and
 presigned direct PUT.
 
-Committed mutations record a durable receipt binding the `commit_id` to its
+Commits record a durable receipt binding the `commit_id` to its
 `committed_seq`; replay reads that receipt. Receipts are currently retained
 for the life of the namespace. When receipt retention becomes bounded, this
 contract will state the replay window explicitly, and resubmission after the
@@ -410,7 +410,7 @@ window must fail loudly rather than silently committing again.
 ### 5.3 Writer topology and fencing
 
 Each namespace has one active writer session. Many concurrent clients may
-submit mutations through that session — the reference server is exactly this
+submit commits through that session — the reference server is exactly this
 shape: one service-level writer session coordinating every client request —
 and independent readers scale separately.
 
@@ -444,7 +444,7 @@ A representative v0 binding is shown below.
 | List file revisions by path | `GET /v0/namespaces/{ns}/filesystem/revisions?path=/docs/report.txt&limit=100&cursor=...` |
 | Read file content | `GET /v0/namespaces/{ns}/filesystem/content?path=/docs/report.txt` |
 | Read prior file content by path | `GET /v0/namespaces/{ns}/filesystem/content?path=/docs/report.txt&revision_no=3` |
-| Apply path-oriented operations | `POST /v0/namespaces/{ns}/filesystem/operations` |
+| Apply a commit | `POST /v0/namespaces/{ns}/commits` |
 | Begin or prepare upload | `POST /v0/namespaces/{ns}/uploads` |
 | Upload full staged content | `PUT /v0/namespaces/{ns}/uploads/{upload_id}/content` |
 | Complete staged upload | `POST /v0/namespaces/{ns}/uploads/{upload_id}/complete` |
@@ -598,12 +598,14 @@ ignored.
       "token": "opaque-server-token"
     }
   ],
-  "operation": {
-    "kind": "put_file",
-    "path": "/docs/report.pdf",
-    "content_ref": { "kind": "whole_file_v0", "digest": "sha256:...", "size_bytes": 1234 },
-    "behavior": "no_replace"
-  }
+  "operations": [
+    {
+      "kind": "put_file",
+      "path": "/docs/report.pdf",
+      "content_ref": { "kind": "whole_file_v0", "digest": "sha256:...", "size_bytes": 1234 },
+      "behavior": "no_replace"
+    }
+  ]
 }
 ```
 
@@ -847,25 +849,82 @@ the retention floor has advanced.
 }
 ```
 
-### 6.8 `POST /filesystem/operations`
+### 6.8 `POST /commits`
+
+This is the binding for the commit model in section 5.1: one `commit_id`,
+an optional `message`, and `operations` — an ordered, non-empty array of
+path operations. An empty array is `invalid_request`.
 
 Representative request:
 
 ```json
 {
   "commit_id": "c_f3a9c2d4b6e8417a90c5d2f8e1b7a6c0",
-  "operation": {
-    "kind": "move_path",
-    "from_path": "/docs/report.txt",
-    "to_path": "/reports/report.txt",
-    "behavior": "replace"
-  }
+  "operations": [
+    {
+      "kind": "move_path",
+      "from_path": "/docs/report.txt",
+      "to_path": "/reports/report.txt",
+      "behavior": "replace"
+    }
+  ]
 }
 ```
 
-This binding carries one operation per request, which is the one-operation
-case of the mutation model in section 5.1; a request body that carries an
-ordered list is not part of v0 yet.
+A one-operation request is the one-element case of this shape, not a
+different request: a convenience call and a batch produce the same commit
+and the same fingerprint, so a commit id used by either replays against the
+other.
+
+The operations commit together, in order, as one logical commit: either
+every operation commits or none does. Operation `k` sees authoritative
+namespace state plus everything operations `0..k` do, so one request can
+create a directory and write into it:
+
+```json
+{
+  "commit_id": "c_2a41d0c6b9f34e7d8a1b5c9e0f234567",
+  "message": "import the January report",
+  "content_tokens": [
+    {
+      "content_ref": { "kind": "whole_file_v0", "digest": "sha256:...", "size_bytes": 1234 },
+      "token": "opaque-server-token"
+    }
+  ],
+  "operations": [
+    { "kind": "create_directory", "path": "/reports/2026" },
+    {
+      "kind": "put_file",
+      "path": "/reports/2026/january.pdf",
+      "content_ref": { "kind": "whole_file_v0", "digest": "sha256:...", "size_bytes": 1234 },
+      "behavior": "no_replace"
+    },
+    {
+      "kind": "delete_path",
+      "path": "/inbox/january.pdf"
+    }
+  ]
+}
+```
+
+One `content_tokens` proof covers every operation that names its
+`content_ref`; tokens naming a ref no operation puts are ignored.
+
+The first operation that fails aborts the whole request — nothing it or its
+predecessors would have written becomes visible — and the error names the
+position that stopped it. Had the put above raced another writer:
+
+```json
+{
+  "code": "path_conflict",
+  "message": "operation 1: destination `/reports/2026/january.pdf` already exists",
+  "request_id": "req_9c2f4a1b7d8e4f21a0b3c4d5e6f70819",
+  "details": {
+    "commit_id": "c_2a41d0c6b9f34e7d8a1b5c9e0f234567",
+    "operation_index": 1
+  }
+}
+```
 
 Move and copy accept the same `behavior` choice as put: `no_replace` (the
 default) fails when the destination is occupied, and `replace` replaces a
@@ -880,11 +939,11 @@ write fails with the revision conflict's expected/actual details instead of
 silently stacking a revision on state the caller never saw. The guard
 asserts an existing file — an absent path answers `path_not_found`, and
 combining it with `no_replace` is `invalid_request`. Like the delete guard,
-it is part of the mutation's semantic identity for commit-id reuse.
+it is part of the commit's semantic identity for commit-id reuse.
 
 A successful response is returned only after the underlying change is actually
 committed: the WAL segment is durable and the head has advanced. Every
-mutation returns the same envelope (section 5.2).
+commit returns the same envelope (section 5.2).
 
 Representative response:
 
@@ -901,10 +960,7 @@ The same endpoint also accepts path directory creation:
 ```json
 {
   "commit_id": "c_8b7d4ef098ec4c1fbde15edbe02f9a64",
-  "operation": {
-    "kind": "create_directory",
-    "path": "/docs"
-  }
+  "operations": [{ "kind": "create_directory", "path": "/docs" }]
 }
 ```
 
@@ -913,11 +969,13 @@ and path revision restore:
 ```json
 {
   "commit_id": "c_8f9a1b2c3d4e4f50a6b7c8d9e0f12345",
-  "operation": {
-    "kind": "restore_revision",
-    "path": "/docs/report.txt",
-    "source_revision_no": 3
-  }
+  "operations": [
+    {
+      "kind": "restore_revision",
+      "path": "/docs/report.txt",
+      "source_revision_no": 3
+    }
+  ]
 }
 ```
 
@@ -930,12 +988,14 @@ the inode id and the deletion's committed sequence.
 ```json
 {
   "commit_id": "c_5d6e7f8091a2b3c4d5e6f70812345678",
-  "operation": {
-    "kind": "undelete",
-    "inode_id": 42,
-    "deleted_at_seq": 17,
-    "path": "/docs/report.txt"
-  }
+  "operations": [
+    {
+      "kind": "undelete",
+      "inode_id": 42,
+      "deleted_at_seq": 17,
+      "path": "/docs/report.txt"
+    }
+  ]
 }
 ```
 
@@ -1024,7 +1084,7 @@ Representative complete-upload response:
 
 ### 6.10 `GET /changes`
 
-Each change is one committed mutation carrying its identity (`seq`,
+Each change is one commit carrying its identity (`seq`,
 `commit_id`, observational `committed_at_ms`, writer provenance, optional
 `message`) and `events`: semantic filesystem events, exactly one per
 committed operation, in request-operation order.
@@ -1263,7 +1323,7 @@ Typical behavior:
 
 - maintains a durable cursor;
 - projects remote state into local state;
-- may upload content and publish mutations of its own;
+- may upload content and publish commits of its own;
 - preserves conflicts according to the client's conflict policy.
 
 ### 8.3 Operator or admin tool

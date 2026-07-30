@@ -19,7 +19,7 @@ use loonfs_api::ErrorCode;
 use loonfs_api::{
     ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior, GrepRequest, NamespaceId,
 };
-use loonfs_client::{Client, ClientConfig, ClientError, MutationOptions, NamespacePath};
+use loonfs_client::{Client, ClientConfig, ClientError, CommitOptions, NamespacePath};
 use loonfs_grep::keyspace::{manifest_key as grep_manifest_key, root_key as grep_root_key};
 use loonfs_grep::root::{encode_grep_root, GrepManifestId, GrepRootEnvelope, GrepRootPointer};
 use loonfs_grep::{GrepDriverParked, GrepIndexSnapshot, GrepWorker, NamespaceReads};
@@ -743,7 +743,7 @@ async fn http_missing_namespace_mutations_return_namespace_not_found() {
                 &target,
                 &destination,
                 DestinationBehavior::NoReplace,
-                &MutationOptions::default(),
+                &CommitOptions::default(),
             )
             .await,
         404,
@@ -843,7 +843,7 @@ async fn http_put_over_directory_and_move_into_existing_target_return_path_confl
                 &from,
                 &to,
                 DestinationBehavior::NoReplace,
-                &MutationOptions::default(),
+                &CommitOptions::default(),
             )
             .await,
         409,
@@ -902,7 +902,7 @@ async fn http_put_and_move_under_deleted_ancestor_create_fresh_subtrees() {
             &from,
             &to,
             DestinationBehavior::NoReplace,
-            &MutationOptions::default(),
+            &CommitOptions::default(),
         )
         .await
         .expect("move lands in the recreated subtree");
@@ -1070,23 +1070,23 @@ async fn http_malformed_request_pieces_answer_in_envelope_behind_auth() {
         .expect_err("unauthorized malformed body should answer 401");
     expect_enveloped(error, 401, "unauthorized");
 
-    // Filesystem-operation paths now validate while the authorized JSON
-    // body is decoded. The served code stays the same invalid_request
+    // Commit operation paths now validate while the authorized JSON body
+    // is decoded. The served code stays the same invalid_request
     // classification the former handler-boundary validation used.
-    let operation_url = format!("http://{addr}/v0/namespaces/demo/filesystem/operations");
+    let commits_url = format!("http://{addr}/v0/namespaces/demo/commits");
     let invalid_operation = r#"{
         "commit_id":"invalid-path",
-        "operation":{"kind":"create_directory","path":"relative"}
+        "operations":[{"kind":"create_directory","path":"relative"}]
     }"#;
     let error = raw_agent()
-        .post(&operation_url)
+        .post(&commits_url)
         .set("authorization", "Bearer test-token")
         .set("content-type", "application/json")
         .send_string(invalid_operation)
         .expect_err("invalid operation path should answer 400");
     expect_enveloped(error, 400, "invalid_request");
     let error = raw_agent()
-        .post(&operation_url)
+        .post(&commits_url)
         .set("content-type", "application/json")
         .send_string(invalid_operation)
         .expect_err("authorization should precede operation path decoding");

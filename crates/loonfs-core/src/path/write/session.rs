@@ -1,8 +1,8 @@
 //! [`PublishPlanningSession`]: plans a batch's candidates in admission
 //! order, each seeing the rows earlier candidates would persist.
 
-use super::intent::MutationRequest;
-use super::planner::{plan_mutation_against_publish_view, PlannedMutation};
+use super::intent::CommitRequest;
+use super::planner::{plan_commit_against_publish_view, PlannedCommit};
 use crate::commit::CommitPlan;
 use crate::error::Result;
 use crate::metadata::{DurableVisibilityCache, MetadataState, MetadataView};
@@ -51,14 +51,14 @@ impl PublishPlanningSession {
         &self.durable_cache
     }
 
-    pub(crate) async fn plan_mutation<S: ObjectStore + ?Sized>(
+    pub(crate) async fn plan_commit<S: ObjectStore + ?Sized>(
         &self,
-        request: &MutationRequest,
+        request: &CommitRequest,
         base_view: MetadataView<'_, '_, S>,
         committed_at_ms: u64,
-    ) -> Result<PlannedMutation> {
+    ) -> Result<PlannedCommit> {
         let cached_view = base_view.with_durable_cache(&self.durable_cache);
-        plan_mutation_against_publish_view(
+        plan_commit_against_publish_view(
             request,
             &self.head,
             cached_view,
@@ -81,7 +81,7 @@ impl PublishPlanningSession {
 mod tests {
     use super::super::intent::FilesystemOperation;
     use super::*;
-    use crate::commit_engine::{publish_namespace_mutations_batch, MutationCandidate};
+    use crate::commit_engine::{publish_namespace_commits_batch, CommitCandidate};
     use crate::context::MutationContext;
     use crate::error::{CoreError, ErrorCode};
     use crate::namespace::bootstrap::bootstrap_namespace;
@@ -120,13 +120,13 @@ mod tests {
         absolute_path: &str,
         content_store_id: &loonfs_api::ContentStoreId,
         content_ref: loonfs_api::ContentRef,
-    ) -> MutationCandidate {
+    ) -> CommitCandidate {
         let admission = ContentAdmission::for_durable_content_write(
             content_store_id.clone(),
             content_ref.clone(),
         );
-        MutationCandidate::prepared(
-            MutationRequest::single(
+        CommitCandidate::prepared(
+            CommitRequest::single(
                 CommitId::parse(commit_id).expect("valid commit id"),
                 None,
                 FilesystemOperation::PutFile {
@@ -150,7 +150,7 @@ mod tests {
             .await
             .expect("stage");
         // Durable parent directory so the walks touch manifest-backed state.
-        publish_namespace_mutations_batch(
+        publish_namespace_commits_batch(
             &store,
             &namespace_id,
             vec![put_file_candidate(
@@ -177,7 +177,7 @@ mod tests {
         .expect("load publish view");
         let session = PublishPlanningSession::new(view.head());
 
-        let first_request = MutationRequest::single(
+        let first_request = CommitRequest::single(
             CommitId::parse("plan-a").expect("valid commit id"),
             None,
             FilesystemOperation::PutFile {
@@ -188,12 +188,12 @@ mod tests {
             },
         );
         session
-            .plan_mutation(&first_request, view.metadata_view(), 1)
+            .plan_commit(&first_request, view.metadata_view(), 1)
             .await
             .expect("first plan");
         let after_first = session.durable_cache().stats();
 
-        let second_request = MutationRequest::single(
+        let second_request = CommitRequest::single(
             CommitId::parse("plan-b").expect("valid commit id"),
             None,
             FilesystemOperation::PutFile {
@@ -204,7 +204,7 @@ mod tests {
             },
         );
         session
-            .plan_mutation(&second_request, view.metadata_view(), 1)
+            .plan_commit(&second_request, view.metadata_view(), 1)
             .await
             .expect("second plan");
         let after_second = session.durable_cache().stats();
@@ -229,7 +229,7 @@ mod tests {
             .await
             .expect("stage");
 
-        let results = publish_namespace_mutations_batch(
+        let results = publish_namespace_commits_batch(
             &store,
             &namespace_id,
             vec![
@@ -275,7 +275,7 @@ mod tests {
             .await
             .expect("stage");
 
-        let results = publish_namespace_mutations_batch(
+        let results = publish_namespace_commits_batch(
             &store,
             &namespace_id,
             vec![
@@ -309,7 +309,7 @@ mod tests {
             .await
             .expect("stage");
 
-        let results = publish_namespace_mutations_batch(
+        let results = publish_namespace_commits_batch(
             &store,
             &namespace_id,
             vec![
@@ -319,7 +319,7 @@ mod tests {
                     &staged.content_store_id,
                     staged.content_ref.clone(),
                 ),
-                MutationCandidate::new(MutationRequest::single(
+                CommitCandidate::new(CommitRequest::single(
                     CommitId::parse("delete-doomed").expect("valid commit id"),
                     None,
                     FilesystemOperation::DeletePath {

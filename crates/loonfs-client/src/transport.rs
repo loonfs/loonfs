@@ -158,7 +158,7 @@ impl Client {
     /// `commit_queue_full`, `shutting_down`) and network-level transport
     /// errors — with doubling backoff, bounded by
     /// [`MAX_TRANSIENT_ATTEMPTS`]. Call sites opt into this path only for
-    /// reads, mutations with durable replay identity, and operations whose
+    /// reads, commits (which carry a durable replay identity), and operations whose
     /// repeat semantics are idempotent. Lifecycle mutations and upload
     /// session creation use [`Self::call_once`] so ambiguous success remains
     /// visible to the caller. Other unavailability codes are excluded on

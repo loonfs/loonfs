@@ -148,23 +148,23 @@ impl From<ControlUpdateError> for WriterEpochAcquireError {
 mod tests {
     use super::*;
     use crate::commit_engine::delete_namespace;
-    use crate::commit_engine::{MutationCandidate, NamespaceCommitEngine};
+    use crate::commit_engine::{CommitCandidate, NamespaceCommitEngine};
     use crate::error::ErrorCode;
     use crate::namespace::bootstrap::bootstrap_namespace;
     use crate::namespace::control::read_head_object;
     use crate::options::DeleteNamespaceOptions;
 
-    async fn submit_mutation<S: loonfs_objectstore::ObjectStore + ?Sized>(
+    async fn submit_commit<S: loonfs_objectstore::ObjectStore + ?Sized>(
         store: &S,
         namespace_id: &NamespaceId,
-        request: crate::path::write::MutationRequest,
+        request: crate::path::write::CommitRequest,
         context: &crate::context::MutationContext,
     ) -> crate::error::Result<loonfs_api::v0::CommitResponse> {
         let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
         engine
             .publish_batch(
                 store,
-                vec![MutationCandidate::new(request)],
+                vec![CommitCandidate::new(request)],
                 context,
                 &crate::protocol::PublishTailOptions::default(),
             )
@@ -367,8 +367,8 @@ mod tests {
     fn create_dir_request(
         commit_id: &str,
         display_name: &str,
-    ) -> crate::path::write::MutationRequest {
-        crate::path::write::MutationRequest::single(
+    ) -> crate::path::write::CommitRequest {
+        crate::path::write::CommitRequest::single(
             CommitId::parse(commit_id).expect("valid commit id"),
             None,
             crate::path::write::FilesystemOperation::CreateDir {
@@ -393,7 +393,7 @@ mod tests {
             .await
             .expect("bootstrap");
 
-        submit_mutation(
+        submit_commit(
             &store,
             &namespace_id,
             create_dir_request("writer-a-first", "from-a"),
@@ -403,7 +403,7 @@ mod tests {
         .expect("writer a first commit");
 
         let writer_b = context("writer-b", 2_000);
-        submit_mutation(
+        submit_commit(
             &store,
             &namespace_id,
             create_dir_request("writer-b-first", "from-b"),
@@ -413,7 +413,7 @@ mod tests {
         .expect("writer b commit after takeover");
 
         let writer_a_again = context("writer-a", 3_000);
-        submit_mutation(
+        submit_commit(
             &store,
             &namespace_id,
             create_dir_request("writer-a-second", "from-a-again"),

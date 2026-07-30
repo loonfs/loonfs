@@ -7,10 +7,10 @@
 
 #![allow(clippy::panic)]
 
-use super::super::{CommitOp, CommitRequest, CommitValidationContext, PlannedOp};
+use super::super::{CommitIr, CommitOp, CommitValidationContext, PlannedOp};
 use super::build_commit_plan;
 use crate::commit::{
-    materialize_commit, CommitOpResult, CommitValidationError, MutationFingerprint, PreparedCommit,
+    materialize_commit, CommitFingerprint, CommitOpResult, CommitValidationError, PreparedCommit,
 };
 use crate::error::{CoreError, ErrorCode};
 use crate::metadata::MetadataState;
@@ -35,8 +35,8 @@ fn planned(ops: Vec<CommitOp>) -> Vec<PlannedOp> {
     ops.into_iter().map(PlannedOp::unchecked).collect()
 }
 
-fn test_fingerprint() -> MutationFingerprint {
-    MutationFingerprint::new_unchecked("v0:sha256:test".to_owned())
+fn test_fingerprint() -> CommitFingerprint {
+    CommitFingerprint::new_unchecked("v0:sha256:test".to_owned())
 }
 
 fn wal_create_directory(
@@ -180,7 +180,7 @@ async fn stale_revision_precondition_is_rejected() {
         wal_append_revision(0, InodeId(3), RevisionNo(2), content_ref("content-2")),
     ]);
     let context = validation_context(&metadata_state, ChangeSeq(3), InodeId(4));
-    let request = CommitRequest {
+    let request = CommitIr {
         namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
         commit_id: CommitId::parse("stale-revision").expect("valid commit id"),
         writer_epoch: WriterEpoch(1),
@@ -209,7 +209,7 @@ async fn stale_revision_precondition_is_rejected() {
 async fn failed_multi_op_plan_uses_preview_without_mutating_base_metadata() {
     let metadata_state = metadata_state_after(&[]);
     let context = validation_context(&metadata_state, ChangeSeq(0), InodeId(2));
-    let request = CommitRequest {
+    let request = CommitIr {
         namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
         commit_id: CommitId::parse("preview-rollback").expect("valid commit id"),
         writer_epoch: WriterEpoch(1),
@@ -272,7 +272,7 @@ async fn create_and_replace_under_ancestor_tombstone_report_corruption() {
     let context = validation_context(&metadata_state, ChangeSeq(3), InodeId(4));
 
     let create_error = build_commit_plan(
-        &CommitRequest {
+        &CommitIr {
             namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
             commit_id: CommitId::parse("create-under-tombstone").expect("valid commit id"),
             writer_epoch: WriterEpoch(1),
@@ -301,7 +301,7 @@ async fn create_and_replace_under_ancestor_tombstone_report_corruption() {
     );
 
     let replace_error = build_commit_plan(
-        &CommitRequest {
+        &CommitIr {
             namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
             commit_id: CommitId::parse("replace-under-tombstone").expect("valid commit id"),
             writer_epoch: WriterEpoch(1),
@@ -339,7 +339,7 @@ async fn restore_revision_validation_rejects_missing_inode() {
         "docs".to_owned(),
     )]);
     let context = validation_context(&metadata_state, ChangeSeq(1), InodeId(3));
-    let request = CommitRequest {
+    let request = CommitIr {
         namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
         commit_id: CommitId::parse("restore-missing-inode").expect("valid commit id"),
         writer_epoch: WriterEpoch(1),
@@ -371,7 +371,7 @@ async fn restore_revision_validation_rejects_non_file_target() {
         "docs".to_owned(),
     )]);
     let context = validation_context(&metadata_state, ChangeSeq(1), InodeId(3));
-    let request = CommitRequest {
+    let request = CommitIr {
         namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
         commit_id: CommitId::parse("restore-non-file").expect("valid commit id"),
         writer_epoch: WriterEpoch(1),
@@ -411,7 +411,7 @@ async fn restore_revision_validation_rejects_stale_or_missing_source_revision() 
     let context = validation_context(&metadata_state, ChangeSeq(3), InodeId(4));
 
     let stale_base = build_commit_plan(
-        &CommitRequest {
+        &CommitIr {
             namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
             commit_id: CommitId::parse("restore-stale-base").expect("valid commit id"),
             writer_epoch: WriterEpoch(1),
@@ -437,7 +437,7 @@ async fn restore_revision_validation_rejects_stale_or_missing_source_revision() 
     ));
 
     let missing_source = build_commit_plan(
-        &CommitRequest {
+        &CommitIr {
             namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
             commit_id: CommitId::parse("restore-missing-source").expect("valid commit id"),
             writer_epoch: WriterEpoch(1),
@@ -476,7 +476,7 @@ async fn restore_revision_can_reference_revision_created_earlier_in_same_request
     ]);
     let context = validation_context(&metadata_state, ChangeSeq(2), InodeId(4));
 
-    let request = CommitRequest {
+    let request = CommitIr {
         namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
         commit_id: CommitId::parse("restore-same-request-source").expect("valid commit id"),
         writer_epoch: WriterEpoch(1),
@@ -526,7 +526,7 @@ async fn restore_revision_can_reference_restore_created_earlier_in_same_request(
     ]);
     let context = validation_context(&metadata_state, ChangeSeq(3), InodeId(4));
 
-    let request = CommitRequest {
+    let request = CommitIr {
         namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
         commit_id: CommitId::parse("restore-after-restore-same-request").expect("valid commit id"),
         writer_epoch: WriterEpoch(1),
@@ -587,7 +587,7 @@ async fn restore_revision_under_tombstoned_ancestor_reports_corruption() {
     let context = validation_context(&metadata_state, ChangeSeq(3), InodeId(4));
 
     let error = build_commit_plan(
-        &CommitRequest {
+        &CommitIr {
             namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
             commit_id: CommitId::parse("restore-under-tombstone").expect("valid commit id"),
             writer_epoch: WriterEpoch(1),
@@ -640,7 +640,7 @@ async fn restore_revision_overflow_is_rejected() {
         )
         .apply_committed_wal_deltas(ChangeSeq(1), 4_200, &deltas);
     let context = validation_context(&metadata_state, ChangeSeq(1), InodeId(3));
-    let request = CommitRequest {
+    let request = CommitIr {
         namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
         commit_id: CommitId::parse("restore-overflow").expect("valid commit id"),
         writer_epoch: WriterEpoch(1),

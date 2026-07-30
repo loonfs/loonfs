@@ -332,8 +332,8 @@ async fn wait_past_cas_pacing() {
 fn create_directory_request(
     commit_id: impl Into<String>,
     directory_name: impl AsRef<str>,
-) -> MutationRequest {
-    MutationRequest::single(
+) -> CommitRequest {
+    CommitRequest::single(
         CommitId::parse(commit_id.into()).expect("valid commit id"),
         None,
         FilesystemOperation::CreateDir {
@@ -344,27 +344,27 @@ fn create_directory_request(
     )
 }
 
-fn admit_mutation(
+fn admit_commit(
     publisher: &NamespacePublisher,
     namespace_id: &NamespaceId,
-    request: MutationRequest,
+    request: CommitRequest,
 ) -> oneshot::Receiver<CommitResult> {
-    try_admit_mutation(publisher, namespace_id, request).expect("admit mutation")
+    try_admit_commit(publisher, namespace_id, request).expect("admit mutation")
 }
 
-fn try_admit_mutation(
+fn try_admit_commit(
     publisher: &NamespacePublisher,
     namespace_id: &NamespaceId,
-    request: MutationRequest,
+    request: CommitRequest,
 ) -> Result<oneshot::Receiver<CommitResult>, CoreError> {
-    let candidate = MutationCandidate::new(request);
+    let candidate = CommitCandidate::new(request);
     try_admit_candidate(publisher, namespace_id, candidate)
 }
 
 fn try_admit_candidate(
     publisher: &NamespacePublisher,
     namespace_id: &NamespaceId,
-    candidate: MutationCandidate,
+    candidate: CommitCandidate,
 ) -> Result<oneshot::Receiver<CommitResult>, CoreError> {
     let commit_id = candidate.commit_id().clone();
     let semantic_identity = candidate.semantic_identity(namespace_id)?;
@@ -418,13 +418,13 @@ async fn rejected_duplicate_joins_ready_in_flight_primary() {
     let primary = try_admit_candidate(
         &publisher,
         &namespace_id,
-        MutationCandidate::new(request.clone()),
+        CommitCandidate::new(request.clone()),
     )
     .expect("admit ready primary");
     let duplicate = try_admit_candidate(
         &publisher,
         &namespace_id,
-        MutationCandidate::rejected(
+        CommitCandidate::rejected(
             request,
             ContentPreparationError::ContentToken(ContentTokenError::Expired),
         ),
@@ -456,13 +456,13 @@ async fn ready_duplicate_joins_rejected_in_flight_primary() {
     let primary = try_admit_candidate(
         &publisher,
         &namespace_id,
-        MutationCandidate::rejected(
+        CommitCandidate::rejected(
             request.clone(),
             ContentPreparationError::ContentToken(ContentTokenError::Expired),
         ),
     )
     .expect("admit rejected primary");
-    let duplicate = try_admit_candidate(&publisher, &namespace_id, MutationCandidate::new(request))
+    let duplicate = try_admit_candidate(&publisher, &namespace_id, CommitCandidate::new(request))
         .expect("join ready duplicate");
 
     let primary = primary.await.expect("primary result channel");
@@ -486,14 +486,14 @@ async fn publisher_admits_pending_batch_while_active_publish_blocks() {
     let publisher = standalone_publisher(&namespace_id, &runtime);
 
     store.block_next();
-    let active = admit_mutation(
+    let active = admit_commit(
         &publisher,
         &namespace_id,
         create_directory_request("active", "active"),
     );
     store.wait_until_blocked().await;
 
-    let pending = admit_mutation(
+    let pending = admit_commit(
         &publisher,
         &namespace_id,
         create_directory_request("pending", "pending"),
@@ -529,19 +529,19 @@ async fn publisher_duplicate_active_request_joins_while_conflict_fails() {
     let publisher = standalone_publisher(&namespace_id, &runtime);
 
     store.block_next();
-    let active = admit_mutation(
+    let active = admit_commit(
         &publisher,
         &namespace_id,
         create_directory_request("active", "active"),
     );
     store.wait_until_blocked().await;
 
-    let duplicate = admit_mutation(
+    let duplicate = admit_commit(
         &publisher,
         &namespace_id,
         create_directory_request("active", "active"),
     );
-    let conflict = try_admit_mutation(
+    let conflict = try_admit_commit(
         &publisher,
         &namespace_id,
         create_directory_request("active", "different-active"),
@@ -570,7 +570,7 @@ async fn publisher_pending_batch_full_rejects_distinct_but_allows_duplicate() {
     let publisher = standalone_publisher(&namespace_id, &runtime);
 
     store.block_next();
-    let active = admit_mutation(
+    let active = admit_commit(
         &publisher,
         &namespace_id,
         create_directory_request("active", "active"),
@@ -579,19 +579,19 @@ async fn publisher_pending_batch_full_rejects_distinct_but_allows_duplicate() {
 
     let mut pending = Vec::with_capacity(MAX_BATCH_CANDIDATES);
     for index in 0..MAX_BATCH_CANDIDATES {
-        pending.push(admit_mutation(
+        pending.push(admit_commit(
             &publisher,
             &namespace_id,
             create_directory_request(format!("pending-{index}"), format!("pending-{index}")),
         ));
     }
 
-    let duplicate = admit_mutation(
+    let duplicate = admit_commit(
         &publisher,
         &namespace_id,
         create_directory_request("pending-0", "pending-0"),
     );
-    let conflict = try_admit_mutation(
+    let conflict = try_admit_commit(
         &publisher,
         &namespace_id,
         create_directory_request("pending-0", "different-pending"),
@@ -601,7 +601,7 @@ async fn publisher_pending_batch_full_rejects_distinct_but_allows_duplicate() {
         Err(CoreError::CommitIdReuseConflict(commit_id)) if commit_id == "pending-0"
     ));
 
-    let overflow = try_admit_mutation(
+    let overflow = try_admit_commit(
         &publisher,
         &namespace_id,
         create_directory_request("overflow", "overflow"),
@@ -641,7 +641,7 @@ async fn publisher_takes_a_cold_full_batch_immediately() {
     store.block_next();
     let mut receivers = Vec::with_capacity(MAX_BATCH_CANDIDATES);
     for index in 0..MAX_BATCH_CANDIDATES {
-        receivers.push(admit_mutation(
+        receivers.push(admit_commit(
             &publisher,
             &namespace_id,
             create_directory_request(format!("full-{index}"), format!("full-{index}")),
@@ -675,7 +675,7 @@ async fn cold_submission_publishes_without_a_coalescing_delay() {
     create_namespace(&runtime, &namespace_id).await;
     let publisher = standalone_publisher(&namespace_id, &runtime);
 
-    let receiver = admit_mutation(
+    let receiver = admit_commit(
         &publisher,
         &namespace_id,
         create_directory_request("cold", "cold"),
@@ -706,7 +706,7 @@ async fn hot_submissions_wait_out_the_pacing_interval() {
 
     let warmup_started = Instant::now();
     registry
-        .submit_mutation(
+        .submit_commit(
             namespace_id.clone(),
             create_directory_request("warmup", "warmup"),
         )
@@ -714,7 +714,7 @@ async fn hot_submissions_wait_out_the_pacing_interval() {
         .expect("warmup commit");
 
     registry
-        .submit_mutation(namespace_id.clone(), create_directory_request("hot", "hot"))
+        .submit_commit(namespace_id.clone(), create_directory_request("hot", "hot"))
         .await
         .expect("hot commit");
     let elapsed = warmup_started.elapsed();
@@ -739,7 +739,7 @@ async fn publisher_resolves_unknown_head_outcome_by_replaying_receipt() {
     // acquisition is a head compare-and-swap too, and this test is about the
     // publication swap.
     let warm = recv_commit(
-        admit_mutation(
+        admit_commit(
             &publisher,
             &namespace_id,
             create_directory_request("warm-epoch", "warm-epoch"),
@@ -754,7 +754,7 @@ async fn publisher_resolves_unknown_head_outcome_by_replaying_receipt() {
     // instead of reporting `commit_outcome_unknown` to the waiter.
     store.fail_next(1);
     let response = recv_commit(
-        admit_mutation(
+        admit_commit(
             &publisher,
             &namespace_id,
             create_directory_request("unknown-ack", "unknown-ack"),
@@ -777,7 +777,7 @@ async fn publisher_survives_publish_panic_and_keeps_serving() {
     let publisher = standalone_publisher(&namespace_id, &runtime);
 
     store.arm_blocking_panic();
-    let doomed = admit_mutation(
+    let doomed = admit_commit(
         &publisher,
         &namespace_id,
         create_directory_request("doomed", "doomed"),
@@ -786,7 +786,7 @@ async fn publisher_survives_publish_panic_and_keeps_serving() {
 
     // Queued behind the in-flight batch: only a worker that survives the
     // panic can ever publish this one.
-    let queued = admit_mutation(
+    let queued = admit_commit(
         &publisher,
         &namespace_id,
         create_directory_request("queued", "queued"),
@@ -806,7 +806,7 @@ async fn publisher_survives_publish_panic_and_keeps_serving() {
     assert_eq!(queued_response.committed_seq, ChangeSeq(1));
 
     // The publisher is fully serviceable after the panic.
-    let after = admit_mutation(
+    let after = admit_commit(
         &publisher,
         &namespace_id,
         create_directory_request("after", "after"),
@@ -830,13 +830,13 @@ async fn delete_barrier_publishes_admitted_work_and_rejects_later_work() {
 
     // A publishes and blocks at its head CAS; B queues behind it.
     store.block_next();
-    let before_a = admit_mutation(
+    let before_a = admit_commit(
         &publisher,
         &namespace_id,
         create_directory_request("before-a", "before-a"),
     );
     store.wait_until_blocked().await;
-    let before_b = admit_mutation(
+    let before_b = admit_commit(
         &publisher,
         &namespace_id,
         create_directory_request("before-b", "before-b"),
@@ -854,7 +854,7 @@ async fn delete_barrier_publishes_admitted_work_and_rejects_later_work() {
     };
     // Deterministic: wait until the delete has queued behind the open batch.
     wait_for_queued_delete(&publisher).await;
-    let after = admit_mutation(
+    let after = admit_commit(
         &publisher,
         &namespace_id,
         create_directory_request("after", "after"),
@@ -884,7 +884,7 @@ async fn delete_barrier_publishes_admitted_work_and_rejects_later_work() {
         .expect("after waiter answered")
         .expect_err("admitted after the delete");
     assert_eq!(after_error.code(), ErrorCode::NamespaceDeleted);
-    let fast_fail = try_admit_mutation(
+    let fast_fail = try_admit_commit(
         &publisher,
         &namespace_id,
         create_directory_request("too-late", "too-late"),
@@ -911,7 +911,7 @@ async fn second_delete_during_inflight_delete_settles_both() {
     // One publication first, so the session already holds its writer epoch:
     // the next head compare-and-swap is the delete's own tombstone swap.
     recv_commit(
-        admit_mutation(
+        admit_commit(
             &publisher,
             &namespace_id,
             create_directory_request("seed", "seed"),
@@ -933,7 +933,7 @@ async fn second_delete_during_inflight_delete_settles_both() {
 
     // Admitted while the first delete holds the head: a mutation, then a
     // second delete behind it.
-    let orphan = admit_mutation(
+    let orphan = admit_commit(
         &publisher,
         &namespace_id,
         create_directory_request("orphan", "orphan"),
@@ -969,7 +969,7 @@ async fn second_delete_during_inflight_delete_settles_both() {
     assert_eq!(orphan_error.code(), ErrorCode::NamespaceDeleted);
 }
 
-/// Mutation admission races a delete already queued behind an in-flight
+/// Commit admission races a delete already queued behind an in-flight
 /// publication.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mutations_admitted_after_a_queued_delete_wait_behind_it() {
@@ -982,7 +982,7 @@ async fn mutations_admitted_after_a_queued_delete_wait_behind_it() {
     let publisher = standalone_publisher(&namespace_id, &runtime);
 
     store.block_next();
-    let before = admit_mutation(
+    let before = admit_commit(
         &publisher,
         &namespace_id,
         create_directory_request("before", "before"),
@@ -998,7 +998,7 @@ async fn mutations_admitted_after_a_queued_delete_wait_behind_it() {
         })
     };
     wait_for_queued_delete(&publisher).await;
-    let after = admit_mutation(
+    let after = admit_commit(
         &publisher,
         &namespace_id,
         create_directory_request("after", "after"),
@@ -1047,7 +1047,7 @@ async fn publisher_batches_concurrent_distinct_commits_into_one_wal_segment() {
     // two publications. Inside the pacing interval the open batch
     // deterministically holds both.
     registry
-        .submit_mutation(
+        .submit_commit(
             namespace_id.clone(),
             create_directory_request("warmup", "warmup"),
         )
@@ -1058,8 +1058,8 @@ async fn publisher_batches_concurrent_distinct_commits_into_one_wal_segment() {
     let request_b = create_directory_request("req-b", "beta");
 
     let (response_a, response_b) = tokio::join!(
-        registry.submit_mutation(namespace_id.clone(), request_a),
-        registry.submit_mutation(namespace_id.clone(), request_b)
+        registry.submit_commit(namespace_id.clone(), request_a),
+        registry.submit_commit(namespace_id.clone(), request_b)
     );
     assert_eq!(response_a.expect("response a").committed_seq, ChangeSeq(2));
     assert_eq!(response_b.expect("response b").committed_seq, ChangeSeq(3));
@@ -1111,7 +1111,7 @@ async fn publisher_batches_plain_and_prepared_mutations_together() {
     // Warm the namespace so the pacing interval deterministically holds
     // the two concurrent submissions in one batch.
     registry
-        .submit_mutation(
+        .submit_commit(
             namespace_id.clone(),
             create_directory_request("warmup", "warmup"),
         )
@@ -1119,7 +1119,7 @@ async fn publisher_batches_plain_and_prepared_mutations_together() {
         .expect("warmup commit");
 
     let plain = create_directory_request("plain-mutation", "alpha");
-    let prepared = MutationRequest::single(
+    let prepared = CommitRequest::single(
         CommitId::parse("prepared-put").expect("valid commit id"),
         None,
         FilesystemOperation::PutFile {
@@ -1130,8 +1130,8 @@ async fn publisher_batches_plain_and_prepared_mutations_together() {
         },
     );
     let (plain_response, prepared_response) = tokio::join!(
-        registry.submit_mutation(namespace_id.clone(), plain),
-        registry.submit_mutation_with_prepared_content(
+        registry.submit_commit(namespace_id.clone(), plain),
+        registry.submit_commit_with_prepared_content(
             namespace_id.clone(),
             prepared,
             vec![prepared_content]
@@ -1186,7 +1186,7 @@ async fn registry_close_admission_refuses_new_work_while_admitted_work_drains() 
         let namespace_id = namespace_id.clone();
         tokio::spawn(async move {
             registry
-                .submit_mutation(namespace_id, create_directory_request("active", "active"))
+                .submit_commit(namespace_id, create_directory_request("active", "active"))
                 .await
         })
     };
@@ -1195,7 +1195,7 @@ async fn registry_close_admission_refuses_new_work_while_admitted_work_drains() 
     // ...then admission closes. New work is refused at the front door.
     registry.close_admission();
     let refused = registry
-        .submit_mutation(
+        .submit_commit(
             namespace_id.clone(),
             create_directory_request("refused", "refused"),
         )
@@ -1211,7 +1211,7 @@ async fn registry_close_admission_refuses_new_work_while_admitted_work_drains() 
         .get(&namespace_id)
         .expect("active publisher exists")
         .clone();
-    let direct = try_admit_mutation(
+    let direct = try_admit_commit(
         &publisher,
         &namespace_id,
         create_directory_request("direct", "direct"),
@@ -1254,7 +1254,7 @@ async fn worker_survives_panic_and_processes_later_queue_items() {
         let namespace_id = namespace_id.clone();
         tokio::spawn(async move {
             registry
-                .submit_mutation(namespace_id, create_directory_request("doomed", "doomed"))
+                .submit_commit(namespace_id, create_directory_request("doomed", "doomed"))
                 .await
         })
     };
@@ -1267,7 +1267,7 @@ async fn worker_survives_panic_and_processes_later_queue_items() {
         let namespace_id = namespace_id.clone();
         tokio::spawn(async move {
             registry
-                .submit_mutation(namespace_id, create_directory_request("queued", "queued"))
+                .submit_commit(namespace_id, create_directory_request("queued", "queued"))
                 .await
         })
     };
@@ -1318,7 +1318,7 @@ async fn successful_delete_evicts_the_namespace_publisher() {
     let registry = writer.publisher();
 
     registry
-        .submit_mutation(
+        .submit_commit(
             namespace_id.clone(),
             create_directory_request("before", "before"),
         )
@@ -1338,7 +1338,7 @@ async fn successful_delete_evicts_the_namespace_publisher() {
     // A later submission builds a fresh publisher and still fails, now
     // on the durable tombstone instead of the fast in-memory flag.
     let late = registry
-        .submit_mutation(
+        .submit_commit(
             namespace_id.clone(),
             create_directory_request("late", "late"),
         )
@@ -1359,7 +1359,7 @@ async fn close_admission_refuses_without_creating_publishers() {
 
     registry.close_admission();
     let refused = registry
-        .submit_mutation(
+        .submit_commit(
             namespace_id.clone(),
             create_directory_request("nope", "nope"),
         )
@@ -1399,7 +1399,7 @@ async fn delete_queued_mid_publish_waits_behind_admitted_work() {
         let namespace_id = namespace_id.clone();
         tokio::spawn(async move {
             registry
-                .submit_mutation(namespace_id, create_directory_request("before", "before"))
+                .submit_commit(namespace_id, create_directory_request("before", "before"))
                 .await
         })
     };
@@ -1419,7 +1419,7 @@ async fn delete_queued_mid_publish_waits_behind_admitted_work() {
         let namespace_id = namespace_id.clone();
         tokio::spawn(async move {
             registry
-                .submit_mutation(namespace_id, create_directory_request("second", "second"))
+                .submit_commit(namespace_id, create_directory_request("second", "second"))
                 .await
         })
     };

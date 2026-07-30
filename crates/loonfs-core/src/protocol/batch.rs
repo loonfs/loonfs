@@ -11,7 +11,7 @@ use crate::commit::{
     publish_commit_head, wal_payload_from_materialized_commit, CommitHeadPublishError,
     MaterializedCommit, PreparedCommit, PreparedCommitHeadPublish, PublishCommitValidationContext,
 };
-use crate::commit_engine::MutationCandidate;
+use crate::commit_engine::CommitCandidate;
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result, StoreFailureClass};
 use crate::limits::WAL_PUBLISH_BUDGET_MS;
@@ -72,12 +72,12 @@ impl PublishBatchAgainstViewResult {
     }
 }
 
-pub(crate) async fn publish_namespace_mutations_batch_against_publish_view<
+pub(crate) async fn publish_namespace_commits_batch_against_publish_view<
     S: ObjectStore + ?Sized,
 >(
     store: &S,
     namespace_id: &NamespaceId,
-    candidates: &[MutationCandidate],
+    candidates: &[CommitCandidate],
     context: &MutationContext,
     view: &PublishMetadataView<'_, S>,
     timer: &dyn MonotonicTimer,

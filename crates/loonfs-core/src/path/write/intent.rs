@@ -1,11 +1,11 @@
-//! [`MutationRequest`]: the one filesystem mutation language, before planning.
+//! [`CommitRequest`]: the one filesystem commit language, before planning.
 
 use loonfs_api::{
     AbsolutePath, ChangeSeq, CommitId, ContentRef, DeleteDirectoryBehavior, DestinationBehavior,
     InodeId, RevisionNo,
 };
 
-/// One logical filesystem mutation: an idempotency key, an optional caller
+/// One logical filesystem commit: an idempotency key, an optional caller
 /// annotation, and an ordered, non-empty list of operations.
 ///
 /// The whole request is one commit. Operations resolve in order, each seeing
@@ -19,7 +19,7 @@ use loonfs_api::{
 ///
 /// [`parse_mutation_path`]: crate::path::parse_mutation_path
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MutationRequest {
+pub struct CommitRequest {
     /// Client idempotency key for the whole request.
     pub commit_id: CommitId,
     /// Caller annotation recorded on the commit. Part of the request's
@@ -29,7 +29,7 @@ pub struct MutationRequest {
     pub operations: Vec<FilesystemOperation>,
 }
 
-impl MutationRequest {
+impl CommitRequest {
     /// A request carrying exactly one operation.
     pub fn single(
         commit_id: CommitId,
@@ -44,7 +44,7 @@ impl MutationRequest {
     }
 }
 
-/// One path-oriented operation inside a [`MutationRequest`].
+/// One path-oriented operation inside a [`CommitRequest`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FilesystemOperation {
     /// Create one directory.

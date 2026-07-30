@@ -7,7 +7,7 @@
 //! - `operations` — namespace lifecycle, path-oriented filesystem
 //!   operations, file revisions, maintenance, and the `ApiError` body.
 //! - `reads` — authoritative read results (stat/list entries, file bytes).
-//! - `commits` — committed-mutation results and the change feed.
+//! - `commits` — commit results and the change feed.
 //! - `search` — content search and grep-index administration.
 //! - `uploads` — upload sessions and direct-put access.
 //!
@@ -22,12 +22,13 @@ mod uploads;
 
 pub use commits::{ChangesResponse, CommitResponse, CommittedChange, FilesystemChange};
 pub use operations::{
-    AdvanceRetentionResponse, ApiError, CreateCheckpointRequest, CreateCheckpointResponse,
-    CreateNamespaceRequest, DeleteDirectoryBehavior, DeleteNamespaceResponse, DestinationBehavior,
-    ErrorDetails, FileRevision, FilesystemOperation, FilesystemOperationRequest, FlushWalOutcome,
-    FlushWalResponse, ForkNamespaceRequest, GcRequest, GcResponse, ListFileRevisionsResponse,
-    MaintenanceStepKind, MaintenanceStepRequest, MaintenanceStepResponse, NamespaceStatusResponse,
-    NamespaceSummary, ReleaseCheckpointResponse, ReorganizeStepOutcome, WalFlushStepOutcome,
+    AdvanceRetentionResponse, ApiError, CommitRequest, CreateCheckpointRequest,
+    CreateCheckpointResponse, CreateNamespaceRequest, DeleteDirectoryBehavior,
+    DeleteNamespaceResponse, DestinationBehavior, ErrorDetails, FileRevision, FilesystemOperation,
+    FlushWalOutcome, FlushWalResponse, ForkNamespaceRequest, GcRequest, GcResponse,
+    ListFileRevisionsResponse, MaintenanceStepKind, MaintenanceStepRequest,
+    MaintenanceStepResponse, NamespaceStatusResponse, NamespaceSummary, ReleaseCheckpointResponse,
+    ReorganizeStepOutcome, WalFlushStepOutcome,
 };
 pub use reads::{
     AuthoritativeFileBytes, AuthoritativePathEntry, ListPathEntriesResponse, ListTrashResponse,

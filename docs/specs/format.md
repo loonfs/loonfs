@@ -850,7 +850,7 @@ of guessing which of the two readings is the true one.
 
 ### 3.1 Write protocol
 
-A write has four phases: durably stage content (if a mutation contains
+A write has four phases: durably stage content (if a commit contains
 content), reconstruct and validate, publish one or more logical commits into
 the WAL, and advance the head. A commit request may be rejected immediately,
 or tentatively accepted and written to a WAL segment, but it is committed and
@@ -907,7 +907,7 @@ If a request contains multiple operations, they are evaluated sequentially
 against ephemeral state advanced by earlier operations in the same request.
 
 Passing validation does not by itself make the request committed or
-successful. If a client mutation request reaches the success boundary in
+successful. If a client commit request reaches the success boundary in
 section 3.1.4, it becomes one logical commit.
 
 Content reference validation fails before metadata preconditions are evaluated
@@ -1050,7 +1050,7 @@ Given a visible file inode at seq N:
 
 A **file revision** is an immutable content state for one file inode,
 identified by that inode's monotonic `revision_no`. A namespace commit `seq`
-is the global visibility order for committed mutations; it is not a file
+is the global visibility order for commits; it is not a file
 revision number. Revision reads may target either the current path's current
 inode or an inode id directly. Path-based revision reads first resolve the
 path at the current head; inode-based revision reads use the retained revision
@@ -1069,7 +1069,7 @@ Given a visible directory inode at seq N:
 
 ### 3.3 Logical commits, sequence numbers, and visibility
 
-A successful client mutation request is one logical commit.
+A successful client commit request is one logical commit.
 
 A request may contain more than one operation, but:
 
@@ -1104,7 +1104,7 @@ exactly the order shown) of:
 
 ```json
 {
-  "domain": "loonfs.mutation.semantic.v0",
+  "domain": "loonfs.commit.semantic.v0",
   "namespace_id": "...",
   "operations": [...],
   "message": "... or null"
@@ -1117,10 +1117,10 @@ parameters including its caller-supplied race guards), and `message` is
 `null` when absent — so reusing a `commit_id` with a different message, a
 different guard, or the same operations in a different order conflicts. The
 preimage deliberately excludes `commit_id`, writer epoch, and
-`committed_at_ms`: a retry of the same logical mutation must fingerprint
+`committed_at_ms`: a retry of the same logical commit must fingerprint
 identically no matter who retries it or when.
 
-There is one preimage for every mutation. A convenience call carrying one
+There is one preimage for every commit. A convenience call carrying one
 operation and a request carrying a one-element operation list are the same
 request, so they fingerprint identically by construction.
 
@@ -1137,7 +1137,7 @@ within scheme `v0`.
 
 ### 3.4 Server authority
 
-The server is authoritative for mutation validation.
+The server is authoritative for commit validation.
 
 In particular, the server is responsible for:
 
@@ -1185,7 +1185,7 @@ create-inode deltas are not standard client-facing commit operations.
 
 ### 3.6 Preconditions
 
-A mutation may include explicit preconditions. Preconditions are how clients
+A commit may include explicit preconditions. Preconditions are how clients
 say, "apply this only if the namespace still looks like the state I planned
 against."
 
