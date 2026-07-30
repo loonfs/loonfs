@@ -93,7 +93,9 @@ pub mod publish {
 /// catalog binding. The resulting admission records accepted durability
 /// evidence and does not expire. Most embedded users never need this module.
 pub mod content_tokens {
-    pub use loonfs_core::content::{mint_content_token, ContentTokenError};
+    pub use loonfs_core::content::{
+        mint_content_token, CompletedUpload, CompletedUploadReceipt, ContentTokenError,
+    };
 }
 
 /// Server-integration seam: the resolved direct-put upload target a serving

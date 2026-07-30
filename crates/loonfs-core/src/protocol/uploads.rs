@@ -1,26 +1,41 @@
-//! Durable upload sessions: begin, stage, and complete content uploads,
-//! including direct-put targets that move bytes past the server.
+//! Durable upload sessions: begin, stage, complete, and abort content
+//! uploads, including direct-put targets that move bytes past the server.
+//!
+//! A session is `open`, then `completed` or `aborted`, and both of those are
+//! final. The compare-and-swap that lands one of them is the serialization
+//! point for the whole upload: provider state is cleaned strictly after the
+//! durable transition, never before it, so whichever transition wins is what
+//! happened and the loser reports a terminal error instead of undoing
+//! anything.
 
 use crate::context::MutationContext;
 use crate::control_update::{
-    try_update_upload_session, update_upload_session, UploadSessionCas, UploadSessionUpdate,
+    read_upload_session_state, update_upload_session, UploadSessionUpdate,
 };
 use crate::engine::{BeginDirectPutUploadTargetResponse, DirectPutUploadTarget};
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
-use crate::limits::CONTENTION_RETRY_LIMIT;
+use crate::limits::{
+    COMPLETED_UPLOAD_RECEIPT_WINDOW_MS, CONTENTION_RETRY_LIMIT, UPLOAD_SESSION_LEASE_MS,
+};
 use crate::namespace::catalog::load_namespace_content_store_id;
 use crate::namespace::control::load_namespace_head_control;
-use crate::storage::content::{stage_bytes_under_content_id, verify_durable_content_checksum};
-use crate::storage::content_admission::{ContentAdmission, PreparedContent};
+use crate::storage::content::{
+    delete_unpublished_content_object, stage_bytes_under_content_id,
+    verify_durable_content_checksum,
+};
+use crate::storage::content_admission::{
+    CompletedUploadReceipt, ContentAdmission, PreparedContent,
+};
 use bytes::Bytes;
 use loonfs_api::v0::{
-    BeginUploadRequest, BeginUploadResponse, CompleteUploadRequest, CompleteUploadResponse,
-    DirectPutContentClaim, UploadContentResponse, UploadMode,
+    AbortUploadResponse, BeginUploadRequest, BeginUploadResponse, CompleteUploadRequest,
+    CompleteUploadResponse, DirectPutContentClaim, UploadContentResponse, UploadMode,
+    UploadSessionStatus, UploadStatusResponse,
 };
 use loonfs_api::wire::control::{
-    encode_control_object, CompletedUpload, ControlObjectKind, NamespaceState,
-    UploadSessionEnvelope, UploadSessionLifecycle, UploadSessionState,
+    encode_control_object, ControlObjectKind, NamespaceState, UploadSessionEnvelope,
+    UploadSessionLifecycle, UploadSessionState,
 };
 use loonfs_api::{
     ChecksumAlgorithm, ContentId, ContentRef, ContentRefKind, ContentStoreId, NamespaceId,
@@ -28,12 +43,6 @@ use loonfs_api::{
 };
 use loonfs_objectstore::keys::{content_blob, upload_session};
 use loonfs_objectstore::ObjectStore;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum UploadSessionSweep {
-    Delete,
-    Retain,
-}
 
 pub(crate) async fn begin_upload<S: ObjectStore + ?Sized>(
     store: &S,
@@ -171,9 +180,10 @@ async fn create_upload_session<S: ObjectStore + ?Sized>(
         claimed_checksum: session.claimed_checksum,
         direct_put_content_ref: session.direct_put_content_ref,
         staged_content_ref: None,
-        completed: None,
         created_at_ms: context.now_ms,
-        state: UploadSessionLifecycle::Active,
+        state: UploadSessionLifecycle::Open {
+            expires_at_ms: context.now_ms.saturating_add(UPLOAD_SESSION_LEASE_MS),
+        },
     };
     let envelope = UploadSessionEnvelope::from_state(ControlObjectKind::UploadSession, state)
         .map_err(|err| {
@@ -211,6 +221,24 @@ async fn ensure_upload_namespace_available<S: ObjectStore + ?Sized>(
     Ok(())
 }
 
+/// How a terminal session answers an operation that needed it open.
+///
+/// A completed session is a conflict the caller can reason about; an aborted
+/// one reports the same absence the eventual physical deletion does, because
+/// it will never select content again.
+fn terminal_session_error(
+    state: &UploadSessionLifecycle,
+    upload_id: UploadId,
+) -> Option<CoreError> {
+    match state {
+        UploadSessionLifecycle::Open { .. } => None,
+        UploadSessionLifecycle::Completed { .. } => {
+            Some(CoreError::UploadAlreadyCompleted { upload_id })
+        }
+        UploadSessionLifecycle::Aborted { .. } => Some(CoreError::UploadNotFound { upload_id }),
+    }
+}
+
 /// Stages bytes into a service-proxied session.
 ///
 /// The bytes land under the identity the session allocated when it began,
@@ -236,11 +264,8 @@ pub(crate) async fn upload_content<S: ObjectStore + ?Sized>(
             let namespace_id = namespace_id.clone();
             let upload_id = upload_id.to_owned();
             async move {
-                if state.state == UploadSessionLifecycle::Condemned {
-                    return Err(CoreError::UploadNotFound { upload_id });
-                }
-                if state.completed.is_some() {
-                    return Err(CoreError::UploadAlreadyCompleted { upload_id });
+                if let Some(error) = terminal_session_error(&state.state, upload_id.clone()) {
+                    return Err(error);
                 }
                 if state.mode == UploadMode::DirectPut {
                     return Err(CoreError::InvalidUploadContent(
@@ -284,13 +309,38 @@ pub(crate) async fn upload_content<S: ObjectStore + ?Sized>(
     .await
 }
 
+/// Completes an upload: verify the bytes, then make the completion durable.
+///
+/// The order is the contract. Verification happens before the
+/// compare-and-swap, so nothing is ever recorded as completed on the
+/// strength of a provider response alone; and the terminal states are
+/// checked before any provider call, so a completion arriving after an abort
+/// fails without touching the object the abort is cleaning up.
 pub(crate) async fn complete_upload<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     content_store_id: &ContentStoreId,
     upload_id: &UploadId,
     request: &CompleteUploadRequest,
-) -> Result<(CompleteUploadResponse, PreparedContent)> {
+    context: &MutationContext,
+) -> Result<CompletedUpload> {
+    let now_ms = context.now_ms;
+    let loaded = read_upload_session_state(store, namespace_id, upload_id).await?;
+    if let Some(completed) = completed_outcome(
+        &loaded.state,
+        namespace_id,
+        content_store_id,
+        upload_id,
+        Some(&request.content_ref),
+        now_ms,
+    )? {
+        return Ok(completed);
+    }
+
+    let verified =
+        verified_completion_content_ref(store, content_store_id, &loaded, &request.content_ref)
+            .await?;
+
     update_upload_session(
         store,
         namespace_id,
@@ -300,64 +350,38 @@ pub(crate) async fn complete_upload<S: ObjectStore + ?Sized>(
             let namespace_id = namespace_id.clone();
             let content_store_id = content_store_id.clone();
             let upload_id = upload_id.to_owned();
-            let request = request.clone();
+            let verified = verified.clone();
             async move {
-                if state.state == UploadSessionLifecycle::Condemned {
-                    return Err(CoreError::UploadNotFound { upload_id });
-                }
-                if let Some(completed) = &state.completed {
-                    if completed.content_ref == request.content_ref {
-                        let prepared_content = prepare_completed_upload_content(
-                            content_store_id.clone(),
-                            completed.content_ref.clone(),
-                        );
-                        return Ok(UploadSessionUpdate::Noop((
-                            CompleteUploadResponse {
-                                namespace_id,
-                                upload_id,
-                                content_ref: completed.content_ref.clone(),
-                                validated_content_token: None,
-                            },
-                            prepared_content,
-                        )));
-                    }
-                    return Err(CoreError::UploadAlreadyCompleted { upload_id });
+                // A racing abort or a peer's completion may have landed
+                // between the read above and this swap. Whatever the durable
+                // record says now is what happened.
+                if let Some(completed) = completed_outcome(
+                    &state.state,
+                    &namespace_id,
+                    &content_store_id,
+                    &upload_id,
+                    Some(&verified),
+                    now_ms,
+                )? {
+                    return Ok(UploadSessionUpdate::Noop(completed));
                 }
 
-                let prepared_content = match state.staged_content_ref.clone() {
-                    Some(content_ref) => {
-                        prepare_completed_upload_content(content_store_id.clone(), content_ref)
-                    }
-                    None => {
-                        stage_direct_put_content_ref(store, &content_store_id, &state, &request)
-                            .await?
-                    }
+                state.staged_content_ref = Some(verified.clone());
+                state.state = UploadSessionLifecycle::Completed {
+                    completed_at_ms: now_ms,
+                    content_ref: verified.clone(),
                 };
-                let staged_content_ref = prepared_content.content_ref().clone();
-                if staged_content_ref != request.content_ref {
-                    return Err(CoreError::InvalidUploadContent(
-                        "completed content ref does not match staged content".to_owned(),
-                    ));
-                }
-
-                if state.staged_content_ref.is_none() {
-                    state.staged_content_ref = Some(staged_content_ref);
-                }
-                state.completed = Some(CompletedUpload {
-                    content_ref: request.content_ref.clone(),
-                });
-
+                let outcome = completed_upload(
+                    &namespace_id,
+                    &content_store_id,
+                    &upload_id,
+                    &verified,
+                    now_ms,
+                    now_ms,
+                );
                 Ok(UploadSessionUpdate::Replace {
                     next: Box::new(state),
-                    outcome: (
-                        CompleteUploadResponse {
-                            namespace_id,
-                            upload_id,
-                            content_ref: request.content_ref.clone(),
-                            validated_content_token: None,
-                        },
-                        prepared_content,
-                    ),
+                    outcome,
                 })
             }
         },
@@ -365,121 +389,619 @@ pub(crate) async fn complete_upload<S: ObjectStore + ?Sized>(
     .await
 }
 
-/// Condemns one abandoned session using exactly the state and etag inspected
-/// together. A lost CAS is retained without retry so a racing completion can
-/// never be overwritten on a second read. Completed and already-condemned
-/// sessions are themselves absorbing and may be deleted once age-qualified.
-pub(crate) async fn condemn_upload_session_if_aged<S: ObjectStore + ?Sized>(
+/// Aborts an upload session, then cleans up what it was writing.
+///
+/// The durable transition comes first and the provider work strictly after
+/// it, so a crash in between leaves an object that the next garbage
+/// collection pass reclaims from the aborted record — never an object
+/// deleted out from under a session that is still open. Repeating an abort
+/// is a success that reports the first abort's stamp.
+pub(crate) async fn abort_upload<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
+    content_store_id: &ContentStoreId,
     upload_id: &UploadId,
-    reap_window_ms: u64,
     context: &MutationContext,
-) -> Result<UploadSessionSweep> {
-    let update = try_update_upload_session(
+) -> Result<AbortUploadResponse> {
+    let now_ms = context.now_ms;
+    let (response, content_id) = update_upload_session(
         store,
         namespace_id,
         upload_id,
-        |mut state, metadata| async move {
-            let Some(last_modified_ms) = metadata.last_modified_ms else {
-                return Ok(UploadSessionUpdate::Noop(UploadSessionSweep::Retain));
-            };
-            if context.now_ms.saturating_sub(last_modified_ms) < reap_window_ms {
-                return Ok(UploadSessionUpdate::Noop(UploadSessionSweep::Retain));
+        CONTENTION_RETRY_LIMIT,
+        |mut state| {
+            let namespace_id = namespace_id.clone();
+            let upload_id = upload_id.to_owned();
+            async move {
+                let aborted = |aborted_at_ms| AbortUploadResponse {
+                    namespace_id: namespace_id.clone(),
+                    upload_id: upload_id.clone(),
+                    aborted_at_ms,
+                };
+                match state.state {
+                    UploadSessionLifecycle::Aborted { aborted_at_ms } => Ok(
+                        UploadSessionUpdate::Noop((aborted(aborted_at_ms), state.content_id)),
+                    ),
+                    // Completion is final in the other direction: the
+                    // content may already be published, so an abort cannot
+                    // quietly succeed over it.
+                    UploadSessionLifecycle::Completed { .. } => {
+                        Err(CoreError::UploadAlreadyCompleted { upload_id })
+                    }
+                    UploadSessionLifecycle::Open { .. } => {
+                        state.state = UploadSessionLifecycle::Aborted {
+                            aborted_at_ms: now_ms,
+                        };
+                        let content_id = state.content_id.clone();
+                        Ok(UploadSessionUpdate::Replace {
+                            next: Box::new(state),
+                            outcome: (aborted(now_ms), content_id),
+                        })
+                    }
+                }
             }
-            if state.state == UploadSessionLifecycle::Condemned || state.completed.is_some() {
-                return Ok(UploadSessionUpdate::Noop(UploadSessionSweep::Delete));
-            }
-            state.state = UploadSessionLifecycle::Condemned;
-            Ok(UploadSessionUpdate::Replace {
-                next: Box::new(state),
-                outcome: UploadSessionSweep::Delete,
-            })
         },
     )
-    .await;
-    match update {
-        Ok(UploadSessionCas::Applied(outcome)) => Ok(outcome),
-        Ok(UploadSessionCas::Conflict) => {
-            tracing::debug!(
-                namespace_id = %namespace_id,
-                upload_id = %upload_id,
-                "upload-session condemn lost its inspected etag; retaining"
-            );
-            Ok(UploadSessionSweep::Retain)
+    .await?;
+
+    delete_unpublished_content_object(store, content_store_id, &content_id).await;
+    Ok(response)
+}
+
+/// Reads one session, minting a fresh receipt when it is completed.
+///
+/// This read is the reason a lost commit response is cheap: the completed
+/// session is durable, so the receipt it hands back is as good as the one
+/// the completion returned, and the bytes never move again.
+pub(crate) async fn read_upload_status<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    content_store_id: &ContentStoreId,
+    upload_id: &UploadId,
+    now_ms: u64,
+) -> Result<(UploadStatusResponse, Option<CompletedUploadReceipt>)> {
+    let loaded = read_upload_session_state(store, namespace_id, upload_id).await?;
+    let (status, receipt) = match loaded.state {
+        UploadSessionLifecycle::Open { expires_at_ms } => {
+            (UploadSessionStatus::Open { expires_at_ms }, None)
         }
-        Err(CoreError::UploadNotFound { .. }) => Ok(UploadSessionSweep::Retain),
-        Err(error) => Err(error),
+        UploadSessionLifecycle::Aborted { aborted_at_ms } => {
+            (UploadSessionStatus::Aborted { aborted_at_ms }, None)
+        }
+        UploadSessionLifecycle::Completed {
+            completed_at_ms,
+            content_ref,
+        } => (
+            UploadSessionStatus::Completed {
+                completed_at_ms,
+                content_ref: content_ref.clone(),
+                validated_content_token: None,
+            },
+            receipt_within_window(
+                namespace_id,
+                content_store_id,
+                &content_ref,
+                completed_at_ms,
+                now_ms,
+            ),
+        ),
+    };
+    Ok((
+        UploadStatusResponse {
+            namespace_id: namespace_id.clone(),
+            upload_id: upload_id.clone(),
+            status,
+        },
+        receipt,
+    ))
+}
+
+/// What a completed upload hands back: the wire response, the in-process
+/// admission a same-process publication uses, and the receipt a remote one
+/// carries back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletedUpload {
+    /// Wire response for the completion or its idempotent replay.
+    pub response: CompleteUploadResponse,
+    /// Admission for a publication in this process, which needs no token.
+    pub prepared: PreparedContent,
+    /// Receipt for a publication elsewhere, or `None` once the session has
+    /// stopped minting them.
+    pub receipt: Option<CompletedUploadReceipt>,
+}
+
+fn completed_upload(
+    namespace_id: &NamespaceId,
+    content_store_id: &ContentStoreId,
+    upload_id: &UploadId,
+    content_ref: &ContentRef,
+    completed_at_ms: u64,
+    now_ms: u64,
+) -> CompletedUpload {
+    CompletedUpload {
+        response: CompleteUploadResponse {
+            namespace_id: namespace_id.clone(),
+            upload_id: upload_id.clone(),
+            content_ref: content_ref.clone(),
+            validated_content_token: None,
+        },
+        prepared: PreparedContent::from_admission(ContentAdmission::for_durable_content_write(
+            content_store_id.clone(),
+            content_ref.clone(),
+        )),
+        receipt: receipt_within_window(
+            namespace_id,
+            content_store_id,
+            content_ref,
+            completed_at_ms,
+            now_ms,
+        ),
     }
 }
 
-fn prepare_completed_upload_content(
-    content_store_id: ContentStoreId,
-    content_ref: ContentRef,
-) -> PreparedContent {
-    let admission = ContentAdmission::for_durable_content_write(content_store_id, content_ref);
-    PreparedContent::from_admission(admission)
+/// Mints a receipt only while the completed session is still inside its
+/// receipt window.
+///
+/// The window is what makes content reclamation decidable: past it no new
+/// receipt exists, so no new metadata reference to this content can appear
+/// (`limits::CONTENT_RECLAMATION_GRACE_MS`).
+fn receipt_within_window(
+    namespace_id: &NamespaceId,
+    content_store_id: &ContentStoreId,
+    content_ref: &ContentRef,
+    completed_at_ms: u64,
+    now_ms: u64,
+) -> Option<CompletedUploadReceipt> {
+    (now_ms.saturating_sub(completed_at_ms) < COMPLETED_UPLOAD_RECEIPT_WINDOW_MS).then(|| {
+        CompletedUploadReceipt::for_completed_session(
+            namespace_id.clone(),
+            content_store_id.clone(),
+            content_ref.clone(),
+        )
+    })
 }
 
-async fn stage_direct_put_content_ref<S: ObjectStore + ?Sized>(
+/// Answers a completion against a session that has already reached a
+/// terminal state: a replay of the same content succeeds idempotently,
+/// anything else is the terminal error for that state.
+fn completed_outcome(
+    state: &UploadSessionLifecycle,
+    namespace_id: &NamespaceId,
+    content_store_id: &ContentStoreId,
+    upload_id: &UploadId,
+    expected: Option<&ContentRef>,
+    now_ms: u64,
+) -> Result<Option<CompletedUpload>> {
+    match state {
+        UploadSessionLifecycle::Open { .. } => Ok(None),
+        UploadSessionLifecycle::Aborted { .. } => Err(CoreError::UploadNotFound {
+            upload_id: upload_id.clone(),
+        }),
+        UploadSessionLifecycle::Completed {
+            completed_at_ms,
+            content_ref,
+        } => {
+            if expected.is_some_and(|expected| expected != content_ref) {
+                return Err(CoreError::UploadAlreadyCompleted {
+                    upload_id: upload_id.clone(),
+                });
+            }
+            Ok(Some(completed_upload(
+                namespace_id,
+                content_store_id,
+                upload_id,
+                content_ref,
+                *completed_at_ms,
+                now_ms,
+            )))
+        }
+    }
+}
+
+/// Establishes the content reference a completion may freeze.
+///
+/// A proxied session already wrote and checked its bytes, so the staged
+/// reference is the answer. A direct-put session's bytes bypassed the
+/// server, so this is where the server learns what actually landed: it
+/// verifies rather than trusts, because provider enforcement is not uniform
+/// across the family we support and a random object id says nothing about
+/// its contents. One checksum-bearing HEAD settles size and bytes together
+/// without a download.
+async fn verified_completion_content_ref<S: ObjectStore + ?Sized>(
     store: &S,
     content_store_id: &ContentStoreId,
-    state: &UploadSessionState,
-    request: &CompleteUploadRequest,
-) -> Result<PreparedContent> {
-    if state.mode != UploadMode::DirectPut {
+    session: &UploadSessionState,
+    requested: &ContentRef,
+) -> Result<ContentRef> {
+    if let Some(staged) = &session.staged_content_ref {
+        if staged != requested {
+            return Err(CoreError::InvalidUploadContent(
+                "completed content ref does not match staged content".to_owned(),
+            ));
+        }
+        return Ok(staged.clone());
+    }
+
+    if session.mode != UploadMode::DirectPut {
         return Err(CoreError::InvalidUploadContent(
             "upload content has not been staged".to_owned(),
         ));
     }
-
-    let Some(expected) = &state.direct_put_content_ref else {
+    let Some(expected) = &session.direct_put_content_ref else {
         return Err(CoreError::InvalidUploadContent(
             "direct_put session is missing its target content ref".to_owned(),
         ));
     };
-    if expected != &request.content_ref {
+    if expected != requested {
         return Err(CoreError::InvalidUploadContent(
             "completed content ref does not match direct_put target".to_owned(),
         ));
     }
 
-    // Bytes bypassed the LoonFS server, so completion is where the server
-    // establishes what actually landed. It verifies rather than trusts: the
-    // presigned write is checksum-bound, but provider enforcement is not
-    // uniform across the family we support, and the object's identity no
-    // longer says anything about its bytes. One checksum-bearing HEAD
-    // settles both size and content without a download.
-    match verify_durable_content_checksum(store, content_store_id, &request.content_ref).await {
-        Ok(()) => Ok(prepare_completed_upload_content(
-            content_store_id.clone(),
-            request.content_ref.clone(),
-        )),
+    match verify_durable_content_checksum(store, content_store_id, requested).await {
+        Ok(()) => Ok(requested.clone()),
         Err(err) => {
-            delete_unpublished_content_object(store, content_store_id, &request.content_ref).await;
+            // The id is random and still open, so the object nothing can
+            // name is safe to remove and would otherwise leak.
+            delete_unpublished_content_object(store, content_store_id, &requested.content_id).await;
             Err(CoreError::InvalidUploadContent(err.to_string()))
         }
     }
 }
 
-/// Removes the object a failed completion was about.
-///
-/// The id is random and was never published, so exactly one session can be
-/// talking about this object and nothing references it. Deleting is safe and
-/// keeping it would leak bytes no one can ever name. Cleanup failure is not
-/// worth failing the completion twice over — the session's own reaping
-/// covers what this misses — so it is logged and dropped.
-async fn delete_unpublished_content_object<S: ObjectStore + ?Sized>(
-    store: &S,
-    content_store_id: &ContentStoreId,
-    content_ref: &ContentRef,
-) {
-    let object_key = content_blob(content_store_id.as_str(), &content_ref.content_id);
-    if let Err(error) = store.delete(&object_key).await {
-        tracing::warn!(
-            content_id = %content_ref.content_id,
-            error = %error,
-            "failed to remove the content object of a rejected direct-put completion"
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::namespace::bootstrap::bootstrap_namespace;
+    use loonfs_api::v0::BeginUploadRequest;
+    use loonfs_objectstore::local_fs_store::LocalFsStore;
+    use tempfile::tempdir;
+
+    const BYTES: &[u8] = b"terminal states\n";
+
+    fn context(now_ms: u64) -> MutationContext {
+        MutationContext {
+            writer_id: "upload-test".to_owned(),
+            now_ms,
+        }
+    }
+
+    /// One store with a namespace and one open, staged session in it.
+    async fn staged_session(
+        store: &LocalFsStore,
+        context: &MutationContext,
+    ) -> (NamespaceId, ContentStoreId, UploadId, ContentRef, String) {
+        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+        bootstrap_namespace(store, &namespace_id, context, false)
+            .await
+            .expect("bootstrap");
+        let begin = begin_upload(store, &namespace_id, BeginUploadRequest::default(), context)
+            .await
+            .expect("begin upload");
+        let staged = upload_content(store, &namespace_id, &begin.upload_id, BYTES)
+            .await
+            .expect("stage upload");
+        let content_store_id = load_namespace_content_store_id(store, &namespace_id)
+            .await
+            .expect("content store id");
+        let content_key = content_blob(content_store_id.as_str(), &staged.content_ref.content_id);
+        (
+            namespace_id,
+            content_store_id,
+            begin.upload_id,
+            staged.content_ref,
+            content_key,
+        )
+    }
+
+    async fn complete(
+        store: &LocalFsStore,
+        namespace_id: &NamespaceId,
+        content_store_id: &ContentStoreId,
+        upload_id: &UploadId,
+        content_ref: &ContentRef,
+        context: &MutationContext,
+    ) -> Result<CompletedUpload> {
+        complete_upload(
+            store,
+            namespace_id,
+            content_store_id,
+            upload_id,
+            &CompleteUploadRequest {
+                content_ref: content_ref.clone(),
+            },
+            context,
+        )
+        .await
+    }
+
+    /// An aborted session is logically absent: it will never select content,
+    /// which is the same thing the eventual physical deletion says. A
+    /// completion arriving afterwards must not resurrect it — and must not
+    /// touch the object the abort already cleaned up.
+    #[tokio::test]
+    async fn a_completion_after_an_abort_fails_terminally_and_touches_nothing() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let setup = context(1_000);
+        let (namespace_id, content_store_id, upload_id, content_ref, content_key) =
+            staged_session(&store, &setup).await;
+
+        abort_upload(
+            &store,
+            &namespace_id,
+            &content_store_id,
+            &upload_id,
+            &context(2_000),
+        )
+        .await
+        .expect("abort");
+        assert!(store.head(&content_key).await.expect("head").is_none());
+
+        let error = complete(
+            &store,
+            &namespace_id,
+            &content_store_id,
+            &upload_id,
+            &content_ref,
+            &context(3_000),
+        )
+        .await
+        .expect_err("an aborted session cannot complete");
+        assert!(matches!(error, CoreError::UploadNotFound { .. }));
+
+        let state = read_upload_session_state(&store, &namespace_id, &upload_id)
+            .await
+            .expect("session still readable");
+        assert!(matches!(
+            state.state,
+            UploadSessionLifecycle::Aborted {
+                aborted_at_ms: 2_000
+            }
+        ));
+        assert!(store.head(&content_key).await.expect("head").is_none());
+    }
+
+    /// Completion is terminal in the other direction. An abort cannot
+    /// quietly succeed over it, because by then the content may already be
+    /// published and deleting it would break a live reference.
+    #[tokio::test]
+    async fn an_abort_after_completion_is_refused_and_keeps_the_content() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let setup = context(1_000);
+        let (namespace_id, content_store_id, upload_id, content_ref, content_key) =
+            staged_session(&store, &setup).await;
+        complete(
+            &store,
+            &namespace_id,
+            &content_store_id,
+            &upload_id,
+            &content_ref,
+            &context(2_000),
+        )
+        .await
+        .expect("complete");
+
+        let error = abort_upload(
+            &store,
+            &namespace_id,
+            &content_store_id,
+            &upload_id,
+            &context(3_000),
+        )
+        .await
+        .expect_err("a completed session cannot be aborted");
+        assert!(matches!(error, CoreError::UploadAlreadyCompleted { .. }));
+        assert!(
+            store.head(&content_key).await.expect("head").is_some(),
+            "a refused abort must not clean up published-able content"
         );
+    }
+
+    /// Aborting twice is a success that reports the abort that stands, so a
+    /// client retrying a lost response learns the same thing both times.
+    #[tokio::test]
+    async fn a_repeated_abort_reports_the_first_stamp() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let setup = context(1_000);
+        let (namespace_id, content_store_id, upload_id, _content_ref, _content_key) =
+            staged_session(&store, &setup).await;
+
+        let first = abort_upload(
+            &store,
+            &namespace_id,
+            &content_store_id,
+            &upload_id,
+            &context(2_000),
+        )
+        .await
+        .expect("first abort");
+        let second = abort_upload(
+            &store,
+            &namespace_id,
+            &content_store_id,
+            &upload_id,
+            &context(9_000),
+        )
+        .await
+        .expect("repeated abort");
+
+        assert_eq!(first.aborted_at_ms, 2_000);
+        assert_eq!(second, first);
+    }
+
+    /// Bytes may only be staged into the one live state.
+    #[tokio::test]
+    async fn staging_into_a_terminal_session_is_refused() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let setup = context(1_000);
+        let (namespace_id, content_store_id, upload_id, content_ref, _content_key) =
+            staged_session(&store, &setup).await;
+        complete(
+            &store,
+            &namespace_id,
+            &content_store_id,
+            &upload_id,
+            &content_ref,
+            &context(2_000),
+        )
+        .await
+        .expect("complete");
+        let error = upload_content(&store, &namespace_id, &upload_id, BYTES)
+            .await
+            .expect_err("a completed session takes no more bytes");
+        assert!(matches!(error, CoreError::UploadAlreadyCompleted { .. }));
+
+        let aborted = begin_upload(&store, &namespace_id, BeginUploadRequest::default(), &setup)
+            .await
+            .expect("begin a second upload");
+        abort_upload(
+            &store,
+            &namespace_id,
+            &content_store_id,
+            &aborted.upload_id,
+            &context(3_000),
+        )
+        .await
+        .expect("abort");
+        let error = upload_content(&store, &namespace_id, &aborted.upload_id, BYTES)
+            .await
+            .expect_err("an aborted session takes no more bytes");
+        assert!(matches!(error, CoreError::UploadNotFound { .. }));
+    }
+
+    /// A receipt exists for exactly one state. An open session has nothing
+    /// durable to attest yet, and an aborted one never will.
+    #[tokio::test]
+    async fn only_a_completed_session_mints_a_receipt() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let setup = context(1_000);
+        let (namespace_id, content_store_id, upload_id, content_ref, _content_key) =
+            staged_session(&store, &setup).await;
+
+        let (open, receipt) =
+            read_upload_status(&store, &namespace_id, &content_store_id, &upload_id, 1_500)
+                .await
+                .expect("status of an open session");
+        assert!(matches!(open.status, UploadSessionStatus::Open { .. }));
+        assert!(receipt.is_none(), "an open session attests nothing");
+
+        complete(
+            &store,
+            &namespace_id,
+            &content_store_id,
+            &upload_id,
+            &content_ref,
+            &context(2_000),
+        )
+        .await
+        .expect("complete");
+        let (completed, receipt) =
+            read_upload_status(&store, &namespace_id, &content_store_id, &upload_id, 2_500)
+                .await
+                .expect("status of a completed session");
+        assert!(matches!(
+            completed.status,
+            UploadSessionStatus::Completed { .. }
+        ));
+        assert_eq!(
+            receipt.expect("a completed session mints").content_ref(),
+            &content_ref
+        );
+
+        // A second session, aborted, to check the other terminal state.
+        let begin = begin_upload(&store, &namespace_id, BeginUploadRequest::default(), &setup)
+            .await
+            .expect("begin second upload");
+        abort_upload(
+            &store,
+            &namespace_id,
+            &content_store_id,
+            &begin.upload_id,
+            &context(3_000),
+        )
+        .await
+        .expect("abort");
+        let (aborted, receipt) = read_upload_status(
+            &store,
+            &namespace_id,
+            &content_store_id,
+            &begin.upload_id,
+            3_500,
+        )
+        .await
+        .expect("status of an aborted session");
+        assert!(matches!(
+            aborted.status,
+            UploadSessionStatus::Aborted { .. }
+        ));
+        assert!(receipt.is_none(), "an aborted session attests nothing");
+    }
+
+    /// Re-minting is what makes a lost publish response cheap, and its
+    /// window is what makes content reclamation decidable: the session hands
+    /// out fresh receipts for as long as its content is protected, then
+    /// stops.
+    #[tokio::test]
+    async fn a_completed_session_re_mints_until_its_receipt_window_closes() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let setup = context(1_000);
+        let (namespace_id, content_store_id, upload_id, content_ref, _content_key) =
+            staged_session(&store, &setup).await;
+        let completed_at_ms = 2_000;
+        complete(
+            &store,
+            &namespace_id,
+            &content_store_id,
+            &upload_id,
+            &content_ref,
+            &context(completed_at_ms),
+        )
+        .await
+        .expect("complete");
+
+        // Long after the first receipt would have expired, the durable
+        // session still answers with a usable one.
+        let much_later = completed_at_ms + COMPLETED_UPLOAD_RECEIPT_WINDOW_MS - 1;
+        let (_, receipt) = read_upload_status(
+            &store,
+            &namespace_id,
+            &content_store_id,
+            &upload_id,
+            much_later,
+        )
+        .await
+        .expect("status inside the receipt window");
+        assert_eq!(receipt.expect("still minting").content_ref(), &content_ref);
+
+        let past = completed_at_ms + COMPLETED_UPLOAD_RECEIPT_WINDOW_MS;
+        let (status, receipt) =
+            read_upload_status(&store, &namespace_id, &content_store_id, &upload_id, past)
+                .await
+                .expect("status past the receipt window");
+        assert!(matches!(status, UploadStatusResponse { .. }));
+        assert!(
+            receipt.is_none(),
+            "past the window no receipt exists, which is what lets content GC decide"
+        );
+
+        // The same rule governs a very late idempotent completion replay.
+        let replay = complete(
+            &store,
+            &namespace_id,
+            &content_store_id,
+            &upload_id,
+            &content_ref,
+            &context(past),
+        )
+        .await
+        .expect("replay still succeeds");
+        assert_eq!(replay.response.content_ref, content_ref);
+        assert!(replay.receipt.is_none());
     }
 }

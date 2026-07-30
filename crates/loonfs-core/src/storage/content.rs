@@ -175,6 +175,31 @@ pub(crate) async fn verify_durable_content_checksum<S: ObjectStore + ?Sized>(
     Ok(())
 }
 
+/// Removes the content object an upload session owned but never published.
+///
+/// The id is random and an upload session is the only thing that can name
+/// one before publication, so exactly one session is ever talking about this
+/// object and no metadata can reference it. Deleting is therefore safe and
+/// keeping it would leak bytes nobody can name again. This runs strictly
+/// after the durable transition that made the session terminal, and it is
+/// idempotent, so a cleanup lost to a crash is simply repeated by the next
+/// garbage-collection pass — which is why a failure here is logged rather
+/// than propagated.
+pub(crate) async fn delete_unpublished_content_object<S: ObjectStore + ?Sized>(
+    store: &S,
+    content_store_id: &ContentStoreId,
+    content_id: &ContentId,
+) {
+    let object_key = content_blob(content_store_id.as_str(), content_id);
+    if let Err(error) = store.delete(&object_key).await {
+        tracing::warn!(
+            content_id = %content_id,
+            error = %error,
+            "failed to remove the content object of a terminated upload session"
+        );
+    }
+}
+
 pub(crate) async fn read_durable_content_bytes<S: ObjectStore + ?Sized>(
     store: &S,
     content_store_id: &ContentStoreId,

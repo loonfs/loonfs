@@ -1832,6 +1832,180 @@
         }
       }
     },
+    "/v0/namespaces/{namespace}/uploads/{upload_id}": {
+      "get": {
+        "tags": [
+          "uploads"
+        ],
+        "summary": "Read upload session",
+        "description": "Reads one upload session. A completed session answers with a freshly minted validation token for its content, so a client that lost a commit response can commit again without re-uploading anything.",
+        "operationId": "read_upload_status",
+        "parameters": [
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "Namespace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "upload_id",
+            "in": "path",
+            "description": "Upload session id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Upload session state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadStatusResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid upload id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace or upload not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v0/namespaces/{namespace}/uploads/{upload_id}/abort": {
+      "post": {
+        "tags": [
+          "uploads"
+        ],
+        "summary": "Abort upload",
+        "description": "Ends an upload session without selecting content and deletes the object it was writing. Repeating it succeeds; a session that already completed cannot be aborted.",
+        "operationId": "abort_upload",
+        "parameters": [
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "Namespace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "upload_id",
+            "in": "path",
+            "description": "Upload session id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Upload aborted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AbortUploadResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid upload id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace or upload not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Upload already completed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v0/namespaces/{namespace}/uploads/{upload_id}/complete": {
       "post": {
         "tags": [
@@ -2064,6 +2238,31 @@
   },
   "components": {
     "schemas": {
+      "AbortUploadResponse": {
+        "type": "object",
+        "description": "Response after aborting an upload session.",
+        "required": [
+          "namespace_id",
+          "upload_id",
+          "aborted_at_ms"
+        ],
+        "properties": {
+          "aborted_at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix-millisecond stamp of the abort that stands, which for a repeated\nabort is the first one's.",
+            "minimum": 0
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace that owns the session."
+          },
+          "upload_id": {
+            "$ref": "#/components/schemas/UploadId",
+            "description": "Session that is now final."
+          }
+        }
+      },
       "AbsolutePath": {
         "type": "string",
         "description": "Validated complete absolute namespace path, serialized as a plain string."
@@ -3414,15 +3613,6 @@
             "format": "int64",
             "description": "Maximum candidates examined by this invocation. Omit to retain the\nrun-to-completion behavior.",
             "minimum": 0
-          },
-          "reap_window_ms": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "Upload sessions older than this may be reaped. Must be at least the\ngrace window.",
-            "minimum": 0
           }
         }
       },
@@ -4234,6 +4424,115 @@
           "service_proxied",
           "direct_put"
         ]
+      },
+      "UploadSessionStatus": {
+        "oneOf": [
+          {
+            "type": "object",
+            "title": "UploadSessionStatusOpen",
+            "description": "Accepting content until its lease passes.",
+            "required": [
+              "expires_at_ms",
+              "state"
+            ],
+            "properties": {
+              "expires_at_ms": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Unix-millisecond instant after which the session is abandoned and\nmay be aborted by server-side cleanup.",
+                "minimum": 0
+              },
+              "state": {
+                "type": "string",
+                "enum": [
+                  "open"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "title": "UploadSessionStatusCompleted",
+            "description": "Final: the content is durable and verified.",
+            "required": [
+              "completed_at_ms",
+              "content_ref",
+              "state"
+            ],
+            "properties": {
+              "completed_at_ms": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Unix-millisecond stamp of the completion.",
+                "minimum": 0
+              },
+              "content_ref": {
+                "$ref": "#/components/schemas/ContentRef",
+                "description": "Verified immutable content this session settled on."
+              },
+              "state": {
+                "type": "string",
+                "enum": [
+                  "completed"
+                ]
+              },
+              "validated_content_token": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Freshly minted proof for a following commit, or `None` once the\nsession has stopped minting them."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "title": "UploadSessionStatusAborted",
+            "description": "Final: the session selected no content and its object is gone.",
+            "required": [
+              "aborted_at_ms",
+              "state"
+            ],
+            "properties": {
+              "aborted_at_ms": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Unix-millisecond stamp of the abort.",
+                "minimum": 0
+              },
+              "state": {
+                "type": "string",
+                "enum": [
+                  "aborted"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Observed state of an upload session.\n\nA session is `open`, then `completed` or `aborted`, and both of those are\nfinal. Reading a completed session mints a fresh receipt for content that\nis already durable, which is why losing a commit response never costs a\nretransfer."
+      },
+      "UploadStatusResponse": {
+        "type": "object",
+        "description": "Response for reading one upload session.",
+        "required": [
+          "namespace_id",
+          "upload_id",
+          "status"
+        ],
+        "properties": {
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace that owns the session."
+          },
+          "status": {
+            "$ref": "#/components/schemas/UploadSessionStatus",
+            "description": "The session's state, with a fresh receipt when it is completed."
+          },
+          "upload_id": {
+            "$ref": "#/components/schemas/UploadId",
+            "description": "Session that was read."
+          }
+        }
       },
       "ValidatedContentToken": {
         "type": "object",

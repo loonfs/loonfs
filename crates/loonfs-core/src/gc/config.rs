@@ -4,16 +4,18 @@ use crate::error::{CoreError, Result};
 use crate::limits::GC_MIN_GRACE_WINDOW_MS;
 use serde::{Deserialize, Serialize};
 
-/// Grace and reap windows for the sweep (format spec, "Garbage collection").
-/// Both are wall-clock cleanup policy, never validity inputs. The defaults
-/// are conservative: every object gets one hour of unconditional protection,
-/// while old upload sessions wait seven days. Abandoned fork records are not
-/// under either window — a fork attempt carries its own lease, and letting
-/// that pass is the whole proof (`gc/fork_checkpoints.rs`).
+/// The grace window for the sweep (format spec, "Garbage collection"). It is
+/// wall-clock cleanup policy, never a validity input, and the default is
+/// conservative: every object gets one hour of unconditional protection.
+/// Abandoned fork records are not under it — a fork attempt carries its own
+/// lease, and letting that pass is the whole proof
+/// (`gc/fork_checkpoints.rs`) — and neither are upload sessions or the
+/// content they leave behind: a session carries its own lease, and the
+/// window a completed session's content is protected for is derived in
+/// `limits`, not configured.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GcConfig {
     pub grace_window_ms: u64,
-    pub reap_window_ms: u64,
     /// Maximum sweep candidates examined by this invocation. `None` keeps
     /// the run-to-completion behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -32,7 +34,6 @@ impl Default for GcConfig {
     fn default() -> Self {
         Self {
             grace_window_ms: 60 * 60 * 1000,
-            reap_window_ms: 7 * 24 * 60 * 60 * 1000,
             max_objects: None,
             cursor: None,
         }
@@ -50,11 +51,6 @@ impl GcConfig {
                 "grace_window_ms {} is below the derived safety minimum {}",
                 self.grace_window_ms, GC_MIN_GRACE_WINDOW_MS
             )));
-        }
-        if self.reap_window_ms < self.grace_window_ms {
-            return Err(CoreError::InvalidGcConfig(
-                "reap_window_ms must be at least the grace window".to_owned(),
-            ));
         }
         if self.max_objects == Some(0) {
             return Err(CoreError::InvalidGcConfig(

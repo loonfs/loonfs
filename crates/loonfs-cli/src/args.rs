@@ -664,10 +664,6 @@ pub(crate) struct AdminGcArgs {
     /// omitted).
     #[arg(long)]
     pub grace_window_ms: Option<u64>,
-    /// Old upload sessions and abandoned fork records wait at least this long
-    /// (server default when omitted).
-    #[arg(long)]
-    pub reap_window_ms: Option<u64>,
     /// Examine at most this many candidates and return after one bounded
     /// pass. Omit to loop bounded passes through completion.
     #[arg(long)]

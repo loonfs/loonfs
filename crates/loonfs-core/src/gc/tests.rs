@@ -6,9 +6,14 @@ use super::run::{gc_namespace, gc_namespace_with_reverify_chunk};
 use crate::checkpoint::advance_retention_floor;
 use crate::checkpoint::record::release_checkpoint_record;
 use crate::checkpoint::tests::{create_checkpoint, mutation_context, write_test_file};
+use crate::commit_engine::{CommitCandidate, NamespaceCommitEngine};
 use crate::context::MutationContext;
 use crate::error::CoreError;
-use crate::limits::{FORK_CHECKPOINT_LEASE_MS, GC_MIN_GRACE_WINDOW_MS};
+use crate::limits::{
+    CONTENT_RECLAMATION_GRACE_MS, FORK_CHECKPOINT_LEASE_MS, GC_MIN_GRACE_WINDOW_MS,
+    UPLOAD_SESSION_LEASE_MS,
+};
+use crate::path::write::{CommitRequest, FilesystemOperation};
 use loonfs_api::v0::GcResponse;
 use loonfs_api::wire::control::{
     decode_control_object, CheckpointOwner, CheckpointRecordLifecycle, CheckpointRecordState,
@@ -39,12 +44,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tempfile::tempdir;
 
 const GRACE_MS: u64 = 60 * 60 * 1000;
-const REAP_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 
 fn config() -> GcConfig {
     GcConfig {
         grace_window_ms: GRACE_MS,
-        reap_window_ms: REAP_MS,
         max_objects: None,
         cursor: None,
     }
@@ -111,7 +114,7 @@ struct IncompleteGcAccountingStore {
 enum BlockingControlCasTarget {
     CheckpointReleased,
     UploadCompleted,
-    UploadCondemned,
+    UploadAborted,
 }
 
 impl BlockingControlCasTarget {
@@ -129,8 +132,7 @@ impl BlockingControlCasTarget {
                     CheckpointRecordLifecycle::Released { .. }
                 )
             }
-            BlockingControlCasTarget::UploadCompleted
-            | BlockingControlCasTarget::UploadCondemned => {
+            BlockingControlCasTarget::UploadCompleted | BlockingControlCasTarget::UploadAborted => {
                 let Ok(envelope) = decode_control_object::<UploadSessionState>(
                     bytes,
                     ControlObjectKind::UploadSession,
@@ -138,9 +140,12 @@ impl BlockingControlCasTarget {
                     return false;
                 };
                 match self {
-                    BlockingControlCasTarget::UploadCompleted => envelope.state.completed.is_some(),
-                    BlockingControlCasTarget::UploadCondemned => {
-                        envelope.state.state == UploadSessionLifecycle::Condemned
+                    BlockingControlCasTarget::UploadCompleted => matches!(
+                        envelope.state.state,
+                        UploadSessionLifecycle::Completed { .. }
+                    ),
+                    BlockingControlCasTarget::UploadAborted => {
+                        matches!(envelope.state.state, UploadSessionLifecycle::Aborted { .. })
                     }
                     _ => false,
                 }
@@ -219,7 +224,6 @@ async fn gc_rejects_grace_windows_below_the_derived_minimum() {
 
     let too_small = GcConfig {
         grace_window_ms: GC_MIN_GRACE_WINDOW_MS - 1,
-        reap_window_ms: REAP_MS,
         ..GcConfig::default()
     };
     let error = gc_namespace(&store, &namespace_id, &too_small, &context(1_000))
@@ -235,16 +239,6 @@ async fn gc_rejects_grace_windows_below_the_derived_minimum() {
         crate::error::ErrorCode::InvalidRequest,
         "the rejection surfaces as invalid_request"
     );
-
-    let inverted = GcConfig {
-        grace_window_ms: GRACE_MS,
-        reap_window_ms: GRACE_MS - 1,
-        ..GcConfig::default()
-    };
-    let error = gc_namespace(&store, &namespace_id, &inverted, &context(1_000))
-        .await
-        .expect_err("reap below grace must be rejected");
-    assert!(matches!(error, CoreError::InvalidGcConfig(_)));
 
     let zero_budget = GcConfig {
         max_objects: Some(0),
@@ -295,9 +289,10 @@ async fn write_upload_session(store: &LocalFsStore, namespace_id: &NamespaceId) 
         claimed_checksum: None,
         direct_put_content_ref: None,
         staged_content_ref: None,
-        completed: None,
         created_at_ms: 1_000,
-        state: loonfs_api::wire::control::UploadSessionLifecycle::Active,
+        state: loonfs_api::wire::control::UploadSessionLifecycle::Open {
+            expires_at_ms: 1_000 + UPLOAD_SESSION_LEASE_MS,
+        },
     };
     let envelope = loonfs_api::wire::control::UploadSessionEnvelope::from_state(
         loonfs_api::wire::control::ControlObjectKind::UploadSession,
@@ -584,8 +579,11 @@ async fn fork_protected_bases_survive_source_deletion_until_the_target_dies() {
     assert!(!report.degraded_retention);
 }
 
+/// The whole upload arm end to end: a lease that passes turns into a
+/// durable abort with its provider object gone, and the record itself
+/// survives one more grace so the abort is observable before it is reaped.
 #[tokio::test]
-async fn upload_sessions_reap_after_the_window_and_survive_inside_it() {
+async fn upload_gc_aborts_an_expired_session_then_reaps_it() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -594,44 +592,87 @@ async fn upload_sessions_reap_after_the_window_and_survive_inside_it() {
         .await
         .expect("bootstrap");
     write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
-    let session_key = write_upload_session(&store, &namespace_id).await;
+    let (upload_id, content_ref, content_store_id) =
+        stage_upload(&store, &namespace_id, &setup).await;
+    let session_key =
+        loonfs_objectstore::keys::upload_session(namespace_id.as_str(), upload_id.as_str());
+    let content_key =
+        loonfs_objectstore::keys::content_blob(content_store_id.as_str(), &content_ref.content_id);
 
-    // Past the grace window but inside the reap window: sessions are
-    // aged on the reap window, so this pass retains the session.
-    let inside = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
+    // Inside the lease nothing happens, however old the object looks: the
+    // session carries its own expiry, so no provider timestamp decides this.
+    let inside = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS - 1);
     let report = gc_namespace(&store, &namespace_id, &config(), &inside)
         .await
-        .expect("gc pass inside the reap window");
+        .expect("gc pass inside the lease");
     assert_eq!(report.deleted_upload_sessions, 0);
-    assert!(store
-        .head(&session_key)
-        .await
-        .expect("head session")
-        .is_some());
+    assert!(store.head(&content_key).await.expect("head").is_some());
 
-    // Past the reap window GC condemns the abandoned session under its etag,
-    // then deletes the now-absorbing object.
-    let aged = context(now_after_newest_object(&store, &namespace_id, REAP_MS + 1).await);
-    let report = gc_namespace(&store, &namespace_id, &config(), &aged)
+    // Past the lease plus a grace the session is aborted and the object it
+    // was writing is deleted — in that order.
+    let expired = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS + GRACE_MS + 1);
+    let report = gc_namespace(&store, &namespace_id, &config(), &expired)
         .await
-        .expect("gc pass past the reap window");
+        .expect("gc pass past the lease");
+    assert_eq!(
+        report.deleted_upload_sessions, 0,
+        "the record outlives its abort"
+    );
+    let session = read_upload_session(&store, &namespace_id, &upload_id)
+        .await
+        .expect("aborted session retained");
+    assert!(matches!(
+        session.state,
+        UploadSessionLifecycle::Aborted { .. }
+    ));
+    assert!(
+        store.head(&content_key).await.expect("head").is_none(),
+        "aborting deletes the object the session owned"
+    );
+
+    // The aborted record is reaped a grace window after its own stamp.
+    let reaped = context(expired.now_ms + GRACE_MS + 1);
+    let report = gc_namespace(&store, &namespace_id, &config(), &reaped)
+        .await
+        .expect("gc pass past the abort grace");
     assert_eq!(report.deleted_upload_sessions, 1);
-    assert!(store
-        .head(&session_key)
-        .await
-        .expect("head session")
-        .is_none());
+    assert!(store.head(&session_key).await.expect("head").is_none());
 
-    // The pass is idempotent: nothing left to count.
-    let again = context(now_after_newest_object(&store, &namespace_id, REAP_MS + 1).await);
+    let again = context(reaped.now_ms + GRACE_MS);
     let report = gc_namespace(&store, &namespace_id, &config(), &again)
         .await
         .expect("gc pass after the sweep");
     assert_eq!(report.deleted_upload_sessions, 0);
 }
 
+/// A session record written straight into the store, never touched by an
+/// upload, still ages out on nothing but its own recorded lease.
 #[tokio::test]
-async fn upload_completion_wins_before_condemn_and_the_session_is_retained() {
+async fn upload_gc_reaps_a_session_that_never_staged_anything() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = context(1_000);
+    bootstrap_namespace(&store, &namespace_id, &setup, false)
+        .await
+        .expect("bootstrap");
+    let session_key = write_upload_session(&store, &namespace_id).await;
+
+    let expired = context(1_000 + UPLOAD_SESSION_LEASE_MS + GRACE_MS + 1);
+    gc_namespace(&store, &namespace_id, &config(), &expired)
+        .await
+        .expect("gc pass past the lease");
+    let reaped = context(expired.now_ms + GRACE_MS + 1);
+    let report = gc_namespace(&store, &namespace_id, &config(), &reaped)
+        .await
+        .expect("gc pass past the abort grace");
+
+    assert_eq!(report.deleted_upload_sessions, 1);
+    assert!(store.head(&session_key).await.expect("head").is_none());
+}
+
+#[tokio::test]
+async fn upload_completion_wins_before_gc_abort_and_the_session_is_retained() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -641,8 +682,10 @@ async fn upload_completion_wins_before_condemn_and_the_session_is_retained() {
         .expect("bootstrap");
     let (upload_id, content_ref, content_store_id) =
         stage_upload(&store, &namespace_id, &setup).await;
-    let aged = context(now_after_newest_object(&store, &namespace_id, REAP_MS + 1).await);
-    let store = blocking_control_cas_store(store, BlockingControlCasTarget::UploadCondemned);
+    let aged = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS + GRACE_MS + 1);
+    let content_key =
+        loonfs_objectstore::keys::content_blob(content_store_id.as_str(), &content_ref.content_id);
+    let store = blocking_control_cas_store(store, BlockingControlCasTarget::UploadAborted);
     let gc_config = config();
     let gc = gc_namespace(&store, &namespace_id, &gc_config, &aged);
     let complete = async {
@@ -655,24 +698,31 @@ async fn upload_completion_wins_before_condemn_and_the_session_is_retained() {
             &loonfs_api::v0::CompleteUploadRequest {
                 content_ref: content_ref.clone(),
             },
+            &aged,
         )
         .await;
         store.release();
         result
     };
     let (report, completion) = tokio::join!(gc, complete);
-    completion.expect("completion wins the blocked condemn CAS");
+    completion.expect("completion wins the blocked abort CAS");
     let report = report.expect("gc pass");
     assert_eq!(report.deleted_upload_sessions, 0);
     let session = read_upload_session(&store, &namespace_id, &upload_id)
         .await
         .expect("completed session retained");
-    assert!(session.completed.is_some());
-    assert_eq!(session.state, UploadSessionLifecycle::Active);
+    assert!(matches!(
+        session.state,
+        UploadSessionLifecycle::Completed { .. }
+    ));
+    assert!(
+        store.head(&content_key).await.expect("head").is_some(),
+        "the losing abort must not clean up the winner's content"
+    );
 }
 
 #[tokio::test]
-async fn upload_condemn_wins_before_completion_and_completion_reports_not_found() {
+async fn gc_abort_wins_before_completion_and_completion_reports_not_found() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -682,7 +732,9 @@ async fn upload_condemn_wins_before_completion_and_completion_reports_not_found(
         .expect("bootstrap");
     let (upload_id, content_ref, content_store_id) =
         stage_upload(&store, &namespace_id, &setup).await;
-    let aged = context(now_after_newest_object(&store, &namespace_id, REAP_MS + 1).await);
+    let aged = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS + GRACE_MS + 1);
+    let content_key =
+        loonfs_objectstore::keys::content_blob(content_store_id.as_str(), &content_ref.content_id);
     let store = blocking_control_cas_store(store, BlockingControlCasTarget::UploadCompleted);
     let request = loonfs_api::v0::CompleteUploadRequest {
         content_ref: content_ref.clone(),
@@ -693,21 +745,234 @@ async fn upload_condemn_wins_before_completion_and_completion_reports_not_found(
         &content_store_id,
         &upload_id,
         &request,
+        &aged,
     );
-    let condemn = async {
+    let abort = async {
         store.wait_until_blocked().await;
         let report = gc_namespace(&store, &namespace_id, &config(), &aged).await;
         store.release();
         report
     };
-    let (completion, report) = tokio::join!(completion, condemn);
-    let error = completion.expect_err("condemned session is logically absent");
+    let (completion, report) = tokio::join!(completion, abort);
+    let error = completion.expect_err("an aborted session is logically absent");
     assert!(matches!(&error, CoreError::UploadNotFound { .. }));
     assert_eq!(error.code(), crate::error::ErrorCode::UploadNotFound);
-    assert_eq!(report.expect("gc pass").deleted_upload_sessions, 1);
+    report.expect("gc pass");
+    let session = read_upload_session(&store, &namespace_id, &upload_id)
+        .await
+        .expect("aborted session retained for a grace window");
+    assert!(matches!(
+        session.state,
+        UploadSessionLifecycle::Aborted { .. }
+    ));
+    assert!(
+        store.head(&content_key).await.expect("head").is_none(),
+        "the winning abort cleans up, and the losing completion does not resurrect"
+    );
+}
+
+/// Runs one upload through to its durable completed state and hands back
+/// everything the content half of the sweep reasons about.
+async fn complete_upload_for_gc<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    bytes: &[u8],
+    context: &MutationContext,
+) -> (
+    UploadId,
+    ContentRef,
+    ContentStoreId,
+    crate::publish::PreparedContent,
+) {
+    let begin = crate::protocol::begin_upload(
+        store,
+        namespace_id,
+        loonfs_api::v0::BeginUploadRequest::default(),
+        context,
+    )
+    .await
+    .expect("begin upload");
+    let staged = crate::protocol::upload_content(store, namespace_id, &begin.upload_id, bytes)
+        .await
+        .expect("stage upload");
+    let content_store_id =
+        crate::namespace::catalog::load_namespace_content_store_id(store, namespace_id)
+            .await
+            .expect("content store id");
+    let completed = crate::protocol::complete_upload(
+        store,
+        namespace_id,
+        &content_store_id,
+        &begin.upload_id,
+        &loonfs_api::v0::CompleteUploadRequest {
+            content_ref: staged.content_ref.clone(),
+        },
+        context,
+    )
+    .await
+    .expect("complete upload");
+    (
+        begin.upload_id,
+        staged.content_ref,
+        content_store_id,
+        completed.prepared,
+    )
+}
+
+async fn publish_completed_content<S: ObjectStore>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    path: &str,
+    content_ref: ContentRef,
+    prepared: crate::publish::PreparedContent,
+    context: &MutationContext,
+) {
+    NamespaceCommitEngine::new(namespace_id.clone())
+        .publish_batch(
+            store,
+            vec![CommitCandidate::prepared(
+                CommitRequest::single(
+                    loonfs_api::CommitId::parse("publish-completed-content").expect("commit id"),
+                    None,
+                    FilesystemOperation::PutFile {
+                        absolute_path: loonfs_api::AbsolutePath::parse(path).expect("path"),
+                        content_ref,
+                        behavior: loonfs_api::DestinationBehavior::NoReplace,
+                        expected_revision_no: None,
+                    },
+                ),
+                vec![prepared],
+            )],
+            context,
+            &crate::protocol::PublishTailOptions::default(),
+        )
+        .await
+        .results
+        .pop()
+        .expect("one result")
+        .expect("published");
+}
+
+/// Inside the derived grace a completed session's content is untouchable,
+/// because a receipt could still be minted for it and a commit carrying that
+/// receipt could still be in flight.
+#[tokio::test]
+async fn content_gc_retains_completed_content_inside_its_grace() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = context(1_000);
+    bootstrap_namespace(&store, &namespace_id, &setup, false)
+        .await
+        .expect("bootstrap");
+    let (upload_id, content_ref, content_store_id, _prepared) =
+        complete_upload_for_gc(&store, &namespace_id, b"unpublished\n", &setup).await;
+    let content_key =
+        loonfs_objectstore::keys::content_blob(content_store_id.as_str(), &content_ref.content_id);
+
+    let inside = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_MS - 1);
+    let report = gc_namespace(&store, &namespace_id, &config(), &inside)
+        .await
+        .expect("gc pass inside the content grace");
+
+    assert_eq!(report.deleted_upload_sessions, 0);
+    assert!(store.head(&content_key).await.expect("head").is_some());
+    assert!(read_upload_session(&store, &namespace_id, &upload_id)
+        .await
+        .is_some());
+}
+
+/// Past the grace, content no metadata references is provably nobody's: no
+/// receipt survives that could admit a commit for it, so the set of
+/// references can no longer grow.
+#[tokio::test]
+async fn content_gc_reclaims_completed_content_nothing_references() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = context(1_000);
+    bootstrap_namespace(&store, &namespace_id, &setup, false)
+        .await
+        .expect("bootstrap");
+    write_test_file(&store, &namespace_id, "/docs/other.txt", "gc-other", &setup).await;
+    let (upload_id, content_ref, content_store_id, _prepared) =
+        complete_upload_for_gc(&store, &namespace_id, b"unpublished\n", &setup).await;
+    let content_key =
+        loonfs_objectstore::keys::content_blob(content_store_id.as_str(), &content_ref.content_id);
+
+    let past = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_MS + 1);
+    let report = gc_namespace(&store, &namespace_id, &config(), &past)
+        .await
+        .expect("gc pass past the content grace");
+
+    assert_eq!(report.deleted_upload_sessions, 1);
+    assert!(
+        store.head(&content_key).await.expect("head").is_none(),
+        "completed content nothing published is reclaimable"
+    );
     assert!(read_upload_session(&store, &namespace_id, &upload_id)
         .await
         .is_none());
+}
+
+/// Published content is metadata's now. The session record still ages out —
+/// it has nothing left to say — but the object it named stays, whether the
+/// commit that referenced it is still only in the WAL or already
+/// materialized into a manifest.
+#[tokio::test]
+async fn content_gc_never_reclaims_published_content() {
+    for materialize in [false, true] {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+        let setup = context(1_000);
+        bootstrap_namespace(&store, &namespace_id, &setup, false)
+            .await
+            .expect("bootstrap");
+        let (upload_id, content_ref, content_store_id, prepared) =
+            complete_upload_for_gc(&store, &namespace_id, b"published\n", &setup).await;
+        publish_completed_content(
+            &store,
+            &namespace_id,
+            "/docs/published.txt",
+            content_ref.clone(),
+            prepared,
+            &setup,
+        )
+        .await;
+        if materialize {
+            // Materializing and then dropping the WAL below the floor
+            // leaves the manifest as the only place the reference lives.
+            crate::checkpoint::flush_wal(&store, &namespace_id, &setup)
+                .await
+                .expect("flush wal");
+            advance_retention_floor(&store, &namespace_id, &setup)
+                .await
+                .expect("advance floor");
+        }
+        let content_key = loonfs_objectstore::keys::content_blob(
+            content_store_id.as_str(),
+            &content_ref.content_id,
+        );
+
+        let past = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_MS + 1);
+        let report = gc_namespace(&store, &namespace_id, &config(), &past)
+            .await
+            .expect("gc pass past the content grace");
+
+        assert_eq!(
+            report.deleted_upload_sessions, 1,
+            "materialize={materialize}"
+        );
+        assert!(
+            store.head(&content_key).await.expect("head").is_some(),
+            "published content survives its session (materialize={materialize})"
+        );
+        assert!(read_upload_session(&store, &namespace_id, &upload_id)
+            .await
+            .is_none());
+        assert!(!report.degraded_retention);
+    }
 }
 
 #[tokio::test]
@@ -1677,7 +1942,6 @@ async fn gc_releases_abandoned_fork_checkpoints_once_the_lease_expires() {
     // lease decides, not the ages.
     let tight = GcConfig {
         grace_window_ms: GC_MIN_GRACE_WINDOW_MS,
-        reap_window_ms: GC_MIN_GRACE_WINDOW_MS,
         max_objects: None,
         cursor: None,
     };
@@ -2081,7 +2345,12 @@ async fn bounded_passes_delete_exactly_the_unbounded_pass_set() {
     copy_tree(&unbounded_root, &bounded_root);
     let bounded_store = LocalFsStore::new(&bounded_root).expect("bounded store");
 
-    let unbounded_now = now_after_newest_object(&unbounded_store, &namespace_id, REAP_MS + 1).await;
+    let unbounded_now = now_after_newest_object(
+        &unbounded_store,
+        &namespace_id,
+        UPLOAD_SESSION_LEASE_MS + 2 * GRACE_MS + 1,
+    )
+    .await;
     let unbounded_report = gc_namespace(
         &unbounded_store,
         &namespace_id,
@@ -2091,7 +2360,12 @@ async fn bounded_passes_delete_exactly_the_unbounded_pass_set() {
     .await
     .expect("unbounded pass");
 
-    let bounded_now = now_after_newest_object(&bounded_store, &namespace_id, REAP_MS + 1).await;
+    let bounded_now = now_after_newest_object(
+        &bounded_store,
+        &namespace_id,
+        UPLOAD_SESSION_LEASE_MS + 2 * GRACE_MS + 1,
+    )
+    .await;
     let mut bounded_config = config();
     bounded_config.max_objects = Some(3);
     let mut bounded_report = GcResponse::empty(namespace_id.clone());

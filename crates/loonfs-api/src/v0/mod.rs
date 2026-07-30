@@ -39,7 +39,8 @@ pub use search::{
     GrepResponse,
 };
 pub use uploads::{
-    BeginUploadRequest, BeginUploadResponse, CompleteUploadRequest, CompleteUploadResponse,
-    DirectPutContentClaim, DirectPutUpload, ObjectTransferAccess, UploadContentResponse,
-    UploadMode, ValidatedContentToken,
+    AbortUploadResponse, BeginUploadRequest, BeginUploadResponse, CompleteUploadRequest,
+    CompleteUploadResponse, DirectPutContentClaim, DirectPutUpload, ObjectTransferAccess,
+    UploadContentResponse, UploadMode, UploadSessionStatus, UploadStatusResponse,
+    ValidatedContentToken,
 };

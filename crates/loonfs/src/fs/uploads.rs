@@ -1,6 +1,6 @@
 //! Staged uploads and direct-put targets.
 
-use crate::publish::PreparedContent;
+use crate::content_tokens::{CompletedUpload, CompletedUploadReceipt};
 use crate::uploads::BeginDirectPutUploadTargetResponse;
 use crate::FsWriter;
 use crate::Result;
@@ -8,6 +8,7 @@ use crate::{
     BeginUploadRequest, BeginUploadResponse, CompleteUploadRequest, CompleteUploadResponse,
     DirectPutContentClaim, NamespaceId, UploadContentResponse,
 };
+use loonfs_api::v0::{AbortUploadResponse, UploadStatusResponse};
 use loonfs_api::UploadId;
 
 impl FsWriter {
@@ -53,10 +54,10 @@ impl FsWriter {
         upload_id: &UploadId,
         request: &CompleteUploadRequest,
     ) -> Result<CompleteUploadResponse> {
-        let (response, _) = self
+        Ok(self
             .complete_upload_prepared(namespace_id, upload_id, request)
-            .await?;
-        Ok(response)
+            .await?
+            .response)
     }
 
     /// Completes an upload session and returns proof for later publication.
@@ -68,13 +69,34 @@ impl FsWriter {
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
         request: &CompleteUploadRequest,
-    ) -> Result<(CompleteUploadResponse, PreparedContent)> {
+    ) -> Result<CompletedUpload> {
         let catalog = self
             .load_namespace_catalog_for_content_preparation(namespace_id)
             .await?;
         Ok(self
             .engine(namespace_id)
             .complete_upload_prepared_with_catalog(&catalog, upload_id, request)
+            .await?)
+    }
+
+    /// Aborts an upload session and deletes the content object it owned.
+    pub async fn abort_upload(
+        &self,
+        namespace_id: &NamespaceId,
+        upload_id: &UploadId,
+    ) -> Result<AbortUploadResponse> {
+        Ok(self.engine(namespace_id).abort_upload(upload_id).await?)
+    }
+
+    /// Reads one upload session, with a fresh receipt when it is completed.
+    pub async fn read_upload_status(
+        &self,
+        namespace_id: &NamespaceId,
+        upload_id: &UploadId,
+    ) -> Result<(UploadStatusResponse, Option<CompletedUploadReceipt>)> {
+        Ok(self
+            .engine(namespace_id)
+            .read_upload_status(upload_id)
             .await?)
     }
 }

@@ -4,9 +4,12 @@ use crate::common::http_split_support::*;
 use crate::common::start_server;
 use loonfs_api::ContentId;
 use loonfs_api::{
-    v0::{BeginUploadRequest, CompleteUploadRequest, FilesystemChange},
+    v0::{
+        AbortUploadResponse, BeginUploadRequest, CompleteUploadRequest, FilesystemChange,
+        UploadSessionStatus, UploadStatusResponse,
+    },
     AbsolutePath, ApiError, ChangeSeq, CommitId, CommitRequest, CommitResponse, ContentRef,
-    DestinationBehavior, FilesystemOperation, InodeId, InodeKind, RevisionNo,
+    DestinationBehavior, ErrorCode, FilesystemOperation, InodeId, InodeKind, RevisionNo,
 };
 use loonfs_client::{ClientError, NamespacePath};
 use loonfs_test_support::http::raw_agent;
@@ -206,4 +209,167 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
     assert_eq!(empty.changes, Vec::new());
 
     harness.server.abort();
+}
+
+/// The two new surfaces over HTTP: reading a session, and ending one
+/// without content. The status read is what re-mints, so a client that lost
+/// its commit response gets a usable token back without sending a byte.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_upload_status_re_mints_and_abort_is_terminal() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loonfs-server-test",
+        "http-upload-status-and-abort",
+    ))
+    .await;
+    let namespace = namespace_id("demo");
+    harness
+        .client
+        .create_namespace(&namespace)
+        .await
+        .expect("create namespace");
+
+    // An open session reports itself and mints nothing.
+    let open = harness
+        .client
+        .begin_upload(&namespace, &BeginUploadRequest::default())
+        .await
+        .expect("begin upload");
+    let status = read_upload_status(&harness.server_url, &open.upload_id);
+    assert!(matches!(status.status, UploadSessionStatus::Open { .. }));
+
+    // Aborting it is terminal, repeatable, and observable.
+    let aborted = abort_upload(&harness.server_url, &open.upload_id).expect("abort");
+    let repeated = abort_upload(&harness.server_url, &open.upload_id).expect("repeated abort");
+    assert_eq!(repeated, aborted);
+    let status = read_upload_status(&harness.server_url, &open.upload_id);
+    let UploadSessionStatus::Aborted { aborted_at_ms } = status.status else {
+        unreachable!("an aborted session reports itself aborted");
+    };
+    assert_eq!(aborted_at_ms, aborted.aborted_at_ms);
+
+    // Completing an aborted session reports the same absence its eventual
+    // deletion will.
+    let completion = harness
+        .client
+        .complete_upload(
+            &namespace,
+            &open.upload_id,
+            &CompleteUploadRequest {
+                content_ref: ContentRef::blob_v1(ContentId::generate(), b"never staged"),
+            },
+        )
+        .await
+        .expect_err("an aborted session cannot complete");
+    assert_eq!(completion.code(), Some(ErrorCode::UploadNotFound));
+
+    // A completed session re-mints on every read, and refuses to be aborted.
+    // The client here is one that lost its commit response and threw the
+    // completion's receipt away: it reads the session and commits with what
+    // the read hands back, without sending a byte of content again.
+    let (upload_id, content_ref) =
+        complete_upload_session(&harness, &namespace, b"status re-mint").await;
+    let status = read_upload_status(&harness.server_url, &upload_id);
+    let UploadSessionStatus::Completed {
+        content_ref: reported_ref,
+        validated_content_token,
+        ..
+    } = status.status
+    else {
+        unreachable!("a completed session reports itself completed");
+    };
+    assert_eq!(reported_ref, content_ref);
+    let re_minted = validated_content_token.expect("a completed session re-mints");
+    let commit = send_commit(
+        &harness.server_url,
+        &namespace,
+        &CommitRequest {
+            commit_id: CommitId::parse("re-minted-receipt-put").expect("valid commit id"),
+            message: None,
+            content_tokens: vec![loonfs_api::v0::ValidatedContentToken {
+                content_ref: content_ref.clone(),
+                token: re_minted,
+            }],
+            operations: vec![FilesystemOperation::PutFile {
+                path: AbsolutePath::parse("/re-minted.txt").expect("path"),
+                content_ref,
+                behavior: DestinationBehavior::NoReplace,
+                expected_revision_no: None,
+            }],
+        },
+    )
+    .expect("a re-minted receipt admits its content");
+    let commit: CommitResponse =
+        serde_json::from_reader(commit.into_reader()).expect("decode commit response");
+    assert_eq!(commit.committed_seq, ChangeSeq(1));
+
+    let ureq::Error::Status(status_code, response) =
+        *abort_upload(&harness.server_url, &upload_id).expect_err("a completed session is final")
+    else {
+        unreachable!("aborting a completed session should return an HTTP status");
+    };
+    assert_eq!(status_code, 409);
+    let error: ApiError =
+        serde_json::from_reader(response.into_reader()).expect("API error envelope");
+    assert_eq!(error.code, "upload_already_completed");
+
+    harness.server.abort();
+}
+
+/// Stages content and hands back the session id, which the shared helper
+/// does not expose.
+async fn complete_upload_session(
+    harness: &crate::common::TestServer,
+    namespace: &loonfs_api::NamespaceId,
+    bytes: &[u8],
+) -> (loonfs_api::UploadId, ContentRef) {
+    let begin = harness
+        .client
+        .begin_upload(namespace, &BeginUploadRequest::default())
+        .await
+        .expect("begin upload");
+    let staged = harness
+        .client
+        .upload_content(namespace, &begin.upload_id, bytes)
+        .await
+        .expect("upload content");
+    let completed = harness
+        .client
+        .complete_upload(
+            namespace,
+            &begin.upload_id,
+            &CompleteUploadRequest {
+                content_ref: staged.content_ref,
+            },
+        )
+        .await
+        .expect("complete upload");
+    (begin.upload_id, completed.content_ref)
+}
+
+fn read_upload_status(server_url: &str, upload_id: &loonfs_api::UploadId) -> UploadStatusResponse {
+    let response = raw_agent()
+        .get(&format!(
+            "{server_url}/v0/namespaces/demo/uploads/{upload_id}"
+        ))
+        .set("authorization", "Bearer test-token")
+        .call()
+        .expect("read upload status");
+    serde_json::from_reader(response.into_reader()).expect("decode upload status")
+}
+
+fn abort_upload(
+    server_url: &str,
+    upload_id: &loonfs_api::UploadId,
+) -> Result<AbortUploadResponse, Box<ureq::Error>> {
+    let response = raw_agent()
+        .post(&format!(
+            "{server_url}/v0/namespaces/demo/uploads/{upload_id}/abort"
+        ))
+        .set("authorization", "Bearer test-token")
+        .set("content-type", "application/json")
+        .send_string("{}")
+        .map_err(Box::new)?;
+    Ok(serde_json::from_reader(response.into_reader()).expect("decode abort response"))
 }

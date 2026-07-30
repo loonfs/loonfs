@@ -1,11 +1,15 @@
 //! Producer-only content preparation proofs and short-lived wire tokens.
 //!
-//! A serving session verifies token expiry once when turning a signed wire
-//! token into an opaque [`PreparedContent`]. Its internal admission then
-//! remains valid for the process lifetime: it records accepted authoritative
-//! evidence that the identified content is durable, rather than carrying
-//! another clock.
+//! A content token is an upload's receipt: it is minted only from a durable
+//! upload session already observed in its terminal completed state, and it
+//! says that the content it names is durable and verified so a later commit
+//! does not have to look. A serving session verifies token expiry once when
+//! turning a signed wire token into an opaque [`PreparedContent`]. Its
+//! internal admission then remains valid for the process lifetime: it records
+//! accepted authoritative evidence that the identified content is durable,
+//! rather than carrying another clock.
 
+use crate::limits::CONTENT_RECEIPT_TTL_MS;
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use base64::Engine as _;
 use loonfs_api::v0::ValidatedContentToken;
@@ -15,7 +19,39 @@ use sha2::Sha256;
 use thiserror::Error;
 
 const TOKEN_VERSION: &str = "vct0";
-const DEFAULT_TOKEN_TTL_MS: u64 = 60 * 60 * 1000;
+
+/// Everything a receipt attests, read out of a durable upload session that
+/// was observed in its terminal completed state.
+///
+/// The type has no public constructor on purpose. The only way to hold one
+/// is for the upload protocol to have loaded a completed session from the
+/// object store, so a receipt can never be minted from an in-memory
+/// expectation, a provider response, or a completion still in flight.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletedUploadReceipt {
+    namespace_id: NamespaceId,
+    content_store_id: ContentStoreId,
+    content_ref: ContentRef,
+}
+
+impl CompletedUploadReceipt {
+    pub(crate) fn for_completed_session(
+        namespace_id: NamespaceId,
+        content_store_id: ContentStoreId,
+        content_ref: ContentRef,
+    ) -> Self {
+        Self {
+            namespace_id,
+            content_store_id,
+            content_ref,
+        }
+    }
+
+    /// Returns the completed session's verified content reference.
+    pub fn content_ref(&self) -> &ContentRef {
+        &self.content_ref
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContentAdmission {
@@ -68,6 +104,10 @@ impl PreparedContent {
 struct ContentTokenPayload {
     version: String,
     namespace_id: NamespaceId,
+    /// Where the content lives. Namespaces may share a content store, so
+    /// binding both ends keeps a receipt from admitting anything outside the
+    /// exact pairing the completed session was for.
+    content_store_id: ContentStoreId,
     content_ref: ContentRef,
     expires_at_ms: u64,
 }
@@ -82,6 +122,8 @@ pub enum ContentTokenError {
     NamespaceMismatch,
     #[error("content token content ref mismatch")]
     ContentRefMismatch,
+    #[error("content token content store mismatch")]
+    ContentStoreMismatch,
     #[error("content token has expired")]
     Expired,
     #[error("content token codec error: {0}")]
@@ -90,19 +132,25 @@ pub enum ContentTokenError {
     TimeOverflow,
 }
 
+/// Mints one receipt for a completed upload.
+///
+/// The receipt is short-lived because it does not have to be durable: the
+/// completed session is, so reading the session's status mints another one.
+/// That is what makes a lost publish response cost a request instead of a
+/// retransfer.
 pub fn mint_content_token(
     secret: &str,
-    namespace_id: &NamespaceId,
-    content_ref: &ContentRef,
+    receipt: &CompletedUploadReceipt,
     now_ms: u64,
 ) -> Result<String, ContentTokenError> {
     let expires_at_ms = now_ms
-        .checked_add(DEFAULT_TOKEN_TTL_MS)
+        .checked_add(CONTENT_RECEIPT_TTL_MS)
         .ok_or(ContentTokenError::TimeOverflow)?;
     let payload = ContentTokenPayload {
         version: TOKEN_VERSION.to_owned(),
-        namespace_id: namespace_id.clone(),
-        content_ref: content_ref.clone(),
+        namespace_id: receipt.namespace_id.clone(),
+        content_store_id: receipt.content_store_id.clone(),
+        content_ref: receipt.content_ref.clone(),
         expires_at_ms,
     };
     let payload_json = serde_json::to_vec(&payload)
@@ -141,6 +189,9 @@ pub fn verify_content_token(
     if payload.namespace_id != *catalog.namespace_id() {
         return Err(ContentTokenError::NamespaceMismatch);
     }
+    if payload.content_store_id != *catalog.content_store_id() {
+        return Err(ContentTokenError::ContentStoreMismatch);
+    }
     if payload.content_ref != token.content_ref {
         return Err(ContentTokenError::ContentRefMismatch);
     }
@@ -148,11 +199,8 @@ pub fn verify_content_token(
         return Err(ContentTokenError::Expired);
     }
 
-    let content_ref = payload.content_ref;
-    let admission = ContentAdmission::for_durable_content_write(
-        catalog.content_store_id().clone(),
-        content_ref,
-    );
+    let admission =
+        ContentAdmission::for_durable_content_write(payload.content_store_id, payload.content_ref);
     Ok(PreparedContent::from_admission(admission))
 }
 
@@ -198,11 +246,13 @@ mod tests {
             "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
         );
     }
-    use super::{mint_content_token, verify_content_token};
+    use super::{mint_content_token, verify_content_token, CompletedUploadReceipt};
     use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
     use loonfs_api::v0::ValidatedContentToken;
     use loonfs_api::wire::control::HeadState;
     use loonfs_api::{ContentId, ContentRef, ContentStoreId, NamespaceId};
+
+    const CONTENT_STORE: &str = "cs_00000000000000000000000000000001";
 
     fn catalog_entry(
         namespace_id: NamespaceId,
@@ -214,16 +264,33 @@ mod tests {
         ))
     }
 
+    fn receipt(
+        namespace_id: &NamespaceId,
+        content_store: &str,
+        content_ref: &ContentRef,
+    ) -> CompletedUploadReceipt {
+        CompletedUploadReceipt::for_completed_session(
+            namespace_id.clone(),
+            ContentStoreId::parse(content_store).expect("content store id"),
+            content_ref.clone(),
+        )
+    }
+
     #[test]
     fn token_round_trips_and_admits_matching_content() {
         let namespace = NamespaceId::parse("demo").expect("namespace");
         let content = ContentRef::blob_v1(ContentId::generate(), b"hello");
-        let token = mint_content_token("secret", &namespace, &content, 1_000).expect("mint");
+        let token = mint_content_token(
+            "secret",
+            &receipt(&namespace, CONTENT_STORE, &content),
+            1_000,
+        )
+        .expect("mint");
         let token = ValidatedContentToken {
             content_ref: content.clone(),
             token,
         };
-        let catalog = catalog_entry(namespace, "cs_00000000000000000000000000000001");
+        let catalog = catalog_entry(namespace, CONTENT_STORE);
 
         let prepared =
             verify_content_token("secret", &catalog, &token, 1_000).expect("verify token");
@@ -239,17 +306,22 @@ mod tests {
         let namespace = NamespaceId::parse("demo").expect("namespace");
         let content = ContentRef::blob_v1(ContentId::generate(), b"hello");
         let issued_at_ms = 1_000;
-        let token = mint_content_token("secret", &namespace, &content, issued_at_ms).expect("mint");
+        let token = mint_content_token(
+            "secret",
+            &receipt(&namespace, CONTENT_STORE, &content),
+            issued_at_ms,
+        )
+        .expect("mint");
         let token = ValidatedContentToken {
             content_ref: content.clone(),
             token,
         };
-        let catalog = catalog_entry(namespace, "cs_00000000000000000000000000000001");
+        let catalog = catalog_entry(namespace, CONTENT_STORE);
         let prepared = verify_content_token(
             "secret",
             &catalog,
             &token,
-            issued_at_ms + DEFAULT_TOKEN_TTL_MS,
+            issued_at_ms + CONTENT_RECEIPT_TTL_MS,
         )
         .expect("verify token before expiry");
 
@@ -261,25 +333,41 @@ mod tests {
     }
 
     #[test]
-    fn token_rejects_wrong_secret_namespace_content_and_expiry() {
+    fn token_rejects_wrong_secret_namespace_store_content_and_expiry() {
         let namespace = NamespaceId::parse("demo").expect("namespace");
         let other_namespace = NamespaceId::parse("other").expect("namespace");
+        let other_store = "cs_00000000000000000000000000000002";
         let content = ContentRef::blob_v1(ContentId::generate(), b"hello");
         let other_content = ContentRef::blob_v1(ContentId::generate(), b"other");
         let issued_at_ms = 1_000;
-        let token = mint_content_token("secret", &namespace, &content, issued_at_ms).expect("mint");
+        let token = mint_content_token(
+            "secret",
+            &receipt(&namespace, CONTENT_STORE, &content),
+            issued_at_ms,
+        )
+        .expect("mint");
         let token = ValidatedContentToken {
             content_ref: content.clone(),
             token,
         };
-        let catalog = catalog_entry(namespace, "cs_00000000000000000000000000000001");
-        let other_catalog = catalog_entry(other_namespace, "cs_00000000000000000000000000000001");
+        let catalog = catalog_entry(namespace.clone(), CONTENT_STORE);
+        let other_catalog = catalog_entry(other_namespace, CONTENT_STORE);
 
         assert!(verify_content_token("other", &catalog, &token, 1_000).is_err());
         assert_eq!(
             verify_content_token("secret", &other_catalog, &token, 1_000),
             Err(ContentTokenError::NamespaceMismatch),
             "sharing a content store must not share token authorization"
+        );
+        assert_eq!(
+            verify_content_token(
+                "secret",
+                &catalog_entry(namespace, other_store),
+                &token,
+                1_000
+            ),
+            Err(ContentTokenError::ContentStoreMismatch),
+            "a receipt names the store its content is durable in"
         );
         assert!(verify_content_token(
             "secret",
@@ -295,7 +383,7 @@ mod tests {
             "secret",
             &catalog,
             &token,
-            issued_at_ms + DEFAULT_TOKEN_TTL_MS + 1
+            issued_at_ms + CONTENT_RECEIPT_TTL_MS + 1
         )
         .is_err());
     }

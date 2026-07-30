@@ -229,7 +229,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `namespace_deleted` | 410 | The namespace's head records the terminal deleted state. The id is permanently retired, so a create or fork against it fails here rather than as a conflict. |
 | `path_not_found` | 404 | No visible entry at the path. |
 | `revision_not_found` | 404 | The file has no such revision. |
-| `upload_not_found` | 404 | No upload session with this id. |
+| `upload_not_found` | 404 | No upload session with this id, or one that was aborted: an aborted session will never select content, so it reports the absence that its deletion will. |
 | `namespace_exists` | 409 | The create or fork target already exists: another namespace holds the id. |
 | `content_not_prepared` | 409 | A path put or explicit create/replace operation references external content without a matching admission, or carries a rejected relevant token. Prepare the content and retry with its proof. |
 | `path_conflict` | 409 | The destination path is already bound. |
@@ -240,7 +240,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `writer_fenced` | 409 | The writer epoch was superseded by another session. |
 | `would_cycle` | 409 | The rename would create a directory cycle. |
 | `commit_id_reuse_conflict` | 409 | The commit id was reused with different content. |
-| `upload_already_completed` | 409 | The upload session is already completed. |
+| `upload_already_completed` | 409 | The upload session is already completed, so it cannot select other content and cannot be aborted. |
 | `upload_content_conflict` | 409 | Different bytes were staged under this upload id. |
 | `query_unindexable` | 400 | The pattern has no run of at least 3 literal bytes, so the trigram index cannot narrow candidates; rewrite the pattern, or set `allow_scan` (capped by `query.grep.scan_budget_files`). |
 | `rebootstrap_required` | 409 | The resume position is unanswerable — a change cursor below the retention floor, or a listing cursor minted ahead of the serving head; restart from a fresh listing or checkpoint. |
@@ -460,6 +460,8 @@ A representative v0 binding is shown below.
 | Begin or prepare upload | `POST /v0/namespaces/{ns}/uploads` |
 | Upload full staged content | `PUT /v0/namespaces/{ns}/uploads/{upload_id}/content` |
 | Complete staged upload | `POST /v0/namespaces/{ns}/uploads/{upload_id}/complete` |
+| Read an upload session | `GET /v0/namespaces/{ns}/uploads/{upload_id}` (a completed session answers with a freshly minted `validated_content_token`) |
+| Abort an upload session | `POST /v0/namespaces/{ns}/uploads/{upload_id}/abort` (terminal and repeatable; a completed session is refused) |
 | Read committed changes | `GET /v0/namespaces/{ns}/changes?after_seq=123&limit=100` |
 | Fork a namespace | `POST /v0/namespaces/{source_ns}/forks` |
 | Delete a namespace | `DELETE /v0/namespaces/{ns}?expected_head_seq=418` (feature `core.namespaces.delete`; the precondition is optional) |
@@ -489,9 +491,12 @@ and a value above the write-rejection threshold is rejected as
 `invalid_request`. `retention: true` opts into advancing the retention
 floor to the flushed manifest head; nothing surrenders replay history
 unless it is present. `gc` opts into sweeping and overrides
-`grace_window_ms`/`reap_window_ms`, bounds one invocation with `max_objects`,
-and resumes with `cursor`; a grace window below the derived safety floor or a
-zero budget is rejected as `invalid_request`. Step-driven GC defaults
+`grace_window_ms`, bounds one invocation with `max_objects`, and resumes with
+`cursor`; a grace window below the derived safety floor or a zero budget is
+rejected as `invalid_request`. Upload sessions and the content they leave
+behind are not under `grace_window_ms` alone: a session carries its own
+lease, and how long a completed session's content is protected is derived
+rather than configured (format spec, "Garbage collection", rule 11). Step-driven GC defaults
 `max_objects` to 1024 and returns any `next_cursor` for a later step rather
 than looping internally. Nothing sweeps unless `gc` is present.
 
@@ -597,7 +602,8 @@ deletes the object — safe because the id was never published, so nothing
 references it. Nothing is read back through the server either way.
 
 A server may return a short-lived `validated_content_token` for the completed
-content ref; the token is opaque to clients.
+content ref; the token is opaque to clients, and reading the session mints
+another one for as long as the session is minting them.
 
 ```json
 {
@@ -1060,12 +1066,39 @@ Two *different* sessions carrying identical bytes get their own objects:
 content is never shared across uploads, so retry idempotency belongs to the
 session and nothing else. Completing an
 upload fails if no content was staged or if the expected `content_ref` differs
-from the staged one. An aged abandoned session is conditionally condemned
-before GC deletes it. If condemnation wins a completion race, completion
-reports `upload_not_found`, the same stable surface as the subsequent physical
-absence; if completion wins, GC's conditional write fails and retains the
-completed session. Publication never downloads an arbitrary external ref to
+from the staged one. Publication never downloads an arbitrary external ref to
 rescue a missing proof.
+
+A session is `open`, then `completed` or `aborted`, and both of those are
+final (format spec, section 3.10). What that means at the API:
+
+- `GET /uploads/{upload_id}` reports the state. An `open` session reports its
+  `expires_at_ms`; a `completed` one reports `completed_at_ms`, its
+  `content_ref`, and a **freshly minted** `validated_content_token`; an
+  `aborted` one reports `aborted_at_ms`.
+- `POST /uploads/{upload_id}/abort` ends an open session and deletes the
+  object it was writing. Repeating it succeeds and reports the abort that
+  stands. A completed session is refused with `upload_already_completed`,
+  because its content may already be published.
+- An aborted session reports `upload_not_found` from `PUT /content` and from
+  `complete` — the same stable surface as the physical absence that follows
+  it. This is also what a completion sees when server-side cleanup aborted
+  the session first; if the completion lands first instead, the cleanup's
+  conditional write fails and the completed session is retained.
+
+**Receipt expiry and re-minting.** The `validated_content_token` is the
+upload's receipt: it is minted only from a session the store already says is
+completed, it names one `{namespace, content store, content_ref}` triple, and
+it is short-lived — a commit is expected to follow the upload promptly, and a
+rejected receipt is not an error the client has to plan around. Durability
+lives in the session, not in the receipt: reading the session mints another
+one for bytes that never move again, so **a lost commit response costs one
+request, never a retransfer**. Re-minting stops a fixed window after
+completion, after which the status read reports the session without a token;
+by then the content is either referenced by committed metadata, which
+protects it on its own, or reclaimable (format spec, "Garbage collection",
+rule 11). A client that receives an expired or otherwise rejected receipt
+re-reads the session and commits again with the fresh one.
 
 Representative begin-upload response:
 

@@ -53,6 +53,8 @@ pub fn openapi_json_pretty() -> Result<String, serde_json::Error> {
         crate::http::handlers_uploads::begin_upload,
         crate::http::handlers_uploads::upload_content,
         crate::http::handlers_uploads::complete_upload,
+        crate::http::handlers_uploads::abort_upload,
+        crate::http::handlers_uploads::read_upload_status,
         crate::http::handlers_filesystem::list_changes,
         crate::http::handlers_namespace::create_checkpoint,
         crate::http::handlers_namespace::release_checkpoint,

@@ -20,9 +20,9 @@
 
 use loonfs_api::wire::control::{
     decode_control_object, encode_control_object, CheckpointOwner, CheckpointRecordLifecycle,
-    CheckpointRecordState, CompletedUpload, ControlObjectEnvelope, ControlObjectKind, ForkBasis,
-    HeadState, MetadataRootState, NamespaceState, UploadSessionLifecycle, UploadSessionState,
-    WalFloorState, WalSegmentPointer, WriterBlock,
+    CheckpointRecordState, ControlObjectEnvelope, ControlObjectKind, ForkBasis, HeadState,
+    MetadataRootState, NamespaceState, UploadSessionLifecycle, UploadSessionState, WalFloorState,
+    WalSegmentPointer, WriterBlock,
 };
 use loonfs_api::wire::envelope::EnvelopeCodecError;
 use loonfs_api::wire::manifest::{
@@ -575,11 +575,11 @@ fn control_objects_match_golden_bytes() {
             claimed_checksum: None,
             direct_put_content_ref: None,
             staged_content_ref: Some(sample_content_ref()),
-            completed: Some(CompletedUpload {
-                content_ref: sample_content_ref(),
-            }),
             created_at_ms: 1_000,
-            state: UploadSessionLifecycle::Active,
+            state: UploadSessionLifecycle::Completed {
+                completed_at_ms: 2_000,
+                content_ref: sample_content_ref(),
+            },
         },
     );
     // The released lifecycle and the direct-put session shape are durable
@@ -620,13 +620,14 @@ fn control_objects_match_golden_bytes() {
             claimed_checksum: Some(sample_content_ref().storage_checksum),
             direct_put_content_ref: Some(sample_content_ref()),
             staged_content_ref: None,
-            completed: None,
             created_at_ms: 1_000,
-            state: UploadSessionLifecycle::Active,
+            state: UploadSessionLifecycle::Open {
+                expires_at_ms: 87_400_000,
+            },
         },
     );
     check_control_golden(
-        "control_upload_session_condemned.v1.json",
+        "control_upload_session_aborted.v1.json",
         ControlObjectKind::UploadSession,
         UploadSessionState {
             namespace_id: namespace_id(),
@@ -637,9 +638,10 @@ fn control_objects_match_golden_bytes() {
             claimed_checksum: None,
             direct_put_content_ref: None,
             staged_content_ref: None,
-            completed: None,
             created_at_ms: 1_000,
-            state: UploadSessionLifecycle::Condemned,
+            state: UploadSessionLifecycle::Aborted {
+                aborted_at_ms: 5_000,
+            },
         },
     );
 }
@@ -708,7 +710,7 @@ fn mutable_control_nested_structs_reject_unknown_fields_as_corruption() {
     assert_control_payload_edit_is_corrupt::<UploadSessionState>(
         "control_upload_session.v1.json",
         ControlObjectKind::UploadSession,
-        |payload| payload["completed"]["field_from_the_future"] = serde_json::Value::from(true),
+        |payload| payload["state"]["field_from_the_future"] = serde_json::Value::from(true),
     );
     assert_control_payload_edit_is_corrupt::<UploadSessionState>(
         "control_upload_session.v1.json",
@@ -744,6 +746,41 @@ fn checkpoint_records_reject_the_pre_monotonic_lifecycle_encoding() {
         ControlObjectKind::CheckpointRecord,
         |payload| payload["state"]["kind"] = serde_json::Value::from("released"),
     );
+}
+
+/// The monotonic upload lifecycle is a hard cutover too. The pre-cutover
+/// encoding wrote `state` as a bare string over `active` and `condemned`;
+/// the current decoder takes a tagged object over three states, each
+/// carrying the instant its own transition happened, so nothing written
+/// before the change reads as anything written after it.
+#[test]
+fn upload_sessions_reject_the_pre_monotonic_lifecycle_encoding() {
+    for legacy_state in ["active", "condemned"] {
+        assert_control_payload_edit_is_corrupt::<UploadSessionState>(
+            "control_upload_session.v1.json",
+            ControlObjectKind::UploadSession,
+            |payload| payload["state"] = serde_json::Value::from(legacy_state),
+        );
+    }
+    // The deleted states are not tags this format knows either.
+    for legacy_kind in ["active", "condemned"] {
+        assert_control_payload_edit_is_corrupt::<UploadSessionState>(
+            "control_upload_session.v1.json",
+            ControlObjectKind::UploadSession,
+            |payload| payload["state"]["kind"] = serde_json::Value::from(legacy_kind),
+        );
+    }
+    // Every state is defined by its own stamp: without one it cannot be
+    // aged, so it is not that state.
+    for tagged_without_its_stamp in ["open", "completed", "aborted"] {
+        assert_control_payload_edit_is_corrupt::<UploadSessionState>(
+            "control_upload_session.v1.json",
+            ControlObjectKind::UploadSession,
+            |payload| {
+                payload["state"] = serde_json::json!({ "kind": tagged_without_its_stamp });
+            },
+        );
+    }
 }
 
 #[test]
@@ -813,9 +850,10 @@ fn checkpoint_and_upload_decoders_reject_wrong_format_version_without_fallback()
                 claimed_checksum: None,
                 direct_put_content_ref: None,
                 staged_content_ref: None,
-                completed: None,
                 created_at_ms: 1_000,
-                state: UploadSessionLifecycle::Condemned,
+                state: UploadSessionLifecycle::Aborted {
+                    aborted_at_ms: 5_000,
+                },
             })
             .expect("upload state"),
         ),

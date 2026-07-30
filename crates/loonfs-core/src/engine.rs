@@ -13,10 +13,12 @@ use crate::options::{BootstrapOptions, DeleteNamespaceOptions};
 use crate::path::read::{
     load_metadata_view, CurrentFileState, LoadedMetadataView, ReadLoadContext,
 };
-use crate::storage::content_admission::PreparedContent;
+use crate::protocol::CompletedUpload;
+use crate::storage::content_admission::CompletedUploadReceipt;
 use loonfs_api::v0::{
-    BeginUploadRequest, BeginUploadResponse, ChangesResponse, CommitResponse,
+    AbortUploadResponse, BeginUploadRequest, BeginUploadResponse, ChangesResponse, CommitResponse,
     CompleteUploadRequest, CompleteUploadResponse, DirectPutContentClaim, UploadContentResponse,
+    UploadStatusResponse,
 };
 use loonfs_api::wire::control::{CheckpointOwner, HeadState, NamespaceState};
 use loonfs_api::EffectiveLimit;
@@ -441,8 +443,10 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         upload_id: &UploadId,
         request: &CompleteUploadRequest,
     ) -> Result<CompleteUploadResponse> {
-        let (response, _) = self.complete_upload_prepared(upload_id, request).await?;
-        Ok(response)
+        Ok(self
+            .complete_upload_prepared(upload_id, request)
+            .await?
+            .response)
     }
 
     /// Completes an upload session and returns proof for later publication.
@@ -453,7 +457,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         &self,
         upload_id: &UploadId,
         request: &CompleteUploadRequest,
-    ) -> Result<(CompleteUploadResponse, PreparedContent)> {
+    ) -> Result<CompletedUpload> {
         let catalog = crate::namespace::catalog::load_namespace_catalog_entry(
             &self.store,
             &self.namespace_id,
@@ -470,7 +474,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         catalog: &VerifiedNamespaceCatalogEntry,
         upload_id: &UploadId,
         request: &CompleteUploadRequest,
-    ) -> Result<(CompleteUploadResponse, PreparedContent)> {
+    ) -> Result<CompletedUpload> {
         if catalog.namespace_id() != &self.namespace_id {
             return Err(
                 crate::commit_engine::ContentPreparationError::ContentNotPrepared {
@@ -485,6 +489,48 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             catalog.content_store_id(),
             upload_id,
             request,
+            &self.mutation_context()?,
+        )
+        .await
+    }
+
+    /// Aborts an upload session, then deletes the content object it owned.
+    ///
+    /// Terminal and idempotent: repeating it succeeds, and it refuses a
+    /// session that already completed, whose content may be published.
+    pub async fn abort_upload(&self, upload_id: &UploadId) -> Result<AbortUploadResponse> {
+        let content_store_id = crate::namespace::catalog::load_namespace_content_store_id(
+            &self.store,
+            &self.namespace_id,
+        )
+        .await?;
+        crate::protocol::abort_upload(
+            &self.store,
+            &self.namespace_id,
+            &content_store_id,
+            upload_id,
+            &self.mutation_context()?,
+        )
+        .await
+    }
+
+    /// Reads one upload session, minting a fresh receipt when it is
+    /// completed so a lost commit response never costs a retransfer.
+    pub async fn read_upload_status(
+        &self,
+        upload_id: &UploadId,
+    ) -> Result<(UploadStatusResponse, Option<CompletedUploadReceipt>)> {
+        let content_store_id = crate::namespace::catalog::load_namespace_content_store_id(
+            &self.store,
+            &self.namespace_id,
+        )
+        .await?;
+        crate::protocol::read_upload_status(
+            &self.store,
+            &self.namespace_id,
+            &content_store_id,
+            upload_id,
+            self.mutation_context()?.now_ms,
         )
         .await
     }

@@ -62,7 +62,7 @@ The required durable object families and standard key patterns are:
 | **Namespace manifests** | Immutable | Record one namespace file-set version: its metadata table references and a head summary. Table references carry their own owner, so a fork target's manifest names source-owned tables without recording anything about the fork. | `namespaces/{namespace_id}/metadata/manifests/{manifest_object_id}.manifest.json` |
 | **Checkpoint records** | Mutable lifecycle | Durable stable-view pins to a metadata manifest, each carrying a required owner (user or fork target). The lifecycle is monotonic: a record is created active under a generated id, released once by compare-and-swap, and deleted a grace window after that release. | `namespaces/{namespace_id}/checkpoints/{checkpoint_id}.json` |
 | **Metadata tables** | Immutable | Store metadata rows referenced by manifests. Files may be owned by the namespace itself or by a fork source namespace. | `namespaces/{owner_namespace_id}/metadata/tables/{table_id}.sst.zst` |
-| **Upload sessions** | Mutable lifecycle | Track one staged-content upload from begin to completion; GC conditionally condemns abandoned active sessions before deletion. | `namespaces/{namespace_id}/uploads/{upload_id}.json` |
+| **Upload sessions** | Mutable lifecycle | Track one staged-content upload. The lifecycle is monotonic: a session is created `open` under a lease, and moves once to `completed` or `aborted`, both terminal. | `namespaces/{namespace_id}/uploads/{upload_id}.json` |
 | **Metadata root** | Mutable | Cold pointer to the best known materialized metadata root; monotonic CAS. | `namespaces/{namespace_id}/metadata/root.json` |
 | **WAL floor** | Mutable | Cold lower bound of retained WAL/change history; monotonic CAS. | `namespaces/{namespace_id}/wal/floor.json` |
 | **Content objects** | Immutable | Store one file revision's complete bytes. | `content-stores/{content_store_id}/objects/{content_id[4..6]}/{content_id}` |
@@ -637,9 +637,10 @@ the namespace's history at that `seq`. Every operation that observes the
 deleted head afterward — reads, commits, forks from the namespace, status,
 and re-creation of the same id — fails with `namespace_deleted`.
 
-Namespace deletion does not imply content-store deletion. In v0, content-store
-deletion and destructive content garbage collection are unsupported
-operator-only work. Metadata is reclaimed by garbage collection: on a
+Namespace deletion does not imply content-store deletion. In v0, deleting a
+content store is unsupported operator-only work, and the only content garbage
+collection is the narrow one described in section 6.4: an object a completed
+upload session owns and no metadata references. Metadata is reclaimed by garbage collection: on a
 terminally deleted namespace a GC pass reaps the WAL chain, metadata tables,
 manifests, and non-protecting checkpoint records under the usual windows,
 leaving the head as the id-retiring tombstone, together with the root and
@@ -1492,14 +1493,42 @@ Examples include:
 - resumable uploads that need a stable destination binding.
 
 In those cases, the server may create control-plane objects such as read
-sessions, upload sessions, or put intents. Durable upload sessions carry an
-`active` or absorbing `condemned` lifecycle. GC condemns an aged abandoned
-active session with the exact etag inspected with its provider age before
-deleting it. Completion that observes `condemned` reports
-`upload_not_found`: condemned is logically absent and that existing code is
-also the result after physical deletion. A completion CAS that lands first
-makes the GC CAS fail and the pass retains the session; a condemnation that
-lands first makes completion lose and report `upload_not_found`.
+sessions, upload sessions, or put intents.
+
+A durable upload session has three states and one transition:
+
+- `open { expires_at_ms }` — the only live state. A session may stage bytes
+  and complete only while open. The expiry is a lease carried in the record,
+  so no session transition depends on an object's provider timestamp. Unlike
+  a namespace, a session *is* a lease, so reclaiming an expired one on age
+  alone is the correct reading rather than a guess about the client.
+- `completed { completed_at_ms, content_ref }` — terminal. The reference is
+  verified before the transition is written, and it is what every idempotent
+  completion retry and every later read answers with.
+- `aborted { aborted_at_ms }` — terminal. The session will never select
+  content.
+
+Two rules make this decidable under concurrency:
+
+1. **The durable compare-and-swap is the serialization point.** Whichever of
+   the two terminal transitions lands is what happened. The loser reports a
+   terminal error rather than undoing anything: a completion that finds the
+   session aborted reports `upload_not_found`, because an aborted session is
+   logically absent and will never select content — the same code the
+   subsequent physical deletion produces; an abort that finds the session
+   completed reports `upload_already_completed`, because the content may
+   already be published.
+2. **Provider state follows the durable transition, never precedes it.**
+   Completion verifies the object first and only then swaps. An abort swaps
+   first and only then deletes the object the session owned. A crash in
+   between therefore leaves an object the next garbage-collection pass
+   reclaims from the terminal record — never an object deleted out from
+   under a session that is still open. Cleanup is idempotent and may be
+   repeated freely.
+
+Nothing returns a session to `open`, and no state records consumption: a
+client that wants another attempt begins another session, which mints its own
+content identity, and publication never writes back to a session record.
 
 Three rules apply:
 
@@ -1829,13 +1858,9 @@ does not exist, so there is nothing to collect and nothing to ignore.
 v1 GC is listing mark-and-sweep. Its inputs are `wal/head.json`,
 `wal/floor.json`, `metadata/root.json`, and the `metadata/manifests/`,
 `metadata/tables/`, `checkpoints/`, and `wal/segments/` collections. A live
-manifest roots every object key its `metadata_files` list names. The pass also sweeps
-`uploads/`: sessions root nothing and nothing durable references them, so a
-session whose provider age exceeds the reap window is first compare-and-swapped
-from `active` to absorbing `condemned` under the etag loaded with that age,
-then deleted unconditionally. A lost CAS retains the session for a later
-pass. Completed sessions are already absorbing and may be deleted directly;
-a completion that loses to condemnation answers `upload_not_found`.
+manifest roots every object key its `metadata_files` list names. The pass also
+sweeps `uploads/`, and that sweep owns content reclamation as well; the two
+halves are split at the completed line and described in rule 11.
 Core GC never recognizes, lists specifically, or deletes any object below a
 namespace's `extensions/` prefix; grep collection is owned by `loonfs-grep`.
 Because floor, root, and checkpoint publication no longer serialize through
@@ -1912,8 +1937,9 @@ publishing CAS) — under these rules:
    create-if-absent, content-derived, or write-verification protocols. Once
    one is unreferenced and grace-aged, unconditional deletion is safe: a
    zombie retry can at most recreate identical, still-unreferenced bytes for
-   a later pass. Content-blob GC remains unsupported in v0, but the same
-   immutability argument governs a future sweep.
+   a later pass. Content objects are never enumerated by listing the content
+   store, which is shared by every namespace whose head names it; they are
+   reached only through the upload session that owns them (rule 11).
 10. **Abandoned forks.** A fork that crashes after writing its leased source
    checkpoint record but before installing its target head leaves that
    record with no target at all. Such a record is released once its lease
@@ -1923,6 +1949,56 @@ publishing CAS) — under these rules:
    interrupted install can leave, and it lives on the source, never under
    the target's prefix — the target either has a complete head or has
    nothing.
+11. **Uploads and content, split at `completed`.** One sweep of `uploads/`
+   owns both halves, because a session record is the only handle on the
+   content object it created.
+
+   *Before `completed`, the upload half owns everything, and its reasoning
+   is session-local.* An `open` session whose `expires_at_ms` has passed by a
+   grace window is compare-and-swapped to `aborted` under the etag loaded
+   with it, and only then is the object at its content id deleted, together
+   with any provider-side transfer the session had started. A lost
+   compare-and-swap retains the session for a later pass. An `aborted`
+   record repeats that cleanup — covering a crash between the swap and the
+   delete — and is deleted a grace window after its own `aborted_at_ms`. No
+   reachability question arises: a random content id that was never
+   published belongs to exactly one session, and a session that never
+   completed never had a receipt, so nothing anywhere can reference it.
+
+   *At `completed`, ownership passes to the content half.* Completed content
+   may or may not have been published, and consumption is inferred from
+   metadata references rather than recorded on the session. A completed
+   session's content object is reclaimed only when all of the following
+   hold: `completed_at_ms` is older than the derived grace below; the pass is
+   not degraded (rule 5); and no content reference reachable from this
+   namespace's roots names it. The reachable set is the same root set the
+   rest of the pass uses — every revision in every manifest the live set
+   protects, which includes each fork basis a fork-owned record pins, plus
+   every `AppendFileRevision` in the retained WAL. Either way the session
+   record itself is then deleted; when the content is referenced, metadata
+   protects it from that point on.
+
+   *The grace is derived, not tuned.* A reference can enter metadata only
+   through a receipt, a receipt is minted only from a durable `completed`
+   session, and minting stops a fixed window after completion. So:
+
+   ```
+   CONTENT_RECLAMATION_GRACE
+       >= COMPLETED_UPLOAD_RECEIPT_WINDOW   (the last receipt that can exist)
+          + CONTENT_RECEIPT_TTL             (how long it admits a commit)
+          + T                               (rule 1: that commit's publication)
+   ```
+
+   Past that sum, no receipt survives, so the set of references to this
+   content can no longer grow and a reference set collected earlier in the
+   pass is still sound at delete time — which is why the content family
+   needs no delete-time re-verification. The constants live beside `T` in
+   `loonfs-core`'s `limits` module and the inequality is a compile-time
+   assertion. The reasoning above assumes a content object is referenced
+   only by the namespace whose session created it and by fork descendants
+   reading through a pinned basis; a same-content-store copy across
+   namespaces (section 2.8) would have to root the reference on the source
+   side the way a fork does.
 
 Deletion proceeds data first, records last, so a crash mid-sweep leaves
 orphaned data for the next pass rather than a record whose data vanished.
@@ -1943,11 +2019,12 @@ backstop.
 
 ### 6.5 Control-object cleanup
 
-Upload sessions are condemned and cleaned by the GC pass after the reap
-window ("Garbage collection"). Implementations may additionally clean up
+Upload sessions are moved to a terminal state and cleaned by the GC pass
+("Garbage collection", rule 11). Implementations may additionally clean up
 other expired control-plane objects. Mutable control objects MUST first enter
-an absorbing state by conditional write under the inspected etag; a failed
-conditional write retains them. This is control-plane maintenance, not
+a terminal state by conditional write under the inspected etag, and any
+provider-side state they own MUST be cleaned only after that write lands; a
+failed conditional write retains them. This is control-plane maintenance, not
 namespace history.
 
 ### 6.6 Derived work

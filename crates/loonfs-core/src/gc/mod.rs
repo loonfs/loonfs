@@ -16,6 +16,7 @@ mod reap;
 mod run;
 #[cfg(test)]
 mod tests;
+mod uploads;
 
 pub use config::GcConfig;
 pub use run::gc_namespace;

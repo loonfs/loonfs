@@ -351,9 +351,10 @@ async fn complete_upload_rejects_direct_put_session_without_bound_target() {
         claimed_checksum: None,
         direct_put_content_ref: None,
         staged_content_ref: None,
-        completed: None,
         created_at_ms: context.now_ms,
-        state: loonfs_api::wire::control::UploadSessionLifecycle::Active,
+        state: loonfs_api::wire::control::UploadSessionLifecycle::Open {
+            expires_at_ms: context.now_ms + 60_000,
+        },
     };
     let envelope = UploadSessionEnvelope::from_state(ControlObjectKind::UploadSession, state)
         .expect("upload session envelope");
