@@ -37,7 +37,6 @@ pub struct ServerConfig {
     #[serde(default)]
     pub content_token_secret: SecretString,
     pub writer_id: String,
-    pub writer_version: String,
     #[serde(default)]
     pub runtime_cache: RuntimeCacheConfigOverrides,
     /// Grep serving mode plus worker pacing and bounded-step budgets.
@@ -283,7 +282,6 @@ impl ServerConfig {
     pub(crate) fn validate(&self) -> Result<(), ServerConfigError> {
         let bind = self.bind_addr()?;
         require_non_empty("writer_id", &self.writer_id)?;
-        require_non_empty("writer_version", &self.writer_version)?;
 
         if let Some(token) = &self.auth_token {
             if token.expose().trim().is_empty() {
@@ -425,7 +423,6 @@ mod tests {
 bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 writer_id = "loonfs-server"
-writer_version = "loonfs-server/0.1.0"
 
 [store]
 kind = "local-fs"
@@ -443,7 +440,6 @@ root = "/tmp/loonfs-server"
 bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 writer_id = "loonfs-server"
-writer_version = "loonfs-server/0.1.0"
 background_maintenance = false
 
 [store]
@@ -465,7 +461,6 @@ root = "/tmp/loonfs-server"
 bind = "bad-bind"
 auth_token = "dev-token"
 writer_id = "loonfs-server"
-writer_version = "loonfs-server/0.1.0"
 
 [store]
 kind = "local-fs"
@@ -485,7 +480,6 @@ root = "/tmp/loonfs-server"
 bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 writer_id = "   "
-writer_version = "loonfs-server/0.1.0"
 
 [store]
 kind = "local-fs"
@@ -499,33 +493,12 @@ root = "/tmp/loonfs-server"
     }
 
     #[test]
-    fn load_rejects_blank_writer_version() {
-        let path = write_config(
-            r#"
-bind = "127.0.0.1:9400"
-auth_token = "dev-token"
-writer_id = "loonfs-server"
-writer_version = "   "
-
-[store]
-kind = "local-fs"
-root = "/tmp/loonfs-server"
-"#,
-        );
-
-        let error = load_server_config(&path).expect_err("blank writer version");
-
-        assert_missing_field(error, "writer_version");
-    }
-
-    #[test]
     fn load_rejects_blank_provider_required_fields() {
         let path = write_config(
             r#"
 bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 writer_id = "loonfs-server"
-writer_version = "loonfs-server/0.1.0"
 
 [store]
 kind = "cloudflare-r2"
@@ -549,7 +522,6 @@ secret_access_key = "secret"
 bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 writer_id = "loonfs-server"
-writer_version = "loonfs-server/0.1.0"
 
 [store]
 kind = "aws-s3"
@@ -567,7 +539,6 @@ force_path_style = false
 bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 writer_id = "loonfs-server"
-writer_version = "loonfs-server/0.1.0"
 
 [store]
 kind = "cloudflare-r2"
@@ -584,7 +555,6 @@ key_prefix = "demo"
 bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 writer_id = "loonfs-server"
-writer_version = "loonfs-server/0.1.0"
 
 [store]
 kind = "azure-abs"
@@ -612,7 +582,6 @@ key_prefix = "demo"
 bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 writer_id = "loonfs-server"
-writer_version = "loonfs-server/0.1.0"
 
 [store]
 kind = "gcp-gcs"
@@ -634,7 +603,6 @@ key_prefix = "demo"
 bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 writer_id = "loonfs-server"
-writer_version = "loonfs-server/0.1.0"
 
 [store]
 kind = "azure-abs"
@@ -656,7 +624,6 @@ key_prefix = "demo"
 bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 writer_id = "loonfs-server"
-writer_version = "loonfs-server/0.1.0"
 
 [store]
 kind = "azure-abs"
@@ -678,7 +645,6 @@ access_key = "{AZURITE_ACCOUNT_KEY}"
 bind = "127.0.0.1:9400"
 auth_token = "   "
 writer_id = "loonfs-server"
-writer_version = "loonfs-server/0.1.0"
 
 [store]
 kind = "local-fs"
@@ -703,7 +669,6 @@ root = "/tmp/loonfs-server"
                 r#"
 bind = "{bind}"
 writer_id = "loonfs-server"
-writer_version = "loonfs-server/0.1.0"
 
 [store]
 kind = "local-fs"
@@ -724,7 +689,6 @@ root = "/tmp/loonfs-server"
 bind = "0.0.0.0:9400"
 allow_unauthenticated_remote = true
 writer_id = "loonfs-server"
-writer_version = "loonfs-server/0.1.0"
 
 [store]
 kind = "local-fs"
@@ -741,7 +705,6 @@ root = "/tmp/loonfs-server"
             r#"
 bind = "127.0.0.1:9400"
 writer_id = "loonfs-server"
-writer_version = "loonfs-server/0.1.0"
 
 [store]
 kind = "local-fs"
@@ -759,7 +722,6 @@ root = "/tmp/loonfs-server"
 bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 writer_id = "loonfs-server"
-writer_version = "loonfs-server/0.1.0"
 
 [store]
 kind = "local-fs"
@@ -775,7 +737,6 @@ root = "/tmp/loonfs-server"
 bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 writer_id = "loonfs-server"
-writer_version = "loonfs-server/0.1.0"
 max_upload_bytes = 0
 
 [store]
@@ -794,7 +755,6 @@ root = "/tmp/loonfs-server"
 bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 writer_id = "loonfs-server"
-writer_version = "loonfs-server/0.1.0"
 
 [store]
 kind = "local-fs"
@@ -821,7 +781,6 @@ root = "/tmp/loonfs-server"
 bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 writer_id = "loonfs-server"
-writer_version = "loonfs-server/0.1.0"
 {field} = 0
 
 [store]
@@ -838,7 +797,6 @@ root = "/tmp/loonfs-server"
 bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 writer_id = "loonfs-server"
-writer_version = "loonfs-server/0.1.0"
 
 [grep]
 max_concurrent_steps = 0
@@ -861,7 +819,6 @@ bind = "127.0.0.1:9400"
 auth_token = "debug-auth-token"
 content_token_secret = "debug-content-token-secret"
 writer_id = "loonfs-server"
-writer_version = "loonfs-server/0.1.0"
 
 [store]
 kind = "aws-s3"
@@ -892,7 +849,6 @@ force_path_style = false
 bind = "127.0.0.1:9400"
 auth_token = "file-auth-token"
 writer_id = "loonfs-server"
-writer_version = "loonfs-server/0.1.0"
 
 [store]
 kind = "local-fs"
@@ -940,7 +896,6 @@ root = "/tmp/loonfs-server"
 bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 writer_id = "loonfs-server"
-writer_version = "loonfs-server/0.1.0"
 lease_duration = 60000
 
 [store]
@@ -953,7 +908,6 @@ root = "/tmp/loonfs-server"
 bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 writer_id = "loonfs-server"
-writer_version = "loonfs-server/0.1.0"
 
 [store]
 kind = "local-fs"
@@ -966,7 +920,6 @@ key_prefiks = "typo"
 bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 writer_id = "loonfs-server"
-writer_version = "loonfs-server/0.1.0"
 
 [runtime_cache]
 max_cached_namespacs = 2
@@ -981,7 +934,6 @@ root = "/tmp/loonfs-server"
 bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 writer_id = "loonfs-server"
-writer_version = "loonfs-server/0.1.0"
 
 [grep]
 max_files_per_stepp = 3
@@ -1020,7 +972,6 @@ root = "/tmp/loonfs-server"
 bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 writer_id = "loonfs-server"
-writer_version = "loonfs-server/0.1.0"
 
 [store]
 kind = "local-fs"
@@ -1050,7 +1001,6 @@ root = "/tmp/loonfs-server"
 bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 writer_id = "loonfs-server"
-writer_version = "loonfs-server/0.1.0"
 
 [store]
 kind = "local-fs"
@@ -1072,7 +1022,6 @@ root = "/tmp/loonfs-server"
 bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 writer_id = "loonfs-server"
-writer_version = "loonfs-server/0.1.0"
 
 [runtime_cache]
 max_cached_namespaces = 2
@@ -1100,7 +1049,6 @@ root = "/tmp/loonfs-server"
 bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 writer_id = "loonfs-server"
-writer_version = "loonfs-server/0.1.0"
 
 [runtime_cache]
 max_cached_namespaces = 0
@@ -1127,7 +1075,6 @@ root = "/tmp/loonfs-server"
 bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 writer_id = "loonfs-server"
-writer_version = "loonfs-server/0.1.0"
 
 [store]
 kind = "local-fs"
@@ -1155,7 +1102,6 @@ root = "/tmp/loonfs-server"
 bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 writer_id = "loonfs-server"
-writer_version = "loonfs-server/0.1.0"
 
 [grep]
 mode = "serve_only"
@@ -1197,7 +1143,6 @@ root = "/tmp/loonfs-server"
 bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 writer_id = "loonfs-server"
-writer_version = "loonfs-server/0.1.0"
 
 [grep]
 max_files_per_step = 1024
@@ -1234,7 +1179,6 @@ root = "/tmp/loonfs-server"
 bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 writer_id = "loonfs-server"
-writer_version = "loonfs-server/0.1.0"
 
 [gram_index_build]
 max_files_per_step = 4
@@ -1261,7 +1205,6 @@ root = "/tmp/loonfs-server"
 bind = "127.0.0.1:9400"
 auth_token = "dev-token"
 writer_id = "loonfs-server"
-writer_version = "loonfs-server/0.1.0"
 
 [runtime_cache]
 max_cached_wal_tail_projection_rows = -1

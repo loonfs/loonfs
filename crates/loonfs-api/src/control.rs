@@ -7,7 +7,7 @@ use crate::v0::UploadMode;
 use crate::WriterEpoch;
 use crate::{
     ChangeSeq, CheckpointId, CommitId, ContentRef, ContentRefKind, ContentStoreId, InodeId,
-    ManifestId, ManifestObjectId, NamePolicy, NamespaceId, UploadId, WalSegmentId, ROOT_INODE_ID,
+    ManifestId, ManifestObjectId, NamespaceId, UploadId, WalSegmentId, ROOT_INODE_ID,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -331,10 +331,6 @@ pub struct HeadState {
     /// Minted at creation; a fork target carries its source's, sharing the
     /// content keyspace copy-on-write.
     pub content_store_id: ContentStoreId,
-    /// Immutable per namespace, chosen at creation: the single authority for
-    /// name-key computation on both the write and read paths. Required — a
-    /// head without a policy is malformed, never guessed.
-    pub name_policy: NamePolicy,
     /// Provenance and pre-first-flush basis of a fork target; absent for a
     /// created namespace. Immutable for the namespace's life.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -369,11 +365,10 @@ pub struct HeadState {
 #[serde(deny_unknown_fields)]
 struct StrictHeadState {
     namespace_id: NamespaceId,
-    // Required: a head that omits the namespace's content store or name
-    // policy is malformed. Both were separate durable objects before the
-    // one-publication protocol; nothing reconstructs them.
+    // Required: a head that omits the namespace's content store is
+    // malformed. It was a separate durable object before the
+    // one-publication protocol; nothing reconstructs it.
     content_store_id: ContentStoreId,
-    name_policy: NamePolicy,
     #[serde(default)]
     fork_basis: Option<ForkBasis>,
     seq: ChangeSeq,
@@ -421,7 +416,6 @@ impl<'de> Deserialize<'de> for HeadState {
         Ok(Self {
             namespace_id: state.namespace_id,
             content_store_id: state.content_store_id,
-            name_policy: state.name_policy,
             fork_basis: state.fork_basis,
             seq: state.seq,
             head_commit_id: state.head_commit_id,
@@ -464,15 +458,10 @@ impl fmt::Display for HeadIdentityDrift {
 
 impl HeadState {
     /// Constructs the active sequence-zero head with the root inode already reserved.
-    pub fn initial(
-        namespace_id: NamespaceId,
-        content_store_id: ContentStoreId,
-        name_policy: NamePolicy,
-    ) -> Self {
+    pub fn initial(namespace_id: NamespaceId, content_store_id: ContentStoreId) -> Self {
         Self {
             namespace_id,
             content_store_id,
-            name_policy,
             fork_basis: None,
             seq: ChangeSeq(0),
             head_commit_id: CommitId::parse(GENESIS_COMMIT_ID).expect("genesis commit id is valid"),
@@ -489,8 +478,8 @@ impl HeadState {
     /// Checks that `successor` carries this head's immutable identity
     /// forward verbatim.
     ///
-    /// The head is the only durable home of the namespace's content store,
-    /// name policy, and fork provenance, so every publication that rewrites
+    /// The head is the only durable home of the namespace's content store
+    /// and fork provenance, so every publication that rewrites
     /// the head must copy them unchanged. Publishers call this before the
     /// compare-and-swap: a drifting successor is a construction bug, not a
     /// state to persist.
@@ -508,9 +497,6 @@ impl HeadState {
         }
         if successor.content_store_id != self.content_store_id {
             return drift("content_store_id");
-        }
-        if successor.name_policy != self.name_policy {
-            return drift("name_policy");
         }
         if successor.fork_basis != self.fork_basis {
             return drift("fork_basis");
@@ -651,8 +637,6 @@ pub struct ControlObjectEnvelope<T> {
     pub kind: ControlObjectKind,
     /// Family-local format version obtained from `kind`.
     pub format_version: u32,
-    /// Informational software version of the writer that encoded this object.
-    pub writer_version: String,
     /// Digest of the payload JSON exactly as stored in the durable document,
     /// in `sha256:<hex>` form.
     pub payload_checksum: String,
@@ -667,15 +651,10 @@ where
     /// Builds a family-versioned envelope and computes its checksum from canonical state JSON.
     ///
     /// Construction fails when `state` cannot be encoded.
-    pub fn from_state(
-        kind: ControlObjectKind,
-        writer_version: impl Into<String>,
-        state: T,
-    ) -> Result<Self, EnvelopeCodecError> {
+    pub fn from_state(kind: ControlObjectKind, state: T) -> Result<Self, EnvelopeCodecError> {
         Ok(Self {
             kind,
             format_version: kind.format_version(),
-            writer_version: writer_version.into(),
             payload_checksum: control_payload_checksum(&state)?,
             state,
         })
@@ -718,7 +697,6 @@ where
         envelope.kind.as_str(),
         envelope.format_version,
         envelope.kind.format_version(),
-        &envelope.writer_version,
         &envelope.payload_checksum,
         &envelope.state,
     )
@@ -756,7 +734,6 @@ where
     Ok(ControlObjectEnvelope {
         kind: expected_kind,
         format_version: decoded.format_version,
-        writer_version: decoded.writer_version,
         payload_checksum: decoded.payload_checksum,
         state: decoded.payload,
     })
@@ -781,42 +758,29 @@ mod tests {
             NamespaceId::parse("demo").expect("valid namespace id"),
             ContentStoreId::parse("cs_0123456789abcdef0123456789abcdef")
                 .expect("valid content store id"),
-            NamePolicy::default(),
         )
     }
 
     #[test]
-    fn head_without_name_policy_or_content_store_is_rejected() {
-        // Both are collision- and addressing-semantics authorities; a head
-        // that omits either is malformed, never defaulted.
-        for missing in [
-            serde_json::json!({
-                "namespace_id": "demo",
-                "content_store_id": "cs_0123456789abcdef0123456789abcdef",
-                "seq": 0,
-                "head_commit_id": GENESIS_COMMIT_ID,
-                "writer_epoch": 0,
-                "next_inode_id": 2
-            }),
-            serde_json::json!({
-                "namespace_id": "demo",
-                "name_policy": "nfc_casefold_v0",
-                "seq": 0,
-                "head_commit_id": GENESIS_COMMIT_ID,
-                "writer_epoch": 0,
-                "next_inode_id": 2
-            }),
-        ] {
-            serde_json::from_value::<HeadState>(missing)
-                .expect_err("head without its immutable identity must be rejected");
-        }
+    fn head_without_content_store_is_rejected() {
+        // The content store is the namespace's addressing-semantics
+        // authority; a head that omits it is malformed, never defaulted.
+        let missing = serde_json::json!({
+            "namespace_id": "demo",
+            "seq": 0,
+            "head_commit_id": GENESIS_COMMIT_ID,
+            "writer_epoch": 0,
+            "next_inode_id": 2
+        });
+
+        serde_json::from_value::<HeadState>(missing)
+            .expect_err("head without its immutable identity must be rejected");
     }
 
     #[test]
     fn control_object_codec_round_trips_and_validates() {
-        let envelope =
-            HeadStateEnvelope::from_state(ControlObjectKind::WalHead, "test-writer", sample_head())
-                .expect("envelope");
+        let envelope = HeadStateEnvelope::from_state(ControlObjectKind::WalHead, sample_head())
+            .expect("envelope");
 
         let encoded = encode_control_object(&envelope).expect("encode");
         let decoded: HeadStateEnvelope =

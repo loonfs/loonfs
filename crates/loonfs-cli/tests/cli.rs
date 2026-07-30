@@ -2260,7 +2260,6 @@ bind = "{bind}"
 auth_token = "test-token"
 content_token_secret = "test-content-token-secret"
 writer_id = "{name}"
-writer_version = "{name}/0.1.0"
 
 [store]
 kind = "local-fs"

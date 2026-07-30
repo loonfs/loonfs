@@ -1177,7 +1177,8 @@ A conforming server must:
    `metadata/root.json`, plus the visible WAL segment chain, replayed as
    logical commits; checkpoints pin manifest versions for retention, stable
    reads, restore, and forks;
-8. honor the namespace's `NamePolicy`;
+8. fold sibling names into name keys by the v0 rule (`format.md`, section
+   2.3.1);
 9. keep control-plane sessions and any implementation-specific coordinators
    out of namespace history and the change feed;
 10. preserve per-commit idempotency, ordering, and change-feed identity even

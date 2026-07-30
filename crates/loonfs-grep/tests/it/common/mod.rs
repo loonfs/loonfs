@@ -24,14 +24,13 @@ pub(crate) struct GrepHost {
 }
 
 impl GrepHost {
-    pub(crate) async fn new(store: &SharedObjectStore, actor: &str, version: &str) -> Self {
+    pub(crate) async fn new(store: &SharedObjectStore, actor: &str) -> Self {
         let reader = FsReader::builder_with_store(store.clone())
             .build()
             .await
             .expect("build reader");
         let admin = FsAdmin::builder_with_store(store.clone())
             .actor_id(actor)
-            .actor_version(version)
             .build()
             .await
             .expect("build admin");
@@ -40,7 +39,7 @@ impl GrepHost {
             reader: reader.clone(),
             admin: admin.clone(),
             service: GrepService::new(),
-            worker: GrepWorker::new(store.clone(), reader, admin, version),
+            worker: GrepWorker::new(store.clone(), reader, admin),
         }
     }
 

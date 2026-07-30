@@ -35,7 +35,6 @@ pub(super) async fn plan_publish_delete_path<S: ObjectStore + ?Sized>(
                     // always has a parent.
                     parent_inode_id: resolved.parent_inode_id.unwrap_or(ROOT_INODE_ID),
                     name_key: NameKey::for_display_name(
-                        view.metadata_state.name_policy(),
                         &absolute_path
                             .final_component()
                             .expect("non-root mutation path should have a final component")

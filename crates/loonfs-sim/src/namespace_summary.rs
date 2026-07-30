@@ -58,8 +58,6 @@ pub async fn summarize_namespace_objects<S: ObjectStore + ?Sized>(
                     summary.compacted_metadata_objects += 1;
                 }
                 DurableObjectFamily::WalFloor
-                | DurableObjectFamily::WalIndex
-                | DurableObjectFamily::WalIndexRun
                 | DurableObjectFamily::MetadataRoot
                 | DurableObjectFamily::CheckpointRecord
                 | DurableObjectFamily::UploadSession

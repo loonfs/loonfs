@@ -45,7 +45,7 @@ cargo build -p loonfs-server
 ./target/debug/loonfs-server --config configs/loonfs-server.local-fs.example.toml
 ```
 
-Commented example configs for every supported store live in [configs/](configs) (`local-fs`, `aws-s3`, `gcp-gcs`, `cloudflare-r2`, `azure-abs`). The required fields are `bind`, `writer_id`, `writer_version`, and a `[store]` block; everything else defaults. The optional `[grep]` table selects `mode = "disabled" | "embedded" | "serve_only"` (default `embedded`) and the bounded per-step build/fold policy shown in the local-fs example. Embedded grep maintenance is event-driven per namespace and has no recurring timer or store enumeration. Connect a client:
+Commented example configs for every supported store live in [configs/](configs) (`local-fs`, `aws-s3`, `gcp-gcs`, `cloudflare-r2`, `azure-abs`). The required fields are `bind`, `writer_id`, and a `[store]` block; everything else defaults. The optional `[grep]` table selects `mode = "disabled" | "embedded" | "serve_only"` (default `embedded`) and the bounded per-step build/fold policy shown in the local-fs example. Embedded grep maintenance is event-driven per namespace and has no recurring timer or store enumeration. Connect a client:
 
 ```bash
 export LOONFS_AUTH_TOKEN={auth_token}

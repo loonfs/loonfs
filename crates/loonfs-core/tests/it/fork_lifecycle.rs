@@ -367,7 +367,6 @@ async fn fork_namespace_reuses_content_store_and_isolates_metadata() {
 
     let clone_head = head_state(&store, &clone_namespace_id).await;
     assert_eq!(clone_head.content_store_id, content_store_id);
-    assert_eq!(clone_head.name_policy, source_head.name_policy);
     assert_eq!(clone_head.seq, ChangeSeq(1));
     let fork_basis = clone_head.fork_basis.clone().expect("fork basis");
     assert_eq!(fork_basis.source_namespace_id, source_namespace_id);
@@ -572,8 +571,7 @@ async fn a_fork_basis_checksum_mismatch_is_corruption() {
     fork_basis.source_manifest_checksum =
         loonfs_api::sha256_digest(b"not-the-source-manifest-payload");
     let envelope =
-        HeadStateEnvelope::from_state(ControlObjectKind::WalHead, &context.writer_version, head)
-            .expect("head envelope");
+        HeadStateEnvelope::from_state(ControlObjectKind::WalHead, head).expect("head envelope");
     store
         .put_overwrite(
             &wal_head(clone.as_str()),
@@ -780,9 +778,8 @@ async fn fork_namespace_rejects_corrupt_source_manifest_descriptors() {
         .payload
         .metadata_files
         .retain(|metadata_file| metadata_file.family != MetadataTableFamily::RevisionsByInodeDesc);
-    let manifest =
-        NamespaceManifestEnvelope::from_payload(manifest.writer_version, manifest.payload)
-            .expect("rebuild manifest checksum");
+    let manifest = NamespaceManifestEnvelope::from_payload(manifest.payload)
+        .expect("rebuild manifest checksum");
     let corrupted = encode_namespace_manifest_json(&manifest).expect("encode corrupt manifest");
     store
         .put_overwrite(&manifest_key, Bytes::from(corrupted))
@@ -846,18 +843,10 @@ async fn a_create_losing_to_a_foreign_head_reports_the_id_as_taken() {
     let context = mutation_context();
     let inner = LocalFsStore::new(temp_dir.path()).expect("store");
     // Another writer's complete head for the same id, already durable.
-    let foreign = HeadState::initial(
-        namespace_id.clone(),
-        loonfs_api::ContentStoreId::generate(),
-        loonfs_api::NamePolicy::default(),
-    );
+    let foreign = HeadState::initial(namespace_id.clone(), loonfs_api::ContentStoreId::generate());
     let foreign_bytes = encode_control_object(
-        &HeadStateEnvelope::from_state(
-            ControlObjectKind::WalHead,
-            &context.writer_version,
-            foreign,
-        )
-        .expect("foreign head envelope"),
+        &HeadStateEnvelope::from_state(ControlObjectKind::WalHead, foreign)
+            .expect("foreign head envelope"),
     )
     .expect("encode foreign head");
     let store = InjectCreateFailureStore::new(
@@ -1111,7 +1100,6 @@ impl ReleasePinAfterHeadStore {
             }
             let rewritten = loonfs_api::wire::control::CheckpointRecordEnvelope::from_state(
                 ControlObjectKind::CheckpointRecord,
-                "test-writer",
                 record,
             )
             .expect("rewritten record envelope");

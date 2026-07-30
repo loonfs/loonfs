@@ -16,13 +16,11 @@ use std::sync::Arc;
 pub(crate) fn mutation_context(
     writer_id: &str,
     writer_session_id: &str,
-    writer_version: &str,
     now_ms: u64,
 ) -> MutationContext {
     MutationContext {
         writer_id: writer_id.to_owned(),
         writer_session_id: writer_session_id.to_owned(),
-        writer_version: writer_version.to_owned(),
         now_ms,
     }
 }
@@ -36,7 +34,6 @@ pub(crate) fn namespace_engine<'a, S: ObjectStore + ?Sized>(
         .namespace_id(namespace_id.clone())
         .writer_id(context.writer_id.clone())
         .writer_session_id(context.writer_session_id.clone())
-        .writer_version(context.writer_version.clone())
         .build()
         .expect("build namespace engine")
 }
@@ -384,10 +381,6 @@ pub(crate) mod mutation_split_support {
     ) -> BindingIdentity {
         const BIND_DELTA_INDEX: u32 = 1;
 
-        let name_policy = loonfs_core::control::load_namespace_catalog_entry(store, namespace_id)
-            .await
-            .expect("load namespace catalog")
-            .name_policy();
         let changes = list_changes_after(store, namespace_id, ChangeSeq(0))
             .await
             .expect("read the change feed");
@@ -425,7 +418,7 @@ pub(crate) mod mutation_split_support {
                 }
                 binding = Some(BindingIdentity {
                     parent_inode_id,
-                    name_key: NameKey::for_display_name(name_policy, &name),
+                    name_key: NameKey::for_display_name(&name),
                     child_inode_id: inode_id,
                     bind_seq: change.seq,
                     bind_delta_index: BIND_DELTA_INDEX,
@@ -588,7 +581,7 @@ pub(crate) mod mutation_split_support {
     }
 
     pub(crate) fn mutation_context() -> MutationContext {
-        super::mutation_context("writer-a", "wrs_test", "writer-a/0.1.0", 1_000)
+        super::mutation_context("writer-a", "wrs_test", 1_000)
     }
 
     pub(crate) fn content_ref(seed: &str) -> ContentRef {

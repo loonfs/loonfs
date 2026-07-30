@@ -105,8 +105,7 @@ async fn overwrite_manifest(
     let manifest_id = manifest.payload.manifest_id;
     let manifest_object_id = manifest.payload.manifest_object_id.clone();
     let updated_manifest =
-        NamespaceManifestEnvelope::from_payload(manifest.writer_version, manifest.payload)
-            .expect("updated manifest");
+        NamespaceManifestEnvelope::from_payload(manifest.payload).expect("updated manifest");
     let manifest_bytes =
         encode_namespace_manifest_json(&updated_manifest).expect("encode updated manifest");
     store
@@ -125,7 +124,6 @@ async fn overwrite_manifest(
         root.manifest_payload_checksum = updated_manifest.payload_checksum.clone();
         let envelope = loonfs_api::wire::control::MetadataRootEnvelope::from_state(
             loonfs_api::wire::control::ControlObjectKind::MetadataRoot,
-            "test-writer/0.1.0",
             root,
         )
         .expect("root envelope");
@@ -781,11 +779,9 @@ async fn manifest_rejects_segment_whose_index_fails_its_descriptor_checksum() {
 
     let manifest_key =
         metadata_manifest_object(namespace_id.as_str(), &manifest.payload.manifest_object_id);
-    let writer_version = manifest.writer_version.clone();
     let manifest_id = manifest.payload.manifest_id;
     let updated_manifest =
-        NamespaceManifestEnvelope::from_payload(writer_version, manifest.payload)
-            .expect("updated manifest");
+        NamespaceManifestEnvelope::from_payload(manifest.payload).expect("updated manifest");
     let manifest_bytes =
         encode_namespace_manifest_json(&updated_manifest).expect("encode manifest");
     store
@@ -933,11 +929,9 @@ async fn manifest_rejects_child_bind_index_that_diverges_from_canonical_binds() 
 
     let manifest_key =
         metadata_manifest_object(namespace_id.as_str(), &manifest.payload.manifest_object_id);
-    let writer_version = manifest.writer_version.clone();
     let manifest_id = manifest.payload.manifest_id;
     let updated_manifest =
-        NamespaceManifestEnvelope::from_payload(writer_version, manifest.payload)
-            .expect("updated manifest");
+        NamespaceManifestEnvelope::from_payload(manifest.payload).expect("updated manifest");
     let manifest_bytes =
         encode_namespace_manifest_json(&updated_manifest).expect("encode updated manifest");
     store
@@ -1201,7 +1195,6 @@ async fn unreferenced_manifest_run_is_ignored_by_current_projection_load() {
             retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
             metadata_state: &materialization_before.metadata_state,
         },
-        &context.writer_version,
         MetadataLsmPolicy::default(),
         ManifestId(2),
     )
@@ -1279,7 +1272,7 @@ async fn manifest_load_rejects_descriptors_off_the_frozen_segment_layout() {
             .expect("an inline-filtered descriptor");
         perturb(descriptor);
         let perturbed_object_id = perturbed.manifest_object_id.clone();
-        let envelope = NamespaceManifestEnvelope::from_payload("test-writer", perturbed)
+        let envelope = NamespaceManifestEnvelope::from_payload(perturbed)
             .expect("perturbed manifest envelope");
         write_namespace_manifest(&store, &envelope)
             .await

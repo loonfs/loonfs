@@ -67,14 +67,7 @@ pub(super) async fn release_missing_basis_checkpoint<S: ObjectStore + ?Sized>(
     {
         return Ok(false);
     }
-    release_checkpoint_record(
-        store,
-        namespace_id,
-        &record.checkpoint_id,
-        context.now_ms,
-        &context.writer_version,
-    )
-    .await?;
+    release_checkpoint_record(store, namespace_id, &record.checkpoint_id, context.now_ms).await?;
     Ok(true)
 }
 
@@ -122,7 +115,7 @@ pub(super) async fn maybe_release_fork_checkpoint<S: ObjectStore + ?Sized>(
     released.state = CheckpointRecordLifecycle::Released {
         released_at_ms: context.now_ms,
     };
-    let encoded = encode_checkpoint_record(&released, &context.writer_version)?;
+    let encoded = encode_checkpoint_record(&released)?;
     match store.compare_and_swap(key, etag, encoded).await {
         Ok(_) => Ok(ForkCheckpointSweep::Released),
         // Another pass won the record; retain and let a later pass re-decide

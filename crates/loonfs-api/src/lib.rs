@@ -96,7 +96,7 @@ pub use ids::{
     NameKeyValidationError, NamespaceId, NamespaceIdValidationError, RevisionNo, UploadId,
     WalSegmentId, WriterEpoch, MAX_ID_BYTES, MAX_NAME_KEY_BYTES, ROOT_INODE_ID,
 };
-pub use name_policy::{name_key_for_display_name, NamePolicy};
+pub use name_policy::name_key_for_display_name;
 pub use pagination::{
     decode_cursor, encode_cursor, DirectoryPageCursor, EffectiveLimit, FileRevisionsPageCursor,
     GrepPageCursor, LimitError, Page, PageCursor, PageCursorError, PageRequest, PaginationPolicy,
@@ -132,7 +132,7 @@ mod tests {
         let commit_id = CommitId::generate();
         let path = AbsolutePath::parse("/docs/report.txt").expect("valid path");
         let display_name = DisplayName::parse("Report.txt").expect("valid display name");
-        let name_key = NameKey::for_display_name(NamePolicy::default(), &display_name);
+        let name_key = NameKey::for_display_name(&display_name);
         let content_ref = ContentRef::whole_file_v0(b"hello");
 
         assert_eq!(namespace_id.as_str(), "demo");
@@ -148,7 +148,6 @@ mod tests {
             NamespaceId::parse("demo").expect("valid namespace id"),
             ContentStoreId::parse("cs_0123456789abcdef0123456789abcdef")
                 .expect("valid content store id"),
-            NamePolicy::default(),
         );
         let _wal_delta = wire::wal::WalDelta::TombstoneSubtree {
             delta_index: 0,

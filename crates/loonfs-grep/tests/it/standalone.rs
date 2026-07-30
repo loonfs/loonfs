@@ -221,11 +221,10 @@ async fn worker(store: Arc<LocalFsStore>) -> GrepWorker<Arc<LocalFsStore>> {
         .expect("build reader");
     let admin = FsAdmin::builder_with_store(shared)
         .actor_id("standalone-enable")
-        .actor_version("standalone-enable/0.1")
         .build()
         .await
         .expect("build admin");
-    GrepWorker::new(store, reader, admin, "standalone-enable/0.1")
+    GrepWorker::new(store, reader, admin)
 }
 
 async fn seed(store: &Arc<LocalFsStore>, namespace_id: &NamespaceId) -> FsWriter {
@@ -233,7 +232,6 @@ async fn seed(store: &Arc<LocalFsStore>, namespace_id: &NamespaceId) -> FsWriter
         store.clone(),
         namespace_id,
         format!("standalone-seed-{namespace_id}"),
-        "standalone-test/0.1",
     )
     .await
 }

@@ -387,7 +387,6 @@ impl NamespaceCommitEngine {
             store,
             &self.namespace_id,
             options,
-            context,
             acquired_writer,
         )
         .await;
@@ -590,7 +589,6 @@ mod tests {
         MutationContext {
             writer_id: writer_id.to_owned(),
             writer_session_id: writer_session_id.to_owned(),
-            writer_version: "publisher-test/0.1.0".to_owned(),
             now_ms: 1_000,
         }
     }

@@ -12,12 +12,11 @@ use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::namespace::control::{read_head_object, ControlObjectLoadError};
 use crate::wal::{load_validated_wal_chain, project_validated_wal_tail, WalChainLoadRequest};
 use loonfs_api::wire::control::{AcquiredWriter, HeadState, NamespaceState};
-use loonfs_api::{ChangeSeq, CommitId, ContentStoreId, ManifestId, NamePolicy, NamespaceId};
+use loonfs_api::{ChangeSeq, CommitId, ContentStoreId, ManifestId, NamespaceId};
 use loonfs_objectstore::keys::wal_head;
 use loonfs_objectstore::ObjectStore;
 
 pub(crate) struct PublishMetadataView<'a, S: ObjectStore + ?Sized> {
-    name_policy: NamePolicy,
     content_store_id: ContentStoreId,
     pub(super) head: HeadState,
     pub(super) head_etag: String,
@@ -33,12 +32,7 @@ impl<S: ObjectStore + ?Sized> PublishMetadataView<'_, S> {
     }
 
     pub(crate) fn metadata_view(&self) -> MetadataView<'_, '_, S> {
-        MetadataView::from_loaded_head(
-            &self.head,
-            self.name_policy,
-            &self.manifest_tables,
-            &self.tail_state,
-        )
+        MetadataView::from_loaded_head(&self.head, &self.manifest_tables, &self.tail_state)
     }
 
     pub(crate) fn content_store_id(&self) -> &ContentStoreId {
@@ -180,7 +174,6 @@ pub(crate) async fn load_publish_metadata_view<'a, S: ObjectStore + ?Sized>(
 
     Ok((
         PublishMetadataView {
-            name_policy: catalog_entry.name_policy(),
             content_store_id: catalog_entry.content_store_id().clone(),
             head,
             head_etag,

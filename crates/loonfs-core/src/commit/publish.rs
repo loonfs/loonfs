@@ -2,7 +2,6 @@
 //! compare-and-swap that makes its commits visible.
 
 use super::{CommitHeadPublishError, CommitPlan};
-use crate::invariants::{push_unique_invariant, InvariantId};
 use crate::wal::PreparedWalSegment;
 use bytes::Bytes;
 use loonfs_api::wire::control::{
@@ -20,19 +19,13 @@ pub struct PreparedCommitHeadPublish {
     pub resulting_head: HeadState,
     pub envelope: HeadStateEnvelope,
     pub encoded_bytes: Vec<u8>,
-    pub checked_invariants: Vec<InvariantId>,
 }
 
 pub fn prepare_commit_head_publish(
     current_head: &HeadState,
     plan: &CommitPlan,
     wal: &PreparedWalSegment,
-    writer_version: &str,
 ) -> Result<PreparedCommitHeadPublish, CommitHeadPublishError> {
-    if writer_version.trim().is_empty() {
-        return Err(CommitHeadPublishError::EmptyWriterVersion);
-    }
-
     if current_head.namespace_id != plan.namespace_id {
         return Err(CommitHeadPublishError::NamespaceMismatch {
             head: current_head.namespace_id.clone(),
@@ -94,7 +87,6 @@ pub fn prepare_commit_head_publish(
         // store, name policy, and fork provenance: every successor carries
         // them forward verbatim, and the assertion below proves it did.
         content_store_id: current_head.content_store_id.clone(),
-        name_policy: current_head.name_policy,
         fork_basis: current_head.fork_basis.clone(),
         seq: plan.assigned_seq,
         head_commit_id: plan.commit_id.clone(),
@@ -108,33 +100,24 @@ pub fn prepare_commit_head_publish(
     current_head
         .ensure_successor_identity(&resulting_head)
         .map_err(CommitHeadPublishError::HeadIdentityDrift)?;
-    let envelope = HeadStateEnvelope::from_state(
-        ControlObjectKind::WalHead,
-        writer_version,
-        resulting_head.clone(),
-    )
-    .map_err(|err| CommitHeadPublishError::Codec {
-        object_key: object_key.clone(),
-        message: err.to_string(),
-    })?;
+    let envelope =
+        HeadStateEnvelope::from_state(ControlObjectKind::WalHead, resulting_head.clone()).map_err(
+            |err| CommitHeadPublishError::Codec {
+                object_key: object_key.clone(),
+                message: err.to_string(),
+            },
+        )?;
     let encoded_bytes =
         encode_control_object(&envelope).map_err(|err| CommitHeadPublishError::Codec {
             object_key: object_key.clone(),
             message: err.to_string(),
         })?;
 
-    let mut checked_invariants = plan.checked_invariants.clone();
-    push_unique_invariant(
-        &mut checked_invariants,
-        InvariantId::HeadPublishRequiresDurableWal,
-    );
-
     Ok(PreparedCommitHeadPublish {
         object_key,
         resulting_head,
         envelope,
         encoded_bytes,
-        checked_invariants,
     })
 }
 
@@ -240,7 +223,6 @@ mod tests {
                 "cs_0123456789abcdef0123456789abcdef",
             )
             .expect("content store id"),
-            name_policy: loonfs_api::NamePolicy::default(),
             fork_basis: None,
             seq,
             head_commit_id: CommitId::parse("c_00000000000000000000000000000000")
@@ -266,7 +248,6 @@ mod tests {
             assigned_seq,
             validated_ops: Vec::new(),
             resulting_next_inode_id: InodeId(10),
-            checked_invariants: Vec::new(),
         }
     }
 
@@ -306,13 +287,12 @@ mod tests {
             end_seq,
             records,
         };
-        let envelope = WalSegmentEnvelope::from_payload("test", payload).expect("wal envelope");
+        let envelope = WalSegmentEnvelope::from_payload(payload).expect("wal envelope");
         PreparedWalSegment {
             object_key: wal_segment_key(namespace_id.as_str(), segment_id.as_str()),
             segment_id,
             envelope,
             encoded_bytes: Vec::new(),
-            checked_invariants: Vec::new(),
         }
     }
 
@@ -323,8 +303,8 @@ mod tests {
         let plan = plan(namespace_id.clone(), ChangeSeq(9));
         let wal = wal_segment(namespace_id, ChangeSeq(7), ChangeSeq(8), ChangeSeq(9), 2);
 
-        let prepared = prepare_commit_head_publish(&current_head, &plan, &wal, "test-writer")
-            .expect("prepare head publish");
+        let prepared =
+            prepare_commit_head_publish(&current_head, &plan, &wal).expect("prepare head publish");
 
         assert_eq!(prepared.resulting_head.seq, ChangeSeq(9));
         assert_eq!(
@@ -351,8 +331,8 @@ mod tests {
         let plan = plan(namespace_id.clone(), ChangeSeq(9));
         let wal = wal_segment(namespace_id, ChangeSeq(7), ChangeSeq(8), ChangeSeq(9), 2);
 
-        let prepared = prepare_commit_head_publish(&current_head, &plan, &wal, "test-writer")
-            .expect("prepare head publish");
+        let prepared =
+            prepare_commit_head_publish(&current_head, &plan, &wal).expect("prepare head publish");
 
         let new_tip = wal.envelope.pointer(wal.object_key.clone());
         assert_eq!(
@@ -391,8 +371,8 @@ mod tests {
             1,
         );
 
-        let prepared = prepare_commit_head_publish(&current_head, &plan, &wal, "test-writer")
-            .expect("prepare head publish");
+        let prepared =
+            prepare_commit_head_publish(&current_head, &plan, &wal).expect("prepare head publish");
 
         let recent = &prepared.resulting_head.recent_segments;
         assert_eq!(recent.len(), 32);
@@ -408,7 +388,7 @@ mod tests {
         let wal = wal_segment(namespace_id, ChangeSeq(8), ChangeSeq(9), ChangeSeq(9), 1);
 
         assert!(matches!(
-            prepare_commit_head_publish(&current_head, &plan, &wal, "test-writer"),
+            prepare_commit_head_publish(&current_head, &plan, &wal),
             Err(CommitHeadPublishError::WalSegmentBaseHeadSeqMismatch {
                 expected: ChangeSeq(7),
                 actual: ChangeSeq(8),
@@ -424,7 +404,7 @@ mod tests {
         let wal = wal_segment(namespace_id, ChangeSeq(6), ChangeSeq(7), ChangeSeq(9), 3);
 
         assert!(matches!(
-            prepare_commit_head_publish(&current_head, &plan, &wal, "test-writer"),
+            prepare_commit_head_publish(&current_head, &plan, &wal),
             Err(CommitHeadPublishError::WalSegmentBaseHeadSeqMismatch {
                 expected: ChangeSeq(7),
                 actual: ChangeSeq(6),
@@ -440,7 +420,7 @@ mod tests {
         let wal = wal_segment(namespace_id, ChangeSeq(7), ChangeSeq(8), ChangeSeq(9), 0);
 
         assert!(matches!(
-            prepare_commit_head_publish(&current_head, &plan, &wal, "test-writer"),
+            prepare_commit_head_publish(&current_head, &plan, &wal),
             Err(CommitHeadPublishError::EmptyWalSegment)
         ));
     }
@@ -453,7 +433,7 @@ mod tests {
         let wal = wal_segment(namespace_id, ChangeSeq(7), ChangeSeq(9), ChangeSeq(9), 1);
 
         assert!(matches!(
-            prepare_commit_head_publish(&current_head, &plan, &wal, "test-writer"),
+            prepare_commit_head_publish(&current_head, &plan, &wal),
             Err(CommitHeadPublishError::WalSegmentStartSeqMismatch {
                 expected: ChangeSeq(8),
                 actual: ChangeSeq(9),
@@ -469,7 +449,7 @@ mod tests {
         let wal = wal_segment(namespace_id, ChangeSeq(7), ChangeSeq(8), ChangeSeq(10), 3);
 
         assert!(matches!(
-            prepare_commit_head_publish(&current_head, &plan, &wal, "test-writer"),
+            prepare_commit_head_publish(&current_head, &plan, &wal),
             Err(CommitHeadPublishError::WalSegmentEndSeqMismatch {
                 expected: ChangeSeq(9),
                 actual: ChangeSeq(10),
@@ -496,7 +476,7 @@ mod tests {
         );
 
         assert!(matches!(
-            prepare_commit_head_publish(&current_head, &plan, &wal, "test-writer"),
+            prepare_commit_head_publish(&current_head, &plan, &wal),
             Err(CommitHeadPublishError::WalSegmentNamespaceMismatch { head, wal })
                 if head == NamespaceId::parse("demo").expect("valid namespace id") && wal == NamespaceId::parse("other").expect("valid namespace id")
         ));

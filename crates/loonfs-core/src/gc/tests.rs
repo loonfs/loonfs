@@ -51,7 +51,7 @@ fn config() -> GcConfig {
 }
 
 fn context(now_ms: u64) -> MutationContext {
-    mutation_context("gc-test", "wrs_gc_test", "gc-test/0.1.0", now_ms)
+    mutation_context("gc-test", "wrs_gc_test", now_ms)
 }
 
 /// The durable lifecycle of one checkpoint record, stamp included.
@@ -299,7 +299,6 @@ async fn write_upload_session(store: &LocalFsStore, namespace_id: &NamespaceId) 
     };
     let envelope = loonfs_api::wire::control::UploadSessionEnvelope::from_state(
         loonfs_api::wire::control::ControlObjectKind::UploadSession,
-        "gc-test/0.1.0",
         state,
     )
     .expect("session envelope");
@@ -326,15 +325,10 @@ async fn stage_upload<S: ObjectStore + ?Sized>(
     )
     .await
     .expect("begin upload");
-    let staged = crate::protocol::upload_content(
-        store,
-        namespace_id,
-        &begin.upload_id,
-        b"racing upload\n",
-        context,
-    )
-    .await
-    .expect("stage upload");
+    let staged =
+        crate::protocol::upload_content(store, namespace_id, &begin.upload_id, b"racing upload\n")
+            .await
+            .expect("stage upload");
     let content_store_id =
         crate::namespace::catalog::load_namespace_content_store_id(store, namespace_id)
             .await
@@ -659,7 +653,6 @@ async fn upload_completion_wins_before_condemn_and_the_session_is_retained() {
             &loonfs_api::v0::CompleteUploadRequest {
                 content_ref: content_ref.clone(),
             },
-            &setup,
         )
         .await;
         store.release();
@@ -698,7 +691,6 @@ async fn upload_condemn_wins_before_completion_and_completion_reports_not_found(
         &content_store_id,
         &upload_id,
         &request,
-        &setup,
     );
     let condemn = async {
         store.wait_until_blocked().await;
@@ -805,15 +797,9 @@ async fn gc_reaps_dead_checkpoints_before_their_basis_across_passes() {
             .expect("read first record")
             .expect("first record exists")
             .state;
-    release_checkpoint_record(
-        &store,
-        &namespace_id,
-        &first.checkpoint_id,
-        setup.now_ms,
-        &setup.writer_version,
-    )
-    .await
-    .expect("mark first dead");
+    release_checkpoint_record(&store, &namespace_id, &first.checkpoint_id, setup.now_ms)
+        .await
+        .expect("mark first dead");
 
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
     let first_pass = gc_namespace(&store, &namespace_id, &config(), &aged)
@@ -1914,15 +1900,9 @@ async fn gc_sweep_reverification_chunks_preserve_outcomes() {
     create_checkpoint(&store, &namespace_id, &setup)
         .await
         .expect("second checkpoint");
-    release_checkpoint_record(
-        &store,
-        &namespace_id,
-        &first.checkpoint_id,
-        setup.now_ms,
-        &setup.writer_version,
-    )
-    .await
-    .expect("mark first dead");
+    release_checkpoint_record(&store, &namespace_id, &first.checkpoint_id, setup.now_ms)
+        .await
+        .expect("mark first dead");
 
     let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS + 1).await);
     let first_pass = gc_namespace_with_reverify_chunk(&store, &namespace_id, &config(), &aged, 1)
@@ -2023,15 +2003,9 @@ async fn add_bounded_gc_fixture(
         );
     }
     for checkpoint in &checkpoints[..checkpoints.len() - 1] {
-        release_checkpoint_record(
-            store,
-            namespace_id,
-            &checkpoint.checkpoint_id,
-            setup.now_ms,
-            &setup.writer_version,
-        )
-        .await
-        .expect("release checkpoint");
+        release_checkpoint_record(store, namespace_id, &checkpoint.checkpoint_id, setup.now_ms)
+            .await
+            .expect("release checkpoint");
     }
     advance_retention_floor(store, namespace_id, setup)
         .await

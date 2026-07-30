@@ -52,7 +52,6 @@ pub(super) async fn plan_publish_move_path<S: ObjectStore + ?Sized>(
         }
         ReplaceDestination::Vacant => {
             preconditions.push(publish_child_name_absent_precondition(
-                view,
                 target_parent,
                 &target_name,
             ));
@@ -174,7 +173,6 @@ pub(super) async fn plan_publish_copy_file_path<S: ObjectStore + ?Sized>(
                 content_ref: revision.content_ref,
             });
             preconditions.push(publish_child_name_absent_precondition(
-                view,
                 target_parent,
                 &target_name,
             ));

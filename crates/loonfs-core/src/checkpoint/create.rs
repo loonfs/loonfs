@@ -79,7 +79,7 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
             state: CheckpointRecordLifecycle::Active,
         };
         let verify_started_ms = timer.monotonic_now_ms();
-        write_checkpoint_record(store, &record, &context.writer_version).await?;
+        write_checkpoint_record(store, &record).await?;
 
         let verified = verify_checkpoint_basis(store, &record).await?;
         let within_budget = timer.monotonic_now_ms().saturating_sub(verify_started_ms)
@@ -97,14 +97,7 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
 
         // Overrunning the budget counts as verification failure: the record
         // may have raced the grace window, so it must not stand as a root.
-        release_checkpoint_record(
-            store,
-            namespace_id,
-            &checkpoint_id,
-            context.now_ms,
-            &context.writer_version,
-        )
-        .await?;
+        release_checkpoint_record(store, namespace_id, &checkpoint_id, context.now_ms).await?;
     }
 
     if saw_root_cas_race {

@@ -77,7 +77,6 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
     let head = HeadState {
         namespace_id: new_namespace_id.clone(),
         content_store_id: source_head.content_store_id.clone(),
-        name_policy: source_head.name_policy,
         fork_basis: Some(ForkBasis {
             source_namespace_id: source_namespace_id.clone(),
             source_manifest_object_id: source_record.manifest_object_id.clone(),
@@ -98,7 +97,7 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         recent_segments: Vec::new(),
         state: NamespaceState::Active,
     };
-    match install_namespace_head(store, new_namespace_id, &head, &context.writer_version).await? {
+    match install_namespace_head(store, new_namespace_id, &head).await? {
         NamespaceHeadInstall::Landed => {}
         NamespaceHeadInstall::Exists => {
             return Err(CoreError::NamespaceExists {

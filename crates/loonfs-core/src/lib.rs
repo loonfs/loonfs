@@ -37,7 +37,6 @@
 //! let context = MutationContext {
 //!     writer_id: "example-writer".to_owned(),
 //!     writer_session_id: "example-session".to_owned(),
-//!     writer_version: "example/0.1".to_owned(),
 //!     now_ms: 0,
 //! };
 //! let mut publisher = NamespaceCommitEngine::new(namespace);
@@ -80,7 +79,6 @@ mod control_update;
 mod engine;
 mod error;
 mod gc;
-mod invariants;
 mod namespace;
 mod options;
 mod protocol;

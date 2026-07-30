@@ -297,9 +297,8 @@ async fn complete_upload_rejects_direct_put_session_without_bound_target() {
         created_at_ms: context.now_ms,
         state: loonfs_api::wire::control::UploadSessionLifecycle::Active,
     };
-    let envelope =
-        UploadSessionEnvelope::from_state(ControlObjectKind::UploadSession, "test", state)
-            .expect("upload session envelope");
+    let envelope = UploadSessionEnvelope::from_state(ControlObjectKind::UploadSession, state)
+        .expect("upload session envelope");
     let encoded = encode_control_object(&envelope).expect("encode upload session");
     store
         .put_if_absent(

@@ -47,7 +47,6 @@ async fn build_wal_record_payload_matches_segment_record_payload() {
             bind_delta_index: 1,
         }],
         resulting_next_inode_id: InodeId(3),
-        checked_invariants: Vec::new(),
     };
     let prepared = PreparedCommit::new(request, plan).expect("prepare commit");
     let record = materialize_commit(prepared, 4_200);
@@ -57,7 +56,6 @@ async fn build_wal_record_payload_matches_segment_record_payload() {
         WriterEpoch(1),
         None,
         std::slice::from_ref(&record),
-        "test-writer",
     )
     .expect("prepare wal segment");
     let payload = wal_payload_from_materialized_commit(&record).expect("build commit payload");
@@ -81,7 +79,6 @@ async fn prepared_wal_segments_use_unique_segment_ids_and_object_keys() {
         WriterEpoch(1),
         None,
         std::slice::from_ref(&record),
-        "test-writer",
     )
     .expect("prepare first wal segment");
     let second = prepare_wal_segment(
@@ -89,7 +86,6 @@ async fn prepared_wal_segments_use_unique_segment_ids_and_object_keys() {
         WriterEpoch(1),
         None,
         std::slice::from_ref(&record),
-        "test-writer",
     )
     .expect("prepare second wal segment");
 
@@ -111,14 +107,8 @@ fn wal_segment_namespace_mismatch_names_record_and_segment_values() {
         ChangeSeq(1),
     );
 
-    let error = prepare_wal_segment(
-        segment_namespace,
-        WriterEpoch(1),
-        None,
-        &[record],
-        "test-writer",
-    )
-    .expect_err("namespace mismatch should fail");
+    let error = prepare_wal_segment(segment_namespace, WriterEpoch(1), None, &[record])
+        .expect_err("namespace mismatch should fail");
 
     assert_eq!(
         error.to_string(),
@@ -175,13 +165,11 @@ fn canonical_replay_advances_head_and_applies_metadata_rows() {
         WriterEpoch(1),
         None,
         std::slice::from_ref(&commit),
-        "test-writer",
     )
     .expect("prepare wal segment");
     let mut base_head = loonfs_api::wire::control::HeadState::initial(
         namespace_id.clone(),
         loonfs_api::ContentStoreId::generate(),
-        loonfs_api::NamePolicy::default(),
     );
     base_head.writer_epoch = WriterEpoch(1);
     let record = segment
@@ -236,13 +224,11 @@ fn canonical_replay_rejects_writer_epoch_above_expected_bound() {
         WriterEpoch(2),
         None,
         std::slice::from_ref(&commit),
-        "test-writer",
     )
     .expect("prepare wal segment");
     let mut base_head = loonfs_api::wire::control::HeadState::initial(
         namespace_id.clone(),
         loonfs_api::ContentStoreId::generate(),
-        loonfs_api::NamePolicy::default(),
     );
     base_head.writer_epoch = WriterEpoch(1);
     let record = segment
@@ -461,17 +447,13 @@ fn materialized_create_directory(
             op_index: 0,
             parent_inode_id: InodeId(1),
             display_name: loonfs_api::DisplayName::parse(display_name).expect("valid display name"),
-            name_key: NameKey::parse(loonfs_api::name_key_for_display_name(
-                loonfs_api::NamePolicy::default(),
-                display_name,
-            ))
-            .expect("derived name key"),
+            name_key: NameKey::parse(loonfs_api::name_key_for_display_name(display_name))
+                .expect("derived name key"),
             child_inode_id: InodeId(2),
             create_inode_delta_index: 0,
             bind_delta_index: 1,
         }],
         resulting_next_inode_id: InodeId(3),
-        checked_invariants: Vec::new(),
     };
     let prepared = PreparedCommit::new(request, plan).expect("prepare commit");
     materialize_commit(prepared, 4_200)
@@ -494,7 +476,6 @@ async fn assert_wal_chain_corruption_rejected(
             ChangeSeq(0),
             ChangeSeq(1),
         )],
-        "test-writer",
     )
     .expect("prepare wal segment");
     let mut object_key = segment.object_key;
@@ -635,7 +616,6 @@ async fn write_create_directory_segment(
             apply_after_seq,
             assigned_seq,
         )],
-        "test-writer",
     )
     .expect("prepare wal segment");
     store
@@ -650,8 +630,7 @@ async fn write_create_directory_segment(
 
 fn rewrap_envelope(envelope: &mut WalSegmentEnvelope) {
     *envelope =
-        WalSegmentEnvelope::from_payload(envelope.writer_version.clone(), envelope.payload.clone())
-            .expect("rewrap wal envelope");
+        WalSegmentEnvelope::from_payload(envelope.payload.clone()).expect("rewrap wal envelope");
 }
 
 fn prepared_create_directory_segment(
@@ -673,7 +652,6 @@ fn prepared_create_directory_segment(
             apply_after_seq,
             assigned_seq,
         )],
-        "test-writer",
     )
     .expect("prepare wal segment")
 }

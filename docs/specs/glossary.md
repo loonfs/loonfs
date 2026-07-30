@@ -17,7 +17,7 @@
 | **Snapshot** | An in-process read view. It may be stable for one operation or session, but it is not a durable checkpoint unless explicitly recorded as one. |
 | **Content object** | One immutable object containing file bytes. In v0, each file revision stores the whole file as one object. |
 | **Content ref** | The metadata pointer for a file revision. In v0 it has `kind: "whole_file_v0"`, a `sha256:<hex>` digest, and `size_bytes`. |
-| **NamePolicy** | The versioned rule that decides how sibling names are compared for collisions. |
+| **Name key** | The folded form of a display name that sibling-collision checks compare on. The v0 rule is NFC, Unicode default case folding, then NFC again. |
 | **Tombstone** | A metadata record that hides a deleted inode or subtree without erasing history. |
 | **Retention floor** | The oldest sequence number from which the system still promises incremental replay. Older clients must re-bootstrap. It bounds replay only: file revision history is retained in full regardless of the floor, and the floor never advances unless an operator opts in. |
 | **Change feed** | The ordered stream of committed metadata changes after a chosen `seq`. |

@@ -230,7 +230,6 @@ pub(crate) async fn publish_namespace_mutations_batch_against_publish_view<
         namespace_id,
         view,
         &records,
-        context,
         batch_size,
         accepted_count,
     )
@@ -245,8 +244,7 @@ pub(crate) async fn publish_namespace_mutations_batch_against_publish_view<
         .expect("accepted records should be non-empty")
         .prepared
         .plan;
-    let head_publish =
-        prepare_commit_head_publish(&view.head, last_plan, &wal, &context.writer_version);
+    let head_publish = prepare_commit_head_publish(&view.head, last_plan, &wal);
     let head_publish = match head_publish {
         Ok(value) => value,
         Err(error) => {
@@ -312,7 +310,6 @@ async fn write_batch_wal_segment<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     view: &PublishMetadataView<'_, S>,
     records: &[MaterializedCommit],
-    context: &MutationContext,
     batch_size: u64,
     accepted_count: u64,
 ) -> Result<PreparedWalSegment> {
@@ -334,7 +331,6 @@ async fn write_batch_wal_segment<S: ObjectStore + ?Sized>(
                 .writer_epoch,
             view.head.visible_wal_tip.clone(),
             records,
-            &context.writer_version,
         )
         .map_err(|error| CoreError::Internal(format!("wal build failed: {error}")))?;
         store

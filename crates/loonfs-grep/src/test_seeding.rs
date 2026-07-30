@@ -10,11 +10,9 @@ pub(crate) async fn writer(
     store: SharedObjectStore,
     namespace_id: &NamespaceId,
     writer_id: String,
-    writer_version: &str,
 ) -> FsWriter {
     let writer = FsWriter::builder_with_store(store)
         .writer_id(writer_id)
-        .writer_version(writer_version)
         // A seeded namespace is published one file at a time and read back
         // immediately, so the commit window only adds delay.
         .min_publish_interval_ms(0)

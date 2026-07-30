@@ -137,14 +137,12 @@ async fn run() -> Result<(), StandaloneError> {
     let store = Arc::new(config.store.configured_object_store()?) as SharedObjectStore;
     // One process, one provider client: the runtime handles grep reads and
     // checkpoints through share the client grep writes its own keyspace with.
-    let writer_version = format!("loonfs-grep/{}", env!("CARGO_PKG_VERSION"));
     let reader = FsReader::builder_with_store(store.clone()).build().await?;
     let admin = FsAdmin::builder_with_store(store.clone())
         .actor_id("loonfs-grep")
-        .actor_version(writer_version.clone())
         .build()
         .await?;
-    let worker = GrepWorker::new(store.clone(), reader.clone(), admin, writer_version);
+    let worker = GrepWorker::new(store.clone(), reader.clone(), admin);
     let namespace_ids: BTreeSet<_> = args.namespace.into_iter().collect();
 
     if args.gc {

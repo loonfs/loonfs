@@ -42,11 +42,8 @@ fn create_directory(
         WalDelta::BindDirentry {
             delta_index: delta_index.saturating_add(1),
             parent_inode_id,
-            name_key: NameKey::parse(loonfs_api::name_key_for_display_name(
-                loonfs_api::NamePolicy::default(),
-                display_name,
-            ))
-            .expect("derived name key"),
+            name_key: NameKey::parse(loonfs_api::name_key_for_display_name(display_name))
+                .expect("derived name key"),
             display_name: DisplayName::parse(display_name).expect("valid display name"),
             child_inode_id: inode_id,
         },
@@ -69,11 +66,8 @@ fn create_file(
         WalDelta::BindDirentry {
             delta_index: delta_index.saturating_add(1),
             parent_inode_id,
-            name_key: NameKey::parse(loonfs_api::name_key_for_display_name(
-                loonfs_api::NamePolicy::default(),
-                display_name,
-            ))
-            .expect("derived name key"),
+            name_key: NameKey::parse(loonfs_api::name_key_for_display_name(display_name))
+                .expect("derived name key"),
             display_name: DisplayName::parse(display_name).expect("valid display name"),
             child_inode_id: inode_id,
         },
@@ -109,11 +103,8 @@ fn bind(
     vec![WalDelta::BindDirentry {
         delta_index,
         parent_inode_id,
-        name_key: NameKey::parse(loonfs_api::name_key_for_display_name(
-            loonfs_api::NamePolicy::default(),
-            display_name,
-        ))
-        .expect("derived name key"),
+        name_key: NameKey::parse(loonfs_api::name_key_for_display_name(display_name))
+            .expect("derived name key"),
         display_name: DisplayName::parse(display_name).expect("valid display name"),
         child_inode_id: inode_id,
     }]
@@ -215,17 +206,15 @@ fn metadata_apply_matches_model_for_delete_subtree() {
 }
 
 fn core_bootstrap_state() -> CoreMetadataState {
-    CoreMetadataState::default()
-        .apply_committed_wal_deltas(
-            ChangeSeq(0),
-            4_200,
-            &[WalDelta::CreateInode {
-                delta_index: 0,
-                inode_id: InodeId(1),
-                inode_kind: InodeKind::Directory,
-            }],
-        )
-        .metadata_state
+    CoreMetadataState::default().apply_committed_wal_deltas(
+        ChangeSeq(0),
+        4_200,
+        &[WalDelta::CreateInode {
+            delta_index: 0,
+            inode_id: InodeId(1),
+            inode_kind: InodeKind::Directory,
+        }],
+    )
 }
 
 fn model_bootstrap_state() -> ModelMetadataState {
@@ -238,12 +227,8 @@ fn assert_states_match(sequences: &[Vec<WalDelta>]) {
 
     for (index, deltas) in sequences.iter().enumerate() {
         let seq = ChangeSeq(u64::try_from(index + 1).expect("seq"));
-        core_state = core_state
-            .apply_committed_wal_deltas(seq, 4_200, deltas)
-            .metadata_state;
-        model_state = model_state
-            .apply_committed_wal_deltas(seq, 4_200, deltas)
-            .metadata_state;
+        core_state = core_state.apply_committed_wal_deltas(seq, 4_200, deltas);
+        model_state = model_state.apply_committed_wal_deltas(seq, 4_200, deltas);
     }
 
     assert_eq!(normalize_core(&core_state), normalize_model(&model_state));

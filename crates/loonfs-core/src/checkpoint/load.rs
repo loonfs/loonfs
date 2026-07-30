@@ -72,7 +72,6 @@ fn genesis_basis_manifest(namespace_id: &NamespaceId) -> NamespaceManifestEnvelo
     NamespaceManifestEnvelope {
         kind: NamespaceManifestKind::NamespaceManifest,
         format_version: NAMESPACE_MANIFEST_FORMAT_VERSION,
-        writer_version: String::new(),
         payload_checksum: String::new(),
         payload: NamespaceManifestPayload {
             namespace_id: namespace_id.clone(),
@@ -273,7 +272,6 @@ pub(crate) fn head_from_manifest(
     HeadState {
         namespace_id: current_head.namespace_id.clone(),
         content_store_id: current_head.content_store_id.clone(),
-        name_policy: current_head.name_policy,
         fork_basis: current_head.fork_basis.clone(),
         seq: manifest.payload.head_seq,
         head_commit_id: manifest.payload.head_commit_id.clone(),

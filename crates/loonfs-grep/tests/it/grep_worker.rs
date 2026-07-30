@@ -57,12 +57,8 @@ fn nonzero_usize(value: usize) -> NonZeroUsize {
     NonZeroUsize::new(value).expect("test value should be nonzero")
 }
 
-const GREP_WORKER_TEST_VERSION: &str = "grep-worker-tests/0.1";
-
 async fn worker(store: &SharedObjectStore) -> GrepWorker<SharedObjectStore> {
-    GrepHost::new(store, "grep-worker-tests", GREP_WORKER_TEST_VERSION)
-        .await
-        .worker
+    GrepHost::new(store, "grep-worker-tests").await.worker
 }
 
 async fn drive_worker_to_current(
@@ -468,7 +464,6 @@ async fn an_expired_but_unreleased_backfill_pin_keeps_enumerating() {
     record.expires_at_ms = Some(record.created_at_ms);
     let expired = loonfs_api::wire::control::CheckpointRecordEnvelope::from_state(
         loonfs_api::wire::control::ControlObjectKind::CheckpointRecord,
-        "expiry-test",
         record,
     )
     .expect("expired record envelope");
@@ -1051,11 +1046,9 @@ async fn write_pointer(
     namespace_id: &NamespaceId,
     manifest_id: GrepManifestId,
 ) {
-    let envelope = GrepRootEnvelope::from_pointer(
-        "grep-error-surface-test/0.1",
-        GrepRootPointer::new(namespace_id.clone(), manifest_id),
-    )
-    .expect("build pointer");
+    let envelope =
+        GrepRootEnvelope::from_pointer(GrepRootPointer::new(namespace_id.clone(), manifest_id))
+            .expect("build pointer");
     store
         .put_overwrite(
             &root_key(namespace_id),
@@ -1523,8 +1516,7 @@ async fn pointer_advance_heals_a_manifest_deleted_after_already_exists() {
         current_state.segments().to_vec(),
     )
     .expect("valid successor state");
-    let candidate = GrepManifestEnvelope::from_state("manifest-heal-test/0.1", next.clone())
-        .expect("candidate manifest");
+    let candidate = GrepManifestEnvelope::from_state(next.clone()).expect("candidate manifest");
     let candidate_key = manifest_key(&namespace_id, candidate.manifest_id());
     base.put_if_absent(
         &candidate_key,
@@ -1538,7 +1530,7 @@ async fn pointer_advance_heals_a_manifest_deleted_after_already_exists() {
         root_key(&namespace_id),
     ));
     let store: SharedObjectStore = blocking.clone();
-    let advance = advance_grep_root(&*store, &current, &next, "manifest-heal-test/0.1");
+    let advance = advance_grep_root(&*store, &current, &next);
     let collect = async {
         blocking.wait_until_blocked().await;
         let report = worker(&store)

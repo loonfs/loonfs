@@ -44,9 +44,6 @@ pub(crate) struct EmbeddedBackend {
     /// the query-side block cache for the length of the command, and the
     /// worker below is built from the same handles the other commands use.
     pub(crate) grep: GrepService,
-    /// Stamped into every grep root this backend publishes; the same
-    /// version the writer and admin handles carry.
-    pub(crate) writer_version: String,
 }
 
 /// How many times a gated publish resubmits after settling the maintenance
@@ -118,7 +115,6 @@ impl EmbeddedBackend {
             self.writer.object_store(),
             self.reader.clone(),
             self.admin.clone(),
-            self.writer_version.clone(),
         )
     }
 
@@ -632,7 +628,7 @@ mod tests {
             root: temp_dir.path().display().to_string(),
             key_prefix: None,
         };
-        let target = EmbeddedTarget::new(&store, None, None)
+        let target = EmbeddedTarget::new(&store, None)
             .await
             .expect("build embedded target");
         target
@@ -668,7 +664,7 @@ mod tests {
             root: temp_dir.path().display().to_string(),
             key_prefix: None,
         };
-        let target = EmbeddedTarget::new(&store, None, None)
+        let target = EmbeddedTarget::new(&store, None)
             .await
             .expect("build embedded target");
 
@@ -701,7 +697,7 @@ mod tests {
             root: temp_dir.path().display().to_string(),
             key_prefix: None,
         };
-        let target = EmbeddedTarget::new(&store, None, None)
+        let target = EmbeddedTarget::new(&store, None)
             .await
             .expect("build embedded target");
         target
@@ -748,7 +744,6 @@ mod tests {
         );
         let writer = FsWriter::builder_with_store(store)
             .writer_id("debt-builder")
-            .writer_version("test")
             .background_work(FsBackgroundWork::ManualOnly)
             .min_publish_interval_ms(0)
             .build()
@@ -789,7 +784,7 @@ mod tests {
 
         // The embedded backend digs itself out: the gated publish schedules
         // its own step, the backend settles it and resubmits.
-        let target = EmbeddedTarget::new(&store_config, None, None)
+        let target = EmbeddedTarget::new(&store_config, None)
             .await
             .expect("build embedded target");
         target
@@ -815,7 +810,7 @@ mod tests {
         // the writer id is shared (the CLI defaults it to the hostname) and
         // only the session ids differ, so without session identity in the
         // fence a user reads the error as their machine fencing itself.
-        let first = EmbeddedTarget::new(&store, Some("shared-host"), None)
+        let first = EmbeddedTarget::new(&store, Some("shared-host"))
             .await
             .expect("build first embedded target");
         first
@@ -833,7 +828,7 @@ mod tests {
             .await
             .expect("first put acquires the epoch");
 
-        let rival = EmbeddedTarget::new(&store, Some("shared-host"), None)
+        let rival = EmbeddedTarget::new(&store, Some("shared-host"))
             .await
             .expect("build rival embedded target");
         rival

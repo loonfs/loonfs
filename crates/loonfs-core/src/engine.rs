@@ -85,7 +85,6 @@ pub struct BeginDirectPutUploadTargetResponse {
 struct EngineWriter {
     writer_id: String,
     writer_session_id: String,
-    writer_version: String,
 }
 
 /// A namespace-scoped core API.
@@ -115,7 +114,6 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             namespace_id: None,
             writer_id: None,
             writer_session_id: None,
-            writer_version: default_writer_version(),
         }
     }
 
@@ -136,14 +134,6 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         self.writer
             .as_ref()
             .map(|writer| writer.writer_session_id.as_str())
-    }
-
-    /// Returns the writer version reported in mutation context, or `None`
-    /// for a read-only engine.
-    pub fn writer_version(&self) -> Option<&str> {
-        self.writer
-            .as_ref()
-            .map(|writer| writer.writer_version.as_str())
     }
 
     /// Creates the namespace if it does not already exist.
@@ -260,13 +250,13 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         request: PageRequest<CheckpointFilesPageCursor>,
         context: &RuntimeReadContext,
     ) -> Result<CheckpointFilesPage> {
-        let catalog = self.live_catalog(context)?;
+        // Rejects a mismatched or deleted namespace before any read work.
+        self.live_catalog(context)?;
         crate::checkpoint::list_checkpoint_files_page(
             &self.store,
             Some(context.table_cache.as_ref()),
             &self.namespace_id,
             checkpoint_id,
-            catalog.name_policy(),
             request,
         )
         .await
@@ -452,14 +442,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         upload_id: &UploadId,
         bytes: &[u8],
     ) -> Result<UploadContentResponse> {
-        crate::protocol::upload_content(
-            &self.store,
-            &self.namespace_id,
-            upload_id,
-            bytes,
-            &self.mutation_context()?,
-        )
-        .await
+        crate::protocol::upload_content(&self.store, &self.namespace_id, upload_id, bytes).await
     }
 
     /// Completes an upload session when the expected content ref matches.
@@ -512,7 +495,6 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             catalog.content_store_id(),
             upload_id,
             request,
-            &self.mutation_context()?,
         )
         .await
     }
@@ -613,7 +595,6 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         Ok(MutationContext {
             writer_id: writer.writer_id.clone(),
             writer_session_id: writer.writer_session_id.clone(),
-            writer_version: writer.writer_version.clone(),
             now_ms: current_time_ms()?,
         })
     }
@@ -629,7 +610,6 @@ pub struct NamespaceEngineBuilder<S> {
     namespace_id: Option<NamespaceId>,
     writer_id: Option<String>,
     writer_session_id: Option<String>,
-    writer_version: String,
 }
 
 impl<S: ObjectStore> NamespaceEngineBuilder<S> {
@@ -652,12 +632,6 @@ impl<S: ObjectStore> NamespaceEngineBuilder<S> {
         self
     }
 
-    /// Sets a human-readable writer version.
-    pub fn writer_version(mut self, writer_version: impl Into<String>) -> Self {
-        self.writer_version = writer_version.into();
-        self
-    }
-
     /// Builds a mutating engine after required fields are present.
     pub fn build(self) -> std::result::Result<NamespaceEngine<S>, NamespaceEngineBuildError> {
         let namespace_id = self
@@ -669,9 +643,6 @@ impl<S: ObjectStore> NamespaceEngineBuilder<S> {
         if writer_id.trim().is_empty() {
             return Err(NamespaceEngineBuildError::EmptyWriter);
         }
-        if self.writer_version.trim().is_empty() {
-            return Err(NamespaceEngineBuildError::EmptyWriterVersion);
-        }
 
         Ok(NamespaceEngine {
             store: self.store,
@@ -681,7 +652,6 @@ impl<S: ObjectStore> NamespaceEngineBuilder<S> {
                 writer_session_id: self
                     .writer_session_id
                     .unwrap_or_else(|| generated_id("wrs")),
-                writer_version: self.writer_version,
             }),
         })
     }
@@ -717,13 +687,6 @@ pub enum NamespaceEngineBuildError {
     /// The writer id was empty or whitespace.
     #[error("writer identity must not be empty")]
     EmptyWriter,
-    /// The writer version was empty or whitespace.
-    #[error("writer version must not be empty")]
-    EmptyWriterVersion,
-}
-
-fn default_writer_version() -> String {
-    format!("loonfs-core/{}", env!("CARGO_PKG_VERSION"))
 }
 
 #[allow(clippy::disallowed_methods)]
@@ -758,7 +721,6 @@ mod tests {
         assert_eq!(engine.namespace_id(), &namespace_id);
         assert_eq!(engine.writer_id(), Some("writer-a"));
         assert!(engine.writer_session_id().is_some());
-        assert!(!engine.writer_version().expect("writer version").is_empty());
     }
 
     #[test]
@@ -779,7 +741,6 @@ mod tests {
             None,
             "a reader must not mint a writer session id"
         );
-        assert_eq!(engine.writer_version(), None);
     }
 
     #[tokio::test]

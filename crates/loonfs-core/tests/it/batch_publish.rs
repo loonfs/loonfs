@@ -1210,7 +1210,6 @@ async fn visible_commit_id_retry_aliases_across_writer_takeover() {
     let writer_b = MutationContext {
         writer_id: "writer-b".to_owned(),
         writer_session_id: "wrs-writer-b".to_owned(),
-        writer_version: "writer-b/0.1.0".to_owned(),
         now_ms: writer_a.now_ms.saturating_add(1),
     };
 

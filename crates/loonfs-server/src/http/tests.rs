@@ -1658,18 +1658,16 @@ async fn grep_error_worker(store: &SharedObjectStore) -> GrepWorker<SharedObject
 /// on the given store, its filesystem reads and checkpoints on handles over
 /// the same store.
 async fn grep_worker(store: &SharedObjectStore, actor: &str) -> GrepWorker<SharedObjectStore> {
-    let version = format!("{actor}/0.1");
     let reader = FsReader::builder_with_store(store.clone())
         .build()
         .await
         .expect("build reader");
     let admin = FsAdmin::builder_with_store(store.clone())
         .actor_id(actor)
-        .actor_version(version.clone())
         .build()
         .await
         .expect("build admin");
-    GrepWorker::new(store.clone(), reader, admin, version)
+    GrepWorker::new(store.clone(), reader, admin)
 }
 
 fn grep_error_request() -> GrepRequest {
@@ -1690,11 +1688,9 @@ async fn write_grep_pointer(
     pointer_namespace_id: NamespaceId,
     manifest_id: GrepManifestId,
 ) {
-    let envelope = GrepRootEnvelope::from_pointer(
-        "grep-error-api-test/0.1",
-        GrepRootPointer::new(pointer_namespace_id, manifest_id),
-    )
-    .expect("build grep pointer");
+    let envelope =
+        GrepRootEnvelope::from_pointer(GrepRootPointer::new(pointer_namespace_id, manifest_id))
+            .expect("build grep pointer");
     store
         .put_overwrite(
             &grep_root_key(stored_namespace_id),
@@ -1800,7 +1796,6 @@ async fn start_server_with_config(store: SharedObjectStore, config: ServerConfig
 async fn test_runtime(store: SharedObjectStore, writer_id: &str) -> FsWriter {
     FsWriter::builder_with_store(store)
         .writer_id(writer_id)
-        .writer_version(format!("{writer_id}/0.1.0"))
         .trace_mode(TraceMode::Remote)
         .trace_store_kind(TraceStoreKind::LocalFs)
         .build()
@@ -1814,7 +1809,6 @@ fn test_config(root: &Path, writer_id: &str) -> ServerConfig {
         auth_token: Some("test-token".into()),
         content_token_secret: "test-content-token-secret".into(),
         writer_id: writer_id.to_owned(),
-        writer_version: format!("{writer_id}/0.1.0"),
         runtime_cache: RuntimeCacheConfigOverrides::default(),
         grep: crate::config::GrepConfig::default(),
         background_maintenance: true,

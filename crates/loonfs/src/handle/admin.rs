@@ -1,7 +1,6 @@
 //! The administrative and maintenance runtime handle.
 
 use super::HandleBuilderCore;
-use crate::config::default_writer_version;
 use crate::fs::{ReadCore, WriterIdentity};
 use crate::metrics::ObjectStoreMetricsRecorder;
 use crate::publisher::PublisherRegistry;
@@ -78,7 +77,6 @@ impl FsAdmin {
 pub struct FsAdminBuilder {
     core: HandleBuilderCore,
     actor_id: Option<String>,
-    actor_version: String,
 }
 
 impl FsAdminBuilder {
@@ -86,7 +84,6 @@ impl FsAdminBuilder {
         Self {
             core,
             actor_id: None,
-            actor_version: default_writer_version(),
         }
     }
 
@@ -94,12 +91,6 @@ impl FsAdminBuilder {
     /// control state. Required.
     pub fn actor_id(mut self, actor_id: impl Into<String>) -> Self {
         self.actor_id = Some(actor_id.into());
-        self
-    }
-
-    /// Sets the actor version recorded in mutation context.
-    pub fn actor_version(mut self, actor_version: impl Into<String>) -> Self {
-        self.actor_version = actor_version.into();
         self
     }
 
@@ -148,7 +139,7 @@ impl FsAdminBuilder {
         let actor_id = self
             .actor_id
             .ok_or_else(|| RuntimeError::Config("actor_id is required".to_owned()))?;
-        let actor = WriterIdentity::new(actor_id, self.actor_version)?;
+        let actor = WriterIdentity::new(actor_id)?;
         Ok(FsAdmin {
             core: self.core.open_read_core()?,
             actor,

@@ -67,7 +67,6 @@ pub(crate) async fn acquire_writer_epoch<S: ObjectStore + ?Sized>(
     update_head(
         store,
         namespace_id,
-        &context.writer_version,
         MAX_WRITER_EPOCH_ACQUIRE_ATTEMPTS,
         |loaded_head| {
             let head = &loaded_head.envelope.state;
@@ -124,7 +123,6 @@ fn head_with_writer(
         // namespace's immutable identity forward like every other
         // successor.
         content_store_id: current_head.content_store_id.clone(),
-        name_policy: current_head.name_policy,
         fork_basis: current_head.fork_basis.clone(),
         seq: current_head.seq,
         head_commit_id: current_head.head_commit_id.clone(),
@@ -205,13 +203,10 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::tempdir;
 
-    const WRITER_VERSION: &str = "writer/0.1.0";
-
     fn context(writer_id: &str, writer_session_id: &str, now_ms: u64) -> MutationContext {
         MutationContext {
             writer_id: writer_id.to_owned(),
             writer_session_id: writer_session_id.to_owned(),
-            writer_version: WRITER_VERSION.to_owned(),
             now_ms,
         }
     }
@@ -222,11 +217,8 @@ mod tests {
         writer_session_id: &str,
         writer_epoch: WriterEpoch,
     ) -> HeadState {
-        let mut head = HeadState::initial(
-            namespace_id.clone(),
-            loonfs_api::ContentStoreId::generate(),
-            loonfs_api::NamePolicy::default(),
-        );
+        let mut head =
+            HeadState::initial(namespace_id.clone(), loonfs_api::ContentStoreId::generate());
         head.writer_epoch = writer_epoch;
         head.writer = Some(WriterBlock {
             writer_id: writer_id.to_owned(),
@@ -238,8 +230,7 @@ mod tests {
 
     async fn write_head(store: &LocalFsStore, namespace_id: &NamespaceId, head: HeadState) {
         let envelope =
-            HeadStateEnvelope::from_state(ControlObjectKind::WalHead, WRITER_VERSION, head)
-                .expect("head envelope");
+            HeadStateEnvelope::from_state(ControlObjectKind::WalHead, head).expect("head envelope");
         let bytes = encode_control_object(&envelope).expect("head bytes");
         store
             .put_if_absent(&wal_head(namespace_id.as_str()), Bytes::from(bytes))
@@ -522,7 +513,6 @@ mod tests {
             &store,
             &namespace_id,
             DeleteNamespaceOptions::default(),
-            &delete_attempt,
             acquired,
         )
         .await
@@ -564,9 +554,8 @@ mod tests {
                 writer_session_id: "session-b".to_owned(),
                 acquired_at_ms: 1_500,
             });
-            let next =
-                HeadStateEnvelope::from_state(ControlObjectKind::WalHead, WRITER_VERSION, head)
-                    .expect("head envelope");
+            let next = HeadStateEnvelope::from_state(ControlObjectKind::WalHead, head)
+                .expect("head envelope");
             let bytes = encode_control_object(&next).expect("head bytes");
             self.inner
                 .put(&self.head_key, Bytes::from(bytes), PutMode::Overwrite)
@@ -671,9 +660,8 @@ mod tests {
         async fn inject_winner(&self) {
             let winner =
                 head_with_session(&self.namespace_id, "writer-b", "session-b", WriterEpoch(8));
-            let envelope =
-                HeadStateEnvelope::from_state(ControlObjectKind::WalHead, WRITER_VERSION, winner)
-                    .expect("head envelope");
+            let envelope = HeadStateEnvelope::from_state(ControlObjectKind::WalHead, winner)
+                .expect("head envelope");
             let bytes = encode_control_object(&envelope).expect("head bytes");
             self.inner
                 .put(

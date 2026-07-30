@@ -51,8 +51,6 @@ async fn content_blob_keys(store: &SharedObjectStore) -> BTreeSet<String> {
         .collect()
 }
 
-const GRAMS_TEST_VERSION: &str = "grep-worker-tests/0.1";
-
 async fn drive_worker_step(
     worker: &GrepWorker<SharedObjectStore>,
     namespace_id: &NamespaceId,
@@ -95,7 +93,7 @@ async fn grep_worker_builds_the_gram_index_once_enabled() {
         .build()
         .await
         .expect("build writer");
-    let host = GrepHost::new(&store, "grams-admin", GRAMS_TEST_VERSION).await;
+    let host = GrepHost::new(&store, "grams-admin").await;
 
     writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
@@ -215,7 +213,7 @@ async fn a_publish_below_the_wal_threshold_does_not_schedule_grep_work() {
         .build()
         .await
         .expect("build writer");
-    let host = GrepHost::new(&store, "grams-auto-admin", GRAMS_TEST_VERSION).await;
+    let host = GrepHost::new(&store, "grams-auto-admin").await;
 
     writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
@@ -295,7 +293,7 @@ async fn a_worker_policy_bounds_each_build_step() {
         .build()
         .await
         .expect("build writer");
-    let host = GrepHost::new(&store, "grams-config-admin", GRAMS_TEST_VERSION).await;
+    let host = GrepHost::new(&store, "grams-config-admin").await;
     let policy = GramIndexBuildPolicy {
         max_files_per_step: nonzero_usize(3),
         ..GramIndexBuildPolicy::default()
@@ -361,7 +359,7 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
         .build()
         .await
         .expect("build writer");
-    let host = GrepHost::new(&store, "grams-thousand-admin", GRAMS_TEST_VERSION).await;
+    let host = GrepHost::new(&store, "grams-thousand-admin").await;
     let first_worker = &host.worker;
 
     writer
@@ -477,7 +475,7 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
 
     // Simulate a crash: the fresh worker has no in-memory collection state and
     // can resume only from the published manifest cursor.
-    let resumed_host = GrepHost::new(&store, "grams-resumed-worker", GRAMS_TEST_VERSION).await;
+    let resumed_host = GrepHost::new(&store, "grams-resumed-worker").await;
     let resumed_worker = &resumed_host.worker;
     raw_store.reset_content_reads();
     let second = resumed_worker
@@ -595,7 +593,7 @@ async fn grep_answers_identically_across_tiered_folds() {
         .build()
         .await
         .expect("build writer");
-    let host = GrepHost::new(&store, "grams-tiered-admin", GRAMS_TEST_VERSION).await;
+    let host = GrepHost::new(&store, "grams-tiered-admin").await;
 
     writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
@@ -825,7 +823,7 @@ async fn repeated_grep_serves_posting_blocks_from_the_grep_cache() {
         .build()
         .await
         .expect("build writer");
-    let host = GrepHost::new(&store, "grams-cache-admin", GRAMS_TEST_VERSION).await;
+    let host = GrepHost::new(&store, "grams-cache-admin").await;
 
     writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
@@ -899,7 +897,7 @@ async fn a_failed_candidate_read_surfaces_in_traversal_order() {
         .build()
         .await
         .expect("build writer");
-    let host = GrepHost::new(&store, "grams-fault-admin", GRAMS_TEST_VERSION).await;
+    let host = GrepHost::new(&store, "grams-fault-admin").await;
 
     writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
@@ -1086,7 +1084,7 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
         .build()
         .await
         .expect("build writer");
-    let host = GrepHost::new(&store, "grams-oversized-admin", GRAMS_TEST_VERSION).await;
+    let host = GrepHost::new(&store, "grams-oversized-admin").await;
 
     writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
@@ -1218,7 +1216,7 @@ async fn a_fold_does_not_reuse_grep_private_index_blocks() {
         .expect("build writer");
     // The host's query service and the worker keep separate block caches:
     // one warms on posting probes, the other on folding.
-    let host = GrepHost::new(&store, "grams-fold-admin", GRAMS_TEST_VERSION).await;
+    let host = GrepHost::new(&store, "grams-fold-admin").await;
 
     writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
@@ -1413,7 +1411,7 @@ async fn a_cold_fold_fans_out_its_segment_opens_within_the_io_cap() {
         .build()
         .await
         .expect("build writer");
-    let host = GrepHost::new(&store, "grams-fan-out-admin", GRAMS_TEST_VERSION).await;
+    let host = GrepHost::new(&store, "grams-fan-out-admin").await;
 
     writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())

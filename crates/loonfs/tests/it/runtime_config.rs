@@ -42,15 +42,6 @@ fn open_validates_runtime_config() {
         ),
         "writer_id",
     );
-    assert_config_error(
-        block_on(
-            FsWriter::builder_with_store(object_store.clone())
-                .writer_id("runtime-test")
-                .writer_version("   ")
-                .build(),
-        ),
-        "writer_version",
-    );
 }
 
 #[test]

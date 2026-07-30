@@ -67,15 +67,6 @@ The required durable object families and standard key patterns are:
 | **WAL floor** | Mutable | Cold lower bound of retained WAL/change history; monotonic CAS. | `namespaces/{namespace_id}/wal/floor.json` |
 | **Content objects** | Immutable | Store whole-file v0 bytes. | `content-stores/{content_store_id}/blobs/sha256/{hex[0..2]}/{hex[2..4]}/{hex}` |
 
-The layout additionally reserves these paths for subsystems that land in
-subsequent phases of the namespace layout redesign; the key parser recognizes
-them, and no other family may claim them:
-
-| Reserved path | Future role |
-| --- | --- |
-| `namespaces/{namespace_id}/wal/index.json` | Optional mutable pointer to the newest WAL index run (accelerator, never authority). |
-| `namespaces/{namespace_id}/wal/indexes/{index_id}.json` | Optional immutable runs of visible-chain segment pointers. |
-
 These key shapes are part of the interoperable storage contract.
 Implementations may keep additional private control-plane objects — queues,
 scheduler state, coordination records — outside the key families above;
@@ -475,18 +466,17 @@ normalizing it. A canonical path is bounded at 4,096 UTF-8 bytes and 128
 components, so any stored tree can materialize on a real filesystem, in an
 archive, or through a sync client.
 
-#### 2.3.1 NamePolicy
+#### 2.3.1 Name-key folding
 
-Sibling-name comparison is governed by a versioned `NamePolicy`. A namespace
-has exactly one active name policy, chosen at creation and recorded in the
-head. The head is the single authority for name-key computation on both the
-read and the write path: a stored name key means nothing except under the
-policy that produced it, so there is nowhere else for the policy to live and
-no default to fall back on.
+Sibling-name comparison is a fixed rule of the v0 format, not a per-namespace
+choice. Every name key is derived from its display name by: normalize to NFC,
+apply Unicode default case folding, then normalize to NFC again. Both the read
+and the write path derive keys the same way, so a namespace cannot disagree
+with itself about which two names collide.
 
-The v0 policy is `nfc_casefold_v0`, which defines sibling-name comparison by
-Unicode NFC normalization plus case folding. Future policies may exist, but
-all writers for a namespace must agree on the namespace's active policy.
+Because the rule is fixed, nothing durable records it and there is nothing to
+default. If a second supported folding rule ever ships, the head gains a field
+that selects between them; until then there is nothing to select.
 
 ### 2.4 Files and revisions
 
@@ -663,7 +653,6 @@ Readers reconstruct authoritative state from:
 The head records the namespace's immutable identity:
 
 - `content_store_id`, required: where the namespace's file bytes live
-- `name_policy`, required: the single authority for name-key computation
 - `fork_basis`, optional: present in every head of a fork target, absent in
   every head of a created namespace
 
@@ -673,18 +662,18 @@ The head records the namespace's immutable identity:
 target's own history begins. Section 2.9.1 says what a reader may do with
 them.
 
-Every successor head the publisher writes carries those three fields forward
+Every successor head the publisher writes carries those fields forward
 verbatim, along with `namespace_id`. They are the namespace's identity, not
-its state, and a namespace cannot change which content store holds its bytes,
-which policy compares its names, or where it came from. A publisher that
-builds a successor differing in any of them has a construction bug, and the
-difference is caught before the compare-and-swap rather than persisted.
+its state, and a namespace cannot change which content store holds its bytes
+or where it came from. A publisher that builds a successor differing in any of
+them has a construction bug, and the difference is caught before the
+compare-and-swap rather than persisted.
 
-Decoding is strict. A head whose `content_store_id` or `name_policy` is
-missing is malformed and is hard-rejected, never defaulted: nothing else
-records those facts, so a default would silently invent a namespace's content
-store or rewrite how its names compare. A head carrying an unknown field is
-rejected the same way, under the mutable control-object rules (section 1.7).
+Decoding is strict. A head whose `content_store_id` is missing is malformed
+and is hard-rejected, never defaulted: nothing else records that fact, so a
+default would silently invent a namespace's content store. A head carrying an
+unknown field is rejected the same way, under the mutable control-object rules
+(section 1.7).
 
 The head also summarizes the current visible boundary and replay hints,
 including at minimum:
@@ -992,8 +981,8 @@ object:
 
 1. Read the namespace **head** object (the namespace's identity, current
    `seq`, and visible WAL tip) and `metadata/root.json` (the manifest
-   pointer), concurrently. The head also supplies the `content_store_id` and
-   `name_policy` every later step needs.
+   pointer), concurrently. The head also supplies the `content_store_id`
+   every later step needs.
 2. Load and verify the manifest the root references; its payload checksum
    must match the root's `manifest_payload_checksum`. The manifest references
    one or more materialized metadata runs through its `head_seq`. When the
@@ -1032,8 +1021,8 @@ To resolve an absolute path at seq N:
 
 1. Start at the root inode (inode id 1).
 2. For each path component, find the active directory binding whose
-   normalized `name_key` matches the component under the namespace's
-   `NamePolicy`.
+   normalized `name_key` matches the component under the v0 folding rule
+   (section 2.3.1).
 3. Follow the binding to its `child_inode_id`; v0 path resolution does not
    cross mounts, and mount traversal is reserved future work.
 4. If any component has no matching visible binding, the path does not exist.
@@ -1146,7 +1135,7 @@ In particular, the server is responsible for:
 
 - resolving any supplied paths against the current visible tree;
 - allocating new inode ids;
-- validating name collisions according to the namespace's `NamePolicy`;
+- validating name collisions under the v0 folding rule (section 2.3.1);
 - validating preconditions;
 - verifying that referenced content is already durable; and
 - publishing successful logical commits by durably writing a WAL segment and
@@ -1330,7 +1319,7 @@ context. The protocol is:
    refreshes, or revives an earlier one's.
 3. Read the manifest that record pins for the target's fork sequence and next
    inode id, then build the complete active target head: the source's
-   `content_store_id` and `name_policy` copied verbatim from the source head,
+   `content_store_id` copied verbatim from the source head,
    and a `fork_basis` naming the source namespace, that manifest's object id
    and payload checksum, the source checkpoint id, and the fork sequence.
    Write it with create-if-absent.
@@ -1340,8 +1329,9 @@ context. The protocol is:
    return the checkpoint failure.
 
 The target copies the source's `content_store_id` because a fork shares file
-bytes copy-on-write, and its `name_policy` because it inherits the source's
-materialized name keys, which mean nothing under a different policy.
+bytes copy-on-write. It inherits the source's materialized name keys
+unchanged, which is sound because name-key folding is a fixed rule of the
+format (section 2.3.1) rather than a per-namespace choice.
 
 Step 4 exists because steps 2 and 3 are two separate writes to two different
 objects. A forker that stalls between them can have its record released
@@ -1431,7 +1421,6 @@ A stable format needs explicit versioning in three places.
 | --- | --- |
 | **Storage format** | Durable object envelopes and payload rules (this document). |
 | **Protocol binding** | HTTP or other transport shapes (`api.md`). |
-| **Namespace naming rules** | `NamePolicy` and any future policy revisions. |
 
 A new version should be introduced only when an old implementation could
 misread or misapply a new feature.
@@ -1454,7 +1443,6 @@ payload as an opaque sub-document:
 | --- | --- |
 | `kind` | snake_case object kind string. |
 | `format_version` | Per-family format version (see table below). |
-| `writer_version` | Informational `crate/<version>` of the writer. Never used for decode decisions. |
 | `payload_checksum` | `sha256:<64 lowercase hex>` digest of the exact payload bytes as stored. |
 | `payload` | The payload: a raw JSON sub-document in JSON families, a CBOR byte string in CBOR families. |
 
@@ -1537,8 +1525,8 @@ starts without grep state until grep is enabled for the target.
 
 `root.json` is a small mutable pointer envelope with these fields, in order:
 
-- envelope: `kind = "grep_root"`, `format_version = "v1"`, informational
-  `writer_version`, `payload_checksum`, and raw JSON `payload`;
+- envelope: `kind = "grep_root"`, `format_version = "v1"`,
+  `payload_checksum`, and raw JSON `payload`;
 - payload: `namespace_id` and `manifest_id`.
 
 Each immutable manifest has the same envelope grammar with

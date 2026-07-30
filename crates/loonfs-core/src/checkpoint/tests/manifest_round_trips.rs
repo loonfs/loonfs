@@ -756,21 +756,18 @@ async fn manifest_run_rejects_rows_after_run_seq() {
     .expect("write empty metadata run tables");
     let mut metadata_files = flatten_manifest_tables(malformed_run_tables);
     metadata_files.extend(flatten_manifest_tables(metadata_ssts));
-    let manifest = NamespaceManifestEnvelope::from_payload(
-        &context.writer_version,
-        NamespaceManifestPayload {
-            namespace_id: namespace_id.clone(),
-            manifest_id: manifest_id(materialization.head.seq),
-            manifest_object_id: manifest_object_id(manifest_id(materialization.head.seq)),
-            head_seq: materialization.head.seq,
-            head_commit_id: materialization.head.head_commit_id.clone(),
-            base_seq: first,
-            writer_epoch: materialization.head.writer_epoch,
-            next_inode_id: materialization.head.next_inode_id,
-            retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
-            metadata_files,
-        },
-    )
+    let manifest = NamespaceManifestEnvelope::from_payload(NamespaceManifestPayload {
+        namespace_id: namespace_id.clone(),
+        manifest_id: manifest_id(materialization.head.seq),
+        manifest_object_id: manifest_object_id(manifest_id(materialization.head.seq)),
+        head_seq: materialization.head.seq,
+        head_commit_id: materialization.head.head_commit_id.clone(),
+        base_seq: first,
+        writer_epoch: materialization.head.writer_epoch,
+        next_inode_id: materialization.head.next_inode_id,
+        retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
+        metadata_files,
+    })
     .expect("build malformed manifest");
 
     match load_manifest_metadata_state_for_inspection_from_manifest(
@@ -904,7 +901,6 @@ async fn write_namespace_manifest_conflict_same_payload_is_idempotent() {
             retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
             metadata_state: &materialization.metadata_state,
         },
-        &context.writer_version,
         MetadataLsmPolicy::default(),
         ManifestId(1),
     )
@@ -941,7 +937,6 @@ async fn write_namespace_manifest_conflict_different_payload_is_error() {
             retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
             metadata_state: &materialization.metadata_state,
         },
-        &context.writer_version,
         MetadataLsmPolicy::default(),
         ManifestId(1),
     )
@@ -949,9 +944,8 @@ async fn write_namespace_manifest_conflict_different_payload_is_error() {
     .expect("build manifest");
     let mut conflicting_payload = manifest.payload.clone();
     conflicting_payload.next_inode_id = InodeId(conflicting_payload.next_inode_id.0 + 1);
-    let conflicting_manifest =
-        NamespaceManifestEnvelope::from_payload(&context.writer_version, conflicting_payload)
-            .expect("build conflicting manifest");
+    let conflicting_manifest = NamespaceManifestEnvelope::from_payload(conflicting_payload)
+        .expect("build conflicting manifest");
 
     write_namespace_manifest(&store, &manifest)
         .await
@@ -1010,7 +1004,6 @@ async fn create_checkpoint_pins_a_current_basis_without_building_a_new_manifest(
             retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
             metadata_state: &materialization.metadata_state,
         },
-        &context.writer_version,
         MetadataLsmPolicy::default(),
         ManifestId(1),
     )
@@ -1025,7 +1018,6 @@ async fn create_checkpoint_pins_a_current_basis_without_building_a_new_manifest(
         &manifest_without_checkpoint,
         Some(materialization.root.manifest_object_id.clone()),
         context.now_ms,
-        &context.writer_version,
     )
     .await
     .expect("publish manifest");
@@ -1082,7 +1074,6 @@ async fn manifest_without_checkpoint_record_reconstructs_manifest_head_commit() 
             retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
             metadata_state: &materialization.metadata_state,
         },
-        &context.writer_version,
         MetadataLsmPolicy::default(),
         ManifestId(1),
     )

@@ -173,14 +173,11 @@ pub(super) async fn app_with_store_and_transfer_issuer(
         config.grep.mode.runs_worker().then(|| driver_slot.clone()),
     )
     .await?;
-    let grep_worker = config.grep.mode.serves_grep().then(|| {
-        GrepWorker::new(
-            store.clone(),
-            reader.clone(),
-            admin.clone(),
-            config.writer_version.clone(),
-        )
-    });
+    let grep_worker = config
+        .grep
+        .mode
+        .serves_grep()
+        .then(|| GrepWorker::new(store.clone(), reader.clone(), admin.clone()));
     let grep_service = config
         .grep
         .mode
@@ -274,7 +271,6 @@ async fn build_handles(
 
     let mut writer_builder = FsWriter::builder_with_store(store.clone())
         .writer_id(config.writer_id.clone())
-        .writer_version(config.writer_version.clone())
         .background_work(if config.background_maintenance {
             FsBackgroundWork::Enabled
         } else {
@@ -300,7 +296,6 @@ async fn build_handles(
 
     let admin_builder = FsAdmin::builder_with_store(store)
         .actor_id(format!("{}-admin", config.writer_id))
-        .actor_version(config.writer_version.clone())
         // The admin honors the configured cache sizing and shares the
         // writer's decoded-block cache instance, so explicit maintenance
         // reuses blocks reader traffic already decoded instead of

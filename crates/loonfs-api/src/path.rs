@@ -386,11 +386,10 @@ fn validate_display_name(value: &str) -> Result<(), PathError> {
     // Every stored name key is derived from an admitted display name, and
     // the derivation site treats an invalid derived key as an invariant
     // violation — so admission must guarantee the derived key stays within
-    // the name-key grammar. v0 has exactly one policy; when a second policy
-    // arrives this check moves to the boundary that knows the namespace.
-    let folded_length =
-        crate::name_policy::name_key_for_display_name(crate::NamePolicy::NfcCasefoldV0, value)
-            .len();
+    // the name-key grammar. v0 folds one way for every namespace; if a
+    // second rule ever arrives this check moves to the boundary that knows
+    // the namespace.
+    let folded_length = crate::name_policy::name_key_for_display_name(value).len();
     if folded_length > crate::ids::MAX_NAME_KEY_BYTES {
         return Err(PathError::FoldedNameKeyTooLong {
             byte_length: folded_length,
@@ -449,7 +448,7 @@ impl PathError {
 #[cfg(test)]
 mod tests {
     use super::{AbsolutePath, DisplayName, PathError};
-    use crate::{name_key_for_display_name, NameKey, NamePolicy};
+    use crate::{name_key_for_display_name, NameKey};
 
     #[test]
     fn unportable_names_are_rejected() {
@@ -627,7 +626,7 @@ mod tests {
         // headroom [`crate::ids::MAX_NAME_KEY_BYTES`] documents.
         let display_name =
             DisplayName::parse("\u{0390}".repeat(127)).expect("maximal expander parses");
-        let key = NameKey::for_display_name(NamePolicy::NfcCasefoldV0, &display_name);
+        let key = NameKey::for_display_name(&display_name);
         assert!(key.as_str().len() <= crate::ids::MAX_NAME_KEY_BYTES);
     }
 
@@ -644,13 +643,13 @@ mod tests {
     }
 
     #[test]
-    fn name_key_matches_name_policy_helper() {
+    fn name_key_matches_folding_helper() {
         let display_name = DisplayName::parse("Cafe\u{301}.TXT").expect("display name");
-        let key = NameKey::for_display_name(NamePolicy::NfcCasefoldV0, &display_name);
+        let key = NameKey::for_display_name(&display_name);
 
         assert_eq!(
             key.as_str(),
-            name_key_for_display_name(NamePolicy::NfcCasefoldV0, display_name.as_str())
+            name_key_for_display_name(display_name.as_str())
         );
     }
 }

@@ -205,8 +205,7 @@ fn test_read_core(store: SharedStore) -> ReadCore {
 
 fn test_writer_bits() -> Arc<WriterBits> {
     Arc::new(WriterBits {
-        identity: WriterIdentity::new("writer-a".to_owned(), "test".to_owned())
-            .expect("valid writer identity"),
+        identity: WriterIdentity::new("writer-a".to_owned()).expect("valid writer identity"),
         background: Arc::new(BackgroundWork::new(
             FsBackgroundWork::ManualOnly,
             None,
@@ -240,7 +239,6 @@ async fn test_writer_with_interval(
 ) -> crate::FsWriter {
     crate::FsWriter::builder_with_store(store)
         .writer_id("writer-a")
-        .writer_version("test")
         .min_publish_interval_ms(min_publish_interval_ms)
         .trace_mode(TraceMode::Remote)
         .trace_store_kind(TraceStoreKind::LocalFs)

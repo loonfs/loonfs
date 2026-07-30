@@ -275,22 +275,15 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
         .min()
         .unwrap_or(previous.payload.base_seq);
 
-    let manifest = write_reorganized_manifest(
-        store,
-        namespace_id,
-        previous,
-        metadata_files,
-        base_seq,
-        {
+    let manifest =
+        write_reorganized_manifest(store, namespace_id, previous, metadata_files, base_seq, {
             let mut payload_floor = previous.payload.retention_floor_seq;
             if floor_seq > payload_floor {
                 payload_floor = floor_seq;
             }
             payload_floor
-        },
-        &context.writer_version,
-    )
-    .await?;
+        })
+        .await?;
 
     ensure_metadata_publication_budget(timer, publication_started_ms, namespace_id)?;
     match publish_metadata_root(
@@ -299,7 +292,6 @@ pub(super) async fn reorganize_metadata_step_with_timer<S: ObjectStore + ?Sized>
         &manifest,
         Some(root.manifest_object_id.clone()),
         context.now_ms,
-        &context.writer_version,
     )
     .await?
     {
@@ -497,7 +489,6 @@ async fn write_reorganized_manifest<S: ObjectStore + ?Sized>(
     metadata_files: Vec<MetadataFileRef>,
     base_seq: ChangeSeq,
     retention_floor_seq: ChangeSeq,
-    writer_version: &str,
 ) -> Result<NamespaceManifestEnvelope> {
     let manifest_id = next_manifest_id_after(previous.payload.manifest_id)?;
     for _allocation_attempt in 0..CONTENTION_RETRY_LIMIT {
@@ -519,21 +510,18 @@ async fn write_reorganized_manifest<S: ObjectStore + ?Sized>(
                 ))
             }
         }
-        let manifest = NamespaceManifestEnvelope::from_payload(
-            writer_version,
-            NamespaceManifestPayload {
-                namespace_id: namespace_id.clone(),
-                manifest_id,
-                manifest_object_id,
-                head_seq: previous.payload.head_seq,
-                head_commit_id: previous.payload.head_commit_id.clone(),
-                base_seq,
-                writer_epoch: previous.payload.writer_epoch,
-                next_inode_id: previous.payload.next_inode_id,
-                retention_floor_seq,
-                metadata_files: metadata_files.clone(),
-            },
-        )
+        let manifest = NamespaceManifestEnvelope::from_payload(NamespaceManifestPayload {
+            namespace_id: namespace_id.clone(),
+            manifest_id,
+            manifest_object_id,
+            head_seq: previous.payload.head_seq,
+            head_commit_id: previous.payload.head_commit_id.clone(),
+            base_seq,
+            writer_epoch: previous.payload.writer_epoch,
+            next_inode_id: previous.payload.next_inode_id,
+            retention_floor_seq,
+            metadata_files: metadata_files.clone(),
+        })
         .map_err(|err| {
             CoreError::Internal(format!("failed to build reorganized manifest: {err}"))
         })?;

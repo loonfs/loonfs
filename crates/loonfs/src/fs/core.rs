@@ -4,7 +4,7 @@
 
 use crate::background::BackgroundWork;
 use crate::cache::{RuntimeCacheStatsInner, RuntimeControlCache};
-use crate::config::{validate_writer_identity, ReadConfig};
+use crate::config::{validate_writer_id, ReadConfig};
 use crate::publisher::{PublishObserver, PublisherRegistry};
 use crate::time::current_time_ms;
 use crate::{
@@ -53,7 +53,6 @@ pub(crate) struct ReadCoreInner {
 pub(crate) struct WriterIdentity {
     pub(crate) writer_id: String,
     pub(crate) writer_session_id: String,
-    pub(crate) writer_version: String,
 }
 
 /// What a publisher worker needs from the writer that owns it, in one
@@ -69,14 +68,12 @@ pub(crate) struct WriterBits {
 }
 
 impl WriterIdentity {
-    /// Mints an identity with a fresh session id, rejecting an empty actor
-    /// id or version.
-    pub(crate) fn new(writer_id: String, writer_version: String) -> Result<Self> {
-        validate_writer_identity(&writer_id, &writer_version)?;
+    /// Mints an identity with a fresh session id, rejecting an empty actor id.
+    pub(crate) fn new(writer_id: String) -> Result<Self> {
+        validate_writer_id(&writer_id)?;
         Ok(Self {
             writer_id,
             writer_session_id: generated_id("wrs"),
-            writer_version,
         })
     }
 
@@ -84,7 +81,6 @@ impl WriterIdentity {
         Ok(MutationContext {
             writer_id: self.writer_id.clone(),
             writer_session_id: self.writer_session_id.clone(),
-            writer_version: self.writer_version.clone(),
             now_ms: current_time_ms()?,
         })
     }
@@ -231,7 +227,6 @@ impl ReadCore {
             .namespace_id(namespace_id.clone())
             .writer_id(actor.writer_id.clone())
             .writer_session_id(actor.writer_session_id.clone())
-            .writer_version(actor.writer_version.clone())
             .build()
             .expect("a validated actor identity should build a namespace engine")
     }

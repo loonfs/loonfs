@@ -93,23 +93,14 @@ impl Default for RuntimeCacheConfig {
     }
 }
 
-pub(crate) fn default_writer_version() -> String {
-    format!("loonfs/{}", env!("CARGO_PKG_VERSION"))
-}
-
 /// Checks the actor identity a write-capable handle will publish under.
 ///
 /// Only the writer and admin builders call this; a reader has no identity to
 /// check.
-pub(crate) fn validate_writer_identity(writer_id: &str, writer_version: &str) -> Result<()> {
+pub(crate) fn validate_writer_id(writer_id: &str) -> Result<()> {
     if writer_id.trim().is_empty() {
         return Err(RuntimeError::Config(
             "writer_id must not be empty".to_owned(),
-        ));
-    }
-    if writer_version.trim().is_empty() {
-        return Err(RuntimeError::Config(
-            "writer_version must not be empty".to_owned(),
         ));
     }
     Ok(())

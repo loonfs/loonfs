@@ -49,14 +49,7 @@ pub(crate) async fn release_checkpoint<S: ObjectStore + ?Sized>(
             was_active: false,
         });
     }
-    release_checkpoint_record(
-        store,
-        namespace_id,
-        checkpoint_id,
-        context.now_ms,
-        &context.writer_version,
-    )
-    .await?;
+    release_checkpoint_record(store, namespace_id, checkpoint_id, context.now_ms).await?;
     Ok(ReleaseCheckpointResponse {
         namespace_id: namespace_id.clone(),
         checkpoint_id: checkpoint_id.clone(),

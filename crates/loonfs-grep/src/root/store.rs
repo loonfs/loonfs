@@ -167,15 +167,14 @@ pub async fn load_grep_root<S: ObjectStore + ?Sized>(
 pub async fn seed_grep_root<S: ObjectStore + ?Sized>(
     store: &S,
     state: &GrepRootState,
-    writer_version: &str,
 ) -> Result<LoadedGrepRoot> {
-    let written = write_grep_manifest(store, state, writer_version).await?;
+    let written = write_grep_manifest(store, state).await?;
     let manifest = written.envelope;
     let object_key = root_key(state.namespace_id());
-    let envelope = GrepRootEnvelope::from_pointer(
-        writer_version,
-        GrepRootPointer::new(state.namespace_id().clone(), manifest.manifest_id().clone()),
-    )
+    let envelope = GrepRootEnvelope::from_pointer(GrepRootPointer::new(
+        state.namespace_id().clone(),
+        manifest.manifest_id().clone(),
+    ))
     .map_err(|error| corrupt(&object_key, error))?;
     let bytes = encode_grep_root(&envelope).map_err(|error| corrupt(&object_key, error))?;
     let metadata = match store
@@ -206,7 +205,6 @@ pub async fn advance_grep_root<S: ObjectStore + ?Sized>(
     store: &S,
     current: &LoadedGrepRoot,
     next: &GrepRootState,
-    writer_version: &str,
 ) -> Result<LoadedGrepRoot> {
     let expected_namespace_id = current.pointer.pointer().namespace_id();
     if next.namespace_id() != expected_namespace_id {
@@ -232,14 +230,11 @@ pub async fn advance_grep_root<S: ObjectStore + ?Sized>(
                 object_key: current.pointer.object_key.clone(),
             })?;
 
-    let written = write_grep_manifest(store, next, writer_version).await?;
-    let envelope = GrepRootEnvelope::from_pointer(
-        writer_version,
-        GrepRootPointer::new(
-            next.namespace_id().clone(),
-            written.envelope.manifest_id().clone(),
-        ),
-    )
+    let written = write_grep_manifest(store, next).await?;
+    let envelope = GrepRootEnvelope::from_pointer(GrepRootPointer::new(
+        next.namespace_id().clone(),
+        written.envelope.manifest_id().clone(),
+    ))
     .map_err(|error| corrupt(&current.pointer.object_key, error))?;
     let bytes =
         encode_grep_root(&envelope).map_err(|error| corrupt(&current.pointer.object_key, error))?;
@@ -284,9 +279,8 @@ struct WrittenGrepManifest {
 async fn write_grep_manifest<S: ObjectStore + ?Sized>(
     store: &S,
     state: &GrepRootState,
-    writer_version: &str,
 ) -> Result<WrittenGrepManifest> {
-    let envelope = GrepManifestEnvelope::from_state(writer_version, state.clone())
+    let envelope = GrepManifestEnvelope::from_state(state.clone())
         .map_err(|error| corrupt(&root_key(state.namespace_id()), error))?;
     let object_key = manifest_key(state.namespace_id(), envelope.manifest_id());
     let bytes =

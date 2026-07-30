@@ -2,7 +2,6 @@
 
 pub(crate) use super::frame::WalReplayError;
 use super::{DecodedWalRecord, ReplayedWalTail, ValidatedWalChain};
-use crate::invariants::{push_unique_invariant, InvariantId};
 use crate::metadata::MetadataState;
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::wal::{WalCommitDelta, WalDelta, WalSegmentEnvelope};
@@ -24,10 +23,6 @@ pub(crate) fn project_validated_wal_tail(
     if let Some(last_segment) = wal_tail.segments().last() {
         replayed.resulting_head.visible_wal_tip = Some(last_segment.pointer());
     }
-    extend_invariants(
-        &mut replayed.checked_invariants,
-        wal_tail.checked_invariants(),
-    );
     Ok(replayed)
 }
 
@@ -42,7 +37,6 @@ where
 {
     let mut current_head = base_head.clone();
     let mut current_metadata_state = base_metadata_state.clone();
-    let mut checked_invariants = Vec::new();
 
     for record in records {
         validate_replay_record(&current_head, expected_writer_epoch, &record)?;
@@ -50,7 +44,7 @@ where
         current_head.head_commit_id = record.commit_id.clone();
         current_head.next_inode_id =
             replay_next_inode_id_from_commit_deltas(current_head.next_inode_id, &record.deltas);
-        let apply_invariants = current_metadata_state.apply_committed_wal_record_parts_mut(
+        current_metadata_state.apply_committed_wal_record_parts_mut(
             record.seq,
             record.committed_at_ms,
             record.commit_id,
@@ -58,17 +52,11 @@ where
             record.message,
             &record.deltas,
         );
-        push_unique_invariant(
-            &mut checked_invariants,
-            InvariantId::WalReplayAppliesMetadataRows,
-        );
-        extend_invariants(&mut checked_invariants, &apply_invariants);
     }
 
     Ok(ReplayedWalTail {
         resulting_head: current_head,
         resulting_metadata_state: current_metadata_state,
-        checked_invariants,
     })
 }
 
@@ -182,18 +170,6 @@ pub(super) fn validate_wal_segment_for_replay(
     Ok(())
 }
 
-pub(super) fn extend_wal_replay_invariants(checked_invariants: &mut Vec<InvariantId>) {
-    for invariant in [
-        InvariantId::WalPayloadChecksumMatchesPayload,
-        InvariantId::WalKeyMatchesSegmentSeqRange,
-        InvariantId::WalReplayRequiresMatchingNamespace,
-        InvariantId::WalReplayRequiresMatchingBaseHeadSeq,
-        InvariantId::WalTailSeqIsContiguous,
-    ] {
-        push_unique_invariant(checked_invariants, invariant);
-    }
-}
-
 fn replay_next_inode_id(current_next_inode_id: InodeId, deltas: &[WalDelta]) -> InodeId {
     deltas
         .iter()
@@ -216,10 +192,4 @@ fn replay_next_inode_id_from_commit_deltas(
     deltas.iter().fold(current_next_inode_id, |next, delta| {
         replay_next_inode_id(next, std::slice::from_ref(&delta.delta))
     })
-}
-
-fn extend_invariants(checked_invariants: &mut Vec<InvariantId>, new_invariants: &[InvariantId]) {
-    for invariant in new_invariants {
-        push_unique_invariant(checked_invariants, *invariant);
-    }
 }

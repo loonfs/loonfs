@@ -20,21 +20,16 @@ pub const GREP_MANIFEST_FORMAT_VERSION: &str = "v1";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrepRootEnvelope {
     format_version: String,
-    writer_version: String,
     payload_checksum: String,
     pointer: GrepRootPointer,
 }
 
 impl GrepRootEnvelope {
     /// Builds a fresh root-pointer envelope over its canonical payload bytes.
-    pub fn from_pointer(
-        writer_version: impl Into<String>,
-        pointer: GrepRootPointer,
-    ) -> Result<Self, GrepRootCodecError> {
+    pub fn from_pointer(pointer: GrepRootPointer) -> Result<Self, GrepRootCodecError> {
         let payload = payload_bytes(&pointer)?;
         Ok(Self {
             format_version: GREP_ROOT_FORMAT_VERSION.to_owned(),
-            writer_version: writer_version.into(),
             payload_checksum: sha256_digest(&payload),
             pointer,
         })
@@ -42,10 +37,6 @@ impl GrepRootEnvelope {
 
     pub fn format_version(&self) -> &str {
         &self.format_version
-    }
-
-    pub fn writer_version(&self) -> &str {
-        &self.writer_version
     }
 
     pub fn payload_checksum(&self) -> &str {
@@ -61,7 +52,6 @@ impl GrepRootEnvelope {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrepManifestEnvelope {
     format_version: String,
-    writer_version: String,
     payload_checksum: String,
     manifest_id: GrepManifestId,
     state: GrepRootState,
@@ -69,16 +59,12 @@ pub struct GrepManifestEnvelope {
 
 impl GrepManifestEnvelope {
     /// Builds a manifest whose id is the SHA-256 of its canonical payload.
-    pub fn from_state(
-        writer_version: impl Into<String>,
-        state: GrepRootState,
-    ) -> Result<Self, GrepRootCodecError> {
+    pub fn from_state(state: GrepRootState) -> Result<Self, GrepRootCodecError> {
         state.validate()?;
         let payload = payload_bytes(&state)?;
         let manifest_id = GrepManifestId::for_payload(&payload);
         Ok(Self {
             format_version: GREP_MANIFEST_FORMAT_VERSION.to_owned(),
-            writer_version: writer_version.into(),
             payload_checksum: manifest_id.payload_checksum(),
             manifest_id,
             state,
@@ -87,10 +73,6 @@ impl GrepManifestEnvelope {
 
     pub fn format_version(&self) -> &str {
         &self.format_version
-    }
-
-    pub fn writer_version(&self) -> &str {
-        &self.writer_version
     }
 
     pub fn payload_checksum(&self) -> &str {
@@ -116,7 +98,6 @@ struct EnvelopeProbe {
 struct EnvelopeDocument {
     kind: String,
     format_version: String,
-    writer_version: String,
     payload_checksum: String,
     payload: Box<RawValue>,
 }
@@ -126,7 +107,6 @@ struct EnvelopeDocument {
 struct StrictEnvelopeDocument {
     kind: String,
     format_version: String,
-    writer_version: String,
     payload_checksum: String,
     payload: Box<RawValue>,
 }
@@ -136,7 +116,6 @@ impl From<StrictEnvelopeDocument> for EnvelopeDocument {
         Self {
             kind: document.kind,
             format_version: document.format_version,
-            writer_version: document.writer_version,
             payload_checksum: document.payload_checksum,
             payload: document.payload,
         }
@@ -149,7 +128,6 @@ pub fn encode_grep_root(envelope: &GrepRootEnvelope) -> Result<Vec<u8>, GrepRoot
         GREP_ROOT_KIND,
         GREP_ROOT_FORMAT_VERSION,
         &envelope.format_version,
-        &envelope.writer_version,
         &envelope.payload_checksum,
         &envelope.pointer,
     )
@@ -161,7 +139,6 @@ pub fn decode_grep_root(bytes: &[u8]) -> Result<GrepRootEnvelope, GrepRootCodecE
     let pointer: GrepRootPointer = decode_payload(&document)?;
     Ok(GrepRootEnvelope {
         format_version: document.format_version,
-        writer_version: document.writer_version,
         payload_checksum: document.payload_checksum,
         pointer,
     })
@@ -176,7 +153,6 @@ pub fn encode_grep_manifest(
         GREP_MANIFEST_KIND,
         GREP_MANIFEST_FORMAT_VERSION,
         &envelope.format_version,
-        &envelope.writer_version,
         &envelope.payload_checksum,
         &envelope.state,
     )?;
@@ -205,7 +181,6 @@ pub fn decode_grep_manifest(bytes: &[u8]) -> Result<GrepManifestEnvelope, GrepRo
     }
     Ok(GrepManifestEnvelope {
         format_version: document.format_version,
-        writer_version: document.writer_version,
         payload_checksum: manifest_id.payload_checksum(),
         manifest_id,
         state,
@@ -216,7 +191,6 @@ fn encode_envelope<T: Serialize>(
     kind: &str,
     supported_version: &str,
     format_version: &str,
-    writer_version: &str,
     payload_checksum: &str,
     payload: &T,
 ) -> Result<Vec<u8>, GrepRootCodecError> {
@@ -235,7 +209,6 @@ fn encode_envelope<T: Serialize>(
     let document = EnvelopeDocument {
         kind: kind.to_owned(),
         format_version: format_version.to_owned(),
-        writer_version: writer_version.to_owned(),
         payload_checksum: payload_checksum.to_owned(),
         payload: RawValue::from_string(payload).map_err(|error| {
             GrepRootCodecError::PayloadEncode {

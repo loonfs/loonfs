@@ -6,7 +6,6 @@ async fn build_manifest_from_projection<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     projection: &CurrentProjection,
-    context: &MutationContext,
     manifest_id: ManifestId,
 ) -> NamespaceManifestEnvelope {
     build_namespace_manifest_from_metadata_state(
@@ -18,7 +17,6 @@ async fn build_manifest_from_projection<S: ObjectStore + ?Sized>(
             retention_floor_seq: read_floor_seq(store, namespace_id).await,
             metadata_state: &projection.metadata_state,
         },
-        &context.writer_version,
         MetadataLsmPolicy::default(),
         manifest_id,
     )
@@ -44,7 +42,6 @@ impl ManifestSwapOnCasConflictStore {
         root.manifest_id = ManifestId(root.manifest_id.0 + 1);
         let envelope = loonfs_api::wire::control::MetadataRootEnvelope::from_state(
             loonfs_api::wire::control::ControlObjectKind::MetadataRoot,
-            "test-writer/0.1.0",
             root,
         )
         .expect("root envelope");
@@ -140,7 +137,6 @@ impl FloorRaiseOnCasConflictStore {
         floor.floor_seq = ChangeSeq(5);
         let envelope = loonfs_api::wire::control::WalFloorEnvelope::from_state(
             loonfs_api::wire::control::ControlObjectKind::WalFloor,
-            "test-writer/0.1.0",
             floor,
         )
         .expect("floor envelope");
@@ -367,28 +363,20 @@ struct RootCasTransportAfterCompetingRootStore {
     inner: LocalFsStore,
     root_key: String,
     competing_root: Mutex<Option<MetadataRootState>>,
-    writer_version: String,
 }
 
 impl RootCasTransportAfterCompetingRootStore {
-    fn new(
-        inner: LocalFsStore,
-        root_key: String,
-        competing_root: MetadataRootState,
-        writer_version: &str,
-    ) -> Self {
+    fn new(inner: LocalFsStore, root_key: String, competing_root: MetadataRootState) -> Self {
         Self {
             inner,
             root_key,
             competing_root: Mutex::new(Some(competing_root)),
-            writer_version: writer_version.to_owned(),
         }
     }
 
     async fn install_competing_root(&self, root: MetadataRootState) {
         let envelope = loonfs_api::wire::control::MetadataRootEnvelope::from_state(
             loonfs_api::wire::control::ControlObjectKind::MetadataRoot,
-            &self.writer_version,
             root,
         )
         .expect("metadata root envelope");
@@ -577,22 +565,12 @@ async fn same_root_checkpoint_builders_write_distinct_manifest_objects_and_loser
     let materialization = load_current_projection(&store, &namespace_id)
         .await
         .expect("materialization");
-    let first_manifest = build_manifest_from_projection(
-        &store,
-        &namespace_id,
-        &materialization,
-        &context,
-        ManifestId(1),
-    )
-    .await;
-    let second_manifest = build_manifest_from_projection(
-        &store,
-        &namespace_id,
-        &materialization,
-        &context,
-        ManifestId(1),
-    )
-    .await;
+    let first_manifest =
+        build_manifest_from_projection(&store, &namespace_id, &materialization, ManifestId(1))
+            .await;
+    let second_manifest =
+        build_manifest_from_projection(&store, &namespace_id, &materialization, ManifestId(1))
+            .await;
     assert_eq!(
         first_manifest.payload.manifest_id,
         second_manifest.payload.manifest_id
@@ -615,7 +593,6 @@ async fn same_root_checkpoint_builders_write_distinct_manifest_objects_and_loser
         &first_manifest,
         Some(materialization.root.manifest_object_id.clone()),
         context.now_ms,
-        &context.writer_version,
     )
     .await
     .expect("first publication succeeds");
@@ -635,7 +612,6 @@ async fn same_root_checkpoint_builders_write_distinct_manifest_objects_and_loser
         &second_manifest,
         Some(materialization.root.manifest_object_id.clone()),
         context.now_ms + 1,
-        &context.writer_version,
     )
     .await
     .expect("second publication should yield to the published root");
@@ -693,21 +669,18 @@ async fn lower_seq_root_publication_yields_to_the_newer_root() {
     )
     .await
     .expect("build metadata tables");
-    let manifest = NamespaceManifestEnvelope::from_payload(
-        &context.writer_version,
-        NamespaceManifestPayload {
-            namespace_id: namespace_id.clone(),
-            manifest_id: ManifestId(materialization_before.head.seq.0),
-            manifest_object_id: manifest_object_id(ManifestId(materialization_before.head.seq.0)),
-            head_seq: materialization_before.head.seq,
-            head_commit_id: materialization_before.head.head_commit_id.clone(),
-            base_seq: materialization_before.head.seq,
-            writer_epoch: materialization_before.head.writer_epoch,
-            next_inode_id: materialization_before.head.next_inode_id,
-            retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
-            metadata_files: flatten_manifest_tables(tables),
-        },
-    )
+    let manifest = NamespaceManifestEnvelope::from_payload(NamespaceManifestPayload {
+        namespace_id: namespace_id.clone(),
+        manifest_id: ManifestId(materialization_before.head.seq.0),
+        manifest_object_id: manifest_object_id(ManifestId(materialization_before.head.seq.0)),
+        head_seq: materialization_before.head.seq,
+        head_commit_id: materialization_before.head.head_commit_id.clone(),
+        base_seq: materialization_before.head.seq,
+        writer_epoch: materialization_before.head.writer_epoch,
+        next_inode_id: materialization_before.head.next_inode_id,
+        retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
+        metadata_files: flatten_manifest_tables(tables),
+    })
     .expect("build manifest");
     write_namespace_manifest(&store, &manifest)
         .await
@@ -734,7 +707,6 @@ async fn lower_seq_root_publication_yields_to_the_newer_root() {
         &manifest,
         Some(materialization_before.root.manifest_object_id.clone()),
         context.now_ms,
-        &context.writer_version,
     )
     .await
     .expect("manifest publication should classify the newer root");
@@ -783,7 +755,6 @@ async fn current_manifest_cas_retry_exhaustion_reports_head_race() {
             retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
             metadata_state: &materialization.metadata_state,
         },
-        &context.writer_version,
         MetadataLsmPolicy::default(),
         ManifestId(1),
     )
@@ -800,7 +771,6 @@ async fn current_manifest_cas_retry_exhaustion_reports_head_race() {
         &manifest,
         Some(materialization.root.manifest_object_id.clone()),
         context.now_ms,
-        &context.writer_version,
     )
     .await
     .expect("root publication should report CAS race");
@@ -842,7 +812,6 @@ async fn root_cas_transport_error_recovers_when_candidate_was_published() {
             retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
             metadata_state: &materialization.metadata_state,
         },
-        &context.writer_version,
         MetadataLsmPolicy::default(),
         ManifestId(1),
     )
@@ -859,7 +828,6 @@ async fn root_cas_transport_error_recovers_when_candidate_was_published() {
         &manifest,
         Some(materialization.root.manifest_object_id.clone()),
         context.now_ms,
-        &context.writer_version,
     )
     .await
     .expect("root publication should recover after ambiguous CAS");
@@ -896,22 +864,12 @@ async fn root_cas_transport_error_recovers_when_newer_root_was_published() {
     let materialization = load_current_projection(&raw_store, &namespace_id)
         .await
         .expect("materialization");
-    let candidate_manifest = build_manifest_from_projection(
-        &raw_store,
-        &namespace_id,
-        &materialization,
-        &context,
-        ManifestId(1),
-    )
-    .await;
-    let competing_manifest = build_manifest_from_projection(
-        &raw_store,
-        &namespace_id,
-        &materialization,
-        &context,
-        ManifestId(2),
-    )
-    .await;
+    let candidate_manifest =
+        build_manifest_from_projection(&raw_store, &namespace_id, &materialization, ManifestId(1))
+            .await;
+    let competing_manifest =
+        build_manifest_from_projection(&raw_store, &namespace_id, &materialization, ManifestId(2))
+            .await;
     write_namespace_manifest(&raw_store, &candidate_manifest)
         .await
         .expect("write candidate manifest");
@@ -931,7 +889,6 @@ async fn root_cas_transport_error_recovers_when_newer_root_was_published() {
         LocalFsStore::new(temp_dir.path()).expect("store"),
         loonfs_objectstore::keys::metadata_root(namespace_id.as_str()),
         competing_root,
-        &context.writer_version,
     );
 
     let outcome = publish_metadata_root(
@@ -940,7 +897,6 @@ async fn root_cas_transport_error_recovers_when_newer_root_was_published() {
         &candidate_manifest,
         Some(materialization.root.manifest_object_id.clone()),
         context.now_ms,
-        &context.writer_version,
     )
     .await
     .expect("root publication should recover by observing the competing root");
@@ -1037,7 +993,6 @@ async fn same_seq_root_replacement_publishes_a_compacted_manifest() {
             retention_floor_seq: read_floor_seq(&store, &namespace_id).await,
             metadata_state: &materialization.metadata_state,
         },
-        &context.writer_version,
         MetadataLsmPolicy::default(),
         ManifestId(checkpoint.manifest_id.0 + 1),
     )
@@ -1057,7 +1012,6 @@ async fn same_seq_root_replacement_publishes_a_compacted_manifest() {
         &compacted,
         Some(materialization.root.manifest_object_id.clone()),
         context.now_ms,
-        &context.writer_version,
     )
     .await
     .expect("same-seq replacement publishes");
@@ -1162,7 +1116,6 @@ async fn stale_basis_publication_cannot_clobber_a_sibling_root() {
         &store,
         &namespace_id,
         &sibling_basis,
-        &context,
         ManifestId(sibling_basis.root.manifest_id.0 + 1),
     )
     .await;
@@ -1170,7 +1123,6 @@ async fn stale_basis_publication_cannot_clobber_a_sibling_root() {
         &store,
         &namespace_id,
         &stale_basis,
-        &context,
         ManifestId(stale_basis.root.manifest_id.0 + 1),
     )
     .await;
@@ -1188,7 +1140,6 @@ async fn stale_basis_publication_cannot_clobber_a_sibling_root() {
         &sibling,
         Some(sibling_basis.root.manifest_object_id.clone()),
         context.now_ms,
-        &context.writer_version,
     )
     .await
     .expect("sibling publication");
@@ -1203,7 +1154,6 @@ async fn stale_basis_publication_cannot_clobber_a_sibling_root() {
         &stale_higher_head,
         Some(stale_basis.root.manifest_object_id.clone()),
         context.now_ms + 1,
-        &context.writer_version,
     )
     .await
     .expect("stale publication");

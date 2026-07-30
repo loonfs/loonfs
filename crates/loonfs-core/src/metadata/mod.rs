@@ -34,7 +34,6 @@ mod view;
 mod view_session;
 mod visibility;
 
-pub use self::apply::AppliedMetadataState;
 pub use self::queries::{ResolvedVisiblePath, VisiblePathError};
 pub use self::rows::{
     CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord, InodeRecord, MetadataState,

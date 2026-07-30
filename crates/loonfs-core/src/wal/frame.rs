@@ -1,7 +1,6 @@
 //! WAL segment and chain framing types, shared by the writer, reader, and
 //! replay paths.
 
-use crate::invariants::InvariantId;
 use loonfs_api::wire::control::{HeadState, WalSegmentPointer};
 use loonfs_api::wire::wal::{WalCommitDelta, WalCommitPayload, WalSegmentEnvelope};
 use loonfs_api::{ChangeSeq, CommitId, NamespaceId, WalSegmentId, WriterEpoch};
@@ -15,13 +14,10 @@ pub struct PreparedWalSegment {
     pub segment_id: WalSegmentId,
     pub envelope: WalSegmentEnvelope,
     pub encoded_bytes: Vec<u8>,
-    pub checked_invariants: Vec<InvariantId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
 pub enum WalBuildError {
-    #[error("writer version must not be empty")]
-    EmptyWriterVersion,
     #[error("WAL segment contains no records")]
     EmptySegment,
     #[error("WAL build namespace mismatch: request `{request}`, plan `{plan}`")]
@@ -126,33 +122,21 @@ impl ValidatedWalSegment {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ValidatedWalChain {
     segments: Vec<ValidatedWalSegment>,
-    checked_invariants: Vec<InvariantId>,
 }
 
 impl ValidatedWalChain {
-    pub(crate) fn new(
-        segments: Vec<ValidatedWalSegment>,
-        checked_invariants: Vec<InvariantId>,
-    ) -> Self {
-        Self {
-            segments,
-            checked_invariants,
-        }
+    pub(crate) fn new(segments: Vec<ValidatedWalSegment>) -> Self {
+        Self { segments }
     }
 
     pub(crate) fn empty() -> Self {
         Self {
             segments: Vec::new(),
-            checked_invariants: Vec::new(),
         }
     }
 
     pub(crate) fn segments(&self) -> &[ValidatedWalSegment] {
         &self.segments
-    }
-
-    pub(crate) fn checked_invariants(&self) -> &[InvariantId] {
-        &self.checked_invariants
     }
 
     pub(crate) fn decoded_records(&self) -> impl Iterator<Item = DecodedWalRecord<'_>> {
@@ -202,7 +186,6 @@ pub enum WalChainLoadError {
 pub(crate) struct ReplayedWalTail {
     pub resulting_head: HeadState,
     pub resulting_metadata_state: crate::metadata::MetadataState,
-    pub checked_invariants: Vec<InvariantId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]

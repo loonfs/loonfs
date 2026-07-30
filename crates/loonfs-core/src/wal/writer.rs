@@ -3,7 +3,6 @@
 
 use super::{PreparedWalSegment, WalBuildError};
 use crate::commit::{wal_payload_from_materialized_commit, MaterializedCommit};
-use crate::invariants::InvariantId;
 use loonfs_api::wire::control::WalSegmentPointer;
 use loonfs_api::wire::wal::{
     encode_wal_segment_envelope_zstd, WalCommitPayload, WalSegmentEnvelope, WalSegmentPayload,
@@ -16,11 +15,7 @@ pub(crate) fn prepare_wal_segment(
     writer_epoch: WriterEpoch,
     prev_visible_segment: Option<WalSegmentPointer>,
     records: &[MaterializedCommit],
-    writer_version: &str,
 ) -> Result<PreparedWalSegment, WalBuildError> {
-    if writer_version.trim().is_empty() {
-        return Err(WalBuildError::EmptyWriterVersion);
-    }
     if records.is_empty() {
         return Err(WalBuildError::EmptySegment);
     }
@@ -80,7 +75,7 @@ pub(crate) fn prepare_wal_segment(
         end_seq,
         records: payload_records,
     };
-    let envelope = WalSegmentEnvelope::from_payload(writer_version, payload)
+    let envelope = WalSegmentEnvelope::from_payload(payload)
         .map_err(|err| WalBuildError::Codec(err.to_string()))?;
     let encoded_bytes = encode_wal_segment_envelope_zstd(&envelope)
         .map_err(|err| WalBuildError::Codec(err.to_string()))?;
@@ -91,10 +86,5 @@ pub(crate) fn prepare_wal_segment(
         segment_id,
         envelope,
         encoded_bytes,
-        checked_invariants: vec![
-            InvariantId::WalPayloadChecksumMatchesPayload,
-            InvariantId::WalKeyMatchesSegmentSeqRange,
-            InvariantId::HeadPublishRequiresDurableWal,
-        ],
     })
 }

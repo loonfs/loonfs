@@ -303,7 +303,6 @@ async fn seed_namespace(root: &Path, name: &str) -> (SharedObjectStore, FsWriter
     let store = Arc::new(LocalFsStore::new(root).expect("store")) as SharedObjectStore;
     let writer = FsWriter::builder_with_store(store.clone())
         .writer_id(format!("grep-mode-seed-{name}"))
-        .writer_version("grep-mode-tests/0.1")
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -322,7 +321,6 @@ fn test_config(store_root: &Path, mode: GrepMode) -> ServerConfig {
         auth_token: Some("test-token".into()),
         content_token_secret: "test-content-token-secret".into(),
         writer_id: format!("grep-mode-{mode:?}"),
-        writer_version: "grep-mode-tests/0.1".to_owned(),
         runtime_cache: RuntimeCacheConfigOverrides::default(),
         grep: GrepConfig {
             mode,
@@ -452,18 +450,16 @@ const API_SPEC_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/spe
 
 /// A grep worker over the same handles the server composes.
 async fn grep_worker(store: &SharedObjectStore, actor: &str) -> GrepWorker<SharedObjectStore> {
-    let version = format!("{actor}/0.1");
     let reader = FsReader::builder_with_store(store.clone())
         .build()
         .await
         .expect("build reader");
     let admin = FsAdmin::builder_with_store(store.clone())
         .actor_id(actor)
-        .actor_version(version.clone())
         .build()
         .await
         .expect("build admin");
-    GrepWorker::new(store.clone(), reader, admin, version)
+    GrepWorker::new(store.clone(), reader, admin)
 }
 
 /// The api.md section 2.1 example describes a reference deployment: the

@@ -23,7 +23,7 @@ use loonfs_api::wire::control::{HeadState, NamespaceState};
 use loonfs_api::{
     AbsolutePath, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq, ContentStoreId,
     DirectoryPageCursor, DisplayName, FileRevision, FileRevisionsPageCursor, InodeId, InodeKind,
-    NamePolicy, NamespaceId, Page, PageRequest, RevisionNo, TrashEntry, TrashPageCursor,
+    NamespaceId, Page, PageRequest, RevisionNo, TrashEntry, TrashPageCursor,
 };
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
@@ -117,7 +117,6 @@ pub(crate) async fn load_metadata_view<'a, S: ObjectStore + ?Sized>(
 pub(crate) struct LoadedMetadataView<'a, S: ObjectStore + ?Sized> {
     pub(super) namespace_id: NamespaceId,
     pub(super) content_store_id: ContentStoreId,
-    name_policy: NamePolicy,
     pub(super) head: HeadState,
     pub(super) tables: VerifiedMetadataTables<'a, S>,
     wal_tail_rows: Arc<MetadataState>,
@@ -167,7 +166,6 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 return Ok(Self {
                     namespace_id: namespace_id.clone(),
                     content_store_id: catalog_entry.content_store_id().clone(),
-                    name_policy: catalog_entry.name_policy(),
                     head,
                     tables,
                     wal_tail_rows,
@@ -209,7 +207,6 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         Ok(Self {
             namespace_id: namespace_id.clone(),
             content_store_id: catalog_entry.content_store_id().clone(),
-            name_policy: catalog_entry.name_policy(),
             head,
             tables,
             wal_tail_rows,
@@ -707,12 +704,7 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     }
 
     pub(super) fn metadata_view(&self) -> MetadataView<'_, '_, S> {
-        MetadataView::from_loaded_head(
-            &self.head,
-            self.name_policy,
-            &self.tables,
-            self.wal_tail_rows.as_ref(),
-        )
+        MetadataView::from_loaded_head(&self.head, &self.tables, self.wal_tail_rows.as_ref())
     }
 }
 

@@ -379,8 +379,8 @@ mod tests {
     use crate::commit::{CommitExecutionContext, CommitRequest};
     use loonfs_api::v0::{CommitOp, CommitPrecondition, CommitRequest as ApiCommitRequest};
     use loonfs_api::{
-        ChangeSeq, CommitId, ContentRef, DisplayName, InodeId, NameKey, NamePolicy, NamespaceId,
-        RevisionNo, WriterEpoch,
+        ChangeSeq, CommitId, ContentRef, DisplayName, InodeId, NameKey, NamespaceId, RevisionNo,
+        WriterEpoch,
     };
 
     fn core_request(writer_epoch: WriterEpoch) -> CommitRequest {
@@ -401,10 +401,8 @@ mod tests {
 
     fn representative_request() -> CommitRequest {
         let content_ref = ContentRef::whole_file_v0(b"fingerprint bytes");
-        let name_key = NameKey::for_display_name(
-            NamePolicy::default(),
-            &DisplayName::parse("Docs").expect("display name"),
-        );
+        let name_key =
+            NameKey::for_display_name(&DisplayName::parse("Docs").expect("display name"));
         CommitRequest {
             namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
             commit_id: CommitId::parse("commit-representative").expect("valid commit id"),

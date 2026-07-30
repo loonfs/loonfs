@@ -176,12 +176,8 @@ async fn bind_namespace_to_content_store(
         .expect("load namespace head")
         .state;
     head.content_store_id = content_store_id;
-    let envelope = HeadStateEnvelope::from_state(
-        ControlObjectKind::WalHead,
-        "content-request-accounting/0.1",
-        head,
-    )
-    .expect("build namespace head");
+    let envelope = HeadStateEnvelope::from_state(ControlObjectKind::WalHead, head)
+        .expect("build namespace head");
     store
         .put_overwrite(
             &wal_head(namespace_id.as_str()),
