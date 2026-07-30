@@ -318,6 +318,8 @@ idempotency key that must be reused verbatim for safe retries — an optional
 identity), and an ordered, non-empty list of path operations. A request with
 one operation is the same shape as a request with many, so a convenience
 call and a one-element list are the same mutation and fingerprint alike.
+A `message` is at most 4096 bytes; a longer one is rejected with
+`invalid_request` before planning, on every transport.
 
 The operations of one request commit together, in order, as one logical
 commit. Operation `k` is planned against authoritative namespace state plus

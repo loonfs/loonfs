@@ -26,6 +26,12 @@ pub const MAX_COMMIT_CONTENT_TOKENS: usize = 4096;
 /// its in-memory coverage work while it occupies the serialized publisher.
 pub const MAX_COMMIT_EXTERNAL_CONTENT_REFS: usize = 4096;
 
+/// Maximum byte length of a commit's optional `message` annotation, which is
+/// stored in every durable WAL record, hashed into the mutation fingerprint,
+/// and replayed by the change feed. This is the only bound on the message:
+/// no transport-level body limit is relied on.
+pub const MAX_COMMIT_MESSAGE_BYTES: usize = 4096;
+
 /// Maximum attempts for a bounded compare-and-swap or allocation contention loop.
 pub const CONTENTION_RETRY_LIMIT: usize = 8;
 

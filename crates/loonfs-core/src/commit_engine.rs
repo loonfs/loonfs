@@ -108,6 +108,15 @@ impl MutationCandidate {
                 crate::limits::MAX_COMMIT_OPERATIONS
             )));
         }
+        if let Some(message) = &self.request.message {
+            if message.len() > crate::limits::MAX_COMMIT_MESSAGE_BYTES {
+                return Err(CoreError::InvalidCommitRequest(format!(
+                    "mutation message is {} bytes; maximum is {}",
+                    message.len(),
+                    crate::limits::MAX_COMMIT_MESSAGE_BYTES
+                )));
+            }
+        }
         let prepared_count = match &self.content {
             ContentPreparation::Ready(content) => content.len(),
             ContentPreparation::Rejected(_) => 0,
@@ -605,6 +614,18 @@ mod tests {
         oversized_proofs
             .semantic_identity(&namespace_id)
             .expect("prepared proof limits must not affect identity");
+
+        let oversized_message = MutationCandidate::new(MutationRequest {
+            commit_id: CommitId::parse("too-long-message").expect("valid commit id"),
+            message: Some("m".repeat(crate::limits::MAX_COMMIT_MESSAGE_BYTES + 1)),
+            operations: vec![FilesystemOperation::CreateDir {
+                absolute_path: loonfs_api::AbsolutePath::parse("/docs").expect("valid path"),
+                parents: false,
+            }],
+        });
+        oversized_message
+            .semantic_identity(&namespace_id)
+            .expect("message limits must not affect identity");
     }
 
     /// A batch past the operation ceiling is refused before it can occupy
@@ -642,6 +663,35 @@ mod tests {
         at_ceiling
             .validate_request_limits()
             .expect("a batch at the ceiling is admitted");
+    }
+
+    /// A message past the byte ceiling is refused before it can enter the
+    /// durable record or the fingerprint path.
+    #[test]
+    fn a_message_past_the_byte_ceiling_is_rejected() {
+        let operations = vec![FilesystemOperation::CreateDir {
+            absolute_path: loonfs_api::AbsolutePath::parse("/docs").expect("valid path"),
+            parents: false,
+        }];
+
+        let oversized = MutationCandidate::new(MutationRequest {
+            commit_id: CommitId::parse("oversized-message").expect("valid commit id"),
+            message: Some("m".repeat(crate::limits::MAX_COMMIT_MESSAGE_BYTES + 1)),
+            operations: operations.clone(),
+        });
+        let error = oversized
+            .validate_request_limits()
+            .expect_err("the message is over the byte ceiling");
+        assert_eq!(error.code(), ErrorCode::InvalidRequest);
+
+        let at_ceiling = MutationCandidate::new(MutationRequest {
+            commit_id: CommitId::parse("largest-message").expect("valid commit id"),
+            message: Some("m".repeat(crate::limits::MAX_COMMIT_MESSAGE_BYTES)),
+            operations,
+        });
+        at_ceiling
+            .validate_request_limits()
+            .expect("a message at the ceiling is admitted");
     }
 
     fn create_dir(commit_id: &str, display_name: &str) -> MutationCandidate {
