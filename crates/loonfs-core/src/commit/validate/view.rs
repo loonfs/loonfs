@@ -20,9 +20,11 @@
 use super::super::metadata_overlay::CommitOverlayRows;
 use super::super::{CommitValidationError, ValidatedOp};
 use crate::error::CoreError;
+#[cfg(test)]
+use crate::metadata::InMemoryMetadataView;
 use crate::metadata::{
-    DirentryBindRecord, InMemoryMetadataView, InodeRecord, MetadataState, MetadataView,
-    RevisionRecord, SubtreeTombstoneRecord,
+    DirentryBindRecord, InodeRecord, MetadataState, MetadataView, RevisionRecord,
+    SubtreeTombstoneRecord,
 };
 use loonfs_api::{ChangeSeq, InodeId, NameKey, RevisionNo};
 use loonfs_objectstore::ObjectStore;
@@ -34,7 +36,7 @@ use loonfs_objectstore::ObjectStore;
 /// Every method observes the accumulating commit overlay: the loop applies
 /// each validated op through [`Self::apply_validated_op_mut`] so later ops in
 /// a batch see the rows earlier ops would persist.
-pub(super) trait CommitValidationView {
+pub(crate) trait CommitValidationView {
     type Error: From<CommitValidationError>;
 
     async fn inode_at_seq(&self, inode_id: InodeId) -> Result<Option<InodeRecord>, Self::Error>;
@@ -97,6 +99,7 @@ pub(super) trait CommitValidationView {
 
 /// Bridges the shared [`MetadataView`] error surface into the plain
 /// [`CommitValidationError`] the in-memory entry point returns.
+#[cfg(test)]
 fn commit_validation_from_core(error: CoreError) -> CommitValidationError {
     match error {
         CoreError::CommitValidation(error) => error,
@@ -109,14 +112,16 @@ fn commit_validation_from_core(error: CoreError) -> CommitValidationError {
 /// lookup. Every such lookup completes without awaiting an object store — the
 /// view has no manifest tables — which is what lets [`super::build_commit_plan`]
 /// stay synchronous (its future is resolved by a single poll).
-pub(super) struct InMemoryValidationView<'a> {
+#[cfg(test)]
+pub(crate) struct InMemoryValidationView<'a> {
     metadata_state: &'a MetadataState,
     committed_seq: ChangeSeq,
     overlay: CommitOverlayRows,
 }
 
+#[cfg(test)]
 impl<'a> InMemoryValidationView<'a> {
-    pub(super) fn new(metadata_state: &'a MetadataState, committed_seq: ChangeSeq) -> Self {
+    pub(crate) fn new(metadata_state: &'a MetadataState, committed_seq: ChangeSeq) -> Self {
         Self {
             metadata_state,
             committed_seq,
@@ -133,6 +138,7 @@ impl<'a> InMemoryValidationView<'a> {
     }
 }
 
+#[cfg(test)]
 impl CommitValidationView for InMemoryValidationView<'_> {
     type Error = CommitValidationError;
 
@@ -245,14 +251,14 @@ impl CommitValidationView for InMemoryValidationView<'_> {
 /// accumulating commit overlay (seeded from the rows already accepted earlier
 /// in the batch), rebuilding an overlaid view for each lookup so object-store
 /// failures surface as [`CoreError`].
-pub(super) struct PublishValidationView<'a, S: ObjectStore + ?Sized> {
+pub(crate) struct PublishValidationView<'a, S: ObjectStore + ?Sized> {
     base_view: MetadataView<'a, 'a, S>,
     committed_seq: ChangeSeq,
     overlay: CommitOverlayRows,
 }
 
 impl<'a, S: ObjectStore + ?Sized> PublishValidationView<'a, S> {
-    pub(super) fn new(
+    pub(crate) fn new(
         base_view: MetadataView<'a, 'a, S>,
         accepted_rows: &MetadataState,
         committed_seq: ChangeSeq,
@@ -264,7 +270,11 @@ impl<'a, S: ObjectStore + ?Sized> PublishValidationView<'a, S> {
         }
     }
 
-    fn view(&self) -> MetadataView<'_, 'a, S> {
+    /// The metadata the next operation resolves against: the loaded publish
+    /// view plus every row this commit's earlier operations would persist.
+    /// The planner reads through this so an operation resolves paths against
+    /// what its predecessors did.
+    pub(crate) fn view(&self) -> MetadataView<'_, 'a, S> {
         self.base_view
             .with_overlay(self.overlay.rows(), self.committed_seq)
     }

@@ -14,7 +14,7 @@ pub struct MaterializedCommitDelta {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MaterializedCommit {
+pub(crate) struct MaterializedCommit {
     pub prepared: PreparedCommit,
     /// Observational wall-clock stamp from the publishing request context,
     /// carried into the durable WAL payload. Not part of the semantic
@@ -69,7 +69,10 @@ pub enum CommitOpResult {
     },
 }
 
-pub fn materialize_commit(prepared: PreparedCommit, committed_at_ms: u64) -> MaterializedCommit {
+pub(crate) fn materialize_commit(
+    prepared: PreparedCommit,
+    committed_at_ms: u64,
+) -> MaterializedCommit {
     let mut deltas = Vec::new();
     let mut results = Vec::with_capacity(prepared.plan.validated_ops.len());
     for op in &prepared.plan.validated_ops {

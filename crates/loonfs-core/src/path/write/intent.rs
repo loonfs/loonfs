@@ -1,36 +1,60 @@
-//! [`PathMutationIntent`]: a user-facing path mutation before planning.
+//! [`MutationRequest`]: the one filesystem mutation language, before planning.
 
 use loonfs_api::{
     AbsolutePath, ChangeSeq, CommitId, ContentRef, DeleteDirectoryBehavior, DestinationBehavior,
     InodeId, RevisionNo,
 };
 
-/// User-facing path mutation before it is planned against namespace state.
+/// One logical filesystem mutation: an idempotency key, an optional caller
+/// annotation, and an ordered, non-empty list of operations.
 ///
-/// Server and embedded publishers accept these intents, then resolve paths and
-/// preconditions immediately before publishing. Paths are parsed once at the
-/// surface that accepts the raw string ([`parse_mutation_path`]); an intent
-/// always carries validated, normalized paths.
+/// The whole request is one commit. Operations resolve in order, each seeing
+/// the effects of the ones before it, and either all of them commit or none
+/// of them do. A convenience one-operation request is this same type with a
+/// single-element list, so it plans, fingerprints, and replays identically.
+///
+/// Paths are parsed once at the surface that accepts the raw string
+/// ([`parse_mutation_path`]); a request always carries validated, normalized
+/// paths.
 ///
 /// [`parse_mutation_path`]: crate::path::parse_mutation_path
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PathMutationIntent {
+pub struct MutationRequest {
+    /// Client idempotency key for the whole request.
+    pub commit_id: CommitId,
+    /// Caller annotation recorded on the commit. Part of the request's
+    /// identity: reusing a commit id with a different message conflicts.
+    pub message: Option<String>,
+    /// Ordered operations. Must be non-empty.
+    pub operations: Vec<FilesystemOperation>,
+}
+
+impl MutationRequest {
+    /// A request carrying exactly one operation.
+    pub fn single(
+        commit_id: CommitId,
+        message: Option<String>,
+        operation: FilesystemOperation,
+    ) -> Self {
+        Self {
+            commit_id,
+            message,
+            operations: vec![operation],
+        }
+    }
+}
+
+/// One path-oriented operation inside a [`MutationRequest`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FilesystemOperation {
     /// Create one directory.
     CreateDir {
-        commit_id: CommitId,
-        /// Caller annotation recorded on the commit. Part of the intent's
-        /// identity, exactly as `message` is part of an explicit commit's
-        /// fingerprint preimage.
-        message: Option<String>,
         absolute_path: AbsolutePath,
         /// Also create missing ancestor directories, like `PutFile` does.
         parents: bool,
     },
     /// Put one file at a path.
     PutFile {
-        commit_id: CommitId,
-        /// Caller annotation recorded on the commit; part of intent identity.
-        message: Option<String>,
         absolute_path: AbsolutePath,
         content_ref: ContentRef,
         behavior: DestinationBehavior,
@@ -41,9 +65,6 @@ pub enum PathMutationIntent {
     },
     /// Delete one path.
     DeletePath {
-        commit_id: CommitId,
-        /// Caller annotation recorded on the commit; part of intent identity.
-        message: Option<String>,
         absolute_path: AbsolutePath,
         behavior: DeleteDirectoryBehavior,
         /// When set, the delete applies only while the path still resolves
@@ -53,65 +74,25 @@ pub enum PathMutationIntent {
     },
     /// Move one path to another path.
     MovePath {
-        commit_id: CommitId,
-        /// Caller annotation recorded on the commit; part of intent identity.
-        message: Option<String>,
         from_path: AbsolutePath,
         to_path: AbsolutePath,
         behavior: DestinationBehavior,
     },
     /// Copy one file path to another path.
     CopyFilePath {
-        commit_id: CommitId,
-        /// Caller annotation recorded on the commit; part of intent identity.
-        message: Option<String>,
         from_path: AbsolutePath,
         to_path: AbsolutePath,
         behavior: DestinationBehavior,
     },
     /// Restore a file revision at a path.
     RestoreRevision {
-        commit_id: CommitId,
-        /// Caller annotation recorded on the commit; part of intent identity.
-        message: Option<String>,
         absolute_path: AbsolutePath,
         source_revision_no: RevisionNo,
     },
     /// Recover a deleted subtree to a destination path.
     Undelete {
-        commit_id: CommitId,
-        /// Caller annotation recorded on the commit; part of intent identity.
-        message: Option<String>,
         inode_id: InodeId,
         deleted_at_seq: ChangeSeq,
         absolute_path: AbsolutePath,
     },
-}
-
-impl PathMutationIntent {
-    /// Returns the caller annotation carried by this intent.
-    pub fn message(&self) -> Option<&str> {
-        match self {
-            Self::CreateDir { message, .. }
-            | Self::PutFile { message, .. }
-            | Self::DeletePath { message, .. }
-            | Self::MovePath { message, .. }
-            | Self::CopyFilePath { message, .. }
-            | Self::RestoreRevision { message, .. }
-            | Self::Undelete { message, .. } => message.as_deref(),
-        }
-    }
-
-    /// Returns the idempotency key carried by this intent.
-    pub fn commit_id(&self) -> &CommitId {
-        match self {
-            Self::CreateDir { commit_id, .. }
-            | Self::PutFile { commit_id, .. }
-            | Self::DeletePath { commit_id, .. }
-            | Self::MovePath { commit_id, .. }
-            | Self::CopyFilePath { commit_id, .. }
-            | Self::RestoreRevision { commit_id, .. }
-            | Self::Undelete { commit_id, .. } => commit_id,
-        }
-    }
 }

@@ -1,31 +1,17 @@
-//! [`CommitRequest`]: one logical commit's ops, preconditions, and fencing
-//! epoch.
+//! [`CommitRequest`]: one planned commit's operations and fencing epoch.
 
-use super::CommitExecutionContext;
-use loonfs_api::v0::{CommitOp, CommitPrecondition, CommitRequest as ApiCommitRequest};
+use super::PlannedOp;
 use loonfs_api::{CommitId, NamespaceId, WriterEpoch};
 use serde::{Deserialize, Serialize};
 
+/// The planner's output: every operation the mutation compiles into, in
+/// order, under one commit id.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CommitRequest {
-    pub namespace_id: NamespaceId,
-    pub commit_id: CommitId,
-    pub writer_epoch: WriterEpoch,
-    pub ops: Vec<CommitOp>,
-    pub preconditions: Vec<CommitPrecondition>,
+pub(crate) struct CommitRequest {
+    pub(crate) namespace_id: NamespaceId,
+    pub(crate) commit_id: CommitId,
+    pub(crate) writer_epoch: WriterEpoch,
+    pub(crate) ops: Vec<PlannedOp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-}
-
-impl CommitRequest {
-    pub(crate) fn from_v0(context: CommitExecutionContext, request: ApiCommitRequest) -> Self {
-        Self {
-            namespace_id: context.namespace_id,
-            commit_id: request.commit_id,
-            writer_epoch: context.writer_epoch,
-            ops: request.ops,
-            preconditions: request.preconditions,
-            message: request.message,
-        }
-    }
+    pub(crate) message: Option<String>,
 }

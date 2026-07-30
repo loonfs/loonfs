@@ -104,7 +104,7 @@ fn report(phase: &str, gets: &[RecordedGet], tables: &TableMap) {
 async fn publish_candidates(
     writer: &FsWriter,
     namespace_id: &NamespaceId,
-    candidates: Vec<loonfs::publish::NamespaceMutationCandidate>,
+    candidates: Vec<loonfs::publish::MutationCandidate>,
 ) {
     let publisher = writer.publisher();
     let submissions = candidates
@@ -172,16 +172,18 @@ async fn warm_phase_request_accounting() {
             .await
             .expect("prepare existing content");
             let content_ref = prepared.content_ref().clone();
-            candidates.push(loonfs::publish::NamespaceMutationCandidate::path_prepared(
-                loonfs::publish::PathMutationIntent::PutFile {
-                    commit_id: loonfs::CommitId::generate(),
-                    message: None,
-                    absolute_path: AbsolutePath::parse(format!("/hot/file-{index:05}.txt"))
-                        .expect("path"),
-                    content_ref: content_ref.clone(),
-                    behavior: loonfs::DestinationBehavior::NoReplace,
-                    expected_revision_no: None,
-                },
+            candidates.push(loonfs::publish::MutationCandidate::prepared(
+                loonfs::publish::MutationRequest::single(
+                    loonfs::CommitId::generate(),
+                    None,
+                    loonfs::publish::FilesystemOperation::PutFile {
+                        absolute_path: AbsolutePath::parse(format!("/hot/file-{index:05}.txt"))
+                            .expect("path"),
+                        content_ref: content_ref.clone(),
+                        behavior: loonfs::DestinationBehavior::NoReplace,
+                        expected_revision_no: None,
+                    },
+                ),
                 vec![prepared],
             ));
             index += 1;

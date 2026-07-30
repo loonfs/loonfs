@@ -4,8 +4,9 @@
 // Runtime integration tests use panic in helper assertions for precise diagnostics.
 
 use crate::common::*;
+use loonfs::publish::{parse_mutation_path, FilesystemOperation, MutationRequest};
 use loonfs::{
-    ChangeSeq, CommitId, CommitOp, CommitRequest, CreateNamespaceOptions, DeleteOptions,
+    ChangeSeq, CommitId, CreateNamespaceOptions, DeleteDirectoryBehavior, DeleteOptions,
     DestinationBehavior, ErrorCode, InodeId, ListChangesOptions, MaintenanceStepOptions,
     PutFileOptions, RuntimeError,
 };
@@ -585,24 +586,25 @@ fn undelete_rejects_deletions_from_the_same_commit() {
     // sequence. The undelete must refuse a target in its own commit.
     let guessed_seq = ChangeSeq(entry.head_seq.0 + 1);
     let error = fs
-        .commit_operations_blocking(
+        .mutate_blocking(
             &namespace_id,
-            CommitRequest {
+            MutationRequest {
                 commit_id: CommitId::parse("same-commit-cycle").expect("valid commit id"),
-                preconditions: Vec::new(),
-                ops: vec![
-                    CommitOp::DeleteFile {
-                        inode_id: entry.inode_id,
+                message: None,
+                operations: vec![
+                    FilesystemOperation::DeletePath {
+                        absolute_path: parse_mutation_path("/docs/report.txt")
+                            .expect("valid mutation path"),
+                        behavior: DeleteDirectoryBehavior::Recursive,
+                        expected_inode_id: Some(entry.inode_id),
                     },
-                    CommitOp::Undelete {
+                    FilesystemOperation::Undelete {
                         inode_id: entry.inode_id,
                         deleted_at_seq: guessed_seq,
-                        parent_inode_id: InodeId(1),
-                        display_name: loonfs_api::DisplayName::parse("resurrected.txt")
-                            .expect("valid display name"),
+                        absolute_path: parse_mutation_path("/resurrected.txt")
+                            .expect("valid mutation path"),
                     },
                 ],
-                message: None,
             },
         )
         .expect_err("same-commit delete/undelete cycling must be rejected");

@@ -53,6 +53,11 @@ pub struct ErrorDetails {
     /// Idempotency key of the mutation the error concerns.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit_id: Option<CommitId>,
+    /// Position, in the request's operation list, of the operation that
+    /// failed. A mutation commits all of its operations or none of them, so
+    /// this names the one that stopped the whole request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_index: Option<u32>,
     /// Epoch the failing writer session held when it was displaced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fenced_epoch: Option<WriterEpoch>,

@@ -4,10 +4,11 @@
 // Runtime integration tests use panic in helper assertions for precise diagnostics.
 
 use crate::common::*;
+use loonfs::publish::{parse_mutation_path, FilesystemOperation, MutationRequest};
 use loonfs::{
-    ChangeSeq, CommitId, CommitOp, CommitRequest, CreateNamespaceOptions, ErrorCode, InodeId,
-    MaintenanceStepKind, MaintenanceStepOptions, ManifestId, PutFileOptions, RuntimeError,
-    SharedObjectStore, WalFlushStepOutcome,
+    ChangeSeq, CommitId, CreateNamespaceOptions, ErrorCode, MaintenanceStepKind,
+    MaintenanceStepOptions, ManifestId, PutFileOptions, RuntimeError, SharedObjectStore,
+    WalFlushStepOutcome,
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
 use loonfs_objectstore::keys::{metadata_manifest_object, wal_head, wal_segment_prefix};
@@ -387,6 +388,17 @@ fn maintenance_step_after_existing_manifest_writes_l0_manifest() {
         .any(|metadata_file| metadata_file.run_seq == ChangeSeq(2)));
 }
 
+fn create_directory_request(commit_id: &str, absolute_path: &str) -> MutationRequest {
+    MutationRequest::single(
+        CommitId::parse(commit_id).expect("valid commit id"),
+        None,
+        FilesystemOperation::CreateDir {
+            absolute_path: parse_mutation_path(absolute_path).expect("valid mutation path"),
+            parents: false,
+        },
+    )
+}
+
 #[test]
 fn maintenance_step_counts_segments_not_commits() {
     let temp_dir = tempdir().expect("tempdir");
@@ -395,27 +407,11 @@ fn maintenance_step_counts_segments_not_commits() {
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    let first_batch = fs.commit_operations_batch_blocking(
+    let first_batch = fs.mutate_batch_blocking(
         &namespace_id,
         vec![
-            CommitRequest {
-                commit_id: CommitId::parse("create-a").expect("valid commit id"),
-                preconditions: Vec::new(),
-                ops: vec![CommitOp::CreateDirectory {
-                    parent_inode_id: InodeId(1),
-                    display_name: loonfs_api::DisplayName::parse("a").expect("valid display name"),
-                }],
-                message: None,
-            },
-            CommitRequest {
-                commit_id: CommitId::parse("create-b").expect("valid commit id"),
-                preconditions: Vec::new(),
-                ops: vec![CommitOp::CreateDirectory {
-                    parent_inode_id: InodeId(1),
-                    display_name: loonfs_api::DisplayName::parse("b").expect("valid display name"),
-                }],
-                message: None,
-            },
+            create_directory_request("create-a", "/a"),
+            create_directory_request("create-b", "/b"),
         ],
     );
     assert!(first_batch.iter().all(Result::is_ok));
@@ -439,19 +435,8 @@ fn maintenance_step_counts_segments_not_commits() {
         .expect("maintenance step");
     assert_eq!(step.wal_flush, WalFlushStepOutcome::NotNeeded);
 
-    fs.commit_operations_blocking(
-        &namespace_id,
-        CommitRequest {
-            commit_id: CommitId::parse("create-c").expect("valid commit id"),
-            preconditions: Vec::new(),
-            ops: vec![CommitOp::CreateDirectory {
-                parent_inode_id: InodeId(1),
-                display_name: loonfs_api::DisplayName::parse("c").expect("valid display name"),
-            }],
-            message: None,
-        },
-    )
-    .expect("second segment commit");
+    fs.mutate_blocking(&namespace_id, create_directory_request("create-c", "/c"))
+        .expect("second segment commit");
 
     let step = fs
         .maintenance_step_namespace_blocking(

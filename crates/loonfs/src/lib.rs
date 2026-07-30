@@ -43,9 +43,9 @@ mod trace;
 use thiserror::Error;
 
 pub use loonfs_api::v0::{
-    BeginUploadRequest, BeginUploadResponse, ChangesResponse, CommitOp, CommitPrecondition,
-    CommitRequest, CommitResponse, CommittedChange, CompleteUploadRequest, CompleteUploadResponse,
-    DirectPutUpload, FilesystemChange, ObjectTransferAccess, UploadContentResponse, UploadMode,
+    BeginUploadRequest, BeginUploadResponse, ChangesResponse, CommitResponse, CommittedChange,
+    CompleteUploadRequest, CompleteUploadResponse, DirectPutUpload, FilesystemChange,
+    ObjectTransferAccess, UploadContentResponse, UploadMode,
 };
 pub use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, CapabilityDocument,
@@ -71,9 +71,9 @@ pub use publisher::PublishObserver;
 
 /// Integration seam: the vocabulary for handing classified mutation work to
 /// the runtime's batch publication surface. The server's filesystem
-/// handlers build [`publish::PathMutationIntent`]s for the [`publisher`]
+/// handlers build [`publish::MutationRequest`]s for the [`publisher`]
 /// front-end, which also accepts
-/// [`publish::NamespaceMutationCandidate`]s directly. Most embedded users
+/// [`publish::MutationCandidate`]s directly. Most embedded users
 /// never need this module.
 pub mod publish {
     pub use loonfs_core::limits::{
@@ -81,8 +81,8 @@ pub mod publish {
     };
     pub use loonfs_core::path::{ensure_mutation_path, parse_mutation_path};
     pub use loonfs_core::publish::{
-        ContentPreparation, ContentPreparationError, NamespaceMutation, NamespaceMutationCandidate,
-        PathMutationIntent, PreparedContent,
+        ContentPreparation, ContentPreparationError, FilesystemOperation, MutationCandidate,
+        MutationRequest, PreparedContent,
     };
 }
 

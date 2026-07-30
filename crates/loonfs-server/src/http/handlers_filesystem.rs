@@ -12,8 +12,8 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use loonfs::publish::{
-    ensure_mutation_path, ContentPreparationError, NamespaceMutation, NamespaceMutationCandidate,
-    PathMutationIntent,
+    ensure_mutation_path, ContentPreparationError, FilesystemOperation as MutationOperation,
+    MutationCandidate, MutationRequest,
 };
 use loonfs::{payload_class, ErrorCode, ListChangesOptions, TraceStoreKind};
 #[cfg(feature = "openapi")]
@@ -360,10 +360,10 @@ pub(super) async fn apply_filesystem_operation(
         })?;
         Ok(path)
     };
-    let intent = match operation {
-        FilesystemOperation::CreateDirectory { path, parents } => PathMutationIntent::CreateDir {
-            commit_id,
-            message: message.clone(),
+    // The batch endpoint is not open yet, so a request carries exactly one
+    // operation; the engine's language is the same either way.
+    let operation = match operation {
+        FilesystemOperation::CreateDirectory { path, parents } => MutationOperation::CreateDir {
             absolute_path: validate_path(path)?,
             parents,
         },
@@ -372,9 +372,7 @@ pub(super) async fn apply_filesystem_operation(
             content_ref,
             behavior,
             expected_revision_no,
-        } => PathMutationIntent::PutFile {
-            commit_id,
-            message: message.clone(),
+        } => MutationOperation::PutFile {
             absolute_path: validate_path(path)?,
             content_ref,
             behavior,
@@ -384,9 +382,7 @@ pub(super) async fn apply_filesystem_operation(
             path,
             behavior,
             expected_inode_id,
-        } => PathMutationIntent::DeletePath {
-            commit_id,
-            message: message.clone(),
+        } => MutationOperation::DeletePath {
             absolute_path: validate_path(path)?,
             behavior,
             expected_inode_id,
@@ -395,9 +391,7 @@ pub(super) async fn apply_filesystem_operation(
             from_path,
             to_path,
             behavior,
-        } => PathMutationIntent::MovePath {
-            commit_id,
-            message: message.clone(),
+        } => MutationOperation::MovePath {
             from_path: validate_path(from_path)?,
             to_path: validate_path(to_path)?,
             behavior,
@@ -406,9 +400,7 @@ pub(super) async fn apply_filesystem_operation(
             from_path,
             to_path,
             behavior,
-        } => PathMutationIntent::CopyFilePath {
-            commit_id,
-            message: message.clone(),
+        } => MutationOperation::CopyFilePath {
             from_path: validate_path(from_path)?,
             to_path: validate_path(to_path)?,
             behavior,
@@ -416,9 +408,7 @@ pub(super) async fn apply_filesystem_operation(
         FilesystemOperation::RestoreRevision {
             path,
             source_revision_no,
-        } => PathMutationIntent::RestoreRevision {
-            commit_id,
-            message: message.clone(),
+        } => MutationOperation::RestoreRevision {
             absolute_path: validate_path(path)?,
             source_revision_no,
         },
@@ -426,14 +416,13 @@ pub(super) async fn apply_filesystem_operation(
             inode_id,
             deleted_at_seq,
             path,
-        } => PathMutationIntent::Undelete {
-            commit_id,
-            message: message.clone(),
+        } => MutationOperation::Undelete {
             inode_id,
             deleted_at_seq,
             absolute_path: validate_path(path)?,
         },
     };
+    let request = MutationRequest::single(commit_id, message, operation);
     let response_result = if let Some(payload_class) = put_payload_class {
         let span = tracing::info_span!(
             "loonfs.put",
@@ -446,12 +435,12 @@ pub(super) async fn apply_filesystem_operation(
             let candidate = match put_content_preparation
                 .expect("put payload class should carry content preparation")
             {
-                PutContentPreparation::Absent => NamespaceMutationCandidate::path(intent),
+                PutContentPreparation::Absent => MutationCandidate::new(request),
                 PutContentPreparation::Ready(prepared_content) => {
-                    NamespaceMutationCandidate::path_prepared(intent, prepared_content)
+                    MutationCandidate::prepared(request, prepared_content)
                 }
-                PutContentPreparation::Rejected(error) => NamespaceMutationCandidate::rejected(
-                    NamespaceMutation::Path(intent),
+                PutContentPreparation::Rejected(error) => MutationCandidate::rejected(
+                    request,
                     ContentPreparationError::ContentToken(error),
                 ),
             };
@@ -467,7 +456,7 @@ pub(super) async fn apply_filesystem_operation(
         state
             .writer
             .publisher()
-            .submit_path_intent(namespace_id.clone(), intent)
+            .submit_mutation(namespace_id.clone(), request)
             .await
     };
     let response = response_result.map_err(|error| {

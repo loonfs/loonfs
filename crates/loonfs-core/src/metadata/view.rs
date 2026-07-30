@@ -12,14 +12,17 @@ use crate::metadata::{
     unbind_matches_binding, CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord,
     InodeRecord, MetadataState, ResolvedVisiblePath, RevisionRecord, SubtreeTombstoneRecord,
 };
+#[cfg(test)]
 use async_trait::async_trait;
+#[cfg(test)]
 use bytes::Bytes;
+#[cfg(test)]
 use futures::stream::{self, BoxStream};
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::{AbsolutePath, ChangeSeq, CommitId, InodeId, InodeKind, NameKey, RevisionNo};
-use loonfs_objectstore::{
-    ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
-};
+use loonfs_objectstore::ObjectStore;
+#[cfg(test)]
+use loonfs_objectstore::{ByteRange, ObjectBody, ObjectMetadata, ObjectStoreError, PutMode};
 use std::sync::Arc;
 
 pub(super) const DIRECTORY_PAGE_RAW_SCAN_LIMIT: usize = 64;
@@ -42,9 +45,13 @@ pub(crate) struct MetadataView<'a, 'store, S: ObjectStore + ?Sized> {
     sources: MetadataSourceStack<'a, 'store, S>,
 }
 
+/// A metadata view with no object store behind it: the crate's commit
+/// validation tests drive the shared validation loop over plain rows.
+#[cfg(test)]
 #[derive(Debug)]
 pub(crate) struct InMemoryMetadataViewStore;
 
+#[cfg(test)]
 pub(crate) type InMemoryMetadataView<'a> = MetadataView<'a, 'a, InMemoryMetadataViewStore>;
 
 impl<S: ObjectStore + ?Sized> Copy for MetadataSourceStack<'_, '_, S> {}
@@ -63,6 +70,7 @@ impl<S: ObjectStore + ?Sized> Clone for MetadataView<'_, '_, S> {
     }
 }
 
+#[cfg(test)]
 #[async_trait]
 impl ObjectStore for InMemoryMetadataViewStore {
     async fn head(&self, _key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
@@ -112,6 +120,7 @@ impl ObjectStore for InMemoryMetadataViewStore {
     }
 }
 
+#[cfg(test)]
 impl<'a> InMemoryMetadataView<'a> {
     pub(crate) fn in_memory(
         base: &'a MetadataState,

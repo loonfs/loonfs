@@ -53,12 +53,12 @@
 //! drains without closing, so the handle stays usable.
 
 use crate::fs::{ReadCore, WriterBits};
-use crate::publish::{NamespaceMutationCandidate, PathMutationIntent, PreparedContent};
+use crate::publish::{MutationCandidate, MutationRequest, PreparedContent};
 use crate::{CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, RuntimeError};
 use futures::FutureExt;
-use loonfs_api::v0::{CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse};
+use loonfs_api::v0::CommitResponse as ApiCommitResponse;
 use loonfs_api::{CommitId, NamespaceId};
-use loonfs_core::commit::{CommitHeadPublishError, SemanticMutationIdentity};
+use loonfs_core::commit::{CommitHeadPublishError, MutationFingerprint};
 // Publisher head-CAS races use the core-wide bounded contention retry limit.
 use loonfs_core::limits::CONTENTION_RETRY_LIMIT;
 use loonfs_core::publish::{NamespaceCommitEngine, SharedWriterSessionState};
@@ -174,41 +174,26 @@ impl PublisherRegistry {
         }
     }
 
-    /// Submits one explicit semantic commit request through the
-    /// namespace's publisher.
-    pub async fn submit_commit(
+    /// Submits one mutation request through the namespace's publisher.
+    pub async fn submit_mutation(
         &self,
         namespace_id: NamespaceId,
-        request: ApiCommitRequest,
+        request: MutationRequest,
     ) -> CommitResult {
-        self.submit_candidate(namespace_id, NamespaceMutationCandidate::commit(request))
+        self.submit_candidate(namespace_id, MutationCandidate::new(request))
             .await
     }
 
-    /// Submits one path-level mutation intent through the namespace's
-    /// publisher.
-    pub async fn submit_path_intent(
+    /// Submits one mutation request together with opaque proofs for its
+    /// already-prepared content.
+    pub async fn submit_mutation_with_prepared_content(
         &self,
         namespace_id: NamespaceId,
-        intent: PathMutationIntent,
-    ) -> CommitResult {
-        self.submit_candidate(namespace_id, NamespaceMutationCandidate::path(intent))
-            .await
-    }
-
-    /// Submits a path-level mutation intent together with opaque proofs for
-    /// its already-prepared content.
-    pub async fn submit_path_intent_with_prepared_content(
-        &self,
-        namespace_id: NamespaceId,
-        intent: PathMutationIntent,
+        request: MutationRequest,
         content: Vec<PreparedContent>,
     ) -> CommitResult {
-        self.submit_candidate(
-            namespace_id,
-            NamespaceMutationCandidate::path_prepared(intent, content),
-        )
-        .await
+        self.submit_candidate(namespace_id, MutationCandidate::prepared(request, content))
+            .await
     }
 
     /// Submits a namespace deletion, sequenced as a barrier: mutations
@@ -228,7 +213,7 @@ impl PublisherRegistry {
     pub async fn submit_candidate(
         &self,
         namespace_id: NamespaceId,
-        candidate: NamespaceMutationCandidate,
+        candidate: MutationCandidate,
     ) -> CommitResult {
         let publisher = self.publisher_for(&namespace_id)?;
         publisher.submit(candidate).await
@@ -416,13 +401,12 @@ struct OpenBatch {
 #[derive(Clone)]
 struct BatchCandidate {
     commit_id: CommitId,
-    candidate: NamespaceMutationCandidate,
-    operation_class: &'static str,
+    candidate: MutationCandidate,
     enqueued_at: Instant,
 }
 
 struct InFlightRequest {
-    semantic_identity: SemanticMutationIdentity,
+    semantic_identity: MutationFingerprint,
     waiters: Vec<oneshot::Sender<CommitResult>>,
 }
 
@@ -499,20 +483,12 @@ impl NamespacePublisher {
     /// either admits the candidate or fails, and only then parks on the
     /// result channel. Cancellation tests rely on this — after one poll of
     /// a submission, the publication is admitted and owned by the worker.
-    async fn submit(&self, candidate: NamespaceMutationCandidate) -> CommitResult {
+    async fn submit(&self, candidate: MutationCandidate) -> CommitResult {
         let commit_id = candidate.commit_id().clone();
         let enqueued_at = Instant::now();
         let semantic_identity = candidate.semantic_identity(&self.namespace_id)?;
-        let operation_class = operation_class(&semantic_identity);
         let (sender, receiver) = oneshot::channel();
-        self.admit(
-            commit_id,
-            candidate,
-            semantic_identity,
-            sender,
-            operation_class,
-            enqueued_at,
-        )?;
+        self.admit(commit_id, candidate, semantic_identity, sender, enqueued_at)?;
         receiver.await.unwrap_or_else(|_| {
             Err(CoreError::HeadPublish(
                 CommitHeadPublishError::OutcomeUnknown(
@@ -525,10 +501,9 @@ impl NamespacePublisher {
     fn admit(
         &self,
         commit_id: CommitId,
-        candidate: NamespaceMutationCandidate,
-        semantic_identity: SemanticMutationIdentity,
+        candidate: MutationCandidate,
+        semantic_identity: MutationFingerprint,
         waiter: oneshot::Sender<CommitResult>,
-        operation_class: &'static str,
         enqueued_at: Instant,
     ) -> Result<(), CoreError> {
         let mut state = self.lock_state();
@@ -545,19 +520,18 @@ impl NamespacePublisher {
                 return Err(CoreError::CommitIdReuseConflict(commit_id.to_string()));
             }
             existing.waiters.push(waiter);
-            self.trace_enqueue(operation_class, queued_candidates(&state), "duplicate");
+            self.trace_enqueue(queued_candidates(&state), "duplicate");
             return Ok(());
         }
 
         let queued = queued_candidates(&state);
         if queued >= MAX_BATCH_CANDIDATES {
-            self.trace_enqueue(operation_class, queued, "full");
+            self.trace_enqueue(queued, "full");
             return Err(CoreError::CommitQueueFull);
         }
         let candidate = BatchCandidate {
             commit_id: commit_id.clone(),
             candidate,
-            operation_class,
             enqueued_at,
         };
         match state.queue.back_mut() {
@@ -569,7 +543,7 @@ impl NamespacePublisher {
                 candidates: vec![candidate],
             })),
         }
-        self.trace_enqueue(operation_class, queued + 1, "new");
+        self.trace_enqueue(queued + 1, "new");
         state.in_flight.insert(
             commit_id,
             InFlightRequest {
@@ -742,7 +716,6 @@ impl NamespacePublisher {
                 phase = "wait_for_batch",
                 mode = self.trace_mode,
                 store_kind = self.trace_store_kind,
-                operation_class = candidate.operation_class,
                 result = "ok",
                 wait_ms = elapsed_ms_from(candidate.enqueued_at, selected_at),
                 "publisher.wait_for_batch"
@@ -799,7 +772,7 @@ impl NamespacePublisher {
     async fn publish_through_engine(
         &self,
         writer: &Arc<WriterBits>,
-        candidates: Vec<NamespaceMutationCandidate>,
+        candidates: Vec<MutationCandidate>,
     ) -> Vec<CommitResult> {
         let registry = self.registry();
         let mut slot = self.engine.lock().await;
@@ -984,11 +957,7 @@ impl NamespacePublisher {
                         .next()
                         .expect("equal-length batch should hold one result per candidate"),
                 };
-                wait_traces.push((
-                    candidate.operation_class,
-                    result_label(&result),
-                    elapsed_ms_since(selected_at),
-                ));
+                wait_traces.push((result_label(&result), elapsed_ms_since(selected_at)));
                 if let Some(in_flight) = state.in_flight.remove(&candidate.commit_id) {
                     for waiter in in_flight.waiters {
                         deliveries.push((waiter, result.clone()));
@@ -997,12 +966,11 @@ impl NamespacePublisher {
             }
         }
 
-        for (operation_class, result, wait_ms) in wait_traces {
+        for (result, wait_ms) in wait_traces {
             tracing::info!(
                 phase = "wait_for_result",
                 mode = self.trace_mode,
                 store_kind = self.trace_store_kind,
-                operation_class,
                 result,
                 wait_ms,
                 "publisher.wait_for_result"
@@ -1014,17 +982,11 @@ impl NamespacePublisher {
         }
     }
 
-    fn trace_enqueue(
-        &self,
-        operation_class: &'static str,
-        queue_depth: usize,
-        reason: &'static str,
-    ) {
+    fn trace_enqueue(&self, queue_depth: usize, reason: &'static str) {
         tracing::info!(
             phase = "enqueue",
             mode = self.trace_mode,
             store_kind = self.trace_store_kind,
-            operation_class,
             queue_depth = usize_to_u64(queue_depth),
             reason,
             "publisher.enqueue"
@@ -1078,13 +1040,6 @@ fn runtime_error_to_core(error: RuntimeError) -> CoreError {
         RuntimeError::Bootstrap(error) => CoreError::Internal(error.to_string()),
         RuntimeError::Config(message) => CoreError::Internal(message),
         RuntimeError::RuntimeTask(message) => CoreError::Internal(message),
-    }
-}
-
-fn operation_class(semantic_identity: &SemanticMutationIdentity) -> &'static str {
-    match semantic_identity {
-        SemanticMutationIdentity::CoreCommit(_) => "explicit_commit",
-        SemanticMutationIdentity::PathIntent(_) => "path_mutation",
     }
 }
 

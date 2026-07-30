@@ -4,7 +4,7 @@
 //! publication itself.
 
 use futures::future::BoxFuture;
-use loonfs::publish::{parse_mutation_path, PathMutationIntent};
+use loonfs::publish::{parse_mutation_path, FilesystemOperation, MutationRequest};
 use loonfs::{
     BeginUploadRequest, CommitId, CommitResponse, CoreError, CreateNamespaceOptions,
     DestinationBehavior, FsWriter, NamespaceId, PutFileOptions, SharedObjectStore,
@@ -104,17 +104,19 @@ async fn park_two_puts(temp_dir: &Path) -> ParkedPuts {
     let registry = writer.publisher();
     let mut second: BoxFuture<'static, Result<CommitResponse, CoreError>> = {
         let namespace_id = namespace_id.clone();
-        let intent = PathMutationIntent::PutFile {
-            commit_id: CommitId::parse("parked-second").expect("valid commit id"),
-            message: None,
-            absolute_path: parse_mutation_path("/b.txt").expect("mutation path"),
-            content_ref: prepared_content_ref,
-            behavior: DestinationBehavior::NoReplace,
-            expected_revision_no: None,
-        };
+        let request = MutationRequest::single(
+            CommitId::parse("parked-second").expect("valid commit id"),
+            None,
+            FilesystemOperation::PutFile {
+                absolute_path: parse_mutation_path("/b.txt").expect("mutation path"),
+                content_ref: prepared_content_ref,
+                behavior: DestinationBehavior::NoReplace,
+                expected_revision_no: None,
+            },
+        );
         Box::pin(async move {
             registry
-                .submit_path_intent_with_prepared_content(namespace_id, intent, vec![prepared])
+                .submit_mutation_with_prepared_content(namespace_id, request, vec![prepared])
                 .await
         })
     };

@@ -1,4 +1,6 @@
-//! Commit precondition, name, binding, and content validation guards.
+//! Publish-path validation: content admission, race guards evaluated against
+//! what a request's earlier operations did, and the all-or-nothing rule that
+//! makes a multi-operation request one commit.
 
 #![allow(clippy::panic)]
 // These integration tests use panic in unexpected match arms for precise diagnostics.
@@ -8,22 +10,14 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
 use loonfs_api::{
-    v0::{
-        CommitOp, CommitOp as ApiCommitOp, CommitPrecondition, CommitRequest as ApiCommitRequest,
-        ValidatedContentToken,
-    },
-    wire::control::{HeadState, WriterBlock},
-    wire::wal::WalDelta,
-    AbsolutePath, ChangeSeq, CommitId, ContentRef, DestinationBehavior, DisplayName, InodeId,
-    InodeKind, NameKey, NamespaceId, RevisionNo, WriterEpoch,
-};
-use loonfs_core::commit::{
-    build_commit_plan, materialize_commit, CommitOpResult, CommitRequest, CommitValidationContext,
-    CommitValidationError, PreparedCommit,
+    v0::{FilesystemChange, ValidatedContentToken},
+    AbsolutePath, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior, DisplayName,
+    NamespaceId, RevisionNo,
 };
 use loonfs_core::content::{mint_content_token, store_bytes_as_content, verify_content_token};
-use loonfs_core::metadata::MetadataState;
-use loonfs_core::publish::{NamespaceMutationCandidate, PathMutationIntent};
+use loonfs_core::publish::{
+    ContentPreparationError, FilesystemOperation, MutationCandidate, MutationRequest,
+};
 use loonfs_core::{Error as CoreError, ErrorCode};
 use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -36,133 +30,8 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tempfile::tempdir;
 
-fn wal_create_directory(
-    delta_index: u32,
-    inode_id: InodeId,
-    parent_inode_id: InodeId,
-    display_name: String,
-) -> Vec<WalDelta> {
-    vec![
-        WalDelta::CreateInode {
-            delta_index,
-            inode_id,
-            inode_kind: InodeKind::Directory,
-        },
-        WalDelta::BindDirentry {
-            delta_index: delta_index.saturating_add(1),
-            parent_inode_id,
-            name_key: NameKey::parse(loonfs_api::name_key_for_display_name(&display_name))
-                .expect("derived name key"),
-            display_name: test_display_name(display_name),
-            child_inode_id: inode_id,
-        },
-    ]
-}
-
-fn wal_create_file(
-    delta_index: u32,
-    inode_id: InodeId,
-    parent_inode_id: InodeId,
-    display_name: String,
-    content_ref: ContentRef,
-) -> Vec<WalDelta> {
-    vec![
-        WalDelta::CreateInode {
-            delta_index,
-            inode_id,
-            inode_kind: InodeKind::File,
-        },
-        WalDelta::BindDirentry {
-            delta_index: delta_index.saturating_add(1),
-            parent_inode_id,
-            name_key: NameKey::parse(loonfs_api::name_key_for_display_name(&display_name))
-                .expect("derived name key"),
-            display_name: test_display_name(display_name),
-            child_inode_id: inode_id,
-        },
-        WalDelta::AppendFileRevision {
-            delta_index: delta_index.saturating_add(2),
-            inode_id,
-            revision_no: RevisionNo(1),
-            content_ref,
-        },
-    ]
-}
-
-fn wal_append_revision(
-    delta_index: u32,
-    inode_id: InodeId,
-    revision_no: RevisionNo,
-    content_ref: ContentRef,
-) -> Vec<WalDelta> {
-    vec![WalDelta::AppendFileRevision {
-        delta_index,
-        inode_id,
-        revision_no,
-        content_ref,
-    }]
-}
-
-fn wal_tombstone(delta_index: u32, root_inode_id: InodeId) -> Vec<WalDelta> {
-    vec![WalDelta::TombstoneSubtree {
-        delta_index,
-        root_inode_id,
-        parent_inode_id: None,
-        name_key: None,
-        display_name: None,
-    }]
-}
-
-fn metadata_state_after(sequences: &[Vec<WalDelta>]) -> MetadataState {
-    let mut state = MetadataState::default().apply_committed_wal_deltas(
-        ChangeSeq(0),
-        4_200,
-        &[WalDelta::CreateInode {
-            delta_index: 0,
-            inode_id: InodeId(1),
-            inode_kind: InodeKind::Directory,
-        }],
-    );
-
-    for (index, deltas) in sequences.iter().enumerate() {
-        state = state.apply_committed_wal_deltas(
-            ChangeSeq(u64::try_from(index + 1).expect("seq")),
-            4_200,
-            deltas,
-        )
-    }
-
-    state
-}
-
-fn validation_context(
-    metadata_state: &MetadataState,
-    seq: ChangeSeq,
-    next_inode_id: InodeId,
-) -> CommitValidationContext<'_> {
-    let namespace_id = namespace_id("demo");
-    let head = HeadState {
-        content_store_id: loonfs_api::ContentStoreId::generate(),
-        fork_basis: None,
-        namespace_id: namespace_id.clone(),
-        seq,
-        head_commit_id: CommitId::parse("c_00000000000000000000000000000000").expect("commit id"),
-        writer_epoch: WriterEpoch(1),
-        writer: Some(WriterBlock {
-            writer_id: "writer-a".to_owned(),
-            acquired_at_ms: 1_000,
-        }),
-        next_inode_id,
-        visible_wal_tip: None,
-        recent_segments: Vec::new(),
-        state: Default::default(),
-    };
-    CommitValidationContext {
-        head,
-        metadata_state,
-    }
-}
-
+/// A store that fails any read of the content-store keyspace, so a test can
+/// assert that validation never went looking for content at all.
 #[derive(Debug)]
 struct ContentStoreAccessLimitStore {
     inner: LocalFsStore,
@@ -241,496 +110,32 @@ impl ObjectStore for ContentStoreAccessLimitStore {
     }
 }
 
-#[tokio::test]
-async fn stale_revision_precondition_is_rejected() {
-    let metadata_state = metadata_state_after(&[
-        wal_create_directory(0, InodeId(2), InodeId(1), "docs".to_owned()),
-        wal_create_file(
-            0,
-            InodeId(3),
-            InodeId(2),
-            "readme.txt".to_owned(),
-            content_ref("content-1"),
-        ),
-        wal_append_revision(0, InodeId(3), RevisionNo(2), content_ref("content-2")),
-    ]);
-    let context = validation_context(&metadata_state, ChangeSeq(3), InodeId(4));
-    let request = CommitRequest {
-        namespace_id: namespace_id("demo"),
-        commit_id: CommitId::parse("stale-revision").expect("valid commit id"),
-        writer_epoch: WriterEpoch(1),
-        ops: vec![CommitOp::ReplaceFile {
-            inode_id: InodeId(3),
-            base_revision_no: RevisionNo(1),
-            content_ref: content_ref("content-3"),
-        }],
-        preconditions: Vec::new(),
-        message: None,
-    };
-
-    let error = build_commit_plan(&request, 4_200, &context)
-        .await
-        .expect_err("stale revision");
-    assert!(matches!(
-        error,
-        CommitValidationError::ReplaceFileBaseRevisionMismatch {
-            inode_id: InodeId(3),
-            expected: RevisionNo(1),
-            actual: Some(RevisionNo(2)),
-        }
-    ));
+fn put_file(absolute_path: &str, content_ref: loonfs_api::ContentRef) -> FilesystemOperation {
+    FilesystemOperation::PutFile {
+        absolute_path: AbsolutePath::parse(absolute_path).expect("path"),
+        content_ref,
+        behavior: DestinationBehavior::NoReplace,
+        expected_revision_no: None,
+    }
 }
 
-#[tokio::test]
-async fn failed_multi_op_plan_uses_preview_without_mutating_base_metadata() {
-    let metadata_state = metadata_state_after(&[]);
-    let context = validation_context(&metadata_state, ChangeSeq(0), InodeId(2));
-    let request = CommitRequest {
-        namespace_id: namespace_id("demo"),
-        commit_id: CommitId::parse("preview-rollback").expect("valid commit id"),
-        writer_epoch: WriterEpoch(1),
-        ops: vec![
-            CommitOp::CreateDirectory {
-                parent_inode_id: InodeId(1),
-                display_name: test_display_name("docs"),
-            },
-            CommitOp::CreateFile {
-                parent_inode_id: InodeId(2),
-                display_name: test_display_name("readme.txt"),
-                content_ref: content_ref("content-1"),
-            },
-            CommitOp::ReplaceFile {
-                inode_id: InodeId(99),
-                base_revision_no: RevisionNo(1),
-                content_ref: content_ref("content-2"),
-            },
-        ],
-        preconditions: Vec::new(),
-        message: None,
-    };
-
-    let error = build_commit_plan(&request, 4_200, &context)
-        .await
-        .expect_err("late op fails");
-    assert!(matches!(
-        error,
-        CommitValidationError::ReplaceFileInodeMissing {
-            inode_id: InodeId(99)
-        }
-    ));
-    assert!(metadata_state
-        .visible_child(
-            InodeId(1),
-            &NameKey::parse("docs").expect("valid name key"),
-            ChangeSeq(1),
-        )
-        .is_none());
+fn create_dir(absolute_path: &str) -> FilesystemOperation {
+    FilesystemOperation::CreateDir {
+        absolute_path: AbsolutePath::parse(absolute_path).expect("path"),
+        parents: false,
+    }
 }
 
-#[tokio::test]
-async fn create_and_replace_under_ancestor_tombstone_are_rejected() {
-    let metadata_state = metadata_state_after(&[
-        wal_create_directory(0, InodeId(2), InodeId(1), "docs".to_owned()),
-        wal_create_file(
-            0,
-            InodeId(3),
-            InodeId(2),
-            "readme.txt".to_owned(),
-            content_ref("content-1"),
-        ),
-        wal_tombstone(0, InodeId(2)),
-    ]);
-    let context = validation_context(&metadata_state, ChangeSeq(3), InodeId(4));
-
-    let create_error = build_commit_plan(
-        &CommitRequest {
-            namespace_id: namespace_id("demo"),
-            commit_id: CommitId::parse("create-under-tombstone").expect("valid commit id"),
-            writer_epoch: WriterEpoch(1),
-            ops: vec![CommitOp::CreateFile {
-                parent_inode_id: InodeId(2),
-                display_name: test_display_name("new.txt"),
-                content_ref: content_ref("content-2"),
-            }],
-            preconditions: Vec::new(),
-            message: None,
-        },
-        4_200,
-        &context,
-    )
-    .await
-    .expect_err("create under tombstone");
-    assert!(matches!(
-        create_error,
-        CommitValidationError::CreateUnderSubtreeTombstone {
-            parent_inode_id: InodeId(2),
-            ..
-        }
-    ));
-
-    let replace_error = build_commit_plan(
-        &CommitRequest {
-            namespace_id: namespace_id("demo"),
-            commit_id: CommitId::parse("replace-under-tombstone").expect("valid commit id"),
-            writer_epoch: WriterEpoch(1),
-            ops: vec![CommitOp::ReplaceFile {
-                inode_id: InodeId(3),
-                base_revision_no: RevisionNo(1),
-                content_ref: content_ref("content-2"),
-            }],
-            preconditions: Vec::new(),
-            message: None,
-        },
-        4_200,
-        &context,
-    )
-    .await
-    .expect_err("replace under tombstone");
-    assert!(matches!(
-        replace_error,
-        CommitValidationError::ReplaceFileUnderSubtreeTombstone {
-            inode_id: InodeId(3),
-            ..
-        }
-    ));
+fn delete_path(absolute_path: &str) -> FilesystemOperation {
+    FilesystemOperation::DeletePath {
+        absolute_path: AbsolutePath::parse(absolute_path).expect("path"),
+        behavior: DeleteDirectoryBehavior::NonRecursive,
+        expected_inode_id: None,
+    }
 }
 
-#[tokio::test]
-async fn restore_revision_validation_rejects_missing_inode() {
-    let metadata_state = metadata_state_after(&[wal_create_directory(
-        0,
-        InodeId(2),
-        InodeId(1),
-        "docs".to_owned(),
-    )]);
-    let context = validation_context(&metadata_state, ChangeSeq(1), InodeId(3));
-    let request = CommitRequest {
-        namespace_id: namespace_id("demo"),
-        commit_id: CommitId::parse("restore-missing-inode").expect("valid commit id"),
-        writer_epoch: WriterEpoch(1),
-        ops: vec![CommitOp::RestoreRevision {
-            inode_id: InodeId(99),
-            source_revision_no: RevisionNo(1),
-            base_revision_no: RevisionNo(1),
-        }],
-        preconditions: Vec::new(),
-        message: None,
-    };
-
-    let error = build_commit_plan(&request, 4_200, &context)
-        .await
-        .expect_err("restore missing inode");
-    assert!(matches!(
-        error,
-        CommitValidationError::RestoreRevisionInodeMissing {
-            inode_id: InodeId(99),
-        }
-    ));
-}
-
-#[tokio::test]
-async fn restore_revision_validation_rejects_non_file_target() {
-    let metadata_state = metadata_state_after(&[wal_create_directory(
-        0,
-        InodeId(2),
-        InodeId(1),
-        "docs".to_owned(),
-    )]);
-    let context = validation_context(&metadata_state, ChangeSeq(1), InodeId(3));
-    let request = CommitRequest {
-        namespace_id: namespace_id("demo"),
-        commit_id: CommitId::parse("restore-non-file").expect("valid commit id"),
-        writer_epoch: WriterEpoch(1),
-        ops: vec![CommitOp::RestoreRevision {
-            inode_id: InodeId(2),
-            source_revision_no: RevisionNo(1),
-            base_revision_no: RevisionNo(1),
-        }],
-        preconditions: Vec::new(),
-        message: None,
-    };
-
-    let error = build_commit_plan(&request, 4_200, &context)
-        .await
-        .expect_err("restore non-file");
-    assert!(matches!(
-        error,
-        CommitValidationError::RestoreRevisionInodeNotFile {
-            inode_id: InodeId(2),
-            actual_kind: InodeKind::Directory,
-        }
-    ));
-}
-
-#[tokio::test]
-async fn restore_revision_validation_rejects_stale_or_missing_source_revision() {
-    let metadata_state = metadata_state_after(&[
-        wal_create_directory(0, InodeId(2), InodeId(1), "docs".to_owned()),
-        wal_create_file(
-            0,
-            InodeId(3),
-            InodeId(2),
-            "readme.txt".to_owned(),
-            content_ref("content-1"),
-        ),
-        wal_append_revision(0, InodeId(3), RevisionNo(2), content_ref("content-2")),
-    ]);
-    let context = validation_context(&metadata_state, ChangeSeq(3), InodeId(4));
-
-    let stale_base = build_commit_plan(
-        &CommitRequest {
-            namespace_id: namespace_id("demo"),
-            commit_id: CommitId::parse("restore-stale-base").expect("valid commit id"),
-            writer_epoch: WriterEpoch(1),
-            ops: vec![CommitOp::RestoreRevision {
-                inode_id: InodeId(3),
-                source_revision_no: RevisionNo(1),
-                base_revision_no: RevisionNo(1),
-            }],
-            preconditions: Vec::new(),
-            message: None,
-        },
-        4_200,
-        &context,
-    )
-    .await
-    .expect_err("restore stale base");
-    assert!(matches!(
-        stale_base,
-        CommitValidationError::RestoreRevisionBaseRevisionMismatch {
-            inode_id: InodeId(3),
-            expected: RevisionNo(1),
-            actual: Some(RevisionNo(2)),
-        }
-    ));
-
-    let missing_source = build_commit_plan(
-        &CommitRequest {
-            namespace_id: namespace_id("demo"),
-            commit_id: CommitId::parse("restore-missing-source").expect("valid commit id"),
-            writer_epoch: WriterEpoch(1),
-            ops: vec![CommitOp::RestoreRevision {
-                inode_id: InodeId(3),
-                source_revision_no: RevisionNo(99),
-                base_revision_no: RevisionNo(2),
-            }],
-            preconditions: Vec::new(),
-            message: None,
-        },
-        4_200,
-        &context,
-    )
-    .await
-    .expect_err("restore missing source");
-    assert!(matches!(
-        missing_source,
-        CommitValidationError::RestoreRevisionSourceRevisionMissing {
-            inode_id: InodeId(3),
-            source_revision_no: RevisionNo(99),
-        }
-    ));
-}
-
-#[tokio::test]
-async fn restore_revision_can_reference_revision_created_earlier_in_same_request() {
-    let metadata_state = metadata_state_after(&[
-        wal_create_directory(0, InodeId(2), InodeId(1), "docs".to_owned()),
-        wal_create_file(
-            0,
-            InodeId(3),
-            InodeId(2),
-            "readme.txt".to_owned(),
-            content_ref("content-1"),
-        ),
-    ]);
-    let context = validation_context(&metadata_state, ChangeSeq(2), InodeId(4));
-
-    let request = CommitRequest {
-        namespace_id: namespace_id("demo"),
-        commit_id: CommitId::parse("restore-same-request-source").expect("valid commit id"),
-        writer_epoch: WriterEpoch(1),
-        ops: vec![
-            CommitOp::ReplaceFile {
-                inode_id: InodeId(3),
-                base_revision_no: RevisionNo(1),
-                content_ref: content_ref("content-2"),
-            },
-            CommitOp::RestoreRevision {
-                inode_id: InodeId(3),
-                source_revision_no: RevisionNo(2),
-                base_revision_no: RevisionNo(2),
-            },
-        ],
-        preconditions: Vec::new(),
-        message: None,
-    };
-    let plan = build_commit_plan(&request, 4_200, &context)
-        .await
-        .expect("replace then restore in same request should validate");
-    let materialized = materialize_commit(
-        PreparedCommit::new(request, plan).expect("prepare commit"),
-        4_200,
-    );
-    let expected = content_ref("content-2");
-    assert!(matches!(
-        &materialized.results[1],
-        CommitOpResult::RestoreRevision {
-            content_ref,
-            ..
-        } if *content_ref == expected
-    ));
-}
-
-#[tokio::test]
-async fn restore_revision_can_reference_restore_created_earlier_in_same_request() {
-    let metadata_state = metadata_state_after(&[
-        wal_create_directory(0, InodeId(2), InodeId(1), "docs".to_owned()),
-        wal_create_file(
-            0,
-            InodeId(3),
-            InodeId(2),
-            "readme.txt".to_owned(),
-            content_ref("content-1"),
-        ),
-        wal_append_revision(0, InodeId(3), RevisionNo(2), content_ref("content-2")),
-    ]);
-    let context = validation_context(&metadata_state, ChangeSeq(3), InodeId(4));
-
-    let request = CommitRequest {
-        namespace_id: namespace_id("demo"),
-        commit_id: CommitId::parse("restore-after-restore-same-request").expect("valid commit id"),
-        writer_epoch: WriterEpoch(1),
-        ops: vec![
-            CommitOp::RestoreRevision {
-                inode_id: InodeId(3),
-                source_revision_no: RevisionNo(1),
-                base_revision_no: RevisionNo(2),
-            },
-            CommitOp::RestoreRevision {
-                inode_id: InodeId(3),
-                source_revision_no: RevisionNo(3),
-                base_revision_no: RevisionNo(3),
-            },
-        ],
-        preconditions: Vec::new(),
-        message: None,
-    };
-    let plan = build_commit_plan(&request, 4_200, &context)
-        .await
-        .expect("restore then restore in same request should validate");
-    let materialized = materialize_commit(
-        PreparedCommit::new(request, plan).expect("prepare commit"),
-        4_200,
-    );
-    let expected = content_ref("content-1");
-    assert!(matches!(
-        &materialized.results[0],
-        CommitOpResult::RestoreRevision {
-            content_ref,
-            ..
-        } if *content_ref == expected
-    ));
-    assert!(matches!(
-        &materialized.results[1],
-        CommitOpResult::RestoreRevision {
-            content_ref,
-            ..
-        } if *content_ref == expected
-    ));
-}
-
-#[tokio::test]
-async fn restore_revision_under_tombstoned_ancestor_is_rejected() {
-    let metadata_state = metadata_state_after(&[
-        wal_create_directory(0, InodeId(2), InodeId(1), "docs".to_owned()),
-        wal_create_file(
-            0,
-            InodeId(3),
-            InodeId(2),
-            "readme.txt".to_owned(),
-            content_ref("content-1"),
-        ),
-        wal_tombstone(0, InodeId(2)),
-    ]);
-    let context = validation_context(&metadata_state, ChangeSeq(3), InodeId(4));
-
-    let error = build_commit_plan(
-        &CommitRequest {
-            namespace_id: namespace_id("demo"),
-            commit_id: CommitId::parse("restore-under-tombstone").expect("valid commit id"),
-            writer_epoch: WriterEpoch(1),
-            ops: vec![CommitOp::RestoreRevision {
-                inode_id: InodeId(3),
-                source_revision_no: RevisionNo(1),
-                base_revision_no: RevisionNo(1),
-            }],
-            preconditions: Vec::new(),
-            message: None,
-        },
-        4_200,
-        &context,
-    )
-    .await
-    .expect_err("restore tombstone conflict");
-    assert!(matches!(
-        error,
-        CommitValidationError::RestoreRevisionUnderSubtreeTombstone {
-            inode_id: InodeId(3),
-            ..
-        }
-    ));
-}
-
-#[tokio::test]
-async fn restore_revision_overflow_is_rejected() {
-    let mut deltas = wal_create_file(
-        0,
-        InodeId(2),
-        InodeId(1),
-        "overflow.txt".to_owned(),
-        content_ref("content-max"),
-    );
-    deltas[2] = WalDelta::AppendFileRevision {
-        delta_index: 2,
-        inode_id: InodeId(2),
-        revision_no: RevisionNo(u64::MAX),
-        content_ref: content_ref("content-max"),
-    };
-    let metadata_state = MetadataState::default()
-        .apply_committed_wal_deltas(
-            ChangeSeq(0),
-            4_200,
-            &[WalDelta::CreateInode {
-                delta_index: 0,
-                inode_id: InodeId(1),
-                inode_kind: InodeKind::Directory,
-            }],
-        )
-        .apply_committed_wal_deltas(ChangeSeq(1), 4_200, &deltas);
-    let context = validation_context(&metadata_state, ChangeSeq(1), InodeId(3));
-    let request = CommitRequest {
-        namespace_id: namespace_id("demo"),
-        commit_id: CommitId::parse("restore-overflow").expect("valid commit id"),
-        writer_epoch: WriterEpoch(1),
-        ops: vec![CommitOp::RestoreRevision {
-            inode_id: InodeId(2),
-            source_revision_no: RevisionNo(u64::MAX),
-            base_revision_no: RevisionNo(u64::MAX),
-        }],
-        preconditions: Vec::new(),
-        message: None,
-    };
-
-    let error = build_commit_plan(&request, 4_200, &context)
-        .await
-        .expect_err("restore overflow");
-    assert!(matches!(
-        error,
-        CommitValidationError::RestoreRevisionOverflow {
-            inode_id: InodeId(2),
-            base_revision_no: RevisionNo(u64::MAX),
-        }
-    ));
+fn commit_id(value: &str) -> CommitId {
+    CommitId::parse(value).expect("valid commit id")
 }
 
 #[tokio::test]
@@ -751,16 +156,11 @@ async fn path_put_file_without_admission_fails_without_reading_content() {
     let responses = publish_namespace_mutations_batch(
         &store,
         &namespace_id,
-        vec![NamespaceMutationCandidate::path(
-            PathMutationIntent::PutFile {
-                commit_id: CommitId::parse("put-cold-content").expect("valid commit id"),
-                message: None,
-                absolute_path: AbsolutePath::parse("/docs/hello.txt").expect("path"),
-                content_ref: content.content_ref,
-                behavior: DestinationBehavior::NoReplace,
-                expected_revision_no: None,
-            },
-        )],
+        vec![MutationCandidate::new(MutationRequest::single(
+            commit_id("put-cold-content"),
+            None,
+            put_file("/docs/hello.txt", content.content_ref),
+        ))],
         &context,
     )
     .await;
@@ -794,22 +194,16 @@ async fn path_batch_rejects_repeated_unadmitted_content_without_reading_it() {
         &store,
         &namespace_id,
         vec![
-            NamespaceMutationCandidate::path(PathMutationIntent::PutFile {
-                commit_id: CommitId::parse("put-shared-a").expect("valid commit id"),
-                message: None,
-                absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
-                content_ref: content.content_ref.clone(),
-                behavior: DestinationBehavior::NoReplace,
-                expected_revision_no: None,
-            }),
-            NamespaceMutationCandidate::path(PathMutationIntent::PutFile {
-                commit_id: CommitId::parse("put-shared-b").expect("valid commit id"),
-                message: None,
-                absolute_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
-                content_ref: content.content_ref,
-                behavior: DestinationBehavior::NoReplace,
-                expected_revision_no: None,
-            }),
+            MutationCandidate::new(MutationRequest::single(
+                commit_id("put-shared-a"),
+                None,
+                put_file("/docs/a.txt", content.content_ref.clone()),
+            )),
+            MutationCandidate::new(MutationRequest::single(
+                commit_id("put-shared-b"),
+                None,
+                put_file("/docs/b.txt", content.content_ref),
+            )),
         ],
         &context,
     )
@@ -861,28 +255,27 @@ async fn valid_content_admission_skips_durable_content_validation() {
     let responses = publish_namespace_mutations_batch(
         &store,
         &namespace_id,
-        vec![NamespaceMutationCandidate::path_prepared(
-            PathMutationIntent::PutFile {
-                commit_id: CommitId::parse("put-admitted-content").expect("valid commit id"),
-                message: None,
-                absolute_path: AbsolutePath::parse("/docs/admitted.txt").expect("path"),
-                content_ref: content.content_ref,
-                behavior: DestinationBehavior::NoReplace,
-                expected_revision_no: None,
-            },
+        vec![MutationCandidate::prepared(
+            MutationRequest::single(
+                commit_id("put-admitted-content"),
+                None,
+                put_file("/docs/admitted.txt", content.content_ref),
+            ),
             vec![prepared],
         )],
         &context,
     )
     .await;
 
-    assert!(responses[0].is_ok());
+    responses[0].as_ref().expect("admitted put commits");
     // A live admission is the fast path: no content read at all.
     assert_eq!(store.count(OperationClass::Read), 0);
 }
 
+/// A later candidate in one batch resolves against what the earlier one did,
+/// so a delete of a path the earlier candidate renamed away finds nothing.
 #[tokio::test]
-async fn binding_is_precondition_observes_earlier_batch_candidate() {
+async fn a_later_batch_candidate_observes_the_earlier_one() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -900,45 +293,33 @@ async fn binding_is_precondition_observes_earlier_batch_candidate() {
     )
     .await
     .expect("seed file");
-    let docs_inode = resolve_path(&store, &namespace_id, "/docs")
-        .await
-        .expect("resolve docs")
-        .inode_id;
     let file_inode = resolve_path(&store, &namespace_id, "/docs/readme.txt")
         .await
         .expect("resolve file")
         .inode_id;
-    let original_binding = current_binding_for_child(&store, &namespace_id, file_inode).await;
 
-    let responses = commit_operations_batch(
+    let responses = submit_mutations_batch(
         &store,
         &namespace_id,
         vec![
-            ApiCommitRequest {
-                commit_id: CommitId::parse("move-before-child-name-check")
-                    .expect("valid commit id"),
-                preconditions: Vec::new(),
-                ops: vec![ApiCommitOp::Rename {
-                    inode_id: file_inode,
-                    new_parent_inode_id: docs_inode,
-                    new_display_name: test_display_name("moved.txt"),
-                }],
-                message: None,
-            },
-            ApiCommitRequest {
-                commit_id: CommitId::parse("delete-with-stale-binding").expect("valid commit id"),
-                preconditions: vec![CommitPrecondition::BindingIs {
-                    parent_inode_id: docs_inode,
-                    name_key: original_binding.name_key.clone(),
-                    child_inode_id: file_inode,
-                    bind_seq: original_binding.bind_seq,
-                    bind_delta_index: original_binding.bind_delta_index,
-                }],
-                ops: vec![ApiCommitOp::DeleteFile {
-                    inode_id: file_inode,
-                }],
-                message: None,
-            },
+            MutationRequest::single(
+                commit_id("move-before-child-name-check"),
+                None,
+                FilesystemOperation::MovePath {
+                    from_path: AbsolutePath::parse("/docs/readme.txt").expect("path"),
+                    to_path: AbsolutePath::parse("/docs/moved.txt").expect("path"),
+                    behavior: DestinationBehavior::NoReplace,
+                },
+            ),
+            MutationRequest::single(
+                commit_id("delete-with-stale-binding"),
+                None,
+                FilesystemOperation::DeletePath {
+                    absolute_path: AbsolutePath::parse("/docs/readme.txt").expect("path"),
+                    behavior: DeleteDirectoryBehavior::NonRecursive,
+                    expected_inode_id: Some(file_inode),
+                },
+            ),
         ],
         &context,
     )
@@ -950,12 +331,14 @@ async fn binding_is_precondition_observes_earlier_batch_candidate() {
     );
     let error = responses[1]
         .as_ref()
-        .expect_err("stale binding precondition");
-    assert_eq!(error.code(), ErrorCode::PathConflict);
+        .expect_err("the moved-away path no longer resolves");
+    assert_eq!(error.code(), ErrorCode::PathNotFound);
 }
 
+/// The directory-empty rule is evaluated against what the earlier candidate
+/// did, so a delete of a directory a earlier candidate just filled fails.
 #[tokio::test]
-async fn directory_empty_precondition_observes_earlier_batch_candidate() {
+async fn a_directory_delete_observes_an_earlier_batch_candidate() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -963,56 +346,33 @@ async fn directory_empty_precondition_observes_earlier_batch_candidate() {
     bootstrap_namespace(&store, &namespace_id, &context, false)
         .await
         .expect("bootstrap");
-    commit_operations(
+    submit_operation(
         &store,
         &namespace_id,
-        ApiCommitRequest {
-            commit_id: CommitId::parse("seed-empty-dir").expect("valid commit id"),
-            preconditions: Vec::new(),
-            ops: vec![ApiCommitOp::CreateDirectory {
-                parent_inode_id: InodeId(1),
-                display_name: test_display_name("docs"),
-            }],
-            message: None,
-        },
+        commit_id("seed-empty-dir"),
+        create_dir("/docs"),
         &context,
     )
     .await
     .expect("seed docs");
-    let docs_inode = resolve_path(&store, &namespace_id, "/docs")
-        .await
-        .expect("resolve seeded directory")
-        .inode_id;
     let content = store_bytes_as_content(&store, &namespace_id, b"child")
         .await
         .expect("stage content");
 
-    let responses = commit_operations_batch(
+    let responses = submit_mutations_batch(
         &store,
         &namespace_id,
         vec![
-            ApiCommitRequest {
-                commit_id: CommitId::parse("create-child-before-empty-check")
-                    .expect("valid commit id"),
-                preconditions: Vec::new(),
-                ops: vec![ApiCommitOp::CreateFile {
-                    parent_inode_id: docs_inode,
-                    display_name: test_display_name("child.txt"),
-                    content_ref: content.content_ref,
-                }],
-                message: None,
-            },
-            ApiCommitRequest {
-                commit_id: CommitId::parse("delete-dir-with-stale-empty-check")
-                    .expect("valid commit id"),
-                preconditions: vec![CommitPrecondition::DirectoryEmpty {
-                    inode_id: docs_inode,
-                }],
-                ops: vec![ApiCommitOp::DeleteSubtree {
-                    root_inode_id: docs_inode,
-                }],
-                message: None,
-            },
+            MutationRequest::single(
+                commit_id("create-child-before-empty-check"),
+                None,
+                put_file("/docs/child.txt", content.content_ref),
+            ),
+            MutationRequest::single(
+                commit_id("delete-dir-with-stale-empty-check"),
+                None,
+                delete_path("/docs"),
+            ),
         ],
         &context,
     )
@@ -1024,12 +384,12 @@ async fn directory_empty_precondition_observes_earlier_batch_candidate() {
     );
     let error = responses[1]
         .as_ref()
-        .expect_err("directory empty precondition");
+        .expect_err("directory is no longer empty");
     assert_eq!(error.code(), ErrorCode::DirectoryNotEmpty);
 }
 
 #[tokio::test]
-async fn explicit_commit_rejects_invalid_display_names() {
+async fn mutation_paths_reject_invalid_display_names() {
     assert!(DisplayName::parse("a/b").is_err());
     assert!(DisplayName::parse(".").is_err());
 }
@@ -1046,43 +406,28 @@ async fn restore_revision_does_not_revalidate_retained_content_before_publish() 
     let first = store_bytes_as_content(&store, &namespace_id("demo"), b"first")
         .await
         .expect("stage first");
-    commit_operations(
+    submit_operation(
         &store,
         &namespace_id("demo"),
-        ApiCommitRequest {
-            commit_id: CommitId::parse("restore-create").expect("valid commit id"),
-            preconditions: Vec::new(),
-            ops: vec![ApiCommitOp::CreateFile {
-                parent_inode_id: InodeId(1),
-                display_name: test_display_name("restore.txt"),
-                content_ref: first.content_ref.clone(),
-            }],
-            message: None,
-        },
+        commit_id("restore-create"),
+        put_file("/restore.txt", first.content_ref.clone()),
         &context,
     )
     .await
     .expect("create file");
-    let inode_id = resolve_path(&store, &namespace_id("demo"), "/restore.txt")
-        .await
-        .expect("resolve created file")
-        .inode_id;
 
     let second = store_bytes_as_content(&store, &namespace_id("demo"), b"second")
         .await
         .expect("stage second");
-    commit_operations(
+    submit_operation(
         &store,
         &namespace_id("demo"),
-        ApiCommitRequest {
-            commit_id: CommitId::parse("restore-replace").expect("valid commit id"),
-            preconditions: Vec::new(),
-            ops: vec![ApiCommitOp::ReplaceFile {
-                inode_id,
-                base_revision_no: RevisionNo(1),
-                content_ref: second.content_ref,
-            }],
-            message: None,
+        commit_id("restore-replace"),
+        FilesystemOperation::PutFile {
+            absolute_path: AbsolutePath::parse("/restore.txt").expect("path"),
+            content_ref: second.content_ref,
+            behavior: DestinationBehavior::Replace,
+            expected_revision_no: None,
         },
         &context,
     )
@@ -1097,18 +442,13 @@ async fn restore_revision_does_not_revalidate_retained_content_before_publish() 
         .await
         .expect("delete first content");
 
-    let response = commit_operations(
+    let response = submit_operation(
         &store,
         &namespace_id("demo"),
-        ApiCommitRequest {
-            commit_id: CommitId::parse("restore-missing-content").expect("valid commit id"),
-            preconditions: Vec::new(),
-            ops: vec![ApiCommitOp::RestoreRevision {
-                inode_id,
-                source_revision_no: RevisionNo(1),
-                base_revision_no: RevisionNo(2),
-            }],
-            message: None,
+        commit_id("restore-missing-content"),
+        FilesystemOperation::RestoreRevision {
+            absolute_path: AbsolutePath::parse("/restore.txt").expect("path"),
+            source_revision_no: RevisionNo(1),
         },
         &context,
     )
@@ -1118,7 +458,7 @@ async fn restore_revision_does_not_revalidate_retained_content_before_publish() 
 }
 
 #[tokio::test]
-async fn metadata_only_commit_does_not_validate_content_store_refs() {
+async fn metadata_only_mutation_does_not_validate_content_store_refs() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
@@ -1135,21 +475,13 @@ async fn metadata_only_commit_does_not_validate_content_store_refs() {
     )
     .await
     .expect("seed file");
-    let inode_id = resolve_path(&store, &namespace_id("demo"), "/docs/delete-me.txt")
-        .await
-        .expect("resolve seeded file")
-        .inode_id;
 
     let guarded_store = ContentStoreAccessLimitStore::new(temp_dir.path(), 0);
-    let response = commit_operations(
+    let response = submit_operation(
         &guarded_store,
         &namespace_id("demo"),
-        ApiCommitRequest {
-            commit_id: CommitId::parse("metadata-only-delete").expect("valid commit id"),
-            preconditions: Vec::new(),
-            ops: vec![ApiCommitOp::DeleteFile { inode_id }],
-            message: None,
-        },
+        commit_id("metadata-only-delete"),
+        delete_path("/docs/delete-me.txt"),
         &context,
     )
     .await
@@ -1163,51 +495,11 @@ async fn metadata_only_commit_does_not_validate_content_store_refs() {
     );
 }
 
+/// Content coverage is checked before the commit plan validates operations,
+/// so a put whose caller-supplied revision guard is also stale answers for
+/// the missing proof, and nothing is read.
 #[tokio::test]
-async fn explicit_create_file_fails_unprepared_before_parent_validation_without_content_reads() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id("demo"), &context, false)
-        .await
-        .expect("bootstrap namespace");
-
-    let guarded_store = ContentStoreAccessLimitStore::new(temp_dir.path(), 0);
-    let missing_content = content_ref("missing-content");
-    let error = publish_namespace_mutations_batch(
-        &guarded_store,
-        &namespace_id("demo"),
-        vec![NamespaceMutationCandidate::commit(ApiCommitRequest {
-            commit_id: CommitId::parse("create-missing-parent-unprepared-content")
-                .expect("valid commit id"),
-            preconditions: Vec::new(),
-            ops: vec![ApiCommitOp::CreateFile {
-                parent_inode_id: InodeId(99),
-                display_name: test_display_name("missing.txt"),
-                content_ref: missing_content.clone(),
-            }],
-            message: None,
-        })],
-        &context,
-    )
-    .await
-    .into_iter()
-    .next()
-    .expect("one result")
-    .expect_err("unprepared content should win before missing parent");
-    assert!(matches!(
-        error,
-        CoreError::ContentPreparation(
-            loonfs_core::publish::ContentPreparationError::ContentNotPrepared {
-                content_ref_digest
-            }
-        ) if content_ref_digest == missing_content.digest
-    ));
-    assert_eq!(guarded_store.content_store_access_count(), 0);
-}
-
-#[tokio::test]
-async fn explicit_replace_file_fails_unprepared_before_revision_validation_without_content_reads() {
+async fn a_guarded_put_fails_unprepared_before_revision_validation_without_content_reads() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
@@ -1224,26 +516,22 @@ async fn explicit_replace_file_fails_unprepared_before_revision_validation_witho
     )
     .await
     .expect("seed replace target");
-    let inode_id = resolve_path(&store, &namespace_id("demo"), "/docs/replace.txt")
-        .await
-        .expect("resolve path")
-        .inode_id;
 
     let guarded_store = ContentStoreAccessLimitStore::new(temp_dir.path(), 0);
     let missing_content = content_ref("missing-content");
     let error = publish_namespace_mutations_batch(
         &guarded_store,
         &namespace_id("demo"),
-        vec![NamespaceMutationCandidate::commit(ApiCommitRequest {
-            commit_id: CommitId::parse("replace-stale-missing-content").expect("valid commit id"),
-            preconditions: Vec::new(),
-            ops: vec![ApiCommitOp::ReplaceFile {
-                inode_id,
-                base_revision_no: RevisionNo(99),
+        vec![MutationCandidate::new(MutationRequest::single(
+            commit_id("replace-stale-missing-content"),
+            None,
+            FilesystemOperation::PutFile {
+                absolute_path: AbsolutePath::parse("/docs/replace.txt").expect("path"),
                 content_ref: missing_content.clone(),
-            }],
-            message: None,
-        })],
+                behavior: DestinationBehavior::Replace,
+                expected_revision_no: Some(RevisionNo(99)),
+            },
+        ))],
         &context,
     )
     .await
@@ -1253,11 +541,9 @@ async fn explicit_replace_file_fails_unprepared_before_revision_validation_witho
     .expect_err("unprepared content should win before stale revision");
     assert!(matches!(
         error,
-        CoreError::ContentPreparation(
-            loonfs_core::publish::ContentPreparationError::ContentNotPrepared {
-                content_ref_digest
-            }
-        ) if content_ref_digest == missing_content.digest
+        CoreError::ContentPreparation(ContentPreparationError::ContentNotPrepared {
+            content_ref_digest
+        }) if content_ref_digest == missing_content.digest
     ));
     assert_eq!(guarded_store.content_store_access_count(), 0);
 }
@@ -1280,27 +566,344 @@ async fn restore_revision_missing_source_is_revision_not_found() {
     )
     .await
     .expect("seed restore target");
-    let inode_id = resolve_path(&store, &namespace_id("demo"), "/docs/restore.txt")
-        .await
-        .expect("resolve path")
-        .inode_id;
 
-    let error = commit_operations(
+    let error = submit_operation(
         &store,
         &namespace_id("demo"),
-        ApiCommitRequest {
-            commit_id: CommitId::parse("restore-missing-source").expect("valid commit id"),
-            preconditions: Vec::new(),
-            ops: vec![ApiCommitOp::RestoreRevision {
-                inode_id,
-                source_revision_no: RevisionNo(99),
-                base_revision_no: RevisionNo(1),
-            }],
-            message: None,
+        commit_id("restore-missing-source"),
+        FilesystemOperation::RestoreRevision {
+            absolute_path: AbsolutePath::parse("/docs/restore.txt").expect("path"),
+            source_revision_no: RevisionNo(99),
         },
         &context,
     )
     .await
     .expect_err("missing restore source should fail");
     assert_eq!(error.code(), ErrorCode::RevisionNotFound);
+}
+
+/// A directory and the files under it land in one commit: the puts resolve
+/// against the directory the first operation creates, and the change feed
+/// reports one committed change whose events follow operation order.
+#[tokio::test]
+async fn a_batch_creates_a_directory_and_writes_into_it_in_one_commit() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = namespace_id("demo");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap namespace");
+    let first = store_bytes_as_content(&store, &namespace_id, b"first")
+        .await
+        .expect("stage first");
+    let second = store_bytes_as_content(&store, &namespace_id, b"second")
+        .await
+        .expect("stage second");
+
+    let response = submit_mutation(
+        &store,
+        &namespace_id,
+        MutationRequest {
+            commit_id: commit_id("reports-batch"),
+            message: Some("import reports".to_owned()),
+            operations: vec![
+                create_dir("/reports"),
+                put_file("/reports/a.txt", first.content_ref.clone()),
+                put_file("/reports/b.txt", second.content_ref.clone()),
+            ],
+        },
+        &context,
+    )
+    .await
+    .expect("the batch commits");
+    assert_eq!(response.committed_seq, ChangeSeq(1));
+
+    for path in ["/reports", "/reports/a.txt", "/reports/b.txt"] {
+        resolve_path(&store, &namespace_id, path)
+            .await
+            .expect("every operation of the batch is visible");
+    }
+
+    let changes = list_changes_after(&store, &namespace_id, ChangeSeq(0))
+        .await
+        .expect("read the change feed");
+    assert_eq!(changes.changes.len(), 1, "the batch is one logical commit");
+    let change = &changes.changes[0];
+    assert_eq!(change.commit_id, commit_id("reports-batch"));
+    assert_eq!(change.message.as_deref(), Some("import reports"));
+    let names = change
+        .events
+        .iter()
+        .map(|event| match event {
+            FilesystemChange::Created { name, .. } => name.as_str().to_owned(),
+            other => panic!("unexpected event: {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(names, vec!["reports", "a.txt", "b.txt"]);
+}
+
+/// A request stops at its first failing operation and nothing it would have
+/// written becomes visible. The same commit id then commits a corrected
+/// batch, because the failed attempt left no receipt behind.
+#[tokio::test]
+async fn a_batch_that_stops_commits_nothing_and_names_the_operation() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = namespace_id("demo");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap namespace");
+
+    let error = submit_mutation(
+        &store,
+        &namespace_id,
+        MutationRequest {
+            commit_id: commit_id("half-good-batch"),
+            message: None,
+            operations: vec![
+                create_dir("/first"),
+                delete_path("/missing"),
+                create_dir("/third"),
+            ],
+        },
+        &context,
+    )
+    .await
+    .expect_err("the delete cannot resolve");
+    assert_eq!(error.code(), ErrorCode::PathNotFound);
+    assert_eq!(
+        error
+            .details()
+            .expect("a stopped batch carries details")
+            .operation_index,
+        Some(1)
+    );
+
+    for path in ["/first", "/third"] {
+        resolve_path(&store, &namespace_id, path)
+            .await
+            .expect_err("no operation of a stopped batch is visible");
+    }
+
+    let response = submit_mutation(
+        &store,
+        &namespace_id,
+        MutationRequest {
+            commit_id: commit_id("half-good-batch"),
+            message: None,
+            operations: vec![create_dir("/first"), create_dir("/third")],
+        },
+        &context,
+    )
+    .await
+    .expect("a corrected batch commits under the same commit id");
+    assert_eq!(response.committed_seq, ChangeSeq(1));
+}
+
+/// Reusing a commit id replays the original receipt for the same request and
+/// conflicts for a different one, and a one-operation request is the same
+/// request as a one-element batch.
+#[tokio::test]
+async fn a_reused_commit_id_replays_the_receipt_or_conflicts() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = namespace_id("demo");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap namespace");
+
+    let batch = |commit: &str| MutationRequest {
+        commit_id: commit_id(commit),
+        message: None,
+        operations: vec![create_dir("/a"), create_dir("/b")],
+    };
+    let first = submit_mutation(&store, &namespace_id, batch("replayed-batch"), &context)
+        .await
+        .expect("the batch commits");
+
+    let replayed = submit_mutation(&store, &namespace_id, batch("replayed-batch"), &context)
+        .await
+        .expect("the same batch replays");
+    assert_eq!(replayed.committed_seq, first.committed_seq);
+
+    let error = submit_mutation(
+        &store,
+        &namespace_id,
+        MutationRequest {
+            commit_id: commit_id("replayed-batch"),
+            message: None,
+            operations: vec![create_dir("/a"), create_dir("/c")],
+        },
+        &context,
+    )
+    .await
+    .expect_err("different operations under the same commit id conflict");
+    assert_eq!(error.code(), ErrorCode::CommitIdReuseConflict);
+
+    // The convenience form and a one-element list are the same request, so
+    // either style replays the other's receipt.
+    let convenience = submit_operation(
+        &store,
+        &namespace_id,
+        commit_id("one-operation"),
+        create_dir("/docs"),
+        &context,
+    )
+    .await
+    .expect("the convenience call commits");
+    let as_batch = submit_mutation(
+        &store,
+        &namespace_id,
+        MutationRequest {
+            commit_id: commit_id("one-operation"),
+            message: None,
+            operations: vec![create_dir("/docs")],
+        },
+        &context,
+    )
+    .await
+    .expect("the one-element batch replays the same receipt");
+    assert_eq!(as_batch.committed_seq, convenience.committed_seq);
+}
+
+/// Operation order is the contract: creating then deleting a path leaves it
+/// gone, and deleting then creating leaves it present.
+#[tokio::test]
+async fn operation_order_decides_the_outcome() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = namespace_id("demo");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap namespace");
+
+    submit_mutation(
+        &store,
+        &namespace_id,
+        MutationRequest {
+            commit_id: commit_id("create-then-delete"),
+            message: None,
+            operations: vec![create_dir("/x"), delete_path("/x")],
+        },
+        &context,
+    )
+    .await
+    .expect("create then delete commits");
+    resolve_path(&store, &namespace_id, "/x")
+        .await
+        .expect_err("the delete ran after the create");
+
+    submit_mutation(
+        &store,
+        &namespace_id,
+        MutationRequest {
+            commit_id: commit_id("seed-y"),
+            message: None,
+            operations: vec![create_dir("/y")],
+        },
+        &context,
+    )
+    .await
+    .expect("seed a path to delete");
+    submit_mutation(
+        &store,
+        &namespace_id,
+        MutationRequest {
+            commit_id: commit_id("delete-then-create"),
+            message: None,
+            operations: vec![delete_path("/y"), create_dir("/y")],
+        },
+        &context,
+    )
+    .await
+    .expect("delete then create commits");
+    resolve_path(&store, &namespace_id, "/y")
+        .await
+        .expect("the create ran after the delete");
+}
+
+/// A caller's revision guard is evaluated against the state its own
+/// operation sees, which includes the revision an earlier operation of the
+/// same request wrote.
+#[tokio::test]
+async fn a_revision_guard_observes_an_earlier_operation_of_the_same_request() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = namespace_id("demo");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap namespace");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/guarded.txt",
+        b"first",
+        &context,
+        Some("seed-guarded"),
+    )
+    .await
+    .expect("seed guarded file");
+    let second = store_bytes_as_content(&store, &namespace_id, b"second")
+        .await
+        .expect("stage second");
+    let third = store_bytes_as_content(&store, &namespace_id, b"third")
+        .await
+        .expect("stage third");
+
+    let replace =
+        |content_ref: loonfs_api::ContentRef, expected: u64| FilesystemOperation::PutFile {
+            absolute_path: AbsolutePath::parse("/docs/guarded.txt").expect("path"),
+            content_ref,
+            behavior: DestinationBehavior::Replace,
+            expected_revision_no: Some(RevisionNo(expected)),
+        };
+
+    // The second put guards on revision 2, which only exists because the
+    // first put of this same request created it.
+    submit_mutation(
+        &store,
+        &namespace_id,
+        MutationRequest {
+            commit_id: commit_id("guarded-chain"),
+            message: None,
+            operations: vec![
+                replace(second.content_ref.clone(), 1),
+                replace(third.content_ref.clone(), 2),
+            ],
+        },
+        &context,
+    )
+    .await
+    .expect("the second guard sees the first write");
+
+    // Guarding on the revision the request started from is stale by the time
+    // the second operation runs, so the whole request stops there.
+    let error = submit_mutation(
+        &store,
+        &namespace_id,
+        MutationRequest {
+            commit_id: commit_id("stale-guarded-chain"),
+            message: None,
+            operations: vec![
+                replace(second.content_ref, 3),
+                replace(third.content_ref, 3),
+            ],
+        },
+        &context,
+    )
+    .await
+    .expect_err("the second guard is stale once the first write lands");
+    assert_eq!(error.code(), ErrorCode::StaleRevision);
+    assert_eq!(
+        error
+            .details()
+            .expect("a stopped batch carries details")
+            .operation_index,
+        Some(1)
+    );
 }

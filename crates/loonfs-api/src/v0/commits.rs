@@ -1,34 +1,12 @@
-//! The engine's commit vocabulary and the change-feed shapes for the v0
-//! HTTP API: commit requests with preconditions and semantic operations
-//! (the internal IR path operations compile into), and the ordered feed of
-//! semantic filesystem events those commits produce. Path-oriented
-//! operations live in [`super::operations`].
+//! The committed-mutation shapes for the v0 HTTP API: the envelope every
+//! mutation resolves to, and the ordered feed of semantic filesystem events
+//! those mutations produce. Path-oriented request shapes live in
+//! [`super::operations`].
 
 use crate::{
-    ChangeSeq, CommitId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, NamespaceId,
-    RevisionNo,
+    ChangeSeq, CommitId, ContentRef, DisplayName, InodeId, InodeKind, NamespaceId, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
-
-/// Explicit semantic commit request: one commit id, optional preconditions,
-/// and multiple ordered operations.
-///
-/// This is the engine's internal mutation vocabulary — path operations
-/// compile into it during planning. It is not a stable wire surface.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-pub struct CommitRequest {
-    /// Client idempotency key for this logical commit.
-    pub commit_id: CommitId,
-    /// Optional race checks evaluated before mutation.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub preconditions: Vec<CommitPrecondition>,
-    /// Ordered semantic operations.
-    pub ops: Vec<CommitOp>,
-    /// Optional human-readable note.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-}
 
 /// Result of one committed mutation.
 ///
@@ -46,150 +24,6 @@ pub struct CommitResponse {
     pub commit_id: CommitId,
     /// Sequence number where the mutation became visible.
     pub committed_seq: ChangeSeq,
-}
-
-/// Semantic operation inside a commit request.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum CommitOp {
-    /// Create a directory under a parent inode.
-    #[cfg_attr(feature = "openapi", schema(title = "CommitOpCreateDirectory"))]
-    CreateDirectory {
-        /// Visible directory that will own the new binding.
-        parent_inode_id: InodeId,
-        /// Requested child spelling, whose derived name key must be absent.
-        display_name: DisplayName,
-    },
-    /// Create a file under a parent inode.
-    #[cfg_attr(feature = "openapi", schema(title = "CommitOpCreateFile"))]
-    CreateFile {
-        /// Visible directory that will own the new binding.
-        parent_inode_id: InodeId,
-        /// Requested child spelling, whose derived name key must be absent.
-        display_name: DisplayName,
-        /// Immutable initial bytes, which must have valid preparation proof before publication.
-        content_ref: ContentRef,
-    },
-    /// Append a new revision to an existing file.
-    #[cfg_attr(feature = "openapi", schema(title = "CommitOpReplaceFile"))]
-    ReplaceFile {
-        /// Visible file inode receiving a new revision.
-        inode_id: InodeId,
-        /// Revision the caller observed; the operation conflicts if it is no longer current.
-        base_revision_no: RevisionNo,
-        /// Immutable replacement bytes, which must have valid preparation proof before publication.
-        content_ref: ContentRef,
-    },
-    /// Restore a prior revision as a new current revision.
-    #[cfg_attr(feature = "openapi", schema(title = "CommitOpRestoreRevision"))]
-    RestoreRevision {
-        /// Visible file inode receiving the restored content as a new revision.
-        inode_id: InodeId,
-        /// Existing historical revision whose content is copied forward.
-        source_revision_no: RevisionNo,
-        /// Current revision the caller observed; concurrent advancement causes a conflict.
-        base_revision_no: RevisionNo,
-    },
-    /// Delete a file inode.
-    #[cfg_attr(feature = "openapi", schema(title = "CommitOpDeleteFile"))]
-    DeleteFile {
-        /// Visible file whose exact parent binding and subtree visibility are validated.
-        inode_id: InodeId,
-    },
-    /// Rename or move an inode.
-    #[cfg_attr(feature = "openapi", schema(title = "CommitOpRename"))]
-    Rename {
-        /// Visible inode whose current binding will be replaced.
-        inode_id: InodeId,
-        /// Visible destination directory, which may equal the current parent.
-        new_parent_inode_id: InodeId,
-        /// Destination spelling, whose derived key must not name another child.
-        new_display_name: DisplayName,
-    },
-    /// Delete a directory subtree.
-    #[cfg_attr(feature = "openapi", schema(title = "CommitOpDeleteSubtree"))]
-    DeleteSubtree {
-        /// Visible non-root directory whose entire reachable subtree becomes tombstoned.
-        root_inode_id: InodeId,
-    },
-    /// Recover a deleted file or subtree: revoke the deletion recorded at
-    /// `deleted_at_seq` (the delete's committed sequence, reported by the
-    /// delete and by the change feed) and re-bind the inode under a visible
-    /// parent directory. Scoping recovery to the observed generation keeps
-    /// a stale request from cancelling a later deletion of the same inode.
-    #[cfg_attr(feature = "openapi", schema(title = "CommitOpUndelete"))]
-    Undelete {
-        /// Deleted inode to make reachable again.
-        inode_id: InodeId,
-        /// Observed deletion sequence, which prevents cancelling a newer tombstone generation.
-        deleted_at_seq: ChangeSeq,
-        /// Visible directory that will own the recovered binding.
-        parent_inode_id: InodeId,
-        /// Recovered child spelling, whose derived key must be absent.
-        display_name: DisplayName,
-    },
-}
-
-/// Race check evaluated before a commit is accepted.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum CommitPrecondition {
-    /// File inode is still at this revision.
-    #[cfg_attr(
-        feature = "openapi",
-        schema(title = "CommitPreconditionInodeRevisionIs")
-    )]
-    InodeRevisionIs {
-        /// File inode whose visible revision is tested.
-        inode_id: InodeId,
-        /// Exact revision required at commit evaluation time.
-        revision_no: RevisionNo,
-    },
-    /// Inode ancestors have not been subtree-deleted.
-    #[cfg_attr(
-        feature = "openapi",
-        schema(title = "CommitPreconditionAncestorsNotSubtreeDeleted")
-    )]
-    AncestorsNotSubtreeDeleted {
-        /// Inode whose ancestor chain must contain no active tombstone.
-        inode_id: InodeId,
-    },
-    /// Directory child name is still absent.
-    #[cfg_attr(
-        feature = "openapi",
-        schema(title = "CommitPreconditionChildNameAbsent")
-    )]
-    ChildNameAbsent {
-        /// Visible directory in which absence is tested.
-        parent_inode_id: InodeId,
-        /// Canonical lookup key that must not have an active binding.
-        name_key: NameKey,
-    },
-    /// Directory binding is still exactly the binding the caller saw.
-    #[cfg_attr(feature = "openapi", schema(title = "CommitPreconditionBindingIs"))]
-    BindingIs {
-        /// Directory expected to own the observed binding.
-        parent_inode_id: InodeId,
-        /// Canonical name key of the observed binding.
-        name_key: NameKey,
-        /// Child identity expected at that name.
-        child_inode_id: InodeId,
-        /// Sequence that created the exact observed binding generation.
-        bind_seq: ChangeSeq,
-        /// Delta position that disambiguates the generation within `bind_seq`.
-        bind_delta_index: u32,
-    },
-    /// Directory is still empty.
-    #[cfg_attr(
-        feature = "openapi",
-        schema(title = "CommitPreconditionDirectoryEmpty")
-    )]
-    DirectoryEmpty {
-        /// Visible directory that must have no active child bindings.
-        inode_id: InodeId,
-    },
 }
 
 /// One semantic filesystem change inside a committed mutation.
@@ -310,32 +144,8 @@ pub struct ChangesResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::{CommitOp, CommitPrecondition, FilesystemChange};
-    use crate::{InodeId, InodeKind, NameKey};
-
-    #[test]
-    fn commit_precondition_name_key_serializes_as_plain_string() {
-        let precondition = CommitPrecondition::ChildNameAbsent {
-            parent_inode_id: InodeId(1),
-            name_key: NameKey::parse("report.txt").expect("valid name key"),
-        };
-
-        assert_eq!(
-            serde_json::to_string(&precondition).expect("serialize precondition"),
-            r#"{"kind":"child_name_absent","parent_inode_id":1,"name_key":"report.txt"}"#
-        );
-    }
-
-    #[test]
-    fn commit_precondition_rejects_invalid_name_key() {
-        let encoded = r#"{
-            "kind":"child_name_absent",
-            "parent_inode_id":1,
-            "name_key":"invalid/name"
-        }"#;
-
-        assert!(serde_json::from_str::<CommitPrecondition>(encoded).is_err());
-    }
+    use super::FilesystemChange;
+    use crate::{InodeId, InodeKind};
 
     #[test]
     fn filesystem_change_events_use_snake_case_kind_tags() {
@@ -412,47 +222,6 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&undeleted).expect("serialize undeleted event"),
             r#"{"kind":"undeleted","inode_id":2,"parent_inode_id":1,"name":"a.txt"}"#
-        );
-    }
-
-    #[test]
-    fn commit_ops_tolerate_unknown_fields() {
-        // Tolerant wire: decoders ignore unknown fields so additive
-        // evolution never breaks an older reader.
-        let op: CommitOp = serde_json::from_value(serde_json::json!({
-            "kind": "rename",
-            "inode_id": 2,
-            "new_parent_inode_id": 1,
-            "new_display_name": "renamed.txt",
-            "unknown_future_field": true
-        }))
-        .expect("unknown fields are ignored");
-
-        assert_eq!(
-            op,
-            CommitOp::Rename {
-                inode_id: InodeId(2),
-                new_parent_inode_id: InodeId(1),
-                new_display_name: crate::DisplayName::parse("renamed.txt")
-                    .expect("valid display name"),
-            }
-        );
-    }
-
-    #[test]
-    fn commit_create_directory_uses_directory_wire_name() {
-        let op = CommitOp::CreateDirectory {
-            parent_inode_id: InodeId(1),
-            display_name: crate::DisplayName::parse("docs").expect("valid display name"),
-        };
-
-        assert_eq!(
-            serde_json::to_value(&op).expect("create directory op json"),
-            serde_json::json!({
-                "kind": "create_directory",
-                "parent_inode_id": 1,
-                "display_name": "docs"
-            })
         );
     }
 }

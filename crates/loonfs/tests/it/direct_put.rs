@@ -5,11 +5,11 @@
 
 use crate::common::*;
 use bytes::Bytes;
-use loonfs::publish::{parse_mutation_path, PathMutationIntent};
+use loonfs::publish::{parse_mutation_path, FilesystemOperation, MutationRequest};
 use loonfs::{
-    BeginUploadRequest, ChangeSeq, CommitId, CommitOp, CommitRequest, CompleteUploadRequest,
-    ContentRef, CreateDirectoryOptions, CreateNamespaceOptions, DestinationBehavior, ErrorCode,
-    InodeId, NamespaceId, PutFileOptions, RuntimeCacheConfig, SharedObjectStore,
+    BeginUploadRequest, ChangeSeq, CommitId, CompleteUploadRequest, ContentRef,
+    CreateDirectoryOptions, CreateNamespaceOptions, DestinationBehavior, ErrorCode, NamespaceId,
+    PutFileOptions, RuntimeCacheConfig, SharedObjectStore,
 };
 use loonfs_objectstore::keys::wal_head;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -393,14 +393,16 @@ fn concurrent_puts_coalesce_into_one_wal_segment() {
             |commit_id: &str, path: &str, prepared: loonfs_core::content::PreparedContent| {
                 let content_ref = prepared.content_ref().clone();
                 (
-                    PathMutationIntent::PutFile {
-                        commit_id: CommitId::parse(commit_id).expect("valid commit id"),
-                        message: None,
-                        absolute_path: parse_mutation_path(path).expect("valid mutation path"),
-                        content_ref,
-                        behavior: DestinationBehavior::NoReplace,
-                        expected_revision_no: None,
-                    },
+                    MutationRequest::single(
+                        CommitId::parse(commit_id).expect("valid commit id"),
+                        None,
+                        FilesystemOperation::PutFile {
+                            absolute_path: parse_mutation_path(path).expect("valid mutation path"),
+                            content_ref,
+                            behavior: DestinationBehavior::NoReplace,
+                            expected_revision_no: None,
+                        },
+                    ),
                     vec![prepared],
                 )
             };
@@ -411,26 +413,14 @@ fn concurrent_puts_coalesce_into_one_wal_segment() {
         let publisher = fs.writer.publisher();
 
         let puts = tokio::join!(
-            publisher.submit_path_intent_with_prepared_content(
-                namespace_id.clone(),
-                put_a.0,
-                put_a.1,
-            ),
-            publisher.submit_path_intent_with_prepared_content(
-                namespace_id.clone(),
-                put_b.0,
-                put_b.1,
-            ),
-            publisher.submit_path_intent_with_prepared_content(
-                namespace_id.clone(),
-                put_c.0,
-                put_c.1,
-            ),
-            publisher.submit_path_intent_with_prepared_content(
-                namespace_id.clone(),
-                put_d.0,
-                put_d.1,
-            ),
+            publisher
+                .submit_mutation_with_prepared_content(namespace_id.clone(), put_a.0, put_a.1,),
+            publisher
+                .submit_mutation_with_prepared_content(namespace_id.clone(), put_b.0, put_b.1,),
+            publisher
+                .submit_mutation_with_prepared_content(namespace_id.clone(), put_c.0, put_c.1,),
+            publisher
+                .submit_mutation_with_prepared_content(namespace_id.clone(), put_d.0, put_d.1,),
         );
         puts.0.expect("put a");
         puts.1.expect("put b");
@@ -637,29 +627,27 @@ fn begin_upload_rejects_malformed_head_and_lease_when_cache_disabled() {
 }
 
 #[test]
-fn explicit_commit_appears_in_change_feed() {
+fn a_mutation_request_appears_in_change_feed() {
     let temp_dir = tempdir().expect("tempdir");
     let fs = runtime(temp_dir.path(), "commit-test");
     let namespace_id = namespace_id("demo");
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    let commit_id = CommitId::parse("explicit-create-dir").expect("valid commit id");
+    let commit_id = CommitId::parse("create-dir").expect("valid commit id");
     let response = fs
-        .commit_operations_blocking(
+        .mutate_blocking(
             &namespace_id,
-            CommitRequest {
-                commit_id: commit_id.clone(),
-                preconditions: Vec::new(),
-                ops: vec![CommitOp::CreateDirectory {
-                    parent_inode_id: InodeId(1),
-                    display_name: loonfs_api::DisplayName::parse("docs")
-                        .expect("valid display name"),
-                }],
-                message: Some("create docs".to_owned()),
-            },
+            MutationRequest::single(
+                commit_id.clone(),
+                Some("create docs".to_owned()),
+                FilesystemOperation::CreateDir {
+                    absolute_path: parse_mutation_path("/docs").expect("valid mutation path"),
+                    parents: false,
+                },
+            ),
         )
-        .expect("commit operation");
+        .expect("publish mutation");
 
     let changes = fs
         .list_changes_blocking(&namespace_id, ChangeSeq(0))

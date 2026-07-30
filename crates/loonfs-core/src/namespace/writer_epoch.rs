@@ -148,23 +148,23 @@ impl From<ControlUpdateError> for WriterEpochAcquireError {
 mod tests {
     use super::*;
     use crate::commit_engine::delete_namespace;
-    use crate::commit_engine::{NamespaceCommitEngine, NamespaceMutationCandidate};
+    use crate::commit_engine::{MutationCandidate, NamespaceCommitEngine};
     use crate::error::ErrorCode;
     use crate::namespace::bootstrap::bootstrap_namespace;
     use crate::namespace::control::read_head_object;
     use crate::options::DeleteNamespaceOptions;
 
-    async fn commit_operations<S: loonfs_objectstore::ObjectStore + ?Sized>(
+    async fn submit_mutation<S: loonfs_objectstore::ObjectStore + ?Sized>(
         store: &S,
         namespace_id: &NamespaceId,
-        request: ApiCommitRequest,
+        request: crate::path::write::MutationRequest,
         context: &crate::context::MutationContext,
     ) -> crate::error::Result<loonfs_api::v0::CommitResponse> {
         let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
         engine
             .publish_batch(
                 store,
-                vec![NamespaceMutationCandidate::commit(request)],
+                vec![MutationCandidate::new(request)],
                 context,
                 &crate::protocol::PublishTailOptions::default(),
             )
@@ -176,12 +176,11 @@ mod tests {
     use async_trait::async_trait;
     use bytes::Bytes;
     use futures::stream::BoxStream;
-    use loonfs_api::v0::{CommitOp as ApiCommitOp, CommitRequest as ApiCommitRequest};
     use loonfs_api::wire::control::{
         decode_control_object, encode_control_object, ControlObjectKind, HeadStateEnvelope,
         NamespaceState,
     };
-    use loonfs_api::{ChangeSeq, CommitId, InodeId, NamespaceId};
+    use loonfs_api::{ChangeSeq, CommitId, NamespaceId};
     use loonfs_objectstore::keys::wal_head;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::{
@@ -365,17 +364,19 @@ mod tests {
         assert_eq!(writer.acquired_at_ms, 2_000);
     }
 
-    fn create_dir_request(commit_id: &str, display_name: &str) -> ApiCommitRequest {
-        ApiCommitRequest {
-            commit_id: CommitId::parse(commit_id).expect("valid commit id"),
-            preconditions: Vec::new(),
-            ops: vec![ApiCommitOp::CreateDirectory {
-                parent_inode_id: InodeId(1),
-                display_name: loonfs_api::DisplayName::parse(display_name)
-                    .expect("valid display name"),
-            }],
-            message: None,
-        }
+    fn create_dir_request(
+        commit_id: &str,
+        display_name: &str,
+    ) -> crate::path::write::MutationRequest {
+        crate::path::write::MutationRequest::single(
+            CommitId::parse(commit_id).expect("valid commit id"),
+            None,
+            crate::path::write::FilesystemOperation::CreateDir {
+                absolute_path: loonfs_api::AbsolutePath::parse(format!("/{display_name}"))
+                    .expect("valid path"),
+                parents: false,
+            },
+        )
     }
 
     #[tokio::test]
@@ -392,7 +393,7 @@ mod tests {
             .await
             .expect("bootstrap");
 
-        commit_operations(
+        submit_mutation(
             &store,
             &namespace_id,
             create_dir_request("writer-a-first", "from-a"),
@@ -402,7 +403,7 @@ mod tests {
         .expect("writer a first commit");
 
         let writer_b = context("writer-b", 2_000);
-        commit_operations(
+        submit_mutation(
             &store,
             &namespace_id,
             create_dir_request("writer-b-first", "from-b"),
@@ -412,7 +413,7 @@ mod tests {
         .expect("writer b commit after takeover");
 
         let writer_a_again = context("writer-a", 3_000);
-        commit_operations(
+        submit_mutation(
             &store,
             &namespace_id,
             create_dir_request("writer-a-second", "from-a-again"),

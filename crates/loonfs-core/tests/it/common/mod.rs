@@ -60,16 +60,15 @@ pub(crate) mod mutation_split_support {
     use bytes::Bytes;
     use futures::stream::BoxStream;
     use loonfs_api::{
-        sha256_digest,
-        v0::{CommitOp as ApiCommitOp, CommitRequest as ApiCommitRequest, FilesystemChange},
-        AbsolutePath, ChangeSeq, CommitId, ContentRef, ContentRefKind, DestinationBehavior,
-        DisplayName, InodeId, NameKey, NamespaceId,
+        sha256_digest, AbsolutePath, ChangeSeq, CommitId, ContentRef, ContentRefKind,
+        DestinationBehavior, NamespaceId,
     };
 
     use loonfs_core::content::{prepare_existing_content_ref, store_bytes_as_content};
 
     use loonfs_core::publish::{
-        NamespaceCommitEngine, NamespaceMutationCandidate, PathMutationIntent, PublishTailOptions,
+        FilesystemOperation, MutationCandidate, MutationRequest, NamespaceCommitEngine,
+        PublishTailOptions,
     };
     use loonfs_core::{BootstrapOptions, Error as CoreError, MutationContext};
 
@@ -84,15 +83,6 @@ pub(crate) mod mutation_split_support {
 
     use std::sync::Mutex;
 
-    #[derive(Debug, Clone)]
-    pub(crate) struct BindingIdentity {
-        pub(crate) parent_inode_id: InodeId,
-        pub(crate) name_key: NameKey,
-        pub(crate) child_inode_id: InodeId,
-        pub(crate) bind_seq: ChangeSeq,
-        pub(crate) bind_delta_index: u32,
-    }
-
     pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
         store: &S,
         namespace_id: &NamespaceId,
@@ -104,13 +94,15 @@ pub(crate) mod mutation_split_support {
             .await
     }
 
-    pub(crate) async fn commit_operations<S: ObjectStore + ?Sized>(
+    /// Publishes one mutation request through the commit engine — the single
+    /// publish pipeline — with its content already prepared.
+    pub(crate) async fn submit_mutation<S: ObjectStore + ?Sized>(
         store: &S,
         namespace_id: &NamespaceId,
-        request: ApiCommitRequest,
+        request: MutationRequest,
         context: &MutationContext,
     ) -> Result<loonfs_api::v0::CommitResponse, CoreError> {
-        let candidate = prepared_commit_candidate(store, namespace_id, request).await?;
+        let candidate = prepared_candidate(store, namespace_id, request).await;
         publish_namespace_mutations_batch(store, namespace_id, vec![candidate], context)
             .await
             .into_iter()
@@ -118,41 +110,49 @@ pub(crate) mod mutation_split_support {
             .expect("single commit result")
     }
 
-    pub(crate) async fn commit_operations_batch<S: ObjectStore + ?Sized>(
+    /// Publishes several mutation requests as one batch, so their outcomes
+    /// are decided against the same durable state.
+    pub(crate) async fn submit_mutations_batch<S: ObjectStore + ?Sized>(
         store: &S,
         namespace_id: &NamespaceId,
-        requests: Vec<ApiCommitRequest>,
+        requests: Vec<MutationRequest>,
         context: &MutationContext,
     ) -> Vec<Result<loonfs_api::v0::CommitResponse, CoreError>> {
-        let request_count = requests.len();
-        let mut candidates = Vec::with_capacity(request_count);
+        let mut candidates = Vec::with_capacity(requests.len());
         for request in requests {
-            match prepared_commit_candidate(store, namespace_id, request).await {
-                Ok(candidate) => candidates.push(candidate),
-                Err(error) => return (0..request_count).map(|_| Err(error.clone())).collect(),
-            }
+            candidates.push(prepared_candidate(store, namespace_id, request).await);
         }
         publish_namespace_mutations_batch(store, namespace_id, candidates, context).await
     }
 
-    pub(crate) async fn prepared_commit_candidate<S: ObjectStore + ?Sized>(
+    /// Wraps a request with a preparation proof for each distinct content ref
+    /// it puts, which is what publication requires of new external content.
+    ///
+    /// The namespace catalog is loaded only when there is content to prepare,
+    /// so a request that touches no content leaves the store untouched and
+    /// tests that count store operations still see what they expect.
+    pub(crate) async fn prepared_candidate<S: ObjectStore + ?Sized>(
         store: &S,
         namespace_id: &NamespaceId,
-        request: ApiCommitRequest,
-    ) -> Result<NamespaceMutationCandidate, CoreError> {
+        request: MutationRequest,
+    ) -> MutationCandidate {
         let mut seen = HashSet::new();
         let mut prepared = Vec::new();
         let mut catalog = None;
-        for content_ref in request.ops.iter().filter_map(|op| match op {
-            ApiCommitOp::CreateFile { content_ref, .. }
-            | ApiCommitOp::ReplaceFile { content_ref, .. } => Some(content_ref),
-            _ => None,
-        }) {
+        for content_ref in request
+            .operations
+            .iter()
+            .filter_map(|operation| match operation {
+                FilesystemOperation::PutFile { content_ref, .. } => Some(content_ref),
+                _ => None,
+            })
+        {
             if seen.insert(content_ref.clone()) {
                 if catalog.is_none() {
                     catalog = Some(
                         loonfs_core::control::load_namespace_catalog_entry(store, namespace_id)
-                            .await?,
+                            .await
+                            .expect("load namespace catalog"),
                     );
                 }
                 prepared.push(
@@ -163,19 +163,18 @@ pub(crate) mod mutation_split_support {
                             .expect("external content should load the namespace catalog"),
                         content_ref.clone(),
                     )
-                    .await?,
+                    .await
+                    .expect("prepare existing content"),
                 );
             }
         }
-        Ok(NamespaceMutationCandidate::commit_prepared(
-            request, prepared,
-        ))
+        MutationCandidate::prepared(request, prepared)
     }
 
     pub(crate) async fn publish_namespace_mutations_batch<S: ObjectStore + ?Sized>(
         store: &S,
         namespace_id: &NamespaceId,
-        candidates: Vec<NamespaceMutationCandidate>,
+        candidates: Vec<MutationCandidate>,
         context: &MutationContext,
     ) -> Vec<Result<loonfs_api::v0::CommitResponse, CoreError>> {
         let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
@@ -211,61 +210,22 @@ pub(crate) mod mutation_split_support {
             .unwrap_or_else(CommitId::generate)
     }
 
-    pub(crate) fn test_display_name(value: impl AsRef<str>) -> DisplayName {
-        DisplayName::parse(value.as_ref()).expect("test display name should be valid")
-    }
-
-    /// Pins the current head and manifest the way the runtime does before a
-    /// read.
-    /// Publishes one path intent through the commit engine — the single publish
-    /// pipeline.
-    pub(crate) async fn admitted_candidate<S: ObjectStore + ?Sized>(
+    /// Publishes one operation as a whole request, which is the shape almost
+    /// every fixture below wants: one operation, one commit id, no message.
+    pub(crate) async fn submit_operation<S: ObjectStore + ?Sized>(
         store: &S,
         namespace_id: &NamespaceId,
-        intent: PathMutationIntent,
-    ) -> NamespaceMutationCandidate {
-        match &intent {
-            PathMutationIntent::PutFile { content_ref, .. } => {
-                let catalog =
-                    loonfs_core::control::load_namespace_catalog_entry(store, namespace_id)
-                        .await
-                        .expect("load namespace catalog");
-                let prepared = prepare_existing_content_ref(store, &catalog, content_ref.clone())
-                    .await
-                    .expect("prepare existing content");
-                NamespaceMutationCandidate::path_prepared(intent, vec![prepared])
-            }
-            _ => NamespaceMutationCandidate::path(intent),
-        }
-    }
-
-    pub(crate) async fn submit_intent_async<S: ObjectStore + ?Sized>(
-        store: &S,
-        namespace_id: &NamespaceId,
-        intent: PathMutationIntent,
+        commit_id: CommitId,
+        operation: FilesystemOperation,
         context: &MutationContext,
     ) -> Result<loonfs_api::CommitResponse, CoreError> {
-        let candidate = admitted_candidate(store, namespace_id, intent).await;
-        NamespaceCommitEngine::new(namespace_id.clone())
-            .publish_batch(
-                store,
-                vec![candidate],
-                context,
-                &PublishTailOptions::default(),
-            )
-            .await
-            .results
-            .pop()
-            .expect("one publish result")
-    }
-
-    pub(crate) async fn submit_intent<S: ObjectStore + ?Sized>(
-        store: &S,
-        namespace_id: &NamespaceId,
-        intent: PathMutationIntent,
-        context: &MutationContext,
-    ) -> Result<loonfs_api::CommitResponse, CoreError> {
-        submit_intent_async(store, namespace_id, intent, context).await
+        submit_mutation(
+            store,
+            namespace_id,
+            MutationRequest::single(commit_id, None, operation),
+            context,
+        )
+        .await
     }
 
     pub(crate) async fn put_file_bytes<S: ObjectStore + ?Sized>(
@@ -278,12 +238,11 @@ pub(crate) mod mutation_split_support {
         commit_id: Option<&str>,
     ) -> Result<loonfs_api::CommitResponse, CoreError> {
         let content = store_bytes_as_content(store, namespace_id, bytes).await?;
-        submit_intent(
+        submit_operation(
             store,
             namespace_id,
-            PathMutationIntent::PutFile {
-                commit_id: test_commit_id(commit_id),
-                message: None,
+            test_commit_id(commit_id),
+            FilesystemOperation::PutFile {
                 absolute_path: AbsolutePath::parse(absolute_path).expect("path"),
                 content_ref: content.content_ref,
                 behavior,
@@ -321,12 +280,11 @@ pub(crate) mod mutation_split_support {
         context: &MutationContext,
         commit_id: Option<&str>,
     ) -> Result<loonfs_api::CommitResponse, CoreError> {
-        submit_intent(
+        submit_operation(
             store,
             namespace_id,
-            PathMutationIntent::CreateDir {
-                commit_id: test_commit_id(commit_id),
-                message: None,
+            test_commit_id(commit_id),
+            FilesystemOperation::CreateDir {
                 absolute_path: AbsolutePath::parse(absolute_path).expect("path"),
                 parents: false,
             },
@@ -355,71 +313,6 @@ pub(crate) mod mutation_split_support {
         namespace_engine(store, namespace_id, &mutation_context())
             .read_file(absolute_path, &context, None)
             .await
-    }
-
-    /// Reads the child's active parent binding, with the generation identity
-    /// (`bind_seq`, `bind_delta_index`) a `BindingIs` precondition pins.
-    ///
-    /// The change feed names the binding — which directory, under which
-    /// spelling, committed at which sequence — but reports semantic events
-    /// without delta positions, so the harness supplies the one position the
-    /// reducer fixes: every binding operation materializes its
-    /// `BindDirentry` as the second delta of its operation group (create is
-    /// allocate + bind [+ first revision], rename is unbind + bind, undelete
-    /// is revoke + bind). These fixtures publish one operation per commit,
-    /// so that is also the position within the commit.
-    pub(crate) async fn current_binding_for_child<S: ObjectStore + ?Sized>(
-        store: &S,
-        namespace_id: &NamespaceId,
-        target_child_inode_id: InodeId,
-    ) -> BindingIdentity {
-        const BIND_DELTA_INDEX: u32 = 1;
-
-        let changes = list_changes_after(store, namespace_id, ChangeSeq(0))
-            .await
-            .expect("read the change feed");
-        let mut binding = None;
-        for change in changes.changes {
-            for event in change.events {
-                let bound = match event {
-                    FilesystemChange::Created {
-                        inode_id,
-                        parent_inode_id,
-                        name,
-                        ..
-                    }
-                    | FilesystemChange::Undeleted {
-                        inode_id,
-                        parent_inode_id,
-                        name,
-                        ..
-                    } => Some((inode_id, parent_inode_id, name)),
-                    FilesystemChange::Moved {
-                        inode_id,
-                        to_parent_inode_id,
-                        to_name,
-                        ..
-                    } => Some((inode_id, to_parent_inode_id, to_name)),
-                    FilesystemChange::ContentChanged { .. } | FilesystemChange::Deleted { .. } => {
-                        None
-                    }
-                };
-                let Some((inode_id, parent_inode_id, name)) = bound else {
-                    continue;
-                };
-                if inode_id != target_child_inode_id {
-                    continue;
-                }
-                binding = Some(BindingIdentity {
-                    parent_inode_id,
-                    name_key: NameKey::for_display_name(&name),
-                    child_inode_id: inode_id,
-                    bind_seq: change.seq,
-                    bind_delta_index: BIND_DELTA_INDEX,
-                });
-            }
-        }
-        binding.expect("the tracked child has an active binding")
     }
 
     #[derive(Debug)]

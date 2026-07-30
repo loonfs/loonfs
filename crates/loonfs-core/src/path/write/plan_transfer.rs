@@ -4,26 +4,20 @@ use super::planning_helpers::ReplaceDestination;
 use super::planning_helpers::{
     publish_binding_is_precondition, publish_child_name_absent_precondition,
     publish_reject_tombstoned_path_ancestor, publish_resolve_parent_directory,
-    publish_resolve_replace_destination, PublishPathPlanningView,
+    publish_resolve_replace_destination, PlannedOperation, PublishPathPlanningView,
 };
+use crate::commit::{CommitOp as ApiCommitOp, CommitPrecondition as ApiCommitPrecondition};
 use crate::error::{CoreError, Result};
 use crate::path::helpers::{ensure_mutation_path, final_component};
-use loonfs_api::{
-    v0::{
-        CommitOp as ApiCommitOp, CommitPrecondition as ApiCommitPrecondition,
-        CommitRequest as ApiCommitRequest,
-    },
-    AbsolutePath, CommitId, DestinationBehavior, InodeKind,
-};
+use loonfs_api::{AbsolutePath, DestinationBehavior, InodeKind};
 use loonfs_objectstore::ObjectStore;
 
 pub(super) async fn plan_publish_move_path<S: ObjectStore + ?Sized>(
     from_path: &AbsolutePath,
     to_path: &AbsolutePath,
     behavior: DestinationBehavior,
-    commit_id: &CommitId,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
-) -> Result<ApiCommitRequest> {
+) -> Result<PlannedOperation> {
     ensure_mutation_path(from_path)?;
     ensure_mutation_path(to_path)?;
     publish_reject_tombstoned_path_ancestor(view, from_path).await?;
@@ -82,21 +76,15 @@ pub(super) async fn plan_publish_move_path<S: ObjectStore + ?Sized>(
     preconditions.push(ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
         inode_id: target_parent,
     });
-    Ok(ApiCommitRequest {
-        commit_id: commit_id.to_owned(),
-        ops,
-        preconditions,
-        message: None,
-    })
+    Ok(PlannedOperation::new(ops, preconditions))
 }
 
 pub(super) async fn plan_publish_copy_file_path<S: ObjectStore + ?Sized>(
     from_path: &AbsolutePath,
     to_path: &AbsolutePath,
     behavior: DestinationBehavior,
-    commit_id: &CommitId,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
-) -> Result<ApiCommitRequest> {
+) -> Result<PlannedOperation> {
     ensure_mutation_path(from_path)?;
     ensure_mutation_path(to_path)?;
     publish_reject_tombstoned_path_ancestor(view, from_path).await?;
@@ -181,10 +169,5 @@ pub(super) async fn plan_publish_copy_file_path<S: ObjectStore + ?Sized>(
     preconditions.push(ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
         inode_id: target_parent,
     });
-    Ok(ApiCommitRequest {
-        commit_id: commit_id.to_owned(),
-        ops,
-        preconditions,
-        message: None,
-    })
+    Ok(PlannedOperation::new(ops, preconditions))
 }

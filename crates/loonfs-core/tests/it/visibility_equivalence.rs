@@ -5,13 +5,13 @@
 //! with one hand-written expectation.
 
 use crate::common::read_context;
-use loonfs_api::v0::{CommitOp, CommitRequest, CommitResponse};
+use loonfs_api::v0::CommitResponse;
 use loonfs_api::{
-    AbsolutePath, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior, DisplayName,
-    InodeId, NamespaceId, PageRequest, RevisionNo,
+    AbsolutePath, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeId,
+    NamespaceId, PageRequest, RevisionNo,
 };
 use loonfs_core::content::{prepare_stored_content, store_bytes_as_content};
-use loonfs_core::publish::{NamespaceMutationCandidate, PathMutationIntent};
+use loonfs_core::publish::{FilesystemOperation, MutationCandidate, MutationRequest};
 use loonfs_core::{
     BootstrapOptions, Error as CoreError, ErrorCode, MetadataReorganizeOutcome, NamespaceEngine,
     RuntimeReadContext,
@@ -54,10 +54,7 @@ impl VisibilityHarness {
         self.engine.namespace_id()
     }
 
-    async fn publish(
-        &self,
-        candidate: NamespaceMutationCandidate,
-    ) -> Result<CommitResponse, CoreError> {
+    async fn publish(&self, candidate: MutationCandidate) -> Result<CommitResponse, CoreError> {
         let mut results = self
             .engine
             .publish_namespace_mutations_batch(vec![candidate])
@@ -66,15 +63,25 @@ impl VisibilityHarness {
         results.pop().expect("one publish result")
     }
 
+    /// Publishes one operation as its own single-operation request, the shape
+    /// every scenario below drives except where it deliberately batches.
+    async fn publish_operation(
+        &self,
+        operation: FilesystemOperation,
+    ) -> Result<CommitResponse, CoreError> {
+        self.publish(MutationCandidate::new(MutationRequest::single(
+            CommitId::generate(),
+            None,
+            operation,
+        )))
+        .await
+    }
+
     async fn create_directory(&self, path: &str) -> Result<CommitResponse, CoreError> {
-        self.publish(NamespaceMutationCandidate::path(
-            PathMutationIntent::CreateDir {
-                commit_id: CommitId::generate(),
-                message: None,
-                absolute_path: AbsolutePath::parse(path).expect("valid path"),
-                parents: false,
-            },
-        ))
+        self.publish_operation(FilesystemOperation::CreateDir {
+            absolute_path: AbsolutePath::parse(path).expect("valid path"),
+            parents: false,
+        })
         .await
     }
 
@@ -93,15 +100,17 @@ impl VisibilityHarness {
                 .await
                 .expect("load namespace catalog");
         let prepared = prepare_stored_content(&catalog, stored).expect("prepare stored content");
-        self.publish(NamespaceMutationCandidate::path_prepared(
-            PathMutationIntent::PutFile {
-                commit_id: CommitId::generate(),
-                message: None,
-                absolute_path: AbsolutePath::parse(path).expect("valid path"),
-                content_ref,
-                behavior,
-                expected_revision_no: None,
-            },
+        self.publish(MutationCandidate::prepared(
+            MutationRequest::single(
+                CommitId::generate(),
+                None,
+                FilesystemOperation::PutFile {
+                    absolute_path: AbsolutePath::parse(path).expect("valid path"),
+                    content_ref,
+                    behavior,
+                    expected_revision_no: None,
+                },
+            ),
             vec![prepared],
         ))
         .await
@@ -112,41 +121,29 @@ impl VisibilityHarness {
         path: &str,
         behavior: DeleteDirectoryBehavior,
     ) -> Result<CommitResponse, CoreError> {
-        self.publish(NamespaceMutationCandidate::path(
-            PathMutationIntent::DeletePath {
-                commit_id: CommitId::generate(),
-                message: None,
-                absolute_path: AbsolutePath::parse(path).expect("valid path"),
-                behavior,
-                expected_inode_id: None,
-            },
-        ))
+        self.publish_operation(FilesystemOperation::DeletePath {
+            absolute_path: AbsolutePath::parse(path).expect("valid path"),
+            behavior,
+            expected_inode_id: None,
+        })
         .await
     }
 
     async fn move_path(&self, from_path: &str, to_path: &str) -> Result<CommitResponse, CoreError> {
-        self.publish(NamespaceMutationCandidate::path(
-            PathMutationIntent::MovePath {
-                commit_id: CommitId::generate(),
-                message: None,
-                from_path: AbsolutePath::parse(from_path).expect("valid source path"),
-                to_path: AbsolutePath::parse(to_path).expect("valid destination path"),
-                behavior: DestinationBehavior::NoReplace,
-            },
-        ))
+        self.publish_operation(FilesystemOperation::MovePath {
+            from_path: AbsolutePath::parse(from_path).expect("valid source path"),
+            to_path: AbsolutePath::parse(to_path).expect("valid destination path"),
+            behavior: DestinationBehavior::NoReplace,
+        })
         .await
     }
 
     async fn copy_file(&self, from_path: &str, to_path: &str) -> Result<CommitResponse, CoreError> {
-        self.publish(NamespaceMutationCandidate::path(
-            PathMutationIntent::CopyFilePath {
-                commit_id: CommitId::generate(),
-                message: None,
-                from_path: AbsolutePath::parse(from_path).expect("valid source path"),
-                to_path: AbsolutePath::parse(to_path).expect("valid destination path"),
-                behavior: DestinationBehavior::NoReplace,
-            },
-        ))
+        self.publish_operation(FilesystemOperation::CopyFilePath {
+            from_path: AbsolutePath::parse(from_path).expect("valid source path"),
+            to_path: AbsolutePath::parse(to_path).expect("valid destination path"),
+            behavior: DestinationBehavior::NoReplace,
+        })
         .await
     }
 
@@ -155,14 +152,10 @@ impl VisibilityHarness {
         path: &str,
         source_revision_no: RevisionNo,
     ) -> Result<CommitResponse, CoreError> {
-        self.publish(NamespaceMutationCandidate::path(
-            PathMutationIntent::RestoreRevision {
-                commit_id: CommitId::generate(),
-                message: None,
-                absolute_path: AbsolutePath::parse(path).expect("valid path"),
-                source_revision_no,
-            },
-        ))
+        self.publish_operation(FilesystemOperation::RestoreRevision {
+            absolute_path: AbsolutePath::parse(path).expect("valid path"),
+            source_revision_no,
+        })
         .await
     }
 
@@ -172,24 +165,24 @@ impl VisibilityHarness {
         deleted_at_seq: ChangeSeq,
         path: &str,
     ) -> Result<CommitResponse, CoreError> {
-        self.publish(NamespaceMutationCandidate::path(
-            PathMutationIntent::Undelete {
-                commit_id: CommitId::generate(),
-                message: None,
-                inode_id,
-                deleted_at_seq,
-                absolute_path: AbsolutePath::parse(path).expect("valid path"),
-            },
-        ))
+        self.publish_operation(FilesystemOperation::Undelete {
+            inode_id,
+            deleted_at_seq,
+            absolute_path: AbsolutePath::parse(path).expect("valid path"),
+        })
         .await
     }
 
-    async fn explicit_commit(&self, ops: Vec<CommitOp>) -> Result<CommitResponse, CoreError> {
-        self.publish(NamespaceMutationCandidate::commit(CommitRequest {
+    /// Publishes several operations as one commit, so later operations in the
+    /// batch resolve against what the earlier ones would persist.
+    async fn batched_commit(
+        &self,
+        operations: Vec<FilesystemOperation>,
+    ) -> Result<CommitResponse, CoreError> {
+        self.publish(MutationCandidate::new(MutationRequest {
             commit_id: CommitId::generate(),
-            ops,
-            preconditions: Vec::new(),
             message: None,
+            operations,
         }))
         .await
     }
@@ -521,30 +514,46 @@ async fn move_across_a_delete_boundary_preserves_visibility_equivalence() {
     let reverse_file = harness.inode_id("/reverse/branch/file.txt").await;
     let safe = harness.inode_id("/safe").await;
 
+    // Operations inside one commit resolve in order, so the move sees what
+    // the delete before it would persist: the whole subtree is gone, and
+    // there is no longer a source path to move out. The failure names the
+    // move as the operation that stopped the commit.
     let rejected = harness
-        .explicit_commit(vec![
-            CommitOp::DeleteSubtree {
-                root_inode_id: reverse,
+        .batched_commit(vec![
+            FilesystemOperation::DeletePath {
+                absolute_path: AbsolutePath::parse("/reverse").expect("valid path"),
+                behavior: DeleteDirectoryBehavior::Recursive,
+                expected_inode_id: None,
             },
-            CommitOp::Rename {
-                inode_id: reverse_branch,
-                new_parent_inode_id: safe,
-                new_display_name: DisplayName::parse("reverse-branch").expect("valid display name"),
+            FilesystemOperation::MovePath {
+                from_path: AbsolutePath::parse("/reverse/branch").expect("valid source path"),
+                to_path: AbsolutePath::parse("/safe/reverse-branch")
+                    .expect("valid destination path"),
+                behavior: DestinationBehavior::NoReplace,
             },
         ])
         .await
         .expect_err("moving out after the ancestor delete must be rejected");
-    assert_eq!(rejected.code(), ErrorCode::TombstoneConflict);
+    assert_eq!(rejected.code(), ErrorCode::PathNotFound);
+    assert_eq!(
+        rejected
+            .details()
+            .expect("a rejected multi-operation commit names its operation")
+            .operation_index,
+        Some(1)
+    );
 
     let deletion = harness
-        .explicit_commit(vec![
-            CommitOp::Rename {
-                inode_id: branch,
-                new_parent_inode_id: safe,
-                new_display_name: DisplayName::parse("branch").expect("valid display name"),
+        .batched_commit(vec![
+            FilesystemOperation::MovePath {
+                from_path: AbsolutePath::parse("/source/branch").expect("valid source path"),
+                to_path: AbsolutePath::parse("/safe/branch").expect("valid destination path"),
+                behavior: DestinationBehavior::NoReplace,
             },
-            CommitOp::DeleteSubtree {
-                root_inode_id: source,
+            FilesystemOperation::DeletePath {
+                absolute_path: AbsolutePath::parse("/source").expect("valid path"),
+                behavior: DeleteDirectoryBehavior::Recursive,
+                expected_inode_id: None,
             },
         ])
         .await

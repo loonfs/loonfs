@@ -1,10 +1,10 @@
 //! Shared publish-planning preconditions and visible-ancestor walks.
 
+use crate::commit::PlannedOp;
+use crate::commit::{CommitOp as ApiCommitOp, CommitPrecondition as ApiCommitPrecondition};
 use crate::error::{CoreError, Result};
 use crate::metadata::{MetadataView, ResolvedVisiblePath, VisiblePathError};
-use loonfs_api::wire::control::HeadState;
 use loonfs_api::{
-    v0::{CommitOp as ApiCommitOp, CommitPrecondition as ApiCommitPrecondition},
     AbsolutePath, DestinationBehavior, DisplayName, InodeId, InodeKind, NameKey, ROOT_INODE_ID,
 };
 use loonfs_objectstore::ObjectStore;
@@ -16,8 +16,38 @@ pub(super) fn is_missing_visible_path(error: &CoreError) -> bool {
     )
 }
 
+/// One filesystem operation compiled into the commit operations it needs,
+/// plus the race checks that must hold before the first of them runs.
+pub(super) struct PlannedOperation {
+    pub(super) ops: Vec<ApiCommitOp>,
+    pub(super) preconditions: Vec<ApiCommitPrecondition>,
+}
+
+impl PlannedOperation {
+    pub(super) fn new(ops: Vec<ApiCommitOp>, preconditions: Vec<ApiCommitPrecondition>) -> Self {
+        Self { ops, preconditions }
+    }
+
+    /// Attaches the operation's race checks to the first commit operation it
+    /// compiles into. They describe the state this operation resolved
+    /// against, which is the state just before that first operation runs.
+    pub(crate) fn into_planned_ops(self) -> Vec<PlannedOp> {
+        let mut preconditions = Some(self.preconditions);
+        self.ops
+            .into_iter()
+            .map(|op| PlannedOp {
+                preconditions: preconditions.take().unwrap_or_default(),
+                op,
+            })
+            .collect()
+    }
+}
+
 pub(super) struct PublishPathPlanningView<'a, 'b, 'store, S: ObjectStore + ?Sized> {
-    pub(super) head: &'a HeadState,
+    /// The next inode id this request has not yet handed out. Operations
+    /// predict the ids of the directories they create from it, in the same
+    /// order the commit plan allocates them.
+    pub(super) next_inode_id: InodeId,
     pub(super) metadata_state: &'a MetadataView<'b, 'store, S>,
 }
 

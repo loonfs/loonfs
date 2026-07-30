@@ -18,7 +18,8 @@
 //! ```no_run
 //! use loonfs_api::{AbsolutePath, CommitId, NamespaceId};
 //! use loonfs_core::publish::{
-//!     NamespaceCommitEngine, NamespaceMutationCandidate, PathMutationIntent, PublishTailOptions,
+//!     FilesystemOperation, MutationRequest, NamespaceCommitEngine, MutationCandidate,
+//!     PublishTailOptions,
 //! };
 //! use loonfs_core::{BootstrapOptions, MutationContext, NamespaceEngine};
 //! use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -41,12 +42,14 @@
 //! let mut publisher = NamespaceCommitEngine::new(namespace);
 //! let _ = publisher.publish_batch(
 //!     &publish_store,
-//!     vec![NamespaceMutationCandidate::path(PathMutationIntent::CreateDir {
-//!         commit_id: CommitId::generate(),
-//!         message: None,
-//!         absolute_path: AbsolutePath::parse("/plans").expect("path"),
-//!         parents: false,
-//!     })],
+//!     vec![MutationCandidate::new(MutationRequest::single(
+//!         CommitId::generate(),
+//!         None,
+//!         FilesystemOperation::CreateDir {
+//!             absolute_path: AbsolutePath::parse("/plans").expect("path"),
+//!             parents: false,
+//!         },
+//!     ))],
 //!     &context,
 //!     &PublishTailOptions::default(),
 //! );
@@ -139,13 +142,13 @@ pub mod control {
 /// publisher, and re-exported as `loonfs::publish` for the server's
 /// filesystem handlers.
 pub mod publish {
-    pub use crate::commit::{CommitHeadPublishError, SemanticMutationIdentity};
+    pub use crate::commit::{CommitHeadPublishError, MutationFingerprint};
     pub use crate::commit_engine::{
-        ContentPreparation, ContentPreparationError, NamespaceCommitEngine,
-        NamespaceCommitEnginePublishResult, NamespaceMutation, NamespaceMutationCandidate,
-        ResultingReadState, SharedWriterSessionState, WalTailPolicy, WriterSessionState,
+        ContentPreparation, ContentPreparationError, MutationCandidate, NamespaceCommitEngine,
+        NamespaceCommitEnginePublishResult, ResultingReadState, SharedWriterSessionState,
+        WalTailPolicy, WriterSessionState,
     };
-    pub use crate::path::write::PathMutationIntent;
+    pub use crate::path::write::{FilesystemOperation, MutationRequest};
     pub use crate::protocol::PublishTailOptions;
     pub use crate::storage::content_admission::PreparedContent;
 }

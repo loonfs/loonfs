@@ -1,11 +1,11 @@
 //! [`FsWriter`]'s path mutations, commits, and the publication pipeline.
 
 use super::core::{BackgroundStepClaim, ReadCore, WriterBits};
-use crate::publish::{NamespaceMutationCandidate, PathMutationIntent, PreparedContent};
+use crate::publish::{FilesystemOperation, MutationCandidate, MutationRequest, PreparedContent};
 use crate::publisher::PublisherRegistry;
 use crate::FsWriter;
 use crate::{
-    ChangeSeq, CommitId, CommitRequest, CommitResponse, ContentRef, CopyOptions, CoreError,
+    ChangeSeq, CommitId, CommitResponse, ContentRef, CopyOptions, CoreError,
     CreateDirectoryOptions, DeleteOptions, InodeId, MaintenanceStepOptions, MoveOptions,
     NamespaceId, PutFileOptions, RestoreRevisionOptions, RevisionNo, UndeleteOptions,
 };
@@ -144,19 +144,19 @@ impl FsWriter {
             ),
         );
         let content_ref = prepared_content.content_ref().clone();
-        self.publish_candidate(
+        self.mutate_prepared(
             namespace_id,
-            NamespaceMutationCandidate::path_prepared(
-                PathMutationIntent::PutFile {
-                    commit_id: options.commit_id.unwrap_or_else(CommitId::generate),
-                    message: options.message.clone(),
+            MutationRequest::single(
+                options.commit_id.unwrap_or_else(CommitId::generate),
+                options.message.clone(),
+                FilesystemOperation::PutFile {
                     absolute_path: loonfs_core::path::parse_mutation_path(absolute_path)?,
                     content_ref,
                     behavior: options.behavior,
                     expected_revision_no: options.expected_revision_no,
                 },
-                vec![prepared_content],
             ),
+            vec![prepared_content],
         )
         .await
     }
@@ -273,14 +273,16 @@ impl FsWriter {
         absolute_path: &str,
         options: CreateDirectoryOptions,
     ) -> Result<CommitResponse> {
-        self.publish_path_intent(
+        self.mutate(
             namespace_id,
-            PathMutationIntent::CreateDir {
-                commit_id: options.commit_id.unwrap_or_else(CommitId::generate),
-                message: options.message.clone(),
-                absolute_path: loonfs_core::path::parse_mutation_path(absolute_path)?,
-                parents: options.parents,
-            },
+            MutationRequest::single(
+                options.commit_id.unwrap_or_else(CommitId::generate),
+                options.message.clone(),
+                FilesystemOperation::CreateDir {
+                    absolute_path: loonfs_core::path::parse_mutation_path(absolute_path)?,
+                    parents: options.parents,
+                },
+            ),
         )
         .await
     }
@@ -297,15 +299,17 @@ impl FsWriter {
         absolute_path: &str,
         options: DeleteOptions,
     ) -> Result<CommitResponse> {
-        self.publish_path_intent(
+        self.mutate(
             namespace_id,
-            PathMutationIntent::DeletePath {
-                commit_id: options.commit_id.unwrap_or_else(CommitId::generate),
-                message: options.message.clone(),
-                absolute_path: loonfs_core::path::parse_mutation_path(absolute_path)?,
-                behavior: options.behavior,
-                expected_inode_id: options.expected_inode_id,
-            },
+            MutationRequest::single(
+                options.commit_id.unwrap_or_else(CommitId::generate),
+                options.message.clone(),
+                FilesystemOperation::DeletePath {
+                    absolute_path: loonfs_core::path::parse_mutation_path(absolute_path)?,
+                    behavior: options.behavior,
+                    expected_inode_id: options.expected_inode_id,
+                },
+            ),
         )
         .await
     }
@@ -318,15 +322,17 @@ impl FsWriter {
         to_path: &str,
         options: MoveOptions,
     ) -> Result<CommitResponse> {
-        self.publish_path_intent(
+        self.mutate(
             namespace_id,
-            PathMutationIntent::MovePath {
-                commit_id: options.commit_id.unwrap_or_else(CommitId::generate),
-                message: options.message.clone(),
-                from_path: loonfs_core::path::parse_mutation_path(from_path)?,
-                to_path: loonfs_core::path::parse_mutation_path(to_path)?,
-                behavior: options.behavior,
-            },
+            MutationRequest::single(
+                options.commit_id.unwrap_or_else(CommitId::generate),
+                options.message.clone(),
+                FilesystemOperation::MovePath {
+                    from_path: loonfs_core::path::parse_mutation_path(from_path)?,
+                    to_path: loonfs_core::path::parse_mutation_path(to_path)?,
+                    behavior: options.behavior,
+                },
+            ),
         )
         .await
     }
@@ -340,15 +346,17 @@ impl FsWriter {
         to_path: &str,
         options: CopyOptions,
     ) -> Result<CommitResponse> {
-        self.publish_path_intent(
+        self.mutate(
             namespace_id,
-            PathMutationIntent::CopyFilePath {
-                commit_id: options.commit_id.unwrap_or_else(CommitId::generate),
-                message: options.message.clone(),
-                from_path: loonfs_core::path::parse_mutation_path(from_path)?,
-                to_path: loonfs_core::path::parse_mutation_path(to_path)?,
-                behavior: options.behavior,
-            },
+            MutationRequest::single(
+                options.commit_id.unwrap_or_else(CommitId::generate),
+                options.message.clone(),
+                FilesystemOperation::CopyFilePath {
+                    from_path: loonfs_core::path::parse_mutation_path(from_path)?,
+                    to_path: loonfs_core::path::parse_mutation_path(to_path)?,
+                    behavior: options.behavior,
+                },
+            ),
         )
         .await
     }
@@ -361,14 +369,16 @@ impl FsWriter {
         source_revision_no: RevisionNo,
         options: RestoreRevisionOptions,
     ) -> Result<CommitResponse> {
-        self.publish_path_intent(
+        self.mutate(
             namespace_id,
-            PathMutationIntent::RestoreRevision {
-                commit_id: options.commit_id.unwrap_or_else(CommitId::generate),
-                message: options.message.clone(),
-                absolute_path: loonfs_core::path::parse_mutation_path(absolute_path)?,
-                source_revision_no,
-            },
+            MutationRequest::single(
+                options.commit_id.unwrap_or_else(CommitId::generate),
+                options.message.clone(),
+                FilesystemOperation::RestoreRevision {
+                    absolute_path: loonfs_core::path::parse_mutation_path(absolute_path)?,
+                    source_revision_no,
+                },
+            ),
         )
         .await
     }
@@ -384,57 +394,54 @@ impl FsWriter {
         absolute_path: &str,
         options: UndeleteOptions,
     ) -> Result<CommitResponse> {
-        self.publish_path_intent(
+        self.mutate(
             namespace_id,
-            PathMutationIntent::Undelete {
-                commit_id: options.commit_id.unwrap_or_else(CommitId::generate),
-                message: options.message.clone(),
-                inode_id,
-                deleted_at_seq,
-                absolute_path: loonfs_core::path::parse_mutation_path(absolute_path)?,
-            },
+            MutationRequest::single(
+                options.commit_id.unwrap_or_else(CommitId::generate),
+                options.message.clone(),
+                FilesystemOperation::Undelete {
+                    inode_id,
+                    deleted_at_seq,
+                    absolute_path: loonfs_core::path::parse_mutation_path(absolute_path)?,
+                },
+            ),
         )
         .await
     }
 
-    /// Submits one explicit semantic commit request.
+    /// Applies one mutation request: its operations commit together, in
+    /// order, under one commit id.
     ///
-    /// This is the lower-level surface for clients that need their own commit
-    /// ids, preconditions, and operation lists. Operations with external
-    /// content refs require [`Self::commit_operations_prepared`].
-    pub async fn commit_operations(
+    /// Each operation resolves against the namespace plus everything the
+    /// operations ahead of it do, so a request can create a directory and
+    /// write into it. Nothing commits unless every operation does, and the
+    /// error of a request that stops names the operation that stopped it.
+    /// Operations that introduce new external content require
+    /// [`Self::mutate_prepared`].
+    pub async fn mutate(
         &self,
         namespace_id: &NamespaceId,
-        request: CommitRequest,
+        request: MutationRequest,
     ) -> Result<CommitResponse> {
-        self.publish_candidate(namespace_id, NamespaceMutationCandidate::commit(request))
+        self.publish_candidate(namespace_id, MutationCandidate::new(request))
             .await
     }
 
-    /// Submits one semantic commit request with prepared content proofs.
+    /// Applies one mutation request with prepared content proofs.
     ///
     /// Submission and publication perform no content I/O. One prepared value
     /// covers every operation that uses its content ref.
-    pub async fn commit_operations_prepared(
+    pub async fn mutate_prepared(
         &self,
         namespace_id: &NamespaceId,
-        request: CommitRequest,
+        request: MutationRequest,
         prepared_content: Vec<PreparedContent>,
     ) -> Result<CommitResponse> {
         self.publish_candidate(
             namespace_id,
-            NamespaceMutationCandidate::commit_prepared(request, prepared_content),
+            MutationCandidate::prepared(request, prepared_content),
         )
         .await
-    }
-
-    async fn publish_path_intent(
-        &self,
-        namespace_id: &NamespaceId,
-        intent: PathMutationIntent,
-    ) -> Result<CommitResponse> {
-        self.publish_candidate(namespace_id, NamespaceMutationCandidate::path(intent))
-            .await
     }
 
     /// Publishes one candidate through the core's publication service (see
@@ -445,7 +452,7 @@ impl FsWriter {
     async fn publish_candidate(
         &self,
         namespace_id: &NamespaceId,
-        candidate: NamespaceMutationCandidate,
+        candidate: MutationCandidate,
     ) -> Result<CommitResponse> {
         self.publisher
             .submit_candidate(namespace_id.clone(), candidate)
@@ -470,7 +477,7 @@ pub(crate) async fn publish_batch_with_engine(
     publisher: Option<&PublisherRegistry>,
     namespace_id: &NamespaceId,
     engine: &mut loonfs_core::publish::NamespaceCommitEngine,
-    candidates: Vec<NamespaceMutationCandidate>,
+    candidates: Vec<MutationCandidate>,
 ) -> Vec<Result<CommitResponse>> {
     let batch_size = u64::try_from(candidates.len()).unwrap_or(u64::MAX);
     let store = core.store();

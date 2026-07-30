@@ -4,7 +4,7 @@
 //! Frozen full-pipeline `GrepService` query semantics and budgets.
 
 use crate::common::{control, grep_with, GrepHost};
-use loonfs::publish::{NamespaceMutationCandidate, PathMutationIntent};
+use loonfs::publish::{FilesystemOperation, MutationCandidate, MutationRequest};
 use loonfs::{
     CommitId, CoreError, CreateDirectoryOptions, CreateNamespaceOptions, DeleteOptions,
     DestinationBehavior, FsAdmin, FsReader, FsWriter, MoveOptions, NamespaceId, PutFileOptions,
@@ -100,16 +100,18 @@ async fn publish_same_content_files(
     let content_ref = prepared.content_ref().clone();
     let candidates = (0..count)
         .map(|index| {
-            NamespaceMutationCandidate::path_prepared(
-                PathMutationIntent::PutFile {
-                    commit_id: CommitId::generate(),
-                    message: None,
-                    absolute_path: AbsolutePath::parse(format!("/{prefix}-{index:04}.txt"))
-                        .expect("batch path"),
-                    content_ref: content_ref.clone(),
-                    behavior: DestinationBehavior::NoReplace,
-                    expected_revision_no: None,
-                },
+            MutationCandidate::prepared(
+                MutationRequest::single(
+                    CommitId::generate(),
+                    None,
+                    FilesystemOperation::PutFile {
+                        absolute_path: AbsolutePath::parse(format!("/{prefix}-{index:04}.txt"))
+                            .expect("batch path"),
+                        content_ref: content_ref.clone(),
+                        behavior: DestinationBehavior::NoReplace,
+                        expected_revision_no: None,
+                    },
+                ),
                 vec![prepared.clone()],
             )
         })

@@ -1,8 +1,8 @@
 //! [`PublishPlanningSession`]: plans a batch's candidates in admission
 //! order, each seeing the rows earlier candidates would persist.
 
-use super::intent::PathMutationIntent;
-use super::planner::{plan_path_mutation_against_publish_view, PlannedPathMutation};
+use super::intent::MutationRequest;
+use super::planner::{plan_mutation_against_publish_view, PlannedMutation};
 use crate::commit::CommitPlan;
 use crate::error::Result;
 use crate::metadata::{DurableVisibilityCache, MetadataState, MetadataView};
@@ -10,6 +10,7 @@ use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::wal::WalCommitPayload;
 #[cfg(test)]
 use loonfs_api::AbsolutePath;
+#[cfg(test)]
 use loonfs_api::NamespaceId;
 use loonfs_objectstore::ObjectStore;
 
@@ -50,15 +51,21 @@ impl PublishPlanningSession {
         &self.durable_cache
     }
 
-    pub(crate) async fn plan_path_mutation<S: ObjectStore + ?Sized>(
+    pub(crate) async fn plan_mutation<S: ObjectStore + ?Sized>(
         &self,
-        namespace_id: &NamespaceId,
-        intent: &PathMutationIntent,
+        request: &MutationRequest,
         base_view: MetadataView<'_, '_, S>,
-    ) -> Result<PlannedPathMutation> {
+        committed_at_ms: u64,
+    ) -> Result<PlannedMutation> {
         let cached_view = base_view.with_durable_cache(&self.durable_cache);
-        let view = cached_view.with_overlay(&self.accepted_rows, self.head.seq);
-        plan_path_mutation_against_publish_view(namespace_id, intent, &self.head, &view).await
+        plan_mutation_against_publish_view(
+            request,
+            &self.head,
+            cached_view,
+            &self.accepted_rows,
+            committed_at_ms,
+        )
+        .await
     }
 
     /// Folds an accepted commit into the session so later candidates in the
@@ -72,8 +79,9 @@ impl PublishPlanningSession {
 
 #[cfg(test)]
 mod tests {
+    use super::super::intent::FilesystemOperation;
     use super::*;
-    use crate::commit_engine::{publish_namespace_mutations_batch, NamespaceMutationCandidate};
+    use crate::commit_engine::{publish_namespace_mutations_batch, MutationCandidate};
     use crate::context::MutationContext;
     use crate::error::{CoreError, ErrorCode};
     use crate::namespace::bootstrap::bootstrap_namespace;
@@ -112,20 +120,22 @@ mod tests {
         absolute_path: &str,
         content_store_id: &loonfs_api::ContentStoreId,
         content_ref: loonfs_api::ContentRef,
-    ) -> NamespaceMutationCandidate {
+    ) -> MutationCandidate {
         let admission = ContentAdmission::for_durable_content_write(
             content_store_id.clone(),
             content_ref.clone(),
         );
-        NamespaceMutationCandidate::path_prepared(
-            PathMutationIntent::PutFile {
-                commit_id: CommitId::parse(commit_id).expect("valid commit id"),
-                message: None,
-                absolute_path: AbsolutePath::parse(absolute_path).expect("path"),
-                content_ref: content_ref.clone(),
-                behavior: DestinationBehavior::NoReplace,
-                expected_revision_no: None,
-            },
+        MutationCandidate::prepared(
+            MutationRequest::single(
+                CommitId::parse(commit_id).expect("valid commit id"),
+                None,
+                FilesystemOperation::PutFile {
+                    absolute_path: AbsolutePath::parse(absolute_path).expect("path"),
+                    content_ref: content_ref.clone(),
+                    behavior: DestinationBehavior::NoReplace,
+                    expected_revision_no: None,
+                },
+            ),
             vec![PreparedContent::from_admission(admission)],
         )
     }
@@ -167,30 +177,34 @@ mod tests {
         .expect("load publish view");
         let session = PublishPlanningSession::new(view.head());
 
-        let first_intent = PathMutationIntent::PutFile {
-            commit_id: CommitId::parse("plan-a").expect("valid commit id"),
-            message: None,
-            absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
-            content_ref: staged.content_ref.clone(),
-            behavior: DestinationBehavior::NoReplace,
-            expected_revision_no: None,
-        };
+        let first_request = MutationRequest::single(
+            CommitId::parse("plan-a").expect("valid commit id"),
+            None,
+            FilesystemOperation::PutFile {
+                absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
+                content_ref: staged.content_ref.clone(),
+                behavior: DestinationBehavior::NoReplace,
+                expected_revision_no: None,
+            },
+        );
         session
-            .plan_path_mutation(&namespace_id, &first_intent, view.metadata_view())
+            .plan_mutation(&first_request, view.metadata_view(), 1)
             .await
             .expect("first plan");
         let after_first = session.durable_cache().stats();
 
-        let second_intent = PathMutationIntent::PutFile {
-            commit_id: CommitId::parse("plan-b").expect("valid commit id"),
-            message: None,
-            absolute_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
-            content_ref: staged.content_ref.clone(),
-            behavior: DestinationBehavior::NoReplace,
-            expected_revision_no: None,
-        };
+        let second_request = MutationRequest::single(
+            CommitId::parse("plan-b").expect("valid commit id"),
+            None,
+            FilesystemOperation::PutFile {
+                absolute_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
+                content_ref: staged.content_ref.clone(),
+                behavior: DestinationBehavior::NoReplace,
+                expected_revision_no: None,
+            },
+        );
         session
-            .plan_path_mutation(&namespace_id, &second_intent, view.metadata_view())
+            .plan_mutation(&second_request, view.metadata_view(), 1)
             .await
             .expect("second plan");
         let after_second = session.durable_cache().stats();
@@ -305,13 +319,15 @@ mod tests {
                     &staged.content_store_id,
                     staged.content_ref.clone(),
                 ),
-                NamespaceMutationCandidate::path(PathMutationIntent::DeletePath {
-                    commit_id: CommitId::parse("delete-doomed").expect("valid commit id"),
-                    message: None,
-                    absolute_path: AbsolutePath::parse("/docs/doomed.txt").expect("path"),
-                    behavior: DeleteDirectoryBehavior::NonRecursive,
-                    expected_inode_id: None,
-                }),
+                MutationCandidate::new(MutationRequest::single(
+                    CommitId::parse("delete-doomed").expect("valid commit id"),
+                    None,
+                    FilesystemOperation::DeletePath {
+                        absolute_path: AbsolutePath::parse("/docs/doomed.txt").expect("path"),
+                        behavior: DeleteDirectoryBehavior::NonRecursive,
+                        expected_inode_id: None,
+                    },
+                )),
             ],
             &context,
         )

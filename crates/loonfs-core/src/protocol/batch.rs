@@ -11,7 +11,7 @@ use crate::commit::{
     publish_commit_head, wal_payload_from_materialized_commit, CommitHeadPublishError,
     MaterializedCommit, PreparedCommit, PreparedCommitHeadPublish, PublishCommitValidationContext,
 };
-use crate::commit_engine::NamespaceMutationCandidate;
+use crate::commit_engine::MutationCandidate;
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result, StoreFailureClass};
 use crate::limits::WAL_PUBLISH_BUDGET_MS;
@@ -77,7 +77,7 @@ pub(crate) async fn publish_namespace_mutations_batch_against_publish_view<
 >(
     store: &S,
     namespace_id: &NamespaceId,
-    candidates: &[NamespaceMutationCandidate],
+    candidates: &[MutationCandidate],
     context: &MutationContext,
     view: &PublishMetadataView<'_, S>,
     timer: &dyn MonotonicTimer,
@@ -117,6 +117,7 @@ pub(crate) async fn publish_namespace_mutations_batch_against_publish_view<
                 &session,
                 candidate,
                 index,
+                context.now_ms,
                 &mut dedup,
             )
             .instrument(tracing::info_span!(
@@ -145,7 +146,7 @@ pub(crate) async fn publish_namespace_mutations_batch_against_publish_view<
             };
             let request = candidate_request.request;
             if let Err(error) =
-                validate_commit_content_references(&request, candidate, view.content_store_id())
+                validate_commit_content_references(candidate, view.content_store_id())
             {
                 outcomes[index] = Some(Err(error));
                 continue;
@@ -163,13 +164,21 @@ pub(crate) async fn publish_namespace_mutations_batch_against_publish_view<
                     }
                 }
             };
+            // One allocator: the planner predicted these ids while resolving
+            // the request's operations, and the plan re-derives them from the
+            // operation list. A disagreement would mean an operation was
+            // parented under an inode nothing creates.
+            debug_assert_eq!(
+                plan.resulting_next_inode_id, candidate_request.predicted_next_inode_id,
+                "planner prediction and commit-plan allocation disagree"
+            );
             let prepared = {
                 let _span = tracing::info_span!("loonfs.phase", phase = "PreparedCommit::prepare")
                     .entered();
-                match PreparedCommit::prepare(
+                match PreparedCommit::new(
                     request,
                     plan.clone(),
-                    candidate_request.identity_source,
+                    candidate_request.semantic_identity,
                 ) {
                     Ok(value) => value,
                     Err(error) => {

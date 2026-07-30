@@ -3,13 +3,13 @@
 use bytes::Bytes;
 use loonfs::content_tokens::ContentTokenError;
 use loonfs::publish::{
-    parse_mutation_path, ContentPreparationError, NamespaceMutation, NamespaceMutationCandidate,
-    PathMutationIntent, PreparedContent,
+    parse_mutation_path, ContentPreparationError, FilesystemOperation, MutationCandidate,
+    MutationRequest, PreparedContent,
 };
 use loonfs::{
-    BeginUploadRequest, CommitId, CommitOp, CommitRequest, CompleteUploadRequest, CoreError,
-    CreateDirectoryOptions, CreateNamespaceOptions, DestinationBehavior, ErrorCode, FsWriter,
-    InodeId, NamespaceId, PutFileOptions, RevisionNo, RuntimeError, SharedObjectStore,
+    BeginUploadRequest, CommitId, CompleteUploadRequest, CoreError, CreateDirectoryOptions,
+    CreateNamespaceOptions, DestinationBehavior, ErrorCode, FsWriter, NamespaceId, PutFileOptions,
+    RevisionNo, RuntimeError, SharedObjectStore,
 };
 use loonfs_api::wire::control::{encode_control_object, ControlObjectKind, HeadStateEnvelope};
 use loonfs_api::ContentStoreId;
@@ -201,15 +201,17 @@ async fn prepare_content(
         .expect("prepare existing content")
 }
 
-fn put_intent(commit_id: &str, path: &str, content_ref: loonfs::ContentRef) -> PathMutationIntent {
-    PathMutationIntent::PutFile {
-        commit_id: CommitId::parse(commit_id).expect("valid commit id"),
-        message: None,
-        absolute_path: parse_mutation_path(path).expect("valid mutation path"),
-        content_ref,
-        behavior: DestinationBehavior::NoReplace,
-        expected_revision_no: None,
-    }
+fn put_request(commit_id: &str, path: &str, content_ref: loonfs::ContentRef) -> MutationRequest {
+    MutationRequest::single(
+        CommitId::parse(commit_id).expect("valid commit id"),
+        None,
+        FilesystemOperation::PutFile {
+            absolute_path: parse_mutation_path(path).expect("valid mutation path"),
+            content_ref,
+            behavior: DestinationBehavior::NoReplace,
+            expected_revision_no: None,
+        },
+    )
 }
 
 fn assert_content_counts(
@@ -601,9 +603,9 @@ async fn plain_path_put_fails_unprepared_without_content_io() {
     let error = harness
         .writer
         .publisher()
-        .submit_path_intent(
+        .submit_mutation(
             harness.namespace_id.clone(),
-            put_intent("plain-unprepared-put", "/file.txt", content_ref.clone()),
+            put_request("plain-unprepared-put", "/file.txt", content_ref.clone()),
         )
         .await
         .expect_err("plain path put must require prepared content");
@@ -613,31 +615,22 @@ async fn plain_path_put_fails_unprepared_without_content_io() {
 }
 
 #[tokio::test]
-async fn commit_operations_with_external_ref_fails_typed_without_content_io() {
+async fn writer_mutate_with_external_ref_fails_typed_without_content_io() {
     let harness = TestHarness::new("create-unprepared").await;
-    let content_ref = harness.stage_content(b"explicit create content").await;
+    let content_ref = harness.stage_content(b"unprepared create content").await;
     harness.recording.reset();
 
-    // Explicit commits use the same in-memory proof coverage as path puts;
-    // publication never rescues an unprepared ref with content I/O.
+    // The writer surface wraps the same in-memory proof coverage the
+    // publisher applies; publication never rescues an unprepared ref with
+    // content I/O, and the caller still receives a typed core error.
     let error = harness
         .writer
-        .commit_operations(
+        .mutate(
             &harness.namespace_id,
-            CommitRequest {
-                commit_id: CommitId::parse("explicit-create").expect("valid commit id"),
-                preconditions: Vec::new(),
-                ops: vec![CommitOp::CreateFile {
-                    parent_inode_id: InodeId(1),
-                    display_name: loonfs_api::DisplayName::parse("file.txt")
-                        .expect("valid display name"),
-                    content_ref: content_ref.clone(),
-                }],
-                message: None,
-            },
+            put_request("mutate-create", "/file.txt", content_ref.clone()),
         )
         .await
-        .expect_err("unprepared explicit create must fail");
+        .expect_err("unprepared create must fail");
 
     assert!(
         matches!(error, RuntimeError::Core(_)),
@@ -651,7 +644,7 @@ async fn commit_operations_with_external_ref_fails_typed_without_content_io() {
 }
 
 #[tokio::test]
-async fn explicit_replace_file_fails_unprepared_without_content_io() {
+async fn replacing_put_fails_unprepared_without_content_io() {
     let harness = TestHarness::new("replace-unprepared").await;
     harness
         .writer
@@ -663,36 +656,31 @@ async fn explicit_replace_file_fails_unprepared_without_content_io() {
         )
         .await
         .expect("seed file");
-    let inode_id = harness
-        .writer
-        .reader()
-        .stat_path(&harness.namespace_id, "/file.txt")
-        .await
-        .expect("stat seeded file")
-        .inode_id;
-    let content_ref = harness.stage_content(b"explicit replacement content").await;
+    let content_ref = harness
+        .stage_content(b"unprepared replacement content")
+        .await;
     harness.recording.reset();
 
-    // The existing inode does not change proof coverage: a replacement's
+    // The existing file does not change proof coverage: a replacement's
     // external ref must already be prepared before publication.
     let error = harness
         .writer
         .publisher()
-        .submit_commit(
+        .submit_mutation(
             harness.namespace_id.clone(),
-            CommitRequest {
-                commit_id: CommitId::parse("explicit-replace").expect("valid commit id"),
-                preconditions: Vec::new(),
-                ops: vec![CommitOp::ReplaceFile {
-                    inode_id,
-                    base_revision_no: RevisionNo(1),
+            MutationRequest::single(
+                CommitId::parse("unprepared-replace").expect("valid commit id"),
+                None,
+                FilesystemOperation::PutFile {
+                    absolute_path: parse_mutation_path("/file.txt").expect("valid mutation path"),
                     content_ref: content_ref.clone(),
-                }],
-                message: None,
-            },
+                    behavior: DestinationBehavior::Replace,
+                    expected_revision_no: None,
+                },
+            ),
         )
         .await
-        .expect_err("unprepared explicit replacement must fail");
+        .expect_err("unprepared replacement must fail");
 
     assert_content_not_prepared(error, &content_ref);
     assert_content_counts(harness.recording.snapshot(), 0, 0, 0, 0);
@@ -727,51 +715,38 @@ async fn prepared_commit_after_concurrent_preparations_uses_no_publication_conte
     let third = prepared[2].content_ref().clone();
     harness.recording.reset();
 
+    // One request, four puts, three distinct refs: two of the puts share a
+    // ref, so one proof covers both.
+    let put = |path: &str, content_ref: loonfs::ContentRef| FilesystemOperation::PutFile {
+        absolute_path: parse_mutation_path(path).expect("valid mutation path"),
+        content_ref,
+        behavior: DestinationBehavior::NoReplace,
+        expected_revision_no: None,
+    };
     harness
         .writer
-        .commit_operations_prepared(
+        .mutate_prepared(
             &harness.namespace_id,
-            CommitRequest {
-                commit_id: CommitId::parse("prepared-explicit-many").expect("valid commit id"),
-                preconditions: Vec::new(),
-                ops: vec![
-                    CommitOp::CreateFile {
-                        parent_inode_id: InodeId(1),
-                        display_name: loonfs_api::DisplayName::parse("first.txt")
-                            .expect("valid display name"),
-                        content_ref: first.clone(),
-                    },
-                    CommitOp::CreateFile {
-                        parent_inode_id: InodeId(1),
-                        display_name: loonfs_api::DisplayName::parse("first-copy.txt")
-                            .expect("valid display name"),
-                        content_ref: first,
-                    },
-                    CommitOp::CreateFile {
-                        parent_inode_id: InodeId(1),
-                        display_name: loonfs_api::DisplayName::parse("second.txt")
-                            .expect("valid display name"),
-                        content_ref: second,
-                    },
-                    CommitOp::CreateFile {
-                        parent_inode_id: InodeId(1),
-                        display_name: loonfs_api::DisplayName::parse("third.txt")
-                            .expect("valid display name"),
-                        content_ref: third,
-                    },
-                ],
+            MutationRequest {
+                commit_id: CommitId::parse("prepared-many-puts").expect("valid commit id"),
                 message: None,
+                operations: vec![
+                    put("/first.txt", first.clone()),
+                    put("/first-copy.txt", first),
+                    put("/second.txt", second),
+                    put("/third.txt", third),
+                ],
             },
             prepared,
         )
         .await
-        .expect("publish prepared explicit commit");
+        .expect("publish prepared multi-operation request");
 
     assert_content_counts(harness.recording.snapshot(), 0, 0, 0, 0);
 }
 
 #[tokio::test]
-async fn explicit_restore_revision_uses_retained_metadata_without_content_io() {
+async fn restore_revision_uses_retained_metadata_without_content_io() {
     let harness = TestHarness::new("restore-retained").await;
     let first = b"first revision";
     harness
@@ -799,34 +774,25 @@ async fn explicit_restore_revision_uses_retained_metadata_without_content_io() {
         )
         .await
         .expect("put second revision");
-    let inode_id = harness
-        .writer
-        .reader()
-        .stat_path(&harness.namespace_id, "/file.txt")
-        .await
-        .expect("stat current file")
-        .inode_id;
     harness.recording.reset();
 
     // Restore resolves content from retained namespace metadata, so
     // re-downloading the retained blob would prove nothing.
     harness
         .writer
-        .commit_operations(
+        .mutate(
             &harness.namespace_id,
-            CommitRequest {
-                commit_id: CommitId::parse("explicit-restore").expect("valid commit id"),
-                preconditions: Vec::new(),
-                ops: vec![CommitOp::RestoreRevision {
-                    inode_id,
+            MutationRequest::single(
+                CommitId::parse("restore-first-revision").expect("valid commit id"),
+                None,
+                FilesystemOperation::RestoreRevision {
+                    absolute_path: parse_mutation_path("/file.txt").expect("valid mutation path"),
                     source_revision_no: RevisionNo(1),
-                    base_revision_no: RevisionNo(2),
-                }],
-                message: None,
-            },
+                },
+            ),
         )
         .await
-        .expect("publish explicit restore");
+        .expect("publish restore");
 
     assert_content_counts(harness.recording.snapshot(), 0, 0, 0, 0);
 }
@@ -856,12 +822,12 @@ async fn put_file_bytes_publishes_without_reading_content() {
 async fn commit_id_replay_performs_no_content_operations() {
     let harness = TestHarness::new("receipt-replay").await;
     let content_ref = harness.stage_content(b"replayed content").await;
-    let intent = put_intent("replayed-put", "/file.txt", content_ref.clone());
+    let intent = put_request("replayed-put", "/file.txt", content_ref.clone());
     let prepared = prepare_content(&harness.store, &harness.namespace_id, &content_ref).await;
     let original = harness
         .writer
         .publisher()
-        .submit_path_intent_with_prepared_content(
+        .submit_mutation_with_prepared_content(
             harness.namespace_id.clone(),
             intent.clone(),
             vec![prepared],
@@ -873,7 +839,7 @@ async fn commit_id_replay_performs_no_content_operations() {
     let replay = harness
         .writer
         .publisher()
-        .submit_path_intent(harness.namespace_id.clone(), intent)
+        .submit_mutation(harness.namespace_id.clone(), intent)
         .await
         .expect("replay put");
 
@@ -885,12 +851,12 @@ async fn commit_id_replay_performs_no_content_operations() {
 async fn rejected_preparation_replays_durable_receipt_without_content_operations() {
     let harness = TestHarness::new("rejected-receipt-replay").await;
     let content_ref = harness.stage_content(b"replayed rejected content").await;
-    let intent = put_intent("rejected-replayed-put", "/file.txt", content_ref.clone());
+    let intent = put_request("rejected-replayed-put", "/file.txt", content_ref.clone());
     let prepared = prepare_content(&harness.store, &harness.namespace_id, &content_ref).await;
     let original = harness
         .writer
         .publisher()
-        .submit_path_intent_with_prepared_content(
+        .submit_mutation_with_prepared_content(
             harness.namespace_id.clone(),
             intent.clone(),
             vec![prepared],
@@ -904,8 +870,8 @@ async fn rejected_preparation_replays_durable_receipt_without_content_operations
         .publisher()
         .submit_candidate(
             harness.namespace_id.clone(),
-            NamespaceMutationCandidate::rejected(
-                NamespaceMutation::Path(intent),
+            MutationCandidate::rejected(
+                intent,
                 ContentPreparationError::ContentToken(ContentTokenError::Expired),
             ),
         )
@@ -920,20 +886,22 @@ async fn rejected_preparation_replays_durable_receipt_without_content_operations
 async fn new_rejected_preparation_fails_before_path_planning_without_content_operations() {
     let harness = TestHarness::new("new-rejected-preparation").await;
     harness.recording.reset();
-    let intent = PathMutationIntent::CreateDir {
-        commit_id: CommitId::parse("new-rejected").expect("valid commit id"),
-        message: None,
-        absolute_path: parse_mutation_path("/missing/child").expect("valid mutation path"),
-        parents: false,
-    };
+    let intent = MutationRequest::single(
+        CommitId::parse("new-rejected").expect("valid commit id"),
+        None,
+        FilesystemOperation::CreateDir {
+            absolute_path: parse_mutation_path("/missing/child").expect("valid mutation path"),
+            parents: false,
+        },
+    );
 
     let error = harness
         .writer
         .publisher()
         .submit_candidate(
             harness.namespace_id.clone(),
-            NamespaceMutationCandidate::rejected(
-                NamespaceMutation::Path(intent),
+            MutationCandidate::rejected(
+                intent,
                 ContentPreparationError::ContentToken(ContentTokenError::Expired),
             ),
         )
@@ -968,7 +936,7 @@ async fn in_flight_duplicate_performs_no_additional_content_operations() {
             .await
             .expect("stage content")
             .content_ref;
-    let intent = put_intent("in-flight-put", "/file.txt", content_ref.clone());
+    let intent = put_request("in-flight-put", "/file.txt", content_ref.clone());
     // Full preparation deliberately costs one content HEAD and one GET; do it
     // before the reset so this phase isolates publication and duplicate join.
     let prepared = prepare_content(&store, &namespace_id, &content_ref).await;
@@ -982,7 +950,7 @@ async fn in_flight_duplicate_performs_no_additional_content_operations() {
         let prepared = prepared.clone();
         tokio::spawn(async move {
             registry
-                .submit_path_intent_with_prepared_content(namespace_id, intent, vec![prepared])
+                .submit_mutation_with_prepared_content(namespace_id, intent, vec![prepared])
                 .await
         })
     };
@@ -991,7 +959,7 @@ async fn in_flight_duplicate_performs_no_additional_content_operations() {
     assert_content_counts(primary_counts, 0, 0, 0, 0);
 
     let registry = writer.publisher();
-    let mut duplicate = Box::pin(registry.submit_path_intent_with_prepared_content(
+    let mut duplicate = Box::pin(registry.submit_mutation_with_prepared_content(
         namespace_id.clone(),
         intent,
         vec![prepared],
@@ -1037,7 +1005,7 @@ async fn stale_head_retry_preserves_content_admission() {
             .await
             .expect("stage content")
             .content_ref;
-    let intent = put_intent("retry-put", "/file.txt", content_ref.clone());
+    let intent = put_request("retry-put", "/file.txt", content_ref.clone());
     // Full preparation deliberately costs one content HEAD and one GET; do it
     // before the reset so this phase isolates publication retries.
     let prepared = prepare_content(&store, &namespace_id, &content_ref).await;
@@ -1046,7 +1014,7 @@ async fn stale_head_retry_preserves_content_admission() {
 
     writer
         .publisher()
-        .submit_path_intent_with_prepared_content(namespace_id, intent, vec![prepared])
+        .submit_mutation_with_prepared_content(namespace_id, intent, vec![prepared])
         .await
         .expect("publish after stale-head retry");
 
@@ -1084,14 +1052,17 @@ async fn mixed_batch_publishes_admitted_put_and_rejects_unprepared_put_without_c
         let namespace_id = namespace_id.clone();
         tokio::spawn(async move {
             registry
-                .submit_path_intent(
+                .submit_mutation(
                     namespace_id,
-                    PathMutationIntent::CreateDir {
-                        commit_id: CommitId::parse("mixed-blocker").expect("valid commit id"),
-                        message: None,
-                        absolute_path: parse_mutation_path("/hold").expect("valid mutation path"),
-                        parents: false,
-                    },
+                    MutationRequest::single(
+                        CommitId::parse("mixed-blocker").expect("valid commit id"),
+                        None,
+                        FilesystemOperation::CreateDir {
+                            absolute_path: parse_mutation_path("/hold")
+                                .expect("valid mutation path"),
+                            parents: false,
+                        },
+                    ),
                 )
                 .await
         })
@@ -1099,18 +1070,18 @@ async fn mixed_batch_publishes_admitted_put_and_rejects_unprepared_put_without_c
     blocking.wait_until_blocked().await;
 
     let registry = writer.publisher();
-    let mut admitted = Box::pin(registry.submit_path_intent_with_prepared_content(
+    let mut admitted = Box::pin(registry.submit_mutation_with_prepared_content(
         namespace_id.clone(),
-        put_intent("mixed-admitted", "/admitted.txt", content_ref.clone()),
+        put_request("mixed-admitted", "/admitted.txt", content_ref.clone()),
         vec![prepared],
     ));
     assert!(
         futures::poll!(admitted.as_mut()).is_pending(),
         "admitted put must queue behind the blocked publication"
     );
-    let mut unprepared = Box::pin(registry.submit_path_intent(
+    let mut unprepared = Box::pin(registry.submit_mutation(
         namespace_id.clone(),
-        put_intent("mixed-unprepared", "/unprepared.txt", content_ref.clone()),
+        put_request("mixed-unprepared", "/unprepared.txt", content_ref.clone()),
     ));
     assert!(
         futures::poll!(unprepared.as_mut()).is_pending(),

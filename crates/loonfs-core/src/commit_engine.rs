@@ -3,18 +3,18 @@
 //! candidate.
 
 use crate::checkpoint::MetadataTableCache;
-use crate::commit::{core_commit_fingerprint_for_v0_request, SemanticMutationIdentity};
+use crate::commit::MutationFingerprint;
 use crate::context::MutationContext;
 use crate::error::{CoreError, MetadataViewError, Result, WriterFence};
 use crate::metadata::MetadataState;
 use crate::namespace::basis::MetadataBasis;
 use crate::namespace::writer_epoch::acquire_writer_epoch;
 use crate::options::DeleteNamespaceOptions;
-use crate::path::write::{path_intent_fingerprint, PathMutationIntent};
+use crate::path::write::{mutation_fingerprint, FilesystemOperation, MutationRequest};
 use crate::protocol::{load_publish_metadata_view, PublishTailOptions, PublishTailProjection};
 use crate::storage::content_admission::{ContentAdmission, ContentTokenError, PreparedContent};
 use crate::timing::{MonotonicTimer, StdMonotonicTimer};
-use loonfs_api::v0::{CommitRequest as ApiCommitRequest, CommitResponse as ApiCommitResponse};
+use loonfs_api::v0::CommitResponse as ApiCommitResponse;
 use loonfs_api::wire::control::{AcquiredWriter, HeadState};
 use loonfs_api::{ChangeSeq, CommitId, DeleteNamespaceResponse, ManifestId, NamespaceId};
 use loonfs_objectstore::ObjectStore;
@@ -25,16 +25,9 @@ use thiserror::Error;
 /// One namespace mutation together with the result of preparing any content
 /// it references.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NamespaceMutationCandidate {
-    mutation: NamespaceMutation,
+pub struct MutationCandidate {
+    request: MutationRequest,
     content: ContentPreparation,
-}
-
-/// The semantic mutation carried by a publication candidate.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum NamespaceMutation {
-    Commit(ApiCommitRequest),
-    Path(PathMutationIntent),
 }
 
 /// The result of preparing external content referenced by a mutation.
@@ -56,20 +49,19 @@ pub enum ContentPreparationError {
     ContentNotPrepared { content_ref_digest: String },
 }
 
-impl NamespaceMutationCandidate {
-    /// Wraps an explicit semantic commit with no attached content proofs.
-    pub fn commit(request: ApiCommitRequest) -> Self {
+impl MutationCandidate {
+    /// Wraps a mutation request with no attached content proofs.
+    pub fn new(request: MutationRequest) -> Self {
         Self {
-            mutation: NamespaceMutation::Commit(request),
+            request,
             content: ContentPreparation::Ready(Vec::new()),
         }
     }
 
-    /// Wraps an explicit semantic commit with opaque proofs for its prepared
-    /// content.
-    pub fn commit_prepared(request: ApiCommitRequest, content: Vec<PreparedContent>) -> Self {
+    /// Wraps a mutation request with opaque proofs for its prepared content.
+    pub fn prepared(request: MutationRequest, content: Vec<PreparedContent>) -> Self {
         Self {
-            mutation: NamespaceMutation::Commit(request),
+            request,
             content: ContentPreparation::Ready(
                 content
                     .into_iter()
@@ -79,78 +71,40 @@ impl NamespaceMutationCandidate {
         }
     }
 
-    /// Wraps a path mutation with no attached content proofs.
-    pub fn path(intent: PathMutationIntent) -> Self {
+    /// Wraps a mutation request whose content preparation failed.
+    pub fn rejected(request: MutationRequest, error: ContentPreparationError) -> Self {
         Self {
-            mutation: NamespaceMutation::Path(intent),
-            content: ContentPreparation::Ready(Vec::new()),
-        }
-    }
-
-    /// Wraps a path mutation with opaque proofs for its prepared content.
-    pub fn path_prepared(intent: PathMutationIntent, content: Vec<PreparedContent>) -> Self {
-        Self {
-            mutation: NamespaceMutation::Path(intent),
-            content: ContentPreparation::Ready(
-                content
-                    .into_iter()
-                    .map(PreparedContent::into_admission)
-                    .collect(),
-            ),
-        }
-    }
-
-    /// Wraps a semantic mutation whose content preparation failed.
-    pub fn rejected(mutation: NamespaceMutation, error: ContentPreparationError) -> Self {
-        Self {
-            mutation,
+            request,
             content: ContentPreparation::Rejected(error),
         }
     }
 
-    pub(crate) fn mutation(&self) -> &NamespaceMutation {
-        &self.mutation
+    pub(crate) fn request(&self) -> &MutationRequest {
+        &self.request
     }
 
     pub(crate) fn content_preparation(&self) -> &ContentPreparation {
         &self.content
     }
 
-    /// Returns the idempotency key carried by the semantic mutation.
+    /// Returns the idempotency key carried by the mutation request.
     pub fn commit_id(&self) -> &CommitId {
-        match &self.mutation {
-            NamespaceMutation::Commit(request) => &request.commit_id,
-            NamespaceMutation::Path(intent) => intent.commit_id(),
-        }
+        &self.request.commit_id
     }
 
-    /// Computes semantic identity from the mutation alone, without applying
+    /// Computes semantic identity from the request alone, without applying
     /// current operational request limits.
-    pub fn semantic_identity(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<SemanticMutationIdentity> {
-        match &self.mutation {
-            NamespaceMutation::Commit(request) => {
-                core_commit_fingerprint_for_v0_request(namespace_id, request)
-                    .map(SemanticMutationIdentity::CoreCommit)
-                    .map_err(|err| {
-                        CoreError::Internal(format!("failed to fingerprint commit request: {err}"))
-                    })
-            }
-            NamespaceMutation::Path(intent) => path_intent_fingerprint(namespace_id, intent)
-                .map(SemanticMutationIdentity::PathIntent),
-        }
+    pub fn semantic_identity(&self, namespace_id: &NamespaceId) -> Result<MutationFingerprint> {
+        mutation_fingerprint(namespace_id, &self.request)
     }
 
     pub(crate) fn validate_request_limits(&self) -> Result<()> {
-        let NamespaceMutation::Commit(request) = &self.mutation else {
-            return Ok(());
-        };
-        if request.ops.len() > crate::limits::MAX_COMMIT_OPERATIONS {
+        // The ceilings apply to the request as a whole: a batch occupies the
+        // serialized publisher for as long as all of its operations take.
+        if self.request.operations.len() > crate::limits::MAX_COMMIT_OPERATIONS {
             return Err(CoreError::InvalidCommitRequest(format!(
-                "commit has {} operations; maximum is {}",
-                request.ops.len(),
+                "mutation has {} operations; maximum is {}",
+                self.request.operations.len(),
                 crate::limits::MAX_COMMIT_OPERATIONS
             )));
         }
@@ -160,23 +114,23 @@ impl NamespaceMutationCandidate {
         };
         if prepared_count > crate::limits::MAX_COMMIT_CONTENT_TOKENS {
             return Err(CoreError::InvalidCommitRequest(format!(
-                "commit has {prepared_count} prepared content proofs; maximum is {}",
+                "mutation has {prepared_count} prepared content proofs; maximum is {}",
                 crate::limits::MAX_COMMIT_CONTENT_TOKENS
             )));
         }
-        let distinct_content_refs = request
-            .ops
+        let distinct_content_refs = self
+            .request
+            .operations
             .iter()
-            .filter_map(|op| match op {
-                loonfs_api::v0::CommitOp::CreateFile { content_ref, .. }
-                | loonfs_api::v0::CommitOp::ReplaceFile { content_ref, .. } => Some(content_ref),
+            .filter_map(|operation| match operation {
+                FilesystemOperation::PutFile { content_ref, .. } => Some(content_ref),
                 _ => None,
             })
             .collect::<HashSet<_>>()
             .len();
         if distinct_content_refs > crate::limits::MAX_COMMIT_EXTERNAL_CONTENT_REFS {
             return Err(CoreError::InvalidCommitRequest(format!(
-                "commit references {distinct_content_refs} distinct external content refs; maximum is {}",
+                "mutation references {distinct_content_refs} distinct external content refs; maximum is {}",
                 crate::limits::MAX_COMMIT_EXTERNAL_CONTENT_REFS
             )));
         }
@@ -401,7 +355,7 @@ impl NamespaceCommitEngine {
     pub async fn publish_batch<S: ObjectStore + ?Sized>(
         &mut self,
         store: &S,
-        candidates: Vec<NamespaceMutationCandidate>,
+        candidates: Vec<MutationCandidate>,
         context: &MutationContext,
         tail_options: &PublishTailOptions,
     ) -> NamespaceCommitEnginePublishResult {
@@ -546,7 +500,7 @@ fn repeated_error(count: usize, error: CoreError) -> Vec<Result<ApiCommitRespons
 pub(crate) async fn publish_namespace_mutations_batch<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    candidates: Vec<NamespaceMutationCandidate>,
+    candidates: Vec<MutationCandidate>,
     context: &MutationContext,
 ) -> Vec<Result<ApiCommitResponse>> {
     let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
@@ -577,7 +531,7 @@ mod tests {
     use crate::namespace::bootstrap::bootstrap_namespace;
     use crate::namespace::control::read_head_object;
     use futures::StreamExt;
-    use loonfs_api::{ChangeSeq, ContentRef, ContentStoreId, InodeId, WriterEpoch};
+    use loonfs_api::{ChangeSeq, ContentRef, ContentStoreId, WriterEpoch};
     use loonfs_objectstore::keys::wal_segment_prefix;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::ObjectStore;
@@ -592,18 +546,25 @@ mod tests {
         }
     }
 
+    fn create_dir_request(commit_id: &str, name: &str) -> MutationRequest {
+        MutationRequest::single(
+            CommitId::parse(commit_id).expect("valid commit id"),
+            None,
+            FilesystemOperation::CreateDir {
+                absolute_path: loonfs_api::AbsolutePath::parse(format!("/{name}"))
+                    .expect("valid path"),
+                parents: false,
+            },
+        )
+    }
+
     #[test]
     fn semantic_identity_excludes_content_preparation() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let intent = PathMutationIntent::CreateDir {
-            commit_id: CommitId::parse("same-mutation").expect("valid commit id"),
-            message: None,
-            absolute_path: loonfs_api::AbsolutePath::parse("/docs").expect("path"),
-            parents: false,
-        };
-        let ready = NamespaceMutationCandidate::path(intent.clone());
-        let rejected = NamespaceMutationCandidate::rejected(
-            NamespaceMutation::Path(intent),
+        let request = create_dir_request("same-mutation", "docs");
+        let ready = MutationCandidate::new(request.clone());
+        let rejected = MutationCandidate::rejected(
+            request,
             ContentPreparationError::ContentToken(ContentTokenError::Expired),
         );
 
@@ -616,17 +577,16 @@ mod tests {
     #[test]
     fn semantic_identity_ignores_current_request_limits() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let oversized_ops = NamespaceMutationCandidate::commit(ApiCommitRequest {
+        let oversized_ops = MutationCandidate::new(MutationRequest {
             commit_id: CommitId::parse("too-many-ops").expect("valid commit id"),
-            preconditions: Vec::new(),
-            ops: (0..=crate::limits::MAX_COMMIT_OPERATIONS)
-                .map(|index| loonfs_api::v0::CommitOp::CreateDirectory {
-                    parent_inode_id: InodeId(1),
-                    display_name: loonfs_api::DisplayName::parse(format!("dir-{index}"))
-                        .expect("valid display name"),
+            message: None,
+            operations: (0..=crate::limits::MAX_COMMIT_OPERATIONS)
+                .map(|index| FilesystemOperation::CreateDir {
+                    absolute_path: loonfs_api::AbsolutePath::parse(format!("/dir-{index}"))
+                        .expect("valid path"),
+                    parents: false,
                 })
                 .collect(),
-            message: None,
         });
         oversized_ops
             .semantic_identity(&namespace_id)
@@ -638,17 +598,8 @@ mod tests {
             content_ref,
         );
         let prepared = PreparedContent::from_admission(admission);
-        let oversized_proofs = NamespaceMutationCandidate::commit_prepared(
-            ApiCommitRequest {
-                commit_id: CommitId::parse("too-many-proofs").expect("valid commit id"),
-                preconditions: Vec::new(),
-                ops: vec![loonfs_api::v0::CommitOp::CreateDirectory {
-                    parent_inode_id: InodeId(1),
-                    display_name: loonfs_api::DisplayName::parse("docs")
-                        .expect("valid display name"),
-                }],
-                message: None,
-            },
+        let oversized_proofs = MutationCandidate::prepared(
+            create_dir_request("too-many-proofs", "docs"),
             vec![prepared; crate::limits::MAX_COMMIT_CONTENT_TOKENS + 1],
         );
         oversized_proofs
@@ -656,17 +607,45 @@ mod tests {
             .expect("prepared proof limits must not affect identity");
     }
 
-    fn create_dir(commit_id: &str, display_name: &str) -> NamespaceMutationCandidate {
-        NamespaceMutationCandidate::commit(ApiCommitRequest {
-            commit_id: CommitId::parse(commit_id).expect("valid commit id"),
-            preconditions: Vec::new(),
-            ops: vec![loonfs_api::v0::CommitOp::CreateDirectory {
-                parent_inode_id: InodeId(1),
-                display_name: loonfs_api::DisplayName::parse(display_name)
-                    .expect("valid display name"),
-            }],
+    /// A batch past the operation ceiling is refused before it can occupy
+    /// the publisher.
+    #[test]
+    fn a_batch_past_the_operation_ceiling_is_rejected() {
+        let oversized = MutationCandidate::new(MutationRequest {
+            commit_id: CommitId::parse("oversized-batch").expect("valid commit id"),
             message: None,
-        })
+            operations: (0..=crate::limits::MAX_COMMIT_OPERATIONS)
+                .map(|index| FilesystemOperation::CreateDir {
+                    absolute_path: loonfs_api::AbsolutePath::parse(format!("/dir-{index}"))
+                        .expect("valid path"),
+                    parents: false,
+                })
+                .collect(),
+        });
+
+        let error = oversized
+            .validate_request_limits()
+            .expect_err("the batch is over the operation ceiling");
+        assert_eq!(error.code(), ErrorCode::InvalidRequest);
+
+        let at_ceiling = MutationCandidate::new(MutationRequest {
+            commit_id: CommitId::parse("largest-batch").expect("valid commit id"),
+            message: None,
+            operations: (0..crate::limits::MAX_COMMIT_OPERATIONS)
+                .map(|index| FilesystemOperation::CreateDir {
+                    absolute_path: loonfs_api::AbsolutePath::parse(format!("/dir-{index}"))
+                        .expect("valid path"),
+                    parents: false,
+                })
+                .collect(),
+        });
+        at_ceiling
+            .validate_request_limits()
+            .expect("a batch at the ceiling is admitted");
+    }
+
+    fn create_dir(commit_id: &str, display_name: &str) -> MutationCandidate {
+        MutationCandidate::new(create_dir_request(commit_id, display_name))
     }
 
     async fn wal_segment_count(store: &LocalFsStore, namespace_id: &NamespaceId) -> usize {
