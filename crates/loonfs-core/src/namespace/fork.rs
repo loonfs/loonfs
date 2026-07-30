@@ -89,7 +89,6 @@ pub(crate) async fn fork_namespace<S: ObjectStore + ?Sized>(
         writer_epoch: WriterEpoch(0),
         writer: Some(WriterBlock {
             writer_id: context.writer_id.clone(),
-            writer_session_id: context.writer_session_id.clone(),
             acquired_at_ms: context.now_ms,
         }),
         next_inode_id: source_manifest.payload.next_inode_id,

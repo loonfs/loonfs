@@ -51,7 +51,7 @@ fn config() -> GcConfig {
 }
 
 fn context(now_ms: u64) -> MutationContext {
-    mutation_context("gc-test", "wrs_gc_test", now_ms)
+    mutation_context("gc-test", now_ms)
 }
 
 /// The durable lifecycle of one checkpoint record, stamp included.

@@ -230,7 +230,6 @@ mod tests {
             writer_epoch: WriterEpoch(1),
             writer: Some(WriterBlock {
                 writer_id: "writer-a".to_owned(),
-                writer_session_id: "wrs_test".to_owned(),
                 acquired_at_ms: 1_000,
             }),
             next_inode_id: InodeId(10),
@@ -269,8 +268,6 @@ mod tests {
                     semantic_commit_fingerprint: format!("fingerprint-{index}"),
                     committed_at_ms: 4_200,
                     message: None,
-                    writer_id: "publish-test-writer".to_owned(),
-                    writer_session_id: "wrs_publish_test".to_owned(),
                     deltas: Vec::new(),
                 }
             })

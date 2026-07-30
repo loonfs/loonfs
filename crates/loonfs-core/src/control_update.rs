@@ -14,10 +14,13 @@ use loonfs_objectstore::{ObjectMetadata, ObjectStore, ObjectStoreError};
 use std::future::Future;
 use thiserror::Error;
 
+/// The head a closure wants installed, plus what the caller receives once
+/// the compare-and-swap lands. Every head update replaces: a closure that
+/// must not write errors instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum HeadUpdate<T> {
-    Noop(T),
-    Replace { next: Box<HeadState>, outcome: T },
+pub(crate) struct HeadReplacement<T> {
+    pub(crate) next: Box<HeadState>,
+    pub(crate) outcome: T,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,8 +52,8 @@ pub(crate) enum ControlUpdateError {
     RetryExhausted { attempts: usize },
 }
 
-/// Reads the head, lets `update` decide `Noop` or `Replace`, and publishes a
-/// replacement by compare-and-swap on the loaded etag, retrying the whole
+/// Reads the head, lets `update` build the replacement, and publishes it by
+/// compare-and-swap on the loaded etag, retrying the whole
 /// read-decide-swap cycle on CAS conflict. Closure errors propagate
 /// immediately without retrying — that is the fencing hook: a closure that
 /// observes a disqualifying head (newer writer, changed manifest) must error,
@@ -64,7 +67,7 @@ pub(crate) async fn update_head<S, T, E, F>(
 where
     S: ObjectStore + ?Sized,
     E: From<ControlUpdateError>,
-    F: FnMut(&LoadedHeadObject) -> Result<HeadUpdate<T>, E>,
+    F: FnMut(&LoadedHeadObject) -> Result<HeadReplacement<T>, E>,
 {
     for _attempt in 0..max_attempts {
         let loaded = read_head_object(store, namespace_id)
@@ -72,25 +75,21 @@ where
             .map_err(|error| E::from(ControlUpdateError::LoadHead(error)))?;
         let expected_etag = required_etag(&loaded.metadata, &loaded.object_key).map_err(E::from)?;
 
-        match update(&loaded)? {
-            HeadUpdate::Noop(outcome) => return Ok(outcome),
-            HeadUpdate::Replace { next, outcome } => {
-                let encoded = encode_head(*next, &loaded.object_key).map_err(E::from)?;
-                match store
-                    .compare_and_swap(&loaded.object_key, expected_etag, Bytes::from(encoded))
-                    .await
-                {
-                    Ok(_) => return Ok(outcome),
-                    Err(ObjectStoreError::PreconditionFailed { .. }) => {
-                        continue;
-                    }
-                    Err(error) => {
-                        return Err(E::from(ControlUpdateError::Store {
-                            object_key: loaded.object_key,
-                            message: error.to_string(),
-                        }))
-                    }
-                }
+        let HeadReplacement { next, outcome } = update(&loaded)?;
+        let encoded = encode_head(*next, &loaded.object_key).map_err(E::from)?;
+        match store
+            .compare_and_swap(&loaded.object_key, expected_etag, Bytes::from(encoded))
+            .await
+        {
+            Ok(_) => return Ok(outcome),
+            Err(ObjectStoreError::PreconditionFailed { .. }) => {
+                continue;
+            }
+            Err(error) => {
+                return Err(E::from(ControlUpdateError::Store {
+                    object_key: loaded.object_key,
+                    message: error.to_string(),
+                }))
             }
         }
     }
@@ -276,35 +275,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_head_noop_returns_without_writing() {
-        let temp_dir = tempdir().expect("tempdir");
-        let store = LocalFsStore::new(temp_dir.path()).expect("store");
-        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        write_initial_head(&store, &namespace_id).await;
-        let before = store
-            .head(&wal_head(namespace_id.as_str()))
-            .await
-            .expect("head")
-            .expect("head exists")
-            .etag;
-
-        let outcome = update_head(&store, &namespace_id, 3, |_loaded| {
-            Ok::<_, ControlUpdateError>(HeadUpdate::Noop("unchanged"))
-        })
-        .await
-        .expect("noop update");
-
-        let after = store
-            .head(&wal_head(namespace_id.as_str()))
-            .await
-            .expect("head")
-            .expect("head exists")
-            .etag;
-        assert_eq!(outcome, "unchanged");
-        assert_eq!(after, before);
-    }
-
-    #[tokio::test]
     async fn update_head_retries_cas_conflict_and_succeeds() {
         let temp_dir = tempdir().expect("tempdir");
         let inner = LocalFsStore::new(temp_dir.path()).expect("store");
@@ -321,7 +291,7 @@ mod tests {
         let outcome = update_head(&store, &namespace_id, 3, |loaded| {
             let mut next = loaded.envelope.state.clone();
             next.seq.0 += 1;
-            Ok::<_, ControlUpdateError>(HeadUpdate::Replace {
+            Ok::<_, ControlUpdateError>(HeadReplacement {
                 next: Box::new(next),
                 outcome: "updated",
             })
@@ -342,9 +312,12 @@ mod tests {
         let store = MetadataMapStore::without_etag(inner, KeyPredicate::any());
 
         let closure_called = AtomicBool::new(false);
-        let error = update_head(&store, &namespace_id, 3, |_loaded| {
+        let error = update_head(&store, &namespace_id, 3, |loaded| {
             closure_called.store(true, Ordering::SeqCst);
-            Ok::<_, ControlUpdateError>(HeadUpdate::Noop(()))
+            Ok::<_, ControlUpdateError>(HeadReplacement {
+                next: Box::new(loaded.envelope.state.clone()),
+                outcome: (),
+            })
         })
         .await
         .expect_err("missing etag should fail");

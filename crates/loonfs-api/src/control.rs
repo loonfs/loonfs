@@ -242,13 +242,14 @@ pub struct WalSegmentPointer {
 /// authority is `writer_epoch` + CAS; nothing may consult this block for
 /// commit validity, takeover permission, or expiry, and no wall-clock
 /// comparison may gate a publish.
+///
+/// There is no session identity here: two runs of the same writer are told
+/// apart by `acquired_at_ms`, not by an id.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WriterBlock {
     /// Stable writer label supplied by the embedding process for diagnostics.
     pub writer_id: String,
-    /// Per-session generated identity that distinguishes restarts of the same writer.
-    pub writer_session_id: String,
     /// Unix-millisecond stamp of the successful epoch-acquisition CAS.
     pub acquired_at_ms: u64,
 }
@@ -260,8 +261,6 @@ pub struct WriterBlock {
 pub struct AcquiredWriter {
     /// Stable writer label copied into the head's observability block.
     pub writer_id: String,
-    /// Per-session identity used to recognize an already-acquired head.
-    pub writer_session_id: String,
     /// Fencing epoch every commit publication from this session must match.
     pub writer_epoch: WriterEpoch,
 }

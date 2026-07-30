@@ -13,14 +13,9 @@ use loonfs_core::{MutationContext, NamespaceEngine, RuntimeReadContext};
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
 
-pub(crate) fn mutation_context(
-    writer_id: &str,
-    writer_session_id: &str,
-    now_ms: u64,
-) -> MutationContext {
+pub(crate) fn mutation_context(writer_id: &str, now_ms: u64) -> MutationContext {
     MutationContext {
         writer_id: writer_id.to_owned(),
-        writer_session_id: writer_session_id.to_owned(),
         now_ms,
     }
 }
@@ -33,7 +28,6 @@ pub(crate) fn namespace_engine<'a, S: ObjectStore + ?Sized>(
     NamespaceEngine::builder(store)
         .namespace_id(namespace_id.clone())
         .writer_id(context.writer_id.clone())
-        .writer_session_id(context.writer_session_id.clone())
         .build()
         .expect("build namespace engine")
 }
@@ -581,7 +575,7 @@ pub(crate) mod mutation_split_support {
     }
 
     pub(crate) fn mutation_context() -> MutationContext {
-        super::mutation_context("writer-a", "wrs_test", 1_000)
+        super::mutation_context("writer-a", 1_000)
     }
 
     pub(crate) fn content_ref(seed: &str) -> ContentRef {

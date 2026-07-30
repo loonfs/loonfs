@@ -21,11 +21,6 @@ pub(crate) fn wal_payload_from_materialized_commit(
         semantic_commit_fingerprint: prepared.semantic_identity.as_str().to_owned(),
         committed_at_ms: commit.committed_at_ms,
         message: prepared.request.message.clone(),
-        // Observational identity, like `committed_at_ms`: recorded for
-        // history, excluded from the semantic fingerprint, so replay
-        // identity is untouched by which process replays.
-        writer_id: prepared.request.writer_id.clone(),
-        writer_session_id: prepared.request.writer_session_id.clone(),
         deltas: commit
             .deltas
             .iter()
@@ -52,8 +47,6 @@ mod tests {
         let request = CommitRequest {
             namespace_id: namespace_id.clone(),
             commit_id: CommitId::parse("c_wal_payload").expect("valid commit id"),
-            writer_id: "writer-a".to_owned(),
-            writer_session_id: "wrs_test".to_owned(),
             writer_epoch: WriterEpoch(1),
             ops: vec![CommitOp::CreateDirectory {
                 parent_inode_id: InodeId(1),

@@ -387,8 +387,6 @@ mod tests {
         CommitRequest {
             namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
             commit_id: CommitId::parse("commit-a").expect("valid commit id"),
-            writer_id: "writer-a".to_owned(),
-            writer_session_id: "wrs_test".to_owned(),
             writer_epoch,
             ops: vec![CommitOp::CreateDirectory {
                 parent_inode_id: InodeId(1),
@@ -406,8 +404,6 @@ mod tests {
         CommitRequest {
             namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
             commit_id: CommitId::parse("commit-representative").expect("valid commit id"),
-            writer_id: "writer-a".to_owned(),
-            writer_session_id: "wrs_test".to_owned(),
             writer_epoch: WriterEpoch(9),
             preconditions: vec![
                 CommitPrecondition::InodeRevisionIs {
@@ -539,27 +535,17 @@ mod tests {
     }
 
     #[test]
-    fn core_commit_fingerprint_excludes_writer_context_and_commit_id() {
+    fn core_commit_fingerprint_excludes_writer_epoch_and_commit_id() {
         let left =
             core_commit_fingerprint(&core_request(WriterEpoch(1))).expect("left fingerprint");
         let different_epoch = core_commit_fingerprint(&core_request(WriterEpoch(2)))
             .expect("different epoch fingerprint");
-        let mut different_writer = core_request(WriterEpoch(1));
-        different_writer.writer_id = "writer-b".to_owned();
-        let different_writer =
-            core_commit_fingerprint(&different_writer).expect("different writer fingerprint");
-        let mut different_session = core_request(WriterEpoch(1));
-        different_session.writer_session_id = "wrs_other".to_owned();
-        let different_session =
-            core_commit_fingerprint(&different_session).expect("different session fingerprint");
         let mut different_commit_id = core_request(WriterEpoch(1));
         different_commit_id.commit_id = CommitId::parse("commit-b").expect("valid commit id");
         let different_commit_id =
             core_commit_fingerprint(&different_commit_id).expect("different commit id fingerprint");
 
         assert_eq!(left, different_epoch);
-        assert_eq!(left, different_writer);
-        assert_eq!(left, different_session);
         assert_eq!(left, different_commit_id);
     }
 
@@ -593,8 +579,6 @@ mod tests {
         let core = CommitRequest::from_v0(
             CommitExecutionContext {
                 namespace_id: namespace_id.clone(),
-                writer_id: "writer-a".to_owned(),
-                writer_session_id: "wrs_test".to_owned(),
                 writer_epoch: WriterEpoch(1),
             },
             api_request.clone(),

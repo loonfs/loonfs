@@ -210,8 +210,6 @@ fn sample_wal_envelope() -> WalSegmentEnvelope {
                     .to_owned(),
             committed_at_ms: 4_000,
             message: Some("golden commit".to_owned()),
-            writer_id: "golden-writer".to_owned(),
-            writer_session_id: "wrs_golden".to_owned(),
             deltas,
         }],
     })
@@ -273,7 +271,6 @@ fn sample_head_state() -> HeadState {
         writer_epoch: WriterEpoch(3),
         writer: Some(WriterBlock {
             writer_id: "writer-a".to_owned(),
-            writer_session_id: "wrs_00000000000000000000000000000001".to_owned(),
             acquired_at_ms: 2_000,
         }),
         next_inode_id: InodeId(10),

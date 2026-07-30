@@ -13,10 +13,10 @@ use crate::{
 };
 use crate::{Result, RuntimeError, SharedObjectStore};
 use loonfs_api::{
-    encode_cursor, generated_id, CapabilityDocument, EffectiveLimit, FileRevision,
-    FileRevisionsPageCursor, Page, PaginationPolicy, FEATURE_NAMESPACES_CREATE,
-    FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK, FEATURE_UPLOADS_DIRECT_PUT,
-    LIMIT_GC_MIN_GRACE_WINDOW_MS, PROFILE_ADMIN_V0, PROFILE_CORE_V0, PROTOCOL_VERSION,
+    encode_cursor, CapabilityDocument, EffectiveLimit, FileRevision, FileRevisionsPageCursor, Page,
+    PaginationPolicy, FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE,
+    FEATURE_NAMESPACES_FORK, FEATURE_UPLOADS_DIRECT_PUT, LIMIT_GC_MIN_GRACE_WINDOW_MS,
+    PROFILE_ADMIN_V0, PROFILE_CORE_V0, PROTOCOL_VERSION,
 };
 use loonfs_core::cache::{
     MetadataTableCache, WalTailProjectionCache, WalTailProjectionCacheConfig,
@@ -52,7 +52,6 @@ pub(crate) struct ReadCoreInner {
 #[derive(Clone)]
 pub(crate) struct WriterIdentity {
     pub(crate) writer_id: String,
-    pub(crate) writer_session_id: String,
 }
 
 /// What a publisher worker needs from the writer that owns it, in one
@@ -68,19 +67,15 @@ pub(crate) struct WriterBits {
 }
 
 impl WriterIdentity {
-    /// Mints an identity with a fresh session id, rejecting an empty actor id.
+    /// Mints an identity, rejecting an empty actor id.
     pub(crate) fn new(writer_id: String) -> Result<Self> {
         validate_writer_id(&writer_id)?;
-        Ok(Self {
-            writer_id,
-            writer_session_id: generated_id("wrs"),
-        })
+        Ok(Self { writer_id })
     }
 
     pub(crate) fn mutation_context(&self) -> Result<MutationContext> {
         Ok(MutationContext {
             writer_id: self.writer_id.clone(),
-            writer_session_id: self.writer_session_id.clone(),
             now_ms: current_time_ms()?,
         })
     }
@@ -205,8 +200,8 @@ impl ReadCore {
         Arc::clone(&self.inner.store)
     }
 
-    /// A read-only engine: no actor identity, so a reader mints no writer
-    /// session id and cannot mutate even by mistake.
+    /// A read-only engine: no actor identity, so a reader cannot mutate
+    /// even by mistake.
     pub(crate) fn reader_engine(
         &self,
         namespace_id: &NamespaceId,
@@ -226,7 +221,6 @@ impl ReadCore {
         NamespaceEngine::builder(self.inner.store.clone())
             .namespace_id(namespace_id.clone())
             .writer_id(actor.writer_id.clone())
-            .writer_session_id(actor.writer_session_id.clone())
             .build()
             .expect("a validated actor identity should build a namespace engine")
     }

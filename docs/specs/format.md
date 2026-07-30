@@ -267,6 +267,14 @@ superseded session is fenced terminally: it must surface `writer_fenced` and
 must never reacquire on its own. Nothing consults the `writer` block or any
 clock for commit validity.
 
+Every acquisition advances the epoch. There is no recognition step and no
+session identity to recognize: the `writer` block carries the writer's
+configured label and the acquisition stamp (`acquired_at_ms`) and nothing
+else, so two runs of one writer are told apart by when they acquired. A
+writer that acquires twice — which happens only when the first attempt's
+outcome was unknown to it — fences an epoch of its own that published
+nothing, and that is ordinary last-writer-wins.
+
 Writers additionally apply a self-enforced publish budget: a local monotonic
 elapsed-time bound between starting a WAL segment PUT and initiating the head
 CAS (60 seconds). Overrunning it abandons the segment as an orphan and
@@ -1106,8 +1114,7 @@ exactly the order shown) of:
 
 where `ops` and `preconditions` appear in request order using their v0 wire
 encoding, and `message` is `null` when absent. The preimage deliberately
-excludes `commit_id`, writer identity, writer epoch, and `committed_at_ms`: a
-retry of the same
+excludes `commit_id`, writer epoch, and `committed_at_ms`: a retry of the same
 logical commit must fingerprint identically no matter who retries it or when.
 
 Path-level mutations fingerprint the same way with domain
@@ -1373,9 +1380,9 @@ overwritten, and never taken as an empty slot. There is no fourth answer,
 because there is no state between absent and complete.
 
 The loser is not told whether the winner was its own earlier attempt.
-Nothing durable can say so: the head's writer block names one writer
-session, and a server holds one session across every caller it serves, so
-"written by my session" does not mean "written by this attempt" — two
+Nothing durable can say so: the head's writer block names a writer label,
+not an attempt, and a server publishes every caller's work under one label,
+so "written by my writer" does not mean "written by this attempt" — two
 callers of one server would otherwise both be told they created the same
 namespace. An embedded caller that wants a retry after a lost
 acknowledgment to succeed asks for that explicitly, with its

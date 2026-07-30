@@ -167,7 +167,7 @@ Every error response is a JSON body:
 ```json
 {
   "code": "writer_fenced",
-  "message": "writer session fenced: epoch 3 was fenced by epoch 4 (writer `server-b`)",
+  "message": "writer session fenced: epoch 3 was fenced by epoch 4 (writer `server-b`, acquired at 1739459200000 ms)",
   "request_id": "req_9c2f4a1b7d8e4f21a0b3c4d5e6f70819",
   "details": {
     "fenced_epoch": 3,
@@ -619,7 +619,7 @@ answer and nothing to repair.
 
 A create whose first acknowledgment was lost answers `namespace_exists` on
 the retry, like any other lost race. Nothing durable can tell the two apart:
-a server holds one writer session across every caller it serves, so the
+a server publishes every caller's work under one writer label, so the
 head's writer block cannot prove which request wrote it, and answering
 success would tell two callers they each created the same namespace. The
 409 is still actionable, which is the point — the namespace it names is

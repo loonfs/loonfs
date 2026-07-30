@@ -22,8 +22,6 @@ async fn build_wal_record_payload_matches_segment_record_payload() {
     let request = CommitRequest {
         namespace_id: namespace_id.clone(),
         commit_id: CommitId::parse("c_wal_payload").expect("valid commit id"),
-        writer_id: "writer-a".to_owned(),
-        writer_session_id: "wrs_test".to_owned(),
         writer_epoch: WriterEpoch(1),
         ops: vec![CommitOp::CreateDirectory {
             parent_inode_id: InodeId(1),
@@ -428,8 +426,6 @@ fn materialized_create_directory(
     let request = CommitRequest {
         namespace_id: namespace_id.clone(),
         commit_id: CommitId::parse(commit_id).expect("valid commit id"),
-        writer_id: "writer-a".to_owned(),
-        writer_session_id: "wrs_test".to_owned(),
         writer_epoch: WriterEpoch(1),
         ops: vec![CommitOp::CreateDirectory {
             parent_inode_id: InodeId(1),

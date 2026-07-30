@@ -150,7 +150,6 @@ fn validation_context(
         writer_epoch: WriterEpoch(1),
         writer: Some(WriterBlock {
             writer_id: "writer-a".to_owned(),
-            writer_session_id: "wrs_test".to_owned(),
             acquired_at_ms: 1_000,
         }),
         next_inode_id,
@@ -259,8 +258,6 @@ async fn stale_revision_precondition_is_rejected() {
     let request = CommitRequest {
         namespace_id: namespace_id("demo"),
         commit_id: CommitId::parse("stale-revision").expect("valid commit id"),
-        writer_id: "writer-a".to_owned(),
-        writer_session_id: "wrs_test".to_owned(),
         writer_epoch: WriterEpoch(1),
         ops: vec![CommitOp::ReplaceFile {
             inode_id: InodeId(3),
@@ -291,8 +288,6 @@ async fn failed_multi_op_plan_uses_preview_without_mutating_base_metadata() {
     let request = CommitRequest {
         namespace_id: namespace_id("demo"),
         commit_id: CommitId::parse("preview-rollback").expect("valid commit id"),
-        writer_id: "writer-a".to_owned(),
-        writer_session_id: "wrs_test".to_owned(),
         writer_epoch: WriterEpoch(1),
         ops: vec![
             CommitOp::CreateDirectory {
@@ -351,8 +346,6 @@ async fn create_and_replace_under_ancestor_tombstone_are_rejected() {
         &CommitRequest {
             namespace_id: namespace_id("demo"),
             commit_id: CommitId::parse("create-under-tombstone").expect("valid commit id"),
-            writer_id: "writer-a".to_owned(),
-            writer_session_id: "wrs_test".to_owned(),
             writer_epoch: WriterEpoch(1),
             ops: vec![CommitOp::CreateFile {
                 parent_inode_id: InodeId(2),
@@ -379,8 +372,6 @@ async fn create_and_replace_under_ancestor_tombstone_are_rejected() {
         &CommitRequest {
             namespace_id: namespace_id("demo"),
             commit_id: CommitId::parse("replace-under-tombstone").expect("valid commit id"),
-            writer_id: "writer-a".to_owned(),
-            writer_session_id: "wrs_test".to_owned(),
             writer_epoch: WriterEpoch(1),
             ops: vec![CommitOp::ReplaceFile {
                 inode_id: InodeId(3),
@@ -416,8 +407,6 @@ async fn restore_revision_validation_rejects_missing_inode() {
     let request = CommitRequest {
         namespace_id: namespace_id("demo"),
         commit_id: CommitId::parse("restore-missing-inode").expect("valid commit id"),
-        writer_id: "writer-a".to_owned(),
-        writer_session_id: "wrs_test".to_owned(),
         writer_epoch: WriterEpoch(1),
         ops: vec![CommitOp::RestoreRevision {
             inode_id: InodeId(99),
@@ -451,8 +440,6 @@ async fn restore_revision_validation_rejects_non_file_target() {
     let request = CommitRequest {
         namespace_id: namespace_id("demo"),
         commit_id: CommitId::parse("restore-non-file").expect("valid commit id"),
-        writer_id: "writer-a".to_owned(),
-        writer_session_id: "wrs_test".to_owned(),
         writer_epoch: WriterEpoch(1),
         ops: vec![CommitOp::RestoreRevision {
             inode_id: InodeId(2),
@@ -494,8 +481,6 @@ async fn restore_revision_validation_rejects_stale_or_missing_source_revision() 
         &CommitRequest {
             namespace_id: namespace_id("demo"),
             commit_id: CommitId::parse("restore-stale-base").expect("valid commit id"),
-            writer_id: "writer-a".to_owned(),
-            writer_session_id: "wrs_test".to_owned(),
             writer_epoch: WriterEpoch(1),
             ops: vec![CommitOp::RestoreRevision {
                 inode_id: InodeId(3),
@@ -523,8 +508,6 @@ async fn restore_revision_validation_rejects_stale_or_missing_source_revision() 
         &CommitRequest {
             namespace_id: namespace_id("demo"),
             commit_id: CommitId::parse("restore-missing-source").expect("valid commit id"),
-            writer_id: "writer-a".to_owned(),
-            writer_session_id: "wrs_test".to_owned(),
             writer_epoch: WriterEpoch(1),
             ops: vec![CommitOp::RestoreRevision {
                 inode_id: InodeId(3),
@@ -565,8 +548,6 @@ async fn restore_revision_can_reference_revision_created_earlier_in_same_request
     let request = CommitRequest {
         namespace_id: namespace_id("demo"),
         commit_id: CommitId::parse("restore-same-request-source").expect("valid commit id"),
-        writer_id: "writer-a".to_owned(),
-        writer_session_id: "wrs_test".to_owned(),
         writer_epoch: WriterEpoch(1),
         ops: vec![
             CommitOp::ReplaceFile {
@@ -618,8 +599,6 @@ async fn restore_revision_can_reference_restore_created_earlier_in_same_request(
     let request = CommitRequest {
         namespace_id: namespace_id("demo"),
         commit_id: CommitId::parse("restore-after-restore-same-request").expect("valid commit id"),
-        writer_id: "writer-a".to_owned(),
-        writer_session_id: "wrs_test".to_owned(),
         writer_epoch: WriterEpoch(1),
         ops: vec![
             CommitOp::RestoreRevision {
@@ -679,8 +658,6 @@ async fn restore_revision_under_tombstoned_ancestor_is_rejected() {
         &CommitRequest {
             namespace_id: namespace_id("demo"),
             commit_id: CommitId::parse("restore-under-tombstone").expect("valid commit id"),
-            writer_id: "writer-a".to_owned(),
-            writer_session_id: "wrs_test".to_owned(),
             writer_epoch: WriterEpoch(1),
             ops: vec![CommitOp::RestoreRevision {
                 inode_id: InodeId(3),
@@ -734,8 +711,6 @@ async fn restore_revision_overflow_is_rejected() {
     let request = CommitRequest {
         namespace_id: namespace_id("demo"),
         commit_id: CommitId::parse("restore-overflow").expect("valid commit id"),
-        writer_id: "writer-a".to_owned(),
-        writer_session_id: "wrs_test".to_owned(),
         writer_epoch: WriterEpoch(1),
         ops: vec![CommitOp::RestoreRevision {
             inode_id: InodeId(2),
