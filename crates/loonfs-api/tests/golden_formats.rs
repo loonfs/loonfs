@@ -35,15 +35,13 @@ use loonfs_api::wire::wal::{
 };
 use loonfs_api::{
     sha256_digest, v0::UploadMode, ChangeSeq, CheckpointId, CommitId, ContentRef, ContentStoreId,
-    InodeId, InodeKind, ManifestId, ManifestObjectId, MetadataTableId, NameKey, NamePolicy,
-    NamespaceId, RevisionNo, UploadId, WalSegmentId, WriterEpoch,
+    InodeId, InodeKind, ManifestId, ManifestObjectId, MetadataTableId, NameKey, NamespaceId,
+    RevisionNo, UploadId, WalSegmentId, WriterEpoch,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::fmt::Debug;
 use std::path::{Path, PathBuf};
-
-const WRITER_VERSION: &str = "golden-writer/1.0";
 
 // ---------------------------------------------------------------------------
 // Golden helpers
@@ -195,79 +193,73 @@ fn sample_wal_envelope() -> WalSegmentEnvelope {
             },
         },
     ];
-    WalSegmentEnvelope::from_payload(
-        WRITER_VERSION,
-        WalSegmentPayload {
-            namespace_id: namespace_id(),
-            segment_id: WalSegmentId::parse("00000000000000000001-0123456789abcdef")
-                .expect("valid segment id"),
-            writer_epoch: WriterEpoch(3),
-            prev_visible_segment: Some(sample_wal_pointer()),
-            base_head_seq: ChangeSeq(1),
-            start_seq: ChangeSeq(2),
-            end_seq: ChangeSeq(2),
-            records: vec![WalCommitPayload {
-                seq: ChangeSeq(2),
-                commit_id: commit_id(),
-                semantic_commit_fingerprint:
-                    "v0:sha256:0000000000000000000000000000000000000000000000000000000000000042"
-                        .to_owned(),
-                committed_at_ms: 4_000,
-                message: Some("golden commit".to_owned()),
-                writer_id: "golden-writer".to_owned(),
-                writer_session_id: "wrs_golden".to_owned(),
-                deltas,
-            }],
-        },
-    )
+    WalSegmentEnvelope::from_payload(WalSegmentPayload {
+        namespace_id: namespace_id(),
+        segment_id: WalSegmentId::parse("00000000000000000001-0123456789abcdef")
+            .expect("valid segment id"),
+        writer_epoch: WriterEpoch(3),
+        prev_visible_segment: Some(sample_wal_pointer()),
+        base_head_seq: ChangeSeq(1),
+        start_seq: ChangeSeq(2),
+        end_seq: ChangeSeq(2),
+        records: vec![WalCommitPayload {
+            seq: ChangeSeq(2),
+            commit_id: commit_id(),
+            semantic_commit_fingerprint:
+                "v0:sha256:0000000000000000000000000000000000000000000000000000000000000042"
+                    .to_owned(),
+            committed_at_ms: 4_000,
+            message: Some("golden commit".to_owned()),
+            writer_id: "golden-writer".to_owned(),
+            writer_session_id: "wrs_golden".to_owned(),
+            deltas,
+        }],
+    })
     .expect("wal envelope")
 }
 
 fn sample_manifest_envelope() -> NamespaceManifestEnvelope {
-    NamespaceManifestEnvelope::from_payload(
-        WRITER_VERSION,
-        NamespaceManifestPayload {
-            namespace_id: namespace_id(),
-            manifest_id: ManifestId(2),
-            manifest_object_id: manifest_object_id(2, "0123456789abcdef"),
-            head_seq: ChangeSeq(2),
-            head_commit_id: commit_id(),
-            base_seq: ChangeSeq(2),
-            writer_epoch: WriterEpoch(3),
-            next_inode_id: InodeId(10),
-            retention_floor_seq: ChangeSeq(0),
-            metadata_files: vec![MetadataFileRef {
-                owner_namespace_id: namespace_id(),
-                table_id: table_id(),
-                object_key:
-                    "namespaces/demo/metadata/tables/tbl_0123456789abcdef0123456789abcdef.sst.zst"
-                        .to_owned(),
-                run_seq: ChangeSeq(2),
-                level: 0,
-                family: MetadataTableFamily::Inodes,
-                segment_index: 0,
-                row_count: 6,
-                min_key: "commit-receipt".to_owned(),
-                max_key: "tombstone".to_owned(),
-                index_block: loonfs_api::wire::sst_blocks::BlockHandle {
-                    offset: 4_000,
-                    stored_len: 200,
-                    decoded_len: 400,
-                    crc32c: 0x1234_5678,
-                },
-                filter_block: loonfs_api::wire::sst_blocks::BlockHandle {
-                    offset: 3_900,
-                    stored_len: 100,
-                    decoded_len: 100,
-                    crc32c: 0x9abc_def0,
-                },
-                // Only small filters are inlined; this descriptor's filter
-                // is read through its handle, so the field is omitted.
-                filter_inline: None,
-                payload_checksum: sha256_digest(b"sst payload"),
-            }],
-        },
-    )
+    NamespaceManifestEnvelope::from_payload(NamespaceManifestPayload {
+        namespace_id: namespace_id(),
+        manifest_id: ManifestId(2),
+        manifest_object_id: manifest_object_id(2, "0123456789abcdef"),
+        head_seq: ChangeSeq(2),
+        head_commit_id: commit_id(),
+        base_seq: ChangeSeq(2),
+        writer_epoch: WriterEpoch(3),
+        next_inode_id: InodeId(10),
+        retention_floor_seq: ChangeSeq(0),
+        metadata_files: vec![MetadataFileRef {
+            owner_namespace_id: namespace_id(),
+            table_id: table_id(),
+            object_key:
+                "namespaces/demo/metadata/tables/tbl_0123456789abcdef0123456789abcdef.sst.zst"
+                    .to_owned(),
+            run_seq: ChangeSeq(2),
+            level: 0,
+            family: MetadataTableFamily::Inodes,
+            segment_index: 0,
+            row_count: 6,
+            min_key: "commit-receipt".to_owned(),
+            max_key: "tombstone".to_owned(),
+            index_block: loonfs_api::wire::sst_blocks::BlockHandle {
+                offset: 4_000,
+                stored_len: 200,
+                decoded_len: 400,
+                crc32c: 0x1234_5678,
+            },
+            filter_block: loonfs_api::wire::sst_blocks::BlockHandle {
+                offset: 3_900,
+                stored_len: 100,
+                decoded_len: 100,
+                crc32c: 0x9abc_def0,
+            },
+            // Only small filters are inlined; this descriptor's filter
+            // is read through its handle, so the field is omitted.
+            filter_inline: None,
+            payload_checksum: sha256_digest(b"sst payload"),
+        }],
+    })
     .expect("manifest envelope")
 }
 
@@ -275,7 +267,6 @@ fn sample_head_state() -> HeadState {
     HeadState {
         namespace_id: namespace_id(),
         content_store_id: content_store_id(),
-        name_policy: NamePolicy::default(),
         fork_basis: None,
         seq: ChangeSeq(2),
         head_commit_id: commit_id(),
@@ -355,8 +346,7 @@ fn check_control_golden<T>(fixture: &str, kind: ControlObjectKind, state: T)
 where
     T: Serialize + DeserializeOwned + PartialEq + Debug,
 {
-    let envelope =
-        ControlObjectEnvelope::from_state(kind, WRITER_VERSION, state).expect("control envelope");
+    let envelope = ControlObjectEnvelope::from_state(kind, state).expect("control envelope");
     let encoded = encode_control_object(&envelope).expect("encode control object");
     assert_matches_golden(fixture, &encoded);
 
@@ -375,12 +365,8 @@ fn control_document_with_payload_edit(
     let payload = serde_json::to_string(&document["payload"]).expect("encode edited payload");
     document["payload_checksum"] = serde_json::Value::from(sha256_digest(payload.as_bytes()));
     format!(
-        "{{\"kind\":{},\"format_version\":{},\"writer_version\":{},\"payload_checksum\":{},\"payload\":{}}}",
-        document["kind"],
-        document["format_version"],
-        document["writer_version"],
-        document["payload_checksum"],
-        payload,
+        "{{\"kind\":{},\"format_version\":{},\"payload_checksum\":{},\"payload\":{}}}",
+        document["kind"], document["format_version"], document["payload_checksum"], payload,
     )
     .into_bytes()
 }
@@ -756,8 +742,7 @@ fn checkpoint_and_upload_decoders_reject_wrong_format_version_without_fallback()
         ),
     ];
     for (kind, state) in cases {
-        let envelope = ControlObjectEnvelope::from_state(kind, WRITER_VERSION, state)
-            .expect("control envelope");
+        let envelope = ControlObjectEnvelope::from_state(kind, state).expect("control envelope");
         let encoded = encode_control_object(&envelope).expect("encode control");
         let mut document: serde_json::Value =
             serde_json::from_slice(&encoded).expect("decode document");
@@ -959,12 +944,9 @@ fn wal_decode_tolerates_additive_payload_fields() {
 
 #[test]
 fn control_object_decode_rejects_tampered_payload_as_checksum_mismatch() {
-    let envelope = ControlObjectEnvelope::from_state(
-        ControlObjectKind::WalHead,
-        WRITER_VERSION,
-        sample_head_state(),
-    )
-    .expect("control envelope");
+    let envelope =
+        ControlObjectEnvelope::from_state(ControlObjectKind::WalHead, sample_head_state())
+            .expect("control envelope");
     let encoded = encode_control_object(&envelope).expect("encode control object");
     let mut document: serde_json::Value =
         serde_json::from_slice(&encoded).expect("decode document");
@@ -1032,9 +1014,8 @@ fn namespace_manifest_decode_tolerates_additive_payload_fields() {
     // Rebuild the document so the embedded payload bytes are exactly the
     // bytes the checksum was computed over.
     let future_document = format!(
-        "{{\"kind\":{},\"format_version\":{},\"writer_version\":{},\"payload_checksum\":{},\"payload\":{}}}",
-        document["kind"], document["format_version"], document["writer_version"],
-        document["payload_checksum"], future_payload,
+        "{{\"kind\":{},\"format_version\":{},\"payload_checksum\":{},\"payload\":{}}}",
+        document["kind"], document["format_version"], document["payload_checksum"], future_payload,
     );
 
     let decoded = decode_namespace_manifest_json(future_document.as_bytes())

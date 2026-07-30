@@ -124,7 +124,6 @@ mod tests {
                 bind_delta_index: 1,
             }],
             resulting_next_inode_id: InodeId(3),
-            checked_invariants: Vec::new(),
         }
     }
 

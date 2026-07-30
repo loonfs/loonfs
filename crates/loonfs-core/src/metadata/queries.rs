@@ -9,7 +9,7 @@
 
 use super::visibility::{self, resolve_in_memory_read, unbind_matches_binding};
 use super::{DirentryBindRecord, InodeRecord, MetadataState, SubtreeTombstoneRecord};
-use loonfs_api::{AbsolutePath, ChangeSeq, InodeId, InodeKind, NameKey, NamePolicy};
+use loonfs_api::{AbsolutePath, ChangeSeq, InodeId, InodeKind, NameKey};
 use serde::{Deserialize, Serialize};
 use std::future::Future;
 use thiserror::Error;
@@ -214,13 +214,11 @@ impl MetadataState {
     pub fn resolve_visible_path(
         &self,
         absolute_path: &AbsolutePath,
-        name_policy: NamePolicy,
         base_seq: ChangeSeq,
     ) -> Result<ResolvedVisiblePath, VisiblePathError> {
         resolve_in_memory_read(visibility::resolve_visible_path(
             &mut self.reads_at_seq(base_seq),
             absolute_path,
-            name_policy,
         ))
     }
 

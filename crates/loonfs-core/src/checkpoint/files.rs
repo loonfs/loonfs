@@ -17,8 +17,7 @@ use loonfs_api::wire::control::{CheckpointRecordLifecycle, CheckpointRecordState
 use loonfs_api::wire::manifest::{lookup_keys, MetadataRow, MetadataTableFamily};
 use loonfs_api::wire::sst_blocks::string_prefix_upper_bound;
 use loonfs_api::{
-    ChangeSeq, CheckpointId, ContentRef, InodeId, InodeKind, NamePolicy, NamespaceId, PageRequest,
-    RevisionNo,
+    ChangeSeq, CheckpointId, ContentRef, InodeId, InodeKind, NamespaceId, PageRequest, RevisionNo,
 };
 use loonfs_objectstore::ObjectStore;
 
@@ -90,7 +89,6 @@ pub(crate) async fn list_checkpoint_files_page<S: ObjectStore + ?Sized>(
     table_cache: Option<&MetadataTableCache>,
     namespace_id: &NamespaceId,
     checkpoint_id: &CheckpointId,
-    name_policy: NamePolicy,
     request: PageRequest<CheckpointFilesPageCursor>,
 ) -> Result<CheckpointFilesPage> {
     let record = read_pinning_checkpoint_record(store, namespace_id, checkpoint_id).await?;
@@ -117,7 +115,7 @@ pub(crate) async fn list_checkpoint_files_page<S: ObjectStore + ?Sized>(
     }
 
     let checkpoint_seq = record.manifest_head_seq;
-    let view = MetadataView::over_manifest_tables(&tables, checkpoint_seq, name_policy);
+    let view = MetadataView::over_manifest_tables(&tables, checkpoint_seq);
     let mut session = view.session();
 
     // One row past the page proves whether another file exists, so a cursor

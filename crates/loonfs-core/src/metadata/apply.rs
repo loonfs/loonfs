@@ -5,16 +5,8 @@ use super::{
     CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord, InodeRecord, MetadataState,
     RevisionRecord, SubtreeTombstoneAction, SubtreeTombstoneRecord,
 };
-use crate::invariants::{push_unique_invariant, InvariantId};
 use loonfs_api::wire::wal::{WalCommitDelta, WalCommitPayload, WalDelta};
 use loonfs_api::{ChangeSeq, CommitId};
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AppliedMetadataState {
-    pub metadata_state: MetadataState,
-    pub checked_invariants: Vec<InvariantId>,
-}
 
 impl MetadataState {
     pub fn apply_committed_wal_deltas(
@@ -22,15 +14,10 @@ impl MetadataState {
         committed_seq: ChangeSeq,
         committed_at_ms: u64,
         deltas: &[WalDelta],
-    ) -> AppliedMetadataState {
+    ) -> MetadataState {
         let mut metadata_state = self.clone();
-        let checked_invariants =
-            metadata_state.apply_committed_wal_deltas_mut(committed_seq, committed_at_ms, deltas);
-
-        AppliedMetadataState {
-            metadata_state,
-            checked_invariants,
-        }
+        metadata_state.apply_committed_wal_deltas_mut(committed_seq, committed_at_ms, deltas);
+        metadata_state
     }
 
     pub fn apply_committed_wal_deltas_mut(
@@ -38,20 +25,13 @@ impl MetadataState {
         committed_seq: ChangeSeq,
         committed_at_ms: u64,
         deltas: &[WalDelta],
-    ) -> Vec<InvariantId> {
-        let mut checked_invariants = Vec::new();
-
+    ) {
         for delta in deltas {
-            let checked_invariant =
-                self.apply_committed_wal_delta_mut(committed_seq, committed_at_ms, delta);
-            push_unique_invariant(&mut checked_invariants, checked_invariant);
+            self.apply_committed_wal_delta_mut(committed_seq, committed_at_ms, delta);
         }
-
-        checked_invariants
     }
 
-    /// Appends the metadata row encoded by one committed WAL delta and
-    /// returns the invariant that append witnesses.
+    /// Appends the metadata row encoded by one committed WAL delta.
     ///
     /// This is the only WAL-delta to metadata-row mapping in the crate:
     /// durable replay ([`Self::apply_committed_wal_deltas_mut`]) and the
@@ -63,7 +43,7 @@ impl MetadataState {
         committed_seq: ChangeSeq,
         committed_at_ms: u64,
         delta: &WalDelta,
-    ) -> InvariantId {
+    ) {
         match delta {
             WalDelta::CreateInode {
                 delta_index: _,
@@ -75,7 +55,6 @@ impl MetadataState {
                     inode_kind: *inode_kind,
                     created_seq: committed_seq,
                 });
-                InvariantId::CreateInodeWritesInodeRow
             }
             WalDelta::BindDirentry {
                 delta_index,
@@ -92,7 +71,6 @@ impl MetadataState {
                     bind_seq: committed_seq,
                     bind_delta_index: *delta_index,
                 });
-                InvariantId::BindDirentryWritesDirentryBindRow
             }
             WalDelta::UnbindDirentry {
                 delta_index,
@@ -113,7 +91,6 @@ impl MetadataState {
                     unbind_seq: committed_seq,
                     unbind_delta_index: *delta_index,
                 });
-                InvariantId::UnbindDirentryWritesUnbindRow
             }
             WalDelta::AppendFileRevision {
                 delta_index,
@@ -129,7 +106,6 @@ impl MetadataState {
                     revision_delta_index: *delta_index,
                     content_ref: content_ref.clone(),
                 });
-                InvariantId::AppendFileRevisionWritesRevisionRow
             }
             WalDelta::TombstoneSubtree {
                 delta_index,
@@ -148,7 +124,6 @@ impl MetadataState {
                     display_name: display_name.clone(),
                     action: SubtreeTombstoneAction::Set,
                 });
-                InvariantId::TombstoneSubtreeWritesTombstoneRow
             }
             WalDelta::RevokeSubtreeTombstone {
                 delta_index,
@@ -169,15 +144,11 @@ impl MetadataState {
                         target_delta_index: *target_delta_index,
                     },
                 });
-                InvariantId::RevokeSubtreeTombstoneWritesRevokeRow
             }
         }
     }
 
-    pub fn apply_committed_wal_record_mut(
-        &mut self,
-        record: &WalCommitPayload,
-    ) -> Vec<InvariantId> {
+    pub fn apply_committed_wal_record_mut(&mut self, record: &WalCommitPayload) {
         self.apply_committed_wal_record_parts_mut(
             record.seq,
             record.committed_at_ms,
@@ -196,12 +167,9 @@ impl MetadataState {
         semantic_commit_fingerprint: &str,
         message: Option<&str>,
         deltas: &[WalCommitDelta],
-    ) -> Vec<InvariantId> {
-        let mut checked_invariants = Vec::new();
+    ) {
         for delta in deltas {
-            let checked_invariant =
-                self.apply_committed_wal_delta_mut(seq, committed_at_ms, &delta.delta);
-            push_unique_invariant(&mut checked_invariants, checked_invariant);
+            self.apply_committed_wal_delta_mut(seq, committed_at_ms, &delta.delta);
         }
         self.push_commit_receipt_record(CommitReceiptRecord {
             commit_id: commit_id.clone(),
@@ -210,10 +178,5 @@ impl MetadataState {
             committed_at_ms,
             message: message.map(str::to_owned),
         });
-        push_unique_invariant(
-            &mut checked_invariants,
-            InvariantId::WalReplayRecordsCommitReceipt,
-        );
-        checked_invariants
     }
 }

@@ -626,8 +626,6 @@ pub struct NamespaceManifestEnvelope {
     pub kind: NamespaceManifestKind,
     /// Family-local format version, which must equal [`NAMESPACE_MANIFEST_FORMAT_VERSION`].
     pub format_version: u32,
-    /// Informational software version of the writer that encoded this object.
-    pub writer_version: String,
     /// Digest of the payload JSON exactly as stored in the durable document,
     /// in `sha256:<hex>` form.
     pub payload_checksum: String,
@@ -639,14 +637,10 @@ impl NamespaceManifestEnvelope {
     /// Builds a versioned envelope and computes its checksum from canonical payload JSON.
     ///
     /// Construction fails when the payload cannot be encoded.
-    pub fn from_payload(
-        writer_version: impl Into<String>,
-        payload: NamespaceManifestPayload,
-    ) -> Result<Self, EnvelopeCodecError> {
+    pub fn from_payload(payload: NamespaceManifestPayload) -> Result<Self, EnvelopeCodecError> {
         Ok(Self {
             kind: NamespaceManifestKind::NamespaceManifest,
             format_version: NAMESPACE_MANIFEST_FORMAT_VERSION,
-            writer_version: writer_version.into(),
             payload_checksum: namespace_manifest_payload_checksum(&payload)?,
             payload,
         })
@@ -671,7 +665,6 @@ pub fn encode_namespace_manifest_json(
         envelope.kind.as_str(),
         envelope.format_version,
         NAMESPACE_MANIFEST_FORMAT_VERSION,
-        &envelope.writer_version,
         &envelope.payload_checksum,
         &envelope.payload,
     )
@@ -694,7 +687,6 @@ pub fn decode_namespace_manifest_json(
     Ok(NamespaceManifestEnvelope {
         kind: expected_kind,
         format_version: decoded.format_version,
-        writer_version: decoded.writer_version,
         payload_checksum: decoded.payload_checksum,
         payload: decoded.payload,
     })
@@ -752,31 +744,26 @@ mod tests {
 
     #[test]
     fn namespace_manifest_codec_round_trips_base_only_materialization() {
-        let envelope = NamespaceManifestEnvelope::from_payload(
-            "test-writer",
-            NamespaceManifestPayload {
-                namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
-                manifest_id: ManifestId(10),
-                manifest_object_id: ManifestObjectId::parse(
-                    "00000000000000000010-0123456789abcdef",
-                )
+        let envelope = NamespaceManifestEnvelope::from_payload(NamespaceManifestPayload {
+            namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
+            manifest_id: ManifestId(10),
+            manifest_object_id: ManifestObjectId::parse("00000000000000000010-0123456789abcdef")
                 .expect("valid manifest object id"),
-                head_seq: ChangeSeq(10),
-                head_commit_id: CommitId::parse("c_00000000000000000000000000000001")
-                    .expect("commit id"),
-                base_seq: ChangeSeq(10),
-                writer_epoch: WriterEpoch(2),
-                next_inode_id: InodeId(42),
-                retention_floor_seq: ChangeSeq(0),
-                metadata_files: vec![metadata_file_ref(
-                    "demo",
-                    "tbl_00000000000000000000000000000001",
-                    ChangeSeq(10),
-                    1,
-                    "namespaces/demo/metadata/tables/tbl_00000000000000000000000000000001.sst.zst",
-                )],
-            },
-        )
+            head_seq: ChangeSeq(10),
+            head_commit_id: CommitId::parse("c_00000000000000000000000000000001")
+                .expect("commit id"),
+            base_seq: ChangeSeq(10),
+            writer_epoch: WriterEpoch(2),
+            next_inode_id: InodeId(42),
+            retention_floor_seq: ChangeSeq(0),
+            metadata_files: vec![metadata_file_ref(
+                "demo",
+                "tbl_00000000000000000000000000000001",
+                ChangeSeq(10),
+                1,
+                "namespaces/demo/metadata/tables/tbl_00000000000000000000000000000001.sst.zst",
+            )],
+        })
         .expect("manifest");
 
         let encoded = encode_namespace_manifest_json(&envelope).expect("encode manifest");
@@ -794,7 +781,6 @@ mod tests {
     #[test]
     fn namespace_manifest_codec_round_trips_inherited_source_tables() {
         let envelope = NamespaceManifestEnvelope::from_payload(
-            "test-writer",
             NamespaceManifestPayload {
                 namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
                 manifest_id: ManifestId(12),

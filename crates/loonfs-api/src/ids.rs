@@ -549,12 +549,9 @@ string_id! {
 }
 
 impl NameKey {
-    /// Computes the lookup key for a display name under a namespace name policy.
-    pub fn for_display_name(policy: crate::NamePolicy, display_name: &crate::DisplayName) -> Self {
-        Self(crate::name_key_for_display_name(
-            policy,
-            display_name.as_str(),
-        ))
+    /// Computes the lookup key for a display name.
+    pub fn for_display_name(display_name: &crate::DisplayName) -> Self {
+        Self(crate::name_key_for_display_name(display_name.as_str()))
     }
 }
 

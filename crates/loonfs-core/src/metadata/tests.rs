@@ -4,8 +4,7 @@
 use super::*;
 use loonfs_api::wire::wal::WalDelta;
 use loonfs_api::{
-    AbsolutePath, ChangeSeq, CommitId, ContentRef, InodeId, InodeKind, NameKey, NamePolicy,
-    RevisionNo,
+    AbsolutePath, ChangeSeq, CommitId, ContentRef, InodeId, InodeKind, NameKey, RevisionNo,
 };
 
 fn name_key(value: &str) -> NameKey {
@@ -26,8 +25,8 @@ fn bind_direntry_replay_uses_persisted_name_key() {
         }],
     );
 
-    assert_eq!(applied.metadata_state.direntry_binds().len(), 1);
-    let bind = &applied.metadata_state.direntry_binds()[0];
+    assert_eq!(applied.direntry_binds().len(), 1);
+    let bind = &applied.direntry_binds()[0];
     assert_eq!(bind.name_key.as_str(), "persisted-key");
     assert_eq!(bind.display_name.as_str(), "Report.TXT");
     assert_eq!(bind.bind_delta_index, 7);
@@ -132,21 +131,19 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
         InodeId(1)
     );
 
-    let metadata_state = metadata_state
-        .apply_committed_wal_deltas(
-            ChangeSeq(3),
-            4_200,
-            &[WalDelta::UnbindDirentry {
-                delta_index: 0,
-                parent_inode_id: InodeId(1),
-                name_key: NameKey::parse("docs").expect("valid name key"),
-                display_name: loonfs_api::DisplayName::parse("docs").expect("valid display name"),
-                child_inode_id: InodeId(2),
-                bind_seq: ChangeSeq(1),
-                bind_delta_index: 0,
-            }],
-        )
-        .metadata_state;
+    let metadata_state = metadata_state.apply_committed_wal_deltas(
+        ChangeSeq(3),
+        4_200,
+        &[WalDelta::UnbindDirentry {
+            delta_index: 0,
+            parent_inode_id: InodeId(1),
+            name_key: NameKey::parse("docs").expect("valid name key"),
+            display_name: loonfs_api::DisplayName::parse("docs").expect("valid display name"),
+            child_inode_id: InodeId(2),
+            bind_seq: ChangeSeq(1),
+            bind_delta_index: 0,
+        }],
+    );
     assert!(metadata_state
         .visible_child_at_head(InodeId(1), &name_key("docs"))
         .is_none());
@@ -154,20 +151,17 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
         .current_parent_binding_for_child_at_head(InodeId(2))
         .is_none());
 
-    let metadata_state = metadata_state
-        .apply_committed_wal_deltas(
-            ChangeSeq(4),
-            4_200,
-            &[WalDelta::BindDirentry {
-                delta_index: 0,
-                parent_inode_id: InodeId(1),
-                name_key: NameKey::parse("renamed").expect("valid name key"),
-                display_name: loonfs_api::DisplayName::parse("renamed")
-                    .expect("valid display name"),
-                child_inode_id: InodeId(2),
-            }],
-        )
-        .metadata_state;
+    let metadata_state = metadata_state.apply_committed_wal_deltas(
+        ChangeSeq(4),
+        4_200,
+        &[WalDelta::BindDirentry {
+            delta_index: 0,
+            parent_inode_id: InodeId(1),
+            name_key: NameKey::parse("renamed").expect("valid name key"),
+            display_name: loonfs_api::DisplayName::parse("renamed").expect("valid display name"),
+            child_inode_id: InodeId(2),
+        }],
+    );
     assert!(metadata_state
         .visible_child_at_head(InodeId(1), &name_key("docs"))
         .is_none());
@@ -179,19 +173,17 @@ fn maintained_indexes_track_bind_unbind_rename_and_tombstone() {
         InodeId(2)
     );
 
-    let metadata_state = metadata_state
-        .apply_committed_wal_deltas(
-            ChangeSeq(5),
-            4_200,
-            &[WalDelta::TombstoneSubtree {
-                delta_index: 0,
-                root_inode_id: InodeId(2),
-                parent_inode_id: None,
-                name_key: None,
-                display_name: None,
-            }],
-        )
-        .metadata_state;
+    let metadata_state = metadata_state.apply_committed_wal_deltas(
+        ChangeSeq(5),
+        4_200,
+        &[WalDelta::TombstoneSubtree {
+            delta_index: 0,
+            root_inode_id: InodeId(2),
+            parent_inode_id: None,
+            name_key: None,
+            display_name: None,
+        }],
+    );
     assert!(metadata_state
         .visible_child_at_head(InodeId(1), &name_key("renamed"))
         .is_none());
@@ -308,7 +300,7 @@ fn stale_binding_is_not_active_after_newer_bind_claims_same_name() {
 }
 
 #[test]
-fn resolve_visible_path_uses_explicit_name_policy_and_stored_display_name() {
+fn resolve_visible_path_folds_names_and_uses_stored_display_name() {
     let metadata_state = MetadataState::from_rows(
         vec![
             InodeRecord {
@@ -339,7 +331,6 @@ fn resolve_visible_path_uses_explicit_name_policy_and_stored_display_name() {
     let resolved = metadata_state
         .resolve_visible_path(
             &AbsolutePath::parse("/REPORT.txt").expect("path"),
-            NamePolicy::NfcCasefoldV0,
             ChangeSeq(1),
         )
         .expect("resolve path");
@@ -759,8 +750,7 @@ fn has_visible_children_sees_through_unbinds() {
         Vec::new(),
         Vec::new(),
     );
-    let view =
-        InMemoryMetadataView::in_memory(&state, None, ChangeSeq(2), NamePolicy::NfcCasefoldV0);
+    let view = InMemoryMetadataView::in_memory(&state, None, ChangeSeq(2));
     assert!(
         visibility::resolve_in_memory_read(view.has_visible_children(dir))
             .expect("probe bound child")
@@ -788,8 +778,7 @@ fn has_visible_children_sees_through_unbinds() {
         Vec::new(),
         Vec::new(),
     );
-    let view =
-        InMemoryMetadataView::in_memory(&emptied, None, ChangeSeq(3), NamePolicy::NfcCasefoldV0);
+    let view = InMemoryMetadataView::in_memory(&emptied, None, ChangeSeq(3));
     assert!(
         !visibility::resolve_in_memory_read(view.has_visible_children(dir))
             .expect("probe emptied directory")

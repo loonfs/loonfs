@@ -126,12 +126,10 @@ pub(crate) async fn advance_retention_floor<S: ObjectStore + ?Sized>(
             verified_at_ms: context.now_ms,
             updated_at_ms: context.now_ms,
         };
-        let envelope = WalFloorEnvelope::from_state(
-            ControlObjectKind::WalFloor,
-            &context.writer_version,
-            next,
-        )
-        .map_err(|err| CoreError::Internal(format!("failed to build wal floor envelope: {err}")))?;
+        let envelope =
+            WalFloorEnvelope::from_state(ControlObjectKind::WalFloor, next).map_err(|err| {
+                CoreError::Internal(format!("failed to build wal floor envelope: {err}"))
+            })?;
         let encoded = encode_control_object(&envelope).map_err(|err| {
             CoreError::Internal(format!("failed to encode wal floor object: {err}"))
         })?;

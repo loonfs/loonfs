@@ -72,7 +72,7 @@ async fn reads_commits_and_change_feed_never_list() {
         KeyPredicate::any(),
     );
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let context = mutation_context("acceptance", "wrs_acceptance", "acceptance/0.1.0", 1_000);
+    let context = mutation_context("acceptance", "wrs_acceptance", 1_000);
     let engine = namespace_engine(&store, &namespace_id, &context);
     engine
         .bootstrap_namespace(BootstrapOptions::default())
@@ -158,7 +158,7 @@ async fn maintenance_never_touches_the_wal_head() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-    let context = mutation_context("acceptance", "wrs_acceptance", "acceptance/0.1.0", 1_000);
+    let context = mutation_context("acceptance", "wrs_acceptance", 1_000);
     let engine = namespace_engine(&store, &namespace_id, &context);
     engine
         .bootstrap_namespace(BootstrapOptions::default())

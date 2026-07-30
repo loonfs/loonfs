@@ -1,12 +1,10 @@
 //! [`CommitPlan`]: the output of validation — every op checked and
 //! resolved, ready to materialize into WAL deltas.
 
-use crate::invariants::InvariantId;
 use crate::metadata::MetadataState;
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::{
-    ChangeSeq, CommitId, ContentRef, DisplayName, InodeId, NameKey, NamePolicy, NamespaceId,
-    RevisionNo,
+    ChangeSeq, CommitId, ContentRef, DisplayName, InodeId, NameKey, NamespaceId, RevisionNo,
 };
 use serde::{Deserialize, Serialize};
 
@@ -18,7 +16,6 @@ pub struct CommitPlan {
     pub assigned_seq: ChangeSeq,
     pub(crate) validated_ops: Vec<ValidatedOp>,
     pub resulting_next_inode_id: InodeId,
-    pub checked_invariants: Vec<InvariantId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,6 +107,5 @@ pub(crate) enum ValidatedOp {
 #[derive(Debug, Clone)]
 pub struct CommitValidationContext<'a> {
     pub head: HeadState,
-    pub name_policy: NamePolicy,
     pub metadata_state: &'a MetadataState,
 }

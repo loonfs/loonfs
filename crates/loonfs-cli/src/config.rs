@@ -35,8 +35,6 @@ pub(crate) enum ProfileConfig {
         default_namespace: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         writer_id: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        writer_version: Option<String>,
     },
     Remote {
         server_url: String,
@@ -156,12 +154,10 @@ impl ProfileConfig {
                 store,
                 default_namespace,
                 writer_id,
-                writer_version,
             } => ProfileConfig::Embedded {
                 store: store.redacted(),
                 default_namespace: default_namespace.clone(),
                 writer_id: writer_id.clone(),
-                writer_version: writer_version.clone(),
             },
             ProfileConfig::Remote {
                 server_url,
@@ -729,7 +725,6 @@ root = "/tmp/store"
             },
             default_namespace: None,
             writer_id: None,
-            writer_version: None,
         };
         assert_eq!(profile.store_kind_str(), Some("local-fs"));
     }

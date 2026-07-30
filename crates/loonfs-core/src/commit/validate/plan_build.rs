@@ -6,12 +6,12 @@ use super::super::{CommitPlan, CommitRequest, CommitValidationContext, CommitVal
 use super::checks::validate_metadata_preconditions;
 use super::view::{CommitValidationView, InMemoryValidationView, PublishValidationView};
 use crate::error::CoreError;
-use crate::invariants::{push_unique_invariant, InvariantId};
 use crate::metadata::{MetadataState, MetadataView};
 use loonfs_api::v0::CommitOp;
 use loonfs_api::wire::control::HeadState;
-use loonfs_api::{ChangeSeq, InodeId, NamePolicy};
+use loonfs_api::{ChangeSeq, InodeId};
 use loonfs_objectstore::ObjectStore;
+
 struct CommitShape {
     assigned_seq: ChangeSeq,
     allocated_inode_ids: Vec<InodeId>,
@@ -31,20 +31,8 @@ pub async fn build_commit_plan(
     context: &CommitValidationContext<'_>,
 ) -> Result<CommitPlan, CommitValidationError> {
     let shape = compute_commit_shape(request, &context.head)?;
-    let view = InMemoryValidationView::new(
-        context.metadata_state,
-        shape.assigned_seq,
-        context.name_policy,
-    );
-    build_commit_plan_with_view(
-        request,
-        committed_at_ms,
-        &context.head,
-        context.name_policy,
-        shape,
-        view,
-    )
-    .await
+    let view = InMemoryValidationView::new(context.metadata_state, shape.assigned_seq);
+    build_commit_plan_with_view(request, committed_at_ms, &context.head, shape, view).await
 }
 
 pub(crate) async fn build_commit_plan_for_publish<S: ObjectStore + ?Sized>(
@@ -58,7 +46,6 @@ pub(crate) async fn build_commit_plan_for_publish<S: ObjectStore + ?Sized>(
         request,
         committed_at_ms,
         context.head,
-        context.metadata_view.name_policy(),
         shape,
         PublishValidationView::new(context.metadata_view, context.accepted_rows, committed_seq),
     )
@@ -72,63 +59,19 @@ async fn build_commit_plan_with_view<V: CommitValidationView>(
     request: &CommitRequest,
     committed_at_ms: u64,
     head: &HeadState,
-    name_policy: NamePolicy,
     shape: CommitShape,
     metadata_state: V,
 ) -> Result<CommitPlan, V::Error> {
     validate_commit_request_frame(request, head)?;
 
-    let mut checked_invariants = vec![
-        InvariantId::StaleWriterCannotPublish,
-        InvariantId::NextInodeIdIsMonotonic,
-    ];
     let validated_metadata = validate_metadata_preconditions(
         request,
         metadata_state,
         shape.assigned_seq,
         committed_at_ms,
         &shape.allocated_inode_ids,
-        name_policy,
-        &mut checked_invariants,
     )
     .await?;
-
-    if !shape.allocated_inode_ids.is_empty() {
-        push_unique_invariant(
-            &mut checked_invariants,
-            InvariantId::CreateMutationConsumesNextInodeId,
-        );
-    }
-    if request
-        .ops
-        .iter()
-        .any(|op| matches!(op, CommitOp::CreateFile { .. }))
-    {
-        push_unique_invariant(
-            &mut checked_invariants,
-            InvariantId::CreateFileRequiresDurableContent,
-        );
-    }
-    if request
-        .ops
-        .iter()
-        .any(|op| matches!(op, CommitOp::ReplaceFile { .. }))
-    {
-        push_unique_invariant(
-            &mut checked_invariants,
-            InvariantId::ReplaceFileRequiresDurableContent,
-        );
-    }
-    if request
-        .ops
-        .iter()
-        .any(|op| matches!(op, CommitOp::RestoreRevision { .. }))
-    {
-        push_unique_invariant(
-            &mut checked_invariants,
-            InvariantId::RestoreRevisionRequiresDurableContent,
-        );
-    }
 
     Ok(CommitPlan {
         namespace_id: request.namespace_id.clone(),
@@ -137,7 +80,6 @@ async fn build_commit_plan_with_view<V: CommitValidationView>(
         assigned_seq: shape.assigned_seq,
         validated_ops: validated_metadata.validated_ops,
         resulting_next_inode_id: shape.resulting_next_inode_id,
-        checked_invariants,
     })
 }
 

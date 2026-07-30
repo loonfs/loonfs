@@ -174,7 +174,6 @@ pub(super) async fn try_flush_wal<S: ObjectStore + ?Sized>(
                     store,
                     namespace_id,
                     &projection,
-                    &context.writer_version,
                     manifest_id,
                     manifest_object_id,
                 )
@@ -228,7 +227,6 @@ pub(super) async fn try_flush_wal<S: ObjectStore + ?Sized>(
                 .clone()
         }),
         context.now_ms,
-        &context.writer_version,
     )
     .await?
     {
@@ -391,7 +389,6 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     projection: &RootProjection<'_, S>,
-    writer_version: &str,
     manifest_id: ManifestId,
     manifest_object_id: ManifestObjectId,
 ) -> Result<NamespaceManifestEnvelope> {
@@ -439,21 +436,18 @@ async fn build_namespace_manifest_for_projection<S: ObjectStore + ?Sized>(
         (previous_manifest.payload.base_seq, metadata_files)
     };
 
-    NamespaceManifestEnvelope::from_payload(
-        writer_version,
-        NamespaceManifestPayload {
-            namespace_id: namespace_id.clone(),
-            manifest_id,
-            manifest_object_id,
-            head_seq,
-            head_commit_id: projection.head.head_commit_id.clone(),
-            base_seq,
-            writer_epoch: projection.head.writer_epoch,
-            next_inode_id: projection.head.next_inode_id,
-            retention_floor_seq: projection.floor_seq,
-            metadata_files,
-        },
-    )
+    NamespaceManifestEnvelope::from_payload(NamespaceManifestPayload {
+        namespace_id: namespace_id.clone(),
+        manifest_id,
+        manifest_object_id,
+        head_seq,
+        head_commit_id: projection.head.head_commit_id.clone(),
+        base_seq,
+        writer_epoch: projection.head.writer_epoch,
+        next_inode_id: projection.head.next_inode_id,
+        retention_floor_seq: projection.floor_seq,
+        metadata_files,
+    })
     .map_err(|err| {
         CoreError::Internal(format!(
             "failed to build namespace manifest envelope: {err}"

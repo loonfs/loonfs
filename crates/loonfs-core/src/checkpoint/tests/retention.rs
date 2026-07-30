@@ -279,7 +279,6 @@ async fn read_checkpoint_files<S: ObjectStore + ?Sized>(
         None,
         namespace_id,
         checkpoint_id,
-        loonfs_api::NamePolicy::default(),
         loonfs_api::PageRequest {
             cursor: None,
             limit: EffectiveLimit::new(NonZeroU32::new(64).expect("nonzero")),
@@ -1300,7 +1299,6 @@ async fn over_budget_wal_flush_aborts_without_publishing() {
     let context = MutationContext {
         writer_id: "budget-test".to_owned(),
         writer_session_id: "wrs_budget_test".to_owned(),
-        writer_version: "budget-test/0.1.0".to_owned(),
         now_ms: 1_000,
     };
     bootstrap_namespace(&store, &namespace_id, &context, false)
@@ -1362,7 +1360,6 @@ async fn over_budget_reorganization_aborts_without_publishing() {
     let context = MutationContext {
         writer_id: "budget-test".to_owned(),
         writer_session_id: "wrs_budget_test".to_owned(),
-        writer_version: "budget-test/0.1.0".to_owned(),
         now_ms: 1_000,
     };
     bootstrap_namespace(&store, &namespace_id, &context, false)

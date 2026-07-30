@@ -204,8 +204,6 @@ pub struct WalSegmentEnvelope {
     pub kind: WalEnvelopeKind,
     /// Family-local format version, which must equal [`WAL_FORMAT_VERSION`].
     pub format_version: u32,
-    /// Informational software version of the writer that encoded this object.
-    pub writer_version: String,
     /// Digest of the encoded payload bytes exactly as stored in the durable
     /// document, in `sha256:<hex>` form.
     pub payload_checksum: String,
@@ -217,14 +215,10 @@ impl WalSegmentEnvelope {
     /// Builds a versioned envelope and computes its checksum from canonical CBOR payload bytes.
     ///
     /// Construction fails when the payload cannot be encoded.
-    pub fn from_payload(
-        writer_version: impl Into<String>,
-        payload: WalSegmentPayload,
-    ) -> Result<Self, EnvelopeCodecError> {
+    pub fn from_payload(payload: WalSegmentPayload) -> Result<Self, EnvelopeCodecError> {
         Ok(Self {
             kind: WalEnvelopeKind::NamespaceWalSegment,
             format_version: WAL_FORMAT_VERSION,
-            writer_version: writer_version.into(),
             payload_checksum: wal_payload_checksum(&payload)?,
             payload,
         })
@@ -251,7 +245,6 @@ impl WalSegmentEnvelope {
 struct WalSegmentDocument {
     kind: String,
     format_version: u32,
-    writer_version: String,
     payload_checksum: String,
     #[serde(with = "serde_bytes")]
     payload: Vec<u8>,
@@ -291,7 +284,6 @@ pub fn encode_wal_segment_envelope_zstd(
     let document = WalSegmentDocument {
         kind: envelope.kind.as_str().to_owned(),
         format_version: envelope.format_version,
-        writer_version: envelope.writer_version.clone(),
         payload_checksum: envelope.payload_checksum.clone(),
         payload: payload_bytes,
     };
@@ -327,7 +319,6 @@ pub fn decode_wal_segment_envelope_zstd(
     Ok(WalSegmentEnvelope {
         kind: expected_kind,
         format_version: document.format_version,
-        writer_version: document.writer_version,
         payload_checksum: document.payload_checksum,
         payload,
     })

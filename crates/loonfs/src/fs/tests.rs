@@ -3,12 +3,12 @@
 use crate::{
     ChangeSeq, CommitId, CommitOp, CommitPrecondition, CommitRequest, InodeId, NameKey, RevisionNo,
 };
-use loonfs_api::{DisplayName, NamePolicy};
+use loonfs_api::DisplayName;
 
 #[test]
 fn explicit_commit_facade_exports_constructor_types() {
     let display_name = DisplayName::parse("Report.txt").expect("valid display name");
-    let name_key = NameKey::for_display_name(NamePolicy::default(), &display_name);
+    let name_key = NameKey::for_display_name(&display_name);
     let precondition = CommitPrecondition::BindingIs {
         parent_inode_id: InodeId(1),
         name_key,

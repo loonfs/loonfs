@@ -45,12 +45,11 @@ pub(super) async fn publish_binding_is_precondition<S: ObjectStore + ?Sized>(
     })
 }
 
-pub(super) fn publish_child_name_absent_precondition<S: ObjectStore + ?Sized>(
-    view: &PublishPathPlanningView<'_, '_, '_, S>,
+pub(super) fn publish_child_name_absent_precondition(
     parent_inode_id: InodeId,
     display_name: &DisplayName,
 ) -> ApiCommitPrecondition {
-    let name_key = NameKey::for_display_name(view.metadata_state.name_policy(), display_name);
+    let name_key = NameKey::for_display_name(display_name);
     ApiCommitPrecondition::ChildNameAbsent {
         parent_inode_id,
         name_key,
@@ -73,7 +72,7 @@ pub(super) async fn publish_reject_tombstoned_path_ancestor<S: ObjectStore + ?Si
 
     for component in absolute_path.components() {
         let display_name = component.to_display_name();
-        let name_key = NameKey::for_display_name(view.metadata_state.name_policy(), &display_name);
+        let name_key = NameKey::for_display_name(&display_name);
         let Some(bound_child) = view
             .metadata_state
             .visible_child(current_inode, &name_key)
@@ -160,7 +159,7 @@ pub(super) async fn publish_ensure_parent_directories<S: ObjectStore + ?Sized>(
     let mut creating_missing_ancestors = false;
     for component in &components[..components.len() - 1] {
         let display_name = component.to_display_name();
-        let name_key = NameKey::for_display_name(view.metadata_state.name_policy(), &display_name);
+        let name_key = NameKey::for_display_name(&display_name);
         if !creating_missing_ancestors {
             if let Some(child) = view
                 .metadata_state

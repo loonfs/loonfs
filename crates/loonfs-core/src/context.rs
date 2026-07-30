@@ -7,6 +7,5 @@ use serde::{Deserialize, Serialize};
 pub struct MutationContext {
     pub writer_id: String,
     pub writer_session_id: String,
-    pub writer_version: String,
     pub now_ms: u64,
 }

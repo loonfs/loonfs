@@ -64,7 +64,6 @@ pub(super) async fn plan_publish_create_directory<S: ObjectStore + ?Sized>(
         .is_some()
     {
         preconditions.push(publish_child_name_absent_precondition(
-            view,
             parent_inode_id,
             &display_name,
         ));
@@ -117,7 +116,7 @@ pub(super) async fn plan_publish_undelete<S: ObjectStore + ?Sized>(
             display_name: display_name.clone(),
         }],
         preconditions: vec![
-            publish_child_name_absent_precondition(view, parent_inode_id, &display_name),
+            publish_child_name_absent_precondition(parent_inode_id, &display_name),
             ApiCommitPrecondition::AncestorsNotSubtreeDeleted {
                 inode_id: parent_inode_id,
             },
@@ -212,7 +211,6 @@ pub(super) async fn plan_publish_put_file_content_ref<S: ObjectStore + ?Sized>(
                 .is_some()
             {
                 preconditions.push(publish_child_name_absent_precondition(
-                    view,
                     final_parent_inode,
                     &final_name,
                 ));

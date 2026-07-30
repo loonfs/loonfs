@@ -694,7 +694,7 @@ async fn point_lookups_skip_inline_filtered_runs_without_fetches() {
         descriptor.filter_inline = None;
     }
     let stripped_object_id = stripped_payload.manifest_object_id.clone();
-    let stripped = NamespaceManifestEnvelope::from_payload("test-writer", stripped_payload)
+    let stripped = NamespaceManifestEnvelope::from_payload(stripped_payload)
         .expect("stripped manifest envelope");
     write_namespace_manifest(&store, &stripped)
         .await

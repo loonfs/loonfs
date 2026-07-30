@@ -102,7 +102,7 @@ pub(super) async fn sweep_checkpoint_record<S: ObjectStore + ?Sized>(
     released.state = CheckpointRecordLifecycle::Released {
         released_at_ms: context.now_ms,
     };
-    let bytes = encode_checkpoint_record(&released, &context.writer_version)?;
+    let bytes = encode_checkpoint_record(&released)?;
     match store.compare_and_swap(key, etag, bytes).await {
         Ok(_) => Ok(CheckpointSweep::Released),
         Err(ObjectStoreError::PreconditionFailed { .. }) => {

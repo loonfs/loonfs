@@ -24,7 +24,7 @@ use crate::metadata::{
     DirentryBindRecord, InMemoryMetadataView, InodeRecord, MetadataState, MetadataView,
     RevisionRecord, SubtreeTombstoneRecord,
 };
-use loonfs_api::{ChangeSeq, InodeId, NameKey, NamePolicy, RevisionNo};
+use loonfs_api::{ChangeSeq, InodeId, NameKey, RevisionNo};
 use loonfs_objectstore::ObjectStore;
 
 /// Seq-scoped metadata lookups the commit validator performs, implemented by
@@ -112,20 +112,14 @@ fn commit_validation_from_core(error: CoreError) -> CommitValidationError {
 pub(super) struct InMemoryValidationView<'a> {
     metadata_state: &'a MetadataState,
     committed_seq: ChangeSeq,
-    name_policy: NamePolicy,
     overlay: CommitOverlayRows,
 }
 
 impl<'a> InMemoryValidationView<'a> {
-    pub(super) fn new(
-        metadata_state: &'a MetadataState,
-        committed_seq: ChangeSeq,
-        name_policy: NamePolicy,
-    ) -> Self {
+    pub(super) fn new(metadata_state: &'a MetadataState, committed_seq: ChangeSeq) -> Self {
         Self {
             metadata_state,
             committed_seq,
-            name_policy,
             overlay: CommitOverlayRows::new(),
         }
     }
@@ -135,7 +129,6 @@ impl<'a> InMemoryValidationView<'a> {
             self.metadata_state,
             Some(self.overlay.rows()),
             self.committed_seq,
-            self.name_policy,
         )
     }
 }

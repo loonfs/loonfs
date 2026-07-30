@@ -1606,7 +1606,7 @@ async fn copy_file_path_creates_new_inode_and_reuses_content_blob() {
 }
 
 #[tokio::test]
-async fn resolve_path_uses_nfc_casefold_name_policy() {
+async fn resolve_path_uses_nfc_casefold_folding() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();

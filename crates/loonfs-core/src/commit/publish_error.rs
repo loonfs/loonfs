@@ -7,8 +7,6 @@ use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
 pub enum CommitHeadPublishError {
-    #[error("writer version must not be empty")]
-    EmptyWriterVersion,
     #[error("expected head etag must not be empty")]
     EmptyExpectedHeadEtag,
     #[error("publish namespace mismatch: head `{head}`, plan `{plan}`")]

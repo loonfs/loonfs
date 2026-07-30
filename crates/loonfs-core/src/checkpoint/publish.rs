@@ -102,7 +102,6 @@ pub(super) async fn publish_metadata_root<S: ObjectStore + ?Sized>(
     manifest: &NamespaceManifestEnvelope,
     expected_predecessor: Option<ManifestObjectId>,
     updated_at_ms: u64,
-    writer_version: &str,
 ) -> Result<ManifestPublicationOutcome> {
     // Manifest publication CASes metadata/root.json, never the WAL head:
     // head watchers see only commits. Updates are monotonic in
@@ -128,15 +127,7 @@ pub(super) async fn publish_metadata_root<S: ObjectStore + ?Sized>(
             .await
             .map_err(CoreError::load_head)?
         else {
-            match create_first_metadata_root(
-                store,
-                namespace_id,
-                manifest,
-                updated_at_ms,
-                writer_version,
-            )
-            .await?
-            {
+            match create_first_metadata_root(store, namespace_id, manifest, updated_at_ms).await? {
                 Some(published) => return Ok(ManifestPublicationOutcome::Published(published)),
                 // Another publisher created the root first; re-read and let
                 // the ordinary rules decide.
@@ -172,14 +163,11 @@ pub(super) async fn publish_metadata_root<S: ObjectStore + ?Sized>(
             manifest_payload_checksum: manifest.payload_checksum.clone(),
             updated_at_ms,
         };
-        let envelope = MetadataRootEnvelope::from_state(
-            ControlObjectKind::MetadataRoot,
-            writer_version,
-            next.clone(),
-        )
-        .map_err(|err| {
-            CoreError::Internal(format!("failed to build metadata root envelope: {err}"))
-        })?;
+        let envelope =
+            MetadataRootEnvelope::from_state(ControlObjectKind::MetadataRoot, next.clone())
+                .map_err(|err| {
+                    CoreError::Internal(format!("failed to build metadata root envelope: {err}"))
+                })?;
         let encoded = encode_control_object(&envelope).map_err(|err| {
             CoreError::Internal(format!("failed to encode metadata root object: {err}"))
         })?;
@@ -222,7 +210,6 @@ async fn create_first_metadata_root<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     manifest: &NamespaceManifestEnvelope,
     updated_at_ms: u64,
-    writer_version: &str,
 ) -> Result<Option<MetadataRootState>> {
     let object_key = loonfs_objectstore::keys::metadata_root(namespace_id.as_str());
     let next = MetadataRootState {
@@ -233,12 +220,10 @@ async fn create_first_metadata_root<S: ObjectStore + ?Sized>(
         manifest_payload_checksum: manifest.payload_checksum.clone(),
         updated_at_ms,
     };
-    let envelope = MetadataRootEnvelope::from_state(
-        ControlObjectKind::MetadataRoot,
-        writer_version,
-        next.clone(),
-    )
-    .map_err(|err| CoreError::Internal(format!("failed to build metadata root envelope: {err}")))?;
+    let envelope = MetadataRootEnvelope::from_state(ControlObjectKind::MetadataRoot, next.clone())
+        .map_err(|err| {
+            CoreError::Internal(format!("failed to build metadata root envelope: {err}"))
+        })?;
     let encoded = encode_control_object(&envelope).map_err(|err| {
         CoreError::Internal(format!("failed to encode metadata root object: {err}"))
     })?;

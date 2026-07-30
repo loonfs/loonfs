@@ -25,18 +25,14 @@ use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 
 pub(crate) fn encode_checkpoint_record(
     record: &CheckpointRecordState,
-    writer_version: &str,
 ) -> crate::error::Result<Bytes> {
-    let envelope = CheckpointRecordEnvelope::from_state(
-        ControlObjectKind::CheckpointRecord,
-        writer_version,
-        record.clone(),
-    )
-    .map_err(|error| {
-        CoreError::Internal(format!(
-            "failed to build checkpoint record envelope: {error}"
-        ))
-    })?;
+    let envelope =
+        CheckpointRecordEnvelope::from_state(ControlObjectKind::CheckpointRecord, record.clone())
+            .map_err(|error| {
+            CoreError::Internal(format!(
+                "failed to build checkpoint record envelope: {error}"
+            ))
+        })?;
     encode_control_object(&envelope)
         .map(Bytes::from)
         .map_err(|error| {
@@ -54,9 +50,8 @@ pub(crate) fn encode_checkpoint_record(
 pub(crate) async fn write_checkpoint_record<S: ObjectStore + ?Sized>(
     store: &S,
     record: &CheckpointRecordState,
-    writer_version: &str,
 ) -> Result<()> {
-    let encoded = encode_checkpoint_record(record, writer_version)?;
+    let encoded = encode_checkpoint_record(record)?;
     let object_key = checkpoint_record(record.namespace_id.as_str(), record.checkpoint_id.as_str());
     match store.put_if_absent(&object_key, encoded).await {
         Ok(_) => Ok(()),
@@ -112,7 +107,6 @@ pub(crate) async fn release_checkpoint_record<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     checkpoint_id: &CheckpointId,
     released_at_ms: u64,
-    writer_version: &str,
 ) -> Result<()> {
     const RELEASE_CAS_ATTEMPTS: usize = 4;
     let object_key = checkpoint_record(namespace_id.as_str(), checkpoint_id.as_str());
@@ -130,7 +124,7 @@ pub(crate) async fn release_checkpoint_record<S: ObjectStore + ?Sized>(
         }
         let mut next = loaded.state;
         next.state = CheckpointRecordLifecycle::Released { released_at_ms };
-        let encoded = encode_checkpoint_record(&next, writer_version)?;
+        let encoded = encode_checkpoint_record(&next)?;
         let Some(etag) = loaded.etag.as_deref() else {
             return Err(CoreError::NamespaceCorrupt(format!(
                 "missing etag for checkpoint record `{object_key}`"

@@ -161,8 +161,6 @@ async fn standalone_enable_without_head_change_wakes_empty_backfill() {
     stop_poll_and_driver(poll, shutdown, driver).await;
 }
 
-const TEST_WRITER_VERSION: &str = "standalone-poll-test/0.1";
-
 async fn reader(store: &SharedObjectStore) -> FsReader {
     FsReader::builder_with_store(store.clone())
         .build()
@@ -173,7 +171,6 @@ async fn reader(store: &SharedObjectStore) -> FsReader {
 async fn admin(store: &SharedObjectStore, actor: &str) -> FsAdmin {
     FsAdmin::builder_with_store(store.clone())
         .actor_id(format!("{actor}-worker"))
-        .actor_version(TEST_WRITER_VERSION)
         .build()
         .await
         .expect("build admin")
@@ -184,7 +181,6 @@ async fn worker(store: &SharedObjectStore, actor: &str) -> GrepWorker<SharedObje
         store.clone(),
         reader(store).await,
         admin(store, actor).await,
-        TEST_WRITER_VERSION,
     )
 }
 
@@ -193,7 +189,6 @@ async fn seed_namespace(store: SharedObjectStore, namespace_id: &NamespaceId) ->
         store,
         namespace_id,
         format!("{}-seed", namespace_id.as_str()),
-        TEST_WRITER_VERSION,
     )
     .await
 }

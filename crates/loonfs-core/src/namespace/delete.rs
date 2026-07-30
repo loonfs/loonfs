@@ -1,6 +1,5 @@
 //! Namespace deletion: a fenced, terminal head-state transition.
 
-use crate::context::MutationContext;
 use crate::error::CoreError;
 use crate::namespace::control::read_head_object;
 use crate::options::DeleteNamespaceOptions;
@@ -36,7 +35,6 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     options: DeleteNamespaceOptions,
-    context: &MutationContext,
     acquired_writer: AcquiredWriter,
 ) -> Result<DeleteNamespaceResponse, CoreError> {
     let mut attempted_swap = false;
@@ -91,12 +89,8 @@ pub(crate) async fn delete_namespace<S: ObjectStore + ?Sized>(
             state: NamespaceState::Deleted,
             ..head.clone()
         };
-        let envelope = HeadStateEnvelope::from_state(
-            ControlObjectKind::WalHead,
-            &context.writer_version,
-            deleted_head,
-        )
-        .map_err(|err| CoreError::Internal(format!("failed to build head envelope: {err}")))?;
+        let envelope = HeadStateEnvelope::from_state(ControlObjectKind::WalHead, deleted_head)
+            .map_err(|err| CoreError::Internal(format!("failed to build head envelope: {err}")))?;
         let encoded = encode_control_object(&envelope)
             .map_err(|err| CoreError::Internal(format!("failed to encode head object: {err}")))?;
 

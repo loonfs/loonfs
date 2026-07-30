@@ -65,7 +65,6 @@ pub(crate) fn test_config(
         auth_token: Some(auth_token.into()),
         content_token_secret: content_token_secret.into(),
         writer_id: writer_id.to_owned(),
-        writer_version: format!("{writer_id}/0.1.0"),
         runtime_cache: RuntimeCacheConfigOverrides::default(),
         grep: GrepConfig::default(),
         background_maintenance: true,

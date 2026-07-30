@@ -16,9 +16,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{self, BoxStream};
 use loonfs_api::wire::control::HeadState;
-use loonfs_api::{
-    AbsolutePath, ChangeSeq, CommitId, InodeId, InodeKind, NameKey, NamePolicy, RevisionNo,
-};
+use loonfs_api::{AbsolutePath, ChangeSeq, CommitId, InodeId, InodeKind, NameKey, RevisionNo};
 use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
 };
@@ -29,7 +27,6 @@ pub(super) const DIRECTORY_PAGE_RAW_SCAN_LIMIT: usize = 64;
 #[derive(Clone, Copy)]
 pub(crate) struct MetadataSnapshot {
     visible_seq: ChangeSeq,
-    name_policy: NamePolicy,
 }
 
 pub(crate) struct MetadataSourceStack<'a, 'store, S: ObjectStore + ?Sized> {
@@ -120,13 +117,9 @@ impl<'a> InMemoryMetadataView<'a> {
         base: &'a MetadataState,
         overlay: Option<&'a MetadataState>,
         visible_seq: ChangeSeq,
-        name_policy: NamePolicy,
     ) -> Self {
         Self {
-            snapshot: MetadataSnapshot {
-                visible_seq,
-                name_policy,
-            },
+            snapshot: MetadataSnapshot { visible_seq },
             sources: MetadataSourceStack {
                 overlay,
                 wal_tail: None,
@@ -141,14 +134,12 @@ impl<'a> InMemoryMetadataView<'a> {
 impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     pub(crate) fn from_loaded_head(
         head: &'a HeadState,
-        name_policy: NamePolicy,
         tables: &'a VerifiedMetadataTables<'store, S>,
         wal_tail_rows: &'a MetadataState,
     ) -> Self {
         Self {
             snapshot: MetadataSnapshot {
                 visible_seq: head.seq,
-                name_policy,
             },
             sources: MetadataSourceStack {
                 overlay: None,
@@ -171,12 +162,10 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     pub(crate) fn over_manifest_tables(
         tables: &'a VerifiedMetadataTables<'store, S>,
         materialized_seq: ChangeSeq,
-        name_policy: NamePolicy,
     ) -> Self {
         Self {
             snapshot: MetadataSnapshot {
                 visible_seq: materialized_seq,
-                name_policy,
             },
             sources: MetadataSourceStack {
                 overlay: None,
@@ -188,20 +177,13 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         }
     }
 
-    pub(crate) fn name_policy(&self) -> NamePolicy {
-        self.snapshot.name_policy
-    }
-
     pub(crate) fn with_overlay<'view>(
         &'view self,
         overlay: &'view MetadataState,
         visible_seq: ChangeSeq,
     ) -> MetadataView<'view, 'store, S> {
         MetadataView {
-            snapshot: MetadataSnapshot {
-                visible_seq,
-                name_policy: self.snapshot.name_policy,
-            },
+            snapshot: MetadataSnapshot { visible_seq },
             sources: MetadataSourceStack {
                 overlay: Some(overlay),
                 wal_tail: self.sources.wal_tail,
@@ -280,12 +262,7 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         &self,
         absolute_path: &AbsolutePath,
     ) -> Result<ResolvedVisiblePath, CoreError> {
-        visibility::resolve_visible_path(
-            &mut self.reads(),
-            absolute_path,
-            self.snapshot.name_policy,
-        )
-        .await
+        visibility::resolve_visible_path(&mut self.reads(), absolute_path).await
     }
 
     pub(crate) async fn visible_child(

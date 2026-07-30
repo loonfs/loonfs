@@ -6,10 +6,9 @@
 
 use super::super::{CommitRequest, CommitValidationError, ResolvedBinding, ValidatedOp};
 use super::view::CommitValidationView;
-use crate::invariants::{push_unique_invariant, InvariantId};
 use crate::metadata::{BindingIdentity, InodeRecord, RevisionRecord, SubtreeTombstoneRecord};
 use loonfs_api::v0::{CommitOp, CommitPrecondition};
-use loonfs_api::{ChangeSeq, DisplayName, InodeId, InodeKind, NameKey, NamePolicy, RevisionNo};
+use loonfs_api::{ChangeSeq, DisplayName, InodeId, InodeKind, NameKey, RevisionNo};
 
 pub(super) struct ValidatedMetadataOps {
     pub(super) validated_ops: Vec<ValidatedOp>,
@@ -21,15 +20,12 @@ pub(super) async fn validate_metadata_preconditions<V: CommitValidationView>(
     committed_seq: ChangeSeq,
     committed_at_ms: u64,
     allocated_inode_ids: &[InodeId],
-    name_policy: NamePolicy,
-    checked_invariants: &mut Vec<InvariantId>,
 ) -> Result<ValidatedMetadataOps, V::Error> {
     let mut allocated_inode_ids = allocated_inode_ids.iter().copied();
     let mut validated_ops = Vec::with_capacity(request.ops.len());
     let mut next_delta_index = 0u32;
 
-    validate_explicit_preconditions(&request.preconditions, &metadata_state, checked_invariants)
-        .await?;
+    validate_explicit_preconditions(&request.preconditions, &metadata_state).await?;
 
     for (op_index, op) in request.ops.iter().enumerate() {
         let op_index =
@@ -39,19 +35,10 @@ pub(super) async fn validate_metadata_preconditions<V: CommitValidationView>(
                 parent_inode_id,
                 display_name,
             } => {
-                let name_key = validate_child_name_absent(
-                    &metadata_state,
-                    *parent_inode_id,
-                    display_name,
-                    name_policy,
-                )
-                .await?;
-                validate_create_parent_not_covered(
-                    &metadata_state,
-                    *parent_inode_id,
-                    checked_invariants,
-                )
-                .await?;
+                let name_key =
+                    validate_child_name_absent(&metadata_state, *parent_inode_id, display_name)
+                        .await?;
+                validate_create_parent_not_covered(&metadata_state, *parent_inode_id).await?;
                 ValidatedOp::CreateDir {
                     op_index,
                     parent_inode_id: *parent_inode_id,
@@ -70,19 +57,10 @@ pub(super) async fn validate_metadata_preconditions<V: CommitValidationView>(
                 display_name,
                 content_ref,
             } => {
-                let name_key = validate_child_name_absent(
-                    &metadata_state,
-                    *parent_inode_id,
-                    display_name,
-                    name_policy,
-                )
-                .await?;
-                validate_create_parent_not_covered(
-                    &metadata_state,
-                    *parent_inode_id,
-                    checked_invariants,
-                )
-                .await?;
+                let name_key =
+                    validate_child_name_absent(&metadata_state, *parent_inode_id, display_name)
+                        .await?;
+                validate_create_parent_not_covered(&metadata_state, *parent_inode_id).await?;
                 ValidatedOp::CreateFile {
                     op_index,
                     parent_inode_id: *parent_inode_id,
@@ -114,8 +92,7 @@ pub(super) async fn validate_metadata_preconditions<V: CommitValidationView>(
                         }
                     },
                 )?;
-                validate_replace_target_not_covered(&metadata_state, *inode_id, checked_invariants)
-                    .await?;
+                validate_replace_target_not_covered(&metadata_state, *inode_id).await?;
                 ValidatedOp::ReplaceFile {
                     op_index,
                     inode_id: *inode_id,
@@ -144,16 +121,13 @@ pub(super) async fn validate_metadata_preconditions<V: CommitValidationView>(
                         base_revision_no,
                     },
                 )?;
-                validate_not_covered_by_tombstone(
-                    &metadata_state,
-                    *inode_id,
-                    checked_invariants,
-                    |tombstone| CommitValidationError::RestoreRevisionUnderSubtreeTombstone {
+                validate_not_covered_by_tombstone(&metadata_state, *inode_id, |tombstone| {
+                    CommitValidationError::RestoreRevisionUnderSubtreeTombstone {
                         inode_id: *inode_id,
                         root_inode_id: tombstone.root_inode_id,
                         tombstone_seq: tombstone.tombstone_seq,
-                    },
-                )
+                    }
+                })
                 .await?;
                 ValidatedOp::RestoreRevision {
                     op_index,
@@ -180,16 +154,13 @@ pub(super) async fn validate_metadata_preconditions<V: CommitValidationView>(
                     },
                 )
                 .await?;
-                validate_not_covered_by_tombstone(
-                    &metadata_state,
-                    *inode_id,
-                    checked_invariants,
-                    |tombstone| CommitValidationError::DeleteFileCoveredByTombstone {
+                validate_not_covered_by_tombstone(&metadata_state, *inode_id, |tombstone| {
+                    CommitValidationError::DeleteFileCoveredByTombstone {
                         inode_id: *inode_id,
                         covering_root_inode_id: tombstone.root_inode_id,
                         tombstone_seq: tombstone.tombstone_seq,
-                    },
-                )
+                    }
+                })
                 .await?;
                 ValidatedOp::DeleteFile {
                     op_index,
@@ -212,26 +183,21 @@ pub(super) async fn validate_metadata_preconditions<V: CommitValidationView>(
                     *inode_id,
                     *new_parent_inode_id,
                     new_display_name,
-                    name_policy,
                 )
                 .await?;
                 validate_rename_does_not_cycle(&metadata_state, *inode_id, *new_parent_inode_id)
                     .await?;
-                validate_not_covered_by_tombstone(
-                    &metadata_state,
-                    *inode_id,
-                    checked_invariants,
-                    |tombstone| CommitValidationError::RenameInodeUnderSubtreeTombstone {
+                validate_not_covered_by_tombstone(&metadata_state, *inode_id, |tombstone| {
+                    CommitValidationError::RenameInodeUnderSubtreeTombstone {
                         inode_id: *inode_id,
                         root_inode_id: tombstone.root_inode_id,
                         tombstone_seq: tombstone.tombstone_seq,
-                    },
-                )
+                    }
+                })
                 .await?;
                 validate_not_covered_by_tombstone(
                     &metadata_state,
                     *new_parent_inode_id,
-                    checked_invariants,
                     |tombstone| CommitValidationError::RenameTargetParentUnderSubtreeTombstone {
                         parent_inode_id: *new_parent_inode_id,
                         root_inode_id: tombstone.root_inode_id,
@@ -266,16 +232,13 @@ pub(super) async fn validate_metadata_preconditions<V: CommitValidationView>(
                     },
                 )
                 .await?;
-                validate_not_covered_by_tombstone(
-                    &metadata_state,
-                    *root_inode_id,
-                    checked_invariants,
-                    |tombstone| CommitValidationError::DeleteSubtreeRootCoveredByTombstone {
+                validate_not_covered_by_tombstone(&metadata_state, *root_inode_id, |tombstone| {
+                    CommitValidationError::DeleteSubtreeRootCoveredByTombstone {
                         root_inode_id: *root_inode_id,
                         covering_root_inode_id: tombstone.root_inode_id,
                         tombstone_seq: tombstone.tombstone_seq,
-                    },
-                )
+                    }
+                })
                 .await?;
                 ValidatedOp::DeleteSubtree {
                     op_index,
@@ -338,19 +301,10 @@ pub(super) async fn validate_metadata_preconditions<V: CommitValidationView>(
                 // visible directory parent (visibility rules out a parent
                 // inside the recovered subtree, so the bind cannot cycle),
                 // a free name, and no covering tombstone over the parent.
-                let name_key = validate_child_name_absent(
-                    &metadata_state,
-                    *parent_inode_id,
-                    display_name,
-                    name_policy,
-                )
-                .await?;
-                validate_create_parent_not_covered(
-                    &metadata_state,
-                    *parent_inode_id,
-                    checked_invariants,
-                )
-                .await?;
+                let name_key =
+                    validate_child_name_absent(&metadata_state, *parent_inode_id, display_name)
+                        .await?;
+                validate_create_parent_not_covered(&metadata_state, *parent_inode_id).await?;
                 ValidatedOp::Undelete {
                     op_index,
                     inode_id: *inode_id,
@@ -374,7 +328,6 @@ pub(super) async fn validate_metadata_preconditions<V: CommitValidationView>(
 async fn validate_explicit_preconditions<V: CommitValidationView>(
     preconditions: &[CommitPrecondition],
     metadata_state: &V,
-    checked_invariants: &mut Vec<InvariantId>,
 ) -> Result<(), V::Error> {
     for precondition in preconditions {
         match precondition {
@@ -385,8 +338,7 @@ async fn validate_explicit_preconditions<V: CommitValidationView>(
                 validate_inode_revision_is(metadata_state, *inode_id, *revision_no).await?;
             }
             CommitPrecondition::AncestorsNotSubtreeDeleted { inode_id } => {
-                validate_replace_target_not_covered(metadata_state, *inode_id, checked_invariants)
-                    .await?;
+                validate_replace_target_not_covered(metadata_state, *inode_id).await?;
             }
             CommitPrecondition::ChildNameAbsent {
                 parent_inode_id,
@@ -469,39 +421,30 @@ async fn validate_inode_kind<V: CommitValidationView>(
 }
 
 /// Requires no covering subtree tombstone over `inode_id`, with the covered
-/// error supplied by the call site, and records the tombstone invariant.
+/// error supplied by the call site.
 async fn validate_not_covered_by_tombstone<V: CommitValidationView>(
     metadata_state: &V,
     inode_id: InodeId,
-    checked_invariants: &mut Vec<InvariantId>,
     covered: impl FnOnce(&SubtreeTombstoneRecord) -> CommitValidationError,
 ) -> Result<(), V::Error> {
     if let Some(tombstone) = metadata_state.covering_subtree_tombstone(inode_id).await? {
         return Err(covered(&tombstone).into());
     }
 
-    push_unique_invariant(
-        checked_invariants,
-        InvariantId::SubtreeTombstoneBlocksDescendantMutation,
-    );
     Ok(())
 }
 
 async fn validate_create_parent_not_covered<V: CommitValidationView>(
     metadata_state: &V,
     parent_inode_id: InodeId,
-    checked_invariants: &mut Vec<InvariantId>,
 ) -> Result<(), V::Error> {
-    validate_not_covered_by_tombstone(
-        metadata_state,
-        parent_inode_id,
-        checked_invariants,
-        |tombstone| CommitValidationError::CreateUnderSubtreeTombstone {
+    validate_not_covered_by_tombstone(metadata_state, parent_inode_id, |tombstone| {
+        CommitValidationError::CreateUnderSubtreeTombstone {
             parent_inode_id,
             root_inode_id: tombstone.root_inode_id,
             tombstone_seq: tombstone.tombstone_seq,
-        },
-    )
+        }
+    })
     .await
 }
 
@@ -510,9 +453,8 @@ async fn validate_create_parent_not_covered<V: CommitValidationView>(
 async fn validate_replace_target_not_covered<V: CommitValidationView>(
     metadata_state: &V,
     inode_id: InodeId,
-    checked_invariants: &mut Vec<InvariantId>,
 ) -> Result<(), V::Error> {
-    validate_not_covered_by_tombstone(metadata_state, inode_id, checked_invariants, |tombstone| {
+    validate_not_covered_by_tombstone(metadata_state, inode_id, |tombstone| {
         CommitValidationError::ReplaceFileUnderSubtreeTombstone {
             inode_id,
             root_inode_id: tombstone.root_inode_id,
@@ -530,7 +472,6 @@ async fn validate_name_absent<V: CommitValidationView>(
     metadata_state: &V,
     parent_inode_id: InodeId,
     display_name: &DisplayName,
-    name_policy: NamePolicy,
     rebinding_inode_id: Option<InodeId>,
     parent_missing: impl FnOnce() -> CommitValidationError,
     parent_not_directory: impl FnOnce(InodeKind) -> CommitValidationError,
@@ -545,7 +486,7 @@ async fn validate_name_absent<V: CommitValidationView>(
     )
     .await?;
 
-    let name_key = NameKey::for_display_name(name_policy, display_name);
+    let name_key = NameKey::for_display_name(display_name);
     if let Some(existing) = metadata_state
         .visible_child(parent_inode_id, &name_key)
         .await?
@@ -564,13 +505,11 @@ async fn validate_child_name_absent<V: CommitValidationView>(
     metadata_state: &V,
     parent_inode_id: InodeId,
     display_name: &DisplayName,
-    name_policy: NamePolicy,
 ) -> Result<NameKey, V::Error> {
     validate_name_absent(
         metadata_state,
         parent_inode_id,
         display_name,
-        name_policy,
         None,
         || CommitValidationError::CreateParentMissing { parent_inode_id },
         |actual_kind| CommitValidationError::CreateParentNotDirectory {
@@ -591,13 +530,11 @@ async fn validate_rename_target_name_absent<V: CommitValidationView>(
     renaming_inode_id: InodeId,
     parent_inode_id: InodeId,
     display_name: &DisplayName,
-    name_policy: NamePolicy,
 ) -> Result<NameKey, V::Error> {
     validate_name_absent(
         metadata_state,
         parent_inode_id,
         display_name,
-        name_policy,
         Some(renaming_inode_id),
         || CommitValidationError::RenameTargetParentMissing { parent_inode_id },
         |actual_kind| CommitValidationError::RenameTargetParentNotDirectory {

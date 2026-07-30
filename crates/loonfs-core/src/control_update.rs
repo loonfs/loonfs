@@ -58,7 +58,6 @@ pub(crate) enum ControlUpdateError {
 pub(crate) async fn update_head<S, T, E, F>(
     store: &S,
     namespace_id: &NamespaceId,
-    writer_version: &str,
     max_attempts: usize,
     mut update: F,
 ) -> Result<T, E>
@@ -76,8 +75,7 @@ where
         match update(&loaded)? {
             HeadUpdate::Noop(outcome) => return Ok(outcome),
             HeadUpdate::Replace { next, outcome } => {
-                let encoded =
-                    encode_head(writer_version, *next, &loaded.object_key).map_err(E::from)?;
+                let encoded = encode_head(*next, &loaded.object_key).map_err(E::from)?;
                 match store
                     .compare_and_swap(&loaded.object_key, expected_etag, Bytes::from(encoded))
                     .await
@@ -106,7 +104,6 @@ pub(crate) async fn update_upload_session<S, T, F, Fut>(
     store: &S,
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
-    writer_version: &str,
     max_attempts: usize,
     mut update: F,
 ) -> crate::error::Result<T>
@@ -116,13 +113,9 @@ where
     Fut: Future<Output = crate::error::Result<UploadSessionUpdate<T>>>,
 {
     for _attempt in 0..max_attempts {
-        match try_update_upload_session(
-            store,
-            namespace_id,
-            upload_id,
-            writer_version,
-            |state, _metadata| update(state),
-        )
+        match try_update_upload_session(store, namespace_id, upload_id, |state, _metadata| {
+            update(state)
+        })
         .await?
         {
             UploadSessionCas::Applied(outcome) => return Ok(outcome),
@@ -143,7 +136,6 @@ pub(crate) async fn try_update_upload_session<S, T, F, Fut>(
     store: &S,
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
-    writer_version: &str,
     update: F,
 ) -> crate::error::Result<UploadSessionCas<T>>
 where
@@ -156,14 +148,13 @@ where
     match update(loaded.envelope.state, loaded.metadata).await? {
         UploadSessionUpdate::Noop(outcome) => Ok(UploadSessionCas::Applied(outcome)),
         UploadSessionUpdate::Replace { next, outcome } => {
-            let envelope = UploadSessionEnvelope::from_state(
-                ControlObjectKind::UploadSession,
-                writer_version,
-                *next,
-            )
-            .map_err(|err| {
-                CoreError::Internal(format!("failed to build upload session envelope: {err}"))
-            })?;
+            let envelope =
+                UploadSessionEnvelope::from_state(ControlObjectKind::UploadSession, *next)
+                    .map_err(|err| {
+                        CoreError::Internal(format!(
+                            "failed to build upload session envelope: {err}"
+                        ))
+                    })?;
             let encoded = encode_control_object(&envelope).map_err(|err| {
                 CoreError::Internal(format!("failed to encode upload session envelope: {err}"))
             })?;
@@ -179,15 +170,13 @@ where
     }
 }
 
-fn encode_head(
-    writer_version: &str,
-    next: HeadState,
-    object_key: &str,
-) -> Result<Vec<u8>, ControlUpdateError> {
-    let envelope = HeadStateEnvelope::from_state(ControlObjectKind::WalHead, writer_version, next)
-        .map_err(|err| ControlUpdateError::Codec {
-            object_key: object_key.to_owned(),
-            message: err.to_string(),
+fn encode_head(next: HeadState, object_key: &str) -> Result<Vec<u8>, ControlUpdateError> {
+    let envelope =
+        HeadStateEnvelope::from_state(ControlObjectKind::WalHead, next).map_err(|err| {
+            ControlUpdateError::Codec {
+                object_key: object_key.to_owned(),
+                message: err.to_string(),
+            }
         })?;
     encode_control_object(&envelope).map_err(|err| ControlUpdateError::Codec {
         object_key: object_key.to_owned(),
@@ -273,17 +262,10 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use tempfile::tempdir;
 
-    const WRITER_VERSION: &str = "writer/0.1.0";
-
     async fn write_initial_head(store: &LocalFsStore, namespace_id: &NamespaceId) {
         let envelope = HeadStateEnvelope::from_state(
             ControlObjectKind::WalHead,
-            WRITER_VERSION,
-            HeadState::initial(
-                namespace_id.clone(),
-                loonfs_api::ContentStoreId::generate(),
-                loonfs_api::NamePolicy::default(),
-            ),
+            HeadState::initial(namespace_id.clone(), loonfs_api::ContentStoreId::generate()),
         )
         .expect("head envelope");
         let bytes = encode_control_object(&envelope).expect("head bytes");
@@ -306,7 +288,7 @@ mod tests {
             .expect("head exists")
             .etag;
 
-        let outcome = update_head(&store, &namespace_id, WRITER_VERSION, 3, |_loaded| {
+        let outcome = update_head(&store, &namespace_id, 3, |_loaded| {
             Ok::<_, ControlUpdateError>(HeadUpdate::Noop("unchanged"))
         })
         .await
@@ -336,7 +318,7 @@ mod tests {
         );
         store.fail_next(1);
 
-        let outcome = update_head(&store, &namespace_id, WRITER_VERSION, 3, |loaded| {
+        let outcome = update_head(&store, &namespace_id, 3, |loaded| {
             let mut next = loaded.envelope.state.clone();
             next.seq.0 += 1;
             Ok::<_, ControlUpdateError>(HeadUpdate::Replace {
@@ -360,7 +342,7 @@ mod tests {
         let store = MetadataMapStore::without_etag(inner, KeyPredicate::any());
 
         let closure_called = AtomicBool::new(false);
-        let error = update_head(&store, &namespace_id, WRITER_VERSION, 3, |_loaded| {
+        let error = update_head(&store, &namespace_id, 3, |_loaded| {
             closure_called.store(true, Ordering::SeqCst);
             Ok::<_, ControlUpdateError>(HeadUpdate::Noop(()))
         })

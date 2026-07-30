@@ -88,7 +88,6 @@ mod tests {
         MutationContext {
             writer_id: "writer".to_owned(),
             writer_session_id: "wrs_test".to_owned(),
-            writer_version: "test".to_owned(),
             now_ms: 1,
         }
     }

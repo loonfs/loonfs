@@ -35,7 +35,6 @@ impl VisibilityHarness {
             .namespace_id(namespace_id)
             .writer_id("visibility-equivalence")
             .writer_session_id("wrs_visibility_equivalence")
-            .writer_version("visibility-equivalence/0.1.0")
             .build()
             .expect("build namespace engine");
         engine

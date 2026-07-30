@@ -193,7 +193,6 @@ pub struct GrepWorker<S> {
     store: S,
     reader: FsReader,
     admin: FsAdmin,
-    writer_version: String,
     block_cache: Arc<GrepBlockCache>,
 }
 
@@ -204,26 +203,18 @@ impl<S: std::fmt::Debug> std::fmt::Debug for GrepWorker<S> {
         formatter
             .debug_struct("GrepWorker")
             .field("store", &self.store)
-            .field("writer_version", &self.writer_version)
             .finish_non_exhaustive()
     }
 }
 
 impl<S: ObjectStore + Clone> GrepWorker<S> {
-    /// Creates a worker over one grep-keyspace store handle, the runtime
-    /// handles it reads and checkpoints through, and the version stamped
-    /// into every grep root it publishes.
-    pub fn new(
-        store: S,
-        reader: FsReader,
-        admin: FsAdmin,
-        writer_version: impl Into<String>,
-    ) -> Self {
+    /// Creates a worker over one grep-keyspace store handle and the runtime
+    /// handles it reads and checkpoints through.
+    pub fn new(store: S, reader: FsReader, admin: FsAdmin) -> Self {
         Self {
             store,
             reader,
             admin,
-            writer_version: writer_version.into(),
             block_cache: Arc::new(GrepBlockCache::new(MAX_CACHED_GREP_BLOCKS)),
         }
     }
@@ -442,7 +433,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         &self,
         state: &GrepRootState,
     ) -> std::result::Result<LoadedGrepRoot, GrepRootError> {
-        seed_grep_root(&self.store, state, &self.writer_version).await
+        seed_grep_root(&self.store, state).await
     }
 
     async fn advance_root(
@@ -450,7 +441,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         current: &LoadedGrepRoot,
         next: &GrepRootState,
     ) -> std::result::Result<LoadedGrepRoot, GrepRootError> {
-        advance_grep_root(&self.store, current, next, &self.writer_version).await
+        advance_grep_root(&self.store, current, next).await
     }
 
     async fn create_backfill_checkpoint(

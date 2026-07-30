@@ -15,8 +15,7 @@ use loonfs_api::wire::control::{
     WriterBlock,
 };
 use loonfs_api::{
-    ChangeSeq, ContentStoreId, ErrorCode, InodeKind, NamePolicy, NamespaceId, NamespaceSummary,
-    ROOT_INODE_ID,
+    ChangeSeq, ContentStoreId, ErrorCode, InodeKind, NamespaceId, NamespaceSummary, ROOT_INODE_ID,
 };
 use loonfs_objectstore::keys::wal_head;
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
@@ -26,8 +25,6 @@ use thiserror::Error;
 pub enum BootstrapNamespaceError {
     #[error("holder id must not be empty")]
     EmptyHolderId,
-    #[error("writer version must not be empty")]
-    EmptyWriterVersion,
     #[error("namespace `{namespace_id}` already exists")]
     NamespaceAlreadyExists { namespace_id: NamespaceId },
     #[error("namespace `{namespace_id}` is deleted and its id is retired")]
@@ -51,8 +48,7 @@ impl BootstrapNamespaceError {
     /// [`CoreError::code`](crate::Error::code).
     pub fn code(&self) -> ErrorCode {
         match self {
-            BootstrapNamespaceError::EmptyHolderId
-            | BootstrapNamespaceError::EmptyWriterVersion => ErrorCode::InvalidRequest,
+            BootstrapNamespaceError::EmptyHolderId => ErrorCode::InvalidRequest,
             BootstrapNamespaceError::NamespaceAlreadyExists { .. } => ErrorCode::NamespaceExists,
             BootstrapNamespaceError::NamespaceDeleted { .. } => ErrorCode::NamespaceDeleted,
             BootstrapNamespaceError::Head(_) => ErrorCode::ServerError,
@@ -70,25 +66,18 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     if context.writer_id.trim().is_empty() {
         return Err(BootstrapNamespaceError::EmptyHolderId);
     }
-    if context.writer_version.trim().is_empty() {
-        return Err(BootstrapNamespaceError::EmptyWriterVersion);
-    }
 
     // A fresh content-store id per namespace. Nothing claims it durably:
     // uniqueness rests on the generated id's randomness, exactly as it does
     // for every other generated id in the format.
-    let mut head = HeadState::initial(
-        namespace_id.clone(),
-        ContentStoreId::generate(),
-        NamePolicy::default(),
-    );
+    let mut head = HeadState::initial(namespace_id.clone(), ContentStoreId::generate());
     head.writer = Some(WriterBlock {
         writer_id: context.writer_id.clone(),
         writer_session_id: context.writer_session_id.clone(),
         acquired_at_ms: context.now_ms,
     });
 
-    match install_namespace_head(store, namespace_id, &head, &context.writer_version).await? {
+    match install_namespace_head(store, namespace_id, &head).await? {
         NamespaceHeadInstall::Landed => Ok(NamespaceSummary {
             namespace_id: namespace_id.clone(),
         }),
@@ -139,12 +128,10 @@ pub(super) async fn install_namespace_head<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     head: &HeadState,
-    writer_version: &str,
 ) -> Result<NamespaceHeadInstall, CoreError> {
     let object_key = wal_head(namespace_id.as_str());
-    let envelope =
-        HeadStateEnvelope::from_state(ControlObjectKind::WalHead, writer_version, head.clone())
-            .map_err(|err| CoreError::Internal(format!("failed to build head envelope: {err}")))?;
+    let envelope = HeadStateEnvelope::from_state(ControlObjectKind::WalHead, head.clone())
+        .map_err(|err| CoreError::Internal(format!("failed to build head envelope: {err}")))?;
     let bytes = encode_control_object(&envelope)
         .map_err(|err| CoreError::Internal(format!("failed to encode head object: {err}")))?;
     match store.put_if_absent(&object_key, Bytes::from(bytes)).await {

@@ -1,9 +1,7 @@
 //! Loads and validates the WAL segment chain from a base seq through the
 //! head.
 
-use super::replay::{
-    extend_wal_replay_invariants, validate_wal_segment_for_replay, WalReplayError,
-};
+use super::replay::{validate_wal_segment_for_replay, WalReplayError};
 use super::{ValidatedWalChain, ValidatedWalSegment, WalChainLoadError, WalChainLoadRequest};
 use bytes::Bytes;
 use loonfs_api::wire::control::WalSegmentPointer;
@@ -153,7 +151,6 @@ pub(crate) async fn load_validated_wal_chain<S: ObjectStore + ?Sized>(
             actual: expected_base_seq,
         });
     }
-    let mut checked_invariants = Vec::new();
     for segment in &reversed {
         validate_wal_segment_for_replay(
             request.namespace_id,
@@ -162,7 +159,6 @@ pub(crate) async fn load_validated_wal_chain<S: ObjectStore + ?Sized>(
             segment.envelope(),
         )?;
         expected_base_seq = segment.envelope().payload.end_seq;
-        extend_wal_replay_invariants(&mut checked_invariants);
     }
 
     if expected_base_seq != request.head_seq {
@@ -172,7 +168,7 @@ pub(crate) async fn load_validated_wal_chain<S: ObjectStore + ?Sized>(
         });
     }
 
-    Ok(ValidatedWalChain::new(reversed, checked_invariants))
+    Ok(ValidatedWalChain::new(reversed))
 }
 
 fn validate_pointer_matches_envelope(

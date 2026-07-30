@@ -51,11 +51,8 @@ fn wal_create_directory(
         WalDelta::BindDirentry {
             delta_index: delta_index.saturating_add(1),
             parent_inode_id,
-            name_key: NameKey::parse(loonfs_api::name_key_for_display_name(
-                loonfs_api::NamePolicy::default(),
-                &display_name,
-            ))
-            .expect("derived name key"),
+            name_key: NameKey::parse(loonfs_api::name_key_for_display_name(&display_name))
+                .expect("derived name key"),
             display_name: test_display_name(display_name),
             child_inode_id: inode_id,
         },
@@ -78,11 +75,8 @@ fn wal_create_file(
         WalDelta::BindDirentry {
             delta_index: delta_index.saturating_add(1),
             parent_inode_id,
-            name_key: NameKey::parse(loonfs_api::name_key_for_display_name(
-                loonfs_api::NamePolicy::default(),
-                &display_name,
-            ))
-            .expect("derived name key"),
+            name_key: NameKey::parse(loonfs_api::name_key_for_display_name(&display_name))
+                .expect("derived name key"),
             display_name: test_display_name(display_name),
             child_inode_id: inode_id,
         },
@@ -120,26 +114,22 @@ fn wal_tombstone(delta_index: u32, root_inode_id: InodeId) -> Vec<WalDelta> {
 }
 
 fn metadata_state_after(sequences: &[Vec<WalDelta>]) -> MetadataState {
-    let mut state = MetadataState::default()
-        .apply_committed_wal_deltas(
-            ChangeSeq(0),
-            4_200,
-            &[WalDelta::CreateInode {
-                delta_index: 0,
-                inode_id: InodeId(1),
-                inode_kind: InodeKind::Directory,
-            }],
-        )
-        .metadata_state;
+    let mut state = MetadataState::default().apply_committed_wal_deltas(
+        ChangeSeq(0),
+        4_200,
+        &[WalDelta::CreateInode {
+            delta_index: 0,
+            inode_id: InodeId(1),
+            inode_kind: InodeKind::Directory,
+        }],
+    );
 
     for (index, deltas) in sequences.iter().enumerate() {
-        state = state
-            .apply_committed_wal_deltas(
-                ChangeSeq(u64::try_from(index + 1).expect("seq")),
-                4_200,
-                deltas,
-            )
-            .metadata_state;
+        state = state.apply_committed_wal_deltas(
+            ChangeSeq(u64::try_from(index + 1).expect("seq")),
+            4_200,
+            deltas,
+        )
     }
 
     state
@@ -153,7 +143,6 @@ fn validation_context(
     let namespace_id = namespace_id("demo");
     let head = HeadState {
         content_store_id: loonfs_api::ContentStoreId::generate(),
-        name_policy: loonfs_api::NamePolicy::default(),
         fork_basis: None,
         namespace_id: namespace_id.clone(),
         seq,
@@ -171,7 +160,6 @@ fn validation_context(
     };
     CommitValidationContext {
         head,
-        name_policy: loonfs_api::NamePolicy::default(),
         metadata_state,
     }
 }
@@ -741,9 +729,7 @@ async fn restore_revision_overflow_is_rejected() {
                 inode_kind: InodeKind::Directory,
             }],
         )
-        .metadata_state
-        .apply_committed_wal_deltas(ChangeSeq(1), 4_200, &deltas)
-        .metadata_state;
+        .apply_committed_wal_deltas(ChangeSeq(1), 4_200, &deltas);
     let context = validation_context(&metadata_state, ChangeSeq(1), InodeId(3));
     let request = CommitRequest {
         namespace_id: namespace_id("demo"),

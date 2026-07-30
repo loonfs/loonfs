@@ -2,7 +2,6 @@
 //! validation, and verified read-back.
 
 use crate::error::CoreError;
-use crate::invariants::InvariantId;
 use crate::namespace::catalog::{load_namespace_content_store_id, VerifiedNamespaceCatalogEntry};
 use crate::storage::content_admission::{ContentAdmission, PreparedContent};
 use bytes::Bytes;
@@ -18,7 +17,6 @@ pub(crate) struct ValidatedDurableContent {
     pub object_key: String,
     pub file_size_bytes: u64,
     pub file_digest_sha256: String,
-    pub checked_invariants: Vec<InvariantId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -205,12 +203,6 @@ fn validate_loaded_content_bytes(
         object_key,
         file_size_bytes: actual_size,
         file_digest_sha256: actual_digest,
-        checked_invariants: vec![
-            InvariantId::WholeFileContentRefKindIsSupported,
-            InvariantId::WholeFileContentObjectKeyMatchesDigest,
-            InvariantId::WholeFileContentSizeMatchesRef,
-            InvariantId::WholeFileContentDigestMatchesRef,
-        ],
     })
 }
 

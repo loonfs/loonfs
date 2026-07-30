@@ -2,7 +2,6 @@
 
 use super::{owning_runtime, FsReader, HandleBuilderCore};
 use crate::background::{BackgroundWork, FsBackgroundWork};
-use crate::config::default_writer_version;
 use crate::fs::{ReadCore, WriterBits, WriterIdentity};
 use crate::metrics::ObjectStoreMetricsRecorder;
 use crate::publisher::{PublishObserver, PublisherRegistry};
@@ -150,7 +149,6 @@ impl FsWriter {
 pub struct FsWriterBuilder {
     core: HandleBuilderCore,
     writer_id: Option<String>,
-    writer_version: String,
     background_work: FsBackgroundWork,
     max_concurrent_maintenance: usize,
     min_publish_interval_ms: u64,
@@ -162,7 +160,6 @@ impl FsWriterBuilder {
         Self {
             core,
             writer_id: None,
-            writer_version: default_writer_version(),
             background_work: FsBackgroundWork::ManualOnly,
             max_concurrent_maintenance: crate::config::DEFAULT_MAX_CONCURRENT_MAINTENANCE,
             min_publish_interval_ms: crate::config::DEFAULT_MIN_PUBLISH_INTERVAL_MS,
@@ -173,12 +170,6 @@ impl FsWriterBuilder {
     /// Sets the writer id used by namespace mutations. Required.
     pub fn writer_id(mut self, writer_id: impl Into<String>) -> Self {
         self.writer_id = Some(writer_id.into());
-        self
-    }
-
-    /// Sets the writer version used in mutation context.
-    pub fn writer_version(mut self, writer_version: impl Into<String>) -> Self {
-        self.writer_version = writer_version.into();
         self
     }
 
@@ -284,7 +275,7 @@ impl FsWriterBuilder {
         let writer_id = self
             .writer_id
             .ok_or_else(|| RuntimeError::Config("writer_id is required".to_owned()))?;
-        let identity = WriterIdentity::new(writer_id, self.writer_version)?;
+        let identity = WriterIdentity::new(writer_id)?;
         let max_concurrent_maintenance = NonZeroUsize::new(self.max_concurrent_maintenance)
             .ok_or_else(|| {
                 RuntimeError::Config(

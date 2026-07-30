@@ -117,14 +117,10 @@ async fn create_upload_session<S: ObjectStore + ?Sized>(
         created_at_ms: context.now_ms,
         state: UploadSessionLifecycle::Active,
     };
-    let envelope = UploadSessionEnvelope::from_state(
-        ControlObjectKind::UploadSession,
-        &context.writer_version,
-        state,
-    )
-    .map_err(|err| {
-        CoreError::Internal(format!("failed to build upload session envelope: {err}"))
-    })?;
+    let envelope = UploadSessionEnvelope::from_state(ControlObjectKind::UploadSession, state)
+        .map_err(|err| {
+            CoreError::Internal(format!("failed to build upload session envelope: {err}"))
+        })?;
     let encoded = encode_control_object(&envelope).map_err(|err| {
         CoreError::Internal(format!("failed to encode upload session envelope: {err}"))
     })?;
@@ -162,7 +158,6 @@ pub(crate) async fn upload_content<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     upload_id: &UploadId,
     bytes: &[u8],
-    context: &MutationContext,
 ) -> Result<UploadContentResponse> {
     let content_store_id = load_namespace_content_store_id(store, namespace_id).await?;
     let content_ref = ContentRef::whole_file_v0(bytes);
@@ -173,7 +168,6 @@ pub(crate) async fn upload_content<S: ObjectStore + ?Sized>(
         store,
         namespace_id,
         upload_id,
-        &context.writer_version,
         CONTENTION_RETRY_LIMIT,
         |mut state| {
             let content_ref = content_ref.clone();
@@ -230,13 +224,11 @@ pub(crate) async fn complete_upload<S: ObjectStore + ?Sized>(
     content_store_id: &ContentStoreId,
     upload_id: &UploadId,
     request: &CompleteUploadRequest,
-    context: &MutationContext,
 ) -> Result<(CompleteUploadResponse, PreparedContent)> {
     update_upload_session(
         store,
         namespace_id,
         upload_id,
-        &context.writer_version,
         CONTENTION_RETRY_LIMIT,
         |mut state| {
             let namespace_id = namespace_id.clone();
@@ -322,7 +314,6 @@ pub(crate) async fn condemn_upload_session_if_aged<S: ObjectStore + ?Sized>(
         store,
         namespace_id,
         upload_id,
-        &context.writer_version,
         |mut state, metadata| async move {
             let Some(last_modified_ms) = metadata.last_modified_ms else {
                 return Ok(UploadSessionUpdate::Noop(UploadSessionSweep::Retain));

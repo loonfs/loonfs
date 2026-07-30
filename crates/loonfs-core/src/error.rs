@@ -697,8 +697,7 @@ fn classify_head_publish_error(error: &CommitHeadPublishError) -> ErrorCode {
         CommitHeadPublishError::StaleHead
         | CommitHeadPublishError::PublishBudgetExceeded { .. } => ErrorCode::StaleHead,
         CommitHeadPublishError::OutcomeUnknown(_) => ErrorCode::CommitOutcomeUnknown,
-        CommitHeadPublishError::EmptyWriterVersion
-        | CommitHeadPublishError::EmptyExpectedHeadEtag
+        CommitHeadPublishError::EmptyExpectedHeadEtag
         | CommitHeadPublishError::NamespaceMismatch { .. }
         | CommitHeadPublishError::WalSegmentNamespaceMismatch { .. }
         | CommitHeadPublishError::WalSegmentWriterEpochMismatch { .. }

@@ -105,12 +105,9 @@ impl ResolvedTarget {
     pub(crate) async fn resolve(profile: &ProfileConfig, no_retry: bool) -> Result<Self, CliError> {
         match profile {
             ProfileConfig::Embedded {
-                store,
-                writer_id,
-                writer_version,
-                ..
+                store, writer_id, ..
             } => Ok(Self::Embedded(Box::new(
-                EmbeddedTarget::new(store, writer_id.as_deref(), writer_version.as_deref()).await?,
+                EmbeddedTarget::new(store, writer_id.as_deref()).await?,
             ))),
             ProfileConfig::Remote {
                 server_url,
@@ -136,14 +133,10 @@ impl EmbeddedTarget {
     pub(super) async fn new(
         store_config: &StoreConfig,
         writer_id: Option<&str>,
-        writer_version: Option<&str>,
     ) -> Result<Self, CliError> {
         let writer_id = writer_id
             .map(ToOwned::to_owned)
             .unwrap_or_else(default_writer_id);
-        let writer_version = writer_version
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(|| format!("loon/{}", env!("CARGO_PKG_VERSION")));
         let trace_store_kind = TraceStoreKind::from(store_config.kind());
         // One command drives all three handles from one runtime, so they
         // deliberately share one provider client.
@@ -154,7 +147,6 @@ impl EmbeddedTarget {
         );
         let writer = FsWriter::builder_with_store(store.clone())
             .writer_id(writer_id.clone())
-            .writer_version(writer_version.clone())
             // The server's policy: publishes past the WAL threshold schedule
             // their own step. The backend settles scheduled work after each
             // mutation, so a one-shot command exits with maintenance done
@@ -170,7 +162,6 @@ impl EmbeddedTarget {
         let reader = writer.reader();
         let admin = FsAdmin::builder_with_store(store)
             .actor_id(writer_id)
-            .actor_version(writer_version.clone())
             .trace_store_kind(trace_store_kind)
             .build()
             .await
@@ -182,7 +173,6 @@ impl EmbeddedTarget {
             // Embedded mode composes grep itself: the runtime handles above
             // know nothing about it.
             grep: GrepService::new(),
-            writer_version,
         };
         Ok(Self { backend })
     }

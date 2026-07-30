@@ -126,9 +126,7 @@ async fn publish_same_content_files(
 }
 
 async fn worker(store: &SharedObjectStore) -> GrepWorker<SharedObjectStore> {
-    GrepHost::new(store, "grep-worker-tests", "grep-worker-tests/0.1")
-        .await
-        .worker
+    GrepHost::new(store, "grep-worker-tests").await.worker
 }
 
 async fn drive_worker_step(

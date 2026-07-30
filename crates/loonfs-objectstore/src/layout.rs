@@ -21,14 +21,6 @@ pub enum DurableObjectFamily {
     ///
     /// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
     WalFloor,
-    /// Classifies the reserved mutable WAL-index pointer key.
-    ///
-    /// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
-    WalIndex,
-    /// Classifies a reserved immutable WAL-index run.
-    ///
-    /// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
-    WalIndexRun,
     /// Classifies an immutable segment in a namespace's WAL chain.
     ///
     /// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
@@ -105,8 +97,8 @@ impl ObjectLayout {
     }
 
     /// Listing prefix that contains every WAL segment of `namespace` and
-    /// nothing else: `wal/head.json`, `wal/floor.json`, and index objects
-    /// live outside it, so a GC listing yields only segment keys.
+    /// nothing else: `wal/head.json` and `wal/floor.json` live outside it,
+    /// so a GC listing yields only segment keys.
     ///
     /// Segment file names start with the segment's 20-digit `start_seq` as
     /// an operator/GC convenience; no protocol depends on listing order.
@@ -194,12 +186,6 @@ pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
         }
         ["namespaces", namespace, "wal", "floor.json"] => {
             parsed(DurableObjectFamily::WalFloor, Some(namespace))
-        }
-        ["namespaces", namespace, "wal", "index.json"] => {
-            parsed(DurableObjectFamily::WalIndex, Some(namespace))
-        }
-        ["namespaces", namespace, "wal", "indexes", run] if run.ends_with(".json") => {
-            parsed(DurableObjectFamily::WalIndexRun, Some(namespace))
         }
         ["namespaces", namespace, "wal", "segments", segment] if segment.ends_with(".wal.zst") => {
             parsed(DurableObjectFamily::WalSegment, Some(namespace))
@@ -338,8 +324,6 @@ mod tests {
         assert_eq!(prefix, "namespaces/ns-1/wal/segments/");
         assert!(!layout.wal_head("ns-1").as_str().starts_with(&prefix));
         assert!(!layout.wal_floor("ns-1").as_str().starts_with(&prefix));
-        assert!(!"namespaces/ns-1/wal/index.json".starts_with(&prefix));
-        assert!(!"namespaces/ns-1/wal/indexes/idx_1.json".starts_with(&prefix));
         assert!(layout
             .wal_segment("ns-1", "seg_1")
             .as_str()
@@ -352,14 +336,6 @@ mod tests {
         let cases = [
             (layout.wal_head("ns-1"), DurableObjectFamily::WalHead),
             (layout.wal_floor("ns-1"), DurableObjectFamily::WalFloor),
-            (
-                "namespaces/ns-1/wal/index.json".to_owned(),
-                DurableObjectFamily::WalIndex,
-            ),
-            (
-                "namespaces/ns-1/wal/indexes/idx_00000000000000000000000000000001.json".to_owned(),
-                DurableObjectFamily::WalIndexRun,
-            ),
             (
                 layout.wal_segment("ns-1", "seg_00000000000000000000000000000001"),
                 DurableObjectFamily::WalSegment,

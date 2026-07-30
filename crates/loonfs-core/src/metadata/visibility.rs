@@ -30,7 +30,7 @@ use super::{
     DirentryBindRecord, DirentryUnbindRecord, InodeRecord, MetadataState, SubtreeTombstoneRecord,
 };
 use futures::FutureExt;
-use loonfs_api::{AbsolutePath, ChangeSeq, InodeId, InodeKind, NameKey, NamePolicy, ROOT_INODE_ID};
+use loonfs_api::{AbsolutePath, ChangeSeq, InodeId, InodeKind, NameKey, ROOT_INODE_ID};
 use std::collections::BTreeSet;
 use std::future::Future;
 
@@ -351,7 +351,6 @@ pub(crate) async fn visible_child<R: MetadataVisibilityReads>(
 pub(crate) async fn resolve_visible_path<R>(
     reads: &mut R,
     absolute_path: &AbsolutePath,
-    name_policy: NamePolicy,
 ) -> Result<ResolvedVisiblePath, R::Error>
 where
     R: MetadataVisibilityReads,
@@ -395,7 +394,7 @@ where
 
         let requested_absolute_path = join_display_path(&current_absolute_path, component.as_str());
         let display_name = component.to_display_name();
-        let name_key = NameKey::for_display_name(name_policy, &display_name);
+        let name_key = NameKey::for_display_name(&display_name);
         let direntry = reads
             .visible_child(current_inode_id, &name_key)
             .await?

@@ -3,7 +3,7 @@
 
 use crate::namespace::control::{read_head_object, ControlObjectLoadError};
 use loonfs_api::wire::control::HeadState;
-use loonfs_api::{ContentStoreId, NamePolicy, NamespaceId};
+use loonfs_api::{ContentStoreId, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 use thiserror::Error;
 
@@ -23,7 +23,6 @@ pub enum NamespaceCatalogLoadError {
 pub struct VerifiedNamespaceCatalogEntry {
     namespace_id: NamespaceId,
     content_store_id: ContentStoreId,
-    name_policy: NamePolicy,
 }
 
 impl VerifiedNamespaceCatalogEntry {
@@ -33,7 +32,6 @@ impl VerifiedNamespaceCatalogEntry {
         Self {
             namespace_id: head.namespace_id.clone(),
             content_store_id: head.content_store_id.clone(),
-            name_policy: head.name_policy,
         }
     }
 
@@ -44,10 +42,6 @@ impl VerifiedNamespaceCatalogEntry {
 
     pub fn content_store_id(&self) -> &ContentStoreId {
         &self.content_store_id
-    }
-
-    pub fn name_policy(&self) -> NamePolicy {
-        self.name_policy
     }
 }
 

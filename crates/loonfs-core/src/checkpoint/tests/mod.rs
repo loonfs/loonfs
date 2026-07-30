@@ -103,13 +103,11 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
 pub(crate) fn mutation_context(
     writer_id: &str,
     writer_session_id: &str,
-    writer_version: &str,
     now_ms: u64,
 ) -> MutationContext {
     MutationContext {
         writer_id: writer_id.to_owned(),
         writer_session_id: writer_session_id.to_owned(),
-        writer_version: writer_version.to_owned(),
         now_ms,
     }
 }
@@ -328,7 +326,7 @@ fn base_segment_object_keys_for_family(
 }
 
 fn test_context() -> MutationContext {
-    mutation_context("test-writer", "wrs_test", "test-writer/0.1.0", 1_000)
+    mutation_context("test-writer", "wrs_test", 1_000)
 }
 
 fn manifest_id(seq: ChangeSeq) -> ManifestId {
@@ -433,11 +431,8 @@ impl ObjectStore for ConflictOnManifestCreateStore {
                             .map_err(|error| ObjectStoreError::transport(key, error.to_string()))?;
                         let mut payload = candidate.payload;
                         payload.next_inode_id = InodeId(payload.next_inode_id.0 + 1);
-                        let mutated = NamespaceManifestEnvelope::from_payload(
-                            candidate.writer_version,
-                            payload,
-                        )
-                        .map_err(|error| ObjectStoreError::transport(key, error.to_string()))?;
+                        let mutated = NamespaceManifestEnvelope::from_payload(payload)
+                            .map_err(|error| ObjectStoreError::transport(key, error.to_string()))?;
                         Bytes::from(
                             encode_namespace_manifest_json(&mutated).map_err(|error| {
                                 ObjectStoreError::transport(key, error.to_string())
@@ -486,7 +481,6 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
     store: &S,
     namespace_id: &NamespaceId,
     source: ManifestMetadataSource<'_>,
-    writer_version: &str,
     policy: MetadataLsmPolicy,
     manifest_id: ManifestId,
 ) -> crate::error::Result<NamespaceManifestEnvelope> {
@@ -562,21 +556,18 @@ pub(crate) async fn build_namespace_manifest_from_metadata_state<S: ObjectStore 
         }
     };
 
-    NamespaceManifestEnvelope::from_payload(
-        writer_version,
-        NamespaceManifestPayload {
-            namespace_id: namespace_id.clone(),
-            manifest_id,
-            manifest_object_id,
-            head_seq,
-            head_commit_id: head.head_commit_id.clone(),
-            base_seq,
-            writer_epoch: head.writer_epoch,
-            next_inode_id: head.next_inode_id,
-            retention_floor_seq: source.retention_floor_seq,
-            metadata_files,
-        },
-    )
+    NamespaceManifestEnvelope::from_payload(NamespaceManifestPayload {
+        namespace_id: namespace_id.clone(),
+        manifest_id,
+        manifest_object_id,
+        head_seq,
+        head_commit_id: head.head_commit_id.clone(),
+        base_seq,
+        writer_epoch: head.writer_epoch,
+        next_inode_id: head.next_inode_id,
+        retention_floor_seq: source.retention_floor_seq,
+        metadata_files,
+    })
     .map_err(|err| {
         CoreError::Internal(format!(
             "failed to build namespace manifest envelope: {err}"

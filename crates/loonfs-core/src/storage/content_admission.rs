@@ -202,7 +202,7 @@ mod tests {
     use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
     use loonfs_api::v0::ValidatedContentToken;
     use loonfs_api::wire::control::HeadState;
-    use loonfs_api::{ContentRef, ContentStoreId, NamePolicy, NamespaceId};
+    use loonfs_api::{ContentRef, ContentStoreId, NamespaceId};
 
     fn catalog_entry(
         namespace_id: NamespaceId,
@@ -211,7 +211,6 @@ mod tests {
         VerifiedNamespaceCatalogEntry::from_head(&HeadState::initial(
             namespace_id,
             ContentStoreId::parse(content_store).expect("content store id"),
-            NamePolicy::default(),
         ))
     }
 

@@ -1,7 +1,7 @@
 //! The durable envelope layout, decided once.
 //!
 //! Every durable LoonFS object is an envelope document with the same leading
-//! fields — `kind`, `format_version`, `writer_version`, `payload_checksum` —
+//! fields — `kind`, `format_version`, `payload_checksum` —
 //! followed by the payload as an opaque sub-document. This module owns the
 //! whole contract: the probe, the one error vocabulary, the kind/version/
 //! checksum validation rules, and the generic JSON codec that control
@@ -171,7 +171,6 @@ pub(crate) fn verify_checksum_fresh(
 struct JsonEnvelopeDocument {
     kind: String,
     format_version: u32,
-    writer_version: String,
     payload_checksum: String,
     payload: Box<RawValue>,
 }
@@ -181,7 +180,6 @@ struct JsonEnvelopeDocument {
 struct StrictJsonEnvelopeDocument {
     kind: String,
     format_version: u32,
-    writer_version: String,
     payload_checksum: String,
     payload: Box<RawValue>,
 }
@@ -191,7 +189,6 @@ impl From<StrictJsonEnvelopeDocument> for JsonEnvelopeDocument {
         Self {
             kind: document.kind,
             format_version: document.format_version,
-            writer_version: document.writer_version,
             payload_checksum: document.payload_checksum,
             payload: document.payload,
         }
@@ -215,7 +212,6 @@ pub(crate) fn encode_json_envelope<T: Serialize>(
     kind: &str,
     format_version: u32,
     supported_version: u32,
-    writer_version: &str,
     payload_checksum: &str,
     payload: &T,
 ) -> Result<Vec<u8>, EnvelopeCodecError> {
@@ -226,7 +222,6 @@ pub(crate) fn encode_json_envelope<T: Serialize>(
     let document = JsonEnvelopeDocument {
         kind: kind.to_owned(),
         format_version,
-        writer_version: writer_version.to_owned(),
         payload_checksum: payload_checksum.to_owned(),
         payload: RawValue::from_string(payload_json)
             .map_err(|err| EnvelopeCodecError::PayloadEncode(err.to_string()))?,
@@ -237,7 +232,6 @@ pub(crate) fn encode_json_envelope<T: Serialize>(
 /// A decoded JSON-bodied envelope's shared fields plus its parsed payload.
 pub(crate) struct DecodedJsonEnvelope<T> {
     pub(crate) format_version: u32,
-    pub(crate) writer_version: String,
     pub(crate) payload_checksum: String,
     pub(crate) payload: T,
 }
@@ -298,7 +292,6 @@ fn decode_json_envelope_payload<T: DeserializeOwned>(
 
     Ok(DecodedJsonEnvelope {
         format_version: document.format_version,
-        writer_version: document.writer_version,
         payload_checksum: document.payload_checksum,
         payload,
     })
