@@ -2,7 +2,7 @@
 //! sessions from publishing interleaved commits.
 
 use crate::context::MutationContext;
-use crate::control_update::{update_head, ControlUpdateError, HeadUpdate};
+use crate::control_update::{update_head, ControlUpdateError, HeadReplacement};
 use crate::namespace::control::ControlObjectLoadError;
 use loonfs_api::wire::control::{AcquiredWriter, HeadState, NamespaceState, WriterBlock};
 use loonfs_api::{NamespaceId, WriterEpoch};
@@ -21,8 +21,6 @@ pub enum WriterEpochAcquireError {
     NamespaceDeleted { namespace_id: NamespaceId },
     #[error("empty writer id")]
     EmptyWriterId,
-    #[error("empty writer session id")]
-    EmptyWriterSessionId,
     #[error("missing head etag for `{object_key}`")]
     MissingHeadEtag { object_key: String },
     #[error("writer epoch overflow from `{active}`")]
@@ -49,9 +47,14 @@ pub enum WriterEpochAcquireError {
 /// any CAS — no attempt may rewrite the tombstone, inflate its epoch, or
 /// name a "current writer" for a dead namespace.
 ///
-/// The only non-bumping success path is idempotent retry: when the head's
-/// writer block already names this exact session, its current epoch is
-/// returned without a CAS.
+/// Every attempt bumps: there is no "this head is already mine" recognition,
+/// because there is no session identity to recognize. That is safe because a
+/// session acquires at most once — the commit engine memoizes the result in
+/// `session_writer_epoch` and never asks again — so a second call only
+/// happens when the first call's outcome was unknown to the caller. Bumping
+/// again then fences an epoch that never published anything, which takeover
+/// already handles as last-writer-wins. The cost is one wasted epoch on a
+/// rare retry path; the benefit is that acquisition needs no identity at all.
 pub(crate) async fn acquire_writer_epoch<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -60,9 +63,6 @@ pub(crate) async fn acquire_writer_epoch<S: ObjectStore + ?Sized>(
     if context.writer_id.trim().is_empty() {
         return Err(WriterEpochAcquireError::EmptyWriterId);
     }
-    if context.writer_session_id.trim().is_empty() {
-        return Err(WriterEpochAcquireError::EmptyWriterSessionId);
-    }
 
     update_head(
         store,
@@ -70,32 +70,20 @@ pub(crate) async fn acquire_writer_epoch<S: ObjectStore + ?Sized>(
         MAX_WRITER_EPOCH_ACQUIRE_ATTEMPTS,
         |loaded_head| {
             let head = &loaded_head.envelope.state;
-            // Terminal-state guard before the idempotent-retry path: even
-            // the session named in the tombstone's writer block must not get
-            // an epoch back for a deleted namespace.
+            // Terminal-state guard before the bump: no caller, not even the
+            // writer named in the tombstone's block, gets an epoch back for
+            // a deleted namespace.
             if head.state == NamespaceState::Deleted {
                 return Err(WriterEpochAcquireError::NamespaceDeleted {
                     namespace_id: head.namespace_id.clone(),
                 });
             }
-            if let Some(writer) = head.writer.as_ref() {
-                if writer.writer_id == context.writer_id
-                    && writer.writer_session_id == context.writer_session_id
-                {
-                    return Ok(HeadUpdate::Noop(AcquiredWriter {
-                        writer_id: context.writer_id.clone(),
-                        writer_session_id: context.writer_session_id.clone(),
-                        writer_epoch: head.writer_epoch,
-                    }));
-                }
-            }
 
             let next_epoch = next_writer_epoch(head.writer_epoch)?;
-            Ok(HeadUpdate::Replace {
+            Ok(HeadReplacement {
                 next: Box::new(head_with_writer(head, next_epoch, context)),
                 outcome: AcquiredWriter {
                     writer_id: context.writer_id.clone(),
-                    writer_session_id: context.writer_session_id.clone(),
                     writer_epoch: next_epoch,
                 },
             })
@@ -129,7 +117,6 @@ fn head_with_writer(
         writer_epoch,
         writer: Some(WriterBlock {
             writer_id: context.writer_id.clone(),
-            writer_session_id: context.writer_session_id.clone(),
             acquired_at_ms: context.now_ms,
         }),
         next_inode_id: current_head.next_inode_id,
@@ -203,18 +190,16 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::tempdir;
 
-    fn context(writer_id: &str, writer_session_id: &str, now_ms: u64) -> MutationContext {
+    fn context(writer_id: &str, now_ms: u64) -> MutationContext {
         MutationContext {
             writer_id: writer_id.to_owned(),
-            writer_session_id: writer_session_id.to_owned(),
             now_ms,
         }
     }
 
-    fn head_with_session(
+    fn head_owned_by(
         namespace_id: &NamespaceId,
         writer_id: &str,
-        writer_session_id: &str,
         writer_epoch: WriterEpoch,
     ) -> HeadState {
         let mut head =
@@ -222,7 +207,6 @@ mod tests {
         head.writer_epoch = writer_epoch;
         head.writer = Some(WriterBlock {
             writer_id: writer_id.to_owned(),
-            writer_session_id: writer_session_id.to_owned(),
             acquired_at_ms: 500,
         });
         head
@@ -249,64 +233,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn same_session_reuses_active_epoch_without_rewriting_head() {
+    async fn acquiring_twice_from_the_same_context_takes_a_higher_epoch_each_time() {
+        // Nothing recognizes an already-owned head, so a repeat acquire is
+        // an ordinary takeover of the caller's own epoch: it bumps, and the
+        // head's writer block is rewritten with the new acquisition stamp.
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         write_head(
             &store,
             &namespace_id,
-            head_with_session(&namespace_id, "writer", "session-a", WriterEpoch(7)),
-        )
-        .await;
-        let etag_before = head_etag(&store, &namespace_id).await;
-
-        let acquired = acquire_writer_epoch(
-            &store,
-            &namespace_id,
-            &context("writer", "session-a", 1_000),
-        )
-        .await
-        .expect("acquire writer");
-
-        assert_eq!(acquired.writer_epoch, WriterEpoch(7));
-        assert_eq!(head_etag(&store, &namespace_id).await, etag_before);
-    }
-
-    #[tokio::test]
-    async fn restarted_writer_session_bumps_epoch() {
-        // Same writer id, new session: the restarted process fences its own
-        // predecessor instead of silently sharing its epoch.
-        let temp_dir = tempdir().expect("tempdir");
-        let store = LocalFsStore::new(temp_dir.path()).expect("store");
-        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        write_head(
-            &store,
-            &namespace_id,
-            head_with_session(&namespace_id, "writer", "session-a", WriterEpoch(7)),
+            head_owned_by(&namespace_id, "writer", WriterEpoch(7)),
         )
         .await;
 
-        let acquired = acquire_writer_epoch(
-            &store,
-            &namespace_id,
-            &context("writer", "session-b", 1_000),
-        )
-        .await
-        .expect("acquire writer");
+        let first = acquire_writer_epoch(&store, &namespace_id, &context("writer", 1_000))
+            .await
+            .expect("first acquire");
+        let second = acquire_writer_epoch(&store, &namespace_id, &context("writer", 2_000))
+            .await
+            .expect("second acquire");
 
-        assert_eq!(acquired.writer_epoch, WriterEpoch(8));
-        assert_eq!(acquired.writer_session_id, "session-b");
+        assert_eq!(first.writer_epoch, WriterEpoch(8));
+        assert_eq!(second.writer_epoch, WriterEpoch(9));
         let head = read_head_object(&store, &namespace_id)
             .await
             .expect("read head")
             .envelope
             .state;
-        assert_eq!(head.writer_epoch, WriterEpoch(8));
-        assert_eq!(
-            head.writer.expect("writer block").writer_session_id,
-            "session-b"
-        );
+        assert_eq!(head.writer_epoch, WriterEpoch(9));
+        let writer = head.writer.expect("writer block");
+        assert_eq!(writer.writer_id, "writer");
+        assert_eq!(writer.acquired_at_ms, 2_000);
     }
 
     #[tokio::test]
@@ -314,19 +272,17 @@ mod tests {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        // The tombstone names the deleting session in its writer block: even
-        // that exact session must be refused, so the guard precedes the
-        // idempotent-retry path.
-        let mut tombstone = head_with_session(&namespace_id, "writer", "session-a", WriterEpoch(7));
+        // The tombstone names the deleting writer in its writer block: even
+        // that writer must be refused, so the guard precedes the bump.
+        let mut tombstone = head_owned_by(&namespace_id, "writer-a", WriterEpoch(7));
         tombstone.state = NamespaceState::Deleted;
         write_head(&store, &namespace_id, tombstone).await;
         let etag_before = head_etag(&store, &namespace_id).await;
 
-        for session in ["session-a", "session-b"] {
-            let error =
-                acquire_writer_epoch(&store, &namespace_id, &context("writer", session, 1_000))
-                    .await
-                    .expect_err("acquire on a deleted namespace must be refused");
+        for writer_id in ["writer-a", "writer-b"] {
+            let error = acquire_writer_epoch(&store, &namespace_id, &context(writer_id, 1_000))
+                .await
+                .expect_err("acquire on a deleted namespace must be refused");
             assert!(matches!(
                 &error,
                 WriterEpochAcquireError::NamespaceDeleted { namespace_id: deleted_id }
@@ -355,7 +311,7 @@ mod tests {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let writer = context("writer-a", "session-a", 1_000);
+        let writer = context("writer-a", 1_000);
         bootstrap_namespace(&store, &namespace_id, &writer, false)
             .await
             .expect("bootstrap");
@@ -374,7 +330,7 @@ mod tests {
             &store,
             &namespace_id,
             DeleteNamespaceOptions::default(),
-            &context("writer-a", "session-b", 2_000),
+            &context("writer-a", 2_000),
         )
         .await
         .expect_err("second delete must be refused");
@@ -389,17 +345,13 @@ mod tests {
         write_head(
             &store,
             &namespace_id,
-            head_with_session(&namespace_id, "writer-a", "session-a", WriterEpoch(7)),
+            head_owned_by(&namespace_id, "writer-a", WriterEpoch(7)),
         )
         .await;
 
-        let acquired = acquire_writer_epoch(
-            &store,
-            &namespace_id,
-            &context("writer-b", "session-b", 2_000),
-        )
-        .await
-        .expect("takeover acquire");
+        let acquired = acquire_writer_epoch(&store, &namespace_id, &context("writer-b", 2_000))
+            .await
+            .expect("takeover acquire");
 
         assert_eq!(acquired.writer_epoch, WriterEpoch(8));
         assert_eq!(acquired.writer_id, "writer-b");
@@ -435,7 +387,7 @@ mod tests {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let writer_a = context("writer-a", "session-a", 1_000);
+        let writer_a = context("writer-a", 1_000);
         bootstrap_namespace(&store, &namespace_id, &writer_a, false)
             .await
             .expect("bootstrap");
@@ -449,7 +401,7 @@ mod tests {
         .await
         .expect("writer a first commit");
 
-        let writer_b = context("writer-b", "session-b", 2_000);
+        let writer_b = context("writer-b", 2_000);
         commit_operations(
             &store,
             &namespace_id,
@@ -459,7 +411,7 @@ mod tests {
         .await
         .expect("writer b commit after takeover");
 
-        let writer_a_again = context("writer-a", "session-a", 3_000);
+        let writer_a_again = context("writer-a", 3_000);
         commit_operations(
             &store,
             &namespace_id,
@@ -482,7 +434,7 @@ mod tests {
     async fn stale_writer_epoch_cannot_delete_namespace_after_takeover() {
         let temp_dir = tempdir().expect("tempdir");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let writer_a = context("writer-a", "session-a", 1_000);
+        let writer_a = context("writer-a", 1_000);
         bootstrap_namespace(
             &LocalFsStore::new(temp_dir.path()).expect("store"),
             &namespace_id,
@@ -505,7 +457,7 @@ mod tests {
         // production the commit engine's), so the interleaving is explicit:
         // acquire (head read #1), takeover, delete-loop reload (head read
         // #2).
-        let delete_attempt = context("writer-a", "session-a", 2_000);
+        let delete_attempt = context("writer-a", 2_000);
         let acquired = acquire_writer_epoch(&store, &namespace_id, &delete_attempt)
             .await
             .expect("acquire before the takeover");
@@ -551,7 +503,6 @@ mod tests {
             head.writer_epoch = WriterEpoch(head.writer_epoch.0 + 1);
             head.writer = Some(WriterBlock {
                 writer_id: "writer-b".to_owned(),
-                writer_session_id: "session-b".to_owned(),
                 acquired_at_ms: 1_500,
             });
             let next = HeadStateEnvelope::from_state(ControlObjectKind::WalHead, head)
@@ -620,7 +571,7 @@ mod tests {
         write_head(
             &inner,
             &namespace_id,
-            head_with_session(&namespace_id, "writer-a", "session-a", WriterEpoch(7)),
+            head_owned_by(&namespace_id, "writer-a", WriterEpoch(7)),
         )
         .await;
         let store = TakeoverOnCasConflictStore {
@@ -629,13 +580,9 @@ mod tests {
             remaining_conflicts: AtomicUsize::new(1),
         };
 
-        let acquired = acquire_writer_epoch(
-            &store,
-            &namespace_id,
-            &context("writer-c", "session-c", 2_000),
-        )
-        .await
-        .expect("acquire after losing the race");
+        let acquired = acquire_writer_epoch(&store, &namespace_id, &context("writer-c", 2_000))
+            .await
+            .expect("acquire after losing the race");
 
         // writer-b installed epoch 8 during the conflict; writer-c retried
         // and took 9.
@@ -658,8 +605,7 @@ mod tests {
 
     impl TakeoverOnCasConflictStore {
         async fn inject_winner(&self) {
-            let winner =
-                head_with_session(&self.namespace_id, "writer-b", "session-b", WriterEpoch(8));
+            let winner = head_owned_by(&self.namespace_id, "writer-b", WriterEpoch(8));
             let envelope = HeadStateEnvelope::from_state(ControlObjectKind::WalHead, winner)
                 .expect("head envelope");
             let bytes = encode_control_object(&envelope).expect("head bytes");

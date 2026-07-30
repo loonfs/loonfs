@@ -585,10 +585,9 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use tempfile::tempdir;
 
-    fn context(writer_id: &str, writer_session_id: &str) -> MutationContext {
+    fn context(writer_id: &str) -> MutationContext {
         MutationContext {
             writer_id: writer_id.to_owned(),
-            writer_session_id: writer_session_id.to_owned(),
             now_ms: 1_000,
         }
     }
@@ -683,7 +682,7 @@ mod tests {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let writer_a = context("writer-a", "session-a");
+        let writer_a = context("writer-a");
         bootstrap_namespace(&store, &namespace_id, &writer_a, false)
             .await
             .expect("bootstrap");
@@ -701,7 +700,7 @@ mod tests {
 
         // Writer B's session acquires the epoch; A's cached epoch is now
         // superseded.
-        let writer_b = context("writer-b", "session-b");
+        let writer_b = context("writer-b");
         let mut engine_b = NamespaceCommitEngine::new(namespace_id.clone());
         let takeover = engine_b
             .publish_batch(
@@ -755,7 +754,7 @@ mod tests {
 
         let temp_dir = tempdir().expect("tempdir");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let writer_a = context("writer-a", "session-a");
+        let writer_a = context("writer-a");
 
         // Block the WAL tail read: it sits between the head snapshot that the
         // fence check uses and the closing etag recheck.
@@ -803,7 +802,7 @@ mod tests {
         // epoch while A is parked mid-load, so A is fenced by the time it
         // rechecks the etag.
         store.wait_until_blocked().await;
-        let writer_b = context("writer-b", "session-b");
+        let writer_b = context("writer-b");
         let mut engine_b = NamespaceCommitEngine::new(namespace_id.clone());
         engine_b
             .publish_batch(
@@ -827,7 +826,7 @@ mod tests {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let writer_a = context("writer-a", "session-a");
+        let writer_a = context("writer-a");
         bootstrap_namespace(&store, &namespace_id, &writer_a, false)
             .await
             .expect("bootstrap");
@@ -847,7 +846,7 @@ mod tests {
             .remove(0)
             .expect("writer a first commit");
 
-        let writer_b = context("writer-b", "session-b");
+        let writer_b = context("writer-b");
         let mut engine_b = NamespaceCommitEngine::new(namespace_id.clone());
         engine_b
             .publish_batch(
@@ -922,7 +921,7 @@ mod tests {
         let temp_dir = tempdir().expect("tempdir");
         let store = LocalFsStore::new(temp_dir.path()).expect("store");
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let writer = context("writer-a", "session-a");
+        let writer = context("writer-a");
         bootstrap_namespace(&store, &namespace_id, &writer, false)
             .await
             .expect("bootstrap");
@@ -988,7 +987,9 @@ mod tests {
             .envelope
             .state;
         assert_eq!(head_final.seq, ChangeSeq(1));
-        assert_eq!(head_final.writer_epoch, WriterEpoch(0));
+        // Two engines are two sessions, and each acquires its own epoch: the
+        // abandoned attempt took 1, the retry took 2.
+        assert_eq!(head_final.writer_epoch, WriterEpoch(2));
     }
 
     #[tokio::test]
@@ -998,7 +999,7 @@ mod tests {
         let store =
             CountingStore::metadata_tables(LocalFsStore::new(temp_dir.path()).expect("store"));
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let writer = context("writer-a", "session-a");
+        let writer = context("writer-a");
         bootstrap_namespace(&store, &namespace_id, &writer, false)
             .await
             .expect("bootstrap");

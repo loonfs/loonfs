@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 /// Write-capable handle for normal application and server use.
 ///
-/// `FsWriter` owns a writer session identity and the full mutation surface:
+/// `FsWriter` owns a writer identity and the full mutation surface:
 /// file and directory mutations, commit publication, uploads, and namespace
 /// lifecycle. With [`FsBackgroundWork::Enabled`] it may also schedule
 /// non-destructive maintenance after writes, spawned on its owning runtime.
@@ -25,12 +25,12 @@ use std::sync::Arc;
 /// The handle is runtime-bound: open it with `build().await` inside the
 /// long-lived Tokio runtime that will drive it, and do not share one writer
 /// across unrelated runtimes — open another from [`StoreConfig`] instead.
-/// `FsWriter` is cheap to clone; clones share the session, caches, and
+/// `FsWriter` is cheap to clone; clones share the identity, caches, and
 /// background-work state.
 #[derive(Clone)]
 pub struct FsWriter {
     pub(crate) core: ReadCore,
-    /// The writer half of the runtime: the session identity, the
+    /// The writer half of the runtime: the writer identity, the
     /// background-work policy, and the publish observer. Publisher workers
     /// hold this weakly, so dropping every clone of this handle stops new
     /// publication work.

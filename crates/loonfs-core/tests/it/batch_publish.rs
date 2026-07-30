@@ -18,7 +18,9 @@ use loonfs_api::{
 use loonfs_core::commit::CommitValidationError;
 use loonfs_core::content::{prepare_existing_content_ref, store_bytes_as_content};
 use loonfs_core::control::load_namespace_head_control;
-use loonfs_core::publish::{NamespaceMutationCandidate, PathMutationIntent};
+use loonfs_core::publish::{
+    NamespaceCommitEngine, NamespaceMutationCandidate, PathMutationIntent, PublishTailOptions,
+};
 use loonfs_core::{Error as CoreError, ErrorCode, MutationContext};
 use loonfs_objectstore::keys::wal_head;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -932,30 +934,47 @@ async fn retry_succeeds_after_stale_head_get_during_publish_view_load() {
         b"second contents win"
     );
 
-    store.inject_stale_head_get_after(1);
-    let error = create_directory_path(
-        &store,
-        &namespace_id,
-        "/parent/child",
-        &context,
-        Some("mkdir-child"),
-    )
-    .await
-    .expect_err("injected stale head read surfaces to the caller");
+    // One engine across the rest of the test, so the injected stale read
+    // lands on the publish-view load and not on an epoch acquisition —
+    // acquisition reads the head too, and a stale read there is a different
+    // failure. The engine acquires once, on this warm-up publish.
+    let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
+    let publish = async |engine: &mut NamespaceCommitEngine, path: &str, commit_id: &str| {
+        let intent = PathMutationIntent::CreateDir {
+            commit_id: CommitId::parse(commit_id).expect("valid test commit id"),
+            message: None,
+            absolute_path: AbsolutePath::parse(path).expect("path"),
+            parents: false,
+        };
+        engine
+            .publish_batch(
+                &store,
+                vec![NamespaceMutationCandidate::path(intent)],
+                &context,
+                &PublishTailOptions::default(),
+            )
+            .await
+            .results
+            .pop()
+            .expect("one publish result")
+    };
+    let warm = publish(&mut engine, "/parent/warm", "mkdir-warm")
+        .await
+        .expect("warm-up publish acquires the epoch");
+    assert_eq!(warm.committed_seq, ChangeSeq(4));
+
+    store.inject_stale_head_get_after(0);
+    let error = publish(&mut engine, "/parent/child", "mkdir-child")
+        .await
+        .expect_err("injected stale head read surfaces to the caller");
     assert_eq!(error.code(), ErrorCode::StaleHead);
     assert!(store.injected_stale_head_get());
 
     // The failed attempt must not block a retry with the same commit id.
-    let result = create_directory_path(
-        &store,
-        &namespace_id,
-        "/parent/child",
-        &context,
-        Some("mkdir-child"),
-    )
-    .await
-    .expect("retry after the stale head read");
-    assert_eq!(result.committed_seq, ChangeSeq(4));
+    let result = publish(&mut engine, "/parent/child", "mkdir-child")
+        .await
+        .expect("retry after the stale head read");
+    assert_eq!(result.committed_seq, ChangeSeq(5));
     assert_eq!(
         read_file_bytes(&store, &namespace_id, "/file.txt")
             .await
@@ -970,7 +989,7 @@ async fn retry_succeeds_after_stale_head_get_during_publish_view_load() {
     let head = load_namespace_head_control(&store, &namespace_id)
         .await
         .expect("load head");
-    assert_eq!(head.state.seq, ChangeSeq(4));
+    assert_eq!(head.state.seq, ChangeSeq(5));
 }
 
 #[tokio::test]
@@ -1209,7 +1228,6 @@ async fn visible_commit_id_retry_aliases_across_writer_takeover() {
         .expect("writer a commit");
     let writer_b = MutationContext {
         writer_id: "writer-b".to_owned(),
-        writer_session_id: "wrs-writer-b".to_owned(),
         now_ms: writer_a.now_ms.saturating_add(1),
     };
 

@@ -158,13 +158,6 @@ pub struct WalCommitPayload {
     /// Caller-supplied annotation, omitted when absent and excluded from filesystem semantics.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
-    /// Writer label of the publishing session. Observational only, like
-    /// `committed_at_ms`: excluded from the semantic commit fingerprint, so
-    /// replay identity is untouched by which process replays.
-    pub writer_id: String,
-    /// Session id of the publishing session, disambiguating processes that
-    /// share one writer label. Observational only.
-    pub writer_session_id: String,
     /// Materialized mutations in their authoritative `delta_index` order.
     pub deltas: Vec<WalCommitDelta>,
 }

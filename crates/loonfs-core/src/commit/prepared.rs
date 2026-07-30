@@ -10,14 +10,12 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Execution-only commit context, kept separate from the canonical API
-/// operation and precondition vocabulary. Writer identity, session, epoch,
-/// and commit time never enter those vocabulary types or the semantic
-/// fingerprint; namespace scopes the fingerprint separately.
+/// operation and precondition vocabulary. Writer epoch and commit time never
+/// enter those vocabulary types or the semantic fingerprint; namespace scopes
+/// the fingerprint separately.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitExecutionContext {
     pub namespace_id: NamespaceId,
-    pub writer_id: String,
-    pub writer_session_id: String,
     pub writer_epoch: WriterEpoch,
 }
 
@@ -96,8 +94,6 @@ mod tests {
         CommitRequest {
             namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
             commit_id: CommitId::parse("commit-a").expect("valid commit id"),
-            writer_id: "writer-a".to_owned(),
-            writer_session_id: "wrs_test".to_owned(),
             writer_epoch: WriterEpoch(1),
             ops: vec![CommitOp::CreateDirectory {
                 parent_inode_id: InodeId(1),

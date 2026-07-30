@@ -135,8 +135,6 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
         .expect("publish view should carry acquired writer");
     let conversion_context = CommitExecutionContext {
         namespace_id: namespace_id.clone(),
-        writer_id: acquired_writer.writer_id.clone(),
-        writer_session_id: acquired_writer.writer_session_id.clone(),
         writer_epoch: acquired_writer.writer_epoch,
     };
     match candidate.mutation() {

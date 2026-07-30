@@ -100,14 +100,9 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
     .await
 }
 
-pub(crate) fn mutation_context(
-    writer_id: &str,
-    writer_session_id: &str,
-    now_ms: u64,
-) -> MutationContext {
+pub(crate) fn mutation_context(writer_id: &str, now_ms: u64) -> MutationContext {
     MutationContext {
         writer_id: writer_id.to_owned(),
-        writer_session_id: writer_session_id.to_owned(),
         now_ms,
     }
 }
@@ -326,7 +321,7 @@ fn base_segment_object_keys_for_family(
 }
 
 fn test_context() -> MutationContext {
-    mutation_context("test-writer", "wrs_test", 1_000)
+    mutation_context("test-writer", 1_000)
 }
 
 fn manifest_id(seq: ChangeSeq) -> ManifestId {

@@ -327,14 +327,13 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
                     "changes for {} after seq {} (through seq {})",
                     response.namespace_id, response.after_seq.0, response.through_seq.0
                 ),
-                "SEQ\tDATE\tWRITER\tEVENTS\tMESSAGE".to_owned(),
+                "SEQ\tDATE\tEVENTS\tMESSAGE".to_owned(),
             ];
             for change in &response.changes {
                 lines.push(format!(
-                    "{}\t{}\t{}\t{}\t{}",
+                    "{}\t{}\t{}\t{}",
                     change.seq.0,
                     format_utc_ms(change.committed_at_ms),
-                    change.writer_id,
                     event_summary(&change.events),
                     change.message.as_deref().unwrap_or("-")
                 ));

@@ -77,8 +77,6 @@ pub(crate) async fn list_changes_after<S: ObjectStore + ?Sized>(
                     commit_id: record.commit_id.clone(),
                     committed_at_ms: record.committed_at_ms,
                     message: record.message.clone(),
-                    writer_id: record.writer_id.clone(),
-                    writer_session_id: record.writer_session_id.clone(),
                     events: events_from_wal_deltas(&record.deltas)?,
                 });
                 if changes.len() == limit.as_usize() {

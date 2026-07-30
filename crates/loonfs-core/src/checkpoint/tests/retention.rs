@@ -1298,7 +1298,6 @@ async fn over_budget_wal_flush_aborts_without_publishing() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = MutationContext {
         writer_id: "budget-test".to_owned(),
-        writer_session_id: "wrs_budget_test".to_owned(),
         now_ms: 1_000,
     };
     bootstrap_namespace(&store, &namespace_id, &context, false)
@@ -1359,7 +1358,6 @@ async fn over_budget_reorganization_aborts_without_publishing() {
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
     let context = MutationContext {
         writer_id: "budget-test".to_owned(),
-        writer_session_id: "wrs_budget_test".to_owned(),
         now_ms: 1_000,
     };
     bootstrap_namespace(&store, &namespace_id, &context, false)

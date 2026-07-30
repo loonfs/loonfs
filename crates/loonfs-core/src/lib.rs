@@ -36,7 +36,6 @@
 //! let publish_store = LocalFsStore::new(std::env::temp_dir()).expect("store");
 //! let context = MutationContext {
 //!     writer_id: "example-writer".to_owned(),
-//!     writer_session_id: "example-session".to_owned(),
 //!     now_ms: 0,
 //! };
 //! let mut publisher = NamespaceCommitEngine::new(namespace);

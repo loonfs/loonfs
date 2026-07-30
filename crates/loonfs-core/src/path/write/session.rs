@@ -87,7 +87,6 @@ mod tests {
     fn test_context() -> MutationContext {
         MutationContext {
             writer_id: "writer".to_owned(),
-            writer_session_id: "wrs_test".to_owned(),
             now_ms: 1,
         }
     }

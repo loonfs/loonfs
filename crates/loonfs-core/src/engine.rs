@@ -14,7 +14,6 @@ use crate::path::read::{
     load_metadata_view, CurrentFileState, LoadedMetadataView, ReadLoadContext,
 };
 use crate::storage::content_admission::PreparedContent;
-use loonfs_api::generated_id;
 use loonfs_api::v0::{
     BeginUploadRequest, BeginUploadResponse, ChangesResponse, CommitResponse,
     CompleteUploadRequest, CompleteUploadResponse, UploadContentResponse,
@@ -84,7 +83,6 @@ pub struct BeginDirectPutUploadTargetResponse {
 #[derive(Debug)]
 struct EngineWriter {
     writer_id: String,
-    writer_session_id: String,
 }
 
 /// A namespace-scoped core API.
@@ -113,7 +111,6 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             store,
             namespace_id: None,
             writer_id: None,
-            writer_session_id: None,
         }
     }
 
@@ -126,14 +123,6 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     /// publication, or `None` for a read-only engine.
     pub fn writer_id(&self) -> Option<&str> {
         self.writer.as_ref().map(|writer| writer.writer_id.as_str())
-    }
-
-    /// Returns the unique writer session id for this engine instance, or
-    /// `None` for a read-only engine.
-    pub fn writer_session_id(&self) -> Option<&str> {
-        self.writer
-            .as_ref()
-            .map(|writer| writer.writer_session_id.as_str())
     }
 
     /// Creates the namespace if it does not already exist.
@@ -594,7 +583,6 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         })?;
         Ok(MutationContext {
             writer_id: writer.writer_id.clone(),
-            writer_session_id: writer.writer_session_id.clone(),
             now_ms: current_time_ms()?,
         })
     }
@@ -609,7 +597,6 @@ pub struct NamespaceEngineBuilder<S> {
     store: S,
     namespace_id: Option<NamespaceId>,
     writer_id: Option<String>,
-    writer_session_id: Option<String>,
 }
 
 impl<S: ObjectStore> NamespaceEngineBuilder<S> {
@@ -622,13 +609,6 @@ impl<S: ObjectStore> NamespaceEngineBuilder<S> {
     /// Sets the writer identity used for epoch acquisition and commits.
     pub fn writer_id(mut self, writer_id: impl Into<String>) -> Self {
         self.writer_id = Some(writer_id.into());
-        self
-    }
-
-    /// Pins the writer session id instead of generating one — the runtime
-    /// seam for hosts that manage session identity themselves.
-    pub fn writer_session_id(mut self, writer_session_id: impl Into<String>) -> Self {
-        self.writer_session_id = Some(writer_session_id.into());
         self
     }
 
@@ -647,17 +627,11 @@ impl<S: ObjectStore> NamespaceEngineBuilder<S> {
         Ok(NamespaceEngine {
             store: self.store,
             namespace_id,
-            writer: Some(EngineWriter {
-                writer_id,
-                writer_session_id: self
-                    .writer_session_id
-                    .unwrap_or_else(|| generated_id("wrs")),
-            }),
+            writer: Some(EngineWriter { writer_id }),
         })
     }
 
-    /// Builds a read-only engine: no writer identity, and therefore no
-    /// writer session id minted for a caller that will never mutate.
+    /// Builds a read-only engine: no writer identity at all.
     ///
     /// Only the namespace is required. Any writer identity set on the
     /// builder is dropped — a read-only engine carries none by definition.
@@ -720,7 +694,6 @@ mod tests {
 
         assert_eq!(engine.namespace_id(), &namespace_id);
         assert_eq!(engine.writer_id(), Some("writer-a"));
-        assert!(engine.writer_session_id().is_some());
     }
 
     #[test]
@@ -736,11 +709,6 @@ mod tests {
 
         assert_eq!(engine.namespace_id(), &namespace_id);
         assert_eq!(engine.writer_id(), None);
-        assert_eq!(
-            engine.writer_session_id(),
-            None,
-            "a reader must not mint a writer session id"
-        );
     }
 
     #[tokio::test]

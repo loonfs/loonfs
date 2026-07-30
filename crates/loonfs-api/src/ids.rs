@@ -229,7 +229,7 @@ pub(crate) use string_id;
 ///
 /// Ids in the id inventory generate through their newtype `generate()`
 /// constructors; this helper stays public for free-form generated labels
-/// (for example writer-session ids) that have no validated id type.
+/// (for example a server's per-request id) that have no validated id type.
 pub fn generated_id(prefix: &'static str) -> String {
     format!("{prefix}_{}", Uuid::new_v4().simple())
 }

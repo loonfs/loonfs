@@ -547,8 +547,7 @@ fn the_feed_names_deleted_entries_and_their_writer() {
     .expect("list changes");
 
     // A projection of the feed sees the spelling a person typed — on the
-    // deletion as well as the creation — plus which session wrote each
-    // commit, without a second lookup per entry.
+    // deletion as well as the creation — without a second lookup per entry.
     let deleted_name = changes
         .changes
         .iter()
@@ -560,14 +559,6 @@ fn the_feed_names_deleted_entries_and_their_writer() {
             _ => None,
         });
     assert_eq!(deleted_name.as_deref(), Some("Quarterly Report.PDF"));
-    for change in &changes.changes {
-        assert!(!change.writer_id.is_empty());
-        assert!(
-            change.writer_session_id.starts_with("wrs_"),
-            "session id: {}",
-            change.writer_session_id
-        );
-    }
 }
 
 #[test]

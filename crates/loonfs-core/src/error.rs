@@ -401,10 +401,8 @@ impl CoreError {
         match self {
             CoreError::WriterFenced(fence) => Some(ErrorDetails {
                 fenced_epoch: Some(fence.fenced_epoch),
-                fenced_writer_session: Some(fence.fenced_session_id.clone()),
                 active_writer_epoch: Some(fence.active_epoch),
                 active_writer: fence.active_writer.clone(),
-                active_writer_session: fence.active_session_id.clone(),
                 ..ErrorDetails::default()
             }),
             CoreError::CommitIdReuseConflict(commit_id) => Some(ErrorDetails {
@@ -426,22 +424,24 @@ impl CoreError {
 }
 
 /// The fencing event a writer session observed: the epoch the session held,
-/// the epoch that displaced it, and the winner's identity when the head
-/// recorded one. Session ids matter because writer ids are process labels —
-/// every CLI invocation on one machine shares the hostname — so without them
-/// a fence between two local processes reads as a machine fencing itself.
+/// the epoch that displaced it, and — when the head recorded a writer block —
+/// the winner's label and when it acquired.
+///
+/// The epochs are what identifies the two parties. Writer labels are process
+/// names, so two local processes can share one (the CLI defaults `writer_id`
+/// to the hostname); the acquisition stamp is what tells those runs apart in
+/// a diagnostic.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WriterFence {
     /// Epoch the fenced session held.
     pub fenced_epoch: WriterEpoch,
-    /// Session id the fenced writer held.
-    pub fenced_session_id: String,
     /// Epoch that owns the namespace now.
     pub active_epoch: WriterEpoch,
-    /// Writer id recorded by the winning acquirer, when known.
+    /// Writer label recorded by the winning acquirer, when known.
     pub active_writer: Option<String>,
-    /// Session id recorded by the winning acquirer, when known.
-    pub active_session_id: Option<String>,
+    /// When the winning acquirer took the epoch, in Unix milliseconds, when
+    /// known.
+    pub active_acquired_at_ms: Option<u64>,
 }
 
 fn destination_exists_message(path: &str, existing_display_name: Option<&str>) -> String {
@@ -459,13 +459,20 @@ impl std::fmt::Display for WriterFence {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "epoch {} (session `{}`) was fenced by epoch {} (writer `{}`, session `{}`)",
-            self.fenced_epoch,
-            self.fenced_session_id,
-            self.active_epoch,
-            self.active_writer.as_deref().unwrap_or("unknown"),
-            self.active_session_id.as_deref().unwrap_or("unknown")
-        )
+            "epoch {} was fenced by epoch {}",
+            self.fenced_epoch, self.active_epoch
+        )?;
+        // Both fields come from the head's writer block, so in practice they
+        // are present or absent together; the arms keep the message honest
+        // either way.
+        match (self.active_writer.as_deref(), self.active_acquired_at_ms) {
+            (Some(writer), Some(acquired_at_ms)) => {
+                write!(f, " (writer `{writer}`, acquired at {acquired_at_ms} ms)")
+            }
+            (Some(writer), None) => write!(f, " (writer `{writer}`)"),
+            (None, Some(acquired_at_ms)) => write!(f, " (acquired at {acquired_at_ms} ms)"),
+            (None, None) => Ok(()),
+        }
     }
 }
 
@@ -614,7 +621,6 @@ fn classify_writer_epoch_acquire_error(error: &WriterEpochAcquireError) -> Error
         WriterEpochAcquireError::LoadHead(error) => classify_control_object_load_error(error),
         WriterEpochAcquireError::NamespaceDeleted { .. } => ErrorCode::NamespaceDeleted,
         WriterEpochAcquireError::EmptyWriterId
-        | WriterEpochAcquireError::EmptyWriterSessionId
         | WriterEpochAcquireError::MissingHeadEtag { .. }
         | WriterEpochAcquireError::WriterEpochOverflow { .. }
         | WriterEpochAcquireError::HeadWrite(_)
@@ -816,20 +822,28 @@ mod tests {
     fn identity_bearing_errors_expose_structured_wire_details() {
         let fenced = CoreError::WriterFenced(WriterFence {
             fenced_epoch: WriterEpoch(3),
-            fenced_session_id: "wrs-a".to_owned(),
             active_epoch: WriterEpoch(4),
             active_writer: Some("writer-b".to_owned()),
-            active_session_id: Some("wrs-b".to_owned()),
+            active_acquired_at_ms: Some(2_000),
         });
         let details = fenced.details().expect("fence details");
         assert_eq!(details.fenced_epoch, Some(WriterEpoch(3)));
-        assert_eq!(details.fenced_writer_session.as_deref(), Some("wrs-a"));
         assert_eq!(details.active_writer_epoch, Some(WriterEpoch(4)));
         assert_eq!(details.active_writer.as_deref(), Some("writer-b"));
-        assert_eq!(details.active_writer_session.as_deref(), Some("wrs-b"));
-        assert!(fenced.to_string().contains(
-            "epoch 3 (session `wrs-a`) was fenced by epoch 4 (writer `writer-b`, session `wrs-b`)"
-        ));
+        assert!(fenced
+            .to_string()
+            .contains("epoch 3 was fenced by epoch 4 (writer `writer-b`, acquired at 2000 ms)"));
+
+        // A head with no writer block still names both epochs.
+        let anonymous = CoreError::WriterFenced(WriterFence {
+            fenced_epoch: WriterEpoch(3),
+            active_epoch: WriterEpoch(4),
+            active_writer: None,
+            active_acquired_at_ms: None,
+        });
+        assert!(anonymous
+            .to_string()
+            .ends_with("epoch 3 was fenced by epoch 4"));
 
         let reuse = CoreError::CommitIdReuseConflict("retry-key-1".to_owned());
         let details = reuse.details().expect("reuse details");

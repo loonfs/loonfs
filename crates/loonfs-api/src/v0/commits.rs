@@ -286,12 +286,6 @@ pub struct CommittedChange {
     /// Caller annotation, omitted when absent and carrying no filesystem semantics.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
-    /// Writer label of the session that published this commit.
-    /// Observational, like `committed_at_ms`.
-    pub writer_id: String,
-    /// Session id of the publishing session, disambiguating processes that
-    /// share one writer label. Observational.
-    pub writer_session_id: String,
     /// Semantic filesystem events, one per committed operation, in
     /// request-operation order.
     pub events: Vec<FilesystemChange>,

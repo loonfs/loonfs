@@ -571,7 +571,7 @@ fn trash_lists_recoverable_deletions_with_their_handles() {
 }
 
 #[test]
-fn human_output_shows_dates_writers_and_event_names() {
+fn human_output_shows_dates_and_event_names() {
     let harness = Harness::new();
     harness.add_embedded_profile("default");
     assert_success(&harness.run(&["namespace", "create", "demo"]));
@@ -589,10 +589,7 @@ fn human_output_shows_dates_writers_and_event_names() {
     let changes = harness.run(&["changes"]);
     assert_success(&changes);
     let feed = stdout_string(&changes);
-    assert!(
-        feed.contains("SEQ\tDATE\tWRITER\tEVENTS\tMESSAGE"),
-        "{feed}"
-    );
+    assert!(feed.contains("SEQ\tDATE\tEVENTS\tMESSAGE"), "{feed}");
     assert!(feed.contains("create 'Report.PDF'"), "{feed}");
     assert!(feed.contains("delete 'Report.PDF'"), "{feed}");
     // Dates render as UTC wall-clock, not raw milliseconds.

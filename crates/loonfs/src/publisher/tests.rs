@@ -768,6 +768,20 @@ async fn publisher_resolves_unknown_head_outcome_by_replaying_receipt() {
     create_namespace(&runtime, &namespace_id).await;
     let publisher = standalone_publisher(&namespace_id, &runtime);
 
+    // One clean commit first, so the session holds its writer epoch. Epoch
+    // acquisition is a head compare-and-swap too, and this test is about the
+    // publication swap.
+    let warm = recv_commit(
+        admit_commit(
+            &publisher,
+            &namespace_id,
+            create_directory_request("warm-epoch", "warm-epoch"),
+        ),
+        "warm-epoch",
+    )
+    .await;
+    assert_eq!(warm.committed_seq, ChangeSeq(1));
+
     // The commit lands but the CAS acknowledgement is lost. The publisher
     // retries with the same commit id and replays the durable receipt
     // instead of reporting `commit_outcome_unknown` to the waiter.
@@ -781,7 +795,7 @@ async fn publisher_resolves_unknown_head_outcome_by_replaying_receipt() {
         "unknown-ack",
     )
     .await;
-    assert_eq!(response.committed_seq, ChangeSeq(1));
+    assert_eq!(response.committed_seq, ChangeSeq(2));
 }
 
 /// Queued publication races a publication whose panic the worker contains.

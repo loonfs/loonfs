@@ -34,7 +34,6 @@ impl VisibilityHarness {
         let engine = NamespaceEngine::builder(Arc::clone(&store))
             .namespace_id(namespace_id)
             .writer_id("visibility-equivalence")
-            .writer_session_id("wrs_visibility_equivalence")
             .build()
             .expect("build namespace engine");
         engine

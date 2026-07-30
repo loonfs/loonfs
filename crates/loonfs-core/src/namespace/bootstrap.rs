@@ -73,7 +73,6 @@ pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(
     let mut head = HeadState::initial(namespace_id.clone(), ContentStoreId::generate());
     head.writer = Some(WriterBlock {
         writer_id: context.writer_id.clone(),
-        writer_session_id: context.writer_session_id.clone(),
         acquired_at_ms: context.now_ms,
     });
 

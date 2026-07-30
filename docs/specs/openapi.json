@@ -2397,8 +2397,6 @@
           "seq",
           "commit_id",
           "committed_at_ms",
-          "writer_id",
-          "writer_session_id",
           "events"
         ],
         "properties": {
@@ -2429,14 +2427,6 @@
           "seq": {
             "$ref": "#/components/schemas/ChangeSeq",
             "description": "Namespace sequence for this logical commit."
-          },
-          "writer_id": {
-            "type": "string",
-            "description": "Writer label of the session that published this commit.\nObservational, like `committed_at_ms`."
-          },
-          "writer_session_id": {
-            "type": "string",
-            "description": "Session id of the publishing session, disambiguating processes that\nshare one writer label. Observational."
           }
         }
       },
@@ -2725,13 +2715,6 @@
               }
             ]
           },
-          "active_writer_session": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Session id recorded by the current epoch's acquirer, when the head\nrecorded one."
-          },
           "actual_revision": {
             "oneOf": [
               {
@@ -2786,13 +2769,6 @@
                 "description": "Epoch the failing writer session held when it was displaced."
               }
             ]
-          },
-          "fenced_writer_session": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Session id the fenced writer held. Distinguishes two processes that\nshare one writer id (the CLI defaults `writer_id` to the hostname)."
           },
           "inode_id": {
             "oneOf": [

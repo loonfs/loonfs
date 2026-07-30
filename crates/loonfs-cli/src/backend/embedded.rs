@@ -800,16 +800,15 @@ mod tests {
             });
     }
     #[tokio::test]
-    async fn a_fenced_put_fails_terminally_and_names_both_sessions() {
+    async fn a_fenced_put_fails_terminally_and_names_both_epochs() {
         let temp_dir = tempdir().expect("create temp dir");
         let store = StoreConfig::LocalFs {
             root: temp_dir.path().display().to_string(),
             key_prefix: None,
         };
         // Two backends over one store model two concurrent `loon` processes:
-        // the writer id is shared (the CLI defaults it to the hostname) and
-        // only the session ids differ, so without session identity in the
-        // fence a user reads the error as their machine fencing itself.
+        // the writer id is shared (the CLI defaults it to the hostname), so
+        // the epochs are what tell the two apart in the fence.
         let first = EmbeddedTarget::new(&store, Some("shared-host"))
             .await
             .expect("build first embedded target");
@@ -842,9 +841,10 @@ mod tests {
             .expect("rival put takes the epoch over");
 
         // Fenced sessions are terminal — no silent reacquisition, matching
-        // remote mode and the core contract. The error carries both session
-        // identities so the loser is diagnosable, and the failed put
-        // committed nothing.
+        // remote mode and the core contract. Both writers share one label
+        // here (`shared-host`, as two CLI runs on one machine would), so the
+        // message leans on the epochs and the winner's acquisition stamp to
+        // stay diagnosable. The failed put committed nothing.
         let error = first
             .backend
             .put_file_bytes(
@@ -860,10 +860,11 @@ mod tests {
             "{}",
             error.message
         );
-        assert_eq!(
-            error.message.matches("session `wrs_").count(),
-            2,
-            "both sessions named: {}",
+        assert!(
+            error
+                .message
+                .contains("(writer `shared-host`, acquired at "),
+            "the winner is named with its acquisition stamp: {}",
             error.message
         );
 

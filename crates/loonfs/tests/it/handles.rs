@@ -458,9 +458,7 @@ fn writer_reader_and_admin_share_a_namespace_through_store_config() {
 }
 
 /// A standalone reader carries no actor identity at all: its engines are
-/// reader-built, so there is no writer id and — the part that used to be
-/// fabricated — no writer session id minted for a handle that never
-/// mutates.
+/// reader-built, so there is no writer id on a handle that never mutates.
 #[test]
 fn standalone_reader_builds_without_writer_identity() {
     let temp_dir = tempdir().expect("tempdir");
@@ -498,9 +496,8 @@ fn standalone_reader_builds_without_writer_identity() {
             .entries;
         assert_eq!(entries.len(), 1);
 
-        // The identity the reader would have carried is the writer session
-        // recorded on the head. Only the writer's own session is there: a
-        // read minted none of its own.
+        // The only identity on the head is the writer's own label: a read
+        // carries none and records none.
         let store = LocalFsStore::new(temp_dir.path()).expect("open store for inspection");
         let head = loonfs_core::control::load_namespace_head_control(&store, &namespace_id)
             .await
@@ -509,8 +506,8 @@ fn standalone_reader_builds_without_writer_identity() {
         let writer_block = head.writer.expect("head records the writer that published");
         assert_eq!(writer_block.writer_id, "handle-test-writer");
         assert_ne!(
-            writer_block.writer_session_id, "",
-            "the writer's own session is the only session in play"
+            writer_block.acquired_at_ms, 0,
+            "the acquisition stamp is what tells two runs of one writer apart"
         );
     });
 }
