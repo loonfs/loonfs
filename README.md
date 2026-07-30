@@ -6,6 +6,15 @@
   </picture>
 </div>
 <br>
+<div align="center">
+  <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-green?style=flat-square"></a>
+  &nbsp;&nbsp;
+  <a href="https://loonfs.com"><img alt="Site: loonfs.com" src="https://img.shields.io/badge/site-loonfs.com-blue?style=flat-square"></a>
+</div>
+<br>
+<br>
+
+## LoonFS
 
 LoonFS is a durable filesystem built on object storage. It can be used to store, manage, index, and retrieve files and folders for a variety of use cases. Object storage is the only durable dependency from which LoonFS derives virtually unlimited storage and a high throughput ceiling. It uses a single-writer, multi-reader model and can be used across sessions and clients as an embedded engine or through a remote server connection.
 
