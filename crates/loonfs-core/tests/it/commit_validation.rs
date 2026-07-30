@@ -435,10 +435,10 @@ async fn restore_revision_does_not_revalidate_retained_content_before_publish() 
     .expect("replace file");
 
     store
-        .delete(
-            &content_blob(first.content_store_id.as_str(), &first.content_ref.digest)
-                .expect("first content key"),
-        )
+        .delete(&content_blob(
+            first.content_store_id.as_str(),
+            &first.content_ref.content_id,
+        ))
         .await
         .expect("delete first content");
 
@@ -542,8 +542,8 @@ async fn a_guarded_put_fails_unprepared_before_revision_validation_without_conte
     assert!(matches!(
         error,
         CoreError::ContentPreparation(ContentPreparationError::ContentNotPrepared {
-            content_ref_digest
-        }) if content_ref_digest == missing_content.digest
+            content_id
+        }) if content_id == missing_content.content_id
     ));
     assert_eq!(guarded_store.content_store_access_count(), 0);
 }

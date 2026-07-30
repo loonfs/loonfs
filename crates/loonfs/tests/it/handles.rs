@@ -631,7 +631,14 @@ fn put_file_bytes_and_prepare_then_put_commit_equivalent_state() {
             .expect("stat prepared put");
         assert_eq!(simple_stat.revision_no, prepared_stat.revision_no);
         assert_eq!(simple_stat.size_bytes, prepared_stat.size_bytes);
-        assert_eq!(simple_stat.content_ref, prepared_stat.content_ref);
+        // The two paths staged their own content objects, so their
+        // references name different objects and carry identical evidence.
+        let simple_ref = simple_stat.content_ref.expect("simple put content ref");
+        let prepared_ref = prepared_stat.content_ref.expect("prepared put content ref");
+        assert_ne!(simple_ref.content_id, prepared_ref.content_id);
+        assert_eq!(simple_ref.size_bytes, prepared_ref.size_bytes);
+        assert_eq!(simple_ref.storage_checksum, prepared_ref.storage_checksum);
+        assert_eq!(simple_ref.whole_file_sha256, prepared_ref.whole_file_sha256);
 
         let simple_read = reader
             .get_file_bytes(&simple_namespace, "/file.txt")

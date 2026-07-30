@@ -20,8 +20,8 @@ use loonfs_api::{
     v0::{
         BeginUploadRequest, BeginUploadResponse, ChangesResponse,
         CommitResponse as ApiCommitResponse, CompleteUploadRequest, CompleteUploadResponse,
-        DisableGrepIndexResponse, EnableGrepIndexResponse, GrepGcResponse, ObjectTransferAccess,
-        UploadContentResponse, UploadMode, ValidatedContentToken,
+        DirectPutContentClaim, DisableGrepIndexResponse, EnableGrepIndexResponse, GrepGcResponse,
+        ObjectTransferAccess, UploadContentResponse, UploadMode, ValidatedContentToken,
     },
     AbsolutePath, AuthoritativePathEntry, CapabilityDocument, ChangeSeq, CheckpointId, CommitId,
     CommitRequest, ContentRef, CreateCheckpointRequest, CreateCheckpointResponse,
@@ -352,16 +352,22 @@ impl Client {
             .await
     }
 
+    /// Starts a direct upload of bytes the caller already has.
+    ///
+    /// The claim is what the client can know about its own bytes; the
+    /// server answers with the content object it minted for them, and that
+    /// reference — not this claim — is what completion and the later commit
+    /// name.
     pub async fn begin_direct_put(
         &self,
         namespace_id: &NamespaceId,
-        content_ref: ContentRef,
+        claim: DirectPutContentClaim,
     ) -> Result<BeginUploadResponse> {
         self.begin_upload(
             namespace_id,
             &BeginUploadRequest {
                 mode: Some(UploadMode::DirectPut),
-                content_ref: Some(content_ref),
+                content: Some(claim),
             },
         )
         .await
@@ -843,9 +849,21 @@ fn append_query_param(url: &mut String, has_query: &mut bool, name: &str, value:
 mod tests {
     use super::*;
     use crate::transport::{transient_failure, MAX_TRANSIENT_ATTEMPTS};
-    use loonfs_api::{ErrorCode, ErrorKind};
+    use loonfs_api::{ContentId, ErrorCode, ErrorKind};
     use std::fs;
     use tempfile::tempdir;
+
+    fn test_content_ref(bytes: &[u8]) -> ContentRef {
+        ContentRef::blob_v1(ContentId::generate(), bytes)
+    }
+
+    fn direct_put_claim(bytes: &[u8]) -> DirectPutContentClaim {
+        let content_ref = test_content_ref(bytes);
+        DirectPutContentClaim {
+            size_bytes: content_ref.size_bytes,
+            sha256: content_ref.storage_checksum.value,
+        }
+    }
 
     /// `Client::new` runs the same validation as `ClientConfig::load`, so a
     /// directly built config cannot bypass it.
@@ -1076,7 +1094,7 @@ mod tests {
         let (transport, client) = single_attempt_probe();
         assert_single_attempt(
             client
-                .begin_direct_put(&namespace_id, ContentRef::whole_file_v0(b"direct"))
+                .begin_direct_put(&namespace_id, direct_put_claim(b"direct"))
                 .await,
             &transport,
         );
@@ -1107,7 +1125,7 @@ mod tests {
         let response = UploadContentResponse {
             namespace_id: namespace_id.clone(),
             upload_id: upload_id.clone(),
-            content_ref: ContentRef::whole_file_v0(b"content"),
+            content_ref: test_content_ref(b"content"),
         };
         let transport = crate::transport::test_transport::failure_then_success(
             serde_json::to_vec(&response).expect("serialize response"),
@@ -1127,7 +1145,7 @@ mod tests {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let upload_id = loonfs_api::UploadId::parse("upl_00000000000000000000000000000001")
             .expect("valid upload id");
-        let content_ref = ContentRef::whole_file_v0(b"content");
+        let content_ref = test_content_ref(b"content");
         let response = CompleteUploadResponse {
             namespace_id: namespace_id.clone(),
             upload_id: upload_id.clone(),

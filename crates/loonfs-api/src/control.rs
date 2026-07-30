@@ -6,8 +6,9 @@ use crate::envelope::EnvelopeCodecError;
 use crate::v0::UploadMode;
 use crate::WriterEpoch;
 use crate::{
-    ChangeSeq, CheckpointId, CommitId, ContentRef, ContentRefKind, ContentStoreId, InodeId,
-    ManifestId, ManifestObjectId, NamespaceId, UploadId, WalSegmentId, ROOT_INODE_ID,
+    ChangeSeq, CheckpointId, ChecksumAlgorithm, CommitId, ContentId, ContentRef, ContentRefKind,
+    ContentStoreId, InodeId, ManifestId, ManifestObjectId, NamespaceId, StorageChecksum, UploadId,
+    WalSegmentId, ROOT_INODE_ID,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -539,8 +540,19 @@ pub struct UploadSessionState {
     /// Transport path selected when the session was created.
     #[serde(default, skip_serializing_if = "UploadMode::is_service_proxied")]
     pub mode: UploadMode,
+    /// Content object this session writes, allocated when the session began.
+    ///
+    /// The identity exists before any byte is read, so the final object key
+    /// is known up front and belongs to exactly this session.
+    pub content_id: ContentId,
+    /// What the client promised about the bytes, for sessions that make a
+    /// promise up front. `direct_put` claims a size and a whole-file
+    /// SHA-256; a service-proxied session claims nothing and learns both
+    /// from the bytes it receives.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claimed_checksum: Option<StorageChecksum>,
     /// For direct_put sessions, the content ref the presigned URL was minted for.
-    /// It becomes staged only after completion validates the durable object.
+    /// It becomes staged only after completion verifies the durable object.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub direct_put_content_ref: Option<ContentRef>,
     /// Content already verified and staged, or `None` before bytes have passed validation.
@@ -562,6 +574,9 @@ struct StrictUploadSessionState {
     upload_id: UploadId,
     #[serde(default)]
     mode: UploadMode,
+    content_id: ContentId,
+    #[serde(default)]
+    claimed_checksum: Option<StrictStorageChecksum>,
     #[serde(default)]
     direct_put_content_ref: Option<StrictContentRef>,
     #[serde(default)]
@@ -582,25 +597,46 @@ struct StrictCompletedUpload {
 #[serde(deny_unknown_fields)]
 struct StrictContentRef {
     kind: MutableContentRefKind,
-    digest: String,
+    content_id: ContentId,
     size_bytes: u64,
+    storage_checksum: StrictStorageChecksum,
+    #[serde(default)]
+    whole_file_sha256: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StrictStorageChecksum {
+    algorithm: ChecksumAlgorithm,
+    value: String,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum MutableContentRefKind {
-    WholeFileV0,
+    BlobV1,
+}
+
+impl From<StrictStorageChecksum> for StorageChecksum {
+    fn from(checksum: StrictStorageChecksum) -> Self {
+        Self {
+            algorithm: checksum.algorithm,
+            value: checksum.value,
+        }
+    }
 }
 
 impl From<StrictContentRef> for ContentRef {
     fn from(content_ref: StrictContentRef) -> Self {
         let kind = match content_ref.kind {
-            MutableContentRefKind::WholeFileV0 => ContentRefKind::WholeFileV0,
+            MutableContentRefKind::BlobV1 => ContentRefKind::BlobV1,
         };
         Self {
             kind,
-            digest: content_ref.digest,
+            content_id: content_ref.content_id,
             size_bytes: content_ref.size_bytes,
+            storage_checksum: content_ref.storage_checksum.into(),
+            whole_file_sha256: content_ref.whole_file_sha256,
         }
     }
 }
@@ -615,6 +651,8 @@ impl<'de> Deserialize<'de> for UploadSessionState {
             namespace_id: state.namespace_id,
             upload_id: state.upload_id,
             mode: state.mode,
+            content_id: state.content_id,
+            claimed_checksum: state.claimed_checksum.map(Into::into),
             direct_put_content_ref: state.direct_put_content_ref.map(Into::into),
             staged_content_ref: state.staged_content_ref.map(Into::into),
             completed: state.completed.map(|completed| CompletedUpload {

@@ -60,7 +60,8 @@ mod tests {
     use super::*;
     use crate::commit::ResolvedBinding;
     use loonfs_api::wire::wal::WalDelta;
-    use loonfs_api::{ContentRef, ContentRefKind, InodeId, NameKey, RevisionNo};
+    use loonfs_api::ContentId;
+    use loonfs_api::{ContentRef, InodeId, NameKey, RevisionNo};
 
     /// The commit overlay derives its rows from the WAL encoding
     /// (`materialize_validated_op` + `apply_committed_wal_delta_mut`), the
@@ -130,11 +131,7 @@ mod tests {
     }
 
     fn content_ref(seed: u8) -> ContentRef {
-        ContentRef {
-            kind: ContentRefKind::WholeFileV0,
-            digest: format!("sha256:{}", format!("{seed:02x}").repeat(32)),
-            size_bytes: u64::from(seed) + 10,
-        }
+        ContentRef::blob_v1(ContentId::generate(), &[seed; 12])
     }
 
     fn binding(

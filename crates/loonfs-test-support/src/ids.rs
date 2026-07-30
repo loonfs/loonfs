@@ -1,11 +1,26 @@
 //! Small validated-value constructors used throughout tests.
 
-use loonfs_api::{EffectiveLimit, NamespaceId};
+use loonfs_api::{ContentId, ContentRef, EffectiveLimit, NamespaceId};
 use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 
 /// Parses a namespace id that is expected to be valid test data.
 pub fn namespace_id(value: &str) -> NamespaceId {
     NamespaceId::parse(value).expect("valid namespace id")
+}
+
+/// Parses a content id that is expected to be valid test data.
+pub fn content_id(value: &str) -> ContentId {
+    ContentId::parse(value).expect("valid content id")
+}
+
+/// Builds a reference to a fresh content object holding `bytes`, the way
+/// every production write path does.
+///
+/// Each call mints a new identity, so two calls with the same bytes give two
+/// distinct references. A test that needs one object referenced twice should
+/// clone the reference.
+pub fn content_ref(bytes: &[u8]) -> ContentRef {
+    ContentRef::blob_v1(ContentId::generate(), bytes)
 }
 
 /// Constructs a nonzero `usize` that is expected to be valid test data.

@@ -2,9 +2,11 @@
 
 use crate::common::{start_server, test_config};
 use loonfs_api::{
-    v0::{CompleteUploadRequest, ObjectTransferAccess, ValidatedContentToken},
-    ChangeSeq, CommitId, CommitRequest, CommitResponse, ContentRef, DestinationBehavior,
-    FilesystemOperation, NamespaceId,
+    v0::{
+        CompleteUploadRequest, DirectPutContentClaim, ObjectTransferAccess, ValidatedContentToken,
+    },
+    ChangeSeq, CommitId, CommitRequest, CommitResponse, DestinationBehavior, FilesystemOperation,
+    NamespaceId, StorageChecksum,
 };
 use loonfs_client::{Client, ClientError, NamespacePath};
 use loonfs_server::{ServerConfig, StoreConfig};
@@ -14,6 +16,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const AUTH_TOKEN: &str = "test-token";
 const CONTENT_TOKEN_SECRET: &str = "test-content-token-secret";
 const SIGNED_CHECKSUM_HEADER: &str = "x-amz-checksum-sha256";
+
+/// What a direct-put client declares about bytes it is holding.
+fn direct_put_claim(bytes: &[u8]) -> DirectPutContentClaim {
+    DirectPutContentClaim {
+        size_bytes: bytes.len() as u64,
+        sha256: StorageChecksum::sha256(bytes).value,
+    }
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires real AWS S3 credentials"]
@@ -66,7 +76,6 @@ async fn direct_put_round_trip(config: ServerConfig) {
     let target =
         NamespacePath::parse(namespace, "/direct-put.txt").expect("parse direct-put target");
     let bytes = b"direct put through a real provider\n";
-    let content_ref = ContentRef::whole_file_v0(bytes);
 
     let capabilities = harness
         .client
@@ -87,11 +96,18 @@ async fn direct_put_round_trip(config: ServerConfig) {
 
     let begin = harness
         .client
-        .begin_direct_put(&namespace_id, content_ref.clone())
+        .begin_direct_put(&namespace_id, direct_put_claim(bytes))
         .await
         .expect("begin direct put");
     let direct_put = begin.direct_put.expect("direct-put access");
-    assert_eq!(direct_put.content_ref, content_ref);
+    // The server minted the identity; the client learns it here and names it
+    // everywhere afterwards.
+    let content_ref = direct_put.content_ref.clone();
+    assert_eq!(content_ref.size_bytes, bytes.len() as u64);
+    assert_eq!(
+        content_ref.whole_file_sha256.as_deref(),
+        Some(content_ref.storage_checksum.value.as_str())
+    );
 
     harness
         .client
@@ -148,13 +164,12 @@ async fn direct_put_round_trip(config: ServerConfig) {
 async fn assert_wrong_direct_put_bytes_rejected(client: &Client, namespace_id: &NamespaceId) {
     let bytes = b"expected direct put bytes\n";
     let wrong_bytes = b"wrong direct put bytes\n";
-    let content_ref = ContentRef::whole_file_v0(bytes);
     let begin = client
-        .begin_direct_put(namespace_id, content_ref.clone())
+        .begin_direct_put(namespace_id, direct_put_claim(bytes))
         .await
         .expect("begin wrong-bytes direct put");
     let direct_put = begin.direct_put.expect("wrong-bytes direct-put access");
-    assert_eq!(direct_put.content_ref, content_ref);
+    let content_ref = direct_put.content_ref.clone();
 
     expect_client_rejection(
         client
@@ -179,15 +194,14 @@ async fn assert_direct_put_requires_signed_checksum_header(
     namespace_id: &NamespaceId,
 ) {
     let bytes = b"direct put bytes without checksum header\n";
-    let content_ref = ContentRef::whole_file_v0(bytes);
     let begin = client
-        .begin_direct_put(namespace_id, content_ref.clone())
+        .begin_direct_put(namespace_id, direct_put_claim(bytes))
         .await
         .expect("begin missing-checksum direct put");
     let direct_put = begin
         .direct_put
         .expect("missing-checksum direct-put access");
-    assert_eq!(direct_put.content_ref, content_ref);
+    let content_ref = direct_put.content_ref.clone();
     let access_without_checksum =
         presigned_access_without_header(&direct_put.access, SIGNED_CHECKSUM_HEADER);
 
@@ -211,13 +225,12 @@ async fn assert_direct_put_requires_signed_checksum_header(
 
 async fn assert_direct_put_is_no_replace(client: &Client, namespace_id: &NamespaceId) {
     let bytes = b"duplicate direct put bytes\n";
-    let content_ref = ContentRef::whole_file_v0(bytes);
     let begin = client
-        .begin_direct_put(namespace_id, content_ref.clone())
+        .begin_direct_put(namespace_id, direct_put_claim(bytes))
         .await
         .expect("begin duplicate direct put");
     let direct_put = begin.direct_put.expect("duplicate direct-put access");
-    assert_eq!(direct_put.content_ref, content_ref);
+    let content_ref = direct_put.content_ref.clone();
 
     client
         .upload_via_presigned_url(&direct_put.access, bytes)

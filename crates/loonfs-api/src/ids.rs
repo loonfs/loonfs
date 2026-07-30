@@ -239,6 +239,17 @@ fn generated_position_suffix() -> String {
     suffix[..16].to_owned()
 }
 
+/// Draws 128 fresh random bits.
+///
+/// [`generated_id`] spends six of its bits on UUID version and variant tags.
+/// Content ids shard on their leading characters and must be uniform there,
+/// so they draw from the system generator directly instead.
+fn random_128() -> [u8; 16] {
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes).expect("the system random generator must be available");
+    bytes
+}
+
 fn validate_generated_id(
     prefix: &'static str,
     value: &str,
@@ -460,6 +471,42 @@ string_id! {
 }
 
 string_id! {
+    /// Durable identity of one immutable content object.
+    ///
+    /// The body is 128 fully random bits, with no time component: content
+    /// object keys shard on the id's leading characters, and a clock-derived
+    /// prefix would put every upload in one window into one shard. The id
+    /// names *which object*, never what it contains — integrity evidence
+    /// rides [`crate::ContentRef`] beside it.
+    ContentId,
+    error = GeneratedIdValidationError,
+    validate = |value: &str| validate_generated_id("cnt", value)
+}
+
+impl ContentId {
+    /// Generates an id from 128 fresh random bits.
+    pub fn generate() -> Self {
+        Self(format!(
+            "cnt_{}",
+            crate::hex::hex_encode_bytes(&random_128())
+        ))
+    }
+
+    /// Returns the two-character shard prefix content keys are grouped by.
+    ///
+    /// Every valid id has a 32-character lowercase hex body, so this never
+    /// panics.
+    pub fn shard_prefix(&self) -> &str {
+        &self.0[CONTENT_ID_PREFIX_LEN..CONTENT_ID_PREFIX_LEN + CONTENT_ID_SHARD_LEN]
+    }
+}
+
+/// Byte length of the `cnt_` marker that precedes a content id's hex body.
+const CONTENT_ID_PREFIX_LEN: usize = "cnt_".len();
+/// Number of leading body characters that select a content object's shard.
+const CONTENT_ID_SHARD_LEN: usize = 2;
+
+string_id! {
     /// Durable id for one metadata SST table file.
     MetadataTableId,
     prefix = "tbl"
@@ -627,7 +674,7 @@ impl fmt::Display for InodeKind {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChangeSeq, CheckpointId, CommitId, ContentStoreId, ManifestId, ManifestObjectId,
+        ChangeSeq, CheckpointId, CommitId, ContentId, ContentStoreId, ManifestId, ManifestObjectId,
         MetadataTableId, NameKey, NamespaceId, UploadId, WalSegmentId,
     };
     use std::collections::BTreeSet;
@@ -884,6 +931,50 @@ mod tests {
             super::manifest_object_id_manifest_id("not-a-manifest-object-id"),
             None
         );
+    }
+
+    #[test]
+    fn generated_content_ids_are_unique_and_shard_uniformly() {
+        let mut ids = BTreeSet::new();
+        let mut shards = BTreeSet::new();
+        for _ in 0..512 {
+            let id = ContentId::generate();
+            assert_generated_id_shape(id.as_str(), "cnt");
+            assert_eq!(
+                id.shard_prefix(),
+                &id.as_str()["cnt_".len().."cnt_".len() + 2]
+            );
+            shards.insert(id.shard_prefix().to_owned());
+            assert!(
+                ids.insert(id.clone()),
+                "generated duplicate content id {id}"
+            );
+        }
+        // 512 draws over 256 shards: a generator with a fixed or clock-derived
+        // prefix would collapse into a handful of shards.
+        assert!(
+            shards.len() > 128,
+            "content id shard prefixes are not spread: {} distinct",
+            shards.len()
+        );
+    }
+
+    #[test]
+    fn content_id_parse_requires_the_generated_id_shape() {
+        assert!(ContentId::parse("cnt_0123456789abcdef0123456789abcdef").is_ok());
+        for value in [
+            "cnt_",
+            "cnt_abcdef",
+            "cnt_0123456789ABCDEF0123456789abcdef",
+            "cnt_0123456789abcdef0123456789abcde",
+            "upl_0123456789abcdef0123456789abcdef",
+            "0123456789abcdef0123456789abcdef",
+        ] {
+            assert!(
+                ContentId::parse(value).is_err(),
+                "expected invalid content id {value:?}"
+            );
+        }
     }
 
     fn assert_generated_id_shape(value: &str, prefix: &str) {

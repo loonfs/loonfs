@@ -1,0 +1,30 @@
+[
+  {
+    "kind": "blob_v1",
+    "content_id": "cnt_0123456789abcdef0123456789abcdef",
+    "size_bytes": 12,
+    "storage_checksum": {
+      "algorithm": "sha256",
+      "value": "d249b8beb7a58794c75abe3498bcc32d56040fafa42d79d570c13d1628ecc051"
+    },
+    "whole_file_sha256": "d249b8beb7a58794c75abe3498bcc32d56040fafa42d79d570c13d1628ecc051"
+  },
+  {
+    "kind": "blob_v1",
+    "content_id": "cnt_fedcba9876543210fedcba9876543210",
+    "size_bytes": 11534336,
+    "storage_checksum": {
+      "algorithm": "crc64nvme",
+      "value": "bbb7305bdf118bcb"
+    }
+  },
+  {
+    "kind": "blob_v1",
+    "content_id": "cnt_00112233445566778899aabbccddeeff",
+    "size_bytes": 4096,
+    "storage_checksum": {
+      "algorithm": "crc32c",
+      "value": "1a2b3c4d"
+    }
+  }
+]

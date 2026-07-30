@@ -1,6 +1,7 @@
 #![allow(clippy::panic)]
 //! Per-namespace driver isolation, backoff, and explicit-GC boundaries.
 
+use crate::common::is_content_object;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
@@ -241,7 +242,7 @@ impl StepConcurrencyStore {
     }
 
     async fn observe_content_read<T>(&self, key: &str, read: impl Future<Output = T>) -> T {
-        if !key.contains("/blobs/sha256/") {
+        if !is_content_object(key) {
             return read.await;
         }
         let in_flight = self.in_flight.fetch_add(1, Ordering::AcqRel) + 1;

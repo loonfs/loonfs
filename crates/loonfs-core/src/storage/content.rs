@@ -1,11 +1,14 @@
-//! Content blob reads and writes: content-addressed storage, reference
-//! validation, and verified read-back.
+//! Content object reads and writes: minting immutable identities,
+//! validating references, and verified read-back.
 
 use crate::error::CoreError;
 use crate::namespace::catalog::{load_namespace_content_store_id, VerifiedNamespaceCatalogEntry};
 use crate::storage::content_admission::{ContentAdmission, PreparedContent};
 use bytes::Bytes;
-use loonfs_api::{sha256_digest, ContentRef, ContentRefKind, ContentStoreId, NamespaceId};
+use loonfs_api::{
+    ChecksumAlgorithm, ContentId, ContentRef, ContentRefValidationError, ContentStoreId,
+    NamespaceId, StorageChecksum,
+};
 use loonfs_objectstore::keys::content_blob;
 use loonfs_objectstore::ObjectStore;
 use serde::{Deserialize, Serialize};
@@ -16,7 +19,6 @@ pub(crate) struct ValidatedDurableContent {
     pub content_ref: ContentRef,
     pub object_key: String,
     pub file_size_bytes: u64,
-    pub file_digest_sha256: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,7 +32,6 @@ pub struct StoredContent {
     pub content_store_id: ContentStoreId,
     pub object_key: String,
     pub content_ref: ContentRef,
-    pub file_digest_sha256: String,
     pub file_size_bytes: u64,
     #[serde(skip)]
     _write_acknowledged: StoredContentWriteAcknowledgement,
@@ -41,10 +42,8 @@ struct StoredContentWriteAcknowledgement;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
 pub enum DurableContentValidationError {
-    #[error("unsupported content ref kind `{kind}`")]
-    UnsupportedContentRefKind { kind: ContentRefKind },
-    #[error("invalid content digest `{digest}`: {message}")]
-    InvalidDigest { digest: String, message: String },
+    #[error("invalid content reference: {0}")]
+    InvalidContentRef(ContentRefValidationError),
     #[error("missing content object `{object_key}`")]
     MissingContentObject { object_key: String },
     #[error("content length mismatch for `{object_key}`: expected {expected}, actual {actual}")]
@@ -54,12 +53,19 @@ pub enum DurableContentValidationError {
         actual: u64,
     },
     #[error(
-        "content digest mismatch for `{object_key}`: expected `{expected}`, actual `{actual}`"
+        "content checksum mismatch for `{object_key}`: expected `{expected}`, actual `{actual}`"
     )]
-    ContentDigestMismatch {
+    ContentChecksumMismatch {
         object_key: String,
         expected: String,
         actual: String,
+    },
+    #[error(
+        "content checksum for `{object_key}` uses `{algorithm}`, which this build cannot recompute"
+    )]
+    ContentChecksumUnverifiable {
+        object_key: String,
+        algorithm: ChecksumAlgorithm,
     },
     #[error(
         "stored content belongs to content store `{actual}`, not namespace-bound store `{expected}`"
@@ -109,7 +115,7 @@ pub fn prepare_stored_content(
 /// Fully validates an existing durable content reference for publication.
 ///
 /// The verified catalog selects the store to validate. This performs one
-/// object HEAD followed by one full GET and digest check.
+/// object HEAD followed by one full GET and checksum check.
 pub async fn prepare_existing_content_ref<S: ObjectStore + ?Sized>(
     store: &S,
     catalog: &VerifiedNamespaceCatalogEntry,
@@ -122,27 +128,51 @@ pub async fn prepare_existing_content_ref<S: ObjectStore + ?Sized>(
     Ok(PreparedContent::from_admission(admission))
 }
 
-/// Proves a content reference is durable — the object exists and carries the
-/// declared size — from one HEAD, without reading the content.
+/// Verifies the object a reference names against that reference, from the
+/// provider's own stored checksum and size.
 ///
-/// This is the completion check for writes whose digest integrity the
-/// provider already enforced at upload time (a `direct_put` transfer
-/// capability signs the digest into the write, and the provider refuses a
-/// body that does not hash to it — see
-/// [`ObjectTransferIssuer`](loonfs_objectstore::presign::ObjectTransferIssuer)).
-/// Re-hashing here would re-download the payload through the server and
-/// prove nothing the write path has not already proven; the size check
-/// stays because the declared `size_bytes` rides the reference, not the
-/// digest, so a mis-declared size must fail completion. Callers without a
-/// write-time digest guarantee use [`validate_durable_content_reference`],
-/// which reads and hashes.
-pub(crate) async fn probe_durable_content_reference<S: ObjectStore + ?Sized>(
+/// This is the completion check for bytes that never passed through the
+/// LoonFS server. It verifies rather than trusts: the presigned write is
+/// checksum-bound, but a provider that accepts a wrong claim at assembly
+/// time (Cloudflare R2 does, at multipart completion) would otherwise leave
+/// a corrupt object publishable. One `HeadObject` with checksum mode enabled
+/// answers both questions and moves no payload.
+///
+/// A caller that gets a mismatch owns the repair: the object sits at a
+/// random id nothing references yet, so deleting it costs nothing and
+/// leaving it would leak.
+pub(crate) async fn verify_durable_content_checksum<S: ObjectStore + ?Sized>(
     store: &S,
     content_store_id: &ContentStoreId,
     content_ref: &ContentRef,
 ) -> Result<(), DurableContentValidationError> {
     let object_key = content_object_key_for_ref(content_store_id, content_ref)?;
-    validate_content_size(store, &object_key, content_ref).await
+    let stored = match store.head_stored_checksum(&object_key).await {
+        Ok(Some(stored)) => stored,
+        Ok(None) => return Err(DurableContentValidationError::MissingContentObject { object_key }),
+        Err(err) => {
+            return Err(DurableContentValidationError::Store {
+                object_key,
+                message: err.message(),
+            })
+        }
+    };
+
+    if stored.size_bytes != content_ref.size_bytes {
+        return Err(DurableContentValidationError::ContentLengthMismatch {
+            object_key,
+            expected: content_ref.size_bytes,
+            actual: stored.size_bytes,
+        });
+    }
+    if stored.storage_checksum != content_ref.storage_checksum {
+        return Err(DurableContentValidationError::ContentChecksumMismatch {
+            object_key,
+            expected: describe_checksum(&content_ref.storage_checksum),
+            actual: describe_checksum(&stored.storage_checksum),
+        });
+    }
+    Ok(())
 }
 
 pub(crate) async fn read_durable_content_bytes<S: ObjectStore + ?Sized>(
@@ -161,20 +191,21 @@ fn content_object_key_for_ref(
     content_store_id: &ContentStoreId,
     content_ref: &ContentRef,
 ) -> Result<String, DurableContentValidationError> {
-    if content_ref.kind != ContentRefKind::WholeFileV0 {
-        return Err(DurableContentValidationError::UnsupportedContentRefKind {
-            kind: content_ref.kind.clone(),
-        });
-    }
-
-    content_blob(content_store_id.as_str(), &content_ref.digest).map_err(|err| {
-        DurableContentValidationError::InvalidDigest {
-            digest: content_ref.digest.clone(),
-            message: err.to_string(),
-        }
-    })
+    content_ref
+        .validate()
+        .map_err(DurableContentValidationError::InvalidContentRef)?;
+    Ok(content_blob(
+        content_store_id.as_str(),
+        &content_ref.content_id,
+    ))
 }
 
+/// Checks fetched bytes against everything the reference claims about them.
+///
+/// The whole-file SHA-256 is the check whenever it is present, which is
+/// every reference any current write path produces. A reference carrying
+/// only a CRC — which direct multipart will produce — is not silently
+/// accepted here; it is refused until this crate can recompute that CRC.
 fn validate_loaded_content_bytes(
     object_key: String,
     content_ref: &ContentRef,
@@ -189,30 +220,51 @@ fn validate_loaded_content_bytes(
         });
     }
 
-    let actual_digest = sha256_digest(bytes);
-    if actual_digest != content_ref.digest {
-        return Err(DurableContentValidationError::ContentDigestMismatch {
-            object_key,
-            expected: content_ref.digest.clone(),
-            actual: actual_digest,
-        });
+    match expected_sha256(content_ref) {
+        Some(expected) => {
+            let actual = StorageChecksum::sha256(bytes).value;
+            if actual != expected {
+                return Err(DurableContentValidationError::ContentChecksumMismatch {
+                    object_key,
+                    expected: format!("sha256:{expected}"),
+                    actual: format!("sha256:{actual}"),
+                });
+            }
+        }
+        None => {
+            return Err(DurableContentValidationError::ContentChecksumUnverifiable {
+                object_key,
+                algorithm: content_ref.storage_checksum.algorithm,
+            })
+        }
     }
 
     Ok(ValidatedDurableContent {
         content_ref: content_ref.clone(),
         object_key,
         file_size_bytes: actual_size,
-        file_digest_sha256: actual_digest,
     })
 }
 
-/// Existence and size from one HEAD, serving two roles: the authoritative
-/// read-and-hash uses it as cheap prevalidation, so a wrong-sized object
-/// fails fast without downloading it, and the durability probe uses it as
-/// the whole check, because the probe's callers hold a write-time digest
-/// guarantee. When this crate itself verifies a digest it always reads the
-/// bytes — provider checksums are not part of the read contract anywhere
-/// in the fleet.
+/// The SHA-256 a read can recompute for this reference, from the trusted
+/// whole-file digest or from a storage checksum that is itself a SHA-256.
+fn expected_sha256(content_ref: &ContentRef) -> Option<&str> {
+    content_ref
+        .whole_file_sha256
+        .as_deref()
+        .or(match content_ref.storage_checksum.algorithm {
+            ChecksumAlgorithm::Sha256 => Some(content_ref.storage_checksum.value.as_str()),
+            ChecksumAlgorithm::Crc64nvme | ChecksumAlgorithm::Crc32c => None,
+        })
+}
+
+fn describe_checksum(checksum: &StorageChecksum) -> String {
+    format!("{}:{}", checksum.algorithm, checksum.value)
+}
+
+/// Existence and size from one HEAD, used as cheap prevalidation before the
+/// authoritative read-and-hash: a wrong-sized object fails without being
+/// downloaded.
 async fn validate_content_size<S: ObjectStore + ?Sized>(
     store: &S,
     object_key: &str,
@@ -261,14 +313,35 @@ pub async fn store_bytes_as_content<S: ObjectStore + ?Sized>(
 
 /// Stages bytes when the caller already knows the namespace's content-store
 /// binding (it is immutable, so a handle can resolve it once).
+///
+/// Every call mints its own content identity, so two writers staging the
+/// same bytes produce two objects rather than racing for one key. Sharing a
+/// key was free deduplication and also a free existence oracle: anyone
+/// allowed to upload could learn whether specific known bytes were already
+/// in a shared content store. Retry idempotency, the thing that dedup was
+/// quietly providing, belongs to the upload session instead.
 pub async fn store_bytes_as_content_with_store_id<S: ObjectStore + ?Sized>(
     store: &S,
     content_store_id: ContentStoreId,
     bytes: &[u8],
 ) -> Result<StoredContent, CoreError> {
-    let content_ref = ContentRef::whole_file_v0(bytes);
-    let object_key = content_blob(content_store_id.as_str(), &content_ref.digest)
-        .map_err(|err| CoreError::Internal(format!("failed to derive content blob key: {err}")))?;
+    stage_bytes_under_content_id(store, content_store_id, ContentId::generate(), bytes).await
+}
+
+/// Stages bytes under an identity the caller already allocated, for writers
+/// that minted the id earlier (an upload session allocates at `begin`).
+pub(crate) async fn stage_bytes_under_content_id<S: ObjectStore + ?Sized>(
+    store: &S,
+    content_store_id: ContentStoreId,
+    content_id: ContentId,
+    bytes: &[u8],
+) -> Result<StoredContent, CoreError> {
+    let content_ref = ContentRef::blob_v1(content_id, bytes);
+    let object_key = content_blob(content_store_id.as_str(), &content_ref.content_id);
+    // Create-only plus the byte check stay on this write even though a
+    // random id cannot collide: if this key is ever occupied by different
+    // bytes, that is corruption, and it must fail loudly rather than be
+    // overwritten.
     store
         .put_immutable_verified(&object_key, Bytes::copy_from_slice(bytes))
         .await?;
@@ -276,7 +349,6 @@ pub async fn store_bytes_as_content_with_store_id<S: ObjectStore + ?Sized>(
     Ok(StoredContent {
         content_store_id,
         object_key,
-        file_digest_sha256: content_ref.digest.clone(),
         file_size_bytes: content_ref.size_bytes,
         content_ref,
         _write_acknowledged: StoredContentWriteAcknowledgement,
@@ -302,22 +374,29 @@ async fn load_required_object<S: ObjectStore + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::{
-        probe_durable_content_reference, read_durable_content_bytes,
-        validate_durable_content_reference, DurableContentValidationError,
+        read_durable_content_bytes, store_bytes_as_content_with_store_id,
+        validate_durable_content_reference, verify_durable_content_checksum,
+        DurableContentValidationError,
     };
     use bytes::Bytes;
-    use loonfs_api::{ContentRef, ContentRefKind, ContentStoreId};
+    use loonfs_api::{
+        ChecksumAlgorithm, ContentId, ContentRef, ContentRefKind, ContentStoreId, StorageChecksum,
+    };
     use loonfs_objectstore::keys::content_blob;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_objectstore::ObjectStore;
     use loonfs_test_support::stores::{CountingStore, KeyPredicate, OperationClass};
     use tempfile::tempdir;
 
+    fn content_ref(bytes: &[u8]) -> ContentRef {
+        ContentRef::blob_v1(ContentId::generate(), bytes)
+    }
+
     #[tokio::test]
-    async fn validate_whole_file_content_ref_success() {
+    async fn validate_content_ref_success() {
         let (_temp_dir, store, content_store_id) = test_store();
         let bytes = b"whole file bytes";
-        let content_ref = ContentRef::whole_file_v0(bytes);
+        let content_ref = content_ref(bytes);
         put_content_object(&store, &content_store_id, &content_ref, bytes).await;
 
         let validated = validate_durable_content_reference(&store, &content_store_id, &content_ref)
@@ -325,15 +404,14 @@ mod tests {
             .expect("validate content ref");
         assert_eq!(validated.content_ref, content_ref);
         assert_eq!(validated.file_size_bytes, bytes.len() as u64);
-        assert_eq!(validated.file_digest_sha256, content_ref.digest);
     }
 
     #[tokio::test]
-    async fn validate_whole_file_content_ref_reads_and_hashes_the_bytes() {
+    async fn validate_content_ref_reads_and_hashes_the_bytes() {
         let (_temp_dir, inner, content_store_id) = test_store();
         let store = CountingStore::new(inner, KeyPredicate::content_blob());
         let bytes = b"whole file bytes";
-        let content_ref = ContentRef::whole_file_v0(bytes);
+        let content_ref = content_ref(bytes);
         put_content_object(&store, &content_store_id, &content_ref, bytes).await;
 
         store.reset();
@@ -344,10 +422,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn validate_whole_file_content_ref_accepts_empty_files() {
+    async fn validate_content_ref_accepts_empty_files() {
         let (_temp_dir, store, content_store_id) = test_store();
         let bytes = b"";
-        let content_ref = ContentRef::whole_file_v0(bytes);
+        let content_ref = content_ref(bytes);
         put_content_object(&store, &content_store_id, &content_ref, bytes).await;
 
         let read = read_durable_content_bytes(&store, &content_store_id, &content_ref)
@@ -358,9 +436,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn validate_whole_file_content_ref_rejects_missing_object() {
+    async fn validate_content_ref_rejects_missing_object() {
         let (_temp_dir, store, content_store_id) = test_store();
-        let content_ref = ContentRef::whole_file_v0(b"missing");
+        let content_ref = content_ref(b"missing");
 
         let err = validate_durable_content_reference(&store, &content_store_id, &content_ref)
             .await
@@ -372,9 +450,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn validate_whole_file_content_ref_rejects_size_mismatch() {
+    async fn validate_content_ref_rejects_size_mismatch() {
         let (_temp_dir, store, content_store_id) = test_store();
-        let mut content_ref = ContentRef::whole_file_v0(b"abc");
+        let mut content_ref = content_ref(b"abc");
         put_content_object(&store, &content_store_id, &content_ref, b"abc").await;
         content_ref.size_bytes += 1;
 
@@ -388,76 +466,109 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn validate_whole_file_content_ref_rejects_digest_mismatch() {
+    async fn validate_content_ref_rejects_checksum_mismatch() {
         let (_temp_dir, store, content_store_id) = test_store();
-        let content_ref = ContentRef::whole_file_v0(b"expected");
-        put_content_object(&store, &content_store_id, &content_ref, b"mismatch").await;
+        let expected = content_ref(b"expected");
+        // Same id, different bytes: identity alone can no longer prove
+        // content, so the checksum has to.
+        let planted = ContentRef::blob_v1(expected.content_id.clone(), b"mismatch");
+        put_content_object(&store, &content_store_id, &planted, b"mismatch").await;
 
-        let err = validate_durable_content_reference(&store, &content_store_id, &content_ref)
+        let err = validate_durable_content_reference(&store, &content_store_id, &expected)
             .await
-            .expect_err("digest mismatch");
+            .expect_err("checksum mismatch");
         assert!(matches!(
             err,
-            DurableContentValidationError::ContentDigestMismatch { .. }
+            DurableContentValidationError::ContentChecksumMismatch { .. }
+        ));
+    }
+
+    /// A reference whose only evidence is a CRC this build cannot recompute
+    /// must fail the read rather than be waved through unverified.
+    #[tokio::test]
+    async fn read_refuses_a_reference_it_cannot_verify() {
+        let (_temp_dir, store, content_store_id) = test_store();
+        let bytes = b"crc only";
+        let mut content_ref = content_ref(bytes);
+        content_ref.whole_file_sha256 = None;
+        content_ref.storage_checksum = StorageChecksum {
+            algorithm: ChecksumAlgorithm::Crc64nvme,
+            value: "bbb7305bdf118bcb".to_owned(),
+        };
+        put_content_object(&store, &content_store_id, &content_ref, bytes).await;
+
+        let err = read_durable_content_bytes(&store, &content_store_id, &content_ref)
+            .await
+            .expect_err("unverifiable checksum");
+        assert!(matches!(
+            err,
+            DurableContentValidationError::ContentChecksumUnverifiable { .. }
         ));
     }
 
     #[tokio::test]
-    async fn probe_whole_file_content_ref_proves_durability_without_reading() {
+    async fn checksum_verification_proves_the_object_without_reading_it() {
         let (_temp_dir, inner, content_store_id) = test_store();
         let store = CountingStore::new(inner, KeyPredicate::content_blob());
         let bytes = b"provider-verified bytes";
-        let content_ref = ContentRef::whole_file_v0(bytes);
+        let content_ref = content_ref(bytes);
         put_content_object(&store, &content_store_id, &content_ref, bytes).await;
 
         store.reset();
-        probe_durable_content_reference(&store, &content_store_id, &content_ref)
+        verify_durable_content_checksum(&store, &content_store_id, &content_ref)
             .await
-            .expect("probe content ref");
+            .expect("verify content ref");
         assert_eq!(
             store.count(OperationClass::Read),
             0,
-            "the probe proves durability from metadata alone"
+            "verification reads provider metadata, never the payload"
         );
     }
 
     #[tokio::test]
-    async fn probe_whole_file_content_ref_rejects_missing_object() {
+    async fn checksum_verification_rejects_missing_size_and_checksum_drift() {
         let (_temp_dir, store, content_store_id) = test_store();
-        let content_ref = ContentRef::whole_file_v0(b"missing");
+        let bytes = b"abc";
+        let content_ref = content_ref(bytes);
 
-        let err = probe_durable_content_reference(&store, &content_store_id, &content_ref)
+        let err = verify_durable_content_checksum(&store, &content_store_id, &content_ref)
             .await
             .expect_err("missing object");
         assert!(matches!(
             err,
             DurableContentValidationError::MissingContentObject { .. }
         ));
-    }
 
-    #[tokio::test]
-    async fn probe_whole_file_content_ref_rejects_size_mismatch() {
-        let (_temp_dir, store, content_store_id) = test_store();
-        let mut content_ref = ContentRef::whole_file_v0(b"abc");
-        put_content_object(&store, &content_store_id, &content_ref, b"abc").await;
-        content_ref.size_bytes += 1;
-
-        let err = probe_durable_content_reference(&store, &content_store_id, &content_ref)
-            .await
-            .expect_err("size mismatch");
+        put_content_object(&store, &content_store_id, &content_ref, bytes).await;
+        let mut wrong_size = content_ref.clone();
+        wrong_size.size_bytes += 1;
         assert!(matches!(
-            err,
+            verify_durable_content_checksum(&store, &content_store_id, &wrong_size)
+                .await
+                .expect_err("size mismatch"),
             DurableContentValidationError::ContentLengthMismatch { .. }
+        ));
+
+        // The bytes at the key hash to something else: exactly the case the
+        // completion check exists to catch on a provider that accepts a
+        // wrong claim.
+        let mut wrong_checksum = content_ref.clone();
+        wrong_checksum.storage_checksum = StorageChecksum::sha256(b"other bytes");
+        wrong_checksum.whole_file_sha256 = Some(wrong_checksum.storage_checksum.value.clone());
+        assert!(matches!(
+            verify_durable_content_checksum(&store, &content_store_id, &wrong_checksum)
+                .await
+                .expect_err("checksum mismatch"),
+            DurableContentValidationError::ContentChecksumMismatch { .. }
         ));
     }
 
     #[tokio::test]
-    async fn validate_whole_file_content_ref_rejects_unsupported_kind() {
+    async fn validate_content_ref_rejects_unsupported_kind() {
         let (_temp_dir, store, content_store_id) = test_store();
         let content_ref = ContentRef {
             kind: ContentRefKind::Unsupported("kind_from_the_future".to_owned()),
-            digest: ContentRef::whole_file_v0(b"bytes").digest,
-            size_bytes: 5,
+            ..content_ref(b"bytes")
         };
 
         let err = validate_durable_content_reference(&store, &content_store_id, &content_ref)
@@ -465,8 +576,43 @@ mod tests {
             .expect_err("unsupported content ref kind");
         assert!(matches!(
             err,
-            DurableContentValidationError::UnsupportedContentRefKind { .. }
+            DurableContentValidationError::InvalidContentRef(_)
         ));
+    }
+
+    /// Two writers staging the same bytes get two objects. There is no
+    /// shared key to coalesce on, so neither can observe the other.
+    #[tokio::test]
+    async fn staging_identical_bytes_twice_mints_two_distinct_objects() {
+        let (_temp_dir, store, content_store_id) = test_store();
+        let bytes = b"identical payload";
+
+        let first = store_bytes_as_content_with_store_id(&store, content_store_id.clone(), bytes)
+            .await
+            .expect("first stage");
+        let second = store_bytes_as_content_with_store_id(&store, content_store_id, bytes)
+            .await
+            .expect("second stage");
+
+        assert_ne!(
+            first.content_ref.content_id, second.content_ref.content_id,
+            "each staging write owns its own content object"
+        );
+        assert_ne!(first.object_key, second.object_key);
+        assert_eq!(
+            first.content_ref.storage_checksum, second.content_ref.storage_checksum,
+            "identical bytes still carry identical evidence"
+        );
+        for stored in [&first, &second] {
+            assert_eq!(
+                store
+                    .get(&stored.object_key, None)
+                    .await
+                    .expect("read staged object")
+                    .expect("staged object exists"),
+                Bytes::from_static(b"identical payload")
+            );
+        }
     }
 
     fn test_store() -> (tempfile::TempDir, LocalFsStore, ContentStoreId) {
@@ -483,8 +629,7 @@ mod tests {
         content_ref: &ContentRef,
         bytes: &[u8],
     ) {
-        let key =
-            content_blob(content_store_id.as_str(), &content_ref.digest).expect("content key");
+        let key = content_blob(content_store_id.as_str(), &content_ref.content_id);
         store
             .put_if_absent(&key, Bytes::copy_from_slice(bytes))
             .await

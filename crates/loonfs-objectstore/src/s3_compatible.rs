@@ -6,18 +6,37 @@
 
 use crate::keyspace::parse_endpoint_url;
 use crate::object_store::Result;
+use crate::presign::{S3CompatiblePresigner, S3PresignerConfig};
 use crate::secret::SecretString;
 use crate::store_io_runtime::StoreIoRuntime;
 use crate::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, ProviderObjectStore,
-    ProviderObjectStoreConfig, PutMode,
+    ProviderObjectStoreConfig, PutMode, StoredObjectChecksum,
 };
 use async_trait::async_trait;
+use base64::Engine as _;
 use bytes::Bytes;
 use futures::stream::BoxStream;
+use loonfs_api::wire::hex::hex_encode_bytes;
+use loonfs_api::{ChecksumAlgorithm, StorageChecksum};
 use object_store::aws::{AmazonS3Builder, Checksum};
+use object_store::client::{HttpClient, HttpConnector, HttpRequestBody};
 use std::fmt;
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
+
+/// Lifetime of the internally signed `HeadObject` used for checksum
+/// readback. The request is issued immediately and never handed out, so it
+/// only needs to outlive one round trip and its clock skew.
+const CHECKSUM_HEAD_TTL: Duration = Duration::from_secs(60);
+
+/// Provider checksum headers this adapter understands, in the order it
+/// prefers them, paired with the durable algorithm each one names.
+const S3_CHECKSUM_HEADERS: &[(&str, ChecksumAlgorithm)] = &[
+    ("x-amz-checksum-sha256", ChecksumAlgorithm::Sha256),
+    ("x-amz-checksum-crc64nvme", ChecksumAlgorithm::Crc64nvme),
+    ("x-amz-checksum-crc32c", ChecksumAlgorithm::Crc32c),
+];
 
 /// Supplies explicit credentials, addressing, and key scoping for AWS S3.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,8 +88,9 @@ struct S3CompatibleConfig {
     key_prefix: Option<String>,
     force_path_style: bool,
     /// Attach a client-computed SHA-256 to every upload so the provider
-    /// verifies the bytes on PUT (`x-amz-checksum-sha256`). Upload transport
-    /// integrity only; nothing reads checksums back.
+    /// verifies the bytes on PUT (`x-amz-checksum-sha256`). Enabling it also
+    /// gives the provider a stored full-object checksum that
+    /// [`ObjectStore::head_stored_checksum`] can read back.
     sha256_upload_checksum: bool,
 }
 
@@ -79,6 +99,13 @@ struct S3CompatibleConfig {
 pub struct S3CompatibleStore {
     provider_name: &'static str,
     inner: ProviderObjectStore,
+    /// Signs the `HeadObject` that reads a stored checksum back. The
+    /// provider client cannot express that request, and the SigV4 signer
+    /// this crate already owns for direct-put URLs can.
+    checksum_head_signer: S3CompatiblePresigner,
+    /// Sends that one signed request over the store's own IO runtime and
+    /// timeout scheme, exactly like every provider-client request.
+    http: HttpClient,
     /// Keeps the HTTP IO runtime alive for the provider client's lifetime;
     /// the connector inside the client holds only a handle onto it.
     _io_runtime: StoreIoRuntime,
@@ -153,8 +180,22 @@ impl S3CompatibleStore {
                 object_store_endpoint_url(&config.bucket, endpoint, config.force_path_style)
             })
             .transpose()?;
+        let checksum_head_signer = S3CompatiblePresigner::new(S3PresignerConfig {
+            bucket: config.bucket.clone(),
+            region: config.region.clone(),
+            endpoint_url: config.endpoint_url.clone(),
+            access_key_id: config.access_key_id.clone(),
+            secret_access_key: config.secret_access_key.clone(),
+            session_token: config.session_token.clone(),
+            key_prefix: config.key_prefix.clone(),
+            force_path_style: config.force_path_style,
+        })?;
 
         let io_runtime = StoreIoRuntime::new()?;
+        let http = io_runtime
+            .connector()
+            .connect(&crate::provider_object_store::provider_client_options())
+            .map_err(|err| ObjectStoreError::Configuration(err.to_string()))?;
         let mut builder = AmazonS3Builder::new()
             .with_http_connector(io_runtime.connector())
             .with_client_options(crate::provider_object_store::provider_client_options())
@@ -194,8 +235,17 @@ impl S3CompatibleStore {
         Ok(Self {
             provider_name: config.provider_name,
             inner,
+            checksum_head_signer,
+            http,
             _io_runtime: io_runtime,
         })
+    }
+
+    #[allow(clippy::disallowed_methods)]
+    fn checksum_head_signing_time() -> SystemTime {
+        // A SigV4 signature is dated, so this one request enters wall time
+        // here. Nothing durable is derived from it.
+        SystemTime::now()
     }
 }
 
@@ -203,6 +253,65 @@ impl S3CompatibleStore {
 impl ObjectStore for S3CompatibleStore {
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>> {
         self.inner.head(key).await
+    }
+
+    async fn head_stored_checksum(&self, key: &str) -> Result<Option<StoredObjectChecksum>> {
+        let signed = self.checksum_head_signer.presign_head_stored_checksum(
+            key,
+            CHECKSUM_HEAD_TTL,
+            Self::checksum_head_signing_time(),
+        )?;
+        let mut builder = http::Request::builder().method("HEAD").uri(&signed.url);
+        for (name, value) in &signed.headers {
+            builder = builder.header(name, value);
+        }
+        let request = builder
+            .body(HttpRequestBody::empty())
+            .map_err(|err| ObjectStoreError::transport(key, err.to_string()))?;
+        let response = self
+            .http
+            .execute(request)
+            .await
+            .map_err(|err| ObjectStoreError::transport(key, err.to_string()))?;
+
+        let status = response.status();
+        if status == http::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if status == http::StatusCode::FORBIDDEN || status == http::StatusCode::UNAUTHORIZED {
+            return Err(ObjectStoreError::PermissionDenied {
+                object_key: key.to_owned(),
+                message: format!("provider refused the checksum head with {status}"),
+            });
+        }
+        if !status.is_success() {
+            // A HEAD carries no body to quote, so the status is the whole
+            // diagnostic the provider gives us.
+            return Err(ObjectStoreError::transport(
+                key,
+                format!("checksum head failed with {status}"),
+            ));
+        }
+
+        let headers = response.headers();
+        let Some(storage_checksum) = s3_stored_checksum(headers) else {
+            return Err(ObjectStoreError::transport(
+                key,
+                "provider reported no full-object checksum for this object".to_owned(),
+            ));
+        };
+        let size_bytes = headers
+            .get(http::header::CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or_else(|| {
+                ObjectStoreError::transport(key, "checksum head reported no content length")
+            })?;
+
+        Ok(Some(StoredObjectChecksum {
+            size_bytes,
+            storage_checksum,
+        }))
     }
 
     async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>> {
@@ -224,6 +333,30 @@ impl ObjectStore for S3CompatibleStore {
     fn list_prefix_stream(&self, prefix: &str) -> BoxStream<'static, Result<String>> {
         self.inner.list_prefix_stream(prefix)
     }
+}
+
+/// Reads whichever full-object checksum the provider stored.
+///
+/// The checksum *type* header is deliberately not consulted: R2 never sends
+/// one, and full-object coverage is established when LoonFS writes the
+/// object, not discovered when it reads the metadata back.
+fn s3_stored_checksum(headers: &http::HeaderMap) -> Option<StorageChecksum> {
+    for (header, algorithm) in S3_CHECKSUM_HEADERS {
+        let Some(value) = headers.get(*header).and_then(|value| value.to_str().ok()) else {
+            continue;
+        };
+        let Ok(raw) = base64::engine::general_purpose::STANDARD.decode(value) else {
+            continue;
+        };
+        if raw.len() != algorithm.value_bytes() {
+            continue;
+        }
+        return Some(StorageChecksum {
+            algorithm: *algorithm,
+            value: hex_encode_bytes(&raw),
+        });
+    }
+    None
 }
 
 fn validate_config(config: &S3CompatibleConfig) -> Result<()> {

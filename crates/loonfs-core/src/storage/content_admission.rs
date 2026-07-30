@@ -202,7 +202,7 @@ mod tests {
     use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
     use loonfs_api::v0::ValidatedContentToken;
     use loonfs_api::wire::control::HeadState;
-    use loonfs_api::{ContentRef, ContentStoreId, NamespaceId};
+    use loonfs_api::{ContentId, ContentRef, ContentStoreId, NamespaceId};
 
     fn catalog_entry(
         namespace_id: NamespaceId,
@@ -217,7 +217,7 @@ mod tests {
     #[test]
     fn token_round_trips_and_admits_matching_content() {
         let namespace = NamespaceId::parse("demo").expect("namespace");
-        let content = ContentRef::whole_file_v0(b"hello");
+        let content = ContentRef::blob_v1(ContentId::generate(), b"hello");
         let token = mint_content_token("secret", &namespace, &content, 1_000).expect("mint");
         let token = ValidatedContentToken {
             content_ref: content.clone(),
@@ -237,7 +237,7 @@ mod tests {
     #[test]
     fn verified_token_admission_does_not_decay_after_token_expiry() {
         let namespace = NamespaceId::parse("demo").expect("namespace");
-        let content = ContentRef::whole_file_v0(b"hello");
+        let content = ContentRef::blob_v1(ContentId::generate(), b"hello");
         let issued_at_ms = 1_000;
         let token = mint_content_token("secret", &namespace, &content, issued_at_ms).expect("mint");
         let token = ValidatedContentToken {
@@ -264,8 +264,8 @@ mod tests {
     fn token_rejects_wrong_secret_namespace_content_and_expiry() {
         let namespace = NamespaceId::parse("demo").expect("namespace");
         let other_namespace = NamespaceId::parse("other").expect("namespace");
-        let content = ContentRef::whole_file_v0(b"hello");
-        let other_content = ContentRef::whole_file_v0(b"other");
+        let content = ContentRef::blob_v1(ContentId::generate(), b"hello");
+        let other_content = ContentRef::blob_v1(ContentId::generate(), b"other");
         let issued_at_ms = 1_000;
         let token = mint_content_token("secret", &namespace, &content, issued_at_ms).expect("mint");
         let token = ValidatedContentToken {

@@ -291,6 +291,8 @@ async fn write_upload_session(store: &LocalFsStore, namespace_id: &NamespaceId) 
         namespace_id: namespace_id.clone(),
         upload_id: upload_id.clone(),
         mode: loonfs_api::v0::UploadMode::ServiceProxied,
+        content_id: loonfs_api::ContentId::generate(),
+        claimed_checksum: None,
         direct_put_content_ref: None,
         staged_content_ref: None,
         completed: None,

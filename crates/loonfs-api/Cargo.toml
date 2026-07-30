@@ -12,6 +12,9 @@ ciborium.workspace = true
 # Durable-format checksums and filter hashing: both algorithm choices are
 # frozen format constants (docs/design/metadata-block-storage.md).
 crc32c.workspace = true
+# Content ids are 128 fully random bits, drawn straight from the system
+# generator so their shard prefixes stay uniform (see `ids::ContentId`).
+getrandom.workspace = true
 serde.workspace = true
 serde_bytes.workspace = true
 serde_json.workspace = true

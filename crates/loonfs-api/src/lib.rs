@@ -86,15 +86,18 @@ pub use capability::{
     LIMIT_UPLOAD_MAX_CONTENT_BYTES, PROFILE_ADMIN_V0, PROFILE_CORE_V0, PROFILE_QUERY_V0,
     PROTOCOL_VERSION,
 };
-pub use content::{ContentRef, ContentRefKind};
+pub use content::{
+    ChecksumAlgorithm, ContentRef, ContentRefKind, ContentRefValidationError, StorageChecksum,
+};
 pub use digest::sha256_digest;
 pub use error::{ErrorCode, ErrorKind};
 pub use ids::{
     generated_id, manifest_object_id_manifest_id, wal_segment_id_start_seq, ChangeSeq,
-    CheckpointId, CommitId, CommitIdValidationError, ContentStoreId, GeneratedIdValidationError,
-    IndexSegmentId, InodeId, InodeKind, ManifestId, ManifestObjectId, MetadataTableId, NameKey,
-    NameKeyValidationError, NamespaceId, NamespaceIdValidationError, RevisionNo, UploadId,
-    WalSegmentId, WriterEpoch, MAX_ID_BYTES, MAX_NAME_KEY_BYTES, ROOT_INODE_ID,
+    CheckpointId, CommitId, CommitIdValidationError, ContentId, ContentStoreId,
+    GeneratedIdValidationError, IndexSegmentId, InodeId, InodeKind, ManifestId, ManifestObjectId,
+    MetadataTableId, NameKey, NameKeyValidationError, NamespaceId, NamespaceIdValidationError,
+    RevisionNo, UploadId, WalSegmentId, WriterEpoch, MAX_ID_BYTES, MAX_NAME_KEY_BYTES,
+    ROOT_INODE_ID,
 };
 pub use name_policy::name_key_for_display_name;
 pub use pagination::{
@@ -132,7 +135,7 @@ mod tests {
         let path = AbsolutePath::parse("/docs/report.txt").expect("valid path");
         let display_name = DisplayName::parse("Report.txt").expect("valid display name");
         let name_key = NameKey::for_display_name(&display_name);
-        let content_ref = ContentRef::whole_file_v0(b"hello");
+        let content_ref = ContentRef::blob_v1(ContentId::generate(), b"hello");
 
         assert_eq!(namespace_id.as_str(), "demo");
         assert!(commit_id.as_str().starts_with("c_"));

@@ -16,7 +16,7 @@ use crate::path::read::{
 use crate::storage::content_admission::PreparedContent;
 use loonfs_api::v0::{
     BeginUploadRequest, BeginUploadResponse, ChangesResponse, CommitResponse,
-    CompleteUploadRequest, CompleteUploadResponse, UploadContentResponse,
+    CompleteUploadRequest, CompleteUploadResponse, DirectPutContentClaim, UploadContentResponse,
 };
 use loonfs_api::wire::control::{CheckpointOwner, HeadState, NamespaceState};
 use loonfs_api::EffectiveLimit;
@@ -411,15 +411,16 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         .await
     }
 
-    /// Starts a direct_put upload session and returns the internal object key to sign.
+    /// Mints a direct_put upload target: a fresh content identity, the
+    /// reference that names it, and the internal object key to sign.
     pub async fn begin_direct_put_upload_target(
         &self,
-        content_ref: ContentRef,
+        claim: DirectPutContentClaim,
     ) -> Result<BeginDirectPutUploadTargetResponse> {
         crate::protocol::begin_direct_put_upload_target(
             &self.store,
             &self.namespace_id,
-            content_ref,
+            claim,
             &self.mutation_context()?,
         )
         .await
@@ -473,7 +474,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         if catalog.namespace_id() != &self.namespace_id {
             return Err(
                 crate::commit_engine::ContentPreparationError::ContentNotPrepared {
-                    content_ref_digest: request.content_ref.digest.clone(),
+                    content_id: request.content_ref.content_id.clone(),
                 }
                 .into(),
             );

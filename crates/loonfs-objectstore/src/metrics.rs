@@ -3,7 +3,10 @@
 
 use crate::layout::{parse_object_key, DurableObjectFamily};
 use crate::object_store::Result;
-use crate::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
+use crate::{
+    ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
+    StoredObjectChecksum,
+};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{BoxStream, TryStreamExt};
@@ -278,6 +281,15 @@ where
         result
     }
 
+    async fn head_stored_checksum(&self, key: &str) -> Result<Option<StoredObjectChecksum>> {
+        let start = sample_clock();
+        let result = self.inner.head_stored_checksum(key).await;
+        // One provider metadata request, recorded as the head it is: the
+        // point of this call is that it moves no payload.
+        self.record_head_like(ObjectStoreOperation::Head, key, start.elapsed(), &result);
+        result
+    }
+
     async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Option<Bytes>> {
         let start = sample_clock();
         let result = self.inner.get(key, range.clone()).await;
@@ -340,12 +352,12 @@ where
 }
 
 impl<S> InstrumentedObjectStore<S> {
-    fn record_head_like(
+    fn record_head_like<T>(
         &self,
         operation: ObjectStoreOperation,
         key: &str,
         elapsed: Duration,
-        result: &Result<Option<ObjectMetadata>>,
+        result: &Result<Option<T>>,
     ) {
         self.record(ObjectStoreMetricSample {
             operation,

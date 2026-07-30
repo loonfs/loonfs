@@ -3,6 +3,7 @@
 use crate::common::http_split_support::*;
 use crate::common::start_server;
 use loonfs::content_tokens::mint_content_token;
+use loonfs_api::ContentId;
 use loonfs_api::{
     v0::ValidatedContentToken, AbsolutePath, ApiError, ChangeSeq, CommitId, CommitRequest,
     CommitResponse, ContentRef, DestinationBehavior, ErrorCode, FilesystemOperation,
@@ -51,8 +52,8 @@ fn missing_content_proof_message(request: &CommitRequest) -> String {
         unreachable!("content preparation assertion requires a one-put request");
     };
     format!(
-        "content ref `{}` is not prepared for publication",
-        content_ref.digest
+        "content object `{}` is not prepared for publication",
+        content_ref.content_id
     )
 }
 
@@ -321,7 +322,7 @@ async fn puts_with_a_valid_token_reuse_the_ref_and_ignore_irrelevant_tokens() {
         content_tokens: vec![
             validated_content_token(&first),
             ValidatedContentToken {
-                content_ref: ContentRef::whole_file_v0(b"irrelevant"),
+                content_ref: ContentRef::blob_v1(ContentId::generate(), b"irrelevant"),
                 token: "irrelevant.garbage".to_owned(),
             },
         ],

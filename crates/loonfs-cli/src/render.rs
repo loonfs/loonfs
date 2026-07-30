@@ -456,7 +456,7 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
                 lines.push(format!("modified: {}", format_utc_ms(committed_at_ms)));
             }
             if let Some(content_ref) = &entry.content_ref {
-                lines.push(format!("content_ref: {}", content_ref.digest));
+                lines.push(format!("content_id: {}", content_ref.content_id));
                 lines.push(format!("content_kind: {}", content_ref.kind));
             }
             lines.join("\n")
@@ -477,7 +477,7 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
                     format_utc_ms(revision.committed_at_ms),
                     revision.committed_seq.0,
                     revision.content_ref.size_bytes,
-                    revision.content_ref.digest
+                    revision.content_ref.content_id
                 ));
             }
             if let Some(cursor) = next_cursor {

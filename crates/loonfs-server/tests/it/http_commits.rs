@@ -30,12 +30,24 @@ fn commit_id(value: &str) -> CommitId {
 
 /// The comparable content of one committed change: everything the feed
 /// promises except the wall-clock stamp, which is observational.
+/// The parts of a change two transports must agree on.
+///
+/// Content identity is left out on purpose: each transport staged its own
+/// content objects, so their ids differ by construction. The rest of the
+/// reference — size and checksums — stays in, so identical bytes still have
+/// to produce identical evidence.
 fn change_identity(change: &CommittedChange) -> (ChangeSeq, String, Option<String>, String) {
+    let mut events = serde_json::to_value(&change.events).expect("serialize events");
+    for event in events.as_array_mut().expect("events array") {
+        if let Some(content_ref) = event.get_mut("content_ref") {
+            content_ref["content_id"] = serde_json::Value::from("<normalized>");
+        }
+    }
     (
         change.seq,
         change.commit_id.to_string(),
         change.message.clone(),
-        serde_json::to_string(&change.events).expect("serialize events"),
+        events.to_string(),
     )
 }
 

@@ -263,7 +263,7 @@ fn require_content_admission(
         return Ok(());
     }
     Err(ContentPreparationError::ContentNotPrepared {
-        content_ref_digest: content_ref.digest.clone(),
+        content_id: content_ref.content_id.clone(),
     }
     .into())
 }

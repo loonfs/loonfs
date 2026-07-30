@@ -6,6 +6,7 @@ use bytes::Bytes;
 use futures::stream::BoxStream;
 use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
+    StoredObjectChecksum,
 };
 use std::sync::Mutex;
 
@@ -136,6 +137,16 @@ impl<S: ObjectStore> ObjectStore for RecordingStore<S> {
             key: key.to_owned(),
         });
         self.inner.head(key).await
+    }
+
+    async fn head_stored_checksum(
+        &self,
+        key: &str,
+    ) -> Result<Option<StoredObjectChecksum>, ObjectStoreError> {
+        self.record(RecordedOperation::Head {
+            key: key.to_owned(),
+        });
+        self.inner.head_stored_checksum(key).await
     }
 
     async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {

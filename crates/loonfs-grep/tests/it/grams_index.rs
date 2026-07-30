@@ -4,7 +4,7 @@
 //! Host-composed grep over the runtime handles, plus direct `GrepWorker`
 //! building and folding.
 
-use crate::common::GrepHost;
+use crate::common::{is_content_object, GrepHost};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
@@ -48,7 +48,7 @@ async fn content_blob_keys(store: &SharedObjectStore) -> BTreeSet<String> {
         .await
         .expect("list content blobs")
         .into_iter()
-        .filter(|key| key.contains("/blobs/sha256/"))
+        .filter(|key| is_content_object(key))
         .collect()
 }
 
@@ -684,7 +684,7 @@ impl BuildContentAccountingStore {
     }
 
     fn record_content_read(&self, key: &str, bytes: usize) {
-        if key.contains("/blobs/sha256/") {
+        if is_content_object(key) {
             self.content_reads
                 .lock()
                 .expect("content read accounting lock")
@@ -1018,7 +1018,7 @@ impl ContentBlobGetRecordingStore {
     }
 
     fn record_if_content_blob(&self, key: &str) {
-        if key.contains("/blobs/sha256/") {
+        if is_content_object(key) {
             self.content_blob_gets
                 .lock()
                 .expect("content GET log lock")

@@ -4,6 +4,7 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{BoxStream, TryStreamExt};
+use loonfs_api::StorageChecksum;
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -30,6 +31,19 @@ pub struct ObjectMetadata {
     /// treats an absent value as "young" (retain). Never a validity input.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_modified_ms: Option<u64>,
+}
+
+/// Size and the stored full-object checksum for one object, read from a
+/// single provider metadata request.
+///
+/// This is the evidence a completion check needs to decide whether the
+/// object at a key is the object that was promised, without downloading it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredObjectChecksum {
+    /// Complete object length the provider reports.
+    pub size_bytes: u64,
+    /// Full-object checksum the provider stored with the object.
+    pub storage_checksum: StorageChecksum,
 }
 
 /// Full object bytes returned with metadata from the same read operation.
@@ -188,6 +202,27 @@ pub trait ObjectStore: Send + Sync + Debug {
     /// keys and provider failures are returned as [`ObjectStoreError`].
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>>;
 
+    /// Reads size and the stored full-object checksum for one key, returning
+    /// `None` when the object is absent.
+    ///
+    /// This is exactly one metadata request. S3-family stores issue
+    /// `HeadObject` with checksum mode enabled; `GetObjectAttributes` is
+    /// never used anywhere, because Cloudflare R2 answers it with 501 and
+    /// code that reaches for it passes its tests against S3 and fails in
+    /// production.
+    ///
+    /// Stores that cannot report a stored checksum return
+    /// [`ObjectStoreError::Unsupported`]. That is the same capability line
+    /// as presigned direct uploads: a deployment whose provider cannot show
+    /// the checksum back also cannot offer `direct_put`, because completion
+    /// would have nothing to verify against.
+    async fn head_stored_checksum(&self, key: &str) -> Result<Option<StoredObjectChecksum>> {
+        let _ = key;
+        Err(ObjectStoreError::Unsupported(
+            "stored full-object checksum readback",
+        ))
+    }
+
     /// Reads complete bytes and identity metadata from one self-consistent observation.
     ///
     /// Returns `None` when the object is absent; invalid keys and provider
@@ -286,6 +321,10 @@ impl<T: ObjectStore + ?Sized> ObjectStore for Arc<T> {
         self.as_ref().head(key).await
     }
 
+    async fn head_stored_checksum(&self, key: &str) -> Result<Option<StoredObjectChecksum>> {
+        self.as_ref().head_stored_checksum(key).await
+    }
+
     async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>> {
         self.as_ref().get_with_metadata(key).await
     }
@@ -342,6 +381,10 @@ impl<T: ObjectStore + ?Sized> ObjectStore for Arc<T> {
 impl<T: ObjectStore + ?Sized> ObjectStore for &T {
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>> {
         (*self).head(key).await
+    }
+
+    async fn head_stored_checksum(&self, key: &str) -> Result<Option<StoredObjectChecksum>> {
+        (*self).head_stored_checksum(key).await
     }
 
     async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>> {

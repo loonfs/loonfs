@@ -1,1 +1,1 @@
-{"kind":"upload_session","format_version":1,"payload_checksum":"sha256:3582fdb5783e4576c7050df2638b966ffa55add24127297d2ae4bb3e334b43df","payload":{"namespace_id":"demo","upload_id":"upl_11111111111111111111111111111111","created_at_ms":1000,"state":"condemned"}}
+{"kind":"upload_session","format_version":1,"payload_checksum":"sha256:5e67f1290def4db0a21aed4a1e4a4c916079a41d6e0e43a576dd90c4323203e3","payload":{"namespace_id":"demo","upload_id":"upl_11111111111111111111111111111111","content_id":"cnt_11111111111111111111111111111111","created_at_ms":1000,"state":"condemned"}}

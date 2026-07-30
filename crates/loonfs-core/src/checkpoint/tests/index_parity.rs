@@ -1,6 +1,7 @@
 //! Checkpoint secondary-index parity and manifest descriptor validation.
 
 use super::*;
+use loonfs_api::{ContentId, StorageChecksum};
 
 async fn rewrite_manifest_segment(
     store: &LocalFsStore,
@@ -507,15 +508,15 @@ async fn base_rebuild_retains_revisions_superseded_below_floor() {
         &materialized.metadata_state,
         ApiMetadataTableFamily::Revisions,
     );
-    let digest_one = loonfs_api::sha256_digest(b"one\n");
-    let digest_two = loonfs_api::sha256_digest(b"two\n");
+    let checksum_one = StorageChecksum::sha256(b"one\n");
+    let checksum_two = StorageChecksum::sha256(b"two\n");
     assert!(revisions.iter().any(|row| matches!(
         row,
-        MetadataRow::Revision { content_ref, .. } if content_ref.digest == digest_one
+        MetadataRow::Revision { content_ref, .. } if content_ref.storage_checksum == checksum_one
     )));
     assert!(revisions.iter().any(|row| matches!(
         row,
-        MetadataRow::Revision { content_ref, .. } if content_ref.digest == digest_two
+        MetadataRow::Revision { content_ref, .. } if content_ref.storage_checksum == checksum_two
     )));
     let index_rows = manifest_rows_for_family(
         &materialized.metadata_state,
@@ -632,8 +633,7 @@ async fn bounded_subset_rebuild_rejects_divergent_revision_index() {
         revision_index_test_materialization(&store, &namespace_id, &context).await;
     let first = revision_index_rows.first_mut().expect("revision index row");
     if let MetadataRow::Revision { content_ref, .. } = first {
-        content_ref.digest =
-            "sha256:1111111111111111111111111111111111111111111111111111111111111111".to_owned();
+        content_ref.content_id = ContentId::generate();
     }
     rewrite_revision_index_segment(&store, &namespace_id, &mut manifest, revision_index_rows).await;
     overwrite_manifest(&store, &namespace_id, manifest).await;
@@ -1100,8 +1100,7 @@ async fn manifest_rejects_revision_desc_index_changed_content_ref() {
         revision_index_test_materialization(&store, &namespace_id, &context).await;
     let first = revision_index_rows.first_mut().expect("revision index row");
     if let MetadataRow::Revision { content_ref, .. } = first {
-        content_ref.digest =
-            "sha256:0000000000000000000000000000000000000000000000000000000000000000".to_owned();
+        content_ref.content_id = ContentId::generate();
     }
     rewrite_revision_index_segment(&store, &namespace_id, &mut manifest, revision_index_rows).await;
     overwrite_manifest(&store, &namespace_id, manifest).await;

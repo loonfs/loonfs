@@ -65,7 +65,7 @@ The required durable object families and standard key patterns are:
 | **Upload sessions** | Mutable lifecycle | Track one staged-content upload from begin to completion; GC conditionally condemns abandoned active sessions before deletion. | `namespaces/{namespace_id}/uploads/{upload_id}.json` |
 | **Metadata root** | Mutable | Cold pointer to the best known materialized metadata root; monotonic CAS. | `namespaces/{namespace_id}/metadata/root.json` |
 | **WAL floor** | Mutable | Cold lower bound of retained WAL/change history; monotonic CAS. | `namespaces/{namespace_id}/wal/floor.json` |
-| **Content objects** | Immutable | Store whole-file v0 bytes. | `content-stores/{content_store_id}/blobs/sha256/{hex[0..2]}/{hex[2..4]}/{hex}` |
+| **Content objects** | Immutable | Store one file revision's complete bytes. | `content-stores/{content_store_id}/objects/{content_id[4..6]}/{content_id}` |
 
 These key shapes are part of the interoperable storage contract.
 Implementations may keep additional private control-plane objects — queues,
@@ -198,24 +198,50 @@ The metadata log has six rules.
 
 ### 1.6 Immutable content rules
 
-The content model has five rules.
+The content model has six rules.
 
-1. Content digests are content-derived, not provider-derived.
+1. **Identity and integrity are separate.** A content object's identity is a
+   random `content_id`; its integrity evidence is the checksums carried
+   beside that id. Nothing about a content object's name describes its bytes,
+   so a reference's checksums are the only thing that ever does.
 2. A `content_ref` describes one complete file revision.
 3. Immutable content objects are written with create-if-absent semantics.
+   Random ids cannot collide, so a create that finds the key occupied is
+   corruption and must fail rather than overwrite.
 4. A metadata commit may reference a `content_ref` only after the referenced
    object is already durable.
-5. Content verification is read-and-hash: a `content_ref` is verified only
-   by reading the object bytes and computing the digest. Provider checksum
-   metadata is not part of the read contract — checksum semantics diverge
-   across providers, so it is used (where a provider supports it) purely as
-   upload transport integrity, never consulted on reads. A HEAD may
-   prevalidate existence and size so a wrong-sized object fails fast.
+5. **Every reference carries a mandatory full-object checksum.** There is no
+   checksum-*type* field: full-object coverage is an invariant of this
+   format, established when the object is written and never read back from a
+   provider. (Cloudflare R2 does not report a checksum type at all, so a type
+   read back would be missing exactly where it would matter.)
+6. **Read verification uses the reference's own evidence.** A read recomputes
+   the reference's whole-file SHA-256 over the bytes it fetched. A reference
+   whose evidence this implementation cannot recompute fails the read; no
+   read is served unverified. A HEAD may prevalidate existence and size so a
+   wrong-sized object fails fast.
 
-In v0, file content is stored as one whole-file object whose
-`content_ref.kind` is `whole_file_v0`. The digest remains serialized as
-`sha256:<64hex>`, while the object key partitions the hex as
-`sha256/ab/cd/<hex>`.
+##### Checksum provenance
+
+`whole_file_sha256` present means **a trusted party computed it over the
+complete stream**: either the LoonFS write path hashed the whole payload
+itself, or a provider validated a signed whole-object SHA-256 on the write it
+accepted. There are no client-claimed digests in this format. A client's
+declared digest becomes trusted evidence only by being signed into a write the
+provider refuses to accept unless the bytes match, and by being checked again
+against the stored object at completion.
+
+Absent therefore means *nobody trustworthy hashed these bytes* — never "the
+client did not tell us". That single meaning is what lets a reader treat the
+field as a decision rather than a hint.
+
+`storage_checksum.algorithm` is one of `sha256`, `crc64nvme`, or `crc32c`, and
+`storage_checksum.value` is the lowercase hex of the raw checksum bytes (the
+algorithm is its own field, so the value carries no prefix; provider APIs that
+report base64 are converted at the adapter). Only `sha256` has producers
+today. The CRC algorithms exist because direct multipart upload mandates a
+provider-computed full-object CRC-64/NVME, and that producer must not require
+a format change.
 
 Metadata materialization tables include canonical metadata families and
 validated secondary indexes. The canonical families are `inodes`,
@@ -413,9 +439,11 @@ The revision row for the current file contents:
   "revision_no": 7,
   "committed_seq": 91,
   "content_ref": {
-    "kind": "whole_file_v0",
-    "digest": "sha256:42d...",
-    "size_bytes": 19482
+    "kind": "blob_v1",
+    "content_id": "cnt_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
+    "size_bytes": 19482,
+    "storage_checksum": { "algorithm": "sha256", "value": "42d..." },
+    "whole_file_sha256": "42d..."
   }
 }
 ```
@@ -512,21 +540,47 @@ This separation is part of the core model.
 The stable immutable content families are:
 
 ```text
-content-stores/{content_store_id}/blobs/sha256/{hex[0..2]}/{hex[2..4]}/{hex}
+content-stores/{content_store_id}/objects/{content_id[4..6]}/{content_id}
 ```
 
 The core rules are:
 
-- `content_ref.kind` is `whole_file_v0` for the v0 content strategy;
-- `content_ref.digest` uses `sha256:<64 lowercase hex>` over the complete
-  plaintext file bytes;
+- `content_ref.kind` is `blob_v1` for the current content strategy;
+- `content_id` is `cnt_` followed by 32 lowercase hex characters — 128 fully
+  random bits, with no time component. The shard directory is the first two
+  characters of that body, so ingest spreads evenly across provider
+  partitions; a clock-derived prefix would put every upload in a window into
+  one shard;
+- because the id is random, the final object key is known before the first
+  byte is read, and an object that was never published belongs to exactly one
+  upload;
 - `content_ref.size_bytes` records the complete byte length;
-- the object key leaf is the raw 64-character hex digest, while JSON keeps the
-  full `sha256:<hex>` digest string;
+- `content_ref.storage_checksum` is mandatory and covers the complete object;
+- `content_ref.whole_file_sha256` is present exactly when a trusted party
+  hashed the whole stream (section 1.6);
 - all content-object access resolves `namespace_id` through the namespace
   head to its `content_store_id`;
 - future content strategies must use a new `content_ref.kind` and name their
   durability and validation rules before revisions may reference them.
+
+The `ContentRef` document rejects unknown fields, so a field this format does
+not define is corruption, not a future extension:
+
+```json
+{
+  "kind": "blob_v1",
+  "content_id": "cnt_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
+  "size_bytes": 19482,
+  "storage_checksum": { "algorithm": "sha256", "value": "<64 lowercase hex>" },
+  "whole_file_sha256": "<64 lowercase hex>"
+}
+```
+
+Identical bytes uploaded twice produce two content objects. There is no
+cross-upload deduplication: a shared key would also be an existence oracle,
+letting anyone authorized to upload learn whether specific known bytes were
+already stored. The duplicate case that actually matters — a client retrying —
+is answered by resuming the upload session, not by colliding on a key.
 
 #### 2.4.2 Upload-before-publish
 
@@ -861,23 +915,43 @@ reference it. A metadata change becomes visible only after the head advances.
 
 Content must be durable before any metadata change can reference it.
 
-1. Compute the `sha256` digest of the complete plaintext file bytes.
+1. Allocate a fresh `content_id`. This happens before any byte is read, so
+   the final object key exists up front.
 2. Read the namespace head for its `content_store_id`.
 3. Upload the complete byte sequence to
-   `content-stores/{content_store_id}/blobs/sha256/{hex[0..2]}/{hex[2..4]}/{hex}`
+   `content-stores/{content_store_id}/objects/{content_id[4..6]}/{content_id}`
    with create-if-absent semantics.
 4. Build a content reference:
 
    ```json
    {
-     "kind": "whole_file_v0",
-     "digest": "sha256:<64hex>",
-     "size_bytes": 123
+     "kind": "blob_v1",
+     "content_id": "cnt_<32hex>",
+     "size_bytes": 123,
+     "storage_checksum": { "algorithm": "sha256", "value": "<64hex>" },
+     "whole_file_sha256": "<64hex>"
    }
    ```
 
-Content staging is idempotent and has no effect on the visible tree. If the
-caller crashes mid-upload, orphaned content objects are harmless.
+Staging the same bytes twice under two different uploads writes two objects,
+one per id. Retrying *within* one upload session reuses that session's id and
+therefore its object, which is where staging idempotency now lives. An
+orphaned content object — one whose upload never completed — is harmless
+because nothing can reference an id that was never published.
+
+**Direct upload** hands the transfer to the client instead of proxying it. The
+client declares the size and SHA-256 of bytes it already holds; the server
+mints the identity, signs both the digest and a create-only precondition into
+a short-lived write capability, and returns the resulting `content_ref`. A
+client can never name the object it writes to.
+
+Completion **verifies rather than trusts**. The server issues one
+`HeadObject` with checksum mode enabled and compares the provider's stored
+checksum and size against the reference. `GetObjectAttributes` is never used:
+Cloudflare R2 answers it with 501, so code that reaches for it passes its
+tests against AWS S3 and fails in production. A mismatch fails the completion
+and deletes the object — safe precisely because the id is random and
+unpublished, so nothing references what is deleted.
 
 #### 3.1.2 Metadata view loading
 
@@ -893,11 +967,11 @@ The server validates each commit request against the reconstructed state:
 1. Resolve any operation-local references needed to identify referenced
    content.
 2. Verify that all referenced content objects are already durable in object
-   storage, and that `content_ref.kind`, digest, and size match. Existence
-   and size prevalidate from a HEAD; the digest is verified by reading and
-   hashing the object bytes (or skipped entirely under a valid content
-   admission token, which proves this server already validated the staged
-   bytes).
+   storage, and that the reference's kind, size, and checksums match.
+   Existence and size prevalidate from a HEAD; the checksum is verified by
+   reading and hashing the object bytes (or skipped entirely under a valid
+   content admission token, which proves this server already validated the
+   staged bytes).
 3. Evaluate preconditions in order (see section 3.6 for the precondition
    catalogue).
 4. Resolve inode references and allocate new inode ids monotonically from the
@@ -914,13 +988,10 @@ Content reference validation fails before metadata preconditions are evaluated
 when:
 
 - `content_ref.kind` is unsupported;
-- `content_ref.digest` is not a valid `sha256:<64 lowercase hex>` digest;
+- a checksum value is not the lowercase hex its algorithm's width requires;
 - the referenced object is missing from the namespace's content store;
 - the object size differs from `content_ref.size_bytes`; or
-- provider-verified checksum metadata, when present, differs from
-  `content_ref.digest`; or
-- when checksum metadata is absent, the object bytes hash to a different
-  digest than `content_ref.digest`.
+- the object bytes do not match the reference's checksum.
 
 #### 3.1.4 WAL segment publication and head advance
 
@@ -1042,11 +1113,11 @@ Given a visible file inode at seq N:
 1. Look up the file's latest revision at N to obtain `content_ref`.
 2. Read the namespace head for its `content_store_id`.
 3. Verify that `content_ref.kind` is supported by the reader.
-4. For `whole_file_v0`, fetch the object at
-   `content-stores/{content_store_id}/blobs/sha256/{hex[0..2]}/{hex[2..4]}/{hex}`,
-   where `hex` is the digest suffix from `content_ref.digest`.
-5. Verify that the fetched bytes match `content_ref.size_bytes` and
-   `content_ref.digest`.
+4. For `blob_v1`, fetch the object at
+   `content-stores/{content_store_id}/objects/{content_id[4..6]}/{content_id}`.
+5. Verify that the fetched bytes match `content_ref.size_bytes` and the
+   reference's `whole_file_sha256`. A reference whose evidence the reader
+   cannot recompute fails the read; nothing is served unverified.
 
 A **file revision** is an immutable content state for one file inode,
 identified by that inode's monotonic `revision_no`. A namespace commit `seq`
@@ -1119,6 +1190,23 @@ different guard, or the same operations in a different order conflicts. The
 preimage deliberately excludes `commit_id`, writer epoch, and
 `committed_at_ms`: a retry of the same logical commit must fingerprint
 identically no matter who retries it or when.
+
+A content reference enters the preimage as exactly:
+
+```json
+{ "kind": "blob_v1", "content_id": "cnt_<32hex>", "size_bytes": 123 }
+```
+
+The checksums are excluded on purpose. They are evidence about the object,
+pinned to its id by the verification every write and read performs — not part
+of *which* object the request attaches. Including them would make a reference
+that named the same object with a differently spelled checksum read as a
+different mutation.
+
+The visible consequence is a retry rule. Re-uploading bytes mints a new
+content object, so a request that re-runs its upload is a genuinely different
+mutation and a reused `commit_id` conflicts. Retrying a commit means sending
+the same `ContentRef` again, which replays.
 
 There is one preimage for every commit. A convenience call carrying one
 operation and a request carrying a one-element operation list are the same

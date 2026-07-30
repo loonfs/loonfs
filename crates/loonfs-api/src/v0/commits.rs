@@ -149,12 +149,12 @@ mod tests {
 
     #[test]
     fn filesystem_change_events_use_snake_case_kind_tags() {
-        let sample_content_ref = crate::ContentRef {
-            kind: crate::ContentRefKind::WholeFileV0,
-            digest: "sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
-                .to_owned(),
-            size_bytes: 5,
-        };
+        let sample_content_ref = crate::ContentRef::blob_v1(
+            crate::ContentId::parse("cnt_0123456789abcdef0123456789abcdef")
+                .expect("valid content id"),
+            b"hello",
+        );
+        let sample_content_ref_json = r#"{"kind":"blob_v1","content_id":"cnt_0123456789abcdef0123456789abcdef","size_bytes":5,"storage_checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"},"whole_file_sha256":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}"#;
 
         let created = FilesystemChange::Created {
             inode_id: InodeId(2),
@@ -179,7 +179,9 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&created_file).expect("serialize created file event"),
-            r#"{"kind":"created","inode_id":2,"inode_kind":"file","parent_inode_id":1,"name":"a.txt","revision_no":1,"content_ref":{"kind":"whole_file_v0","digest":"sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824","size_bytes":5}}"#
+            format!(
+                r#"{{"kind":"created","inode_id":2,"inode_kind":"file","parent_inode_id":1,"name":"a.txt","revision_no":1,"content_ref":{sample_content_ref_json}}}"#
+            )
         );
 
         let content_changed = FilesystemChange::ContentChanged {
@@ -189,7 +191,9 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&content_changed).expect("serialize content changed event"),
-            r#"{"kind":"content_changed","inode_id":2,"revision_no":3,"content_ref":{"kind":"whole_file_v0","digest":"sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824","size_bytes":5}}"#
+            format!(
+                r#"{{"kind":"content_changed","inode_id":2,"revision_no":3,"content_ref":{sample_content_ref_json}}}"#
+            )
         );
 
         let moved = FilesystemChange::Moved {

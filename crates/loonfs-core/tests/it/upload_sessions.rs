@@ -6,14 +6,15 @@
 use crate::common::commit_split_support::*;
 use crate::common::namespace_engine;
 use bytes::Bytes;
+use loonfs_api::v0::DirectPutContentClaim;
 use loonfs_api::{
-    sha256_digest,
     v0::{CompleteUploadRequest, UploadMode},
     wire::control::{
         encode_control_object, ControlObjectKind, UploadSessionEnvelope, UploadSessionState,
     },
-    ContentRef, ContentRefKind, DestinationBehavior, NamespaceId, UploadId,
+    ContentRef, DestinationBehavior, NamespaceId, UploadId,
 };
+use loonfs_api::{ContentId, StorageChecksum};
 use loonfs_core::content::store_bytes_as_content;
 use loonfs_core::{
     BeginDirectPutUploadTargetResponse, Error as CoreError, ErrorCode, MutationContext,
@@ -38,12 +39,20 @@ async fn begin_upload<S: ObjectStore + ?Sized>(
 async fn begin_direct_put_upload_target<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    content_ref: ContentRef,
+    claim: DirectPutContentClaim,
     context: &MutationContext,
 ) -> Result<BeginDirectPutUploadTargetResponse, CoreError> {
     namespace_engine(store, namespace_id, context)
-        .begin_direct_put_upload_target(content_ref)
+        .begin_direct_put_upload_target(claim)
         .await
+}
+
+/// What a well-behaved direct-put client would send for these bytes.
+fn direct_put_claim(bytes: &[u8]) -> DirectPutContentClaim {
+    DirectPutContentClaim {
+        size_bytes: bytes.len() as u64,
+        sha256: StorageChecksum::sha256(bytes).value,
+    }
 }
 
 async fn upload_content<S: ObjectStore + ?Sized>(
@@ -121,8 +130,54 @@ async fn begin_upload_rejects_missing_and_deleted_namespaces() {
     assert_eq!(deleted_error.code(), ErrorCode::NamespaceDeleted);
 }
 
+/// The server, not the client, names the object a direct upload writes,
+/// and it names it before any byte moves.
 #[tokio::test]
-async fn begin_direct_put_rejects_unsupported_content_ref_without_session() {
+async fn begin_direct_put_mints_the_target_object_up_front() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    let bytes = b"direct put payload";
+
+    let first =
+        begin_direct_put_upload_target(&store, &namespace_id, direct_put_claim(bytes), &context)
+            .await
+            .expect("first direct put target");
+    let second =
+        begin_direct_put_upload_target(&store, &namespace_id, direct_put_claim(bytes), &context)
+            .await
+            .expect("second direct put target");
+
+    let content_ref = &first.target.content_ref;
+    assert_eq!(content_ref.size_bytes, bytes.len() as u64);
+    assert_eq!(
+        content_ref.storage_checksum,
+        StorageChecksum::sha256(bytes),
+        "the signed checksum is the client's claim, verified again at completion"
+    );
+    assert_eq!(
+        content_ref.whole_file_sha256.as_deref(),
+        Some(content_ref.storage_checksum.value.as_str())
+    );
+    assert!(first
+        .target
+        .object_key
+        .ends_with(content_ref.content_id.as_str()));
+    // Same bytes, two sessions, two objects: nothing is shared, so neither
+    // upload can observe the other.
+    assert_ne!(
+        first.target.content_ref.content_id,
+        second.target.content_ref.content_id
+    );
+    assert_ne!(first.target.object_key, second.target.object_key);
+}
+
+#[tokio::test]
+async fn begin_direct_put_rejects_a_malformed_claim_without_creating_a_session() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -131,14 +186,15 @@ async fn begin_direct_put_rejects_unsupported_content_ref_without_session() {
         .await
         .expect("bootstrap");
 
-    let content_ref = ContentRef {
-        kind: ContentRefKind::Unsupported("future_kind".to_owned()),
-        digest: sha256_digest(b"hello"),
+    // The client no longer names an object, so the only thing left to
+    // reject is a malformed claim about its own bytes.
+    let claim = DirectPutContentClaim {
         size_bytes: 5,
+        sha256: "not-a-sha256".to_owned(),
     };
-    let error = begin_direct_put_upload_target(&store, &namespace_id, content_ref, &context)
+    let error = begin_direct_put_upload_target(&store, &namespace_id, claim, &context)
         .await
-        .expect_err("unsupported direct_put content ref");
+        .expect_err("malformed direct_put claim");
 
     assert_eq!(error.code(), ErrorCode::InvalidRequest);
     assert_eq!(
@@ -253,7 +309,7 @@ async fn complete_upload_does_not_get_content_blob_after_staging() {
     )
     .await
     .expect("upload mismatch content");
-    let wrong_ref = ContentRef::whole_file_v0(b"different");
+    let wrong_ref = ContentRef::blob_v1(ContentId::generate(), b"different");
     assert_ne!(wrong_ref, mismatch_uploaded.content_ref);
 
     store.reset();
@@ -291,6 +347,8 @@ async fn complete_upload_rejects_direct_put_session_without_bound_target() {
         namespace_id: namespace_id.clone(),
         upload_id: upload_id.clone(),
         mode: UploadMode::DirectPut,
+        content_id: stored.content_ref.content_id.clone(),
+        claimed_checksum: None,
         direct_put_content_ref: None,
         staged_content_ref: None,
         completed: None,

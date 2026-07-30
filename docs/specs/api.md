@@ -391,6 +391,18 @@ Caller-supplied race guards (`expected_inode_id` on delete,
 so changing, adding, or removing a guard while reusing a `commit_id` fails
 with `commit_id_reuse_conflict`.
 
+A put's content is part of that identity too, and identity means *which
+content object*, not what bytes it holds. So:
+
+- **Retrying a commit means resending the same `content_ref`.** That is a
+  semantically identical commit and it replays.
+- **Re-uploading the bytes and then reusing the `commit_id` conflicts.** A
+  fresh upload mints a fresh content object, which is a different commit,
+  answered with `commit_id_reuse_conflict`.
+
+Keep the `content_ref` a completed upload returned and reuse it across
+commit retries. Do not re-run the upload as part of a commit retry.
+
 Identical resubmission is the reconciliation mechanism. There is no separate
 commit-status lookup: after `commit_outcome_unknown`, a transport failure, or
 a process restart, resubmit the same request with the same `commit_id` and
@@ -506,15 +518,17 @@ cursor may re-examine work or defer a newly inserted key that sorts before its
 position until the next full pass; it can never make a newly live object
 deletable.
 
-For `direct_put`, the client requests a presigned upload capability:
+For `direct_put`, the client requests a presigned upload capability. It
+declares what it can know — how many bytes it holds and what they hash to —
+and nothing about where they go: the server owns content identity, so a
+client can never aim a signed write at an object it chose.
 
 ```json
 {
   "mode": "direct_put",
-  "content_ref": {
-    "kind": "whole_file_v0",
-    "digest": "sha256:...",
-    "size_bytes": 1234
+  "content": {
+    "size_bytes": 1234,
+    "sha256": "<64 lowercase hex>"
   }
 }
 ```
@@ -527,7 +541,13 @@ The response includes only a short-lived transfer capability, never raw object-s
   "upload_id": "upl_...",
   "mode": "direct_put",
   "direct_put": {
-    "content_ref": { "kind": "whole_file_v0", "digest": "sha256:...", "size_bytes": 1234 },
+    "content_ref": {
+      "kind": "blob_v1",
+      "content_id": "cnt_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
+      "size_bytes": 1234,
+      "storage_checksum": { "algorithm": "sha256", "value": "<64 lowercase hex>" },
+      "whole_file_sha256": "<64 lowercase hex>"
+    },
     "access": {
       "kind": "presigned_url",
       "method": "PUT",
@@ -544,9 +564,10 @@ The response includes only a short-lived transfer capability, never raw object-s
 
 The signed headers are part of the transfer capability. In the S3-compatible
 example, `if-none-match: *` keeps the immutable object create-only, and
-`x-amz-checksum-sha256` binds the object-store write to the SHA-256 digest in
-`content_ref`. Because both requirements ride the signature, the provider —
-not the server — proves digest integrity at write time; a deployment only
+`x-amz-checksum-sha256` binds the object-store write to the SHA-256 the client
+declared. Because both requirements ride the signature, the provider rejects
+any body that does not hash to it, and a client cannot drop or edit either
+requirement without invalidating the capability; a deployment only
 advertises `core.uploads.direct_put` when its provider profile proves this or
 the operator explicitly accepts an unproven endpoint. Arbitrary
 S3-compatible gateways are unproven because HMAC interoperability does not
@@ -566,18 +587,23 @@ configuration override. Other implementations may use different headers or
 decline `direct_put` support.
 
 After the client uploads bytes to the presigned URL, it calls complete with the
-same `content_ref`. Completion proves the durable object exists and carries the
-declared size from object metadata alone; the digest needs no re-proof because
-the provider enforced it during the upload, so completion never reads the
-content back through the server. A server may return a short-lived
-`validated_content_token` for the completed content ref; the token is opaque to
-clients.
+`content_ref` the server returned at begin. Completion **verifies rather than
+trusts**: it reads the object's provider-stored full-object checksum and size
+in one metadata request and compares both against the reference. Write-time
+provider enforcement is real but not uniform across S3-compatible providers,
+and a random object id says nothing about its bytes, so the comparison is the
+load-bearing check rather than a formality. A mismatch fails the completion and
+deletes the object — safe because the id was never published, so nothing
+references it. Nothing is read back through the server either way.
+
+A server may return a short-lived `validated_content_token` for the completed
+content ref; the token is opaque to clients.
 
 ```json
 {
   "namespace_id": "demo",
   "upload_id": "upl_...",
-  "content_ref": { "kind": "whole_file_v0", "digest": "sha256:...", "size_bytes": 1234 }
+  "content_ref": { "kind": "blob_v1", "content_id": "cnt_9f2a...", "size_bytes": 1234, "storage_checksum": { "algorithm": "sha256", "value": "..." }, "whole_file_sha256": "..." }
 }
 ```
 
@@ -594,7 +620,7 @@ ignored.
   "commit_id": "commit-a",
   "content_tokens": [
     {
-      "content_ref": { "kind": "whole_file_v0", "digest": "sha256:...", "size_bytes": 1234 },
+      "content_ref": { "kind": "blob_v1", "content_id": "cnt_9f2a...", "size_bytes": 1234, "storage_checksum": { "algorithm": "sha256", "value": "..." }, "whole_file_sha256": "..." },
       "token": "opaque-server-token"
     }
   ],
@@ -602,7 +628,7 @@ ignored.
     {
       "kind": "put_file",
       "path": "/docs/report.pdf",
-      "content_ref": { "kind": "whole_file_v0", "digest": "sha256:...", "size_bytes": 1234 },
+      "content_ref": { "kind": "blob_v1", "content_id": "cnt_9f2a...", "size_bytes": 1234, "storage_checksum": { "algorithm": "sha256", "value": "..." }, "whole_file_sha256": "..." },
       "behavior": "no_replace"
     }
   ]
@@ -722,9 +748,11 @@ the durable naming rules (`format.md`, "Durable naming conventions").
   "revision_no": 7,
   "size_bytes": 19482,
   "content_ref": {
-    "kind": "whole_file_v0",
-    "digest": "sha256:42d...",
-    "size_bytes": 19482
+    "kind": "blob_v1",
+    "content_id": "cnt_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
+    "size_bytes": 19482,
+    "storage_checksum": { "algorithm": "sha256", "value": "42d..." },
+    "whole_file_sha256": "42d..."
   },
   "committed_at_ms": 1752624000000
 }
@@ -785,9 +813,11 @@ stays `invalid_request`.)
       "revision_no": 7,
       "size_bytes": 19482,
       "content_ref": {
-        "kind": "whole_file_v0",
-        "digest": "sha256:42d...",
-        "size_bytes": 19482
+        "kind": "blob_v1",
+        "content_id": "cnt_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
+        "size_bytes": 19482,
+        "storage_checksum": { "algorithm": "sha256", "value": "42d..." },
+        "whole_file_sha256": "42d..."
       }
     },
     {
@@ -839,9 +869,11 @@ the retention floor has advanced.
       "committed_seq": 418,
       "committed_at_ms": 1752624000000,
       "content_ref": {
-        "kind": "whole_file_v0",
-        "digest": "sha256:42d...",
-        "size_bytes": 19482
+        "kind": "blob_v1",
+        "content_id": "cnt_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
+        "size_bytes": 19482,
+        "storage_checksum": { "algorithm": "sha256", "value": "42d..." },
+        "whole_file_sha256": "42d..."
       }
     }
   ],
@@ -887,7 +919,7 @@ create a directory and write into it:
   "message": "import the January report",
   "content_tokens": [
     {
-      "content_ref": { "kind": "whole_file_v0", "digest": "sha256:...", "size_bytes": 1234 },
+      "content_ref": { "kind": "blob_v1", "content_id": "cnt_9f2a...", "size_bytes": 1234, "storage_checksum": { "algorithm": "sha256", "value": "..." }, "whole_file_sha256": "..." },
       "token": "opaque-server-token"
     }
   ],
@@ -896,7 +928,7 @@ create a directory and write into it:
     {
       "kind": "put_file",
       "path": "/reports/2026/january.pdf",
-      "content_ref": { "kind": "whole_file_v0", "digest": "sha256:...", "size_bytes": 1234 },
+      "content_ref": { "kind": "blob_v1", "content_id": "cnt_9f2a...", "size_bytes": 1234, "storage_checksum": { "algorithm": "sha256", "value": "..." }, "whole_file_sha256": "..." },
       "behavior": "no_replace"
     },
     {
@@ -1021,8 +1053,12 @@ The semantic rule is:
   servers may also return an opaque `validated_content_token` that remote
   create/replace mutations carry back as their content-preparation proof.
 
-Repeating `PUT /content` with the same bytes for the same upload id is
-idempotent. Repeating it with different bytes is a conflict. Completing an
+An upload session allocates its content object when it begins, so repeating
+`PUT /content` with the same bytes for the same upload id writes the same
+object and is idempotent. Repeating it with different bytes is a conflict.
+Two *different* sessions carrying identical bytes get their own objects:
+content is never shared across uploads, so retry idempotency belongs to the
+session and nothing else. Completing an
 upload fails if no content was staged or if the expected `content_ref` differs
 from the staged one. An aged abandoned session is conditionally condemned
 before GC deletes it. If condemnation wins a completion race, completion
@@ -1048,9 +1084,11 @@ Representative content-upload response:
   "namespace_id": "demo",
   "upload_id": "upl_4d8f2c91a7b34e0f9c6d1a2b3e5f708c",
   "content_ref": {
-    "kind": "whole_file_v0",
-    "digest": "sha256:7ab...",
-    "size_bytes": 20591
+    "kind": "blob_v1",
+    "content_id": "cnt_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
+    "size_bytes": 20591,
+    "storage_checksum": { "algorithm": "sha256", "value": "7ab..." },
+    "whole_file_sha256": "7ab..."
   }
 }
 ```
@@ -1060,9 +1098,11 @@ Representative complete-upload request:
 ```json
 {
   "content_ref": {
-    "kind": "whole_file_v0",
-    "digest": "sha256:7ab...",
-    "size_bytes": 20591
+    "kind": "blob_v1",
+    "content_id": "cnt_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
+    "size_bytes": 20591,
+    "storage_checksum": { "algorithm": "sha256", "value": "7ab..." },
+    "whole_file_sha256": "7ab..."
   }
 }
 ```
@@ -1074,9 +1114,11 @@ Representative complete-upload response:
   "namespace_id": "demo",
   "upload_id": "upl_4d8f2c91a7b34e0f9c6d1a2b3e5f708c",
   "content_ref": {
-    "kind": "whole_file_v0",
-    "digest": "sha256:7ab...",
-    "size_bytes": 20591
+    "kind": "blob_v1",
+    "content_id": "cnt_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
+    "size_bytes": 20591,
+    "storage_checksum": { "algorithm": "sha256", "value": "7ab..." },
+    "whole_file_sha256": "7ab..."
   },
   "validated_content_token": "opaque-server-token"
 }
@@ -1106,9 +1148,11 @@ committed operation, in request-operation order.
           "inode_id": 42,
           "revision_no": 8,
           "content_ref": {
-            "kind": "whole_file_v0",
-            "digest": "sha256:7ab...",
-            "size_bytes": 20591
+            "kind": "blob_v1",
+            "content_id": "cnt_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
+            "size_bytes": 20591,
+            "storage_checksum": { "algorithm": "sha256", "value": "7ab..." },
+            "whole_file_sha256": "7ab..."
           }
         }
       ]

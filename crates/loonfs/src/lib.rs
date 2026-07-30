@@ -44,18 +44,18 @@ use thiserror::Error;
 
 pub use loonfs_api::v0::{
     BeginUploadRequest, BeginUploadResponse, ChangesResponse, CommitResponse, CommittedChange,
-    CompleteUploadRequest, CompleteUploadResponse, DirectPutUpload, FilesystemChange,
-    ObjectTransferAccess, UploadContentResponse, UploadMode,
+    CompleteUploadRequest, CompleteUploadResponse, DirectPutContentClaim, DirectPutUpload,
+    FilesystemChange, ObjectTransferAccess, UploadContentResponse, UploadMode,
 };
 pub use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, CapabilityDocument,
-    ChangeSeq, CheckpointId, CommitId, ContentRef, ContentRefKind, CreateCheckpointRequest,
-    CreateCheckpointResponse, DeleteDirectoryBehavior, DeleteNamespaceResponse,
-    DestinationBehavior, DirectoryPageCursor, EffectiveLimit, FileRevision,
-    FileRevisionsPageCursor, FlushWalOutcome, FlushWalResponse, GcRequest, GcResponse, InodeId,
-    InodeKind, ListFileRevisionsResponse, ListPathEntriesResponse, MaintenanceStepKind,
-    MaintenanceStepRequest, MaintenanceStepResponse, ManifestId, NameKey, NamespaceId,
-    NamespaceStatusResponse, NamespaceSummary, Page, PageRequest, PaginationPolicy,
+    ChangeSeq, CheckpointId, ChecksumAlgorithm, CommitId, ContentId, ContentRef, ContentRefKind,
+    CreateCheckpointRequest, CreateCheckpointResponse, DeleteDirectoryBehavior,
+    DeleteNamespaceResponse, DestinationBehavior, DirectoryPageCursor, EffectiveLimit,
+    FileRevision, FileRevisionsPageCursor, FlushWalOutcome, FlushWalResponse, GcRequest,
+    GcResponse, InodeId, InodeKind, ListFileRevisionsResponse, ListPathEntriesResponse,
+    MaintenanceStepKind, MaintenanceStepRequest, MaintenanceStepResponse, ManifestId, NameKey,
+    NamespaceId, NamespaceStatusResponse, NamespaceSummary, Page, PageRequest, PaginationPolicy,
     ReleaseCheckpointResponse, ReorganizeStepOutcome, RevisionNo, UploadId, WalFlushStepOutcome,
     FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK,
     FEATURE_UPLOADS_DIRECT_PUT, PROFILE_ADMIN_V0, PROFILE_CORE_V0, PROTOCOL_VERSION,

@@ -34,9 +34,10 @@ use loonfs_api::wire::wal::{
     WalCommitPayload, WalDelta, WalSegmentEnvelope, WalSegmentPayload,
 };
 use loonfs_api::{
-    sha256_digest, v0::UploadMode, ChangeSeq, CheckpointId, CommitId, ContentRef, ContentStoreId,
-    InodeId, InodeKind, ManifestId, ManifestObjectId, MetadataTableId, NameKey, NamespaceId,
-    RevisionNo, UploadId, WalSegmentId, WriterEpoch,
+    sha256_digest, v0::UploadMode, ChangeSeq, CheckpointId, ChecksumAlgorithm, CommitId, ContentId,
+    ContentRef, ContentRefKind, ContentStoreId, InodeId, InodeKind, ManifestId, ManifestObjectId,
+    MetadataTableId, NameKey, NamespaceId, RevisionNo, StorageChecksum, UploadId, WalSegmentId,
+    WriterEpoch,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -115,8 +116,81 @@ fn manifest_object_id(manifest_id: u64, suffix: &str) -> ManifestObjectId {
         .expect("valid manifest object id")
 }
 
+fn content_id(value: &str) -> ContentId {
+    ContentId::parse(value).expect("valid content id")
+}
+
 fn sample_content_ref() -> ContentRef {
-    ContentRef::whole_file_v0(b"golden bytes")
+    ContentRef::blob_v1(
+        content_id("cnt_0123456789abcdef0123456789abcdef"),
+        b"golden bytes",
+    )
+}
+
+/// A reference whose only evidence is a provider-computed full-object CRC.
+///
+/// No current write path produces one; it is here so the fixtures prove the
+/// format decodes what direct multipart will write in the next wave.
+fn sample_crc_content_ref() -> ContentRef {
+    ContentRef {
+        kind: ContentRefKind::BlobV1,
+        content_id: content_id("cnt_fedcba9876543210fedcba9876543210"),
+        size_bytes: 11_534_336,
+        storage_checksum: StorageChecksum {
+            algorithm: ChecksumAlgorithm::Crc64nvme,
+            value: "bbb7305bdf118bcb".to_owned(),
+        },
+        whole_file_sha256: None,
+    }
+}
+
+/// Pins the durable JSON of a content reference for every checksum algorithm
+/// the format defines.
+///
+/// Only `sha256` has a producer today. The CRC variants are pinned anyway:
+/// direct multipart will write full-object CRC-64/NVME, and this fixture is
+/// what proves that arriving producer needs no format change — and what fails
+/// if someone reshapes the reference in the meantime.
+#[test]
+fn content_ref_matches_golden_bytes_for_every_checksum_algorithm() {
+    let references = [
+        sample_content_ref(),
+        sample_crc_content_ref(),
+        ContentRef {
+            kind: ContentRefKind::BlobV1,
+            content_id: content_id("cnt_00112233445566778899aabbccddeeff"),
+            size_bytes: 4_096,
+            storage_checksum: StorageChecksum {
+                algorithm: ChecksumAlgorithm::Crc32c,
+                value: "1a2b3c4d".to_owned(),
+            },
+            whole_file_sha256: None,
+        },
+    ];
+    let encoded = serde_json::to_vec_pretty(&references).expect("encode content refs");
+    assert_matches_golden("content_refs.v1.json", &encoded);
+
+    let decoded: Vec<ContentRef> =
+        serde_json::from_slice(&read_golden("content_refs.v1.json")).expect("decode content refs");
+    assert_eq!(decoded, references);
+    for content_ref in &decoded {
+        content_ref.validate().expect("golden references are valid");
+    }
+}
+
+/// The reference rejects fields it does not define: an unexpected key is
+/// corruption, not a newer writer's extension.
+#[test]
+fn content_ref_decode_rejects_unknown_fields() {
+    let mut document: serde_json::Value =
+        serde_json::to_value(sample_content_ref()).expect("encode content ref");
+    document["checksum_type"] = serde_json::Value::from("full_object");
+
+    let error = serde_json::from_value::<ContentRef>(document).expect_err("unknown field");
+    assert!(
+        error.to_string().contains("checksum_type"),
+        "the rejection should name the field: {error}"
+    );
 }
 
 fn table_id() -> MetadataTableId {
@@ -497,6 +571,8 @@ fn control_objects_match_golden_bytes() {
             upload_id: UploadId::parse("upl_0123456789abcdef0123456789abcdef")
                 .expect("valid upload id"),
             mode: UploadMode::ServiceProxied,
+            content_id: content_id("cnt_0123456789abcdef0123456789abcdef"),
+            claimed_checksum: None,
             direct_put_content_ref: None,
             staged_content_ref: Some(sample_content_ref()),
             completed: Some(CompletedUpload {
@@ -540,6 +616,8 @@ fn control_objects_match_golden_bytes() {
             upload_id: UploadId::parse("upl_abcdef0123456789abcdef0123456789")
                 .expect("valid upload id"),
             mode: UploadMode::DirectPut,
+            content_id: content_id("cnt_0123456789abcdef0123456789abcdef"),
+            claimed_checksum: Some(sample_content_ref().storage_checksum),
             direct_put_content_ref: Some(sample_content_ref()),
             staged_content_ref: None,
             completed: None,
@@ -555,6 +633,8 @@ fn control_objects_match_golden_bytes() {
             upload_id: UploadId::parse("upl_11111111111111111111111111111111")
                 .expect("valid upload id"),
             mode: UploadMode::ServiceProxied,
+            content_id: content_id("cnt_11111111111111111111111111111111"),
+            claimed_checksum: None,
             direct_put_content_ref: None,
             staged_content_ref: None,
             completed: None,
@@ -729,6 +809,8 @@ fn checkpoint_and_upload_decoders_reject_wrong_format_version_without_fallback()
                 upload_id: UploadId::parse("upl_11111111111111111111111111111111")
                     .expect("valid upload id"),
                 mode: UploadMode::ServiceProxied,
+                content_id: content_id("cnt_11111111111111111111111111111111"),
+                claimed_checksum: None,
                 direct_put_content_ref: None,
                 staged_content_ref: None,
                 completed: None,
@@ -1157,6 +1239,14 @@ fn sample_segment_blocks() -> loonfs_api::wire::sst_blocks::BuiltSegmentBlocks {
             committed_at_ms: 3_000,
             revision_delta_index: 0,
             content_ref: sample_content_ref(),
+        },
+        MetadataRow::Revision {
+            inode_id: InodeId(2),
+            revision_no: RevisionNo(2),
+            committed_seq: ChangeSeq(4),
+            committed_at_ms: 4_000,
+            revision_delta_index: 0,
+            content_ref: sample_crc_content_ref(),
         },
         MetadataRow::Tombstone {
             root_inode_id: InodeId(5),

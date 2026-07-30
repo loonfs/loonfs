@@ -59,9 +59,9 @@ pub(crate) mod commit_split_support {
     use async_trait::async_trait;
     use bytes::Bytes;
     use futures::stream::BoxStream;
+    use loonfs_api::ContentId;
     use loonfs_api::{
-        sha256_digest, AbsolutePath, ChangeSeq, CommitId, ContentRef, ContentRefKind,
-        DestinationBehavior, NamespaceId,
+        AbsolutePath, ChangeSeq, CommitId, ContentRef, DestinationBehavior, NamespaceId,
     };
 
     use loonfs_core::content::{prepare_existing_content_ref, store_bytes_as_content};
@@ -472,11 +472,7 @@ pub(crate) mod commit_split_support {
     }
 
     pub(crate) fn content_ref(seed: &str) -> ContentRef {
-        ContentRef {
-            kind: ContentRefKind::WholeFileV0,
-            digest: sha256_digest(seed.as_bytes()),
-            size_bytes: seed.len() as u64,
-        }
+        ContentRef::blob_v1(ContentId::generate(), seed.as_bytes())
     }
 
     pub(crate) fn content_blob_counting_store(

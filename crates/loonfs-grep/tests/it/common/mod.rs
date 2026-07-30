@@ -185,3 +185,11 @@ pub(crate) async fn grep_with(
     let snapshot = GrepIndexSnapshot::from_grep_root(&**store, namespace_id, service).await;
     service.query(request, &snapshot, &reads, store).await
 }
+
+/// Classifies a key by durable family instead of by its spelling, so the
+/// object-key grammar stays the single place that knows the layout.
+pub(crate) fn is_content_object(key: &str) -> bool {
+    loonfs_objectstore::layout::parse_object_key(key).is_some_and(|parsed| {
+        parsed.family() == loonfs_objectstore::layout::DurableObjectFamily::ContentBlob
+    })
+}

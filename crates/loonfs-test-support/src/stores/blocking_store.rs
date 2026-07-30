@@ -7,6 +7,7 @@ use futures::stream::{self, BoxStream};
 use futures::StreamExt;
 use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
+    StoredObjectChecksum,
 };
 use std::fmt;
 use std::pin::pin;
@@ -184,6 +185,18 @@ impl<S: fmt::Debug> fmt::Debug for BlockingStore<S> {
 
 #[async_trait]
 impl<S: ObjectStore> ObjectStore for BlockingStore<S> {
+    async fn head_stored_checksum(
+        &self,
+        key: &str,
+    ) -> Result<Option<StoredObjectChecksum>, ObjectStoreError> {
+        let blocked = self
+            .block_if_selected(&OperationContext::new(key, OperationKind::Head))
+            .await;
+        let result = self.inner.head_stored_checksum(key).await;
+        self.mark_completed(blocked);
+        result
+    }
+
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         let blocked = self
             .block_if_selected(&OperationContext::new(key, OperationKind::Head))

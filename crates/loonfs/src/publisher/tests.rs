@@ -1090,7 +1090,7 @@ async fn publisher_batches_plain_and_prepared_mutations_together() {
             &namespace_id,
             BeginUploadRequest {
                 mode: None,
-                content_ref: None,
+                content: None,
             },
         )
         .await

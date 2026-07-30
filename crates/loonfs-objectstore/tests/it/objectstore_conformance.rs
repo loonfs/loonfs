@@ -7,7 +7,7 @@ use crate::provider_env::{
 };
 use bytes::Bytes;
 use futures::StreamExt;
-use loonfs_api::ManifestObjectId;
+use loonfs_api::{ChecksumAlgorithm, ContentId, ManifestObjectId, StorageChecksum};
 use loonfs_objectstore::abs::{AzureAbsStore, AzureAbsStoreConfig};
 use loonfs_objectstore::gcs::{GcpGcsStore, GcpGcsStoreConfig};
 use loonfs_objectstore::keys::{
@@ -29,10 +29,9 @@ fn key_builders_cover_locked_object_families() {
     assert_eq!(
         content_blob(
             "cs_00000000000000000000000000000001",
-            "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-        )
-        .expect("content blob key"),
-        "content-stores/cs_00000000000000000000000000000001/blobs/sha256/ab/cd/abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+            &ContentId::parse("cnt_abcdef0123456789abcdef0123456789").expect("valid content id"),
+        ),
+        "content-stores/cs_00000000000000000000000000000001/objects/ab/cnt_abcdef0123456789abcdef0123456789"
     );
     assert_eq!(
         wal_segment("ns-1", "seg_00000000000000000000000000000001"),
@@ -270,7 +269,84 @@ async fn assert_provider_conformance<S: ObjectStore>(store: &S) {
     assert_sorted_list_prefix(store).await;
     assert_supports_range_reads(store).await;
     assert_multipart_overwrite_round_trips(store).await;
+    assert_stored_checksum_readback_is_honest(store).await;
     assert_rejects_invalid_keys_consistently(store).await;
+}
+
+/// Direct-put completion decides whether to publish an object from one
+/// checksum-bearing metadata request, so a wrong header name, a mis-decoded
+/// base64 value, or a mis-scoped key would silently break publication.
+///
+/// Which algorithm comes back is the provider's business, and the providers
+/// disagree: AWS S3 reports the SHA-256 this adapter attaches to uploads,
+/// while Cloudflare R2 reports a CRC-64/NVME of its own even though this
+/// adapter attaches nothing to proxied writes. So the check pins what must
+/// be true everywhere — the size, the algorithm's own encoding rules, and a
+/// SHA-256 that actually matches when SHA-256 is what is reported — rather
+/// than a single expected algorithm.
+///
+/// Presigned direct-put writes carry a signed SHA-256 on both providers,
+/// which is the path completion actually verifies; the end-to-end proof of
+/// that lives in `loonfs-server`'s real-provider direct-put tests.
+async fn assert_stored_checksum_readback_is_honest<S: ObjectStore>(store: &S) {
+    let key = wal_segment("ns-1", "seg_00000000000000000000000000000778");
+    let _ = store.delete(&key).await;
+    let payload = Bytes::from_static(b"stored checksum readback payload");
+
+    let absent = match store.head_stored_checksum(&key).await {
+        // A store that cannot ask the question at all says so plainly, and
+        // there is nothing further to check: those are exactly the providers
+        // that do not offer direct_put, so no completion path depends on
+        // them. GCS and Azure Blob Storage are both this case.
+        Err(ObjectStoreError::Unsupported(_)) => return,
+        answer => answer.expect("absent object answers without a checksum"),
+    };
+    assert!(
+        absent.is_none(),
+        "an absent object must not report a checksum"
+    );
+
+    store
+        .put_if_absent(&key, payload.clone())
+        .await
+        .expect("write checksum probe object");
+    match store.head_stored_checksum(&key).await {
+        Ok(stored) => {
+            let stored = stored.expect("a present object must not read back as absent");
+            assert_eq!(stored.size_bytes, payload.len() as u64);
+            let checksum = stored.storage_checksum;
+            assert_eq!(
+                checksum.value.len(),
+                checksum.algorithm.value_bytes() * 2,
+                "a checksum value must be its algorithm's width in hex: {checksum:?}"
+            );
+            assert!(
+                checksum
+                    .value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+                "a checksum value must be lowercase hex: {checksum:?}"
+            );
+            if checksum.algorithm == ChecksumAlgorithm::Sha256 {
+                assert_eq!(
+                    checksum,
+                    StorageChecksum::sha256(&payload),
+                    "a reported sha256 must describe the bytes actually stored"
+                );
+            }
+        }
+        // A provider that stores no checksum for this object must say so
+        // rather than invent an answer.
+        Err(error) => {
+            let message = error.to_string();
+            assert!(
+                message.contains("no full-object checksum"),
+                "a provider that stores no checksum must say so: {message}"
+            );
+        }
+    }
+
+    store.delete(&key).await.expect("delete checksum probe");
 }
 
 /// The one live exercise of the native multipart path: an overwrite past

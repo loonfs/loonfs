@@ -617,11 +617,11 @@ fn classify_visible_path_error(error: &VisiblePathError) -> ErrorCode {
 
 fn classify_durable_content_error(error: &DurableContentValidationError) -> ErrorCode {
     match error {
-        DurableContentValidationError::UnsupportedContentRefKind { .. }
-        | DurableContentValidationError::InvalidDigest { .. }
+        DurableContentValidationError::InvalidContentRef(_)
         | DurableContentValidationError::MissingContentObject { .. }
         | DurableContentValidationError::ContentLengthMismatch { .. }
-        | DurableContentValidationError::ContentDigestMismatch { .. }
+        | DurableContentValidationError::ContentChecksumMismatch { .. }
+        | DurableContentValidationError::ContentChecksumUnverifiable { .. }
         | DurableContentValidationError::ContentStoreMismatch { .. } => ErrorCode::NamespaceCorrupt,
         DurableContentValidationError::Store { .. } => ErrorCode::ServerError,
     }
@@ -803,12 +803,13 @@ mod tests {
         assert_eq!(error.code().as_str(), "namespace_exists");
         assert!(error.message().contains("already exists"));
 
+        let content_id = loonfs_api::ContentId::generate();
         let error = CoreError::ContentPreparation(ContentPreparationError::ContentNotPrepared {
-            content_ref_digest: "abc123".to_owned(),
+            content_id: content_id.clone(),
         });
         assert_eq!(error.kind(), ErrorKind::Conflict);
         assert_eq!(error.code(), ErrorCode::ContentNotPrepared);
-        assert!(error.message().contains("abc123"));
+        assert!(error.message().contains(content_id.as_str()));
     }
 
     #[test]

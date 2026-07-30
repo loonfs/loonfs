@@ -52,7 +52,7 @@ enum OperationFingerprintInput<'a> {
     PutFile {
         absolute_path: &'a str,
         behavior: DestinationBehavior,
-        content_ref: &'a ContentRef,
+        content_ref: ContentRefFingerprintInput<'a>,
         expected_revision_no: Option<RevisionNo>,
     },
     // Identity covers the complete caller-visible logical request. A changed
@@ -84,6 +84,34 @@ enum OperationFingerprintInput<'a> {
     },
 }
 
+/// Canonical preimage for the content a put attaches.
+///
+/// Identity is *which object*, so the id and its length are the whole of it.
+/// The checksums are evidence about those bytes, pinned to the id by the
+/// verification every write and read already performs, and they are left out
+/// deliberately: a reference that named the same object with a differently
+/// spelled checksum would otherwise read as a different mutation.
+///
+/// The consequence is worth stating plainly. A retry that re-runs the whole
+/// operation, upload included, mints a new content object, so it is a
+/// different request and a reused commit id conflicts. Retrying a commit
+/// means sending the same `ContentRef` again — which replays — not uploading
+/// the bytes again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ContentRefFingerprintInput<'a> {
+    kind: &'a str,
+    content_id: &'a str,
+    size_bytes: u64,
+}
+
+fn content_ref_fingerprint_input(content_ref: &ContentRef) -> ContentRefFingerprintInput<'_> {
+    ContentRefFingerprintInput {
+        kind: content_ref.kind.as_str(),
+        content_id: content_ref.content_id.as_str(),
+        size_bytes: content_ref.size_bytes,
+    }
+}
+
 fn operation_fingerprint_input(operation: &FilesystemOperation) -> OperationFingerprintInput<'_> {
     match operation {
         FilesystemOperation::CreateDir {
@@ -101,7 +129,7 @@ fn operation_fingerprint_input(operation: &FilesystemOperation) -> OperationFing
         } => OperationFingerprintInput::PutFile {
             absolute_path: absolute_path.as_str(),
             behavior: *behavior,
-            content_ref,
+            content_ref: content_ref_fingerprint_input(content_ref),
             expected_revision_no: *expected_revision_no,
         },
         FilesystemOperation::DeletePath {
@@ -439,6 +467,89 @@ mod tests {
         assert_eq!(
             fingerprint.as_str(),
             "v0:sha256:edc8e06bd0a651e9470198875ec44c8fcd7d9b95f162fe1d7ca46011c27e2818"
+        );
+    }
+
+    /// Pins the exact stored fingerprint for a put, which is the only
+    /// operation whose preimage embeds a content reference.
+    ///
+    /// The literal covers the canonical content-ref form — kind, content id,
+    /// size, and nothing else. Adding a checksum to that form, or reordering
+    /// it, would change this value and silently break replay for every
+    /// already-published put.
+    #[test]
+    fn put_file_fingerprint_value_is_pinned() {
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let mut fixed = request(FilesystemOperation::PutFile {
+            absolute_path: AbsolutePath::parse("/docs/report.txt").expect("path"),
+            content_ref: ContentRef::blob_v1(
+                loonfs_api::ContentId::parse("cnt_0123456789abcdef0123456789abcdef")
+                    .expect("content id"),
+                b"pinned put bytes",
+            ),
+            behavior: DestinationBehavior::NoReplace,
+            expected_revision_no: None,
+        });
+        fixed.commit_id = CommitId::parse("c_00000000000000000000000000000044").expect("commit id");
+
+        let fingerprint = commit_fingerprint(&namespace_id, &fixed).expect("fingerprint");
+
+        assert_eq!(
+            fingerprint.as_str(),
+            "v0:sha256:473996eb05a5899a9cda36b68aeec7ef7e8e1e3e06e75bba91dcec2ff1ae4016"
+        );
+    }
+
+    /// Two references to the same object with different checksum evidence
+    /// are the same mutation: identity is which object a put attaches, and
+    /// the checksums are pinned to that object by verification elsewhere.
+    #[test]
+    fn checksum_evidence_is_outside_mutation_identity() {
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let content_ref = ContentRef::blob_v1(
+            loonfs_api::ContentId::parse("cnt_0123456789abcdef0123456789abcdef")
+                .expect("content id"),
+            b"pinned put bytes",
+        );
+        let without_trusted_digest = ContentRef {
+            whole_file_sha256: None,
+            ..content_ref.clone()
+        };
+        let build = |content_ref| {
+            request(FilesystemOperation::PutFile {
+                absolute_path: AbsolutePath::parse("/docs/report.txt").expect("path"),
+                content_ref,
+                behavior: DestinationBehavior::NoReplace,
+                expected_revision_no: None,
+            })
+        };
+
+        assert_eq!(
+            commit_fingerprint(&namespace_id, &build(content_ref)).expect("fingerprint"),
+            commit_fingerprint(&namespace_id, &build(without_trusted_digest)).expect("fingerprint")
+        );
+    }
+
+    /// A different content object is a different mutation, which is what
+    /// makes a re-upload under a used commit id conflict instead of replay.
+    #[test]
+    fn a_different_content_object_changes_mutation_identity() {
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let build = |content_ref| {
+            request(FilesystemOperation::PutFile {
+                absolute_path: AbsolutePath::parse("/docs/report.txt").expect("path"),
+                content_ref,
+                behavior: DestinationBehavior::NoReplace,
+                expected_revision_no: None,
+            })
+        };
+        let bytes = b"identical bytes, two uploads";
+        let first = ContentRef::blob_v1(loonfs_api::ContentId::generate(), bytes);
+        let second = ContentRef::blob_v1(loonfs_api::ContentId::generate(), bytes);
+
+        assert_ne!(
+            commit_fingerprint(&namespace_id, &build(first)).expect("fingerprint"),
+            commit_fingerprint(&namespace_id, &build(second)).expect("fingerprint")
         );
     }
 
