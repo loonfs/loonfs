@@ -34,9 +34,14 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-clippy-
       - run: cargo clippy --all-targets --all-features --locked -- -D warnings
 
+  # The blocking-store gates in `loonfs-test-support` wait without a
+  # wall-clock deadline of their own, so a gate nobody opens shows up as a
+  # hung job. This is the bound that reports it; without it the job would
+  # sit at GitHub's six-hour default.
   test:
     name: test
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/cache@v4

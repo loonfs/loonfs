@@ -18,5 +18,16 @@ tempfile.workspace = true
 tokio = { version = "1", default-features = false, features = ["macros", "rt", "sync", "time"] }
 ureq.workspace = true
 
+[dev-dependencies]
+# `test-util` gives the gate's own tests a paused clock, so they can hold a
+# parked operation far longer than any deadline without costing wall time.
+tokio = { version = "1", default-features = false, features = [
+    "macros",
+    "rt",
+    "sync",
+    "test-util",
+    "time",
+] }
+
 [lints]
 workspace = true
