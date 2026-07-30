@@ -156,14 +156,6 @@ pub enum CoreError {
         after_seq: ChangeSeq,
         retention_floor_seq: ChangeSeq,
     },
-    #[error(
-        "path `{path}` is covered by subtree tombstone rooted at inode `{root_inode_id}` from seq `{tombstone_seq}`"
-    )]
-    TombstoneConflict {
-        path: String,
-        root_inode_id: InodeId,
-        tombstone_seq: ChangeSeq,
-    },
     #[error("path component `{0}` is not a directory")]
     NonDirectoryPathComponent(String),
     #[error("namespace corrupt: {0}")]
@@ -397,7 +389,6 @@ impl CoreError {
             | CoreError::ExpectedDirectory { .. }
             | CoreError::DestinationExists { .. } => ErrorCode::PathConflict,
             CoreError::DirectoryNotEmpty(_) => ErrorCode::DirectoryNotEmpty,
-            CoreError::TombstoneConflict { .. } => ErrorCode::TombstoneConflict,
             CoreError::WriterFenced(_) => ErrorCode::WriterFenced,
             CoreError::NamespaceCorrupt(_) => ErrorCode::NamespaceCorrupt,
             // Naming which operation stopped a batch says nothing new about
@@ -673,6 +664,15 @@ fn classify_commit_validation_error(error: &CommitValidationError) -> ErrorCode 
         CommitValidationError::RestoreRevisionSourceRevisionMissing { .. } => {
             ErrorCode::RevisionNotFound
         }
+        // Corruption guards, not caller-actionable conflicts. Every inode an
+        // operation names is either freshly allocated by the same commit or
+        // resolved through visible bindings, and a visible binding already
+        // implies no covering tombstone (`metadata::visibility`: a visible
+        // inode is one no tombstone covers, and a delete unbinds and
+        // tombstones in the same commit). So a covered target here means the
+        // stored rows contradict themselves — a live binding under a
+        // tombstone — which is repair work, not something a caller can fix by
+        // re-reading and retrying.
         CommitValidationError::CreateUnderSubtreeTombstone { .. }
         | CommitValidationError::ReplaceFileUnderSubtreeTombstone { .. }
         | CommitValidationError::RestoreRevisionUnderSubtreeTombstone { .. }
@@ -680,7 +680,7 @@ fn classify_commit_validation_error(error: &CommitValidationError) -> ErrorCode 
         | CommitValidationError::RenameInodeUnderSubtreeTombstone { .. }
         | CommitValidationError::RenameTargetParentUnderSubtreeTombstone { .. }
         | CommitValidationError::DeleteSubtreeRootCoveredByTombstone { .. } => {
-            ErrorCode::TombstoneConflict
+            ErrorCode::NamespaceCorrupt
         }
         CommitValidationError::CreateChildNameCollision { .. }
         | CommitValidationError::NamePreconditionParentNotDirectory { .. }

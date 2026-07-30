@@ -235,7 +235,6 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `directory_not_empty` | 409 | The directory has children and the operation is not recursive. |
 | `stale_head` | 409 | The write raced a head advance; retry against fresh state. |
 | `stale_revision` | 409 | A caller-supplied base revision is no longer current. |
-| `tombstone_conflict` | 409 | The path is covered by a subtree tombstone. |
 | `not_deleted` | 409 | The undelete target is not the root of a live deletion; nothing to recover. |
 | `writer_fenced` | 409 | The writer epoch was superseded by another session. |
 | `would_cycle` | 409 | The rename would create a directory cycle. |

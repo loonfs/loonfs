@@ -138,7 +138,6 @@ error_codes! {
     DirectoryNotEmpty => "directory_not_empty",
     StaleHead => "stale_head",
     StaleRevision => "stale_revision",
-    TombstoneConflict => "tombstone_conflict",
     NotDeleted => "not_deleted",
     WriterFenced => "writer_fenced",
     WouldCycle => "would_cycle",
@@ -206,7 +205,6 @@ impl ErrorCode {
             | ErrorCode::DirectoryNotEmpty
             | ErrorCode::StaleHead
             | ErrorCode::StaleRevision
-            | ErrorCode::TombstoneConflict
             // Undelete's target is not the root of a live deletion: a
             // state conflict, resolved by re-reading namespace state.
             | ErrorCode::NotDeleted
