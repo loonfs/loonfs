@@ -1,12 +1,11 @@
-//! Embedded implementation of the CLI's [`Backend`] seam.
+//! The embedded arm of the CLI's backend seam: an in-process `loonfs`
+//! runtime behind the same method set the remote arm answers.
 
-use super::Backend;
 use crate::backend_error::{
     map_namespace_scoped_grep_error, map_namespace_scoped_runtime_error, map_runtime_error,
     BackendError,
 };
 use crate::render::write_stderr_warning;
-use async_trait::async_trait;
 use loonfs::{
     ChangesResponse, CopyOptions, CreateCheckpointOptions, CreateDirectoryOptions,
     CreateNamespaceOptions, DeleteNamespaceOptions, DeleteNamespaceResponse, DeleteOptions,
@@ -122,11 +121,8 @@ impl EmbeddedBackend {
             self.writer_version.clone(),
         )
     }
-}
 
-#[async_trait]
-impl Backend for EmbeddedBackend {
-    async fn create_namespace(
+    pub(super) async fn create_namespace(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<NamespaceSummary, BackendError> {
@@ -138,7 +134,7 @@ impl Backend for EmbeddedBackend {
         self.settle_background_work_after(result).await
     }
 
-    async fn delete_namespace(
+    pub(super) async fn delete_namespace(
         &self,
         namespace_id: &NamespaceId,
         expected_head_seq: Option<ChangeSeq>,
@@ -152,7 +148,7 @@ impl Backend for EmbeddedBackend {
         self.settle_background_work_after(result).await
     }
 
-    async fn fork_namespace(
+    pub(super) async fn fork_namespace(
         &self,
         source_namespace_id: &NamespaceId,
         new_namespace_id: &NamespaceId,
@@ -165,7 +161,7 @@ impl Backend for EmbeddedBackend {
         self.settle_background_work_after(result).await
     }
 
-    async fn namespace_status(
+    pub(super) async fn namespace_status(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<NamespaceStatusResponse, BackendError> {
@@ -175,7 +171,7 @@ impl Backend for EmbeddedBackend {
             .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
     }
 
-    async fn list_path_entries_all(
+    pub(super) async fn list_path_entries_all(
         &self,
         spec: &NamespacePath,
     ) -> Result<Vec<AuthoritativePathEntry>, BackendError> {
@@ -187,7 +183,7 @@ impl Backend for EmbeddedBackend {
             .entries)
     }
 
-    async fn stat_path(
+    pub(super) async fn stat_path(
         &self,
         spec: &NamespacePath,
     ) -> Result<AuthoritativePathEntry, BackendError> {
@@ -197,7 +193,10 @@ impl Backend for EmbeddedBackend {
             .map_err(|error| map_namespace_scoped_runtime_error(spec.namespace(), error))
     }
 
-    async fn get_file_bytes(&self, spec: &NamespacePath) -> Result<Vec<u8>, BackendError> {
+    pub(super) async fn get_file_bytes(
+        &self,
+        spec: &NamespacePath,
+    ) -> Result<Vec<u8>, BackendError> {
         let result = self
             .reader
             .get_file_bytes(spec.namespace(), spec.absolute_path().as_str())
@@ -206,7 +205,7 @@ impl Backend for EmbeddedBackend {
         Ok(result.bytes)
     }
 
-    async fn grep(
+    pub(super) async fn grep(
         &self,
         namespace_id: &NamespaceId,
         request: &GrepRequest,
@@ -220,7 +219,7 @@ impl Backend for EmbeddedBackend {
             .map_err(|error| map_namespace_scoped_grep_error(namespace_id, error))
     }
 
-    async fn enable_grep_index(
+    pub(super) async fn enable_grep_index(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<EnableGrepIndexResponse, BackendError> {
@@ -251,7 +250,7 @@ impl Backend for EmbeddedBackend {
         })
     }
 
-    async fn disable_grep_index(
+    pub(super) async fn disable_grep_index(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<DisableGrepIndexResponse, BackendError> {
@@ -276,7 +275,7 @@ impl Backend for EmbeddedBackend {
         }
     }
 
-    async fn get_file_revision_bytes(
+    pub(super) async fn get_file_revision_bytes(
         &self,
         spec: &NamespacePath,
         revision_no: RevisionNo,
@@ -289,7 +288,7 @@ impl Backend for EmbeddedBackend {
         Ok(result.bytes)
     }
 
-    async fn list_trash(
+    pub(super) async fn list_trash(
         &self,
         namespace_id: &NamespaceId,
         limit: Option<u32>,
@@ -310,7 +309,7 @@ impl Backend for EmbeddedBackend {
             .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
     }
 
-    async fn list_file_revisions_page(
+    pub(super) async fn list_file_revisions_page(
         &self,
         spec: &NamespacePath,
         limit: Option<u32>,
@@ -331,7 +330,7 @@ impl Backend for EmbeddedBackend {
             .map_err(|error| map_namespace_scoped_runtime_error(spec.namespace(), error))
     }
 
-    async fn put_file_bytes(
+    pub(super) async fn put_file_bytes(
         &self,
         spec: &NamespacePath,
         bytes: &[u8],
@@ -348,7 +347,7 @@ impl Backend for EmbeddedBackend {
         .await
     }
 
-    async fn delete_path(
+    pub(super) async fn delete_path(
         &self,
         spec: &NamespacePath,
         options: &DeleteOptions,
@@ -363,7 +362,7 @@ impl Backend for EmbeddedBackend {
         .await
     }
 
-    async fn create_directory(
+    pub(super) async fn create_directory(
         &self,
         spec: &NamespacePath,
         options: &CreateDirectoryOptions,
@@ -378,7 +377,7 @@ impl Backend for EmbeddedBackend {
         .await
     }
 
-    async fn move_path(
+    pub(super) async fn move_path(
         &self,
         from: &NamespacePath,
         to: &NamespacePath,
@@ -400,7 +399,7 @@ impl Backend for EmbeddedBackend {
         .await
     }
 
-    async fn copy_path(
+    pub(super) async fn copy_path(
         &self,
         from: &NamespacePath,
         to: &NamespacePath,
@@ -422,7 +421,7 @@ impl Backend for EmbeddedBackend {
         .await
     }
 
-    async fn restore_file_revision(
+    pub(super) async fn restore_file_revision(
         &self,
         spec: &NamespacePath,
         source_revision_no: RevisionNo,
@@ -442,7 +441,7 @@ impl Backend for EmbeddedBackend {
         .await
     }
 
-    async fn undelete(
+    pub(super) async fn undelete(
         &self,
         spec: &NamespacePath,
         inode_id: InodeId,
@@ -469,7 +468,7 @@ impl Backend for EmbeddedBackend {
     // runtime reports namespace_not_found. Parity keeps embedded and remote
     // outputs identical.
 
-    async fn create_checkpoint(
+    pub(super) async fn create_checkpoint(
         &self,
         namespace_id: &NamespaceId,
         request: CreateCheckpointRequest,
@@ -480,7 +479,7 @@ impl Backend for EmbeddedBackend {
             .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
     }
 
-    async fn release_checkpoint(
+    pub(super) async fn release_checkpoint(
         &self,
         namespace_id: &NamespaceId,
         checkpoint_id: &CheckpointId,
@@ -491,7 +490,7 @@ impl Backend for EmbeddedBackend {
             .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
     }
 
-    async fn maintenance_step(
+    pub(super) async fn maintenance_step(
         &self,
         namespace_id: &NamespaceId,
         request: MaintenanceStepRequest,
@@ -503,7 +502,7 @@ impl Backend for EmbeddedBackend {
             .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
     }
 
-    async fn list_changes(
+    pub(super) async fn list_changes(
         &self,
         namespace_id: &NamespaceId,
         after_seq: ChangeSeq,
@@ -532,7 +531,7 @@ fn resolve_cli_page_limit(limit: Option<u32>) -> Result<EffectiveLimit, BackendE
 #[cfg(test)]
 #[allow(clippy::panic)]
 mod tests {
-    use super::{map_runtime_error, resolve_cli_page_limit, Backend, GrepError};
+    use super::{map_runtime_error, resolve_cli_page_limit, GrepError};
     use crate::backend_error::map_namespace_scoped_grep_error;
     use crate::config::StoreConfig;
     use crate::resolve::EmbeddedTarget;

@@ -41,7 +41,6 @@ async fn run_namespace_create(
         .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
     let namespace = resolved
         .target
-        .backend()
         .create_namespace(&namespace_id)
         .await
         .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
@@ -104,7 +103,6 @@ async fn run_namespace_delete(
 
     let response = resolved
         .target
-        .backend()
         .delete_namespace(
             &namespace_id,
             args.expected_head_seq.map(loonfs_api::ChangeSeq),
@@ -135,7 +133,6 @@ async fn run_namespace_fork(
         .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
     let namespace = resolved
         .target
-        .backend()
         .fork_namespace(&source_namespace_id, &new_namespace_id)
         .await
         .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
@@ -165,7 +162,6 @@ pub(crate) async fn run_namespace_use(
 
     resolved
         .target
-        .backend()
         .namespace_status(&namespace_id)
         .await
         .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;

@@ -43,7 +43,6 @@ async fn run_admin_step(
     };
     let response = context
         .target
-        .backend()
         .maintenance_step(&context.namespace, request)
         .await
         .map_err(|error| context.fail(kind, error))?;
@@ -72,7 +71,6 @@ async fn run_admin_gc(
     loop {
         let pass = context
             .target
-            .backend()
             .maintenance_step(
                 &context.namespace,
                 MaintenanceStepRequest {
@@ -130,7 +128,6 @@ async fn run_admin_checkpoint(
     };
     let response = context
         .target
-        .backend()
         .create_checkpoint(&context.namespace, request)
         .await
         .map_err(|error| context.fail(kind, error))?;
@@ -156,7 +153,6 @@ async fn run_admin_checkpoint_release(
     })?;
     let response = context
         .target
-        .backend()
         .release_checkpoint(&context.namespace, &checkpoint_id)
         .await
         .map_err(|error| context.fail(kind, error))?;
@@ -176,7 +172,6 @@ async fn run_admin_flush(
     let context = resolve_command_context(kind, &args.target).await?;
     let response = context
         .target
-        .backend()
         .maintenance_step(
             &context.namespace,
             MaintenanceStepRequest {
@@ -206,7 +201,6 @@ async fn run_admin_retention_advance(
     let context = resolve_command_context(kind, &args.target).await?;
     let response = context
         .target
-        .backend()
         .maintenance_step(
             &context.namespace,
             MaintenanceStepRequest {
@@ -235,7 +229,6 @@ pub(crate) async fn run_admin_changes(
     let after_seq = ChangeSeq(args.after.unwrap_or(0));
     let response = context
         .target
-        .backend()
         .list_changes(&context.namespace, after_seq, args.limit)
         .await
         .map_err(|error| context.fail(kind, error))?;
@@ -255,7 +248,6 @@ async fn run_admin_index_enable(
     let context = resolve_command_context(kind, &args.target).await?;
     let response = context
         .target
-        .backend()
         .enable_grep_index(&context.namespace)
         .await
         .map_err(|error| context.fail(kind, error))?;
@@ -274,7 +266,6 @@ async fn run_admin_index_disable(
     let context = resolve_command_context(kind, &args.target).await?;
     let response = context
         .target
-        .backend()
         .disable_grep_index(&context.namespace)
         .await
         .map_err(|error| context.fail(kind, error))?;
