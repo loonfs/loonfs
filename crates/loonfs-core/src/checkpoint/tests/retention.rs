@@ -267,10 +267,34 @@ async fn retention_floor_does_not_advance_past_missing_metadata_segment() {
     assert_eq!(read_floor_seq(&store, &namespace_id).await, ChangeSeq(0));
 }
 
+/// Reads the files one checkpoint pins, or the error that says it no longer
+/// pins anything.
+async fn read_checkpoint_files<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    checkpoint_id: &CheckpointId,
+) -> crate::error::Result<Vec<InodeId>> {
+    let page = crate::checkpoint::list_checkpoint_files_page(
+        store,
+        None,
+        namespace_id,
+        checkpoint_id,
+        loonfs_api::NamePolicy::default(),
+        loonfs_api::PageRequest {
+            cursor: None,
+            limit: EffectiveLimit::new(NonZeroU32::new(64).expect("nonzero")),
+        },
+    )
+    .await?;
+    Ok(page.files.into_iter().map(|file| file.inode_id).collect())
+}
+
 #[tokio::test]
-async fn create_checkpoint_revives_a_dead_record_for_a_verified_basis() {
-    // A record left dead by a failed verification is revived, not
-    // duplicated, when the same basis verifies later.
+async fn release_is_terminal_and_the_next_pin_is_a_different_record() {
+    // Nothing turns a released record back into a pin. A caller asking for
+    // a pin again — even at the same instant, over the same basis, under the
+    // same owner name — gets a brand new record, so the release can never be
+    // undone by racing it.
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -291,49 +315,78 @@ async fn create_checkpoint_revives_a_dead_record_for_a_verified_basis() {
     let first = create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("create checkpoint");
-    crate::checkpoint::record::set_checkpoint_record_state(
+    assert!(
+        !read_checkpoint_files(&store, &namespace_id, &first.checkpoint_id)
+            .await
+            .expect("the first pin serves")
+            .is_empty()
+    );
+
+    let release = crate::checkpoint::release_checkpoint(
         &store,
         &namespace_id,
         &first.checkpoint_id,
-        loonfs_api::wire::control::CheckpointRecordLifecycle::Released,
-        &context.writer_version,
-    )
-    .await
-    .expect("mark dead");
-
-    // Revival goes through renewal: the re-create's expiry (here a real
-    // one, where the original had none) is what the revived record carries.
-    let revived = super::create::create_checkpoint(
-        &store,
-        &namespace_id,
-        loonfs_api::wire::control::CheckpointOwner::User {
-            name: "test-pin".to_owned(),
-        },
-        Some(90_000),
         &context,
-    )
-    .await
-    .expect("recreate checkpoint");
-    assert_eq!(revived.checkpoint_id, first.checkpoint_id);
-    assert_eq!(revived.expires_at_ms, Some(90_000));
-    let record = read_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
+    );
+    let recreate = create_checkpoint(&store, &namespace_id, &context);
+    let (release, second) = tokio::join!(release, recreate);
+    assert!(release.expect("release").was_active);
+    let second = second.expect("a concurrent create takes a fresh pin");
+    assert_ne!(
+        second.checkpoint_id, first.checkpoint_id,
+        "a new pin never lands on a released record's key"
+    );
+
+    let released = read_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
         .await
         .expect("read checkpoint record")
         .expect("record exists")
         .state;
     assert_eq!(
-        record.state,
-        loonfs_api::wire::control::CheckpointRecordLifecycle::Active
+        released.state,
+        loonfs_api::wire::control::CheckpointRecordLifecycle::Released {
+            released_at_ms: context.now_ms
+        }
     );
-    assert_eq!(record.expires_at_ms, Some(90_000));
+    let error = read_checkpoint_files(&store, &namespace_id, &first.checkpoint_id)
+        .await
+        .expect_err("a released record serves no read");
+    assert_eq!(error.code(), ErrorCode::CheckpointUnavailable);
+    assert!(
+        !read_checkpoint_files(&store, &namespace_id, &second.checkpoint_id)
+            .await
+            .expect("the new pin serves")
+            .is_empty()
+    );
+
+    // Releasing again is the same end state, not a revival and not an error.
+    let again = crate::checkpoint::release_checkpoint(
+        &store,
+        &namespace_id,
+        &first.checkpoint_id,
+        &context,
+    )
+    .await
+    .expect("repeat release");
+    assert!(!again.was_active);
+    assert_eq!(
+        read_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
+            .await
+            .expect("read checkpoint record")
+            .expect("record exists")
+            .state
+            .state,
+        loonfs_api::wire::control::CheckpointRecordLifecycle::Released {
+            released_at_ms: context.now_ms
+        }
+    );
 }
 
 #[tokio::test]
-async fn re_creating_a_checkpoint_renews_its_expiry_last_write_wins() {
-    // Same basis + owner on an idle namespace hashes to the same record;
-    // each re-create sets the durable expiry to exactly what it asked —
-    // extend, shrink, and clear — while created_at_ms keeps the original
-    // creation instant and the response echoes the durable state.
+async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
+    // Re-creating a checkpoint is not a renewal of an earlier one. Every
+    // call is its own pin with its own id, its own creation instant, and
+    // exactly the expiry it asked for; earlier records are left alone.
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -361,32 +414,178 @@ async fn re_creating_a_checkpoint_renews_its_expiry_last_write_wins() {
             .expect("create checkpoint");
     assert_eq!(first.expires_at_ms, Some(10_000));
 
-    let mut renew_context = test_context();
-    renew_context.now_ms = 2_000;
-    for renewed_expiry in [Some(99_000), Some(5_000), None] {
-        let renewed = super::create::create_checkpoint(
+    let mut later_context = test_context();
+    later_context.now_ms = 2_000;
+    let mut minted = BTreeSet::from([first.checkpoint_id.clone()]);
+    for expiry in [Some(99_000), Some(5_000), None] {
+        let next = super::create::create_checkpoint(
             &store,
             &namespace_id,
             owner(),
-            renewed_expiry,
-            &renew_context,
+            expiry,
+            &later_context,
         )
         .await
-        .expect("renew checkpoint");
-        assert_eq!(renewed.checkpoint_id, first.checkpoint_id);
-        assert_eq!(renewed.expires_at_ms, renewed_expiry);
-        let record = read_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
+        .expect("create checkpoint");
+        assert!(
+            minted.insert(next.checkpoint_id.clone()),
+            "each pin gets an id of its own"
+        );
+        assert_eq!(next.expires_at_ms, expiry);
+        let record = read_checkpoint_record(&store, &namespace_id, &next.checkpoint_id)
             .await
             .expect("read checkpoint record")
             .expect("record exists")
             .state;
-        assert_eq!(record.expires_at_ms, renewed_expiry);
-        assert_eq!(record.created_at_ms, 1_000, "creation instant is history");
+        assert_eq!(record.expires_at_ms, expiry);
+        assert_eq!(record.created_at_ms, 2_000);
         assert_eq!(
             record.state,
             loonfs_api::wire::control::CheckpointRecordLifecycle::Active
         );
     }
+
+    // The very first record is untouched by any of it: a pin taken without
+    // an expiry, or with one, is held until something releases it.
+    let original = read_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
+        .await
+        .expect("read checkpoint record")
+        .expect("record exists")
+        .state;
+    assert_eq!(original.created_at_ms, 1_000, "creation instant is history");
+    assert_eq!(original.expires_at_ms, Some(10_000));
+    assert_eq!(
+        original.state,
+        loonfs_api::wire::control::CheckpointRecordLifecycle::Active
+    );
+}
+
+#[tokio::test]
+async fn an_expired_but_unreleased_pin_still_enumerates_its_files() {
+    // No clock reads on the checkpoint read path. Release is the whole
+    // authority: until a pass turns the passed expiry into a release, the
+    // record is still a garbage-collection root, so the state behind it is
+    // provably still there and serving it is safe.
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/file.txt",
+        b"body\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write");
+    let already_expired = super::create::create_checkpoint(
+        &store,
+        &namespace_id,
+        loonfs_api::wire::control::CheckpointOwner::User {
+            name: "test-pin".to_owned(),
+        },
+        Some(context.now_ms),
+        &context,
+    )
+    .await
+    .expect("create checkpoint whose expiry has already passed");
+    assert_eq!(
+        read_checkpoint_record(&store, &namespace_id, &already_expired.checkpoint_id)
+            .await
+            .expect("read checkpoint record")
+            .expect("record exists")
+            .state
+            .state,
+        loonfs_api::wire::control::CheckpointRecordLifecycle::Active
+    );
+    assert!(
+        !read_checkpoint_files(&store, &namespace_id, &already_expired.checkpoint_id)
+            .await
+            .expect("an expired but unreleased pin still serves")
+            .is_empty()
+    );
+
+    // The pass that releases it is what ends the reads.
+    crate::gc::gc_namespace(
+        &store,
+        &namespace_id,
+        &crate::gc::GcConfig::default(),
+        &test_context(),
+    )
+    .await
+    .expect("gc pass");
+    let error = read_checkpoint_files(&store, &namespace_id, &already_expired.checkpoint_id)
+        .await
+        .expect_err("a released pin serves nothing");
+    assert_eq!(error.code(), ErrorCode::CheckpointUnavailable);
+}
+
+#[tokio::test]
+async fn a_pin_without_a_ttl_is_held_until_it_is_released() {
+    // No expiry means no clock: the record stays a serving pin however far
+    // the wall clock moves, and only an explicit release ends it.
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+    let context = test_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    write_file_bytes(
+        &store,
+        &namespace_id,
+        "/docs/file.txt",
+        b"body\n",
+        &context,
+        None,
+    )
+    .await
+    .expect("write");
+    let pin = create_checkpoint(&store, &namespace_id, &context)
+        .await
+        .expect("create checkpoint");
+    assert_eq!(pin.expires_at_ms, None);
+
+    let mut distant = test_context();
+    distant.now_ms = u64::MAX / 2;
+    for _ in 0..3 {
+        crate::gc::gc_namespace(
+            &store,
+            &namespace_id,
+            &crate::gc::GcConfig::default(),
+            &distant,
+        )
+        .await
+        .expect("gc pass");
+    }
+    let record = read_checkpoint_record(&store, &namespace_id, &pin.checkpoint_id)
+        .await
+        .expect("read checkpoint record")
+        .expect("an unexpiring pin survives every pass")
+        .state;
+    assert_eq!(
+        record.state,
+        loonfs_api::wire::control::CheckpointRecordLifecycle::Active
+    );
+    assert!(
+        !read_checkpoint_files(&store, &namespace_id, &pin.checkpoint_id)
+            .await
+            .expect("the pin still serves")
+            .is_empty()
+    );
+
+    crate::checkpoint::release_checkpoint(&store, &namespace_id, &pin.checkpoint_id, &distant)
+        .await
+        .expect("release");
+    let error = read_checkpoint_files(&store, &namespace_id, &pin.checkpoint_id)
+        .await
+        .expect_err("release ends it");
+    assert_eq!(error.code(), ErrorCode::CheckpointUnavailable);
 }
 
 #[tokio::test]

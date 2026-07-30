@@ -267,7 +267,6 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             &self.namespace_id,
             checkpoint_id,
             catalog.name_policy(),
-            current_time_ms()?,
             request,
         )
         .await

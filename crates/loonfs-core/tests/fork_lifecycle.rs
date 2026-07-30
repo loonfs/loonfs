@@ -660,6 +660,7 @@ async fn a_fork_whose_source_pin_is_released_deletes_its_own_target() {
     let store = ReleasePinAfterHeadStore::new(
         LocalFsStore::new(temp_dir.path()).expect("store"),
         NamespaceId::parse("clone").expect("valid namespace id"),
+        ForkPinAfterHead::Released,
     );
     let context = mutation_context();
     let source = namespace_id("source");
@@ -679,6 +680,67 @@ async fn a_fork_whose_source_pin_is_released_deletes_its_own_target() {
         .await
         .expect_err("the deleted id is retired");
     assert_eq!(retry.code(), ErrorCode::NamespaceDeleted);
+}
+
+/// The guard is a margin, not a bare re-read. A source record that is still
+/// active but has only the guard margin of lease left could be released by
+/// a pass at any moment, so the fork refuses it and deletes the target it
+/// just published rather than leaving a basis nothing protects.
+#[tokio::test]
+async fn a_fork_whose_source_lease_runs_out_deletes_its_own_target() {
+    let temp_dir = tempdir().expect("tempdir");
+    let context = mutation_context();
+    let store = ReleasePinAfterHeadStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+        NamespaceId::parse("clone").expect("valid namespace id"),
+        ForkPinAfterHead::LeaseAtTheGuardMargin {
+            now_ms: context.now_ms,
+        },
+    );
+    let source = namespace_id("source");
+    let clone = NamespaceId::parse("clone").expect("valid namespace id");
+    seed_source_namespace_for_fork(&store, &source, &context).await;
+
+    let error = fork_namespace(&store, &source, &clone, &context)
+        .await
+        .expect_err("a lease inside the guard margin fails the fork");
+    assert_eq!(error.code(), ErrorCode::CheckpointUnavailable);
+    assert_eq!(
+        head_state(&store, &clone).await.state,
+        loonfs_api::wire::control::NamespaceState::Deleted,
+        "the fork deletes the target it published"
+    );
+}
+
+/// The other side of the guard: a fork with its whole lease ahead of it
+/// stands, even with a garbage-collection pass running against the source
+/// at the same time.
+#[tokio::test]
+async fn a_fork_with_lease_to_spare_survives_a_concurrent_gc_pass() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let context = mutation_context();
+    let source = namespace_id("source");
+    let clone = NamespaceId::parse("clone").expect("valid namespace id");
+    seed_source_namespace_for_fork(store.as_ref(), &source, &context).await;
+
+    let gc_config = loonfs_core::GcConfig::default();
+    let forking = fork_namespace(store.as_ref(), &source, &clone, &context);
+    let collecting = loonfs_core::gc_namespace(store.as_ref(), &source, &gc_config, &context);
+    let (forked, collected) = tokio::join!(forking, collecting);
+    forked.expect("a fresh lease survives a concurrent pass");
+    collected.expect("the pass finishes");
+    assert_eq!(
+        head_state(store.as_ref(), &clone).await.state,
+        loonfs_api::wire::control::NamespaceState::Active
+    );
+    assert_eq!(
+        read_file_bytes(store.as_ref(), &clone, "/docs/shared.txt")
+            .await
+            .expect("the target reads its inherited file")
+            .bytes,
+        b"base"
+    );
 }
 
 /// A source manifest that no longer validates blocks the fork before any
@@ -984,24 +1046,41 @@ async fn gc_handles_a_namespace_with_no_root_and_then_its_tombstone() {
         .is_none());
 }
 
-/// A store that releases the fork's source checkpoint the moment the target
-/// head lands, standing in for a garbage-collection pass that ran while a
-/// stalled forker slept.
+/// What happens to the fork's source pin the moment the target head lands.
+#[derive(Debug, Clone, Copy)]
+enum ForkPinAfterHead {
+    /// A garbage-collection pass released the pin while a stalled forker
+    /// slept.
+    Released,
+    /// The forker stalled until its lease was all but gone: the record is
+    /// still active, but with exactly the guard margin left, which is not
+    /// margin enough to trust.
+    LeaseAtTheGuardMargin { now_ms: u64 },
+}
+
+/// A store that rewrites the fork's source checkpoint the moment the target
+/// head lands, standing in for the window between the two writes.
 #[derive(Debug)]
 struct ReleasePinAfterHeadStore {
     inner: LocalFsStore,
     target_head_key: String,
+    after_head: ForkPinAfterHead,
 }
 
 impl ReleasePinAfterHeadStore {
-    fn new(inner: LocalFsStore, target_namespace_id: NamespaceId) -> Self {
+    fn new(
+        inner: LocalFsStore,
+        target_namespace_id: NamespaceId,
+        after_head: ForkPinAfterHead,
+    ) -> Self {
         Self {
             inner,
             target_head_key: wal_head(target_namespace_id.as_str()),
+            after_head,
         }
     }
 
-    async fn release_every_fork_pin(&self) {
+    async fn rewrite_every_fork_pin(&self) {
         for key in self
             .inner
             .list_prefix("namespaces/")
@@ -1022,20 +1101,29 @@ impl ReleasePinAfterHeadStore {
             if !matches!(record.owner, CheckpointOwner::Fork { .. }) {
                 continue;
             }
-            record.state = CheckpointRecordLifecycle::Released;
-            let released = loonfs_api::wire::control::CheckpointRecordEnvelope::from_state(
+            match self.after_head {
+                ForkPinAfterHead::Released => {
+                    record.state = CheckpointRecordLifecycle::Released {
+                        released_at_ms: 2_000,
+                    };
+                }
+                ForkPinAfterHead::LeaseAtTheGuardMargin { now_ms } => {
+                    record.expires_at_ms = Some(now_ms + loonfs_core::limits::FORK_GUARD_MARGIN_MS);
+                }
+            }
+            let rewritten = loonfs_api::wire::control::CheckpointRecordEnvelope::from_state(
                 ControlObjectKind::CheckpointRecord,
                 "test-writer",
                 record,
             )
-            .expect("released record envelope");
+            .expect("rewritten record envelope");
             self.inner
                 .put_overwrite(
                     &key,
-                    Bytes::from(encode_control_object(&released).expect("encode record")),
+                    Bytes::from(encode_control_object(&rewritten).expect("encode record")),
                 )
                 .await
-                .expect("release record");
+                .expect("rewrite record");
         }
     }
 }
@@ -1073,7 +1161,7 @@ impl ObjectStore for ReleasePinAfterHeadStore {
     ) -> Result<loonfs_objectstore::ObjectMetadata, loonfs_objectstore::ObjectStoreError> {
         let metadata = self.inner.put(key, bytes, mode).await?;
         if key == self.target_head_key {
-            self.release_every_fork_pin().await;
+            self.rewrite_every_fork_pin().await;
         }
         Ok(metadata)
     }

@@ -45,8 +45,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::sync::Arc;
 
-/// User-checkpoint lifetime used by one backfill attempt. An expired attempt
-/// is safely replaced by a fresh checkpoint and a cursor reset.
+/// User-checkpoint lifetime used by one backfill attempt.
+///
+/// A backfill that outlives it needs no rescue and no extension: the pin
+/// keeps serving until a garbage-collection pass releases it, and the
+/// release is what the enumeration reports, at which point the worker
+/// rebootstraps onto a fresh checkpoint and a reset cursor. Nothing here
+/// refreshes a pin — an attempt this long has lost its race with the
+/// retention floor anyway, and starting over is the cheaper answer.
 pub const GREP_BACKFILL_CHECKPOINT_TTL_MS: u64 = 24 * 60 * 60 * 1000;
 
 /// Unreferenced grep objects receive one hour of unconditional protection

@@ -1,14 +1,14 @@
 //! Explicit checkpoint release: the owner-driven end of a user pin's
 //! lifecycle.
 //!
-//! Release flips the record `active` -> `released` by compare-and-swap and
-//! returns. Garbage collection later flips `released` -> `condemned` before
-//! deleting the record, and its basis becomes collectable only on the pass
-//! after that (records-last; format spec, "Garbage collection"). Fork-owned
+//! Release flips the record `active` -> `released` by compare-and-swap,
+//! stamping the release instant, and returns. That is terminal: the record
+//! never pins anything again, and garbage collection deletes it a grace
+//! window after that stamp (format spec, "Garbage collection"). Fork-owned
 //! records are not releasable here: their release is decided by garbage
 //! collection from the fork target's fate.
 
-use super::record::{read_checkpoint_record, set_checkpoint_record_state};
+use super::record::{read_checkpoint_record, release_checkpoint_record};
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
 use loonfs_api::wire::control::{CheckpointOwner, CheckpointRecordLifecycle};
@@ -39,24 +39,21 @@ pub(crate) async fn release_checkpoint<S: ObjectStore + ?Sized>(
              it is released by deleting that namespace, not by this operation"
         )));
     }
-    if loaded.state.state == CheckpointRecordLifecycle::Condemned {
-        return Err(CoreError::CheckpointStateConflict {
-            checkpoint_id: checkpoint_id.clone(),
-            state: loaded.state.state,
-        });
-    }
-    if loaded.state.state == CheckpointRecordLifecycle::Released {
+    if matches!(
+        loaded.state.state,
+        CheckpointRecordLifecycle::Released { .. }
+    ) {
         return Ok(ReleaseCheckpointResponse {
             namespace_id: namespace_id.clone(),
             checkpoint_id: checkpoint_id.clone(),
             was_active: false,
         });
     }
-    set_checkpoint_record_state(
+    release_checkpoint_record(
         store,
         namespace_id,
         checkpoint_id,
-        CheckpointRecordLifecycle::Released,
+        context.now_ms,
         &context.writer_version,
     )
     .await?;

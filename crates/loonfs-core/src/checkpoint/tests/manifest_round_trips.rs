@@ -345,7 +345,7 @@ async fn maintenance_and_status_do_not_make_orphan_wal_visible() {
 }
 
 #[tokio::test]
-async fn checkpoint_records_are_standalone_files_deduplicated_per_basis() {
+async fn checkpoint_records_are_standalone_files_one_per_pin() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -367,12 +367,15 @@ async fn checkpoint_records_are_standalone_files_deduplicated_per_basis() {
     let first = create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("create checkpoint");
-    // Re-creating for the same pinned basis returns the existing record
-    // instead of stacking a duplicate file.
+    // Pinning the same basis again is a second pin, not a second name for
+    // the first one: its own record file under its own id, with the same
+    // basis facts inside.
     let repeated = create_checkpoint(&store, &namespace_id, &context)
         .await
         .expect("repeat checkpoint");
-    assert_eq!(repeated, first);
+    assert_ne!(repeated.checkpoint_id, first.checkpoint_id);
+    assert_eq!(repeated.manifest_id, first.manifest_id);
+    assert_eq!(repeated.checkpoint_seq, first.checkpoint_seq);
 
     let record = read_checkpoint_record(&store, &namespace_id, &first.checkpoint_id)
         .await

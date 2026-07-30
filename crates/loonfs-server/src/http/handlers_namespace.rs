@@ -244,11 +244,11 @@ pub(super) async fn fork_namespace(
         path = "/v0/admin/namespaces/{namespace}/checkpoints",
         tag = "admin",
         summary = "Create checkpoint",
-        description = "Creates or reuses a named, user-owned checkpoint record pinning the current namespace view. The record is a garbage-collection root until released or expired, so routine maintenance should flush the WAL instead. This is a maintenance/admin operation, not a file mutation.",
+        description = "Creates a named, user-owned checkpoint record pinning the current namespace view. Every call mints a new record under a new id; the name is a label, not a key. The record is a garbage-collection root until it is released, so routine maintenance should flush the WAL instead. This is a maintenance/admin operation, not a file mutation.",
         params(("namespace" = String, Path, description = "Namespace id")),
         request_body(content = CreateCheckpointRequest, description = "Checkpoint name and optional lifetime"),
         responses(
-            (status = 200, description = "Checkpoint created or reused", body = CreateCheckpointResponse),
+            (status = 200, description = "Checkpoint created", body = CreateCheckpointResponse),
             (status = 400, description = "Invalid namespace id, name, or lifetime", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),

@@ -159,11 +159,20 @@ async fn http_admin_checkpoint_and_retention_are_idempotent_and_soft() {
     assert_eq!(first.manifest_id, ManifestId(1));
     assert_eq!(first.current_manifest_id, Some(first.manifest_id));
 
+    // Creating again over the same head is a second pin, not a second name
+    // for the first: a new record under a new id, over the same basis.
     let repeated = post_checkpoint(&server_url, namespace.as_str()).expect("repeat checkpoint");
-    assert_eq!(repeated, first);
+    assert_ne!(repeated.checkpoint_id, first.checkpoint_id);
+    assert_eq!(
+        CreateCheckpointResponse {
+            checkpoint_id: first.checkpoint_id.clone(),
+            ..repeated.clone()
+        },
+        first
+    );
 
-    // Release is idempotent the same way: the first call flips the
-    // record, the repeat observes the settled end state.
+    // Release is idempotent: the first call flips the record one way, and
+    // the repeat observes the settled end state.
     let released = post_checkpoint_release(
         &server_url,
         namespace.as_str(),

@@ -60,7 +60,7 @@ The required durable object families and standard key patterns are:
 | **WAL head** | Mutable | The namespace itself. Carries its immutable identity — content store, name policy, and fork provenance — together with the hot head of the semantic commit stream: current visible boundary, writer epoch, writer liveness metadata, replay hints, and visible WAL tip. | `namespaces/{namespace_id}/wal/head.json` |
 | **WAL segments** | Immutable | Record one or more logical commits with a contiguous sequence range. | `namespaces/{namespace_id}/wal/segments/{start_seq:020}-{suffix}.wal.zst` |
 | **Namespace manifests** | Immutable | Record one namespace file-set version: its metadata table references and a head summary. Table references carry their own owner, so a fork target's manifest names source-owned tables without recording anything about the fork. | `namespaces/{namespace_id}/metadata/manifests/{manifest_object_id}.manifest.json` |
-| **Checkpoint records** | Mutable lifecycle | Durable stable-view pins to a metadata manifest, each carrying a required owner (user or fork target); active records may release or revive, and GC conditionally condemns them before deletion. | `namespaces/{namespace_id}/checkpoints/{checkpoint_id}.json` |
+| **Checkpoint records** | Mutable lifecycle | Durable stable-view pins to a metadata manifest, each carrying a required owner (user or fork target). The lifecycle is monotonic: a record is created active under a generated id, released once by compare-and-swap, and deleted a grace window after that release. | `namespaces/{namespace_id}/checkpoints/{checkpoint_id}.json` |
 | **Metadata tables** | Immutable | Store metadata rows referenced by manifests. Files may be owned by the namespace itself or by a fork source namespace. | `namespaces/{owner_namespace_id}/metadata/tables/{table_id}.sst.zst` |
 | **Upload sessions** | Mutable lifecycle | Track one staged-content upload from begin to completion; GC conditionally condemns abandoned active sessions before deletion. | `namespaces/{namespace_id}/uploads/{upload_id}.json` |
 | **Metadata root** | Mutable | Cold pointer to the best known materialized metadata root; monotonic CAS. | `namespaces/{namespace_id}/metadata/root.json` |
@@ -599,10 +599,9 @@ source stay readable.
 
 Forking a namespace creates a new namespace with independent metadata history
 and the same `content_store_id` as the source namespace. The fork point is the
-source namespace's current head. The implementation creates or reuses a
-verified fork-owned source checkpoint at that head and freshens that record by
-compare-and-swap, then installs the complete target head with one
-create-if-absent. The target writes no manifest, no root, and no floor: the
+source namespace's current head. Every attempt creates its own leased,
+verified fork-owned source checkpoint at that head, then installs the complete
+target head with one create-if-absent. The target writes no manifest, no root, and no floor: the
 head's `fork_basis` names the source manifest the target starts from, and the
 fork-owned checkpoint record is what keeps that manifest and its tables alive
 for as long as the target may still need them.
@@ -731,37 +730,56 @@ first-class record under `checkpoints/` — never inside a manifest, and never
 an input to latest visibility. A record carries its basis facts (manifest id,
 seq, payload checksum, head commit id), a required tagged `owner` — a `user`
 owner with a name label, or a `fork` owner naming the target namespace the
-pin protects — an optional expiry (user-owned records only; fork pins never
-expire), and a lifecycle `state` of `active`, `released`, or absorbing
-`condemned`. Only active, non-expired records are long-term GC roots;
-released records remain revivable collectable tombstones, while condemned
-records refuse renewal, revival, and release. A user-owned
-record persists until released or expired; a fork-owned record persists while
-its fork target may still read the basis. Creation is write-then-verify:
-write the record active, then verify — under the self-enforced verify
-budget — that the floor has not passed the basis and the basis manifest still
-loads; on failure flip the record to released and retry against a newer
-basis. Combined with the GC grace window and delete-time re-verification,
-this closes the create-vs-collect race: within the grace window any record is
-protected unconditionally by age.
+pin protects — an optional `expires_at_ms`, and a tagged lifecycle `state`.
+Creation is write-then-verify: write the record active, then verify — under
+the self-enforced verify budget — that the floor has not passed the basis and
+the basis manifest still loads; on failure release the record and retry
+against a newer basis. Combined with the GC grace window and delete-time
+re-verification, this closes the create-vs-collect race: a record whose
+`created_at_ms` is inside the grace window is still inside its own verify
+budget, so nothing releases it for a basis it may yet prove.
 
-Record ids derive deterministically from the basis identity plus the owner
-identity: repeating creation for the same pinned manifest and owner renews
-the existing record (reviving a released one after re-verification) without
-listing. Renewal is last-write-wins on the expiry: the record's
-`expires_at_ms` becomes exactly what the latest create requested — extended,
-shortened, or cleared — while `created_at_ms` keeps the original creation
-instant, and the response always reports the durable state. Distinct owners
-of one basis hold distinct records with
-independent lifecycles. Explicit release flips a user-owned record
-`active -> released` by compare-and-swap and is idempotent. GC loads a
-collectable record and its etag together, changes `released` (or expired
-`active`) to `condemned` with exactly that etag, and only then deletes the key
-unconditionally. A failed condemn CAS means the inspected state changed, so
-the record is retained without retry. A crash after condemnation blocks the
-deterministic name benignly until the next GC pass deletes the condemned
-record; a fresh create can then reuse the name. Its basis becomes collectable
-only after condemnation (records-last, "Garbage collection").
+The lifecycle is monotonic. It has two states and one transition:
+
+```text
+Missing
+  -- create, under a freshly generated id -->
+active
+  -- one-way compare-and-swap: owner release, or GC observing a passed
+     expiry; stamps released_at_ms -->
+released { released_at_ms }
+  -- GC delete, released_at_ms + grace window -->
+Missing
+```
+
+`released` is terminal. Nothing returns a record to `active`: there is no
+refresh, no renewal, and no revival, and a released record protects nothing
+and serves no read. A new pin is a new record under a new id — ids are
+generated, never derived and never supplied by a caller, so a pin can never
+land on a released record's key and a released id is never reused. Distinct
+pins over one basis are distinct records with independent lifecycles.
+
+No checkpoint state transition consults a provider object timestamp. Every
+instant the lifecycle depends on lives in the record: `created_at_ms` for the
+create-vs-collect grace, `expires_at_ms` for the release, and
+`released_at_ms` for the deletion.
+
+`expires_at_ms` means "GC may release this without asking anyone". A user pin
+carries the caller's `ttl_ms`, or nothing at all, in which case it is held
+until released. A fork-owned record always carries one: it is the lease for a
+single fork attempt (section 3.9.2), and letting it pass is how an abandoned
+attempt becomes collectable. An active record whose expiry has passed still
+pins and still serves — until the pass that releases it, it is a root, and
+answering from it is answering from state that is provably still there.
+
+Explicit release is user-owned only, and it is idempotent: releasing an
+already-released or already-deleted record leaves the same end state. Owner
+release and expiry release converge for the same reason — both are the same
+one-way compare-and-swap to the same state — so the loser of a race re-reads,
+finds what it wanted, and writes nothing. A failed release CAS means the
+inspected state changed, so the record is retained without retry. Its basis
+becomes collectable only after the record itself is gone (records-last,
+"Garbage collection").
 
 A namespace manifest is the durable object for one namespace file-set version.
 It may reference one or more immutable metadata runs; standalone checkpoint
@@ -1261,12 +1279,10 @@ protocol.
 
 Creating a checkpoint pins one such manifest version deliberately for one
 owner. It first flushes the WAL tail as above, then writes
-`checkpoints/{id}.json` (id derived deterministically from the basis identity
-plus the owner identity, so repeating creation for the same pinned manifest
-and owner returns the existing record without listing) and verifies the basis
-after the write, flipping the record to released on failure. A live manifest
-does not need to be checkpoint-pinned; checkpoint records explain why a
-manifest version must be retained after the root moves on.
+`checkpoints/{id}.json` under a freshly generated id and verifies the basis
+after the write, releasing the record on failure and retrying under a new id.
+A live manifest does not need to be checkpoint-pinned; checkpoint records
+explain why a manifest version must be retained after the root moves on.
 
 ### 3.9 Namespace creation and forks
 
@@ -1305,37 +1321,48 @@ request supplies only the new namespace id; the server supplies the mutation
 context. The protocol is:
 
 1. Read and verify the source head and its WAL visibility chain.
-2. Create or reuse a verified fork-owned source checkpoint at that head
-   (owner: the target namespace id). This record is the reachability root
-   that keeps the source's basis manifest and tables alive for as long as the
-   target lives; nothing under the target's prefix protects them.
-3. Freshen the fork-owned record by compare-and-swap before writing the
-   target: the rewrite re-stamps the record's provider timestamp so the
-   abandoned-fork rule cannot fire under a live retry, and it serializes the
-   fork against a concurrent GC release — whichever compare-and-swap lands
-   second fails, so a released record is observed (and revived, re-verifying
-   the basis) rather than raced.
-4. Read the manifest that record pins for the target's fork sequence and next
+2. Create a verified fork-owned source checkpoint at that head (owner: the
+   target namespace id) under a freshly generated id, with a lease:
+   `expires_at_ms = now + FORK_CHECKPOINT_LEASE_MS`. This record is the
+   reachability root that keeps the source's basis manifest and tables alive
+   for as long as the target lives; nothing under the target's prefix
+   protects them. Every attempt takes its own record; no attempt reuses,
+   refreshes, or revives an earlier one's.
+3. Read the manifest that record pins for the target's fork sequence and next
    inode id, then build the complete active target head: the source's
    `content_store_id` and `name_policy` copied verbatim from the source head,
    and a `fork_basis` naming the source namespace, that manifest's object id
    and payload checksum, the source checkpoint id, and the fork sequence.
    Write it with create-if-absent.
-5. Re-read the source checkpoint record. If it is no longer active, delete
-   the target through the ordinary namespace-delete path and return the
-   checkpoint failure.
+4. Read the source checkpoint record once. The fork succeeds only if the
+   record is active **and** `expires_at_ms > now + FORK_GUARD_MARGIN_MS`.
+   Otherwise delete the target through the ordinary namespace-delete path and
+   return the checkpoint failure.
 
 The target copies the source's `content_store_id` because a fork shares file
 bytes copy-on-write, and its `name_policy` because it inherits the source's
 materialized name keys, which mean nothing under a different policy.
 
-Step 5 exists because steps 3 and 4 are two separate writes to two different
-objects. A forker that stalls between them can have its freshened record
-released underneath it, and without the re-read the target would survive with
-an unprotected basis — a namespace that reads correctly today and reports
-corruption after the next GC pass. Deleting the target through the ordinary
-delete path, rather than erasing the head, keeps the failure inside the one
-lifecycle every other operation already understands.
+Step 4 exists because steps 2 and 3 are two separate writes to two different
+objects. A forker that stalls between them can have its record released
+underneath it, and without the check the target would survive with an
+unprotected basis — a namespace that reads correctly today and reports
+corruption after the next GC pass. The margin is what makes the check sound
+where a bare re-read raced: garbage collection releases a fork record only
+once its lease has passed, so a lease with more than one provider operation
+left cannot legally be released between the read and the caller acting on it.
+Past that point the target head is the protection — a fork record whose
+target namespace exists and is not deleted is retained by every pass,
+whatever its lease says, so nothing has to clear the lease afterwards.
+Deleting the target through the ordinary delete path, rather than erasing the
+head, keeps the failure inside the one lifecycle every other operation
+already understands.
+
+`FORK_CHECKPOINT_LEASE_MS` is derived, not tuned: two GC grace floors
+(section 6, rule 1), one for the create and one for everything after it, each
+being one publication plus provider bounds plus clock skew.
+`FORK_GUARD_MARGIN_MS` is one provider operation's total wall time — the
+staleness bound on the guard's own read.
 
 The fork does not copy content-store blobs or source metadata SSTs, and
 writes no target manifest, root, or floor. A successful fork has independent
@@ -1755,10 +1782,16 @@ publishing CAS) — under these rules:
    window below the floor is rejected as `invalid_request` at every
    surface. Under the floor's inequality, any acknowledged root
    publication lands its compare-and-swap before an object it references
-   could age past `T`, so GC never deletes or releases any object younger
-   than `T`, reachable or not, and treats any checkpoint record younger
-   than `T` as a root regardless of state. An object without a provider
-   timestamp reads as young.
+   could age past `T`, so GC never deletes any object younger than `T`,
+   reachable or not. An object without a provider timestamp reads as
+   young.
+
+   Checkpoint records are the one family whose age is not a provider
+   timestamp. The record carries every instant its lifecycle needs, and
+   `T` is applied to those instead: a record is deleted `T` after its own
+   `released_at_ms`, and a record whose basis is verifiably absent is
+   released only `T` after its own `created_at_ms`, which is what keeps a
+   create still inside its verify budget from being raced.
 2. **Floor is necessary, not sufficient.** Being below `wal/floor.json` only
    nominates an object for deletion.
 3. **Delete-time re-verification.** Immediately before deleting, GC re-lists
@@ -1767,9 +1800,9 @@ publishing CAS) — under these rules:
    may be arbitrarily stale; deletion may not. On large batches the
    re-verification repeats at least every bounded number of deletion
    decisions, so no deletion consults an arbitrarily stale root set.
-4. Roots: `metadata/root.json`; active, non-expired checkpoint records whose
-   owner still stands (a fork-owned record stops rooting once its target is
-   provably gone); and the visible chain from
+4. Roots: `metadata/root.json`; active checkpoint records whose owner still
+   stands — a user pin until its expiry passes, a fork pin until its target
+   is provably gone (rule 10), whatever its lease says; and the visible chain from
    `wal/head.json.visible_wal_tip` down to the floor. A namespace with no
    root of its own has no manifest or table to protect under its own prefix;
    its basis, if it has a foreign one, is protected on the source side by
@@ -1789,38 +1822,37 @@ publishing CAS) — under these rules:
 8. **Retention wins residual races.** If the floor is ever observed ahead of
    an active checkpoint's basis, the checkpoint's objects remain protected;
    reconciling the floor is an explicit recovery action.
-9. **Immutable sweep families need no condemnation.** WAL segments, metadata
-   tables and manifests, grep segments and manifests, and content blobs have
-   keys that can only contain identical bytes under their create-if-absent,
-   content-derived, or write-verification protocols. Once one is unreferenced
-   and grace-aged, unconditional deletion is safe: a zombie retry can at most
-   recreate identical, still-unreferenced bytes for a later pass. Content-blob
-   GC remains unsupported in v0, but the same immutability argument governs a
-   future sweep.
-10. **Abandoned forks.** A fork that crashes after freshening its source
+9. **Immutable sweep families need no two-step deletion.** WAL segments,
+   metadata tables and manifests, grep segments and manifests, and content
+   blobs have keys that can only contain identical bytes under their
+   create-if-absent, content-derived, or write-verification protocols. Once
+   one is unreferenced and grace-aged, unconditional deletion is safe: a
+   zombie retry can at most recreate identical, still-unreferenced bytes for
+   a later pass. Content-blob GC remains unsupported in v0, but the same
+   immutability argument governs a future sweep.
+10. **Abandoned forks.** A fork that crashes after writing its leased source
    checkpoint record but before installing its target head leaves that
-   record with no target at all. Such a record remains GC-owned and is
-   released under the reap window `R` (`R >= T`): the record must be older
-   than `R`, since a live fork retry freshens it before writing the target
-   head. This is the only debris an interrupted install can leave, and it
-   lives on the source, never under the target's prefix — the target either
-   has a complete head or has nothing.
+   record with no target at all. Such a record is released once its lease
+   has passed and the target head is still absent: the lease covers a whole
+   fork attempt with margin to spare (section 3.9.2), so only an attempt
+   that is really gone can have let it pass. This is the only debris an
+   interrupted install can leave, and it lives on the source, never under
+   the target's prefix — the target either has a complete head or has
+   nothing.
 
 Deletion proceeds data first, records last, so a crash mid-sweep leaves
 orphaned data for the next pass rather than a record whose data vanished.
-To keep that true, every readable non-condemned checkpoint record roots its
-basis for the duration of a pass, whatever its lifecycle, expiry, or owner;
-state, age, and owner fate gate only its condemnation. `condemned` is the sole
-exception because it cannot legally revive; crash residue in that state is
-deleted by the next pass and need not continue rooting. A fork-owned record whose
-target namespace is verifiably terminally deleted (target head
-`state = deleted`, re-checked at delete time) or provably abandoned (rule 10)
-is released by compare-and-swap on the record's freshly observed etag —
-never deleted while active — so a racing fork freshen always wins or always
-observes the release. An aged collectable record is then condemned by one
-exact-etag CAS and deleted only after that CAS succeeds; precondition failure
-means retention, never fallback deletion. If physical deletion fails after
-the CAS, the absorbing record makes the next pass self-healing.
+To keep that true, every readable checkpoint record roots its basis for the
+duration of a pass, whatever its lifecycle, expiry, or owner — no exceptions.
+State, expiry, and owner fate gate only whether the record itself is a
+candidate. A fork-owned record whose target namespace is verifiably
+terminally deleted (target head `state = deleted`, re-checked at delete time)
+or provably abandoned (rule 10) is released by compare-and-swap on the
+record's freshly observed etag — never deleted while active. A released
+record is deleted outright once its `released_at_ms` is a grace window old;
+because release is terminal, no second state is needed between deciding to
+delete and deleting, and a crash between the release CAS and the delete
+leaves a record the next pass reaps unconditionally.
 The intended end-state remains tracked deletion derived from manifest
 predecessor diffs, with the listing sweep demoted to a low-frequency
 backstop.

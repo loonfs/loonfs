@@ -96,6 +96,45 @@ pub const GC_MIN_GRACE_WINDOW_MS: u64 = max_u64(
     + PROVIDER_ATTEMPT_TIMEOUT_MS
     + GC_SAFETY_MARGIN_MS;
 
+/// Lease every fork attempt takes on the fork-owned source checkpoint it
+/// creates. An attempt that never installs its target head lets the lease
+/// pass, and garbage collection releases the record on that alone — no
+/// provider timestamp, no fork-specific age rule.
+///
+/// Two grace floors, because a fork attempt is two of the things that floor
+/// already bounds. The first covers creating the record: the WAL flush and
+/// manifest publication it may perform, the post-write basis verification,
+/// and the provider bounds and clock skew around them — which is exactly
+/// what `GC_MIN_GRACE_WINDOW_MS` is the bound for. The second covers
+/// everything after: reading the pinned manifest and the source head,
+/// installing the target head, and the guard read below. Each half is one
+/// publication plus provider bounds plus skew, so each is one floor.
+pub const FORK_CHECKPOINT_LEASE_MS: u64 = 2 * GC_MIN_GRACE_WINDOW_MS;
+
+/// Margin the post-publish fork guard requires between now and the source
+/// record's lease expiry before it lets a target stand.
+///
+/// The guard's evidence is one record read, and one provider operation's
+/// total wall time is `PROVIDER_OPERATION_DEADLINE_MS +
+/// PROVIDER_ATTEMPT_TIMEOUT_MS` (the deadline gates starting an attempt
+/// rather than preempting one). A record observed with more lease than that
+/// left cannot have been legally expiry-released while the guard was
+/// looking at it, so the observation still holds when the guard acts on it.
+pub const FORK_GUARD_MARGIN_MS: u64 = PROVIDER_OPERATION_DEADLINE_MS + PROVIDER_ATTEMPT_TIMEOUT_MS;
+
+// The fork lease has two jobs, and both are inequalities over the constants
+// above rather than judgement calls, so they are checked where a broken
+// derivation is a compile error instead of a test failure: it must cover a
+// whole fork attempt, and it must leave the guard something to check.
+const _: () = assert!(
+    FORK_CHECKPOINT_LEASE_MS >= GC_MIN_GRACE_WINDOW_MS,
+    "a fork attempt may take as long as any other publication"
+);
+const _: () = assert!(
+    FORK_GUARD_MARGIN_MS < FORK_CHECKPOINT_LEASE_MS,
+    "a fork that finishes promptly must still clear the guard margin"
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;

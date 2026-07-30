@@ -76,7 +76,7 @@
           "admin"
         ],
         "summary": "Create checkpoint",
-        "description": "Creates or reuses a named, user-owned checkpoint record pinning the current namespace view. The record is a garbage-collection root until released or expired, so routine maintenance should flush the WAL instead. This is a maintenance/admin operation, not a file mutation.",
+        "description": "Creates a named, user-owned checkpoint record pinning the current namespace view. Every call mints a new record under a new id; the name is a label, not a key. The record is a garbage-collection root until it is released, so routine maintenance should flush the WAL instead. This is a maintenance/admin operation, not a file mutation.",
         "operationId": "create_checkpoint",
         "parameters": [
           {
@@ -102,7 +102,7 @@
         },
         "responses": {
           "200": {
-            "description": "Checkpoint created or reused",
+            "description": "Checkpoint created",
             "content": {
               "application/json": {
                 "schema": {
@@ -2536,7 +2536,7 @@
       },
       "CreateCheckpointResponse": {
         "type": "object",
-        "description": "Result of creating or reusing a checkpoint.",
+        "description": "Result of creating a checkpoint.",
         "required": [
           "namespace_id",
           "checkpoint_id",
@@ -3377,7 +3377,7 @@
               "null"
             ],
             "format": "int64",
-            "description": "Old upload sessions and abandoned fork records older than this may be\nreaped or released. Must be at least the grace window.",
+            "description": "Upload sessions older than this may be reaped. Must be at least the\ngrace window.",
             "minimum": 0
           }
         }
@@ -3403,7 +3403,7 @@
           "deleted_checkpoint_records": {
             "type": "integer",
             "format": "int64",
-            "description": "Released or expired checkpoint records deleted.",
+            "description": "Released checkpoint records deleted after their grace window.",
             "minimum": 0
           },
           "deleted_manifests": {
@@ -3440,6 +3440,12 @@
               "null"
             ],
             "description": "Opaque resume token when more candidates remain. Resuming rebuilds\nevery safety proof; the token carries enumeration position only and\nis valid only against the same namespace."
+          },
+          "released_expired_checkpoints": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Checkpoint records released because their expiry passed, or because\nthey sit on a terminally deleted namespace.",
+            "minimum": 0
           },
           "released_fork_checkpoints": {
             "type": "integer",

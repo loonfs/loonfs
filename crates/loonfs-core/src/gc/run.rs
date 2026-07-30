@@ -8,7 +8,7 @@ use super::fork_checkpoints::{
 };
 use super::live_set::{collect_live_set, LiveSet, SweepVerifier};
 use super::reap::{
-    condemn_checkpoint_if_aged, delete_if_aged, manifest_object_id_of, CheckpointCondemn,
+    delete_if_aged, manifest_object_id_of, sweep_checkpoint_record, CheckpointSweep,
 };
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
@@ -61,7 +61,7 @@ pub(super) async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
 
     // Every invocation rebuilds all roots before interpreting the cursor.
     // The cursor can skip enumeration only; it never carries safety state.
-    let mark = Arc::new(collect_live_set(store, namespace_id, config, context).await?);
+    let mark = Arc::new(collect_live_set(store, namespace_id, context).await?);
     let mut sweep = SweepVerifier::seeded(Arc::clone(&mark), reverify_chunk);
     let mut report = GcResponse::empty(namespace_id.clone());
     let mut examined = 0_u64;
@@ -133,7 +133,15 @@ async fn process_candidate<S: ObjectStore + ?Sized>(
     }
 
     if family == CandidateFamily::Checkpoints && mark.missing_basis_records.contains(key) {
-        if release_missing_basis_checkpoint(store, namespace_id, key, config, context).await? {
+        if release_missing_basis_checkpoint(
+            store,
+            namespace_id,
+            key,
+            config.grace_window_ms,
+            context,
+        )
+        .await?
+        {
             report.released_missing_basis_checkpoints += 1;
         } else {
             report.retained_candidates += 1;
@@ -158,9 +166,7 @@ async fn process_candidate<S: ObjectStore + ?Sized>(
         return Ok(());
     }
 
-    sweep
-        .refresh_if_due(store, namespace_id, config, context)
-        .await?;
+    sweep.refresh_if_due(store, namespace_id, context).await?;
     match family {
         CandidateFamily::WalSegments => {
             if sweep.live.wal_segments.contains(key) {
@@ -209,7 +215,7 @@ async fn process_checkpoint<S: ObjectStore + ?Sized>(
         report.retained_candidates += 1;
         return Ok(());
     }
-    match maybe_release_fork_checkpoint(store, key, config, context).await? {
+    match maybe_release_fork_checkpoint(store, key, context).await? {
         ForkCheckpointSweep::Released => {
             report.released_fork_checkpoints += 1;
             return Ok(());
@@ -220,7 +226,7 @@ async fn process_checkpoint<S: ObjectStore + ?Sized>(
         }
         ForkCheckpointSweep::NotAnActiveFork => {}
     }
-    match condemn_checkpoint_if_aged(
+    match sweep_checkpoint_record(
         store,
         namespace_id,
         key,
@@ -230,14 +236,15 @@ async fn process_checkpoint<S: ObjectStore + ?Sized>(
     )
     .await?
     {
-        CheckpointCondemn::Delete => {
+        CheckpointSweep::Delete => {
             store
                 .delete(key)
                 .await
                 .map_err(|error| CoreError::store(key, &error))?;
             report.deleted_checkpoint_records += 1;
         }
-        CheckpointCondemn::Retain => report.retained_candidates += 1,
+        CheckpointSweep::Released => report.released_expired_checkpoints += 1,
+        CheckpointSweep::Retain => report.retained_candidates += 1,
     }
     Ok(())
 }

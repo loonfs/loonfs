@@ -28,8 +28,8 @@ use loonfs_grep::{
     GrepWorker, GREP_GC_GRACE_WINDOW_MS,
 };
 use loonfs_objectstore::keys::{
-    checkpoint_prefix, metadata_manifest_object, metadata_manifest_prefix, metadata_table_prefix,
-    upload_session_prefix, wal_segment_prefix,
+    checkpoint_prefix, checkpoint_record, metadata_manifest_object, metadata_manifest_prefix,
+    metadata_table_prefix, upload_session_prefix, wal_segment_prefix,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{
@@ -277,7 +277,10 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
     let checkpoint = control::checkpoint_record(&store, &namespace_id, &checkpoint_id)
         .await
         .expect("released checkpoint record remains until core GC");
-    assert_eq!(checkpoint.state, CheckpointRecordLifecycle::Released);
+    assert!(matches!(
+        checkpoint.state,
+        CheckpointRecordLifecycle::Released { .. }
+    ));
     let response = new_query(&store, &namespace_id, &request("needle"))
         .await
         .expect("materialized query");
@@ -407,17 +410,91 @@ async fn retention_gap_and_vanished_checkpoint_restart_fresh_backfill() {
         vanished.outcome,
         GrepBuildOutcome::BackfillRestarted { .. }
     ));
-    // Checkpoint ids are derived from the basis and the owner, so a
-    // rebootstrap at an unmoved head revives that same name — what makes it
-    // a new attempt is that the record pins its basis again and the walk
-    // starts from nothing.
+    // A released record is finished for good, so the new attempt takes a
+    // pin of its own: a new id, pinning its basis, with the walk starting
+    // from nothing.
     let fresh_checkpoint_id = assert_fresh_backfill_attempt(&store, &namespace_id).await;
-    assert_eq!(fresh_checkpoint_id, gap_checkpoint_id);
+    assert_ne!(fresh_checkpoint_id, gap_checkpoint_id);
 
     drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
     let response = new_query(&store, &namespace_id, &request("needle"))
         .await
         .expect("query after rebootstrap");
+    assert_eq!(response.matches.len(), 1);
+    writer.shutdown_background().await.expect("shutdown");
+}
+
+/// A backfill whose pin has outlived its ttl but has not been released
+/// keeps enumerating. Nothing on the checkpoint read path consults a clock:
+/// the record is still a garbage-collection root, so the state it pins is
+/// still there. The worker only starts over when a pass actually releases
+/// it — which the suite above covers.
+#[tokio::test]
+async fn an_expired_but_unreleased_backfill_pin_keeps_enumerating() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store: SharedObjectStore =
+        Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
+    let namespace_id = NamespaceId::parse("worker-expiry").expect("namespace id");
+    let writer = FsWriter::builder_with_store(store.clone())
+        .writer_id("expiry-writer")
+        .min_publish_interval_ms(0)
+        .build()
+        .await
+        .expect("writer");
+    writer
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
+    writer
+        .put_file_bytes(
+            &namespace_id,
+            "/expiring.txt",
+            b"expiring needle\n",
+            PutFileOptions::default(),
+        )
+        .await
+        .expect("write");
+    let worker = worker(&store).await;
+    worker.enable(&namespace_id).await.expect("enable");
+    let checkpoint_id = assert_fresh_backfill_attempt(&store, &namespace_id).await;
+
+    // Age the pin out from under the backfill without releasing it.
+    let key = checkpoint_record(namespace_id.as_str(), checkpoint_id.as_str());
+    let mut record = control::checkpoint_record(&store, &namespace_id, &checkpoint_id)
+        .await
+        .expect("backfill checkpoint record");
+    assert!(
+        record.expires_at_ms.is_some(),
+        "the backfill pin carries a ttl"
+    );
+    record.expires_at_ms = Some(record.created_at_ms);
+    let expired = loonfs_api::wire::control::CheckpointRecordEnvelope::from_state(
+        loonfs_api::wire::control::ControlObjectKind::CheckpointRecord,
+        "expiry-test",
+        record,
+    )
+    .expect("expired record envelope");
+    store
+        .put_overwrite(
+            &key,
+            Bytes::from(
+                loonfs_api::wire::control::encode_control_object(&expired).expect("encode record"),
+            ),
+        )
+        .await
+        .expect("write the expired record");
+
+    drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
+    let finished = control::checkpoint_record(&store, &namespace_id, &checkpoint_id)
+        .await
+        .expect("the record survives until core GC reaps it");
+    assert!(
+        matches!(finished.state, CheckpointRecordLifecycle::Released { .. }),
+        "the attempt ran to steady state on that pin and then released it"
+    );
+    let response = new_query(&store, &namespace_id, &request("needle"))
+        .await
+        .expect("query after a backfill on an expired pin");
     assert_eq!(response.matches.len(), 1);
     writer.shutdown_background().await.expect("shutdown");
 }

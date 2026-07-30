@@ -14,11 +14,10 @@ use crate::namespace::control::ControlObjectLoadError;
 use crate::namespace::writer_epoch::WriterEpochAcquireError;
 use crate::storage::content::DurableContentValidationError;
 use crate::wal::{WalBuildError, WalChainLoadError, WalReplayError};
-use loonfs_api::wire::control::{CheckpointRecordLifecycle, HeadState};
+use loonfs_api::wire::control::HeadState;
 use loonfs_api::{
-    ChangeSeq, CheckpointId, CommitId, CommitIdValidationError, ErrorDetails,
-    GeneratedIdValidationError, InodeId, InodeKind, NamespaceId, NamespaceIdValidationError,
-    RevisionNo, UploadId, WriterEpoch,
+    ChangeSeq, CommitId, CommitIdValidationError, ErrorDetails, GeneratedIdValidationError,
+    InodeId, InodeKind, NamespaceId, NamespaceIdValidationError, RevisionNo, UploadId, WriterEpoch,
 };
 use loonfs_objectstore::{ImmutableWriteError, ObjectStoreError};
 use thiserror::Error;
@@ -120,11 +119,6 @@ pub enum CoreError {
     ShuttingDown,
     #[error("checkpoint unavailable: {0}")]
     CheckpointUnavailable(String),
-    #[error("checkpoint `{checkpoint_id}` is in absorbing `{state}` state")]
-    CheckpointStateConflict {
-        checkpoint_id: CheckpointId,
-        state: CheckpointRecordLifecycle,
-    },
     #[error("invalid checkpoint request: {0}")]
     InvalidCheckpointRequest(String),
     #[error(
@@ -374,7 +368,6 @@ impl CoreError {
             // An over-budget publication aborts pre-CAS and is retryable
             // after maintenance, exactly the checkpoint_unavailable contract.
             CoreError::CheckpointUnavailable(_)
-            | CoreError::CheckpointStateConflict { .. }
             | CoreError::MetadataPublicationBudgetExceeded { .. } => {
                 ErrorCode::CheckpointUnavailable
             }

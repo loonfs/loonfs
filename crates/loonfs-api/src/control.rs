@@ -120,31 +120,34 @@ pub struct MetadataRootState {
     pub updated_at_ms: u64,
 }
 
-/// Lifecycle of a durable checkpoint record.
+/// Lifecycle of a durable checkpoint record: monotonic, with exactly two
+/// states and one transition.
 ///
-/// Only `active`, non-expired checkpoints are long-term GC roots. `released`
-/// records may be revived after basis verification; garbage collection first
-/// compare-and-swaps one into absorbing `condemned`, which no owner operation
-/// may leave, before deleting it. Any non-condemned record younger than the GC
-/// grace window remains protected regardless of state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
+/// A record is born `active` under a freshly generated id and pins its basis
+/// until something moves it to `released` by compare-and-swap — the owner
+/// asking for it, or garbage collection observing that its `expires_at_ms`
+/// passed. `released` is terminal: nothing returns a record to `active`, so
+/// a released record protects nothing and answers no read. Garbage
+/// collection deletes it once `released_at_ms` is a grace window old. A new
+/// pin is a new record under a new id, never a revival of this one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CheckpointRecordLifecycle {
-    /// Protects the checkpoint basis while the owner remains live and the record unexpired.
-    #[default]
+    /// Protects the checkpoint basis. The sole state a read may serve from.
     Active,
-    /// Relinquishes the pin while allowing basis-verified revival by its owner.
-    Released,
-    /// Irreversibly transfers the record to garbage-collection cleanup.
-    Condemned,
+    /// Terminal: the pin is gone and the record is waiting to be deleted.
+    Released {
+        /// Unix-millisecond stamp written by the release compare-and-swap,
+        /// and the only input to when the record may be deleted.
+        released_at_ms: u64,
+    },
 }
 
 impl std::fmt::Display for CheckpointRecordLifecycle {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let state = match self {
             Self::Active => "active",
-            Self::Released => "released",
-            Self::Condemned => "condemned",
+            Self::Released { .. } => "released",
         };
         formatter.write_str(state)
     }
@@ -162,9 +165,10 @@ pub enum CheckpointOwner {
         /// Operator-facing label that need not be unique.
         name: String,
     },
-    /// A fork target keeping its source basis alive. Released only once the
-    /// target namespace is terminally deleted or its installation tree is
-    /// proven absent.
+    /// A fork target keeping its source basis alive. Released once the
+    /// target namespace is terminally deleted, or once the attempt's lease
+    /// expires with no target head to show for it. A live target keeps the
+    /// record whatever the lease says.
     Fork {
         /// Fork namespace whose continued existence keeps the source basis pinned.
         target_namespace_id: NamespaceId,
@@ -182,7 +186,9 @@ pub enum CheckpointOwner {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CheckpointRecordState {
-    /// Deterministic record identity derived from basis and owner identity.
+    /// Freshly generated record identity, one per logical pin. Nothing
+    /// derives it, and no caller supplies it, so a new pin can never land on
+    /// a released record's key.
     pub checkpoint_id: CheckpointId,
     /// Source namespace whose manifest and metadata remain pinned.
     pub namespace_id: NamespaceId,
@@ -196,14 +202,19 @@ pub struct CheckpointRecordState {
     pub manifest_payload_checksum: String,
     /// Commit identity at the pinned manifest head, verified against its payload.
     pub head_commit_id: CommitId,
-    /// Unix-millisecond creation stamp used by expiry and GC grace policy, never validity ordering.
+    /// Unix-millisecond creation stamp used by GC grace policy, never validity ordering.
     pub created_at_ms: u64,
-    /// Expiry for user-owned records; fork-owned records never expire.
+    /// When garbage collection may release this record without asking anyone.
+    ///
+    /// A user pin carries the caller's `ttl_ms`, or nothing at all, in which
+    /// case it is held until released. A fork-owned record always carries
+    /// one: it is the lease covering a single fork attempt, and its expiry
+    /// is how an abandoned attempt becomes collectable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at_ms: Option<u64>,
     /// Party whose durable lifecycle determines when this pin can be released.
     pub owner: CheckpointOwner,
-    /// Current pin or cleanup lifecycle, changed only by guarded rewrites.
+    /// Current lifecycle, advanced only by the one-way release compare-and-swap.
     pub state: CheckpointRecordLifecycle,
 }
 

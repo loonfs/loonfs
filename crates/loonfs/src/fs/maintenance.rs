@@ -328,12 +328,13 @@ impl FsAdmin {
         Ok(report)
     }
 
-    /// Creates or reuses a checkpoint for the current namespace head.
+    /// Creates a checkpoint for the current namespace head.
     ///
-    /// A checkpoint pins a manifest version for retention and provenance. If
-    /// the current head has no manifest yet, one is published first for the
-    /// current durable namespace state; this is not a request to compact
-    /// metadata.
+    /// A checkpoint pins a manifest version for retention and provenance.
+    /// Every call is its own pin under its own id, held until released — the
+    /// name is a label, not a key. If the current head has no manifest yet,
+    /// one is published first for the current durable namespace state; this
+    /// is not a request to compact metadata.
     #[tracing::instrument(
         level = "info",
         name = "loonfs.compaction",
