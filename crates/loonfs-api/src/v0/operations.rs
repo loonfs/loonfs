@@ -68,6 +68,11 @@ pub struct ErrorDetails {
     /// recorded one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_writer: Option<String>,
+    /// Unix milliseconds at which the current epoch's acquirer took it, when
+    /// the head recorded one. Writer ids are process labels, so two runs on
+    /// one machine can share one; the stamp is what tells them apart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_acquired_at_ms: Option<u64>,
     /// Inode the failed precondition or operation targeted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inode_id: Option<InodeId>,

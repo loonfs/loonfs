@@ -156,14 +156,6 @@ pub enum CoreError {
         after_seq: ChangeSeq,
         retention_floor_seq: ChangeSeq,
     },
-    #[error(
-        "path `{path}` is covered by subtree tombstone rooted at inode `{root_inode_id}` from seq `{tombstone_seq}`"
-    )]
-    TombstoneConflict {
-        path: String,
-        root_inode_id: InodeId,
-        tombstone_seq: ChangeSeq,
-    },
     #[error("path component `{0}` is not a directory")]
     NonDirectoryPathComponent(String),
     #[error("namespace corrupt: {0}")]
@@ -397,7 +389,6 @@ impl CoreError {
             | CoreError::ExpectedDirectory { .. }
             | CoreError::DestinationExists { .. } => ErrorCode::PathConflict,
             CoreError::DirectoryNotEmpty(_) => ErrorCode::DirectoryNotEmpty,
-            CoreError::TombstoneConflict { .. } => ErrorCode::TombstoneConflict,
             CoreError::WriterFenced(_) => ErrorCode::WriterFenced,
             CoreError::NamespaceCorrupt(_) => ErrorCode::NamespaceCorrupt,
             // Naming which operation stopped a batch says nothing new about
@@ -432,6 +423,7 @@ impl CoreError {
                 fenced_epoch: Some(fence.fenced_epoch),
                 active_writer_epoch: Some(fence.active_epoch),
                 active_writer: fence.active_writer.clone(),
+                active_acquired_at_ms: fence.active_acquired_at_ms,
                 ..ErrorDetails::default()
             }),
             CoreError::CommitIdReuseConflict(commit_id) => Some(ErrorDetails {
@@ -673,6 +665,15 @@ fn classify_commit_validation_error(error: &CommitValidationError) -> ErrorCode 
         CommitValidationError::RestoreRevisionSourceRevisionMissing { .. } => {
             ErrorCode::RevisionNotFound
         }
+        // Corruption guards, not caller-actionable conflicts. Every inode an
+        // operation names is either freshly allocated by the same commit or
+        // resolved through visible bindings, and a visible binding already
+        // implies no covering tombstone (`metadata::visibility`: a visible
+        // inode is one no tombstone covers, and a delete unbinds and
+        // tombstones in the same commit). So a covered target here means the
+        // stored rows contradict themselves — a live binding under a
+        // tombstone — which is repair work, not something a caller can fix by
+        // re-reading and retrying.
         CommitValidationError::CreateUnderSubtreeTombstone { .. }
         | CommitValidationError::ReplaceFileUnderSubtreeTombstone { .. }
         | CommitValidationError::RestoreRevisionUnderSubtreeTombstone { .. }
@@ -680,7 +681,7 @@ fn classify_commit_validation_error(error: &CommitValidationError) -> ErrorCode 
         | CommitValidationError::RenameInodeUnderSubtreeTombstone { .. }
         | CommitValidationError::RenameTargetParentUnderSubtreeTombstone { .. }
         | CommitValidationError::DeleteSubtreeRootCoveredByTombstone { .. } => {
-            ErrorCode::TombstoneConflict
+            ErrorCode::NamespaceCorrupt
         }
         CommitValidationError::CreateChildNameCollision { .. }
         | CommitValidationError::NamePreconditionParentNotDirectory { .. }
@@ -866,6 +867,7 @@ mod tests {
         assert_eq!(details.fenced_epoch, Some(WriterEpoch(3)));
         assert_eq!(details.active_writer_epoch, Some(WriterEpoch(4)));
         assert_eq!(details.active_writer.as_deref(), Some("writer-b"));
+        assert_eq!(details.active_acquired_at_ms, Some(2_000));
         assert!(fenced
             .to_string()
             .contains("epoch 3 was fenced by epoch 4 (writer `writer-b`, acquired at 2000 ms)"));

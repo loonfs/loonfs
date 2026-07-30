@@ -90,9 +90,13 @@ pub(super) fn publish_child_name_absent_precondition(
 /// tombstone. The walk observes only visible bindings, so its answer cannot
 /// change when compaction drops rows no retained sequence observes: a deleted
 /// (unbound) name simply ends the walk, and recreating it plans as a fresh
-/// subtree. A visible-but-covered component cannot arise from legal writer
-/// histories; hitting one means corrupt state, and failing the plan is the
-/// safe answer.
+/// subtree.
+///
+/// A visible-but-covered component cannot arise from legal writer histories:
+/// a delete unbinds and tombstones in one commit, and visibility already
+/// excludes a covered inode (`metadata::visibility`). Hitting one means the
+/// stored rows contradict themselves, so this reports corruption rather than
+/// a conflict a caller could resolve.
 pub(super) async fn publish_reject_tombstoned_path_ancestor<S: ObjectStore + ?Sized>(
     view: &PublishPathPlanningView<'_, '_, '_, S>,
     absolute_path: &AbsolutePath,
@@ -117,11 +121,13 @@ pub(super) async fn publish_reject_tombstoned_path_ancestor<S: ObjectStore + ?Si
             .covering_subtree_tombstone(bound_child.child_inode_id)
             .await?
         {
-            return Err(CoreError::TombstoneConflict {
-                path: visible_path.as_str().to_owned(),
-                root_inode_id: tombstone.root_inode_id,
-                tombstone_seq: tombstone.tombstone_seq,
-            });
+            return Err(CoreError::NamespaceCorrupt(format!(
+                "path `{}` is visible but covered by the subtree tombstone rooted at inode \
+                 `{}` from seq `{}`",
+                visible_path.as_str(),
+                tombstone.root_inode_id,
+                tombstone.tombstone_seq,
+            )));
         }
         current_inode = bound_child.child_inode_id;
         current_path = visible_path;

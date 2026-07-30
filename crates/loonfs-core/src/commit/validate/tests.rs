@@ -12,6 +12,7 @@ use super::build_commit_plan;
 use crate::commit::{
     materialize_commit, CommitOpResult, CommitValidationError, MutationFingerprint, PreparedCommit,
 };
+use crate::error::{CoreError, ErrorCode};
 use crate::metadata::MetadataState;
 use loonfs_api::wire::control::{HeadState, WriterBlock};
 use loonfs_api::wire::wal::WalDelta;
@@ -249,8 +250,14 @@ async fn failed_multi_op_plan_uses_preview_without_mutating_base_metadata() {
         .is_none());
 }
 
+/// The rows here are deliberately corrupt: the tombstone lands without the
+/// unbind a real delete emits with it, so `readme.txt` stays bound under a
+/// tombstoned directory. No client history produces that — planning resolves
+/// through visible bindings, and a visible inode is one no tombstone covers
+/// — so the guards fire only on self-contradicting stored state and classify
+/// as corruption.
 #[tokio::test]
-async fn create_and_replace_under_ancestor_tombstone_are_rejected() {
+async fn create_and_replace_under_ancestor_tombstone_report_corruption() {
     let metadata_state = metadata_state_after(&[
         wal_create_directory(0, InodeId(2), InodeId(1), "docs".to_owned()),
         wal_create_file(
@@ -288,6 +295,10 @@ async fn create_and_replace_under_ancestor_tombstone_are_rejected() {
             ..
         }
     ));
+    assert_eq!(
+        CoreError::from(create_error).code(),
+        ErrorCode::NamespaceCorrupt
+    );
 
     let replace_error = build_commit_plan(
         &CommitRequest {
@@ -313,6 +324,10 @@ async fn create_and_replace_under_ancestor_tombstone_are_rejected() {
             ..
         }
     ));
+    assert_eq!(
+        CoreError::from(replace_error).code(),
+        ErrorCode::NamespaceCorrupt
+    );
 }
 
 #[tokio::test]
@@ -553,8 +568,11 @@ async fn restore_revision_can_reference_restore_created_earlier_in_same_request(
     ));
 }
 
+/// Same corrupt shape as the create/replace guards above: a tombstone with
+/// no matching unbind leaves a live binding under it, which is the only way
+/// this guard can fire.
 #[tokio::test]
-async fn restore_revision_under_tombstoned_ancestor_is_rejected() {
+async fn restore_revision_under_tombstoned_ancestor_reports_corruption() {
     let metadata_state = metadata_state_after(&[
         wal_create_directory(0, InodeId(2), InodeId(1), "docs".to_owned()),
         wal_create_file(
@@ -584,7 +602,7 @@ async fn restore_revision_under_tombstoned_ancestor_is_rejected() {
         &context,
     )
     .await
-    .expect_err("restore tombstone conflict");
+    .expect_err("restore under a covering tombstone");
     assert!(matches!(
         error,
         CommitValidationError::RestoreRevisionUnderSubtreeTombstone {
@@ -592,6 +610,7 @@ async fn restore_revision_under_tombstoned_ancestor_is_rejected() {
             ..
         }
     ));
+    assert_eq!(CoreError::from(error).code(), ErrorCode::NamespaceCorrupt);
 }
 
 #[tokio::test]

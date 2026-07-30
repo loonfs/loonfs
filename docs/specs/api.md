@@ -172,7 +172,8 @@ Every error response is a JSON body:
   "details": {
     "fenced_epoch": 3,
     "active_writer_epoch": 4,
-    "active_writer": "server-b"
+    "active_writer": "server-b",
+    "active_acquired_at_ms": 1739459200000
   }
 }
 ```
@@ -200,7 +201,7 @@ The codes that populate it:
 
 | Code | Detail fields |
 | --- | --- |
-| `writer_fenced` | `fenced_epoch`, `active_writer_epoch`, `active_writer` (when the head recorded the winner's writer id) |
+| `writer_fenced` | `fenced_epoch`, `active_writer_epoch`, plus `active_writer` and `active_acquired_at_ms` when the head recorded a writer block. Writer ids are process labels, so two runs on one machine can share one; the acquisition stamp is what tells them apart |
 | `stale_revision` | `inode_id`, `expected_revision`, `actual_revision` (absent when the inode has no current revision) |
 | `commit_id_reuse_conflict` | `commit_id` |
 | `rebootstrap_required` | `after_seq`, `retention_floor_seq` |
@@ -235,7 +236,6 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `directory_not_empty` | 409 | The directory has children and the operation is not recursive. |
 | `stale_head` | 409 | The write raced a head advance; retry against fresh state. |
 | `stale_revision` | 409 | A caller-supplied base revision is no longer current. |
-| `tombstone_conflict` | 409 | The path is covered by a subtree tombstone. |
 | `not_deleted` | 409 | The undelete target is not the root of a live deletion; nothing to recover. |
 | `writer_fenced` | 409 | The writer epoch was superseded by another session. |
 | `would_cycle` | 409 | The rename would create a directory cycle. |

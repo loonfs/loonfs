@@ -341,8 +341,32 @@ async fn two_servers_share_one_store_with_last_writer_wins_fencing() {
             .put_file_bytes(&host_c_target, b"host a again\n", &replace_file_options())
             .await
         {
-            Err(ClientError::Api { code, .. }) => {
-                assert_eq!(code, "writer_fenced", "attempt {attempt}")
+            Err(ClientError::Api {
+                code,
+                message,
+                details,
+                ..
+            }) => {
+                assert_eq!(code, "writer_fenced", "attempt {attempt}");
+                // The details name the winner and when it acquired. Writer
+                // ids are process labels, so two runs on one machine can
+                // share one; the stamp is what separates them, and carrying
+                // it structurally means a caller never parses the message.
+                let details = details.expect("a fenced error carries structured details");
+                assert_eq!(
+                    details.active_writer.as_deref(),
+                    Some("loonfs-server-b"),
+                    "attempt {attempt}"
+                );
+                let acquired_at_ms = details
+                    .active_acquired_at_ms
+                    .expect("fenced details carry the winner's acquisition stamp");
+                assert!(
+                    message.contains(&format!(
+                        "(writer `loonfs-server-b`, acquired at {acquired_at_ms} ms)"
+                    )),
+                    "the structured stamp should be the one the message renders: {message}"
+                );
             }
             other => unreachable!("expected writer_fenced on attempt {attempt}, got {other:?}"),
         }
