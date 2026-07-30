@@ -62,6 +62,12 @@ walkdir = "2"
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
 zstd = "0.13"
 
+[profile.dev]
+# Tests inherit this profile. Line tables are everything a backtrace or a
+# panic location needs; the rest of the debug info only costs link time and
+# disk.
+debug = "line-tables-only"
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 unreachable_pub = "warn"
