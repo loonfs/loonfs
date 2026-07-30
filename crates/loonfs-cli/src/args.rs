@@ -374,7 +374,7 @@ pub(crate) struct FilesystemRmArgs {
     /// Annotation recorded on the commit and shown by `loon changes`. Part
     /// of the commit's identity: resubmitting the same --commit-id with a
     /// different message is a commit id conflict.
-    #[arg(long)]
+    #[arg(short = 'm', long)]
     pub message: Option<String>,
     /// Idempotency key for the commit; resubmit with the same id to retry
     /// safely. Generated when absent and returned in the output.
@@ -393,7 +393,7 @@ pub(crate) struct FilesystemMkdirArgs {
     /// Annotation recorded on the commit and shown by `loon changes`. Part
     /// of the commit's identity: resubmitting the same --commit-id with a
     /// different message is a commit id conflict.
-    #[arg(long)]
+    #[arg(short = 'm', long)]
     pub message: Option<String>,
     /// Idempotency key for the commit; resubmit with the same id to retry
     /// safely. Generated when absent and returned in the output.
@@ -490,7 +490,7 @@ pub(crate) struct FilesystemPutArgs {
     /// Annotation recorded on the commit and shown by `loon changes`. Part
     /// of the commit's identity: resubmitting the same --commit-id with a
     /// different message is a commit id conflict.
-    #[arg(long)]
+    #[arg(short = 'm', long)]
     pub message: Option<String>,
     /// Idempotency key for the commit; resubmit with the same id to retry
     /// safely. Generated when absent and returned in the output.
@@ -514,7 +514,7 @@ pub(crate) struct FilesystemTransferArgs {
     /// Annotation recorded on the commit and shown by `loon changes`. Part
     /// of the commit's identity: resubmitting the same --commit-id with a
     /// different message is a commit id conflict.
-    #[arg(long)]
+    #[arg(short = 'm', long)]
     pub message: Option<String>,
     /// Idempotency key for the commit; resubmit with the same id to retry
     /// safely. Generated when absent and returned in the output.
@@ -532,7 +532,7 @@ pub(crate) struct FilesystemRestoreArgs {
     /// Annotation recorded on the commit and shown by `loon changes`. Part
     /// of the commit's identity: resubmitting the same --commit-id with a
     /// different message is a commit id conflict.
-    #[arg(long)]
+    #[arg(short = 'm', long)]
     pub message: Option<String>,
     /// Idempotency key for the commit; resubmit with the same id to retry
     /// safely. Generated when absent and returned in the output.
@@ -558,7 +558,7 @@ pub(crate) struct FilesystemUndeleteArgs {
     /// Annotation recorded on the commit and shown by `loon changes`. Part
     /// of the commit's identity: resubmitting the same --commit-id with a
     /// different message is a commit id conflict.
-    #[arg(long)]
+    #[arg(short = 'm', long)]
     pub message: Option<String>,
     /// Idempotency key for the commit; resubmit with the same id to retry
     /// safely. Generated when absent and returned in the output.

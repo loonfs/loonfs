@@ -67,6 +67,10 @@ Filesystem operations
     --profile <name>
     --namespace <name>
 
+  Commands that commit (put, mkdir, rm, mv, cp, restore) also accept:
+    -m, --message <message>
+      Annotation recorded on the commit and shown by `loon changes`
+
   loon ls [--profile <name>] [--namespace <name>] [path]
     List entries at a path
 
@@ -79,25 +83,25 @@ Filesystem operations
   loon get [--profile <name>] [--namespace <name>] [--revision <n>] <remote-path> [local-destination]
     Download a remote file
 
-  loon put [--profile <name>] [--namespace <name>] <local-path> [remote-path] [--force]
+  loon put [--profile <name>] [--namespace <name>] <local-path> [remote-path] [--force] [-m <message>]
     Upload a local file
 
   loon revisions [--profile <name>] [--namespace <name>] [--limit <n>] [--cursor <cursor>] <path>
     List file revisions newest-first
 
-  loon mkdir [--profile <name>] [--namespace <name>] <path>
+  loon mkdir [--profile <name>] [--namespace <name>] [-m <message>] <path>
     Create a directory
 
-  loon restore [--profile <name>] [--namespace <name>] --revision <n> <path>
+  loon restore [--profile <name>] [--namespace <name>] [-m <message>] --revision <n> <path>
     Restore a file to a prior revision
 
-  loon rm [--profile <name>] [--namespace <name>] <path>
+  loon rm [--profile <name>] [--namespace <name>] [-m <message>] <path>
     Remove a path
 
-  loon mv [--profile <name>] [--namespace <name>] <source-path> <dest-path>
+  loon mv [--profile <name>] [--namespace <name>] [-m <message>] <source-path> <dest-path>
     Move or rename a path
 
-  loon cp [--profile <name>] [--namespace <name>] <source-path> <dest-path>
+  loon cp [--profile <name>] [--namespace <name>] [-m <message>] <source-path> <dest-path>
     Copy a path
 
 Profile options
