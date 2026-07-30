@@ -75,7 +75,6 @@ pub(crate) async fn run_filesystem_ls(
     .map_err(|error| context.fail(kind, error))?;
     let entries = context
         .target
-        .backend()
         .list_path_entries_all(&spec)
         .await
         .map_err(|error| context.fail(kind, error))?;
@@ -97,7 +96,6 @@ pub(crate) async fn run_filesystem_stat(
         .map_err(|error| context.fail(kind, error))?;
     let entry = context
         .target
-        .backend()
         .stat_path(&spec)
         .await
         .map_err(|error| context.fail(kind, error))?;
@@ -135,7 +133,6 @@ pub(crate) async fn run_filesystem_grep(
     let (namespace_id, head_seq, built_through_seq) = loop {
         let response = context
             .target
-            .backend()
             .grep(&context.namespace, &request)
             .await
             .map_err(|error| context.fail(kind, error))?;
@@ -181,11 +178,10 @@ pub(crate) async fn run_filesystem_cat(
         Some(revision_no) => {
             context
                 .target
-                .backend()
                 .get_file_revision_bytes(&spec, revision_no)
                 .await
         }
-        None => context.target.backend().get_file_bytes(&spec).await,
+        None => context.target.get_file_bytes(&spec).await,
     }
     .map_err(|error| context.fail(kind, error))?;
 
@@ -217,7 +213,6 @@ pub(crate) async fn run_filesystem_get(
         .map_err(|error| context.fail(kind, error))?;
     let entry = context
         .target
-        .backend()
         .stat_path(&spec)
         .await
         .map_err(|error| context.fail(kind, error))?;
@@ -273,11 +268,10 @@ pub(crate) async fn run_filesystem_get(
         Some(revision_no) => {
             context
                 .target
-                .backend()
                 .get_file_revision_bytes(&spec, revision_no)
                 .await
         }
-        None => context.target.backend().get_file_bytes(&spec).await,
+        None => context.target.get_file_bytes(&spec).await,
     }
     .map_err(|error| context.fail(kind, error))?;
     let data = match args.local_destination.as_deref() {
@@ -326,7 +320,6 @@ pub(crate) async fn run_filesystem_trash(
     let context = resolve_command_context(kind, &args.target).await?;
     let response = context
         .target
-        .backend()
         .list_trash(&context.namespace, args.limit, args.cursor.as_deref())
         .await
         .map_err(|error| context.fail(kind, error))?;
@@ -348,7 +341,6 @@ pub(crate) async fn run_filesystem_revisions(
         .map_err(|error| context.fail(kind, error))?;
     let response = context
         .target
-        .backend()
         .list_file_revisions_page(&spec, args.limit, args.cursor.as_deref())
         .await
         .map_err(|error| context.fail(kind, error))?;
@@ -467,7 +459,6 @@ pub(crate) async fn run_filesystem_put(
     };
     let result = context
         .target
-        .backend()
         .put_file_bytes(&spec, &bytes, &options)
         .await
         .map_err(|error| context.fail(kind, error))?;
@@ -501,7 +492,6 @@ pub(crate) async fn run_filesystem_rm(
     // instead of removing (and mis-reporting) a different inode.
     let deleted_inode = context
         .target
-        .backend()
         .stat_path(&spec)
         .await
         .map_err(|error| context.fail(kind, error))?
@@ -519,7 +509,6 @@ pub(crate) async fn run_filesystem_rm(
     };
     let result = context
         .target
-        .backend()
         .delete_path(&spec, &options)
         .await
         .map_err(|error| context.fail(kind, error))?;
@@ -549,7 +538,6 @@ pub(crate) async fn run_filesystem_restore(
         .map_err(|error| context.fail(kind, error))?;
     let result = context
         .target
-        .backend()
         .restore_file_revision(
             &spec,
             RevisionNo(args.revision),
@@ -586,7 +574,6 @@ pub(crate) async fn run_filesystem_undelete(
         .map_err(|error| context.fail(kind, error))?;
     let result = context
         .target
-        .backend()
         .undelete(
             &spec,
             loonfs_api::InodeId(args.inode),
@@ -629,7 +616,6 @@ pub(crate) async fn run_filesystem_mkdir(
     };
     let result = context
         .target
-        .backend()
         .create_directory(&spec, &options)
         .await
         .map_err(|error| context.fail(kind, error))?;
@@ -704,7 +690,6 @@ async fn run_filesystem_transfer(
     let result = if transfer_kind == TransferKind::Copy {
         let entry = context
             .target
-            .backend()
             .stat_path(&from)
             .await
             .map_err(|error| context.fail(kind, error))?;
@@ -753,7 +738,6 @@ async fn run_filesystem_transfer(
         };
         context
             .target
-            .backend()
             .copy_path(
                 &from,
                 &to,
@@ -772,7 +756,6 @@ async fn run_filesystem_transfer(
         };
         context
             .target
-            .backend()
             .move_path(
                 &from,
                 &to,

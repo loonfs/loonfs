@@ -6,8 +6,8 @@ use loonfs_client::ClientError;
 use loonfs_grep::GrepError;
 use thiserror::Error;
 
-/// Failure surfaced by a [`crate::backend::Backend`], as a `(code, message)`
-/// pair.
+/// Failure surfaced by the backend seam ([`crate::resolve::ResolvedTarget`]),
+/// as a `(code, message)` pair.
 ///
 /// `code` draws from exactly two namespaces:
 ///

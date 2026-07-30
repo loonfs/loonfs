@@ -1,7 +1,7 @@
 //! Resolves the active profile and namespace from flags, config defaults,
 //! and the environment.
 
-use crate::backend::{Backend, EmbeddedBackend, RemoteBackend};
+use crate::backend::EmbeddedBackend;
 use crate::backend_error::map_runtime_error;
 use crate::config::{default_config_path, load_config, CliConfig, ProfileConfig, StoreConfig};
 use crate::error::CliError;
@@ -98,7 +98,7 @@ pub(crate) struct EmbeddedTarget {
 }
 
 pub(crate) struct RemoteTarget {
-    backend: RemoteBackend,
+    pub(super) client: Client,
 }
 
 impl ResolvedTarget {
@@ -128,13 +128,6 @@ impl ResolvedTarget {
         match self {
             ResolvedTarget::Embedded(_) => "embedded",
             ResolvedTarget::Remote(_) => "remote",
-        }
-    }
-
-    pub(crate) fn backend(&self) -> &dyn Backend {
-        match self {
-            ResolvedTarget::Embedded(target) => &target.backend,
-            ResolvedTarget::Remote(target) => &target.backend,
         }
     }
 }
@@ -204,8 +197,6 @@ impl RemoteTarget {
             disable_transient_retry: no_retry,
         })
         .map_err(|error| CliError::invalid_config(error.to_string()))?;
-        Ok(Self {
-            backend: RemoteBackend::new(client),
-        })
+        Ok(Self { client })
     }
 }

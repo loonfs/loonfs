@@ -127,7 +127,6 @@ pub(crate) async fn run_put_tree(
         };
         match context
             .target
-            .backend()
             .create_directory(
                 &spec,
                 &CreateDirectoryOptions {
@@ -149,7 +148,7 @@ pub(crate) async fn run_put_tree(
     }
 
     let outcomes = futures::stream::iter(files.into_iter().map(|job| {
-        let backend = context.target.backend();
+        let backend = &context.target;
         let namespace = context.namespace.clone();
         let message = message.clone();
         let remote = format!("{}/{}", remote_root.trim_end_matches('/'), job.remote);
@@ -228,7 +227,7 @@ pub(crate) async fn run_get_tree(
     }
 
     let outcomes = futures::stream::iter(listing.files.into_iter().map(|job| {
-        let backend = context.target.backend();
+        let backend = &context.target;
         let namespace = context.namespace.clone();
         let local = local_root.join(job.local);
         async move {
@@ -300,7 +299,6 @@ pub(crate) async fn run_copy_tree(
         };
         match context
             .target
-            .backend()
             .create_directory(
                 &spec,
                 &CreateDirectoryOptions {
@@ -327,7 +325,7 @@ pub(crate) async fn run_copy_tree(
         DestinationBehavior::NoReplace
     };
     let outcomes = futures::stream::iter(listing.files.into_iter().map(|job| {
-        let backend = context.target.backend();
+        let backend = &context.target;
         let namespace = context.namespace.clone();
         let message = message.clone();
         let destination = joined_remote(
@@ -496,7 +494,6 @@ async fn walk_remote_tree(
             .map_err(|error| context.fail(kind, CliError::invalid_input(error.to_string())))?;
         let entries = context
             .target
-            .backend()
             .list_path_entries_all(&spec)
             .await
             .map_err(|error| context.fail(kind, error))?;
