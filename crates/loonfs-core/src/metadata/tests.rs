@@ -3,6 +3,7 @@
 
 use super::*;
 use loonfs_api::wire::wal::WalDelta;
+use loonfs_api::ContentId;
 use loonfs_api::{
     AbsolutePath, ChangeSeq, CommitId, ContentRef, InodeId, InodeKind, NameKey, RevisionNo,
 };
@@ -443,18 +444,8 @@ fn find_commit_receipt_returns_latest_matching_receipt() {
 #[test]
 fn revisions_advance_watermark_and_receipt_index_round_trips() {
     let commit_id = CommitId::parse("indexed-commit").expect("valid commit id");
-    let content_ref = ContentRef {
-        kind: loonfs_api::ContentRefKind::WholeFileV0,
-        digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-            .to_owned(),
-        size_bytes: 12,
-    };
-    let replacement_ref = ContentRef {
-        kind: loonfs_api::ContentRefKind::WholeFileV0,
-        digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-            .to_owned(),
-        size_bytes: 24,
-    };
+    let content_ref = ContentRef::blob_v1(ContentId::generate(), b"first revision bytes");
+    let replacement_ref = ContentRef::blob_v1(ContentId::generate(), b"second revision bytes");
 
     let mut builder = MetadataStateBuilder::default();
     builder.push_inode(InodeRecord {

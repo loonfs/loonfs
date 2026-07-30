@@ -42,6 +42,7 @@ pub use self::rows::{
 
 pub(crate) use self::durable_cache::DurableVisibilityCache;
 pub(crate) use self::rows::active_tombstone_from_records;
+pub(crate) use self::rows::content_ref_evidence_bytes;
 #[cfg(test)]
 pub(crate) use self::view::InMemoryMetadataView;
 pub(crate) use self::view::MetadataView;

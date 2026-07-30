@@ -88,17 +88,17 @@ async fn begin_direct_put_upload(
              checksum-bound uploads; this deployment's endpoint cannot",
         ));
     };
-    let Some(content_ref) = request.content_ref else {
+    let Some(claim) = request.content else {
         return Err(ApiResponseError::new(
             StatusCode::BAD_REQUEST,
             ErrorCode::InvalidRequest,
-            "invalid upload content: direct_put requires content_ref at begin_upload",
+            "invalid upload content: direct_put requires a content claim at begin_upload",
         ));
     };
 
     let prepared = state
         .writer
-        .begin_direct_put_upload_target(&namespace_id, content_ref)
+        .begin_direct_put_upload_target(&namespace_id, claim)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     let content_ref = prepared.target.content_ref;
@@ -177,7 +177,7 @@ pub(super) async fn content_preparation_for_puts(
             Err(error) => {
                 tracing::debug!(
                     namespace_id = %namespace_id,
-                    content_ref_digest = %token.content_ref.digest,
+                    content_id = %token.content_ref.content_id,
                     error = %error,
                     "content token rejected during put preparation"
                 );

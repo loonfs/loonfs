@@ -556,13 +556,14 @@ mod tests {
 
         assert_eq!(error.code, ErrorCode::RevisionNotFound.as_str());
 
+        let content_id = loonfs::ContentId::generate();
         let error = map_runtime_error(RuntimeError::Core(CoreError::ContentPreparation(
             loonfs::publish::ContentPreparationError::ContentNotPrepared {
-                content_ref_digest: "abc123".to_owned(),
+                content_id: content_id.clone(),
             },
         )));
         assert_eq!(error.code, ErrorCode::ContentNotPrepared.as_str());
-        assert!(error.message.contains("abc123"));
+        assert!(error.message.contains(content_id.as_str()));
     }
 
     #[test]

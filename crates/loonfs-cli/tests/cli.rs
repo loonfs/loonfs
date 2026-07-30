@@ -454,22 +454,20 @@ fn commit_messages_ride_the_feed_and_bind_identity() {
     // a different message conflicts instead of silently replaying.
     let first = harness.run(&[
         "--json",
-        "put",
-        payload.to_str().expect("utf-8 path"),
-        "/pinned.txt",
+        "mkdir",
+        "/pinned",
         "--commit-id",
-        "pinned-put",
+        "pinned-mkdir",
         "--message",
         "one",
     ]);
     assert_success(&first);
     let replay = harness.run(&[
         "--json",
-        "put",
-        payload.to_str().expect("utf-8 path"),
-        "/pinned.txt",
+        "mkdir",
+        "/pinned",
         "--commit-id",
-        "pinned-put",
+        "pinned-mkdir",
         "--message",
         "one",
     ]);
@@ -481,11 +479,10 @@ fn commit_messages_ride_the_feed_and_bind_identity() {
     );
     let conflicted = harness.run(&[
         "--json",
-        "put",
-        payload.to_str().expect("utf-8 path"),
-        "/pinned.txt",
+        "mkdir",
+        "/pinned",
         "--commit-id",
-        "pinned-put",
+        "pinned-mkdir",
         "--message",
         "two",
     ]);
@@ -495,6 +492,36 @@ fn commit_messages_ride_the_feed_and_bind_identity() {
         "commit_id_reuse_conflict",
         "{}",
         json_error(&conflicted)
+    );
+
+    // A put's identity includes *which* content object it attaches, and
+    // `loon put` uploads its file every time it runs. So rerunning the same
+    // command under the same commit id is a different mutation, not a retry,
+    // and it conflicts rather than replaying. Reusing a commit id across
+    // `put` invocations is not a supported retry strategy.
+    let local_payload = payload.to_str().expect("utf-8 path");
+    assert_success(&harness.run(&[
+        "--json",
+        "put",
+        local_payload,
+        "/pinned.txt",
+        "--commit-id",
+        "pinned-put",
+    ]));
+    let reuploaded = harness.run(&[
+        "--json",
+        "put",
+        local_payload,
+        "/pinned.txt",
+        "--commit-id",
+        "pinned-put",
+    ]);
+    assert_failure(&reuploaded);
+    assert_eq!(
+        json_error(&reuploaded)["code"],
+        "commit_id_reuse_conflict",
+        "{}",
+        json_error(&reuploaded)
     );
 }
 

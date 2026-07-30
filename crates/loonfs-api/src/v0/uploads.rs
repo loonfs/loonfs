@@ -7,6 +7,22 @@ use crate::{ContentRef, NamespaceId, UploadId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// What a `direct_put` client promises about bytes it has not written yet.
+///
+/// The server mints the content object's identity — a client cannot name a
+/// key it has not been given — so a direct upload declares only what it can
+/// know about its own bytes. The server signs both into the provider write
+/// and verifies them again at completion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
+pub struct DirectPutContentClaim {
+    /// Complete byte length the client will write.
+    pub size_bytes: u64,
+    /// SHA-256 over the complete payload, lowercase hex.
+    pub sha256: String,
+}
+
 /// Upload transport mode.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -33,9 +49,10 @@ pub struct BeginUploadRequest {
     /// Requested upload transport. Absent keeps the existing service-proxied path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<UploadMode>,
-    /// Required for `direct_put`; the server signs exactly this content object.
+    /// Required for `direct_put`; the server signs exactly these bytes into
+    /// the write it authorizes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content_ref: Option<ContentRef>,
+    pub content: Option<DirectPutContentClaim>,
 }
 
 /// Client-facing direct transfer capability.
@@ -65,7 +82,9 @@ pub enum ObjectTransferAccess {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct DirectPutUpload {
-    /// Exact immutable object identity and byte length covered by the signed request.
+    /// Immutable object identity the server minted, plus the byte length and
+    /// checksum covered by the signed request. Completion and the later
+    /// commit both name exactly this reference.
     pub content_ref: ContentRef,
     /// Short-lived write capability the client uses without learning the raw object key.
     pub access: ObjectTransferAccess,
@@ -134,9 +153,10 @@ pub struct CompleteUploadResponse {
 #[cfg(test)]
 mod tests {
     use super::{
-        BeginUploadRequest, BeginUploadResponse, DirectPutUpload, ObjectTransferAccess, UploadMode,
+        BeginUploadRequest, BeginUploadResponse, DirectPutContentClaim, DirectPutUpload,
+        ObjectTransferAccess, UploadMode,
     };
-    use crate::{ContentRef, NamespaceId, UploadId};
+    use crate::{ContentId, ContentRef, NamespaceId, UploadId};
     use std::collections::BTreeMap;
 
     #[test]
@@ -161,7 +181,7 @@ mod tests {
                 .expect("valid upload id"),
             mode: UploadMode::DirectPut,
             direct_put: Some(DirectPutUpload {
-                content_ref: ContentRef::whole_file_v0(b"hello"),
+                content_ref: ContentRef::blob_v1(ContentId::generate(), b"hello"),
                 access: ObjectTransferAccess::PresignedUrl {
                     method: "PUT".to_owned(),
                     url: "https://bucket.example/object?X-Amz-Signature=abc".to_owned(),
@@ -180,5 +200,26 @@ mod tests {
         let json = serde_json::to_string(&response).expect("serialize response");
         assert!(json.contains(r#""kind":"presigned_url""#));
         assert!(!json.contains("object_key"));
+    }
+
+    /// A direct-put client declares what it is about to write; it cannot
+    /// declare *where*, because the server owns content identity.
+    #[test]
+    fn a_direct_put_claim_names_only_size_and_digest() {
+        let request: BeginUploadRequest = serde_json::from_str(
+            r#"{"mode":"direct_put","content":{"size_bytes":5,"sha256":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}}"#,
+        )
+        .expect("decode direct-put begin request");
+        let claim = request.content.expect("claim");
+        assert_eq!(claim.size_bytes, 5);
+        assert_eq!(claim.sha256.len(), 64);
+
+        assert!(
+            serde_json::from_str::<DirectPutContentClaim>(
+                r#"{"size_bytes":5,"sha256":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824","content_id":"cnt_0123456789abcdef0123456789abcdef"}"#
+            )
+            .is_err(),
+            "a client must not be able to name the content object"
+        );
     }
 }

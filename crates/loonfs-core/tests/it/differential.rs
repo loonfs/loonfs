@@ -2,15 +2,14 @@
 
 use loonfs_api::wire::wal::WalDelta;
 use loonfs_api::{
-    sha256_digest, ChangeSeq, ContentRef, ContentRefKind, DisplayName, InodeId, InodeKind, NameKey,
-    RevisionNo,
+    ChangeSeq, ContentId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, RevisionNo,
 };
 use loonfs_core::metadata::MetadataState as CoreMetadataState;
 use loonfs_model::metadata::MetadataState as ModelMetadataState;
 
 type NormalizedInodes = Vec<(u64, &'static str, u64)>;
 type NormalizedDirentryBinds = Vec<(u64, String, u64, u64, u32)>;
-type NormalizedRevisions = Vec<(u64, u64, u64, u32, String)>;
+type NormalizedRevisions = Vec<(u64, u64, u64, u32, ContentId)>;
 type NormalizedTombstones = Vec<(u64, u64, u32)>;
 type NormalizedMetadata = (
     NormalizedInodes,
@@ -20,11 +19,7 @@ type NormalizedMetadata = (
 );
 
 fn content_ref(seed: &str) -> ContentRef {
-    ContentRef {
-        kind: ContentRefKind::WholeFileV0,
-        digest: sha256_digest(seed.as_bytes()),
-        size_bytes: seed.len() as u64,
-    }
+    ContentRef::blob_v1(ContentId::generate(), seed.as_bytes())
 }
 
 fn create_directory(
@@ -263,7 +258,7 @@ fn normalize_core(state: &CoreMetadataState) -> NormalizedMetadata {
                     revision.revision_no.0,
                     revision.committed_seq.0,
                     revision.revision_delta_index,
-                    revision.content_ref.digest.clone(),
+                    revision.content_ref.content_id.clone(),
                 )
             })
             .collect(),
@@ -314,7 +309,7 @@ fn normalize_model(state: &ModelMetadataState) -> NormalizedMetadata {
                     revision.revision_no.0,
                     revision.committed_seq.0,
                     revision.revision_delta_index,
-                    revision.content_ref.digest.clone(),
+                    revision.content_ref.content_id.clone(),
                 )
             })
             .collect(),

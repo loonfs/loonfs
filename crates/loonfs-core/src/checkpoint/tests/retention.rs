@@ -28,6 +28,70 @@ fn run_segment_object_keys(manifest: &NamespaceManifestEnvelope) -> Vec<String> 
         .collect()
 }
 
+/// Compares two states written by two independent runs of the same
+/// operations.
+///
+/// Every such run stages its own content objects, so revision rows name
+/// different ids by design — and because a commit's fingerprint covers which
+/// object a put attached, the receipt rows differ too. Both differences come
+/// from the seeding, not from the reorganization under test, so both are
+/// normalized away here and only here. Comparisons within one store stay
+/// exact.
+fn metadata_states_equivalent_ignoring_content_identity(
+    left: &MetadataState,
+    right: &MetadataState,
+) -> bool {
+    let normalize = |state: &MetadataState| {
+        CHECKPOINT_TABLE_FAMILIES
+            .into_iter()
+            .map(|family| {
+                let rows = manifest_rows_for_family(state, family)
+                    .into_iter()
+                    .map(|row| match row {
+                        MetadataRow::Revision {
+                            inode_id,
+                            revision_no,
+                            committed_seq,
+                            committed_at_ms,
+                            revision_delta_index,
+                            content_ref,
+                        } => MetadataRow::Revision {
+                            inode_id,
+                            revision_no,
+                            committed_seq,
+                            committed_at_ms,
+                            revision_delta_index,
+                            content_ref: loonfs_api::ContentRef {
+                                content_id: loonfs_api::ContentId::parse(
+                                    "cnt_00000000000000000000000000000000",
+                                )
+                                .expect("placeholder content id"),
+                                ..content_ref
+                            },
+                        },
+                        MetadataRow::CommitReceipt {
+                            commit_id,
+                            semantic_commit_fingerprint: _,
+                            committed_seq,
+                            committed_at_ms,
+                            message,
+                        } => MetadataRow::CommitReceipt {
+                            commit_id,
+                            semantic_commit_fingerprint: "<normalized>".to_owned(),
+                            committed_seq,
+                            committed_at_ms,
+                            message,
+                        },
+                        other => other,
+                    })
+                    .collect::<Vec<_>>();
+                (family, rows)
+            })
+            .collect::<Vec<_>>()
+    };
+    normalize(left) == normalize(right)
+}
+
 fn assert_manifest_rows_have_unique_keys(metadata_state: &MetadataState) {
     for family in CHECKPOINT_TABLE_FAMILIES {
         let rows = manifest_rows_for_family(metadata_state, family);
@@ -933,7 +997,7 @@ async fn bounded_reorganization_converges_to_unbounded_shape_and_preserves_inter
     )
     .await
     .expect("load unbounded result");
-    assert!(metadata_states_equivalent(
+    assert!(metadata_states_equivalent_ignoring_content_identity(
         &bounded.metadata_state,
         &unbounded.metadata_state
     ));

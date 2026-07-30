@@ -2,6 +2,7 @@
 
 use crate::common::http_split_support::*;
 use crate::common::start_server;
+use loonfs_api::ContentId;
 use loonfs_api::{
     v0::{BeginUploadRequest, CompleteUploadRequest, FilesystemChange},
     AbsolutePath, ApiError, ChangeSeq, CommitId, CommitRequest, CommitResponse, ContentRef,
@@ -105,7 +106,7 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
         .expect("stage mismatch upload content");
     assert_ne!(
         staged.content_ref,
-        ContentRef::whole_file_v0(b"other bytes")
+        ContentRef::blob_v1(ContentId::generate(), b"other bytes")
     );
     match harness
         .client
@@ -113,7 +114,7 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
             &namespace,
             &mismatch_upload.upload_id,
             &CompleteUploadRequest {
-                content_ref: ContentRef::whole_file_v0(b"other bytes"),
+                content_ref: ContentRef::blob_v1(ContentId::generate(), b"other bytes"),
             },
         )
         .await

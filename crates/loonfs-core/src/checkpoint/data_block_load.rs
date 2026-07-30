@@ -4,6 +4,7 @@ use super::block_fetch::{load_section_bytes, segment_block_cache_key, segment_co
 use super::block_load::SessionBlockMemo;
 use super::cache::{DecodedMetadataTableBlock, MetadataTableBlockKind, MetadataTableCache};
 use super::error::ManifestLoadError;
+use crate::metadata::content_ref_evidence_bytes;
 use loonfs_api::wire::manifest::{MetadataFileRef, MetadataRow, MetadataTableFamily};
 use loonfs_api::wire::sst_blocks::{decode_data_block, DecodedDataBlock, SegmentIndexEntry};
 use loonfs_objectstore::ObjectStore;
@@ -242,7 +243,7 @@ pub(super) fn decoded_manifest_row_weight(row: &MetadataRow) -> usize {
             ALLOCATED_ROW_OVERHEAD + name_key.as_str().len()
         }
         MetadataRow::Revision { content_ref, .. } => {
-            ALLOCATED_ROW_OVERHEAD + content_ref.digest.len()
+            ALLOCATED_ROW_OVERHEAD + content_ref_evidence_bytes(content_ref)
         }
         MetadataRow::Tombstone { .. } => FIXED_ROW_OVERHEAD,
         MetadataRow::CommitReceipt {

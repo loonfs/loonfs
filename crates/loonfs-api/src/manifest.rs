@@ -874,11 +874,11 @@ mod tests {
             committed_seq: ChangeSeq(12),
             committed_at_ms: 12_000,
             revision_delta_index: 3,
-            content_ref: crate::ContentRef {
-                kind: crate::ContentRefKind::WholeFileV0,
-                digest: "sha256:abc".to_owned(),
-                size_bytes: 123,
-            },
+            content_ref: crate::ContentRef::blob_v1(
+                crate::ContentId::parse("cnt_0123456789abcdef0123456789abcdef")
+                    .expect("valid content id"),
+                b"row key sample",
+            ),
         };
 
         assert_eq!(

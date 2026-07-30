@@ -40,6 +40,6 @@ pub use search::{
 };
 pub use uploads::{
     BeginUploadRequest, BeginUploadResponse, CompleteUploadRequest, CompleteUploadResponse,
-    DirectPutUpload, ObjectTransferAccess, UploadContentResponse, UploadMode,
-    ValidatedContentToken,
+    DirectPutContentClaim, DirectPutUpload, ObjectTransferAccess, UploadContentResponse,
+    UploadMode, ValidatedContentToken,
 };

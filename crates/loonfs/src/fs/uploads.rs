@@ -6,7 +6,7 @@ use crate::FsWriter;
 use crate::Result;
 use crate::{
     BeginUploadRequest, BeginUploadResponse, CompleteUploadRequest, CompleteUploadResponse,
-    ContentRef, NamespaceId, UploadContentResponse,
+    DirectPutContentClaim, NamespaceId, UploadContentResponse,
 };
 use loonfs_api::UploadId;
 
@@ -20,15 +20,16 @@ impl FsWriter {
         Ok(self.engine(namespace_id).begin_upload(request).await?)
     }
 
-    /// Starts a direct-put upload session and returns the internal target for server-side signing.
+    /// Mints the content object a direct upload will write to and returns
+    /// the internal target for server-side signing.
     pub async fn begin_direct_put_upload_target(
         &self,
         namespace_id: &NamespaceId,
-        content_ref: ContentRef,
+        claim: DirectPutContentClaim,
     ) -> Result<BeginDirectPutUploadTargetResponse> {
         Ok(self
             .engine(namespace_id)
-            .begin_direct_put_upload_target(content_ref)
+            .begin_direct_put_upload_target(claim)
             .await?)
     }
 

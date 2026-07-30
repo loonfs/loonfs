@@ -11,18 +11,21 @@ use crate::error::{CoreError, Result};
 use crate::limits::CONTENTION_RETRY_LIMIT;
 use crate::namespace::catalog::load_namespace_content_store_id;
 use crate::namespace::control::load_namespace_head_control;
-use crate::storage::content::probe_durable_content_reference;
+use crate::storage::content::{stage_bytes_under_content_id, verify_durable_content_checksum};
 use crate::storage::content_admission::{ContentAdmission, PreparedContent};
 use bytes::Bytes;
 use loonfs_api::v0::{
     BeginUploadRequest, BeginUploadResponse, CompleteUploadRequest, CompleteUploadResponse,
-    UploadContentResponse, UploadMode,
+    DirectPutContentClaim, UploadContentResponse, UploadMode,
 };
 use loonfs_api::wire::control::{
     encode_control_object, CompletedUpload, ControlObjectKind, NamespaceState,
     UploadSessionEnvelope, UploadSessionLifecycle, UploadSessionState,
 };
-use loonfs_api::{ContentRef, ContentRefKind, ContentStoreId, NamespaceId, UploadId};
+use loonfs_api::{
+    ChecksumAlgorithm, ContentId, ContentRef, ContentRefKind, ContentStoreId, NamespaceId,
+    StorageChecksum, UploadId,
+};
 use loonfs_objectstore::keys::{content_blob, upload_session};
 use loonfs_objectstore::ObjectStore;
 
@@ -48,8 +51,7 @@ pub(crate) async fn begin_upload<S: ObjectStore + ?Sized>(
     let upload_id = create_upload_session(
         store,
         namespace_id,
-        UploadMode::ServiceProxied,
-        None,
+        NewUploadSession::service_proxied(),
         context,
     )
     .await?;
@@ -61,22 +63,28 @@ pub(crate) async fn begin_upload<S: ObjectStore + ?Sized>(
     })
 }
 
+/// Mints the content identity a direct upload will write to, and the
+/// reference that names it.
+///
+/// The client declares only what it can know — how many bytes and what they
+/// hash to. Identity is the server's, so a caller can never aim a presigned
+/// write at an object it chose. The reference returned here is the one the
+/// signed write, the completion check, and the later commit all name.
 pub(crate) async fn begin_direct_put_upload_target<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    content_ref: ContentRef,
+    claim: DirectPutContentClaim,
     context: &MutationContext,
 ) -> Result<BeginDirectPutUploadTargetResponse> {
     ensure_upload_namespace_available(store, namespace_id).await?;
-    ensure_direct_put_content_ref_supported(&content_ref)?;
     let content_store_id = load_namespace_content_store_id(store, namespace_id).await?;
-    let object_key = content_blob(content_store_id.as_str(), &content_ref.digest)
-        .map_err(|err| CoreError::InvalidUploadContent(err.to_string()))?;
+    let content_id = ContentId::generate();
+    let content_ref = direct_put_content_ref(content_id.clone(), &claim)?;
+    let object_key = content_blob(content_store_id.as_str(), &content_id);
     let upload_id = create_upload_session(
         store,
         namespace_id,
-        UploadMode::DirectPut,
-        Some(content_ref.clone()),
+        NewUploadSession::direct_put(content_ref.clone()),
         context,
     )
     .await?;
@@ -90,28 +98,78 @@ pub(crate) async fn begin_direct_put_upload_target<S: ObjectStore + ?Sized>(
     })
 }
 
-fn ensure_direct_put_content_ref_supported(content_ref: &ContentRef) -> Result<()> {
-    if content_ref.kind != ContentRefKind::WholeFileV0 {
-        return Err(CoreError::InvalidUploadContent(
-            "direct_put only supports whole_file_v0 content refs".to_owned(),
-        ));
+/// Turns a client's claim into the reference the write is bound to.
+///
+/// The digest is the client's, but it stops being a client claim the moment
+/// it is signed into the provider write: the provider refuses any body that
+/// does not hash to it, and completion re-checks the stored object against
+/// it. That is why the resulting reference may carry `whole_file_sha256`.
+fn direct_put_content_ref(
+    content_id: ContentId,
+    claim: &DirectPutContentClaim,
+) -> Result<ContentRef> {
+    let storage_checksum = StorageChecksum {
+        algorithm: ChecksumAlgorithm::Sha256,
+        value: claim.sha256.clone(),
+    };
+    let content_ref = ContentRef {
+        kind: ContentRefKind::BlobV1,
+        content_id,
+        size_bytes: claim.size_bytes,
+        whole_file_sha256: Some(storage_checksum.value.clone()),
+        storage_checksum,
+    };
+    content_ref
+        .validate()
+        .map_err(|err| CoreError::InvalidUploadContent(err.to_string()))?;
+    Ok(content_ref)
+}
+
+/// What a session is opened with: everything decided before any byte moves.
+struct NewUploadSession {
+    mode: UploadMode,
+    /// The content object this session will write, allocated up front.
+    content_id: ContentId,
+    /// What the client promised, for modes that promise anything.
+    claimed_checksum: Option<StorageChecksum>,
+    /// The reference a `direct_put` write is signed against.
+    direct_put_content_ref: Option<ContentRef>,
+}
+
+impl NewUploadSession {
+    fn service_proxied() -> Self {
+        Self {
+            mode: UploadMode::ServiceProxied,
+            content_id: ContentId::generate(),
+            claimed_checksum: None,
+            direct_put_content_ref: None,
+        }
     }
-    Ok(())
+
+    fn direct_put(content_ref: ContentRef) -> Self {
+        Self {
+            mode: UploadMode::DirectPut,
+            content_id: content_ref.content_id.clone(),
+            claimed_checksum: Some(content_ref.storage_checksum.clone()),
+            direct_put_content_ref: Some(content_ref),
+        }
+    }
 }
 
 async fn create_upload_session<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    mode: UploadMode,
-    direct_put_content_ref: Option<ContentRef>,
+    session: NewUploadSession,
     context: &MutationContext,
 ) -> Result<UploadId> {
     let upload_id = UploadId::generate();
     let state = UploadSessionState {
         namespace_id: namespace_id.clone(),
         upload_id: upload_id.clone(),
-        mode,
-        direct_put_content_ref,
+        mode: session.mode,
+        content_id: session.content_id,
+        claimed_checksum: session.claimed_checksum,
+        direct_put_content_ref: session.direct_put_content_ref,
         staged_content_ref: None,
         completed: None,
         created_at_ms: context.now_ms,
@@ -153,6 +211,13 @@ async fn ensure_upload_namespace_available<S: ObjectStore + ?Sized>(
     Ok(())
 }
 
+/// Stages bytes into a service-proxied session.
+///
+/// The bytes land under the identity the session allocated when it began,
+/// so re-sending the same bytes to the same session writes the same object
+/// rather than minting a second one. Two *different* sessions carrying
+/// identical bytes still get their own objects; sessions are where retry
+/// idempotency lives now, not the key space.
 pub(crate) async fn upload_content<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -160,9 +225,6 @@ pub(crate) async fn upload_content<S: ObjectStore + ?Sized>(
     bytes: &[u8],
 ) -> Result<UploadContentResponse> {
     let content_store_id = load_namespace_content_store_id(store, namespace_id).await?;
-    let content_ref = ContentRef::whole_file_v0(bytes);
-    let object_key = content_blob(content_store_id.as_str(), &content_ref.digest)
-        .map_err(|err| CoreError::Internal(format!("failed to derive content blob key: {err}")))?;
 
     update_upload_session(
         store,
@@ -170,8 +232,7 @@ pub(crate) async fn upload_content<S: ObjectStore + ?Sized>(
         upload_id,
         CONTENTION_RETRY_LIMIT,
         |mut state| {
-            let content_ref = content_ref.clone();
-            let object_key = object_key.clone();
+            let content_store_id = content_store_id.clone();
             let namespace_id = namespace_id.clone();
             let upload_id = upload_id.to_owned();
             async move {
@@ -188,6 +249,7 @@ pub(crate) async fn upload_content<S: ObjectStore + ?Sized>(
                     ));
                 }
 
+                let content_ref = ContentRef::blob_v1(state.content_id.clone(), bytes);
                 if let Some(existing) = &state.staged_content_ref {
                     if existing == &content_ref {
                         return Ok(UploadSessionUpdate::Noop(UploadContentResponse {
@@ -199,17 +261,21 @@ pub(crate) async fn upload_content<S: ObjectStore + ?Sized>(
                     return Err(CoreError::UploadContentConflict { upload_id });
                 }
 
-                store
-                    .put_immutable_verified(&object_key, Bytes::copy_from_slice(bytes))
-                    .await?;
-                state.staged_content_ref = Some(content_ref.clone());
+                let stored = stage_bytes_under_content_id(
+                    store,
+                    content_store_id,
+                    state.content_id.clone(),
+                    bytes,
+                )
+                .await?;
+                state.staged_content_ref = Some(stored.content_ref.clone());
 
                 Ok(UploadSessionUpdate::Replace {
                     next: Box::new(state),
                     outcome: UploadContentResponse {
                         namespace_id,
                         upload_id,
-                        content_ref,
+                        content_ref: stored.content_ref,
                     },
                 })
             }
@@ -378,18 +444,42 @@ async fn stage_direct_put_content_ref<S: ObjectStore + ?Sized>(
         ));
     }
 
-    // Bytes bypassed the LoonFS server; completion is the authority point
-    // where the server proves the upload actually happened. Digest
-    // integrity needs no re-proof: the transfer capability signed the
-    // digest into the provider write and the key derives from it, so no
-    // object can exist at this key with bytes that do not hash to the
-    // content ref. One HEAD proves existence and the declared size without
-    // pulling the payload back through the server.
-    probe_durable_content_reference(store, content_store_id, &request.content_ref)
-        .await
-        .map_err(|err| CoreError::InvalidUploadContent(err.to_string()))?;
-    Ok(prepare_completed_upload_content(
-        content_store_id.clone(),
-        request.content_ref.clone(),
-    ))
+    // Bytes bypassed the LoonFS server, so completion is where the server
+    // establishes what actually landed. It verifies rather than trusts: the
+    // presigned write is checksum-bound, but provider enforcement is not
+    // uniform across the family we support, and the object's identity no
+    // longer says anything about its bytes. One checksum-bearing HEAD
+    // settles both size and content without a download.
+    match verify_durable_content_checksum(store, content_store_id, &request.content_ref).await {
+        Ok(()) => Ok(prepare_completed_upload_content(
+            content_store_id.clone(),
+            request.content_ref.clone(),
+        )),
+        Err(err) => {
+            delete_unpublished_content_object(store, content_store_id, &request.content_ref).await;
+            Err(CoreError::InvalidUploadContent(err.to_string()))
+        }
+    }
+}
+
+/// Removes the object a failed completion was about.
+///
+/// The id is random and was never published, so exactly one session can be
+/// talking about this object and nothing references it. Deleting is safe and
+/// keeping it would leak bytes no one can ever name. Cleanup failure is not
+/// worth failing the completion twice over — the session's own reaping
+/// covers what this misses — so it is logged and dropped.
+async fn delete_unpublished_content_object<S: ObjectStore + ?Sized>(
+    store: &S,
+    content_store_id: &ContentStoreId,
+    content_ref: &ContentRef,
+) {
+    let object_key = content_blob(content_store_id.as_str(), &content_ref.content_id);
+    if let Err(error) = store.delete(&object_key).await {
+        tracing::warn!(
+            content_id = %content_ref.content_id,
+            error = %error,
+            "failed to remove the content object of a rejected direct-put completion"
+        );
+    }
 }

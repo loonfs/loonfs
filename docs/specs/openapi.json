@@ -2210,14 +2210,14 @@
         "type": "object",
         "description": "Request for starting an upload session.",
         "properties": {
-          "content_ref": {
+          "content": {
             "oneOf": [
               {
                 "type": "null"
               },
               {
-                "$ref": "#/components/schemas/ContentRef",
-                "description": "Required for `direct_put`; the server signs exactly this content object."
+                "$ref": "#/components/schemas/DirectPutContentClaim",
+                "description": "Required for `direct_put`; the server signs exactly these bytes into\nthe write it authorizes."
               }
             ]
           },
@@ -2362,6 +2362,15 @@
       "CheckpointId": {
         "type": "string",
         "description": "Durable checkpoint identifier.\n\nA checkpoint is a durable bookmark to a namespace manifest version."
+      },
+      "ChecksumAlgorithm": {
+        "type": "string",
+        "description": "Algorithm of a stored full-object checksum.\n\nEvery algorithm here covers the complete object. There is deliberately no\nchecksum-*type* field: full-object coverage is an invariant of this\nformat, established when the object is written, never read back from a\nprovider. (Cloudflare R2 never reports `x-amz-checksum-type` at all, so a\ntype read back would be unavailable exactly where it would matter.)\n\nOnly [`ChecksumAlgorithm::Sha256`] has producers today. `Crc64nvme` and\n`Crc32c` decode and round-trip so that direct multipart, which mandates\nprovider-computed full-object CRC-64/NVME, needs no format change to\nstart writing them.",
+        "enum": [
+          "sha256",
+          "crc64nvme",
+          "crc32c"
+        ]
       },
       "CommitId": {
         "type": "string",
@@ -2508,18 +2517,23 @@
           }
         }
       },
+      "ContentId": {
+        "type": "string",
+        "description": "Durable identity of one immutable content object.\n\nThe body is 128 fully random bits, with no time component: content\nobject keys shard on the id's leading characters, and a clock-derived\nprefix would put every upload in one window into one shard. The id\nnames *which object*, never what it contains — integrity evidence\nrides [`crate::ContentRef`] beside it."
+      },
       "ContentRef": {
         "type": "object",
-        "description": "Pointer to immutable file content.\n\nA `ContentRef` is safe to publish only after the referenced bytes are\ndurable in the namespace's content store.",
+        "description": "Pointer to one immutable content object.\n\n`content_id` is identity — *which* object — and the checksums are\nevidence about its bytes. Separating the two is what lets the final\nobject key exist before the first byte is read.\n\nA `ContentRef` is safe to publish only after the referenced bytes are\ndurable in the namespace's content store.",
         "required": [
           "kind",
-          "digest",
-          "size_bytes"
+          "content_id",
+          "size_bytes",
+          "storage_checksum"
         ],
         "properties": {
-          "digest": {
-            "type": "string",
-            "description": "Digest string, currently `sha256:<64 lowercase hex>`."
+          "content_id": {
+            "$ref": "#/components/schemas/ContentId",
+            "description": "Immutable identity of the referenced object."
           },
           "kind": {
             "type": "string",
@@ -2528,10 +2542,22 @@
           "size_bytes": {
             "type": "integer",
             "format": "int64",
-            "description": "Complete byte length of the referenced file content.",
+            "description": "Complete byte length of the referenced content.",
             "minimum": 0
+          },
+          "storage_checksum": {
+            "$ref": "#/components/schemas/StorageChecksum",
+            "description": "Mandatory checksum over the complete object, used to verify the\nstored bytes against this reference without downloading them."
+          },
+          "whole_file_sha256": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "SHA-256 over the complete payload, lowercase hex, when a trusted\nparty computed it.\n\nPresent means the LoonFS write path hashed the whole stream itself,\nor a provider validated a signed whole-object SHA-256 on the write.\nThere are no client-claimed digests: absent means nobody trustworthy\nhashed these bytes, never \"the client did not tell us\"."
           }
-        }
+        },
+        "additionalProperties": false
       },
       "ContentStoreId": {
         "type": "string",
@@ -2654,6 +2680,27 @@
           "replace"
         ]
       },
+      "DirectPutContentClaim": {
+        "type": "object",
+        "description": "What a `direct_put` client promises about bytes it has not written yet.\n\nThe server mints the content object's identity — a client cannot name a\nkey it has not been given — so a direct upload declares only what it can\nknow about its own bytes. The server signs both into the provider write\nand verifies them again at completion.",
+        "required": [
+          "size_bytes",
+          "sha256"
+        ],
+        "properties": {
+          "sha256": {
+            "type": "string",
+            "description": "SHA-256 over the complete payload, lowercase hex."
+          },
+          "size_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Complete byte length the client will write.",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
       "DirectPutUpload": {
         "type": "object",
         "description": "Presigned direct_put upload details. The raw object key is intentionally not public.",
@@ -2668,7 +2715,7 @@
           },
           "content_ref": {
             "$ref": "#/components/schemas/ContentRef",
-            "description": "Exact immutable object identity and byte length covered by the signed request."
+            "description": "Immutable object identity the server minted, plus the byte length and\nchecksum covered by the signed request. Completion and the later\ncommit both name exactly this reference."
           }
         }
       },
@@ -4075,6 +4122,25 @@
         "format": "int64",
         "description": "Monotonically increasing file revision counter within one file inode.",
         "minimum": 0
+      },
+      "StorageChecksum": {
+        "type": "object",
+        "description": "A checksum computed over the complete bytes of one content object.",
+        "required": [
+          "algorithm",
+          "value"
+        ],
+        "properties": {
+          "algorithm": {
+            "$ref": "#/components/schemas/ChecksumAlgorithm",
+            "description": "Algorithm that produced `value`."
+          },
+          "value": {
+            "type": "string",
+            "description": "Lowercase hex of the raw checksum bytes.\n\nThe algorithm is its own field, so the value carries no prefix.\nProvider APIs that report base64 are converted at the adapter."
+          }
+        },
+        "additionalProperties": false
       },
       "TrashEntry": {
         "type": "object",

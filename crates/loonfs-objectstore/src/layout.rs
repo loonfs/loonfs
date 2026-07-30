@@ -1,9 +1,7 @@
 //! The durable key grammar: object families, their path shapes, and
 //! parsing keys back into classified families.
 
-use crate::object_store::Result;
-use crate::ObjectStoreError;
-use loonfs_api::ManifestObjectId;
+use loonfs_api::{ContentId, ManifestObjectId};
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct ObjectLayout;
@@ -160,14 +158,14 @@ impl ObjectLayout {
         format!("namespaces/{namespace}/uploads/")
     }
 
-    pub(crate) fn content_blob(&self, content_store: &str, digest: &str) -> Result<String> {
-        let hex = sha256_hex_from_digest(digest)?;
-        Ok(format!(
-            "content-stores/{content_store}/blobs/sha256/{}/{}/{}",
-            &hex[0..2],
-            &hex[2..4],
-            hex
-        ))
+    /// Content objects shard on the content id's leading characters, which
+    /// are random, so ingest spreads evenly across provider partitions.
+    pub(crate) fn content_blob(&self, content_store: &str, content_id: &ContentId) -> String {
+        format!(
+            "content-stores/{content_store}/objects/{}/{}",
+            content_id.shard_prefix(),
+            content_id.as_str()
+        )
     }
 }
 
@@ -178,9 +176,7 @@ impl ObjectLayout {
 pub fn parse_object_key(key: &str) -> Option<ParsedObjectKey<'_>> {
     let segments: Vec<_> = key.split('/').collect();
     match segments.as_slice() {
-        ["content-stores", _, "blobs", "sha256", _, _, _] => {
-            parsed(DurableObjectFamily::ContentBlob, None)
-        }
+        ["content-stores", _, "objects", _, _] => parsed(DurableObjectFamily::ContentBlob, None),
         ["namespaces", namespace, "wal", "head.json"] => {
             parsed(DurableObjectFamily::WalHead, Some(namespace))
         }
@@ -221,40 +217,14 @@ fn parsed(
     })
 }
 
-/// Extracts canonical lowercase hexadecimal content identity from a `sha256:` digest.
-///
-/// The operation fails when the prefix, length, or lowercase hexadecimal
-/// alphabet is invalid. See
-/// [durable object families](../../../docs/specs/format.md#12-durable-object-families).
-pub fn sha256_hex_from_digest(digest: &str) -> Result<&str> {
-    let Some(hex) = digest.strip_prefix("sha256:") else {
-        return Err(ObjectStoreError::InvalidKey {
-            object_key: digest.to_owned(),
-            message: "digest must start with `sha256:`".to_owned(),
-        });
-    };
-    if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(ObjectStoreError::InvalidKey {
-            object_key: digest.to_owned(),
-            message: "digest must be 64 hex characters".to_owned(),
-        });
-    }
-    if !hex
-        .bytes()
-        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
-    {
-        return Err(ObjectStoreError::InvalidKey {
-            object_key: digest.to_owned(),
-            message: "digest hex must be lowercase".to_owned(),
-        });
-    }
-    Ok(hex)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{parse_object_key, sha256_hex_from_digest, DurableObjectFamily, ObjectLayout};
-    use loonfs_api::ManifestObjectId;
+    use super::{parse_object_key, DurableObjectFamily, ObjectLayout};
+    use loonfs_api::{ContentId, ManifestObjectId};
+
+    fn content_id() -> ContentId {
+        ContentId::parse("cnt_abcdef0123456789abcdef0123456789").expect("valid content id")
+    }
 
     #[test]
     fn layout_golden_tree_matches_target_paths() {
@@ -307,13 +277,9 @@ mod tests {
         );
         assert_eq!(
             layout
-                .content_blob(
-                    "cs_00000000000000000000000000000001",
-                    "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-                )
-                .expect("content key")
+                .content_blob("cs_00000000000000000000000000000001", &content_id())
                 .as_str(),
-            "content-stores/cs_00000000000000000000000000000001/blobs/sha256/ab/cd/abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+            "content-stores/cs_00000000000000000000000000000001/objects/ab/cnt_abcdef0123456789abcdef0123456789"
         );
     }
 
@@ -412,12 +378,7 @@ mod tests {
     #[test]
     fn parse_build_round_trips_for_global_key_families() {
         let layout = ObjectLayout::new();
-        let content_key = layout
-            .content_blob(
-                "cs_00000000000000000000000000000001",
-                "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
-            )
-            .expect("content key");
+        let content_key = layout.content_blob("cs_00000000000000000000000000000001", &content_id());
         let cases = [(content_key, DurableObjectFamily::ContentBlob)];
 
         for (key, family) in cases {
@@ -429,16 +390,21 @@ mod tests {
         assert!(parse_object_key("namespaces/ns-1/unknown/file").is_none());
     }
 
+    /// One content layout exists. Anything else under `content-stores/`,
+    /// including the deeper digest-partitioned shape this format replaced,
+    /// classifies as nothing at all rather than as content.
     #[test]
-    fn content_blob_rejects_invalid_sha256_digest() {
-        assert!(sha256_hex_from_digest("sha1:abcdef").is_err());
-        assert!(sha256_hex_from_digest("sha256:abcd").is_err());
-        assert!(sha256_hex_from_digest(
-            "sha256:ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-        )
-        .is_err());
-        assert!(ObjectLayout::new()
-            .content_blob("ns-1", "sha256:not-hex")
-            .is_err());
+    fn parser_admits_exactly_one_content_layout() {
+        for foreign in [
+            "content-stores/cs-1/blobs/ab/cd/deadbeef",
+            "content-stores/cs-1/objects/ab/cd/deadbeef",
+            "content-stores/cs-1/objects/deadbeef",
+            "content-stores/cs-1/objects/",
+        ] {
+            assert!(
+                parse_object_key(foreign).is_none(),
+                "foreign content path parsed: {foreign}"
+            );
+        }
     }
 }

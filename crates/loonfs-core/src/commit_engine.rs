@@ -16,7 +16,9 @@ use crate::storage::content_admission::{ContentAdmission, ContentTokenError, Pre
 use crate::timing::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_api::v0::CommitResponse as ApiCommitResponse;
 use loonfs_api::wire::control::{AcquiredWriter, HeadState};
-use loonfs_api::{ChangeSeq, CommitId, DeleteNamespaceResponse, ManifestId, NamespaceId};
+use loonfs_api::{
+    ChangeSeq, CommitId, ContentId, DeleteNamespaceResponse, ManifestId, NamespaceId,
+};
 use loonfs_objectstore::ObjectStore;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -45,8 +47,8 @@ pub enum ContentPreparationError {
     #[error("content token was rejected: {0}")]
     ContentToken(#[from] ContentTokenError),
     /// No prepared proof covers the referenced content.
-    #[error("content ref `{content_ref_digest}` is not prepared for publication")]
-    ContentNotPrepared { content_ref_digest: String },
+    #[error("content object `{content_id}` is not prepared for publication")]
+    ContentNotPrepared { content_id: ContentId },
 }
 
 impl CommitCandidate {
@@ -601,7 +603,7 @@ mod tests {
             .semantic_identity(&namespace_id)
             .expect("operation limits must not affect identity");
 
-        let content_ref = ContentRef::whole_file_v0(b"proof");
+        let content_ref = ContentRef::blob_v1(ContentId::generate(), b"proof");
         let admission = ContentAdmission::for_durable_content_write(
             ContentStoreId::parse("cs_00000000000000000000000000000001").expect("content store id"),
             content_ref,

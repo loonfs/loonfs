@@ -6,6 +6,7 @@ use bytes::Bytes;
 use futures::stream::{self, BoxStream};
 use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
+    StoredObjectChecksum,
 };
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -158,6 +159,23 @@ impl<S: fmt::Debug> fmt::Debug for FailStore<S> {
 
 #[async_trait]
 impl<S: ObjectStore> ObjectStore for FailStore<S> {
+    async fn head_stored_checksum(
+        &self,
+        key: &str,
+    ) -> Result<Option<StoredObjectChecksum>, ObjectStoreError> {
+        let fail = self.should_fail(&OperationContext::new(key, OperationKind::Head));
+        if fail && self.mode == FailureMode::BeforeApply {
+            return Err(self.error.for_key(key));
+        }
+        let result = self.inner.head_stored_checksum(key).await;
+        if fail {
+            result?;
+            Err(self.error.for_key(key))
+        } else {
+            result
+        }
+    }
+
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
         let fail = self.should_fail(&OperationContext::new(key, OperationKind::Head));
         if fail && self.mode == FailureMode::BeforeApply {

@@ -863,8 +863,7 @@ async fn read_content_ref_refuses_bytes_that_do_not_match_the_reference() {
             .content_store_id()
             .clone();
     let object_key =
-        loonfs_objectstore::keys::content_blob(content_store_id.as_str(), &content_ref.digest)
-            .expect("content blob key");
+        loonfs_objectstore::keys::content_blob(content_store_id.as_str(), &content_ref.content_id);
     store
         .put_overwrite(&object_key, bytes::Bytes::from_static(b"other bytes"))
         .await
@@ -877,7 +876,7 @@ async fn read_content_ref_refuses_bytes_that_do_not_match_the_reference() {
         .expect_err("bytes that do not hash to the reference are refused");
     assert_eq!(error.code(), ErrorCode::NamespaceCorrupt);
     assert!(
-        matches!(&error, RuntimeError::Core(error) if error.to_string().contains("digest mismatch")),
+        matches!(&error, RuntimeError::Core(error) if error.to_string().contains("checksum mismatch")),
         "unexpected error: {error}"
     );
 }

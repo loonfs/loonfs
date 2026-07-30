@@ -1,7 +1,7 @@
 //! [`ConfiguredObjectStore`]: one enum over every provider, built from
 //! configuration.
 
-use super::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, PutMode};
+use super::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, PutMode, StoredObjectChecksum};
 use crate::abs::{AzureAbsStore, AzureAbsStoreConfig};
 use crate::gcs::{GcpGcsStore, GcpGcsStoreConfig};
 use crate::local_fs_store::LocalFsStore;
@@ -168,6 +168,18 @@ impl ObjectStore for ConfiguredObjectStore {
         }
     }
 
+    async fn head_stored_checksum(&self, key: &str) -> Result<Option<StoredObjectChecksum>> {
+        match &self.inner {
+            ConfiguredObjectStoreInner::LocalFs(store) => store.head_stored_checksum(key).await,
+            ConfiguredObjectStoreInner::AwsS3(store) => store.head_stored_checksum(key).await,
+            ConfiguredObjectStoreInner::CloudflareR2(store) => {
+                store.head_stored_checksum(key).await
+            }
+            ConfiguredObjectStoreInner::GcpGcs(store) => store.head_stored_checksum(key).await,
+            ConfiguredObjectStoreInner::AzureAbs(store) => store.head_stored_checksum(key).await,
+        }
+    }
+
     async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>> {
         match &self.inner {
             ConfiguredObjectStoreInner::LocalFs(store) => store.get_with_metadata(key).await,
@@ -231,6 +243,7 @@ mod tests {
     use crate::ObjectStore;
     use crate::ObjectStoreError;
     use bytes::Bytes;
+    use loonfs_api::ContentId;
     use loonfs_api::ContentRef;
     use std::fs;
     use std::path::PathBuf;
@@ -339,8 +352,8 @@ mod tests {
         let signed = issuer
             .presign_put(
                 PresignedPutRequest {
-                    object_key: "content-stores/cs/blobs/sha256/ab/cd/digest",
-                    content_ref: &ContentRef::whole_file_v0(b"hello"),
+                    object_key: "content-stores/cs/objects/01/cnt_0123456789abcdef0123456789abcdef",
+                    content_ref: &ContentRef::blob_v1(ContentId::generate(), b"hello"),
                     expires_in: Duration::from_secs(900),
                 },
                 UNIX_EPOCH + Duration::from_secs(1_700_000_000),

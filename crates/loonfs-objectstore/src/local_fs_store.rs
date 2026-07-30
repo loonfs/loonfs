@@ -12,11 +12,14 @@ use crate::keyspace::{
     validate_segments,
 };
 use crate::object_store::Result;
-use crate::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
+use crate::{
+    ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
+    StoredObjectChecksum,
+};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{self, BoxStream, StreamExt};
-use loonfs_api::sha256_digest;
+use loonfs_api::{sha256_digest, StorageChecksum};
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::fs::{self, File, OpenOptions};
@@ -343,6 +346,21 @@ impl LocalFsStore {
 impl ObjectStore for LocalFsStore {
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>> {
         self.head_object(&self.scoped(key)?).await
+    }
+
+    /// The reference provider stores no checksum beside an object, so it
+    /// computes one from the object it holds. That is the same guarantee a
+    /// cloud provider's stored checksum gives — the provider attesting to
+    /// the bytes it actually has — and it never crosses a network.
+    async fn head_stored_checksum(&self, key: &str) -> Result<Option<StoredObjectChecksum>> {
+        let scoped = self.scoped(key)?;
+        let Some(bytes) = self.get_object(&scoped, None).await? else {
+            return Ok(None);
+        };
+        Ok(Some(StoredObjectChecksum {
+            size_bytes: bytes.len() as u64,
+            storage_checksum: StorageChecksum::sha256(&bytes),
+        }))
     }
 
     async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>> {

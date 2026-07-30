@@ -2,7 +2,8 @@
 
 use crate::common::http_split_support::*;
 use crate::common::start_server;
-use loonfs_api::{CommitId, DestinationBehavior};
+use loonfs_api::v0::ValidatedContentToken;
+use loonfs_api::{AbsolutePath, CommitId, CommitRequest, DestinationBehavior, FilesystemOperation};
 use loonfs_client::{ClientError, CommitOptions, DeleteOptions, NamespacePath, PutFileOptions};
 use loonfs_test_support::ids::namespace_id;
 use tempfile::tempdir;
@@ -91,17 +92,35 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
     let target = NamespacePath::parse("demo", "/docs/retry.txt").expect("target");
     let commit_id = CommitId::parse("req-v1-put").expect("valid commit id");
 
+    // A put's identity is which content object it attaches, so a retry
+    // resends the reference the first attempt used. Stage once, then commit
+    // that same reference twice.
+    let staged =
+        stage_uploaded_content(&harness.client, &namespace_id("demo"), b"stable bytes\n").await;
+    let token = ValidatedContentToken {
+        content_ref: staged.content_ref.clone(),
+        token: staged
+            .validated_content_token
+            .clone()
+            .expect("completion returns a content token"),
+    };
+    let commit_request = |content_ref, token| CommitRequest {
+        commit_id: commit_id.clone(),
+        message: None,
+        content_tokens: vec![token],
+        operations: vec![FilesystemOperation::PutFile {
+            path: AbsolutePath::parse("/docs/retry.txt").expect("path"),
+            content_ref,
+            behavior: DestinationBehavior::NoReplace,
+            expected_revision_no: None,
+        }],
+    };
+
     let first = harness
         .client
-        .put_file_bytes(
-            &target,
-            b"stable bytes\n",
-            &PutFileOptions {
-                behavior: DestinationBehavior::NoReplace,
-                commit_id: Some(commit_id.clone()),
-                message: None,
-                expected_revision_no: None,
-            },
+        .commit(
+            &namespace_id("demo"),
+            &commit_request(staged.content_ref.clone(), token.clone()),
         )
         .await
         .expect("first put");
@@ -109,6 +128,18 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
 
     let repeated = harness
         .client
+        .commit(
+            &namespace_id("demo"),
+            &commit_request(staged.content_ref.clone(), token),
+        )
+        .await
+        .expect("repeat put");
+    assert_eq!(repeated, first);
+
+    // Re-uploading the same bytes under the same commit id is not a retry:
+    // the upload minted a new content object, so it is a different commit.
+    let reuploaded = harness
+        .client
         .put_file_bytes(
             &target,
             b"stable bytes\n",
@@ -120,8 +151,11 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
             },
         )
         .await
-        .expect("repeat put");
-    assert_eq!(repeated, first);
+        .expect_err("re-uploading under a used commit id must conflict");
+    assert!(
+        matches!(&reuploaded, ClientError::Api { code, .. } if code == "commit_id_reuse_conflict"),
+        "unexpected error: {reuploaded:?}"
+    );
 
     let entry = harness.client.stat_path(&target).await.expect("stat path");
     assert_eq!(entry.head_seq, first.committed_seq);

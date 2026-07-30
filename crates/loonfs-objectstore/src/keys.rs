@@ -1,8 +1,7 @@
 //! Key construction for every durable object family.
 
 use crate::layout::ObjectLayout;
-use crate::object_store::Result;
-use loonfs_api::{ManifestObjectId, NamespaceId};
+use loonfs_api::{ContentId, ManifestObjectId, NamespaceId};
 
 /// Builds the listing prefix containing every durable object owned by one namespace.
 ///
@@ -110,12 +109,11 @@ pub fn upload_session(namespace: &str, upload_id: &str) -> String {
     ObjectLayout::new().upload_session(namespace, upload_id)
 }
 
-/// Builds the immutable content-object key for a whole-file digest.
+/// Builds the immutable content-object key for one content identity.
 ///
-/// The operation fails when `digest` is not the canonical whole-file SHA-256
-/// spelling. See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
-pub fn content_blob(content_store: &str, digest: &str) -> Result<String> {
-    ObjectLayout::new().content_blob(content_store, digest)
+/// See [durable object families](../../../docs/specs/format.md#12-durable-object-families).
+pub fn content_blob(content_store: &str, content_id: &ContentId) -> String {
+    ObjectLayout::new().content_blob(content_store, content_id)
 }
 
 #[cfg(test)]
@@ -126,7 +124,13 @@ mod tests {
         wal_segment_id_from_key, wal_segment_prefix,
     };
     use crate::layout::ObjectLayout;
-    use loonfs_api::{ManifestObjectId, NamespaceId};
+    use loonfs_api::{ContentId, ManifestObjectId, NamespaceId};
+
+    const CONTENT_ID: &str = "cnt_abcdef0123456789abcdef0123456789";
+
+    fn content_id() -> ContentId {
+        ContentId::parse(CONTENT_ID).expect("valid content id")
+    }
 
     #[test]
     fn namespace_prefix_matches_layout_root_prefix() {
@@ -146,7 +150,6 @@ mod tests {
     /// change without the other.
     #[test]
     fn standard_key_patterns_match_format_spec_table() {
-        const HEX: &str = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
         let spec = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../docs/specs/format.md"
@@ -193,9 +196,8 @@ mod tests {
                 .replace("{checkpoint_id}", "chk-1")
                 .replace("{table_id}", "tbl-1")
                 .replace("{upload_id}", "up-1")
-                .replace("{hex[0..2]}", &HEX[0..2])
-                .replace("{hex[2..4]}", &HEX[2..4])
-                .replace("{hex}", HEX)
+                .replace("{content_id[4..6]}", &CONTENT_ID[4..6])
+                .replace("{content_id}", CONTENT_ID)
         };
 
         let built = [
@@ -217,10 +219,7 @@ mod tests {
             ("Upload sessions", upload_session("ns-1", "up-1")),
             ("Metadata root", metadata_root("ns-1")),
             ("WAL floor", wal_floor("ns-1")),
-            (
-                "Content objects",
-                content_blob("cs-1", &format!("sha256:{HEX}")).expect("content key"),
-            ),
+            ("Content objects", content_blob("cs-1", &content_id())),
         ];
 
         let expected: std::collections::BTreeMap<String, String> = built
@@ -278,12 +277,8 @@ mod tests {
             "namespaces/ns-1/checkpoints/chk_00000000000000000000000000000001.json"
         );
         assert_eq!(
-            content_blob(
-                "cs_00000000000000000000000000000001",
-                "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-            )
-            .expect("content key"),
-            "content-stores/cs_00000000000000000000000000000001/blobs/sha256/ab/cd/abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+            content_blob("cs_00000000000000000000000000000001", &content_id()),
+            "content-stores/cs_00000000000000000000000000000001/objects/ab/cnt_abcdef0123456789abcdef0123456789"
         );
         assert_eq!(
             upload_session("ns-1", "upl_00000000000000000000000000000001"),
@@ -291,15 +286,12 @@ mod tests {
         );
     }
 
+    /// Content keys shard on the id's own leading characters, so the shard a
+    /// key lands in is derivable from the id and nothing else.
     #[test]
-    fn content_blob_rejects_invalid_sha256_digest() {
-        assert!(content_blob("ns-1", "sha1:abcdef").is_err());
-        assert!(content_blob("ns-1", "sha256:abcd").is_err());
-        assert!(content_blob(
-            "ns-1",
-            "sha256:ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-        )
-        .is_err());
-        assert!(content_blob("ns-1", "sha256:not-hex").is_err());
+    fn content_keys_shard_on_the_content_id_prefix() {
+        let id = content_id();
+        let key = content_blob("cs-1", &id);
+        assert!(key.ends_with(&format!("/{}/{}", id.shard_prefix(), id.as_str())));
     }
 }

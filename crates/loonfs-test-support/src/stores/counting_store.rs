@@ -6,6 +6,7 @@ use bytes::Bytes;
 use futures::stream::BoxStream;
 use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
+    StoredObjectChecksum,
 };
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
@@ -167,6 +168,16 @@ impl<S: ObjectStore> ObjectStore for CountingStore<S> {
             self.counters.heads.fetch_add(1, Ordering::SeqCst);
         }
         self.inner.head(key).await
+    }
+
+    async fn head_stored_checksum(
+        &self,
+        key: &str,
+    ) -> Result<Option<StoredObjectChecksum>, ObjectStoreError> {
+        if self.matches(key) {
+            self.counters.heads.fetch_add(1, Ordering::SeqCst);
+        }
+        self.inner.head_stored_checksum(key).await
     }
 
     async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {

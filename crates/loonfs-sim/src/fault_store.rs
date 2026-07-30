@@ -9,6 +9,7 @@ use futures::stream::BoxStream;
 use futures::Stream;
 use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
+    StoredObjectChecksum,
 };
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -218,6 +219,16 @@ where
         let op = self.next_object_op(ObjectOperationKind::Head, key);
         let result = self.inner.head(key).await;
         self.push_trace(op, "head", None, result_class(&result));
+        result
+    }
+
+    async fn head_stored_checksum(
+        &self,
+        key: &str,
+    ) -> Result<Option<StoredObjectChecksum>, ObjectStoreError> {
+        let op = self.next_object_op(ObjectOperationKind::Head, key);
+        let result = self.inner.head_stored_checksum(key).await;
+        self.push_trace(op, "head_stored_checksum", None, result_class(&result));
         result
     }
 

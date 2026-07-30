@@ -234,8 +234,8 @@ fn assert_content_not_prepared(error: CoreError, content_ref: &loonfs::ContentRe
         matches!(
             error,
             CoreError::ContentPreparation(ContentPreparationError::ContentNotPrepared {
-                ref content_ref_digest
-            }) if content_ref_digest == &content_ref.digest
+                ref content_id
+            }) if content_id == &content_ref.content_id
         ),
         "content-not-prepared error should carry the rejected digest"
     );
@@ -278,9 +278,16 @@ async fn prepare_file_bytes_performs_one_content_put_and_no_reads() {
         .await
         .expect("prepare file bytes");
 
+    let content_ref = prepared.content_ref();
+    assert_eq!(content_ref.size_bytes, bytes.len() as u64);
     assert_eq!(
-        prepared.content_ref(),
-        &loonfs::ContentRef::whole_file_v0(bytes)
+        content_ref.storage_checksum,
+        loonfs_api::StorageChecksum::sha256(bytes)
+    );
+    assert_eq!(
+        content_ref.whole_file_sha256.as_deref(),
+        Some(content_ref.storage_checksum.value.as_str()),
+        "the write path hashed these bytes itself, so the digest is trusted"
     );
     assert_content_counts(harness.recording.snapshot(), 0, 0, 1, 0);
 }
@@ -537,12 +544,18 @@ async fn proxied_upload_completion_proof_publishes_without_additional_content_io
 async fn direct_put_completion_avoids_blob_get_and_prepared_publish_uses_no_content_io() {
     let harness = TestHarness::new("direct-completion-proof").await;
     let bytes = b"direct provider upload";
-    let content_ref = loonfs::ContentRef::whole_file_v0(bytes);
     let begin = harness
         .writer
-        .begin_direct_put_upload_target(&harness.namespace_id, content_ref.clone())
+        .begin_direct_put_upload_target(
+            &harness.namespace_id,
+            loonfs::DirectPutContentClaim {
+                size_bytes: bytes.len() as u64,
+                sha256: loonfs_api::StorageChecksum::sha256(bytes).value,
+            },
+        )
         .await
         .expect("begin direct put");
+    let content_ref = begin.target.content_ref.clone();
     harness.recording.reset();
 
     harness

@@ -7,11 +7,21 @@ use crate::common::*;
 use bytes::Bytes;
 use loonfs::publish::{parse_mutation_path, CommitRequest, FilesystemOperation};
 use loonfs::{
-    BeginUploadRequest, ChangeSeq, CommitId, CompleteUploadRequest, ContentRef,
-    CreateDirectoryOptions, CreateNamespaceOptions, DestinationBehavior, ErrorCode, NamespaceId,
-    PutFileOptions, RuntimeCacheConfig, SharedObjectStore,
+    BeginUploadRequest, ChangeSeq, CommitId, CompleteUploadRequest, CreateDirectoryOptions,
+    CreateNamespaceOptions, DestinationBehavior, ErrorCode, NamespaceId, PutFileOptions,
+    RuntimeCacheConfig, SharedObjectStore,
 };
+use loonfs_api::v0::DirectPutContentClaim;
+use loonfs_api::StorageChecksum;
 use loonfs_objectstore::keys::wal_head;
+
+/// What a direct-put client declares about bytes it already holds.
+fn direct_put_claim(bytes: &[u8]) -> DirectPutContentClaim {
+    DirectPutContentClaim {
+        size_bytes: bytes.len() as u64,
+        sha256: StorageChecksum::sha256(bytes).value,
+    }
+}
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
 use loonfs_test_support::block_on::block_on;
@@ -81,13 +91,18 @@ fn direct_put_upload_flow_validates_durable_object_on_complete() {
     let fs = runtime(temp_dir.path(), "direct-put-upload-test");
     let namespace_id = namespace_id("demo");
     let bytes = b"direct uploaded";
-    let content_ref = ContentRef::whole_file_v0(bytes);
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    let begin = block_on(fs.begin_direct_put_upload_target(&namespace_id, content_ref.clone()))
+    let begin = block_on(fs.begin_direct_put_upload_target(&namespace_id, direct_put_claim(bytes)))
         .expect("begin direct put");
-    assert_eq!(begin.target.content_ref, content_ref);
+    // The target is minted here, before a byte is written, and the key it
+    // names is derived from that identity alone.
+    let content_ref = begin.target.content_ref.clone();
+    assert!(begin
+        .target
+        .object_key
+        .ends_with(content_ref.content_id.as_str()));
 
     let complete_request = CompleteUploadRequest {
         content_ref: content_ref.clone(),
@@ -131,12 +146,12 @@ fn direct_put_completion_proves_upload_without_reading_content() {
     let object_store: SharedObjectStore = raw_store.clone();
     let fs = open_runtime(object_store, "direct-put-probe-test");
     let bytes = b"direct uploaded, provider verified";
-    let content_ref = ContentRef::whole_file_v0(bytes);
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    let begin = block_on(fs.begin_direct_put_upload_target(&namespace_id, content_ref.clone()))
+    let begin = block_on(fs.begin_direct_put_upload_target(&namespace_id, direct_put_claim(bytes)))
         .expect("begin direct put");
+    let content_ref = begin.target.content_ref.clone();
 
     // Stands in for the provider-verified presigned upload.
     let direct_store = LocalFsStore::new(temp_dir.path()).expect("direct object-store handle");
@@ -157,7 +172,7 @@ fn direct_put_completion_proves_upload_without_reading_content() {
     assert_eq!(
         raw_store.count(OperationClass::Read),
         0,
-        "completion proves the upload from object metadata alone"
+        "completion verifies the object from its stored checksum, not its bytes"
     );
 }
 
@@ -167,15 +182,16 @@ fn direct_put_completion_rejects_a_mis_declared_size() {
     let fs = runtime(temp_dir.path(), "direct-put-size-test");
     let namespace_id = namespace_id("demo");
     let bytes = b"direct put bytes with a lying size";
-    // The digest names the object; the declared size rides the reference
-    // unchecked by the provider, so completion's size check must catch it.
-    let mut content_ref = ContentRef::whole_file_v0(bytes);
-    content_ref.size_bytes += 1;
+    // The client overstates its byte count. Nothing about the object's name
+    // contradicts that, so completion's own size check has to.
+    let mut claim = direct_put_claim(bytes);
+    claim.size_bytes += 1;
 
     fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
         .expect("create namespace");
-    let begin = block_on(fs.begin_direct_put_upload_target(&namespace_id, content_ref.clone()))
+    let begin = block_on(fs.begin_direct_put_upload_target(&namespace_id, claim))
         .expect("begin direct put");
+    let content_ref = begin.target.content_ref.clone();
 
     let direct_store = LocalFsStore::new(temp_dir.path()).expect("direct object-store handle");
     block_on(direct_store.put_if_absent(&begin.target.object_key, Bytes::copy_from_slice(bytes)))
@@ -191,6 +207,50 @@ fn direct_put_completion_rejects_a_mis_declared_size() {
     assert!(
         error.to_string().contains("content length mismatch"),
         "completion names the size mismatch: {error}"
+    );
+}
+
+/// Bytes that do not match the claim are refused at completion and the
+/// object is removed. The id was never published, so nothing can reference
+/// what gets deleted.
+#[test]
+fn direct_put_completion_rejects_and_removes_bytes_that_do_not_match_the_claim() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = runtime(temp_dir.path(), "direct-put-checksum-test");
+    let namespace_id = namespace_id("demo");
+    let promised = b"the bytes the client promised";
+    let delivered = b"different bytes, same length!";
+    assert_eq!(promised.len(), delivered.len(), "size must not be the tell");
+
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    let begin =
+        block_on(fs.begin_direct_put_upload_target(&namespace_id, direct_put_claim(promised)))
+            .expect("begin direct put");
+    let content_ref = begin.target.content_ref.clone();
+
+    let direct_store = LocalFsStore::new(temp_dir.path()).expect("direct object-store handle");
+    block_on(
+        direct_store.put_if_absent(&begin.target.object_key, Bytes::copy_from_slice(delivered)),
+    )
+    .expect("write mismatched direct object");
+
+    let error = fs
+        .complete_upload_blocking(
+            &namespace_id,
+            &begin.upload_id,
+            &CompleteUploadRequest { content_ref },
+        )
+        .expect_err("mismatched bytes must fail completion");
+    assert!(
+        error.to_string().contains("content checksum mismatch"),
+        "completion names the checksum mismatch: {error}"
+    );
+    assert!(
+        block_on(direct_store.head(&begin.target.object_key))
+            .expect("head rejected object")
+            .is_none(),
+        "a rejected completion leaves no orphan behind"
     );
 }
 
@@ -301,8 +361,37 @@ fn path_mutations_return_the_commit_id_they_committed_under() {
         assert_eq!(first.commit_id, commit_id);
 
         // Resubmitting the identical mutation with the same commit id
-        // replays the original commit instead of committing again.
+        // replays the original commit instead of committing again. Identical
+        // means the same content object: a put's identity is which object it
+        // attaches, so the retry reuses the reference the first put landed.
+        let landed = fs
+            .reader
+            .stat_path(&namespace_id, "/docs/a.txt")
+            .await
+            .expect("stat the committed file")
+            .content_ref
+            .expect("a file revision carries a content ref");
         let replay = fs
+            .put_file_content_ref(
+                &namespace_id,
+                "/docs/a.txt",
+                landed,
+                PutFileOptions {
+                    commit_id: Some(commit_id.clone()),
+                    message: None,
+                    ..PutFileOptions::default()
+                },
+            )
+            .await
+            .expect("identical resubmission replays the original commit");
+        assert_eq!(replay.commit_id, first.commit_id);
+        assert_eq!(replay.committed_seq, first.committed_seq);
+
+        // Re-uploading the same bytes under the same commit id does not
+        // replay: a fresh upload mints a fresh content object, so it is a
+        // different mutation and the reused id conflicts. This is the retry
+        // rule clients have to follow — keep the reference, do not re-upload.
+        let conflict = fs
             .put_file_bytes(
                 &namespace_id,
                 "/docs/a.txt",
@@ -314,9 +403,8 @@ fn path_mutations_return_the_commit_id_they_committed_under() {
                 },
             )
             .await
-            .expect("identical resubmission replays the original commit");
-        assert_eq!(replay.commit_id, first.commit_id);
-        assert_eq!(replay.committed_seq, first.committed_seq);
+            .expect_err("re-uploading under a used commit id must conflict");
+        assert_eq!(conflict.code(), ErrorCode::CommitIdReuseConflict);
 
         // Without a caller-supplied id, the generated one is still returned,
         // so every caller holds a reconciliation handle.

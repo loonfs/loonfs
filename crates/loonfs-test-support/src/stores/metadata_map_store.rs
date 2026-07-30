@@ -6,6 +6,7 @@ use bytes::Bytes;
 use futures::stream::BoxStream;
 use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
+    StoredObjectChecksum,
 };
 use std::fmt;
 use std::sync::Arc;
@@ -89,6 +90,16 @@ impl<S: ObjectStore> ObjectStore for MetadataMapStore<S> {
             .head(key)
             .await?
             .map(|metadata| self.map(key, metadata)))
+    }
+
+    /// Passed through unchanged: this store rewrites object metadata, and a
+    /// stored checksum is the provider's statement about bytes, not metadata
+    /// a test may rewrite without making the object lie about itself.
+    async fn head_stored_checksum(
+        &self,
+        key: &str,
+    ) -> Result<Option<StoredObjectChecksum>, ObjectStoreError> {
+        self.inner.head_stored_checksum(key).await
     }
 
     async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {

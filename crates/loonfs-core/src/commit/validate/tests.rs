@@ -17,8 +17,8 @@ use crate::metadata::MetadataState;
 use loonfs_api::wire::control::{HeadState, WriterBlock};
 use loonfs_api::wire::wal::WalDelta;
 use loonfs_api::{
-    ChangeSeq, CommitId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, NamespaceId,
-    RevisionNo, WriterEpoch,
+    ChangeSeq, CommitId, ContentId, ContentRef, DisplayName, InodeId, InodeKind, NameKey,
+    NamespaceId, RevisionNo, WriterEpoch,
 };
 
 fn test_display_name(value: impl AsRef<str>) -> DisplayName {
@@ -26,7 +26,7 @@ fn test_display_name(value: impl AsRef<str>) -> DisplayName {
 }
 
 fn content_ref(seed: &str) -> ContentRef {
-    ContentRef::whole_file_v0(seed.as_bytes())
+    ContentRef::blob_v1(ContentId::generate(), seed.as_bytes())
 }
 
 /// Operations with no race checks of their own: these tests drive the
@@ -476,6 +476,9 @@ async fn restore_revision_can_reference_revision_created_earlier_in_same_request
     ]);
     let context = validation_context(&metadata_state, ChangeSeq(2), InodeId(4));
 
+    // The restore must resolve to the very object the replace attached, so
+    // the expectation is that reference itself.
+    let expected = content_ref("content-2");
     let request = CommitIr {
         namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
         commit_id: CommitId::parse("restore-same-request-source").expect("valid commit id"),
@@ -484,7 +487,7 @@ async fn restore_revision_can_reference_revision_created_earlier_in_same_request
             CommitOp::ReplaceFile {
                 inode_id: InodeId(3),
                 base_revision_no: RevisionNo(1),
-                content_ref: content_ref("content-2"),
+                content_ref: expected.clone(),
             },
             CommitOp::RestoreRevision {
                 inode_id: InodeId(3),
@@ -501,7 +504,6 @@ async fn restore_revision_can_reference_revision_created_earlier_in_same_request
         PreparedCommit::new(request, plan, test_fingerprint()).expect("prepare commit"),
         4_200,
     );
-    let expected = content_ref("content-2");
     assert!(matches!(
         &materialized.results[1],
         CommitOpResult::RestoreRevision {
@@ -513,6 +515,9 @@ async fn restore_revision_can_reference_revision_created_earlier_in_same_request
 
 #[tokio::test]
 async fn restore_revision_can_reference_restore_created_earlier_in_same_request() {
+    // Each restore resolves to an object an earlier revision already named,
+    // so the expectations are those references themselves.
+    let expected = content_ref("content-1");
     let metadata_state = metadata_state_after(&[
         wal_create_directory(0, InodeId(2), InodeId(1), "docs".to_owned()),
         wal_create_file(
@@ -520,7 +525,7 @@ async fn restore_revision_can_reference_restore_created_earlier_in_same_request(
             InodeId(3),
             InodeId(2),
             "readme.txt".to_owned(),
-            content_ref("content-1"),
+            expected.clone(),
         ),
         wal_append_revision(0, InodeId(3), RevisionNo(2), content_ref("content-2")),
     ]);
@@ -551,7 +556,6 @@ async fn restore_revision_can_reference_restore_created_earlier_in_same_request(
         PreparedCommit::new(request, plan, test_fingerprint()).expect("prepare commit"),
         4_200,
     );
-    let expected = content_ref("content-1");
     assert!(matches!(
         &materialized.results[0],
         CommitOpResult::RestoreRevision {

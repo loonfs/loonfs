@@ -628,6 +628,7 @@ pub struct MaintenanceStepResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ContentId;
 
     fn path(value: &str) -> AbsolutePath {
         AbsolutePath::parse(value).expect("valid test path")
@@ -742,9 +743,13 @@ mod tests {
             "kind": "put_file",
             "path": "/docs/a.txt",
             "content_ref": {
-                "kind": "whole_file_v0",
-                "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                "size_bytes": 1
+                "kind": "blob_v1",
+                "content_id": "cnt_0123456789abcdef0123456789abcdef",
+                "size_bytes": 1,
+                "storage_checksum": {
+                    "algorithm": "sha256",
+                    "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                }
             }
         }))
         .expect("put op defaults behavior");
@@ -804,7 +809,7 @@ mod tests {
 
     #[test]
     fn filesystem_operation_paths_keep_the_plain_string_wire_shape() {
-        let content_ref = ContentRef::whole_file_v0(b"hello");
+        let content_ref = ContentRef::blob_v1(ContentId::generate(), b"hello");
         let cases = [
             (
                 FilesystemOperation::PutFile {
@@ -861,7 +866,7 @@ mod tests {
             serde_json::json!({
                 "kind": "put_file",
                 "path": "relative",
-                "content_ref": ContentRef::whole_file_v0(b"hello")
+                "content_ref": ContentRef::blob_v1(ContentId::generate(), b"hello")
             }),
             serde_json::json!({"kind": "delete_path", "path": "relative"}),
             serde_json::json!({

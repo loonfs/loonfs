@@ -1148,7 +1148,7 @@ mod tests {
     #[tokio::test]
     async fn provider_store_range_semantics_match_blocking_contract() {
         let store = memory_store();
-        let key = "content-stores/cs_0123456789abcdef0123456789abcdef/blobs/sha256/ab/cd/abcdef";
+        let key = "content-stores/cs_0123456789abcdef0123456789abcdef/objects/ab/cnt_abcdef0123456789abcdef0123456789";
         store
             .put_overwrite(key, Bytes::from_static(b"abcdef"))
             .await
@@ -1848,7 +1848,7 @@ mod tests {
     const MULTIPART_TEST_THRESHOLD: u64 = 1024;
     const MULTIPART_TEST_PART: u64 = 512;
     const MULTIPART_KEY: &str =
-        "content-stores/cs_0123456789abcdef0123456789abcdef/blobs/sha256/ab/cd/abcdef0123456789";
+        "content-stores/cs_0123456789abcdef0123456789abcdef/objects/ab/cnt_abcdef0123456789abcdef0123456789";
 
     /// Retrying store with a test-sized multipart geometry: payloads of
     /// 1024+ bytes go multipart in 512-byte parts.
