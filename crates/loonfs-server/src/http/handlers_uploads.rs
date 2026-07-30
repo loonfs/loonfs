@@ -149,11 +149,14 @@ fn direct_put_presign_time() -> SystemTime {
     SystemTime::now()
 }
 
-pub(super) async fn content_preparation_for_put(
+/// Prepares the request's content proofs against the content refs its put
+/// operations name. One prepared proof covers every operation that names its
+/// ref; tokens covering a ref no operation puts are ignored.
+pub(super) async fn content_preparation_for_puts(
     writer: &FsWriter,
     config: &ServerConfig,
     namespace_id: &NamespaceId,
-    content_ref: &ContentRef,
+    content_refs: &[&ContentRef],
     tokens: &[ValidatedContentToken],
     now_ms: u64,
 ) -> Result<PutContentPreparation, ApiResponseError> {
@@ -161,7 +164,7 @@ pub(super) async fn content_preparation_for_put(
     let mut first_error = None;
     let matching_tokens = tokens
         .iter()
-        .filter(|token| token.content_ref == *content_ref)
+        .filter(|token| content_refs.contains(&&token.content_ref))
         .cloned()
         .collect::<Vec<_>>();
     for token in &matching_tokens {
@@ -174,7 +177,7 @@ pub(super) async fn content_preparation_for_put(
             Err(error) => {
                 tracing::debug!(
                     namespace_id = %namespace_id,
-                    content_ref_digest = %content_ref.digest,
+                    content_ref_digest = %token.content_ref.digest,
                     error = %error,
                     "content token rejected during put preparation"
                 );

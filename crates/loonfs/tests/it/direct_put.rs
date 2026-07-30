@@ -5,7 +5,7 @@
 
 use crate::common::*;
 use bytes::Bytes;
-use loonfs::publish::{parse_mutation_path, FilesystemOperation, MutationRequest};
+use loonfs::publish::{parse_mutation_path, CommitRequest, FilesystemOperation};
 use loonfs::{
     BeginUploadRequest, ChangeSeq, CommitId, CompleteUploadRequest, ContentRef,
     CreateDirectoryOptions, CreateNamespaceOptions, DestinationBehavior, ErrorCode, NamespaceId,
@@ -393,7 +393,7 @@ fn concurrent_puts_coalesce_into_one_wal_segment() {
             |commit_id: &str, path: &str, prepared: loonfs_core::content::PreparedContent| {
                 let content_ref = prepared.content_ref().clone();
                 (
-                    MutationRequest::single(
+                    CommitRequest::single(
                         CommitId::parse(commit_id).expect("valid commit id"),
                         None,
                         FilesystemOperation::PutFile {
@@ -413,14 +413,10 @@ fn concurrent_puts_coalesce_into_one_wal_segment() {
         let publisher = fs.writer.publisher();
 
         let puts = tokio::join!(
-            publisher
-                .submit_mutation_with_prepared_content(namespace_id.clone(), put_a.0, put_a.1,),
-            publisher
-                .submit_mutation_with_prepared_content(namespace_id.clone(), put_b.0, put_b.1,),
-            publisher
-                .submit_mutation_with_prepared_content(namespace_id.clone(), put_c.0, put_c.1,),
-            publisher
-                .submit_mutation_with_prepared_content(namespace_id.clone(), put_d.0, put_d.1,),
+            publisher.submit_commit_with_prepared_content(namespace_id.clone(), put_a.0, put_a.1,),
+            publisher.submit_commit_with_prepared_content(namespace_id.clone(), put_b.0, put_b.1,),
+            publisher.submit_commit_with_prepared_content(namespace_id.clone(), put_c.0, put_c.1,),
+            publisher.submit_commit_with_prepared_content(namespace_id.clone(), put_d.0, put_d.1,),
         );
         puts.0.expect("put a");
         puts.1.expect("put b");
@@ -638,7 +634,7 @@ fn a_mutation_request_appears_in_change_feed() {
     let response = fs
         .mutate_blocking(
             &namespace_id,
-            MutationRequest::single(
+            CommitRequest::single(
                 commit_id.clone(),
                 Some("create docs".to_owned()),
                 FilesystemOperation::CreateDir {

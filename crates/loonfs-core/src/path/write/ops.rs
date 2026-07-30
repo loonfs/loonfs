@@ -2,8 +2,8 @@
 //! the same pipeline production batches use.
 
 use super::content_write::store_file_bytes_before_metadata_publish;
-use super::intent::{FilesystemOperation, MutationRequest};
-use crate::commit_engine::MutationCandidate;
+use super::intent::{CommitRequest, FilesystemOperation};
+use crate::commit_engine::CommitCandidate;
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
 use crate::path::helpers::parse_mutation_path;
@@ -25,13 +25,13 @@ async fn submit_operation<S: ObjectStore + ?Sized>(
     prepared_content: Vec<PreparedContent>,
     context: &MutationContext,
 ) -> Result<CommitResponse> {
-    let request = MutationRequest::single(commit_id, None, operation);
+    let request = CommitRequest::single(commit_id, None, operation);
     let candidate = if prepared_content.is_empty() {
-        MutationCandidate::new(request)
+        CommitCandidate::new(request)
     } else {
-        MutationCandidate::prepared(request, prepared_content)
+        CommitCandidate::prepared(request, prepared_content)
     };
-    let mut results = crate::commit_engine::publish_namespace_mutations_batch(
+    let mut results = crate::commit_engine::publish_namespace_commits_batch(
         store,
         namespace_id,
         vec![candidate],

@@ -11,7 +11,7 @@ use loonfs_api::{
     NamespaceId, PageRequest, RevisionNo,
 };
 use loonfs_core::content::{prepare_stored_content, store_bytes_as_content};
-use loonfs_core::publish::{FilesystemOperation, MutationCandidate, MutationRequest};
+use loonfs_core::publish::{CommitCandidate, CommitRequest, FilesystemOperation};
 use loonfs_core::{
     BootstrapOptions, Error as CoreError, ErrorCode, MetadataReorganizeOutcome, NamespaceEngine,
     RuntimeReadContext,
@@ -54,10 +54,10 @@ impl VisibilityHarness {
         self.engine.namespace_id()
     }
 
-    async fn publish(&self, candidate: MutationCandidate) -> Result<CommitResponse, CoreError> {
+    async fn publish(&self, candidate: CommitCandidate) -> Result<CommitResponse, CoreError> {
         let mut results = self
             .engine
-            .publish_namespace_mutations_batch(vec![candidate])
+            .publish_namespace_commits_batch(vec![candidate])
             .await;
         assert_eq!(results.len(), 1, "one candidate must produce one result");
         results.pop().expect("one publish result")
@@ -69,7 +69,7 @@ impl VisibilityHarness {
         &self,
         operation: FilesystemOperation,
     ) -> Result<CommitResponse, CoreError> {
-        self.publish(MutationCandidate::new(MutationRequest::single(
+        self.publish(CommitCandidate::new(CommitRequest::single(
             CommitId::generate(),
             None,
             operation,
@@ -100,8 +100,8 @@ impl VisibilityHarness {
                 .await
                 .expect("load namespace catalog");
         let prepared = prepare_stored_content(&catalog, stored).expect("prepare stored content");
-        self.publish(MutationCandidate::prepared(
-            MutationRequest::single(
+        self.publish(CommitCandidate::prepared(
+            CommitRequest::single(
                 CommitId::generate(),
                 None,
                 FilesystemOperation::PutFile {
@@ -179,7 +179,7 @@ impl VisibilityHarness {
         &self,
         operations: Vec<FilesystemOperation>,
     ) -> Result<CommitResponse, CoreError> {
-        self.publish(MutationCandidate::new(MutationRequest {
+        self.publish(CommitCandidate::new(CommitRequest {
             commit_id: CommitId::generate(),
             message: None,
             operations,

@@ -24,8 +24,8 @@ use loonfs_api::{
         UploadContentResponse, UploadMode, ValidatedContentToken,
     },
     AbsolutePath, AuthoritativePathEntry, CapabilityDocument, ChangeSeq, CheckpointId, CommitId,
-    ContentRef, CreateCheckpointRequest, CreateCheckpointResponse, CreateNamespaceRequest,
-    DeleteNamespaceResponse, DestinationBehavior, FilesystemOperation, FilesystemOperationRequest,
+    CommitRequest, ContentRef, CreateCheckpointRequest, CreateCheckpointResponse,
+    CreateNamespaceRequest, DeleteNamespaceResponse, DestinationBehavior, FilesystemOperation,
     ForkNamespaceRequest, GrepRequest, GrepResponse, InodeId, ListFileRevisionsResponse,
     ListPathEntriesResponse, ListTrashResponse, MaintenanceStepRequest, MaintenanceStepResponse,
     NamespaceId, NamespaceStatusResponse, NamespaceSummary, ReleaseCheckpointResponse, RevisionNo,
@@ -78,11 +78,11 @@ pub struct NamespacePath {
     absolute_path: AbsolutePath,
 }
 
-/// Options for client mutations whose only optional input is a commit id.
+/// Options for client commits whose only optional input is a commit id.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct MutationOptions {
+pub struct CommitOptions {
     /// Idempotency key for the commit; retrying with the same id replays
-    /// the committed mutation instead of double-committing. A fresh id is
+    /// the landed commit instead of double-committing. A fresh id is
     /// generated when absent.
     pub commit_id: Option<CommitId>,
     /// Annotation recorded on the commit and reported by the change feed.
@@ -91,7 +91,7 @@ pub struct MutationOptions {
     pub message: Option<String>,
 }
 
-impl MutationOptions {
+impl CommitOptions {
     fn resolve_commit_id(&self) -> CommitId {
         self.commit_id.clone().unwrap_or_else(CommitId::generate)
     }
@@ -543,15 +543,19 @@ impl Client {
             .await
     }
 
-    async fn apply_filesystem_operation(
+    /// Applies one commit: its operations land together, in order, under
+    /// one commit id.
+    ///
+    /// The convenience methods below are the one-element case of this call.
+    /// Operations that introduce new external content carry their proofs in
+    /// the request's `content_tokens`; stage the bytes with the upload
+    /// methods first.
+    pub async fn commit(
         &self,
         namespace_id: &NamespaceId,
-        request: &FilesystemOperationRequest,
+        request: &CommitRequest,
     ) -> Result<ApiCommitResponse> {
-        let url = format!(
-            "{}/v0/namespaces/{namespace_id}/filesystem/operations",
-            self.base_url
-        );
+        let url = format!("{}/v0/namespaces/{namespace_id}/commits", self.base_url);
         // The request's commit id resolves an ambiguous resend through a durable receipt.
         self.request_json::<_, ApiCommitResponse>(self.post(&url), Some(request))
             .await
@@ -601,18 +605,18 @@ impl Client {
             .stage_bytes_as_content_ref(spec.namespace(), bytes)
             .await?;
         let response = self
-            .apply_filesystem_operation(
+            .commit(
                 spec.namespace(),
-                &FilesystemOperationRequest {
+                &CommitRequest {
                     commit_id,
                     message: options.message.clone(),
                     content_tokens: staged.validated_content_token.into_iter().collect(),
-                    operation: FilesystemOperation::PutFile {
+                    operations: vec![FilesystemOperation::PutFile {
                         path: spec.absolute_path().clone(),
                         content_ref: staged.content_ref,
                         behavior: options.behavior,
                         expected_revision_no: options.expected_revision_no,
-                    },
+                    }],
                 },
             )
             .await?;
@@ -626,17 +630,16 @@ impl Client {
     ) -> Result<ApiCommitResponse> {
         let commit_id = options.commit_id.clone().unwrap_or_else(CommitId::generate);
         let response = self
-            .apply_filesystem_operation(
+            .commit(
                 spec.namespace(),
-                &FilesystemOperationRequest {
+                &CommitRequest::single(
                     commit_id,
-                    message: options.message.clone(),
-                    content_tokens: Vec::new(),
-                    operation: FilesystemOperation::CreateDirectory {
+                    options.message.clone(),
+                    FilesystemOperation::CreateDirectory {
                         path: spec.absolute_path().clone(),
                         parents: options.parents,
                     },
-                },
+                ),
             )
             .await?;
         Ok(response)
@@ -649,18 +652,17 @@ impl Client {
     ) -> Result<ApiCommitResponse> {
         let commit_id = options.commit_id.clone().unwrap_or_else(CommitId::generate);
         let response = self
-            .apply_filesystem_operation(
+            .commit(
                 spec.namespace(),
-                &FilesystemOperationRequest {
+                &CommitRequest::single(
                     commit_id,
-                    message: options.message.clone(),
-                    content_tokens: Vec::new(),
-                    operation: FilesystemOperation::DeletePath {
+                    options.message.clone(),
+                    FilesystemOperation::DeletePath {
                         path: spec.absolute_path().clone(),
                         behavior: options.behavior,
                         expected_inode_id: options.expected_inode_id,
                     },
-                },
+                ),
             )
             .await?;
         Ok(response)
@@ -671,7 +673,7 @@ impl Client {
         from: &NamespacePath,
         to: &NamespacePath,
         behavior: DestinationBehavior,
-        options: &MutationOptions,
+        options: &CommitOptions,
     ) -> Result<ApiCommitResponse> {
         if from.namespace() != to.namespace() {
             return Err(ClientError::InvalidNamespacePath(format!(
@@ -682,18 +684,17 @@ impl Client {
         }
         let commit_id = options.resolve_commit_id();
         let response = self
-            .apply_filesystem_operation(
+            .commit(
                 from.namespace(),
-                &FilesystemOperationRequest {
+                &CommitRequest::single(
                     commit_id,
-                    message: options.message.clone(),
-                    content_tokens: Vec::new(),
-                    operation: FilesystemOperation::MovePath {
+                    options.message.clone(),
+                    FilesystemOperation::MovePath {
                         from_path: from.absolute_path().clone(),
                         to_path: to.absolute_path().clone(),
                         behavior,
                     },
-                },
+                ),
             )
             .await?;
         Ok(response)
@@ -704,7 +705,7 @@ impl Client {
         from: &NamespacePath,
         to: &NamespacePath,
         behavior: DestinationBehavior,
-        options: &MutationOptions,
+        options: &CommitOptions,
     ) -> Result<ApiCommitResponse> {
         if from.namespace() != to.namespace() {
             return Err(ClientError::InvalidNamespacePath(format!(
@@ -715,18 +716,17 @@ impl Client {
         }
         let commit_id = options.resolve_commit_id();
         let response = self
-            .apply_filesystem_operation(
+            .commit(
                 from.namespace(),
-                &FilesystemOperationRequest {
+                &CommitRequest::single(
                     commit_id,
-                    message: options.message.clone(),
-                    content_tokens: Vec::new(),
-                    operation: FilesystemOperation::CopyPath {
+                    options.message.clone(),
+                    FilesystemOperation::CopyPath {
                         from_path: from.absolute_path().clone(),
                         to_path: to.absolute_path().clone(),
                         behavior,
                     },
-                },
+                ),
             )
             .await?;
         Ok(response)
@@ -740,22 +740,21 @@ impl Client {
         spec: &NamespacePath,
         inode_id: InodeId,
         deleted_at_seq: ChangeSeq,
-        options: &MutationOptions,
+        options: &CommitOptions,
     ) -> Result<ApiCommitResponse> {
         let commit_id = options.resolve_commit_id();
         let response = self
-            .apply_filesystem_operation(
+            .commit(
                 spec.namespace(),
-                &FilesystemOperationRequest {
+                &CommitRequest::single(
                     commit_id,
-                    message: options.message.clone(),
-                    content_tokens: Vec::new(),
-                    operation: FilesystemOperation::Undelete {
+                    options.message.clone(),
+                    FilesystemOperation::Undelete {
                         inode_id,
                         deleted_at_seq,
                         path: spec.absolute_path().clone(),
                     },
-                },
+                ),
             )
             .await?;
         Ok(response)
@@ -765,21 +764,20 @@ impl Client {
         &self,
         spec: &NamespacePath,
         source_revision_no: RevisionNo,
-        options: &MutationOptions,
+        options: &CommitOptions,
     ) -> Result<ApiCommitResponse> {
         let commit_id = options.resolve_commit_id();
         let response = self
-            .apply_filesystem_operation(
+            .commit(
                 spec.namespace(),
-                &FilesystemOperationRequest {
+                &CommitRequest::single(
                     commit_id,
-                    message: options.message.clone(),
-                    content_tokens: Vec::new(),
-                    operation: FilesystemOperation::RestoreRevision {
+                    options.message.clone(),
+                    FilesystemOperation::RestoreRevision {
                         path: spec.absolute_path().clone(),
                         source_revision_no,
                     },
-                },
+                ),
             )
             .await?;
         Ok(response)

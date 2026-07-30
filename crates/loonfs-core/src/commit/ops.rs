@@ -2,7 +2,7 @@
 //! mutation compiles into, and the race checks evaluated beside them.
 //!
 //! This vocabulary is internal. Callers speak
-//! [`MutationRequest`](crate::path::write::MutationRequest), whose
+//! [`CommitRequest`](crate::path::write::CommitRequest), whose
 //! path-oriented operations the planner compiles into the ops below; nothing
 //! outside this crate constructs them.
 

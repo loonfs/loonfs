@@ -1,6 +1,6 @@
-//! The committed-mutation shapes for the v0 HTTP API: the envelope every
-//! mutation resolves to, and the ordered feed of semantic filesystem events
-//! those mutations produce. Path-oriented request shapes live in
+//! The commit shapes for the v0 HTTP API: the envelope every
+//! commit resolves to, and the ordered feed of semantic filesystem events
+//! those commits produce. Path-oriented request shapes live in
 //! [`super::operations`].
 
 use crate::{
@@ -8,9 +8,9 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
-/// Result of one committed mutation.
+/// Result of one commit.
 ///
-/// Every mutation resolves to this envelope — path-oriented operations and
+/// Every commit resolves to this envelope — path-oriented operations and
 /// explicit commits, embedded or remote. The commit id is the caller's
 /// reconciliation handle: resubmitting the same request with the same id
 /// replays this result instead of committing twice.
@@ -19,14 +19,14 @@ use serde::{Deserialize, Serialize};
 pub struct CommitResponse {
     /// Namespace that changed.
     pub namespace_id: NamespaceId,
-    /// Idempotency key the mutation committed under: caller-supplied, or
+    /// Idempotency key the commit landed under: caller-supplied, or
     /// generated on the caller's behalf when the request carried none.
     pub commit_id: CommitId,
-    /// Sequence number where the mutation became visible.
+    /// Sequence number where the commit became visible.
     pub committed_seq: ChangeSeq,
 }
 
-/// One semantic filesystem change inside a committed mutation.
+/// One semantic filesystem change inside a commit.
 ///
 /// Each event corresponds to one operation of the committed request, in
 /// request order. Events name inodes and their parent-directory bindings

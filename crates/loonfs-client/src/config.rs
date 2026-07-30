@@ -30,8 +30,9 @@ pub struct ClientConfig {
     /// `commit_queue_full`, `shutting_down` — a draining process telling the
     /// caller to retry against the next one) and network-level transport
     /// errors (connect failures, timeouts, resets). Off by default. The retry
-    /// applies only to reads, mutations with durable replay identity, and
-    /// operations whose repeat semantics are idempotent; lifecycle mutations
+    /// applies only to reads, commits (which carry a durable replay
+    /// identity), and operations whose repeat semantics are idempotent;
+    /// lifecycle mutations
     /// and upload-session creation are always single-attempt.
     #[serde(default)]
     pub disable_transient_retry: bool,

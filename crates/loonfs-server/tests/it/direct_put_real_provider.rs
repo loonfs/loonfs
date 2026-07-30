@@ -3,8 +3,8 @@
 use crate::common::{start_server, test_config};
 use loonfs_api::{
     v0::{CompleteUploadRequest, ObjectTransferAccess, ValidatedContentToken},
-    ChangeSeq, CommitId, CommitResponse, ContentRef, DestinationBehavior, FilesystemOperation,
-    FilesystemOperationRequest, NamespaceId,
+    ChangeSeq, CommitId, CommitRequest, CommitResponse, ContentRef, DestinationBehavior,
+    FilesystemOperation, NamespaceId,
 };
 use loonfs_client::{Client, ClientError, NamespacePath};
 use loonfs_server::{ServerConfig, StoreConfig};
@@ -115,22 +115,22 @@ async fn direct_put_round_trip(config: ServerConfig) {
         .validated_content_token
         .expect("completion returns content token");
 
-    let response = post_filesystem_operation(
+    let response = post_commit(
         &harness.server_url,
         namespace,
-        &FilesystemOperationRequest {
+        &CommitRequest {
             commit_id: CommitId::parse("direct-put-e2e").expect("valid commit id"),
             message: None,
             content_tokens: vec![ValidatedContentToken {
                 content_ref: content_ref.clone(),
                 token: validated_content_token,
             }],
-            operation: FilesystemOperation::PutFile {
+            operations: vec![FilesystemOperation::PutFile {
                 path: target.absolute_path().clone(),
                 content_ref,
                 behavior: DestinationBehavior::NoReplace,
                 expected_revision_no: None,
-            },
+            }],
         },
     );
     assert_eq!(response.committed_seq, ChangeSeq(1));
@@ -277,19 +277,13 @@ fn expect_client_rejection<T>(result: Result<T, ClientError>, context: &str) {
     }
 }
 
-fn post_filesystem_operation(
-    server_url: &str,
-    namespace: &str,
-    request: &FilesystemOperationRequest,
-) -> CommitResponse {
-    let response = ureq::post(&format!(
-        "{server_url}/v0/namespaces/{namespace}/filesystem/operations"
-    ))
-    .set("authorization", &format!("Bearer {AUTH_TOKEN}"))
-    .send_json(request)
-    .expect("post filesystem operation");
+fn post_commit(server_url: &str, namespace: &str, request: &CommitRequest) -> CommitResponse {
+    let response = ureq::post(&format!("{server_url}/v0/namespaces/{namespace}/commits"))
+        .set("authorization", &format!("Bearer {AUTH_TOKEN}"))
+        .send_json(request)
+        .expect("post mutation");
 
-    serde_json::from_reader(response.into_reader()).expect("decode filesystem operation response")
+    serde_json::from_reader(response.into_reader()).expect("decode mutation response")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -25,8 +25,8 @@ use self::extractors::{
     UploadBodyBytes,
 };
 use self::handlers_filesystem::{
-    apply_filesystem_operation, get_file_bytes, list_changes, list_file_revisions,
-    list_path_entries, list_trash, stat_path,
+    apply_commit, get_file_bytes, list_changes, list_file_revisions, list_path_entries, list_trash,
+    stat_path,
 };
 use self::handlers_namespace::{
     create_checkpoint, create_namespace, delete_namespace, fork_namespace, maintenance_step,
@@ -142,10 +142,7 @@ fn router(state: AppState) -> Router {
             "/v0/namespaces/:namespace/filesystem/trash",
             get(list_trash),
         )
-        .route(
-            "/v0/namespaces/:namespace/filesystem/operations",
-            post(apply_filesystem_operation),
-        )
+        .route("/v0/namespaces/:namespace/commits", post(apply_commit))
         .route("/v0/namespaces/:namespace/uploads", post(begin_upload))
         .route(
             "/v0/namespaces/:namespace/uploads/:upload_id/content",

@@ -16,7 +16,7 @@ Everything else — caches, queues, coordination state — can be rebuilt from t
 LoonFS can be exposed as:
 
 - an embedded/direct filesystem runtime with commands such as `ls`, `get`, `put`, `mv`, and `cp`
-- a lower-level writer surface: staged uploads, multi-operation mutations, and an ordered change feed
+- a lower-level writer surface: staged uploads, multi-operation commits, and an ordered change feed
 - a foundation for sync clients, batch writers, and operator tooling
 
 This spec standardizes the durable model and the rules for interoperable implementations. It does not standardize implementation internals such as client databases, queues, or schedulers.

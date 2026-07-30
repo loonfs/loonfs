@@ -1,0 +1,571 @@
+//! The one wire commit surface: batches commit atomically, a failing
+//! operation names its position, and replay shares one fingerprint domain
+//! with the embedded runtime.
+
+use crate::common::http_split_support::*;
+use crate::common::start_server;
+use loonfs::publish::{CommitRequest as CoreCommitRequest, FilesystemOperation as CoreOperation};
+use loonfs::{CreateNamespaceOptions, FsWriter, ListChangesOptions, StoreConfig};
+use loonfs_api::{
+    v0::CommittedChange, AbsolutePath, ChangeSeq, CommitId, CommitRequest, ContentRef,
+    DeleteDirectoryBehavior, DestinationBehavior, ErrorCode, FilesystemOperation,
+};
+use loonfs_client::{ClientError, NamespacePath};
+use loonfs_test_support::ids::namespace_id;
+use tempfile::tempdir;
+
+const REPORTS_DIR: &str = "/reports";
+const FIRST_FILE: &str = "/reports/january.txt";
+const SECOND_FILE: &str = "/reports/february.txt";
+const FIRST_BYTES: &[u8] = b"january numbers";
+const SECOND_BYTES: &[u8] = b"february numbers";
+
+fn absolute(path: &str) -> AbsolutePath {
+    AbsolutePath::parse(path).expect("valid absolute path")
+}
+
+fn commit_id(value: &str) -> CommitId {
+    CommitId::parse(value).expect("valid commit id")
+}
+
+/// The comparable content of one committed change: everything the feed
+/// promises except the wall-clock stamp, which is observational.
+fn change_identity(change: &CommittedChange) -> (ChangeSeq, String, Option<String>, String) {
+    (
+        change.seq,
+        change.commit_id.to_string(),
+        change.message.clone(),
+        serde_json::to_string(&change.events).expect("serialize events"),
+    )
+}
+
+/// The directory-then-two-files batch, in the wire language.
+fn wire_batch(first: &ContentRef, second: &ContentRef) -> Vec<FilesystemOperation> {
+    vec![
+        FilesystemOperation::CreateDirectory {
+            path: absolute(REPORTS_DIR),
+            parents: false,
+        },
+        FilesystemOperation::PutFile {
+            path: absolute(FIRST_FILE),
+            content_ref: first.clone(),
+            behavior: DestinationBehavior::NoReplace,
+            expected_revision_no: None,
+        },
+        FilesystemOperation::PutFile {
+            path: absolute(SECOND_FILE),
+            content_ref: second.clone(),
+            behavior: DestinationBehavior::NoReplace,
+            expected_revision_no: None,
+        },
+    ]
+}
+
+/// One batch, two transports: the same three operations submitted over HTTP
+/// and embedded produce the same single commit and the same ordered events.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_batch_commits_once_and_matches_the_same_batch_embedded() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store_root = temp_dir.path().join("store");
+    let harness = start_server(test_config(
+        store_root.clone(),
+        "loonfs-server-batch",
+        "http-commits",
+    ))
+    .await;
+
+    // Two namespaces in one store: writer epochs are per namespace, so the
+    // embedded arm and the served arm never fence each other.
+    let remote_ns = namespace_id("remote");
+    harness
+        .client
+        .create_namespace(&remote_ns)
+        .await
+        .expect("create remote namespace");
+    let first = stage_uploaded_content(&harness.client, &remote_ns, FIRST_BYTES).await;
+    let second = stage_uploaded_content(&harness.client, &remote_ns, SECOND_BYTES).await;
+
+    let committed = harness
+        .client
+        .commit(
+            &remote_ns,
+            &CommitRequest {
+                commit_id: commit_id("batch-one"),
+                message: Some("import the reports".to_owned()),
+                content_tokens: vec![
+                    validated_content_token(&first),
+                    validated_content_token(&second),
+                ],
+                operations: wire_batch(&first.content_ref, &second.content_ref),
+            },
+        )
+        .await
+        .expect("batch commits");
+    // Three operations, one commit: the namespace advanced exactly once.
+    assert_eq!(committed.committed_seq, ChangeSeq(1));
+    assert_eq!(committed.commit_id.as_str(), "batch-one");
+
+    let remote_changes = harness
+        .client
+        .list_changes(&remote_ns, ChangeSeq(0), None)
+        .await
+        .expect("remote changes");
+    assert_eq!(remote_changes.changes.len(), 1, "{remote_changes:?}");
+    // One event per operation, in request order: the directory, then the
+    // two files created under it.
+    assert_eq!(remote_changes.changes[0].events.len(), 3);
+
+    // Every path the batch named is visible, and only because the whole
+    // batch committed.
+    for (path, bytes) in [(FIRST_FILE, FIRST_BYTES), (SECOND_FILE, SECOND_BYTES)] {
+        let spec = NamespacePath::parse("remote", path).expect("path");
+        assert_eq!(
+            harness
+                .client
+                .get_file_bytes(&spec)
+                .await
+                .expect("batch file readable"),
+            bytes
+        );
+    }
+
+    // The same batch, submitted embedded against the same store.
+    let embedded_ns = namespace_id("embedded");
+    let writer = FsWriter::builder(StoreConfig::LocalFs {
+        root: store_root.display().to_string(),
+        key_prefix: Some("http-commits".to_owned()),
+    })
+    .writer_id("loonfs-embedded-batch")
+    .build()
+    .await
+    .expect("embedded writer");
+    writer
+        .create_namespace(&embedded_ns, CreateNamespaceOptions::default())
+        .await
+        .expect("create embedded namespace");
+    let first_prepared = writer
+        .prepare_file_bytes(&embedded_ns, FIRST_BYTES)
+        .await
+        .expect("prepare first");
+    let second_prepared = writer
+        .prepare_file_bytes(&embedded_ns, SECOND_BYTES)
+        .await
+        .expect("prepare second");
+    let embedded_committed = writer
+        .commit_prepared(
+            &embedded_ns,
+            CoreCommitRequest {
+                commit_id: commit_id("batch-one"),
+                message: Some("import the reports".to_owned()),
+                operations: vec![
+                    CoreOperation::CreateDir {
+                        absolute_path: absolute(REPORTS_DIR),
+                        parents: false,
+                    },
+                    CoreOperation::PutFile {
+                        absolute_path: absolute(FIRST_FILE),
+                        content_ref: first_prepared.content_ref().clone(),
+                        behavior: DestinationBehavior::NoReplace,
+                        expected_revision_no: None,
+                    },
+                    CoreOperation::PutFile {
+                        absolute_path: absolute(SECOND_FILE),
+                        content_ref: second_prepared.content_ref().clone(),
+                        behavior: DestinationBehavior::NoReplace,
+                        expected_revision_no: None,
+                    },
+                ],
+            },
+            vec![first_prepared, second_prepared],
+        )
+        .await
+        .expect("embedded batch commits");
+    assert_eq!(embedded_committed.committed_seq, committed.committed_seq);
+
+    let embedded_changes = writer
+        .reader()
+        .list_changes(&embedded_ns, ChangeSeq(0), ListChangesOptions::default())
+        .await
+        .expect("embedded changes");
+
+    // The parity claim: the two transports produced the same commit —
+    // same sequence, same id, same annotation, same ordered events.
+    assert_eq!(
+        remote_changes
+            .changes
+            .iter()
+            .map(change_identity)
+            .collect::<Vec<_>>(),
+        embedded_changes
+            .changes
+            .iter()
+            .map(change_identity)
+            .collect::<Vec<_>>()
+    );
+
+    writer
+        .shutdown_background()
+        .await
+        .expect("settle embedded background work");
+    harness.server.abort();
+}
+
+/// A batch is all-or-nothing: the operation that stops it names its own
+/// position, and nothing the batch would have written is visible.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failing_operation_names_its_position_and_commits_nothing() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loonfs-server-batch-failure",
+        "http-commit-failure",
+    ))
+    .await;
+
+    let namespace = namespace_id("demo");
+    harness
+        .client
+        .create_namespace(&namespace)
+        .await
+        .expect("create namespace");
+    let staged = stage_uploaded_content(&harness.client, &namespace, FIRST_BYTES).await;
+
+    // Operations 0 and 1 are valid and depend on each other; operation 2
+    // deletes a path that was never bound.
+    let error = harness
+        .client
+        .commit(
+            &namespace,
+            &CommitRequest {
+                commit_id: commit_id("batch-stops-at-two"),
+                message: None,
+                content_tokens: vec![validated_content_token(&staged)],
+                operations: vec![
+                    FilesystemOperation::CreateDirectory {
+                        path: absolute(REPORTS_DIR),
+                        parents: false,
+                    },
+                    FilesystemOperation::PutFile {
+                        path: absolute(FIRST_FILE),
+                        content_ref: staged.content_ref.clone(),
+                        behavior: DestinationBehavior::NoReplace,
+                        expected_revision_no: None,
+                    },
+                    FilesystemOperation::DeletePath {
+                        path: absolute("/never-existed.txt"),
+                        behavior: DeleteDirectoryBehavior::NonRecursive,
+                        expected_inode_id: None,
+                    },
+                ],
+            },
+        )
+        .await
+        .expect_err("the third operation has nothing to delete");
+
+    match error {
+        ClientError::Api {
+            status,
+            code,
+            details,
+            ..
+        } => {
+            // The code stays the failing operation's own; the position is
+            // what batching adds.
+            assert_eq!(status, 404);
+            assert_eq!(code, ErrorCode::PathNotFound.as_str());
+            let details = details.expect("failed batch carries details");
+            assert_eq!(details.operation_index, Some(2));
+            assert_eq!(
+                details.commit_id.as_ref().map(CommitId::as_str),
+                Some("batch-stops-at-two")
+            );
+        }
+        other => unreachable!("expected path_not_found with a position, got {other:?}"),
+    }
+
+    // Nothing the batch would have written became visible, and the head
+    // never advanced.
+    for path in [REPORTS_DIR, FIRST_FILE] {
+        let spec = NamespacePath::parse("demo", path).expect("path");
+        let missing = harness
+            .client
+            .stat_path(&spec)
+            .await
+            .expect_err("the aborted batch wrote nothing");
+        match missing {
+            ClientError::Api { code, .. } => assert_eq!(code, ErrorCode::PathNotFound.as_str()),
+            other => unreachable!("expected path_not_found, got {other:?}"),
+        }
+    }
+    assert_eq!(
+        harness
+            .client
+            .namespace_status(&namespace)
+            .await
+            .expect("status")
+            .head_seq,
+        ChangeSeq(0)
+    );
+
+    harness.server.abort();
+}
+
+/// An empty operation list is the one shape the language does not accept;
+/// the wire surfaces core's own classification for it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_empty_operation_list_is_rejected() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loonfs-server-empty-batch",
+        "http-empty-batch",
+    ))
+    .await;
+
+    let namespace = namespace_id("demo");
+    harness
+        .client
+        .create_namespace(&namespace)
+        .await
+        .expect("create namespace");
+
+    let error = harness
+        .client
+        .commit(
+            &namespace,
+            &CommitRequest {
+                commit_id: commit_id("empty-batch"),
+                message: None,
+                content_tokens: Vec::new(),
+                operations: Vec::new(),
+            },
+        )
+        .await
+        .expect_err("an empty request has nothing to commit");
+    match error {
+        ClientError::Api { status, code, .. } => {
+            assert_eq!(status, 400);
+            assert_eq!(code, ErrorCode::InvalidRequest.as_str());
+        }
+        other => unreachable!("expected invalid_request, got {other:?}"),
+    }
+    assert_eq!(
+        harness
+            .client
+            .namespace_status(&namespace)
+            .await
+            .expect("status")
+            .head_seq,
+        ChangeSeq(0)
+    );
+
+    harness.server.abort();
+}
+
+/// Replay over the wire: the same id with the same batch returns the
+/// original receipt, and the same id with a different batch conflicts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_batch_replays_under_its_commit_id() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loonfs-server-batch-replay",
+        "http-commit-replay",
+    ))
+    .await;
+
+    let namespace = namespace_id("demo");
+    harness
+        .client
+        .create_namespace(&namespace)
+        .await
+        .expect("create namespace");
+
+    let batch = |ops: Vec<FilesystemOperation>| CommitRequest {
+        commit_id: commit_id("replayed-batch"),
+        message: Some("two directories".to_owned()),
+        content_tokens: Vec::new(),
+        operations: ops,
+    };
+    let operations = vec![
+        FilesystemOperation::CreateDirectory {
+            path: absolute(REPORTS_DIR),
+            parents: false,
+        },
+        FilesystemOperation::CreateDirectory {
+            path: absolute("/reports/2026"),
+            parents: false,
+        },
+    ];
+
+    let first = harness
+        .client
+        .commit(&namespace, &batch(operations.clone()))
+        .await
+        .expect("batch commits");
+    let replayed = harness
+        .client
+        .commit(&namespace, &batch(operations.clone()))
+        .await
+        .expect("identical resubmission replays");
+    assert_eq!(replayed, first);
+    assert_eq!(
+        harness
+            .client
+            .namespace_status(&namespace)
+            .await
+            .expect("status")
+            .head_seq,
+        first.committed_seq,
+        "the replay committed nothing new"
+    );
+
+    // Dropping the second operation is a different commit under the same
+    // id, so the id is spent.
+    let conflict = harness
+        .client
+        .commit(&namespace, &batch(operations[..1].to_vec()))
+        .await
+        .expect_err("a different batch cannot reuse the id");
+    match conflict {
+        ClientError::Api { code, .. } => {
+            assert_eq!(code, ErrorCode::CommitIdReuseConflict.as_str());
+        }
+        other => unreachable!("expected commit_id_reuse_conflict, got {other:?}"),
+    }
+
+    harness.server.abort();
+}
+
+/// One fingerprint domain across transports: a batch committed embedded
+/// replays over HTTP under the same commit id, and a different batch under
+/// that id conflicts over HTTP just as it would embedded.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_commit_id_used_embedded_replays_over_http() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store_root = temp_dir.path().join("store");
+    let namespace = namespace_id("shared");
+
+    let operations = || {
+        vec![
+            CoreOperation::CreateDir {
+                absolute_path: absolute(REPORTS_DIR),
+                parents: false,
+            },
+            CoreOperation::CreateDir {
+                absolute_path: absolute("/reports/2026"),
+                parents: false,
+            },
+            CoreOperation::MovePath {
+                from_path: absolute("/reports/2026"),
+                to_path: absolute("/reports/2025"),
+                behavior: DestinationBehavior::NoReplace,
+            },
+        ]
+    };
+
+    // Committed embedded first, then the writer goes away: the served
+    // writer acquires its own epoch afterward and finds the receipt.
+    let embedded_receipt = {
+        let writer = FsWriter::builder(StoreConfig::LocalFs {
+            root: store_root.display().to_string(),
+            key_prefix: Some("http-cross-transport".to_owned()),
+        })
+        .writer_id("loonfs-embedded-cross")
+        .build()
+        .await
+        .expect("embedded writer");
+        writer
+            .create_namespace(&namespace, CreateNamespaceOptions::default())
+            .await
+            .expect("create namespace");
+        let receipt = writer
+            .commit(
+                &namespace,
+                CoreCommitRequest {
+                    commit_id: commit_id("crosses-transports"),
+                    message: Some("shaped once".to_owned()),
+                    operations: operations(),
+                },
+            )
+            .await
+            .expect("embedded batch commits");
+        writer
+            .shutdown_background()
+            .await
+            .expect("settle embedded background work");
+        receipt
+    };
+
+    let harness = start_server(test_config(
+        store_root.clone(),
+        "loonfs-server-cross",
+        "http-cross-transport",
+    ))
+    .await;
+
+    // The same commit, written in the wire language under the same id.
+    let wire_operations = vec![
+        FilesystemOperation::CreateDirectory {
+            path: absolute(REPORTS_DIR),
+            parents: false,
+        },
+        FilesystemOperation::CreateDirectory {
+            path: absolute("/reports/2026"),
+            parents: false,
+        },
+        FilesystemOperation::MovePath {
+            from_path: absolute("/reports/2026"),
+            to_path: absolute("/reports/2025"),
+            behavior: DestinationBehavior::NoReplace,
+        },
+    ];
+    let replayed = harness
+        .client
+        .commit(
+            &namespace,
+            &CommitRequest {
+                commit_id: commit_id("crosses-transports"),
+                message: Some("shaped once".to_owned()),
+                content_tokens: Vec::new(),
+                operations: wire_operations.clone(),
+            },
+        )
+        .await
+        .expect("the embedded commit replays over http");
+    assert_eq!(replayed, embedded_receipt);
+    assert_eq!(
+        harness
+            .client
+            .namespace_status(&namespace)
+            .await
+            .expect("status")
+            .head_seq,
+        embedded_receipt.committed_seq,
+        "the cross-transport replay committed nothing new"
+    );
+
+    // And the conflict crosses too: a different batch under the spent id
+    // fails over HTTP on a receipt the embedded runtime wrote.
+    let conflict = harness
+        .client
+        .commit(
+            &namespace,
+            &CommitRequest {
+                commit_id: commit_id("crosses-transports"),
+                message: Some("shaped once".to_owned()),
+                content_tokens: Vec::new(),
+                operations: wire_operations[..2].to_vec(),
+            },
+        )
+        .await
+        .expect_err("a different batch cannot reuse the embedded id");
+    match conflict {
+        ClientError::Api { code, .. } => {
+            assert_eq!(code, ErrorCode::CommitIdReuseConflict.as_str());
+        }
+        other => unreachable!("expected commit_id_reuse_conflict, got {other:?}"),
+    }
+
+    harness.server.abort();
+}

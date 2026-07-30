@@ -3,14 +3,14 @@
 //! candidate.
 
 use crate::checkpoint::MetadataTableCache;
-use crate::commit::MutationFingerprint;
+use crate::commit::CommitFingerprint;
 use crate::context::MutationContext;
 use crate::error::{CoreError, MetadataViewError, Result, WriterFence};
 use crate::metadata::MetadataState;
 use crate::namespace::basis::MetadataBasis;
 use crate::namespace::writer_epoch::acquire_writer_epoch;
 use crate::options::DeleteNamespaceOptions;
-use crate::path::write::{mutation_fingerprint, FilesystemOperation, MutationRequest};
+use crate::path::write::{commit_fingerprint, CommitRequest, FilesystemOperation};
 use crate::protocol::{load_publish_metadata_view, PublishTailOptions, PublishTailProjection};
 use crate::storage::content_admission::{ContentAdmission, ContentTokenError, PreparedContent};
 use crate::timing::{MonotonicTimer, StdMonotonicTimer};
@@ -25,8 +25,8 @@ use thiserror::Error;
 /// One namespace mutation together with the result of preparing any content
 /// it references.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MutationCandidate {
-    request: MutationRequest,
+pub struct CommitCandidate {
+    request: CommitRequest,
     content: ContentPreparation,
 }
 
@@ -49,9 +49,9 @@ pub enum ContentPreparationError {
     ContentNotPrepared { content_ref_digest: String },
 }
 
-impl MutationCandidate {
+impl CommitCandidate {
     /// Wraps a mutation request with no attached content proofs.
-    pub fn new(request: MutationRequest) -> Self {
+    pub fn new(request: CommitRequest) -> Self {
         Self {
             request,
             content: ContentPreparation::Ready(Vec::new()),
@@ -59,7 +59,7 @@ impl MutationCandidate {
     }
 
     /// Wraps a mutation request with opaque proofs for its prepared content.
-    pub fn prepared(request: MutationRequest, content: Vec<PreparedContent>) -> Self {
+    pub fn prepared(request: CommitRequest, content: Vec<PreparedContent>) -> Self {
         Self {
             request,
             content: ContentPreparation::Ready(
@@ -72,14 +72,14 @@ impl MutationCandidate {
     }
 
     /// Wraps a mutation request whose content preparation failed.
-    pub fn rejected(request: MutationRequest, error: ContentPreparationError) -> Self {
+    pub fn rejected(request: CommitRequest, error: ContentPreparationError) -> Self {
         Self {
             request,
             content: ContentPreparation::Rejected(error),
         }
     }
 
-    pub(crate) fn request(&self) -> &MutationRequest {
+    pub(crate) fn request(&self) -> &CommitRequest {
         &self.request
     }
 
@@ -94,8 +94,8 @@ impl MutationCandidate {
 
     /// Computes semantic identity from the request alone, without applying
     /// current operational request limits.
-    pub fn semantic_identity(&self, namespace_id: &NamespaceId) -> Result<MutationFingerprint> {
-        mutation_fingerprint(namespace_id, &self.request)
+    pub fn semantic_identity(&self, namespace_id: &NamespaceId) -> Result<CommitFingerprint> {
+        commit_fingerprint(namespace_id, &self.request)
     }
 
     pub(crate) fn validate_request_limits(&self) -> Result<()> {
@@ -364,7 +364,7 @@ impl NamespaceCommitEngine {
     pub async fn publish_batch<S: ObjectStore + ?Sized>(
         &mut self,
         store: &S,
-        candidates: Vec<MutationCandidate>,
+        candidates: Vec<CommitCandidate>,
         context: &MutationContext,
         tail_options: &PublishTailOptions,
     ) -> NamespaceCommitEnginePublishResult {
@@ -431,7 +431,7 @@ impl NamespaceCommitEngine {
             };
         }
 
-        let published = crate::protocol::publish_namespace_mutations_batch_against_publish_view(
+        let published = crate::protocol::publish_namespace_commits_batch_against_publish_view(
             store,
             &self.namespace_id,
             &candidates,
@@ -506,10 +506,10 @@ fn repeated_error(count: usize, error: CoreError) -> Vec<Result<ApiCommitRespons
 }
 
 /// Publishes one batch through a fresh, uncached commit engine.
-pub(crate) async fn publish_namespace_mutations_batch<S: ObjectStore + ?Sized>(
+pub(crate) async fn publish_namespace_commits_batch<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    candidates: Vec<MutationCandidate>,
+    candidates: Vec<CommitCandidate>,
     context: &MutationContext,
 ) -> Vec<Result<ApiCommitResponse>> {
     let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
@@ -555,8 +555,8 @@ mod tests {
         }
     }
 
-    fn create_dir_request(commit_id: &str, name: &str) -> MutationRequest {
-        MutationRequest::single(
+    fn create_dir_request(commit_id: &str, name: &str) -> CommitRequest {
+        CommitRequest::single(
             CommitId::parse(commit_id).expect("valid commit id"),
             None,
             FilesystemOperation::CreateDir {
@@ -571,8 +571,8 @@ mod tests {
     fn semantic_identity_excludes_content_preparation() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let request = create_dir_request("same-mutation", "docs");
-        let ready = MutationCandidate::new(request.clone());
-        let rejected = MutationCandidate::rejected(
+        let ready = CommitCandidate::new(request.clone());
+        let rejected = CommitCandidate::rejected(
             request,
             ContentPreparationError::ContentToken(ContentTokenError::Expired),
         );
@@ -586,7 +586,7 @@ mod tests {
     #[test]
     fn semantic_identity_ignores_current_request_limits() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let oversized_ops = MutationCandidate::new(MutationRequest {
+        let oversized_ops = CommitCandidate::new(CommitRequest {
             commit_id: CommitId::parse("too-many-ops").expect("valid commit id"),
             message: None,
             operations: (0..=crate::limits::MAX_COMMIT_OPERATIONS)
@@ -607,7 +607,7 @@ mod tests {
             content_ref,
         );
         let prepared = PreparedContent::from_admission(admission);
-        let oversized_proofs = MutationCandidate::prepared(
+        let oversized_proofs = CommitCandidate::prepared(
             create_dir_request("too-many-proofs", "docs"),
             vec![prepared; crate::limits::MAX_COMMIT_CONTENT_TOKENS + 1],
         );
@@ -615,7 +615,7 @@ mod tests {
             .semantic_identity(&namespace_id)
             .expect("prepared proof limits must not affect identity");
 
-        let oversized_message = MutationCandidate::new(MutationRequest {
+        let oversized_message = CommitCandidate::new(CommitRequest {
             commit_id: CommitId::parse("too-long-message").expect("valid commit id"),
             message: Some("m".repeat(crate::limits::MAX_COMMIT_MESSAGE_BYTES + 1)),
             operations: vec![FilesystemOperation::CreateDir {
@@ -632,7 +632,7 @@ mod tests {
     /// the publisher.
     #[test]
     fn a_batch_past_the_operation_ceiling_is_rejected() {
-        let oversized = MutationCandidate::new(MutationRequest {
+        let oversized = CommitCandidate::new(CommitRequest {
             commit_id: CommitId::parse("oversized-batch").expect("valid commit id"),
             message: None,
             operations: (0..=crate::limits::MAX_COMMIT_OPERATIONS)
@@ -649,7 +649,7 @@ mod tests {
             .expect_err("the batch is over the operation ceiling");
         assert_eq!(error.code(), ErrorCode::InvalidRequest);
 
-        let at_ceiling = MutationCandidate::new(MutationRequest {
+        let at_ceiling = CommitCandidate::new(CommitRequest {
             commit_id: CommitId::parse("largest-batch").expect("valid commit id"),
             message: None,
             operations: (0..crate::limits::MAX_COMMIT_OPERATIONS)
@@ -674,7 +674,7 @@ mod tests {
             parents: false,
         }];
 
-        let oversized = MutationCandidate::new(MutationRequest {
+        let oversized = CommitCandidate::new(CommitRequest {
             commit_id: CommitId::parse("oversized-message").expect("valid commit id"),
             message: Some("m".repeat(crate::limits::MAX_COMMIT_MESSAGE_BYTES + 1)),
             operations: operations.clone(),
@@ -684,7 +684,7 @@ mod tests {
             .expect_err("the message is over the byte ceiling");
         assert_eq!(error.code(), ErrorCode::InvalidRequest);
 
-        let at_ceiling = MutationCandidate::new(MutationRequest {
+        let at_ceiling = CommitCandidate::new(CommitRequest {
             commit_id: CommitId::parse("largest-message").expect("valid commit id"),
             message: Some("m".repeat(crate::limits::MAX_COMMIT_MESSAGE_BYTES)),
             operations,
@@ -694,8 +694,8 @@ mod tests {
             .expect("a message at the ceiling is admitted");
     }
 
-    fn create_dir(commit_id: &str, display_name: &str) -> MutationCandidate {
-        MutationCandidate::new(create_dir_request(commit_id, display_name))
+    fn create_dir(commit_id: &str, display_name: &str) -> CommitCandidate {
+        CommitCandidate::new(create_dir_request(commit_id, display_name))
     }
 
     async fn wal_segment_count(store: &LocalFsStore, namespace_id: &NamespaceId) -> usize {

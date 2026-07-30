@@ -81,21 +81,18 @@ async fn http_malformed_bodies_fail_inside_the_error_envelope() {
     let move_request = |commit_id: &str, behavior: &str| {
         json!({
             "commit_id": commit_id,
-            "operation": {
+            "operations": [{
                 "kind": "move_path",
                 "from_path": "/docs/source.txt",
                 "to_path": "/docs/target.txt",
                 "behavior": behavior,
-            },
+            }],
         })
     };
-    let operations_url = format!(
-        "{}/v0/namespaces/demo/filesystem/operations",
-        harness.server_url
-    );
+    let commits_url = format!("{}/v0/namespaces/demo/commits", harness.server_url);
 
     match raw_agent()
-        .post(&operations_url)
+        .post(&commits_url)
         .set("authorization", "Bearer test-token")
         .send_json(move_request("move-exchange", "exchange"))
     {
@@ -109,7 +106,7 @@ async fn http_malformed_bodies_fail_inside_the_error_envelope() {
     }
 
     let accepted = raw_agent()
-        .post(&operations_url)
+        .post(&commits_url)
         .set("authorization", "Bearer test-token")
         .send_json(move_request("move-replace", "replace"))
         .expect("replace is a valid move behavior");

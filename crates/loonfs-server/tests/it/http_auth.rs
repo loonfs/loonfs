@@ -4,8 +4,8 @@ use crate::common::http_split_support::*;
 use crate::common::start_server;
 use loonfs::content_tokens::mint_content_token;
 use loonfs_api::{
-    v0::ValidatedContentToken, AbsolutePath, ApiError, ChangeSeq, CommitId, CommitResponse,
-    ContentRef, DestinationBehavior, ErrorCode, FilesystemOperation, FilesystemOperationRequest,
+    v0::ValidatedContentToken, AbsolutePath, ApiError, ChangeSeq, CommitId, CommitRequest,
+    CommitResponse, ContentRef, DestinationBehavior, ErrorCode, FilesystemOperation,
 };
 use loonfs_client::NamespacePath;
 use loonfs_test_support::ids::namespace_id;
@@ -24,7 +24,7 @@ fn response_bytes(response: ureq::Response) -> Vec<u8> {
 
 fn assert_content_not_prepared_response(
     result: Result<ureq::Response, Box<ureq::Error>>,
-    request: &FilesystemOperationRequest,
+    request: &CommitRequest,
     expected_message: &str,
 ) {
     match result {
@@ -46,9 +46,9 @@ fn assert_content_not_prepared_response(
     }
 }
 
-fn missing_content_proof_message(request: &FilesystemOperationRequest) -> String {
-    let FilesystemOperation::PutFile { content_ref, .. } = &request.operation else {
-        unreachable!("content preparation assertion requires a put request");
+fn missing_content_proof_message(request: &CommitRequest) -> String {
+    let [FilesystemOperation::PutFile { content_ref, .. }] = &request.operations[..] else {
+        unreachable!("content preparation assertion requires a one-put request");
     };
     format!(
         "content ref `{}` is not prepared for publication",
@@ -74,22 +74,22 @@ async fn path_put_with_bad_content_token_fails_content_not_prepared() {
         .expect("create namespace");
     let completed = stage_uploaded_content(&harness.client, &namespace, b"token rejected").await;
 
-    let request = FilesystemOperationRequest {
+    let request = CommitRequest {
         commit_id: CommitId::parse("bad-token-put").expect("valid commit id"),
         message: None,
         content_tokens: vec![ValidatedContentToken {
             content_ref: completed.content_ref.clone(),
             token: "not.a.valid.token".to_owned(),
         }],
-        operation: FilesystemOperation::PutFile {
+        operations: vec![FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/bad-token.txt").expect("path"),
             content_ref: completed.content_ref,
             behavior: DestinationBehavior::NoReplace,
             expected_revision_no: None,
-        },
+        }],
     };
     assert_content_not_prepared_response(
-        send_filesystem_operation(&harness.server_url, &namespace, &request),
+        send_commit(&harness.server_url, &namespace, &request),
         &request,
         "content token was rejected: content token is malformed",
     );
@@ -114,20 +114,20 @@ async fn path_put_without_content_token_fails_content_not_prepared() {
         .await
         .expect("create namespace");
     let completed = stage_uploaded_content(&harness.client, &namespace, b"token missing").await;
-    let request = FilesystemOperationRequest {
+    let request = CommitRequest {
         commit_id: CommitId::parse("missing-token-put").expect("valid commit id"),
         message: None,
         content_tokens: Vec::new(),
-        operation: FilesystemOperation::PutFile {
+        operations: vec![FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/missing-token.txt").expect("path"),
             content_ref: completed.content_ref,
             behavior: DestinationBehavior::NoReplace,
             expected_revision_no: None,
-        },
+        }],
     };
 
     assert_content_not_prepared_response(
-        send_filesystem_operation(&harness.server_url, &namespace, &request),
+        send_commit(&harness.server_url, &namespace, &request),
         &request,
         &missing_content_proof_message(&request),
     );
@@ -153,7 +153,7 @@ async fn path_put_with_valid_content_token_succeeds() {
         .expect("create namespace");
     let bytes = b"valid token";
     let completed = stage_uploaded_content(&harness.client, &namespace, bytes).await;
-    let request = FilesystemOperationRequest {
+    let request = CommitRequest {
         commit_id: CommitId::parse("valid-token-put").expect("valid commit id"),
         message: None,
         content_tokens: vec![ValidatedContentToken {
@@ -162,15 +162,14 @@ async fn path_put_with_valid_content_token_succeeds() {
                 .validated_content_token
                 .expect("completed upload carries token"),
         }],
-        operation: FilesystemOperation::PutFile {
+        operations: vec![FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/valid-token.txt").expect("path"),
             content_ref: completed.content_ref,
             behavior: DestinationBehavior::NoReplace,
             expected_revision_no: None,
-        },
+        }],
     };
-    let response = send_filesystem_operation(&harness.server_url, &namespace, &request)
-        .expect("valid token put");
+    let response = send_commit(&harness.server_url, &namespace, &request).expect("valid token put");
     let response: CommitResponse =
         serde_json::from_reader(response.into_reader()).expect("decode operation response");
     assert_eq!(response.committed_seq, ChangeSeq(1));
@@ -206,7 +205,7 @@ async fn landed_path_put_replays_after_content_token_is_absent_expired_or_garbag
         .expect("create namespace");
     let completed = stage_uploaded_content(&harness.client, &namespace, b"token replay").await;
     let content_ref = completed.content_ref.clone();
-    let mut request = FilesystemOperationRequest {
+    let mut request = CommitRequest {
         commit_id: CommitId::parse("token-replay-put").expect("valid commit id"),
         message: None,
         content_tokens: vec![ValidatedContentToken {
@@ -215,18 +214,18 @@ async fn landed_path_put_replays_after_content_token_is_absent_expired_or_garbag
                 .validated_content_token
                 .expect("completed upload carries token"),
         }],
-        operation: FilesystemOperation::PutFile {
+        operations: vec![FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/token-replay.txt").expect("path"),
             content_ref: completed.content_ref,
             behavior: DestinationBehavior::NoReplace,
             expected_revision_no: None,
-        },
+        }],
     };
     // Replays must be byte-for-byte: the durable receipt answers, not a
     // fresh evaluation that could phrase the same outcome differently.
-    let send = |request: &FilesystemOperationRequest| {
+    let send = |request: &CommitRequest| {
         response_bytes(
-            send_filesystem_operation(&harness.server_url, &namespace, request)
+            send_commit(&harness.server_url, &namespace, request)
                 .expect("landed put should replay"),
         )
     };
@@ -271,7 +270,7 @@ async fn path_put_with_only_an_irrelevant_token_reports_the_missing_put_proof() 
     let target = stage_uploaded_content(&harness.client, &namespace, b"target content").await;
     let irrelevant =
         stage_uploaded_content(&harness.client, &namespace, b"irrelevant content").await;
-    let request = FilesystemOperationRequest {
+    let request = CommitRequest {
         commit_id: CommitId::parse("irrelevant-token-put").expect("valid commit id"),
         message: None,
         content_tokens: vec![ValidatedContentToken {
@@ -280,16 +279,16 @@ async fn path_put_with_only_an_irrelevant_token_reports_the_missing_put_proof() 
                 .validated_content_token
                 .expect("completed upload carries token"),
         }],
-        operation: FilesystemOperation::PutFile {
+        operations: vec![FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/irrelevant-token.txt").expect("path"),
             content_ref: target.content_ref,
             behavior: DestinationBehavior::NoReplace,
             expected_revision_no: None,
-        },
+        }],
     };
 
     assert_content_not_prepared_response(
-        send_filesystem_operation(&harness.server_url, &namespace, &request),
+        send_commit(&harness.server_url, &namespace, &request),
         &request,
         &missing_content_proof_message(&request),
     );
@@ -316,7 +315,7 @@ async fn puts_with_a_valid_token_reuse_the_ref_and_ignore_irrelevant_tokens() {
     let first = stage_uploaded_content(&harness.client, &namespace, b"first").await;
     // An irrelevant garbage token rides along with the valid proof; only
     // the token covering the operation's ref decides admission.
-    let request = FilesystemOperationRequest {
+    let request = CommitRequest {
         commit_id: CommitId::parse("put-all-proofs").expect("valid commit id"),
         message: None,
         content_tokens: vec![
@@ -326,33 +325,33 @@ async fn puts_with_a_valid_token_reuse_the_ref_and_ignore_irrelevant_tokens() {
                 token: "irrelevant.garbage".to_owned(),
             },
         ],
-        operation: FilesystemOperation::PutFile {
+        operations: vec![FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/first.txt").expect("path"),
             content_ref: first.content_ref.clone(),
             behavior: DestinationBehavior::NoReplace,
             expected_revision_no: None,
-        },
+        }],
     };
-    let response = send_filesystem_operation(&harness.server_url, &namespace, &request)
-        .expect("covered ref is prepared");
+    let response =
+        send_commit(&harness.server_url, &namespace, &request).expect("covered ref is prepared");
     let response: CommitResponse =
         serde_json::from_reader(response.into_reader()).expect("decode operation response");
     assert_eq!(response.committed_seq, ChangeSeq(1));
 
     // The same staged ref and token admit a second put: preparation
     // belongs to the content, not to one operation.
-    let repeat_ref = FilesystemOperationRequest {
+    let repeat_ref = CommitRequest {
         commit_id: CommitId::parse("put-repeated-ref").expect("valid commit id"),
         message: None,
         content_tokens: vec![validated_content_token(&first)],
-        operation: FilesystemOperation::PutFile {
+        operations: vec![FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/first-copy.txt").expect("path"),
             content_ref: first.content_ref.clone(),
             behavior: DestinationBehavior::NoReplace,
             expected_revision_no: None,
-        },
+        }],
     };
-    send_filesystem_operation(&harness.server_url, &namespace, &repeat_ref)
+    send_commit(&harness.server_url, &namespace, &repeat_ref)
         .expect("repeated ref is still prepared");
     assert_eq!(
         harness
@@ -385,15 +384,15 @@ async fn bare_operation_body_without_content_tokens_still_parses_and_commits_mkd
         .expect("create namespace");
     let body = json!({
         "commit_id": "bare-commit-mkdir",
-        "operation": {
+        "operations": [{
             "kind": "create_directory",
             "path": "/docs"
-        },
+        }],
         "message": null
     });
 
-    let response = send_filesystem_operation_json(&harness.server_url, &namespace, &body)
-        .expect("bare operation body");
+    let response =
+        send_commit_json(&harness.server_url, &namespace, &body).expect("bare operation body");
     let response: CommitResponse =
         serde_json::from_reader(response.into_reader()).expect("decode response");
     assert_eq!(response.committed_seq, ChangeSeq(1));

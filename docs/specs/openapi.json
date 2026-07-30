@@ -941,6 +941,109 @@
         }
       }
     },
+    "/v0/namespaces/{namespace}/commits": {
+      "post": {
+        "tags": [
+          "filesystem"
+        ],
+        "summary": "Apply a commit",
+        "description": "Applies one commit: an ordered, non-empty list of path operations that commit together as one logical commit, under one commit id that makes retries idempotent. A single-operation call is the one-element case. The first operation that fails aborts the whole request and names its position in `details.operation_index`.",
+        "operationId": "apply_commit",
+        "parameters": [
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "Namespace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CommitRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Commit applied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommitResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid commit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace or path not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Operation conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Commit unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v0/namespaces/{namespace}/filesystem/content": {
       "get": {
         "tags": [
@@ -1146,109 +1249,6 @@
           },
           "410": {
             "description": "Namespace deleted",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/v0/namespaces/{namespace}/filesystem/operations": {
-      "post": {
-        "tags": [
-          "filesystem"
-        ],
-        "summary": "Run filesystem operation",
-        "description": "Runs one path-oriented filesystem mutation, such as create directory, put file, move, copy, delete, or restore revision. The commit id makes retries idempotent.",
-        "operationId": "apply_filesystem_operation",
-        "parameters": [
-          {
-            "name": "namespace",
-            "in": "path",
-            "description": "Namespace id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/FilesystemOperationRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Filesystem operation committed",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/CommitResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid operation",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Namespace or path not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Operation conflict",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "410": {
-            "description": "Namespace deleted",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "Commit unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -2367,9 +2367,44 @@
         "type": "string",
         "description": "Client-supplied idempotency key for one logical commit.\n\nReuse the same `CommitId` when retrying the same request."
       },
+      "CommitRequest": {
+        "type": "object",
+        "description": "One commit: an idempotency key, an optional annotation, and an ordered\nlist of path operations that commit together (API spec, section 5.1).\n\nA one-operation request is the one-element case of this shape, not a\ndifferent request: a convenience call and a batch produce the same commit\nand the same fingerprint.",
+        "required": [
+          "commit_id",
+          "operations"
+        ],
+        "properties": {
+          "commit_id": {
+            "$ref": "#/components/schemas/CommitId",
+            "description": "Caller-supplied idempotency key for the whole request."
+          },
+          "content_tokens": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ValidatedContentToken"
+            },
+            "description": "Proofs for any new external content refs introduced by this request.\nOne proof covers every operation that names its content ref."
+          },
+          "message": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Caller annotation recorded on the commit and reported by the change\nfeed. Part of the commit's identity: reusing `commit_id` with a\ndifferent message is a `commit_id_reuse_conflict`, exactly as it is\nfor an explicit commit."
+          },
+          "operations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FilesystemOperation"
+            },
+            "description": "Ordered operations to apply. Must be non-empty; they commit all\ntogether or not at all."
+          }
+        }
+      },
       "CommitResponse": {
         "type": "object",
-        "description": "Result of one committed mutation.\n\nEvery mutation resolves to this envelope — path-oriented operations and\nexplicit commits, embedded or remote. The commit id is the caller's\nreconciliation handle: resubmitting the same request with the same id\nreplays this result instead of committing twice.",
+        "description": "Result of one commit.\n\nEvery commit resolves to this envelope — path-oriented operations and\nexplicit commits, embedded or remote. The commit id is the caller's\nreconciliation handle: resubmitting the same request with the same id\nreplays this result instead of committing twice.",
         "required": [
           "namespace_id",
           "commit_id",
@@ -2378,11 +2413,11 @@
         "properties": {
           "commit_id": {
             "$ref": "#/components/schemas/CommitId",
-            "description": "Idempotency key the mutation committed under: caller-supplied, or\ngenerated on the caller's behalf when the request carried none."
+            "description": "Idempotency key the commit landed under: caller-supplied, or\ngenerated on the caller's behalf when the request carried none."
           },
           "committed_seq": {
             "$ref": "#/components/schemas/ChangeSeq",
-            "description": "Sequence number where the mutation became visible."
+            "description": "Sequence number where the commit became visible."
           },
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
@@ -2753,7 +2788,7 @@
               },
               {
                 "$ref": "#/components/schemas/CommitId",
-                "description": "Idempotency key of the mutation the error concerns."
+                "description": "Idempotency key of the commit the error concerns."
               }
             ]
           },
@@ -2796,7 +2831,7 @@
               "null"
             ],
             "format": "int32",
-            "description": "Position, in the request's operation list, of the operation that\nfailed. A mutation commits all of its operations or none of them, so\nthis names the one that stopped the whole request.",
+            "description": "Position, in the request's operation list, of the operation that\nfailed. A commit applies all of its operations or none of them, so\nthis names the one that stopped the whole request.",
             "minimum": 0
           },
           "requested_deletion_seq": {
@@ -3065,7 +3100,7 @@
             }
           }
         ],
-        "description": "One semantic filesystem change inside a committed mutation.\n\nEach event corresponds to one operation of the committed request, in\nrequest order. Events name inodes and their parent-directory bindings\nrather than full paths; a consumer that needs paths can stat the inode\nor maintain its own binding projection from this feed."
+        "description": "One semantic filesystem change inside a commit.\n\nEach event corresponds to one operation of the committed request, in\nrequest order. Events name inodes and their parent-directory bindings\nrather than full paths; a consumer that needs paths can stat the inode\nor maintain its own binding projection from this feed."
       },
       "FilesystemOperation": {
         "oneOf": [
@@ -3290,38 +3325,6 @@
           }
         ],
         "description": "One path-oriented filesystem operation."
-      },
-      "FilesystemOperationRequest": {
-        "type": "object",
-        "description": "Request wrapper for one path-oriented operation.",
-        "required": [
-          "commit_id",
-          "operation"
-        ],
-        "properties": {
-          "commit_id": {
-            "$ref": "#/components/schemas/CommitId",
-            "description": "Caller-supplied idempotency key for this operation."
-          },
-          "content_tokens": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/ValidatedContentToken"
-            },
-            "description": "Proofs for any new external content refs introduced by this operation."
-          },
-          "message": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Caller annotation recorded on the commit and reported by the change\nfeed. Part of the operation's identity: reusing `commit_id` with a\ndifferent message is a `commit_id_reuse_conflict`, exactly as it is\nfor an explicit commit."
-          },
-          "operation": {
-            "$ref": "#/components/schemas/FilesystemOperation",
-            "description": "Operation to apply."
-          }
-        }
       },
       "ForkNamespaceRequest": {
         "type": "object",

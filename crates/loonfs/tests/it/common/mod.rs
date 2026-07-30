@@ -4,7 +4,7 @@
 #![allow(clippy::panic)]
 // Fixture assertions panic for precise diagnostics, as the test modules do.
 
-use loonfs::publish::MutationRequest;
+use loonfs::publish::CommitRequest;
 use loonfs::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, BeginUploadRequest,
     BeginUploadResponse, ChangeSeq, ChangesResponse, CommitResponse, CompleteUploadRequest,
@@ -291,12 +291,12 @@ pub(crate) trait RuntimeTestExt {
     fn mutate_blocking(
         &self,
         namespace_id: &NamespaceId,
-        request: MutationRequest,
+        request: CommitRequest,
     ) -> loonfs::Result<CommitResponse>;
     fn mutate_batch_blocking(
         &self,
         namespace_id: &NamespaceId,
-        requests: Vec<MutationRequest>,
+        requests: Vec<CommitRequest>,
     ) -> Vec<loonfs::Result<CommitResponse>>;
     fn list_changes_blocking(
         &self,
@@ -470,15 +470,15 @@ impl RuntimeTestExt for TestRuntime {
     fn mutate_blocking(
         &self,
         namespace_id: &NamespaceId,
-        request: MutationRequest,
+        request: CommitRequest,
     ) -> loonfs::Result<CommitResponse> {
-        block_on(self.writer.mutate(namespace_id, request))
+        block_on(self.writer.commit(namespace_id, request))
     }
 
     fn mutate_batch_blocking(
         &self,
         namespace_id: &NamespaceId,
-        requests: Vec<MutationRequest>,
+        requests: Vec<CommitRequest>,
     ) -> Vec<loonfs::Result<CommitResponse>> {
         let publisher = self.writer.publisher();
         block_on(async move {
@@ -486,7 +486,7 @@ impl RuntimeTestExt for TestRuntime {
             // any of them, so the requests coalesce into one publication.
             let submissions = requests
                 .into_iter()
-                .map(|request| publisher.submit_mutation(namespace_id.clone(), request));
+                .map(|request| publisher.submit_commit(namespace_id.clone(), request));
             futures::future::join_all(submissions)
                 .await
                 .into_iter()

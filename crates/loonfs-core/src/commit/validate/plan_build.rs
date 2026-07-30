@@ -2,7 +2,7 @@
 //! chosen validation view, and delta-index assignment.
 
 use super::super::frame::validate_commit_request_frame;
-use super::super::{CommitOp, CommitPlan, CommitRequest, CommitValidationError, PlannedOp};
+use super::super::{CommitIr, CommitOp, CommitPlan, CommitValidationError, PlannedOp};
 use super::checks::{validate_ops, OpValidationCursor};
 #[cfg(test)]
 use super::view::InMemoryValidationView;
@@ -33,7 +33,7 @@ pub(crate) struct PublishCommitValidationContext<'a, S: ObjectStore + ?Sized> {
 /// mutations go through [`build_commit_plan_for_publish`].
 #[cfg(test)]
 pub(crate) async fn build_commit_plan(
-    request: &CommitRequest,
+    request: &CommitIr,
     committed_at_ms: u64,
     context: &CommitValidationContext<'_>,
 ) -> Result<CommitPlan, CommitValidationError> {
@@ -43,7 +43,7 @@ pub(crate) async fn build_commit_plan(
 }
 
 pub(crate) async fn build_commit_plan_for_publish<S: ObjectStore + ?Sized>(
-    request: &CommitRequest,
+    request: &CommitIr,
     committed_at_ms: u64,
     context: &PublishCommitValidationContext<'_, S>,
 ) -> Result<CommitPlan, CoreError> {
@@ -62,7 +62,7 @@ pub(crate) async fn build_commit_plan_for_publish<S: ObjectStore + ?Sized>(
 /// The single commit plan builder. Only the metadata view (and with it the
 /// error surface) differs between entry points.
 async fn build_commit_plan_with_view<V: CommitValidationView>(
-    request: &CommitRequest,
+    request: &CommitIr,
     committed_at_ms: u64,
     head: &HeadState,
     shape: CommitShape,
@@ -101,7 +101,7 @@ pub(crate) fn allocates_inode(op: &CommitOp) -> bool {
 }
 
 fn compute_commit_shape(
-    request: &CommitRequest,
+    request: &CommitIr,
     head: &HeadState,
 ) -> Result<CommitShape, CommitValidationError> {
     let assigned_seq = head

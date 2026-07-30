@@ -3,7 +3,7 @@
 #![allow(clippy::panic)]
 // These integration tests use panic in unexpected match arms for precise diagnostics.
 
-use crate::common::mutation_split_support::*;
+use crate::common::commit_split_support::*;
 use crate::common::{namespace_engine, read_context};
 use loonfs_api::{
     v0::FilesystemChange,
@@ -13,7 +13,7 @@ use loonfs_api::{
     PageRequest, RevisionNo,
 };
 use loonfs_core::content::store_bytes_as_content;
-use loonfs_core::publish::{FilesystemOperation, MutationCandidate, MutationRequest};
+use loonfs_core::publish::{CommitCandidate, CommitRequest, FilesystemOperation};
 use loonfs_core::{Error as CoreError, ErrorCode, MutationContext};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
@@ -980,7 +980,7 @@ async fn name_key_stays_typed_through_planning_and_fingerprint() {
     // A spelling whose canonical lookup key differs from it: planning must
     // derive the key from the path component and carry it typed all the way
     // into the durable binding.
-    let request = MutationRequest::single(
+    let request = CommitRequest::single(
         CommitId::parse("typed-name-key").expect("valid commit id"),
         Some("typed boundary".to_owned()),
         FilesystemOperation::CreateDir {
@@ -991,11 +991,11 @@ async fn name_key_stays_typed_through_planning_and_fingerprint() {
     let expected_name_key = NameKey::parse("caf\u{e9}").expect("valid name key");
     // Identity is computed from the request alone, before anything is
     // published, so the committed record must carry exactly this value.
-    let expected_fingerprint = MutationCandidate::new(request.clone())
+    let expected_fingerprint = CommitCandidate::new(request.clone())
         .semantic_identity(&namespace_id)
         .expect("fingerprint mutation request");
 
-    submit_mutation(&store, &namespace_id, request, &context)
+    submit_commit(&store, &namespace_id, request, &context)
         .await
         .expect("commit typed name key");
 
@@ -1117,14 +1117,14 @@ async fn path_intents_in_one_batch_see_tentative_state() {
         .await
         .expect("stage content");
 
-    let responses = publish_namespace_mutations_batch(
+    let responses = publish_namespace_commits_batch(
         &store,
         &namespace_id,
         vec![
             prepared_candidate(
                 &store,
                 &namespace_id,
-                MutationRequest::single(
+                CommitRequest::single(
                     CommitId::parse("put-batched-path").expect("valid commit id"),
                     None,
                     FilesystemOperation::PutFile {
@@ -1136,7 +1136,7 @@ async fn path_intents_in_one_batch_see_tentative_state() {
                 ),
             )
             .await,
-            MutationCandidate::new(MutationRequest::single(
+            CommitCandidate::new(CommitRequest::single(
                 CommitId::parse("move-batched-path").expect("valid commit id"),
                 None,
                 FilesystemOperation::MovePath {

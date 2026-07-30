@@ -3,8 +3,8 @@
 use bytes::Bytes;
 use loonfs::content_tokens::ContentTokenError;
 use loonfs::publish::{
-    parse_mutation_path, ContentPreparationError, FilesystemOperation, MutationCandidate,
-    MutationRequest, PreparedContent,
+    parse_mutation_path, CommitCandidate, CommitRequest, ContentPreparationError,
+    FilesystemOperation, PreparedContent,
 };
 use loonfs::{
     BeginUploadRequest, CommitId, CompleteUploadRequest, CoreError, CreateDirectoryOptions,
@@ -201,8 +201,8 @@ async fn prepare_content(
         .expect("prepare existing content")
 }
 
-fn put_request(commit_id: &str, path: &str, content_ref: loonfs::ContentRef) -> MutationRequest {
-    MutationRequest::single(
+fn put_request(commit_id: &str, path: &str, content_ref: loonfs::ContentRef) -> CommitRequest {
+    CommitRequest::single(
         CommitId::parse(commit_id).expect("valid commit id"),
         None,
         FilesystemOperation::PutFile {
@@ -603,7 +603,7 @@ async fn plain_path_put_fails_unprepared_without_content_io() {
     let error = harness
         .writer
         .publisher()
-        .submit_mutation(
+        .submit_commit(
             harness.namespace_id.clone(),
             put_request("plain-unprepared-put", "/file.txt", content_ref.clone()),
         )
@@ -625,7 +625,7 @@ async fn writer_mutate_with_external_ref_fails_typed_without_content_io() {
     // content I/O, and the caller still receives a typed core error.
     let error = harness
         .writer
-        .mutate(
+        .commit(
             &harness.namespace_id,
             put_request("mutate-create", "/file.txt", content_ref.clone()),
         )
@@ -666,9 +666,9 @@ async fn replacing_put_fails_unprepared_without_content_io() {
     let error = harness
         .writer
         .publisher()
-        .submit_mutation(
+        .submit_commit(
             harness.namespace_id.clone(),
-            MutationRequest::single(
+            CommitRequest::single(
                 CommitId::parse("unprepared-replace").expect("valid commit id"),
                 None,
                 FilesystemOperation::PutFile {
@@ -725,9 +725,9 @@ async fn prepared_commit_after_concurrent_preparations_uses_no_publication_conte
     };
     harness
         .writer
-        .mutate_prepared(
+        .commit_prepared(
             &harness.namespace_id,
-            MutationRequest {
+            CommitRequest {
                 commit_id: CommitId::parse("prepared-many-puts").expect("valid commit id"),
                 message: None,
                 operations: vec![
@@ -780,9 +780,9 @@ async fn restore_revision_uses_retained_metadata_without_content_io() {
     // re-downloading the retained blob would prove nothing.
     harness
         .writer
-        .mutate(
+        .commit(
             &harness.namespace_id,
-            MutationRequest::single(
+            CommitRequest::single(
                 CommitId::parse("restore-first-revision").expect("valid commit id"),
                 None,
                 FilesystemOperation::RestoreRevision {
@@ -827,7 +827,7 @@ async fn commit_id_replay_performs_no_content_operations() {
     let original = harness
         .writer
         .publisher()
-        .submit_mutation_with_prepared_content(
+        .submit_commit_with_prepared_content(
             harness.namespace_id.clone(),
             intent.clone(),
             vec![prepared],
@@ -839,7 +839,7 @@ async fn commit_id_replay_performs_no_content_operations() {
     let replay = harness
         .writer
         .publisher()
-        .submit_mutation(harness.namespace_id.clone(), intent)
+        .submit_commit(harness.namespace_id.clone(), intent)
         .await
         .expect("replay put");
 
@@ -856,7 +856,7 @@ async fn rejected_preparation_replays_durable_receipt_without_content_operations
     let original = harness
         .writer
         .publisher()
-        .submit_mutation_with_prepared_content(
+        .submit_commit_with_prepared_content(
             harness.namespace_id.clone(),
             intent.clone(),
             vec![prepared],
@@ -870,7 +870,7 @@ async fn rejected_preparation_replays_durable_receipt_without_content_operations
         .publisher()
         .submit_candidate(
             harness.namespace_id.clone(),
-            MutationCandidate::rejected(
+            CommitCandidate::rejected(
                 intent,
                 ContentPreparationError::ContentToken(ContentTokenError::Expired),
             ),
@@ -886,7 +886,7 @@ async fn rejected_preparation_replays_durable_receipt_without_content_operations
 async fn new_rejected_preparation_fails_before_path_planning_without_content_operations() {
     let harness = TestHarness::new("new-rejected-preparation").await;
     harness.recording.reset();
-    let intent = MutationRequest::single(
+    let intent = CommitRequest::single(
         CommitId::parse("new-rejected").expect("valid commit id"),
         None,
         FilesystemOperation::CreateDir {
@@ -900,7 +900,7 @@ async fn new_rejected_preparation_fails_before_path_planning_without_content_ope
         .publisher()
         .submit_candidate(
             harness.namespace_id.clone(),
-            MutationCandidate::rejected(
+            CommitCandidate::rejected(
                 intent,
                 ContentPreparationError::ContentToken(ContentTokenError::Expired),
             ),
@@ -950,7 +950,7 @@ async fn in_flight_duplicate_performs_no_additional_content_operations() {
         let prepared = prepared.clone();
         tokio::spawn(async move {
             registry
-                .submit_mutation_with_prepared_content(namespace_id, intent, vec![prepared])
+                .submit_commit_with_prepared_content(namespace_id, intent, vec![prepared])
                 .await
         })
     };
@@ -959,7 +959,7 @@ async fn in_flight_duplicate_performs_no_additional_content_operations() {
     assert_content_counts(primary_counts, 0, 0, 0, 0);
 
     let registry = writer.publisher();
-    let mut duplicate = Box::pin(registry.submit_mutation_with_prepared_content(
+    let mut duplicate = Box::pin(registry.submit_commit_with_prepared_content(
         namespace_id.clone(),
         intent,
         vec![prepared],
@@ -1014,7 +1014,7 @@ async fn stale_head_retry_preserves_content_admission() {
 
     writer
         .publisher()
-        .submit_mutation_with_prepared_content(namespace_id, intent, vec![prepared])
+        .submit_commit_with_prepared_content(namespace_id, intent, vec![prepared])
         .await
         .expect("publish after stale-head retry");
 
@@ -1052,9 +1052,9 @@ async fn mixed_batch_publishes_admitted_put_and_rejects_unprepared_put_without_c
         let namespace_id = namespace_id.clone();
         tokio::spawn(async move {
             registry
-                .submit_mutation(
+                .submit_commit(
                     namespace_id,
-                    MutationRequest::single(
+                    CommitRequest::single(
                         CommitId::parse("mixed-blocker").expect("valid commit id"),
                         None,
                         FilesystemOperation::CreateDir {
@@ -1070,7 +1070,7 @@ async fn mixed_batch_publishes_admitted_put_and_rejects_unprepared_put_without_c
     blocking.wait_until_blocked().await;
 
     let registry = writer.publisher();
-    let mut admitted = Box::pin(registry.submit_mutation_with_prepared_content(
+    let mut admitted = Box::pin(registry.submit_commit_with_prepared_content(
         namespace_id.clone(),
         put_request("mixed-admitted", "/admitted.txt", content_ref.clone()),
         vec![prepared],
@@ -1079,7 +1079,7 @@ async fn mixed_batch_publishes_admitted_put_and_rejects_unprepared_put_without_c
         futures::poll!(admitted.as_mut()).is_pending(),
         "admitted put must queue behind the blocked publication"
     );
-    let mut unprepared = Box::pin(registry.submit_mutation(
+    let mut unprepared = Box::pin(registry.submit_commit(
         namespace_id.clone(),
         put_request("mixed-unprepared", "/unprepared.txt", content_ref.clone()),
     ));

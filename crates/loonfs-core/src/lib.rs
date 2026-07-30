@@ -10,7 +10,7 @@
 //!
 //! # Example
 //!
-//! Mutations are published as candidate batches through
+//! Commits are published as candidate batches through
 //! [`publish::NamespaceCommitEngine`]; day-to-day reads and writes should go
 //! through the `loonfs` crate's `FsReader`/`FsWriter` handles, which wrap
 //! this crate with caching and batching.
@@ -18,7 +18,7 @@
 //! ```no_run
 //! use loonfs_api::{AbsolutePath, CommitId, NamespaceId};
 //! use loonfs_core::publish::{
-//!     FilesystemOperation, MutationRequest, NamespaceCommitEngine, MutationCandidate,
+//!     FilesystemOperation, CommitRequest, NamespaceCommitEngine, CommitCandidate,
 //!     PublishTailOptions,
 //! };
 //! use loonfs_core::{BootstrapOptions, MutationContext, NamespaceEngine};
@@ -42,7 +42,7 @@
 //! let mut publisher = NamespaceCommitEngine::new(namespace);
 //! let _ = publisher.publish_batch(
 //!     &publish_store,
-//!     vec![MutationCandidate::new(MutationRequest::single(
+//!     vec![CommitCandidate::new(CommitRequest::single(
 //!         CommitId::generate(),
 //!         None,
 //!         FilesystemOperation::CreateDir {
@@ -142,13 +142,13 @@ pub mod control {
 /// publisher, and re-exported as `loonfs::publish` for the server's
 /// filesystem handlers.
 pub mod publish {
-    pub use crate::commit::{CommitHeadPublishError, MutationFingerprint};
+    pub use crate::commit::{CommitFingerprint, CommitHeadPublishError};
     pub use crate::commit_engine::{
-        ContentPreparation, ContentPreparationError, MutationCandidate, NamespaceCommitEngine,
+        CommitCandidate, ContentPreparation, ContentPreparationError, NamespaceCommitEngine,
         NamespaceCommitEnginePublishResult, ResultingReadState, SharedWriterSessionState,
         WalTailPolicy, WriterSessionState,
     };
-    pub use crate::path::write::{FilesystemOperation, MutationRequest};
+    pub use crate::path::write::{CommitRequest, FilesystemOperation};
     pub use crate::protocol::PublishTailOptions;
     pub use crate::storage::content_admission::PreparedContent;
 }

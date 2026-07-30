@@ -27,7 +27,7 @@ use tempfile::tempdir;
 async fn publish_candidates(
     writer: &FsWriter,
     namespace_id: &NamespaceId,
-    candidates: Vec<loonfs::publish::MutationCandidate>,
+    candidates: Vec<loonfs::publish::CommitCandidate>,
 ) {
     let publisher = writer.publisher();
     let submissions = candidates
@@ -98,8 +98,8 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
             .await
             .expect("prepare existing content");
             let content_ref = prepared.content_ref().clone();
-            candidates.push(loonfs::publish::MutationCandidate::prepared(
-                loonfs::publish::MutationRequest::single(
+            candidates.push(loonfs::publish::CommitCandidate::prepared(
+                loonfs::publish::CommitRequest::single(
                     loonfs::CommitId::generate(),
                     None,
                     loonfs::publish::FilesystemOperation::PutFile {

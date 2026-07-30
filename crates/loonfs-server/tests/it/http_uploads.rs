@@ -4,8 +4,8 @@ use crate::common::http_split_support::*;
 use crate::common::start_server;
 use loonfs_api::{
     v0::{BeginUploadRequest, CompleteUploadRequest, FilesystemChange},
-    AbsolutePath, ApiError, ChangeSeq, CommitId, CommitResponse, ContentRef, DestinationBehavior,
-    FilesystemOperation, FilesystemOperationRequest, InodeId, InodeKind, RevisionNo,
+    AbsolutePath, ApiError, ChangeSeq, CommitId, CommitRequest, CommitResponse, ContentRef,
+    DestinationBehavior, FilesystemOperation, InodeId, InodeKind, RevisionNo,
 };
 use loonfs_client::{ClientError, NamespacePath};
 use loonfs_test_support::http::raw_agent;
@@ -127,20 +127,20 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
 
     // The staged upload publishes through a put that references the
     // uploaded ref with its validated content token.
-    let put_request = FilesystemOperationRequest {
+    let put_request = CommitRequest {
         commit_id: CommitId::parse("req-phase-2a-create-file").expect("valid commit id"),
         message: Some("upload over http".to_owned()),
         content_tokens: vec![validated_content_token(&completed)],
-        operation: FilesystemOperation::PutFile {
+        operations: vec![FilesystemOperation::PutFile {
             path: AbsolutePath::parse("/uploaded.txt").expect("path"),
             content_ref: content_ref.clone(),
             behavior: DestinationBehavior::NoReplace,
             expected_revision_no: None,
-        },
+        }],
     };
-    let send_put = |request: &FilesystemOperationRequest| {
-        let response = send_filesystem_operation(&harness.server_url, &namespace, request)
-            .expect("commit uploaded file");
+    let send_put = |request: &CommitRequest| {
+        let response =
+            send_commit(&harness.server_url, &namespace, request).expect("commit uploaded file");
         serde_json::from_reader::<_, CommitResponse>(response.into_reader())
             .expect("decode operation response")
     };

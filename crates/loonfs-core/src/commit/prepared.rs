@@ -1,16 +1,16 @@
 //! [`PreparedCommit`]: a validated request paired with its plan and
 //! semantic identity, ready for publication.
 
-use super::{CommitPlan, CommitRequest, MutationFingerprint};
+use super::{CommitFingerprint, CommitIr, CommitPlan};
 use loonfs_api::NamespaceId;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PreparedCommit {
-    pub(crate) request: CommitRequest,
+    pub(crate) request: CommitIr,
     pub(crate) plan: CommitPlan,
-    pub(crate) semantic_identity: MutationFingerprint,
+    pub(crate) semantic_identity: CommitFingerprint,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -26,9 +26,9 @@ pub enum CommitPrepareError {
 
 impl PreparedCommit {
     pub(crate) fn new(
-        request: CommitRequest,
+        request: CommitIr,
         plan: CommitPlan,
-        semantic_identity: MutationFingerprint,
+        semantic_identity: CommitFingerprint,
     ) -> Result<Self, CommitPrepareError> {
         if request.namespace_id != plan.namespace_id {
             return Err(CommitPrepareError::NamespaceMismatch {
@@ -52,17 +52,17 @@ impl PreparedCommit {
 mod tests {
     use super::*;
     use crate::commit::{materialize_commit, CommitOpResult, PlannedOp, ValidatedOp};
-    use crate::commit::{CommitOp, MutationFingerprint};
+    use crate::commit::{CommitFingerprint, CommitOp};
     use loonfs_api::wire::wal::WalDelta;
     use loonfs_api::NameKey;
     use loonfs_api::{ChangeSeq, CommitId, InodeId, WriterEpoch};
 
-    fn fingerprint() -> MutationFingerprint {
-        MutationFingerprint::new_unchecked("v0:sha256:test".to_owned())
+    fn fingerprint() -> CommitFingerprint {
+        CommitFingerprint::new_unchecked("v0:sha256:test".to_owned())
     }
 
-    fn request() -> CommitRequest {
-        CommitRequest {
+    fn request() -> CommitIr {
+        CommitIr {
             namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
             commit_id: CommitId::parse("commit-a").expect("valid commit id"),
             writer_epoch: WriterEpoch(1),

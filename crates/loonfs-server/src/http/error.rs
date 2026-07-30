@@ -55,7 +55,7 @@ impl ApiResponseError {
 
     /// Stamps the mutation's idempotency key into the error details, so a
     /// failed or uncertain outcome carries the caller's reconciliation
-    /// handle (API spec, "Mutation responses and safe retry"). Details the
+    /// handle (API spec, "Commit responses and safe retry"). Details the
     /// error already carries win over the stamp.
     pub(super) fn with_commit_id(mut self, commit_id: &CommitId) -> Self {
         self.body

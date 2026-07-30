@@ -5,7 +5,7 @@
 #![allow(clippy::panic)]
 // These integration tests use panic in unexpected match arms for precise diagnostics.
 
-use crate::common::mutation_split_support::*;
+use crate::common::commit_split_support::*;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
@@ -16,7 +16,7 @@ use loonfs_api::{
 };
 use loonfs_core::content::{mint_content_token, store_bytes_as_content, verify_content_token};
 use loonfs_core::publish::{
-    ContentPreparationError, FilesystemOperation, MutationCandidate, MutationRequest,
+    CommitCandidate, CommitRequest, ContentPreparationError, FilesystemOperation,
 };
 use loonfs_core::{Error as CoreError, ErrorCode};
 use loonfs_objectstore::keys::content_blob;
@@ -153,10 +153,10 @@ async fn path_put_file_without_admission_fails_without_reading_content() {
         .expect("stage content");
 
     store.reset();
-    let responses = publish_namespace_mutations_batch(
+    let responses = publish_namespace_commits_batch(
         &store,
         &namespace_id,
-        vec![MutationCandidate::new(MutationRequest::single(
+        vec![CommitCandidate::new(CommitRequest::single(
             commit_id("put-cold-content"),
             None,
             put_file("/docs/hello.txt", content.content_ref),
@@ -190,16 +190,16 @@ async fn path_batch_rejects_repeated_unadmitted_content_without_reading_it() {
         .expect("stage content");
 
     store.reset();
-    let responses = publish_namespace_mutations_batch(
+    let responses = publish_namespace_commits_batch(
         &store,
         &namespace_id,
         vec![
-            MutationCandidate::new(MutationRequest::single(
+            CommitCandidate::new(CommitRequest::single(
                 commit_id("put-shared-a"),
                 None,
                 put_file("/docs/a.txt", content.content_ref.clone()),
             )),
-            MutationCandidate::new(MutationRequest::single(
+            CommitCandidate::new(CommitRequest::single(
                 commit_id("put-shared-b"),
                 None,
                 put_file("/docs/b.txt", content.content_ref),
@@ -252,11 +252,11 @@ async fn valid_content_admission_skips_durable_content_validation() {
     .expect("verify token");
 
     store.reset();
-    let responses = publish_namespace_mutations_batch(
+    let responses = publish_namespace_commits_batch(
         &store,
         &namespace_id,
-        vec![MutationCandidate::prepared(
-            MutationRequest::single(
+        vec![CommitCandidate::prepared(
+            CommitRequest::single(
                 commit_id("put-admitted-content"),
                 None,
                 put_file("/docs/admitted.txt", content.content_ref),
@@ -298,11 +298,11 @@ async fn a_later_batch_candidate_observes_the_earlier_one() {
         .expect("resolve file")
         .inode_id;
 
-    let responses = submit_mutations_batch(
+    let responses = submit_commits_batch(
         &store,
         &namespace_id,
         vec![
-            MutationRequest::single(
+            CommitRequest::single(
                 commit_id("move-before-child-name-check"),
                 None,
                 FilesystemOperation::MovePath {
@@ -311,7 +311,7 @@ async fn a_later_batch_candidate_observes_the_earlier_one() {
                     behavior: DestinationBehavior::NoReplace,
                 },
             ),
-            MutationRequest::single(
+            CommitRequest::single(
                 commit_id("delete-with-stale-binding"),
                 None,
                 FilesystemOperation::DeletePath {
@@ -359,16 +359,16 @@ async fn a_directory_delete_observes_an_earlier_batch_candidate() {
         .await
         .expect("stage content");
 
-    let responses = submit_mutations_batch(
+    let responses = submit_commits_batch(
         &store,
         &namespace_id,
         vec![
-            MutationRequest::single(
+            CommitRequest::single(
                 commit_id("create-child-before-empty-check"),
                 None,
                 put_file("/docs/child.txt", content.content_ref),
             ),
-            MutationRequest::single(
+            CommitRequest::single(
                 commit_id("delete-dir-with-stale-empty-check"),
                 None,
                 delete_path("/docs"),
@@ -519,10 +519,10 @@ async fn a_guarded_put_fails_unprepared_before_revision_validation_without_conte
 
     let guarded_store = ContentStoreAccessLimitStore::new(temp_dir.path(), 0);
     let missing_content = content_ref("missing-content");
-    let error = publish_namespace_mutations_batch(
+    let error = publish_namespace_commits_batch(
         &guarded_store,
         &namespace_id("demo"),
-        vec![MutationCandidate::new(MutationRequest::single(
+        vec![CommitCandidate::new(CommitRequest::single(
             commit_id("replace-stale-missing-content"),
             None,
             FilesystemOperation::PutFile {
@@ -601,10 +601,10 @@ async fn a_batch_creates_a_directory_and_writes_into_it_in_one_commit() {
         .await
         .expect("stage second");
 
-    let response = submit_mutation(
+    let response = submit_commit(
         &store,
         &namespace_id,
-        MutationRequest {
+        CommitRequest {
             commit_id: commit_id("reports-batch"),
             message: Some("import reports".to_owned()),
             operations: vec![
@@ -656,10 +656,10 @@ async fn a_batch_that_stops_commits_nothing_and_names_the_operation() {
         .await
         .expect("bootstrap namespace");
 
-    let error = submit_mutation(
+    let error = submit_commit(
         &store,
         &namespace_id,
-        MutationRequest {
+        CommitRequest {
             commit_id: commit_id("half-good-batch"),
             message: None,
             operations: vec![
@@ -687,10 +687,10 @@ async fn a_batch_that_stops_commits_nothing_and_names_the_operation() {
             .expect_err("no operation of a stopped batch is visible");
     }
 
-    let response = submit_mutation(
+    let response = submit_commit(
         &store,
         &namespace_id,
-        MutationRequest {
+        CommitRequest {
             commit_id: commit_id("half-good-batch"),
             message: None,
             operations: vec![create_dir("/first"), create_dir("/third")],
@@ -715,24 +715,24 @@ async fn a_reused_commit_id_replays_the_receipt_or_conflicts() {
         .await
         .expect("bootstrap namespace");
 
-    let batch = |commit: &str| MutationRequest {
+    let batch = |commit: &str| CommitRequest {
         commit_id: commit_id(commit),
         message: None,
         operations: vec![create_dir("/a"), create_dir("/b")],
     };
-    let first = submit_mutation(&store, &namespace_id, batch("replayed-batch"), &context)
+    let first = submit_commit(&store, &namespace_id, batch("replayed-batch"), &context)
         .await
         .expect("the batch commits");
 
-    let replayed = submit_mutation(&store, &namespace_id, batch("replayed-batch"), &context)
+    let replayed = submit_commit(&store, &namespace_id, batch("replayed-batch"), &context)
         .await
         .expect("the same batch replays");
     assert_eq!(replayed.committed_seq, first.committed_seq);
 
-    let error = submit_mutation(
+    let error = submit_commit(
         &store,
         &namespace_id,
-        MutationRequest {
+        CommitRequest {
             commit_id: commit_id("replayed-batch"),
             message: None,
             operations: vec![create_dir("/a"), create_dir("/c")],
@@ -754,10 +754,10 @@ async fn a_reused_commit_id_replays_the_receipt_or_conflicts() {
     )
     .await
     .expect("the convenience call commits");
-    let as_batch = submit_mutation(
+    let as_batch = submit_commit(
         &store,
         &namespace_id,
-        MutationRequest {
+        CommitRequest {
             commit_id: commit_id("one-operation"),
             message: None,
             operations: vec![create_dir("/docs")],
@@ -781,10 +781,10 @@ async fn operation_order_decides_the_outcome() {
         .await
         .expect("bootstrap namespace");
 
-    submit_mutation(
+    submit_commit(
         &store,
         &namespace_id,
-        MutationRequest {
+        CommitRequest {
             commit_id: commit_id("create-then-delete"),
             message: None,
             operations: vec![create_dir("/x"), delete_path("/x")],
@@ -797,10 +797,10 @@ async fn operation_order_decides_the_outcome() {
         .await
         .expect_err("the delete ran after the create");
 
-    submit_mutation(
+    submit_commit(
         &store,
         &namespace_id,
-        MutationRequest {
+        CommitRequest {
             commit_id: commit_id("seed-y"),
             message: None,
             operations: vec![create_dir("/y")],
@@ -809,10 +809,10 @@ async fn operation_order_decides_the_outcome() {
     )
     .await
     .expect("seed a path to delete");
-    submit_mutation(
+    submit_commit(
         &store,
         &namespace_id,
-        MutationRequest {
+        CommitRequest {
             commit_id: commit_id("delete-then-create"),
             message: None,
             operations: vec![delete_path("/y"), create_dir("/y")],
@@ -865,10 +865,10 @@ async fn a_revision_guard_observes_an_earlier_operation_of_the_same_request() {
 
     // The second put guards on revision 2, which only exists because the
     // first put of this same request created it.
-    submit_mutation(
+    submit_commit(
         &store,
         &namespace_id,
-        MutationRequest {
+        CommitRequest {
             commit_id: commit_id("guarded-chain"),
             message: None,
             operations: vec![
@@ -883,10 +883,10 @@ async fn a_revision_guard_observes_an_earlier_operation_of_the_same_request() {
 
     // Guarding on the revision the request started from is stale by the time
     // the second operation runs, so the whole request stops there.
-    let error = submit_mutation(
+    let error = submit_commit(
         &store,
         &namespace_id,
-        MutationRequest {
+        CommitRequest {
             commit_id: commit_id("stale-guarded-chain"),
             message: None,
             operations: vec![

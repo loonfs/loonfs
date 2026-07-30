@@ -349,7 +349,7 @@ pub(crate) async fn run_copy_tree(
                     &from,
                     &to,
                     behavior,
-                    &loonfs_client::MutationOptions {
+                    &loonfs_client::CommitOptions {
                         commit_id: None,
                         message: message.clone(),
                     },

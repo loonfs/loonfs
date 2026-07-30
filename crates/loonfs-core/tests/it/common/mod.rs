@@ -52,7 +52,7 @@ pub(crate) async fn read_context<S: ObjectStore + ?Sized>(
     }
 }
 
-pub(crate) mod mutation_split_support {
+pub(crate) mod commit_split_support {
     #![allow(dead_code)]
 
     use super::{namespace_engine, read_context};
@@ -67,7 +67,7 @@ pub(crate) mod mutation_split_support {
     use loonfs_core::content::{prepare_existing_content_ref, store_bytes_as_content};
 
     use loonfs_core::publish::{
-        FilesystemOperation, MutationCandidate, MutationRequest, NamespaceCommitEngine,
+        CommitCandidate, CommitRequest, FilesystemOperation, NamespaceCommitEngine,
         PublishTailOptions,
     };
     use loonfs_core::{BootstrapOptions, Error as CoreError, MutationContext};
@@ -96,14 +96,14 @@ pub(crate) mod mutation_split_support {
 
     /// Publishes one mutation request through the commit engine — the single
     /// publish pipeline — with its content already prepared.
-    pub(crate) async fn submit_mutation<S: ObjectStore + ?Sized>(
+    pub(crate) async fn submit_commit<S: ObjectStore + ?Sized>(
         store: &S,
         namespace_id: &NamespaceId,
-        request: MutationRequest,
+        request: CommitRequest,
         context: &MutationContext,
     ) -> Result<loonfs_api::v0::CommitResponse, CoreError> {
         let candidate = prepared_candidate(store, namespace_id, request).await;
-        publish_namespace_mutations_batch(store, namespace_id, vec![candidate], context)
+        publish_namespace_commits_batch(store, namespace_id, vec![candidate], context)
             .await
             .into_iter()
             .next()
@@ -112,17 +112,17 @@ pub(crate) mod mutation_split_support {
 
     /// Publishes several mutation requests as one batch, so their outcomes
     /// are decided against the same durable state.
-    pub(crate) async fn submit_mutations_batch<S: ObjectStore + ?Sized>(
+    pub(crate) async fn submit_commits_batch<S: ObjectStore + ?Sized>(
         store: &S,
         namespace_id: &NamespaceId,
-        requests: Vec<MutationRequest>,
+        requests: Vec<CommitRequest>,
         context: &MutationContext,
     ) -> Vec<Result<loonfs_api::v0::CommitResponse, CoreError>> {
         let mut candidates = Vec::with_capacity(requests.len());
         for request in requests {
             candidates.push(prepared_candidate(store, namespace_id, request).await);
         }
-        publish_namespace_mutations_batch(store, namespace_id, candidates, context).await
+        publish_namespace_commits_batch(store, namespace_id, candidates, context).await
     }
 
     /// Wraps a request with a preparation proof for each distinct content ref
@@ -134,8 +134,8 @@ pub(crate) mod mutation_split_support {
     pub(crate) async fn prepared_candidate<S: ObjectStore + ?Sized>(
         store: &S,
         namespace_id: &NamespaceId,
-        request: MutationRequest,
-    ) -> MutationCandidate {
+        request: CommitRequest,
+    ) -> CommitCandidate {
         let mut seen = HashSet::new();
         let mut prepared = Vec::new();
         let mut catalog = None;
@@ -168,13 +168,13 @@ pub(crate) mod mutation_split_support {
                 );
             }
         }
-        MutationCandidate::prepared(request, prepared)
+        CommitCandidate::prepared(request, prepared)
     }
 
-    pub(crate) async fn publish_namespace_mutations_batch<S: ObjectStore + ?Sized>(
+    pub(crate) async fn publish_namespace_commits_batch<S: ObjectStore + ?Sized>(
         store: &S,
         namespace_id: &NamespaceId,
-        candidates: Vec<MutationCandidate>,
+        candidates: Vec<CommitCandidate>,
         context: &MutationContext,
     ) -> Vec<Result<loonfs_api::v0::CommitResponse, CoreError>> {
         let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
@@ -219,10 +219,10 @@ pub(crate) mod mutation_split_support {
         operation: FilesystemOperation,
         context: &MutationContext,
     ) -> Result<loonfs_api::CommitResponse, CoreError> {
-        submit_mutation(
+        submit_commit(
             store,
             namespace_id,
-            MutationRequest::single(commit_id, None, operation),
+            CommitRequest::single(commit_id, None, operation),
             context,
         )
         .await

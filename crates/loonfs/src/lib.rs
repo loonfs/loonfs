@@ -69,11 +69,11 @@ pub use loonfs_core::{
 };
 pub use publisher::PublishObserver;
 
-/// Integration seam: the vocabulary for handing classified mutation work to
+/// Integration seam: the vocabulary for handing classified commit work to
 /// the runtime's batch publication surface. The server's filesystem
-/// handlers build [`publish::MutationRequest`]s for the [`publisher`]
+/// handlers build [`publish::CommitRequest`]s for the [`publisher`]
 /// front-end, which also accepts
-/// [`publish::MutationCandidate`]s directly. Most embedded users
+/// [`publish::CommitCandidate`]s directly. Most embedded users
 /// never need this module.
 pub mod publish {
     pub use loonfs_core::limits::{
@@ -81,8 +81,8 @@ pub mod publish {
     };
     pub use loonfs_core::path::{ensure_mutation_path, parse_mutation_path};
     pub use loonfs_core::publish::{
-        ContentPreparation, ContentPreparationError, FilesystemOperation, MutationCandidate,
-        MutationRequest, PreparedContent,
+        CommitCandidate, CommitRequest, ContentPreparation, ContentPreparationError,
+        FilesystemOperation, PreparedContent,
     };
 }
 

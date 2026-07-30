@@ -18,6 +18,6 @@ pub(crate) mod planner;
 mod planning_helpers;
 mod session;
 
-pub use intent::{FilesystemOperation, MutationRequest};
-pub(crate) use planner::mutation_fingerprint;
+pub use intent::{CommitRequest, FilesystemOperation};
+pub(crate) use planner::commit_fingerprint;
 pub(crate) use session::PublishPlanningSession;
