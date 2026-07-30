@@ -172,7 +172,8 @@ Every error response is a JSON body:
   "details": {
     "fenced_epoch": 3,
     "active_writer_epoch": 4,
-    "active_writer": "server-b"
+    "active_writer": "server-b",
+    "active_acquired_at_ms": 1739459200000
   }
 }
 ```
@@ -200,7 +201,7 @@ The codes that populate it:
 
 | Code | Detail fields |
 | --- | --- |
-| `writer_fenced` | `fenced_epoch`, `active_writer_epoch`, `active_writer` (when the head recorded the winner's writer id) |
+| `writer_fenced` | `fenced_epoch`, `active_writer_epoch`, plus `active_writer` and `active_acquired_at_ms` when the head recorded a writer block. Writer ids are process labels, so two runs on one machine can share one; the acquisition stamp is what tells them apart |
 | `stale_revision` | `inode_id`, `expected_revision`, `actual_revision` (absent when the inode has no current revision) |
 | `commit_id_reuse_conflict` | `commit_id` |
 | `rebootstrap_required` | `after_seq`, `retention_floor_seq` |

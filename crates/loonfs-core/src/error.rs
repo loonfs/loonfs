@@ -423,6 +423,7 @@ impl CoreError {
                 fenced_epoch: Some(fence.fenced_epoch),
                 active_writer_epoch: Some(fence.active_epoch),
                 active_writer: fence.active_writer.clone(),
+                active_acquired_at_ms: fence.active_acquired_at_ms,
                 ..ErrorDetails::default()
             }),
             CoreError::CommitIdReuseConflict(commit_id) => Some(ErrorDetails {
@@ -866,6 +867,7 @@ mod tests {
         assert_eq!(details.fenced_epoch, Some(WriterEpoch(3)));
         assert_eq!(details.active_writer_epoch, Some(WriterEpoch(4)));
         assert_eq!(details.active_writer.as_deref(), Some("writer-b"));
+        assert_eq!(details.active_acquired_at_ms, Some(2_000));
         assert!(fenced
             .to_string()
             .contains("epoch 3 was fenced by epoch 4 (writer `writer-b`, acquired at 2000 ms)"));
