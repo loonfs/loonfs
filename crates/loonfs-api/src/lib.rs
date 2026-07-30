@@ -7,6 +7,12 @@
 //! Other LoonFS crates depend on this one for vocabulary; it depends on none
 //! of them.
 //!
+//! One module here is deliberately not a boundary format: [`options`] holds
+//! the per-operation argument structs that the embedded runtime and the HTTP
+//! client both expose. They parameterize the same semantic operations on both
+//! surfaces, so this crate — the shared vocabulary — owns the single
+//! definition rather than each surface keeping its own copy to drift.
+//!
 //! Module rule: v0 HTTP shapes live in [`v0`]; the crate root keeps the
 //! ids/paths/errors/wire-format modules and re-exports the common v0
 //! surface as a curated explicit list below.
@@ -23,6 +29,7 @@ mod hex;
 mod ids;
 mod manifest;
 mod name_policy;
+pub mod options;
 mod pagination;
 mod path;
 mod sst_blocks;

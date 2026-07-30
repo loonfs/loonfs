@@ -19,10 +19,7 @@ use loonfs_api::ErrorCode;
 use loonfs_api::{
     ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior, GrepRequest, NamespaceId,
 };
-use loonfs_client::{
-    Client, ClientConfig, ClientError, DeleteOptions as ClientDeleteOptions, MutationOptions,
-    NamespacePath, PutFileOptions as ClientPutFileOptions,
-};
+use loonfs_client::{Client, ClientConfig, ClientError, MutationOptions, NamespacePath};
 use loonfs_grep::keyspace::{manifest_key as grep_manifest_key, root_key as grep_root_key};
 use loonfs_grep::root::{encode_grep_root, GrepManifestId, GrepRootEnvelope, GrepRootPointer};
 use loonfs_grep::{GrepDriverParked, GrepIndexSnapshot, GrepWorker, NamespaceReads};
@@ -33,10 +30,10 @@ use loonfs_objectstore::{
 };
 use std::path::Path;
 
-fn replace_file_options() -> ClientPutFileOptions {
-    ClientPutFileOptions {
+fn replace_file_options() -> PutFileOptions {
+    PutFileOptions {
         behavior: DestinationBehavior::Replace,
-        ..ClientPutFileOptions::default()
+        ..PutFileOptions::default()
     }
 }
 
@@ -732,7 +729,7 @@ async fn http_missing_namespace_mutations_return_namespace_not_found() {
     assert_api_error(
         harness
             .client
-            .delete_path(&target, &ClientDeleteOptions::default())
+            .delete_path(&target, &DeleteOptions::default())
             .await,
         404,
         "namespace_not_found",
@@ -785,7 +782,7 @@ async fn http_delete_missing_path_returns_path_not_found() {
     assert_api_error(
         harness
             .client
-            .delete_path(&target, &ClientDeleteOptions::default())
+            .delete_path(&target, &DeleteOptions::default())
             .await,
         404,
         "path_not_found",
@@ -949,7 +946,7 @@ async fn http_first_write_takes_over_a_namespace_owned_by_another_writer() {
         .expect("first write takes over the namespace");
     assert_eq!(result.committed_seq, ChangeSeq(1));
 
-    let head = loonfs_core::control::load_namespace_head_control(
+    let head = loonfs::control::load_namespace_head_control(
         store_for_check.as_ref(),
         &namespace_id("demo"),
     )

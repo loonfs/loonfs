@@ -1,18 +1,24 @@
 //! Per-operation option types for the runtime handle surface, plus the
 //! request-to-options resolutions the server and embedded hosts share.
 //!
+//! The options that also parameterize the HTTP client's identical operations
+//! — [`PutFileOptions`], [`CreateDirectoryOptions`], [`DeleteOptions`] — are
+//! defined once in [`loonfs_api::options`] and re-exported here, so the two
+//! surfaces cannot drift a field apart. What stays defined below is either
+//! runtime-only (maintenance, checkpoints, namespace creation, change-feed
+//! paging) or shaped differently from the client's equivalent.
+//!
 //! Results are the `loonfs-api` wire shapes themselves: the handles return
 //! `MaintenanceStepResponse` and `GcResponse` directly, the same way they
 //! already return `CommitResponse` and `FlushWalResponse`.
 
-use crate::{
-    CommitId, DeleteDirectoryBehavior, DestinationBehavior, EffectiveLimit, GcConfig, InodeId,
-    RevisionNo,
-};
+use crate::{CommitId, DestinationBehavior, EffectiveLimit, GcConfig};
 use loonfs_api::v0::{
     CreateCheckpointRequest, GcRequest, MaintenanceStepKind, MaintenanceStepRequest,
 };
 use loonfs_core::publish::WalTailPolicy;
+
+pub use loonfs_api::options::{CreateDirectoryOptions, DeleteOptions, PutFileOptions};
 
 /// Options for one maintenance step.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,69 +113,6 @@ impl CreateCheckpointOptions {
 pub struct CreateNamespaceOptions {
     /// If true, creating an already-existing namespace is treated as success.
     pub allow_existing: bool,
-}
-
-/// Options for writing a file path.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PutFileOptions {
-    /// Create-only or replace-existing behavior.
-    pub behavior: DestinationBehavior,
-    /// Optional idempotency key.
-    pub commit_id: Option<CommitId>,
-    /// Annotation recorded on the commit; part of the commit's identity.
-    pub message: Option<String>,
-    /// Replace only while the file's current revision is still this one.
-    /// Requires `Replace` behavior; a raced write fails instead of
-    /// stacking a revision on state the caller never saw.
-    pub expected_revision_no: Option<RevisionNo>,
-}
-
-impl Default for PutFileOptions {
-    fn default() -> Self {
-        Self {
-            behavior: DestinationBehavior::NoReplace,
-            commit_id: None,
-            message: None,
-            expected_revision_no: None,
-        }
-    }
-}
-
-/// Options for creating a directory.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct CreateDirectoryOptions {
-    /// Optional idempotency key.
-    pub commit_id: Option<CommitId>,
-    /// Annotation recorded on the commit; part of the commit's identity.
-    pub message: Option<String>,
-    /// Also create missing ancestor directories, like `put_file` does.
-    pub parents: bool,
-}
-
-/// Options for deleting a path.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeleteOptions {
-    /// Directory delete behavior.
-    pub behavior: DeleteDirectoryBehavior,
-    /// Optional idempotency key.
-    pub commit_id: Option<CommitId>,
-    /// Annotation recorded on the commit; part of the commit's identity.
-    pub message: Option<String>,
-    /// When set, the delete applies only while the path still resolves to
-    /// this inode, so a raced rebinding fails instead of deleting the
-    /// wrong inode.
-    pub expected_inode_id: Option<InodeId>,
-}
-
-impl Default for DeleteOptions {
-    fn default() -> Self {
-        Self {
-            behavior: DeleteDirectoryBehavior::NonRecursive,
-            commit_id: None,
-            message: None,
-            expected_inode_id: None,
-        }
-    }
 }
 
 /// Options for moving a path.

@@ -17,9 +17,7 @@ use crate::render::write_stderr_progress;
 use futures::StreamExt;
 use loonfs_api::DestinationBehavior;
 use loonfs_api::InodeKind;
-use loonfs_client::{
-    CreateDirectoryOptions, NamespacePath, PutFileOptions as ClientPutFileOptions,
-};
+use loonfs_client::{CreateDirectoryOptions, NamespacePath, PutFileOptions};
 use std::path::{Path, PathBuf};
 
 /// How many per-file operations run at once. Matches the reference server's
@@ -168,7 +166,7 @@ pub(crate) async fn run_put_tree(
                 .put_file_bytes(
                     &spec,
                     &bytes,
-                    &ClientPutFileOptions {
+                    &PutFileOptions {
                         behavior,
                         commit_id: None,
                         message: message.clone(),

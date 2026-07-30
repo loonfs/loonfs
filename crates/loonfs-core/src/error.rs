@@ -28,8 +28,10 @@ use thiserror::Error;
 /// machine-readable reason.
 pub use self::CoreError as Error;
 
-/// Result type used by `loonfs-core` entrypoints.
-pub type Result<T> = std::result::Result<T, Error>;
+/// Result type used by `loonfs-core` entrypoints. Crate-internal: the alias
+/// is transparent, so public signatures using it still read as
+/// `std::result::Result<T, Error>` from outside.
+pub(crate) type Result<T> = std::result::Result<T, Error>;
 
 pub use loonfs_api::{ErrorCode, ErrorKind};
 

@@ -1,6 +1,6 @@
 //! Per-operation options structs for the engine surface.
 
-use loonfs_api::{ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior};
+use loonfs_api::ChangeSeq;
 
 /// Options for namespace bootstrap.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -15,27 +15,4 @@ pub struct DeleteNamespaceOptions {
     /// Delete only if the head is still at this sequence. A mismatch fails
     /// with `stale_head` instead of deleting work the caller has not seen.
     pub expected_head_seq: Option<ChangeSeq>,
-}
-
-/// Options for path-oriented writes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WriteOptions {
-    /// Optional caller-provided idempotency key.
-    ///
-    /// If omitted, path helpers generate one internally.
-    pub commit_id: Option<CommitId>,
-    /// Whether a file put may replace an existing file.
-    pub put_behavior: DestinationBehavior,
-    /// Whether delete may remove a non-empty subtree.
-    pub delete_behavior: DeleteDirectoryBehavior,
-}
-
-impl Default for WriteOptions {
-    fn default() -> Self {
-        Self {
-            commit_id: None,
-            put_behavior: DestinationBehavior::NoReplace,
-            delete_behavior: DeleteDirectoryBehavior::NonRecursive,
-        }
-    }
 }

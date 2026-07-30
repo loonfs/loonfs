@@ -12,7 +12,7 @@ pub(crate) struct CommandContext {
     pub(crate) profile_name: String,
     pub(crate) mode: String,
     pub(crate) namespace: NamespaceId,
-    pub(crate) target: crate::backend::ResolvedTarget,
+    pub(crate) target: crate::resolve::ResolvedTarget,
 }
 
 /// Attributes a failure to a resolved profile and mode, for command paths

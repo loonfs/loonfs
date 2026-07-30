@@ -270,6 +270,11 @@ codebase.
   same `capabilities()` accessor returning the capability document of
   section 2.1. For the remote client the document is fetched from
   `GET /v0/capabilities` and cached; for the embedded handles it is a constant.
+- The two surfaces stay aligned by sharing one definition of every option
+  struct they both take (`PutFileOptions`, `CreateDirectoryOptions`,
+  `DeleteOptions` live in `loonfs-api` and are re-exported by both), not by a
+  trait either one implements. There is no transport abstraction to program
+  against: a host picks the embedded runtime or the HTTP client directly.
 - Unsupported surface area is typed: individual ops return the
   `not_supported` error with its `feature` name, so gating logic — check the
   capability document, fall back on `not_supported` — is identical against

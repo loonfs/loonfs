@@ -54,27 +54,60 @@
 //! );
 //! ```
 
+// Sanctioned consumers of this crate's public surface, in full:
+//
+// - **`loonfs`** — the embedded runtime, the only production consumer. It
+//   wraps everything below with caching, batching, and handles, and re-exports
+//   what applications need. Application code depends on `loonfs`, never on
+//   this crate.
+// - **`loonfs-core`'s own integration tests** (`tests/it`) — a white-box
+//   consumer that asserts on durable layout and replay directly. It is why
+//   `metadata` and parts of `commit` are public at all.
+//
+// Nothing else depends on this crate. `loonfs-grep` was extracted and reads
+// filesystem state through `loonfs`; `loonfs-sim`, `loonfs-model`, and
+// `loonfs-test-support` never depended on it; `loonfs-server` and `loonfs-cli`
+// reach the durable control plane through `loonfs::control`.
+//
+// The module list below is grouped by that intent: private modules are engine
+// internals, and each public one names why it is public.
+
+// --- engine internals: private, reachable only through the seams below ---
 mod checkpoint;
-pub mod commit;
 mod commit_engine;
-pub mod content;
 mod context;
 mod control_update;
 mod engine;
 mod error;
-pub mod gc;
+mod gc;
 mod invariants;
-pub mod limits;
-pub mod metadata;
-pub mod namespace;
+mod namespace;
 mod options;
-pub mod path;
 mod protocol;
 mod storage;
-pub mod timing;
+mod timing;
 mod wal;
 
-/// Cache types and configuration for runtime read paths.
+// --- public seams ---
+/// Commit planning, validation, and materialization. Consumed by the `loonfs`
+/// publisher and by this crate's commit-validation integration tests.
+pub mod commit;
+/// Content staging and preparation-token minting. Consumed by `loonfs`'s
+/// write path and its server-integration `content_tokens` seam.
+pub mod content;
+/// Protocol and resource ceilings. Consumed by `loonfs` (re-exported to the
+/// server for request validation) and by layout tests.
+pub mod limits;
+/// Durable metadata state and its row codecs. Public for this crate's
+/// white-box integration tests, which compare projected state against the
+/// reference model; `loonfs` reaches metadata only through the seams above.
+pub mod metadata;
+/// Path parsing and current-state resolution. Consumed by `loonfs`'s write
+/// path (`ensure_mutation_path`, `parse_mutation_path`).
+pub mod path;
+
+/// Cache types and configuration for runtime read paths. Consumed by
+/// `loonfs`, which owns the runtime's cache configuration and stats.
 pub mod cache {
     pub use crate::checkpoint::{
         ManifestLoadError, ManifestLoadFailureClass, MetadataTableCache, MetadataTableCacheConfig,
@@ -89,6 +122,9 @@ pub mod cache {
 }
 
 /// Typed namespace control-object loaders and verified catalog state.
+/// Consumed by `loonfs`'s cache and write paths, and re-exported as
+/// `loonfs::control` for the white-box layout assertions the server and this
+/// crate's own tests make.
 pub mod control {
     pub use crate::namespace::catalog::{
         load_namespace_catalog_entry, NamespaceCatalogLoadError, VerifiedNamespaceCatalogEntry,
@@ -102,7 +138,9 @@ pub mod control {
     pub use crate::namespace::{BasisManifest, MetadataBasis};
 }
 
-/// Commit publication types for runtime integrations.
+/// Commit publication types for runtime integrations. Consumed by `loonfs`'s
+/// publisher, and re-exported as `loonfs::publish` for the server's
+/// filesystem handlers.
 pub mod publish {
     pub use crate::commit::{CommitHeadPublishError, SemanticMutationIdentity};
     pub use crate::commit_engine::{
@@ -115,6 +153,11 @@ pub mod publish {
     pub use crate::storage::content_admission::PreparedContent;
 }
 
+// Crate-root re-exports. Every name below has a named consumer: `loonfs`
+// unless the comment says otherwise, or reachability through a public
+// signature where noted.
+// `MetadataReorganizeReport` has no caller that names it; it stays public
+// because it is the return type of `NamespaceEngine::reorganize_metadata`.
 pub use checkpoint::{
     CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor, MetadataReorganizeOutcome,
     MetadataReorganizeReport,
@@ -122,13 +165,14 @@ pub use checkpoint::{
 pub use context::MutationContext;
 pub use engine::RuntimeReadContext;
 pub use engine::{BeginDirectPutUploadTargetResponse, DirectPutUploadTarget};
+// The builder pair is reachable through `NamespaceEngine::builder()` and its
+// `build()`, so both stay public even though no caller names them directly.
 pub use engine::{NamespaceEngine, NamespaceEngineBuildError, NamespaceEngineBuilder};
 pub use error::{
-    Error, ErrorCode, ErrorKind, MetadataProjectionLoadError, MetadataViewError, Result,
-    StoreFailureClass, WriterFence,
+    Error, ErrorCode, ErrorKind, MetadataProjectionLoadError, MetadataViewError, StoreFailureClass,
+    WriterFence,
 };
 pub use gc::{gc_namespace, GcConfig};
 pub use namespace::BootstrapNamespaceError;
-pub use options::{BootstrapOptions, DeleteNamespaceOptions, WriteOptions};
+pub use options::{BootstrapOptions, DeleteNamespaceOptions};
 pub use path::read::{CurrentFileState, MAX_RESOLVE_CURRENT_FILES};
-pub use timing::{MonotonicTimer, StdMonotonicTimer};
