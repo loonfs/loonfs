@@ -1,13 +1,16 @@
-//! Builds one commit plan: frame validation, precondition checks over the
+//! Builds one commit plan: frame validation, per-operation checks over the
 //! chosen validation view, and delta-index assignment.
 
 use super::super::frame::validate_commit_request_frame;
-use super::super::{CommitPlan, CommitRequest, CommitValidationContext, CommitValidationError};
-use super::checks::validate_metadata_preconditions;
-use super::view::{CommitValidationView, InMemoryValidationView, PublishValidationView};
+use super::super::{CommitOp, CommitPlan, CommitRequest, CommitValidationError, PlannedOp};
+use super::checks::{validate_ops, OpValidationCursor};
+#[cfg(test)]
+use super::view::InMemoryValidationView;
+use super::view::{CommitValidationView, PublishValidationView};
+#[cfg(test)]
+use crate::commit::CommitValidationContext;
 use crate::error::CoreError;
 use crate::metadata::{MetadataState, MetadataView};
-use loonfs_api::v0::CommitOp;
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::{ChangeSeq, InodeId};
 use loonfs_objectstore::ObjectStore;
@@ -25,7 +28,11 @@ pub(crate) struct PublishCommitValidationContext<'a, S: ObjectStore + ?Sized> {
     pub(crate) accepted_rows: &'a MetadataState,
 }
 
-pub async fn build_commit_plan(
+/// Validates one planned commit against an in-memory metadata state. This is
+/// the store-free entry point the crate's validation tests drive; production
+/// mutations go through [`build_commit_plan_for_publish`].
+#[cfg(test)]
+pub(crate) async fn build_commit_plan(
     request: &CommitRequest,
     committed_at_ms: u64,
     context: &CommitValidationContext<'_>,
@@ -52,24 +59,24 @@ pub(crate) async fn build_commit_plan_for_publish<S: ObjectStore + ?Sized>(
     .await
 }
 
-/// The single commit plan builder behind [`build_commit_plan`] and
-/// [`build_commit_plan_for_publish`]; only the metadata view (and with it
-/// the error surface) differs between the two entry points.
+/// The single commit plan builder. Only the metadata view (and with it the
+/// error surface) differs between entry points.
 async fn build_commit_plan_with_view<V: CommitValidationView>(
     request: &CommitRequest,
     committed_at_ms: u64,
     head: &HeadState,
     shape: CommitShape,
-    metadata_state: V,
+    mut metadata_state: V,
 ) -> Result<CommitPlan, V::Error> {
     validate_commit_request_frame(request, head)?;
 
-    let validated_metadata = validate_metadata_preconditions(
-        request,
-        metadata_state,
+    let validated_ops = validate_ops(
+        &request.ops,
+        &mut metadata_state,
+        &mut OpValidationCursor::new(),
         shape.assigned_seq,
         committed_at_ms,
-        &shape.allocated_inode_ids,
+        &mut shape.allocated_inode_ids.iter().copied(),
     )
     .await?;
 
@@ -78,9 +85,19 @@ async fn build_commit_plan_with_view<V: CommitValidationView>(
         commit_id: request.commit_id.clone(),
         apply_after_seq: head.seq,
         assigned_seq: shape.assigned_seq,
-        validated_ops: validated_metadata.validated_ops,
+        validated_ops,
         resulting_next_inode_id: shape.resulting_next_inode_id,
     })
+}
+
+/// Counts the inode ids a commit allocates, in operation order. The planner
+/// predicts these same ids while resolving operations, so this is the one
+/// allocator both agree on.
+pub(crate) fn allocates_inode(op: &CommitOp) -> bool {
+    matches!(
+        op,
+        CommitOp::CreateDirectory { .. } | CommitOp::CreateFile { .. }
+    )
 }
 
 fn compute_commit_shape(
@@ -96,12 +113,7 @@ fn compute_commit_shape(
     let create_op_count = request
         .ops
         .iter()
-        .filter(|op| {
-            matches!(
-                op,
-                CommitOp::CreateDirectory { .. } | CommitOp::CreateFile { .. }
-            )
-        })
+        .filter(|planned: &&PlannedOp| allocates_inode(&planned.op))
         .count();
     let allocated_inode_ids = (0..create_op_count)
         .map(|offset| {

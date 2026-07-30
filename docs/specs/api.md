@@ -206,6 +206,7 @@ The codes that populate it:
 | `rebootstrap_required` | `after_seq`, `retention_floor_seq` |
 | `not_deleted` | `inode_id`, plus `requested_deletion_seq` and `active_deletion_seq` when a live deletion exists at a different generation |
 | any failed mutation | `commit_id` — the idempotency key the request committed under, echoed so failed and uncertain outcomes carry the caller's reconciliation handle (section 5.2) |
+| any mutation carrying more than one operation | `operation_index` — the position of the operation that stopped the request (section 5.1) |
 
 One code exists specifically so capability handling is uniform from day one:
 
@@ -311,19 +312,34 @@ tokens on the existing wire requests.
 
 ### 5.1 Mutation identity and race guards
 
-Every mutation carries a `commit_id` — a client-generated stable idempotency
-key that must be reused verbatim for safe retries — and an optional
-`message`, a human-readable annotation that is part of the mutation's
-identity.
+A mutation is one request: a `commit_id` — a client-generated stable
+idempotency key that must be reused verbatim for safe retries — an optional
+`message` (a human-readable annotation that is part of the mutation's
+identity), and an ordered, non-empty list of path operations. A request with
+one operation is the same shape as a request with many, so a convenience
+call and a one-element list are the same mutation and fingerprint alike.
 
-The server plans each path operation against authoritative namespace state
-under the publish lock, synthesizing the exact semantic checks the operation
+The operations of one request commit together, in order, as one logical
+commit. Operation `k` is planned against authoritative namespace state plus
+everything operations `0..k` do, so a request can create a directory and
+write into it, or delete a path and recreate it. Either every operation
+commits or none does: the first operation that fails aborts the whole
+request, nothing it or its predecessors would have written becomes visible,
+and — when the request carried more than one operation — the error names the
+position that stopped it in `details.operation_index`. The error code stays
+the failing operation's own; no code is specific to batching.
+
+The server plans each operation against authoritative namespace state under
+the publish lock, synthesizing the exact semantic checks the operation
 implies (revision identity, binding identity, name absence, directory
 emptiness, ancestor visibility) so races fail explicitly rather than
-silently merge. Callers add their own cross-request guards on the operation
-itself where staleness matters: `expected_revision_no` on a replacing put,
-`expected_inode_id` on a delete, `deleted_at_seq` on an undelete, and
-`expected_head_seq` on a namespace delete.
+silently merge. Those checks are evaluated where their operation runs, which
+is what lets a later operation depend on an earlier one. Callers add their
+own cross-request guards on the operation itself where staleness matters:
+`expected_revision_no` on a replacing put, `expected_inode_id` on a delete,
+`deleted_at_seq` on an undelete, and `expected_head_seq` on a namespace
+delete. A guard is evaluated against the state its own operation sees, which
+includes what earlier operations in the same request did.
 
 The server validates each request against authoritative namespace state and
 may reject it immediately. A tentatively accepted request becomes one
@@ -844,6 +860,10 @@ Representative request:
   }
 }
 ```
+
+This binding carries one operation per request, which is the one-operation
+case of the mutation model in section 5.1; a request body that carries an
+ordered list is not part of v0 yet.
 
 Move and copy accept the same `behavior` choice as put: `no_replace` (the
 default) fails when the destination is occupied, and `replace` replaces a

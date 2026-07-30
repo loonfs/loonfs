@@ -156,9 +156,9 @@ The load-bearing invariants of this layout, in one place:
 The namespace head is updated by different classes of work, and each class has
 its own authority boundary.
 
-Semantic namespace mutations — file writes, restores, renames, deletes, and
-explicit commits — are fenced by `writer_epoch` and then linearized by the head
-compare-and-swap that makes their WAL visible.
+Semantic namespace mutations — file writes, restores, renames, deletes,
+alone or batched into one request — are fenced by `writer_epoch` and then
+linearized by the head compare-and-swap that makes their WAL visible.
 
 Checkpoint and retention maintenance updates are CAS-linearized metadata
 updates. They preserve `writer_epoch` and the `writer` block, and must not
@@ -1104,24 +1104,25 @@ exactly the order shown) of:
 
 ```json
 {
-  "domain": "loonfs.core.commit.semantic.v0",
+  "domain": "loonfs.mutation.semantic.v0",
   "namespace_id": "...",
-  "preconditions": [...],
-  "ops": [...],
+  "operations": [...],
   "message": "... or null"
 }
 ```
 
-where `ops` and `preconditions` appear in request order using their v0 wire
-encoding, and `message` is `null` when absent. The preimage deliberately
-excludes `commit_id`, writer epoch, and `committed_at_ms`: a retry of the same
-logical commit must fingerprint identically no matter who retries it or when.
+where `operations` appear in request order, each as its canonical form
+(operation kind, canonical absolute paths, and the operation's semantic
+parameters including its caller-supplied race guards), and `message` is
+`null` when absent — so reusing a `commit_id` with a different message, a
+different guard, or the same operations in a different order conflicts. The
+preimage deliberately excludes `commit_id`, writer epoch, and
+`committed_at_ms`: a retry of the same logical mutation must fingerprint
+identically no matter who retries it or when.
 
-Path-level mutations fingerprint the same way with domain
-`loonfs.path.intent.semantic.v0` over the canonical path intent (intent kind,
-canonical absolute paths, the intent's semantic parameters, and the caller
-message — `null` when absent, mirroring explicit commits, so reusing a
-`commit_id` with a different message conflicts on either surface).
+There is one preimage for every mutation. A convenience call carrying one
+operation and a request carrying a one-element operation list are the same
+request, so they fingerprint identically by construction.
 
 The idempotency horizon is the retention floor. Commit receipts below the
 floor are dropped when metadata runs are rebuilt, so a commit retried from
@@ -1131,8 +1132,8 @@ feed gives sub-floor cursors.
 A reused `commit_id` with an equal fingerprint replays the originally
 committed response; an unequal fingerprint is rejected as
 `commit_id_reuse_conflict`. Reference values are pinned by tests in
-`loonfs-core` (`commit/identity.rs` and `path/write/planner.rs`); those literals
-must never change within scheme `v0`.
+`loonfs-core` (`path/write/planner.rs`); those literals must never change
+within scheme `v0`.
 
 ### 3.4 Server authority
 

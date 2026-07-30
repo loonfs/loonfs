@@ -23,7 +23,7 @@ use loonfs_api::{
 };
 use loonfs_core::content::store_bytes_as_content;
 use loonfs_core::control::load_namespace_head_control;
-use loonfs_core::publish::PathMutationIntent;
+use loonfs_core::publish::FilesystemOperation;
 use loonfs_core::{Error as CoreError, ErrorCode, MutationContext};
 use loonfs_objectstore::keys::{metadata_manifest_object, metadata_root, wal_floor, wal_head};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -886,12 +886,11 @@ async fn namespace_delete_is_terminal_for_reads_writes_creation_and_forks() {
     let content = store_bytes_as_content(&store, &namespace_id, b"will vanish")
         .await
         .expect("stage content");
-    submit_intent_async(
+    submit_operation(
         &store,
         &namespace_id,
-        PathMutationIntent::PutFile {
-            commit_id: CommitId::parse("before-delete").expect("valid commit id"),
-            message: None,
+        CommitId::parse("before-delete").expect("valid commit id"),
+        FilesystemOperation::PutFile {
             absolute_path: AbsolutePath::parse("/keep.txt").expect("path"),
             content_ref: content.content_ref.clone(),
             behavior: DestinationBehavior::NoReplace,
@@ -924,12 +923,11 @@ async fn namespace_delete_is_terminal_for_reads_writes_creation_and_forks() {
         .await
         .expect_err("read after delete");
     assert_eq!(read.code(), ErrorCode::NamespaceDeleted);
-    let commit = submit_intent_async(
+    let commit = submit_operation(
         &store,
         &namespace_id,
-        PathMutationIntent::PutFile {
-            commit_id: CommitId::parse("after-delete").expect("valid commit id"),
-            message: None,
+        CommitId::parse("after-delete").expect("valid commit id"),
+        FilesystemOperation::PutFile {
             absolute_path: AbsolutePath::parse("/late.txt").expect("path"),
             content_ref: content.content_ref.clone(),
             behavior: DestinationBehavior::NoReplace,

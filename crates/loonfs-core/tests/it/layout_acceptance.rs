@@ -10,7 +10,8 @@ use loonfs_api::AbsolutePath;
 use loonfs_api::{ChangeSeq, NamespaceId};
 use loonfs_core::content::{prepare_existing_content_ref, store_bytes_as_content};
 use loonfs_core::publish::{
-    NamespaceCommitEngine, NamespaceMutationCandidate, PathMutationIntent, PublishTailOptions,
+    FilesystemOperation, MutationCandidate, MutationRequest, NamespaceCommitEngine,
+    PublishTailOptions,
 };
 use loonfs_core::{gc_namespace, GcConfig};
 use loonfs_core::{BootstrapOptions, MutationContext};
@@ -40,15 +41,17 @@ async fn put_file<S: ObjectStore + ?Sized>(
     NamespaceCommitEngine::new(namespace_id.clone())
         .publish_batch(
             store,
-            vec![NamespaceMutationCandidate::path_prepared(
-                PathMutationIntent::PutFile {
-                    commit_id: loonfs_api::CommitId::generate(),
-                    message: None,
-                    absolute_path: AbsolutePath::parse(absolute_path).expect("path"),
-                    content_ref,
-                    behavior: loonfs_api::DestinationBehavior::NoReplace,
-                    expected_revision_no: None,
-                },
+            vec![MutationCandidate::prepared(
+                MutationRequest::single(
+                    loonfs_api::CommitId::generate(),
+                    None,
+                    FilesystemOperation::PutFile {
+                        absolute_path: AbsolutePath::parse(absolute_path).expect("path"),
+                        content_ref,
+                        behavior: loonfs_api::DestinationBehavior::NoReplace,
+                        expected_revision_no: None,
+                    },
+                ),
                 vec![prepared],
             )],
             context,

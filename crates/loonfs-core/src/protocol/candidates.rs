@@ -3,25 +3,24 @@
 //! and same-batch primaries.
 
 use super::publish_view::PublishMetadataView;
-use crate::commit::{
-    core_commit_fingerprint, CommitExecutionContext, CommitIdentitySource,
-    CommitRequest as CoreCommitRequest, SemanticMutationIdentity,
-};
-use crate::commit_engine::{
-    ContentPreparation, ContentPreparationError, NamespaceMutation, NamespaceMutationCandidate,
-};
+use crate::commit::{CommitRequest as CoreCommitRequest, MutationFingerprint};
+use crate::commit_engine::{ContentPreparation, ContentPreparationError, MutationCandidate};
 use crate::error::{CoreError, Result};
 use crate::metadata::CommitReceiptRecord;
-use crate::path::write::{path_intent_fingerprint, PublishPlanningSession};
+use crate::path::write::{FilesystemOperation, PublishPlanningSession};
 use crate::storage::content_admission::ContentAdmission;
-use loonfs_api::v0::{CommitOp, CommitResponse as ApiCommitResponse};
-use loonfs_api::{CommitId, ContentRef, ContentStoreId, NamespaceId};
+use loonfs_api::v0::CommitResponse as ApiCommitResponse;
+use loonfs_api::{CommitId, ContentRef, ContentStoreId, InodeId, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 use std::collections::HashMap;
 
 pub(super) struct CandidateCoreRequest {
     pub(super) request: CoreCommitRequest,
-    pub(super) identity_source: CommitIdentitySource,
+    pub(super) semantic_identity: MutationFingerprint,
+    /// The next free inode id the planner predicted for this request. The
+    /// commit plan derives the same value from the operation list; the
+    /// publish path checks that the two agree.
+    pub(super) predicted_next_inode_id: InodeId,
 }
 
 /// How one batch candidate resolved during admission.
@@ -39,7 +38,7 @@ pub(super) enum CandidateAdmission {
 #[derive(Debug, Clone)]
 struct InBatchRequest {
     primary_index: usize,
-    semantic_identity: SemanticMutationIdentity,
+    semantic_identity: MutationFingerprint,
 }
 
 /// Duplicate-commit-id bookkeeping for one publish batch.
@@ -64,7 +63,7 @@ impl BatchDedup {
         &mut self,
         index: usize,
         commit_id: &CommitId,
-        semantic_identity: &SemanticMutationIdentity,
+        semantic_identity: &MutationFingerprint,
     ) -> Option<CandidateAdmission> {
         let Some(existing) = self.in_batch_requests.get(commit_id) else {
             self.in_batch_requests.insert(
@@ -125,79 +124,53 @@ pub(super) async fn prepare_candidate_request<S: ObjectStore + ?Sized>(
     namespace_id: &NamespaceId,
     view: &PublishMetadataView<'_, S>,
     session: &PublishPlanningSession,
-    candidate: &NamespaceMutationCandidate,
+    candidate: &MutationCandidate,
     index: usize,
+    committed_at_ms: u64,
     dedup: &mut BatchDedup,
 ) -> Result<CandidateAdmission> {
     let acquired_writer = view
         .acquired_writer
         .as_ref()
         .expect("publish view should carry acquired writer");
-    let conversion_context = CommitExecutionContext {
-        namespace_id: namespace_id.clone(),
-        writer_epoch: acquired_writer.writer_epoch,
-    };
-    match candidate.mutation() {
-        NamespaceMutation::Commit(request) => {
-            let request = CoreCommitRequest::from_v0(conversion_context, request.clone());
-            let semantic_identity = core_commit_fingerprint(&request).map_err(|error| {
-                CoreError::Internal(format!("failed to fingerprint commit request: {error}"))
-            })?;
-            let semantic_identity = SemanticMutationIdentity::CoreCommit(semantic_identity);
-            if let Some(admission) = resolve_commit_id_reuse(
-                namespace_id,
-                view,
-                dedup,
-                index,
-                &request.commit_id,
-                &semantic_identity,
-            )
-            .await?
-            {
-                return Ok(admission);
-            }
-            validate_new_primary(candidate)?;
-            Ok(CandidateAdmission::Prepared(CandidateCoreRequest {
-                request,
-                identity_source: CommitIdentitySource::CoreCommitRequest,
-            }))
-        }
-        NamespaceMutation::Path(intent) => {
-            let path_intent_fingerprint = path_intent_fingerprint(namespace_id, intent)?;
-            let semantic_identity =
-                SemanticMutationIdentity::PathIntent(path_intent_fingerprint.clone());
-            if let Some(admission) = resolve_commit_id_reuse(
-                namespace_id,
-                view,
-                dedup,
-                index,
-                intent.commit_id(),
-                &semantic_identity,
-            )
-            .await?
-            {
-                return Ok(admission);
-            }
-            validate_new_primary(candidate)?;
-            let planned = session
-                .plan_path_mutation(namespace_id, intent, view.metadata_view())
-                .await?;
-            let request = CoreCommitRequest::from_v0(conversion_context, planned.commit_request);
-            Ok(CandidateAdmission::Prepared(CandidateCoreRequest {
-                request,
-                identity_source: CommitIdentitySource::PathIntent(planned.path_intent_fingerprint),
-            }))
-        }
+    let mutation = candidate.request();
+    let semantic_identity = candidate.semantic_identity(namespace_id)?;
+    if let Some(admission) = resolve_commit_id_reuse(
+        namespace_id,
+        view,
+        dedup,
+        index,
+        &mutation.commit_id,
+        &semantic_identity,
+    )
+    .await?
+    {
+        return Ok(admission);
     }
+    validate_new_primary(candidate)?;
+    let planned = session
+        .plan_mutation(mutation, view.metadata_view(), committed_at_ms)
+        .await?;
+    Ok(CandidateAdmission::Prepared(CandidateCoreRequest {
+        request: CoreCommitRequest {
+            namespace_id: namespace_id.clone(),
+            commit_id: mutation.commit_id.clone(),
+            writer_epoch: acquired_writer.writer_epoch,
+            ops: planned.ops,
+            message: mutation.message.clone(),
+        },
+        semantic_identity,
+        predicted_next_inode_id: planned.resulting_next_inode_id,
+    }))
 }
 
-fn validate_new_primary(candidate: &NamespaceMutationCandidate) -> Result<()> {
+fn validate_new_primary(candidate: &MutationCandidate) -> Result<()> {
     // For new primaries, request limits precede rejected content preparation.
     candidate.validate_request_limits()?;
     reject_failed_content_preparation(candidate)
 }
 
-fn reject_failed_content_preparation(candidate: &NamespaceMutationCandidate) -> Result<()> {
+fn reject_failed_content_preparation(candidate: &MutationCandidate) -> Result<()> {
     match candidate.content_preparation() {
         ContentPreparation::Ready(_) => Ok(()),
         ContentPreparation::Rejected(error) => Err(error.clone().into()),
@@ -216,7 +189,7 @@ async fn resolve_commit_id_reuse<S: ObjectStore + ?Sized>(
     dedup: &mut BatchDedup,
     index: usize,
     commit_id: &CommitId,
-    semantic_identity: &SemanticMutationIdentity,
+    semantic_identity: &MutationFingerprint,
 ) -> Result<Option<CandidateAdmission>> {
     if let Some(existing) = view.find_commit_receipt(commit_id).await? {
         return Ok(Some(CandidateAdmission::Settled(
@@ -255,9 +228,11 @@ impl CommitContentAdmissions<'_> {
 }
 
 /// Checks every new external content ref against in-memory preparation proofs.
+///
+/// Copy and restore reuse content already retained by the namespace, whose
+/// durability is guaranteed; only a put introduces bytes that need proof.
 pub(super) fn validate_commit_content_references(
-    request: &CoreCommitRequest,
-    candidate: &NamespaceMutationCandidate,
+    candidate: &MutationCandidate,
     content_store_id: &ContentStoreId,
 ) -> Result<()> {
     let admissions = CommitContentAdmissions {
@@ -271,23 +246,10 @@ pub(super) fn validate_commit_content_references(
             }
         },
     };
-    match candidate.mutation() {
-        NamespaceMutation::Commit(_) => {
-            for content_ref in request.ops.iter().filter_map(|op| match op {
-                CommitOp::CreateFile { content_ref, .. }
-                | CommitOp::ReplaceFile { content_ref, .. } => Some(content_ref),
-                // Restore content is resolved from retained namespace metadata,
-                // whose durability is already guaranteed.
-                _ => None,
-            }) {
-                require_content_admission(&admissions, content_ref)?;
-            }
+    for operation in &candidate.request().operations {
+        if let FilesystemOperation::PutFile { content_ref, .. } = operation {
+            require_content_admission(&admissions, content_ref)?;
         }
-        NamespaceMutation::Path(crate::path::write::PathMutationIntent::PutFile {
-            content_ref,
-            ..
-        }) => require_content_admission(&admissions, content_ref)?,
-        NamespaceMutation::Path(_) => return Ok(()),
     }
 
     Ok(())

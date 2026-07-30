@@ -7,7 +7,7 @@
 //! - `operations` — namespace lifecycle, path-oriented filesystem
 //!   operations, file revisions, maintenance, and the `ApiError` body.
 //! - `reads` — authoritative read results (stat/list entries, file bytes).
-//! - `commits` — explicit semantic commits and the change feed.
+//! - `commits` — committed-mutation results and the change feed.
 //! - `search` — content search and grep-index administration.
 //! - `uploads` — upload sessions and direct-put access.
 //!
@@ -20,10 +20,7 @@ mod reads;
 mod search;
 mod uploads;
 
-pub use commits::{
-    ChangesResponse, CommitOp, CommitPrecondition, CommitRequest, CommitResponse, CommittedChange,
-    FilesystemChange,
-};
+pub use commits::{ChangesResponse, CommitResponse, CommittedChange, FilesystemChange};
 pub use operations::{
     AdvanceRetentionResponse, ApiError, CreateCheckpointRequest, CreateCheckpointResponse,
     CreateNamespaceRequest, DeleteDirectoryBehavior, DeleteNamespaceResponse, DestinationBehavior,

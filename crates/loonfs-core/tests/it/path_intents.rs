@@ -6,18 +6,14 @@
 use crate::common::mutation_split_support::*;
 use crate::common::{namespace_engine, read_context};
 use loonfs_api::{
-    v0::{
-        CommitOp as ApiCommitOp, CommitPrecondition, CommitRequest as ApiCommitRequest,
-        FilesystemChange,
-    },
+    v0::FilesystemChange,
     wire::wal::{decode_wal_segment_envelope_zstd, WalDelta},
     AbsolutePath, AuthoritativePathEntry, ChangeSeq, CommitId, DeleteDirectoryBehavior,
     DestinationBehavior, DirectoryPageCursor, InodeId, InodeKind, NameKey, NamespaceId, Page,
     PageRequest, RevisionNo,
 };
-use loonfs_core::commit::core_commit_fingerprint_for_v0_request;
 use loonfs_core::content::store_bytes_as_content;
-use loonfs_core::publish::{NamespaceMutationCandidate, PathMutationIntent};
+use loonfs_core::publish::{FilesystemOperation, MutationCandidate, MutationRequest};
 use loonfs_core::{Error as CoreError, ErrorCode, MutationContext};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::ObjectStore;
@@ -40,12 +36,11 @@ async fn delete_path<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     commit_id: Option<&str>,
 ) -> Result<loonfs_api::CommitResponse, CoreError> {
-    submit_intent(
+    submit_operation(
         store,
         namespace_id,
-        PathMutationIntent::DeletePath {
-            commit_id: test_commit_id(commit_id),
-            message: None,
+        test_commit_id(commit_id),
+        FilesystemOperation::DeletePath {
             absolute_path: AbsolutePath::parse(absolute_path).expect("path"),
             behavior: DeleteDirectoryBehavior::Recursive,
             expected_inode_id: None,
@@ -62,12 +57,11 @@ async fn delete_path_non_recursive<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     commit_id: Option<&str>,
 ) -> Result<loonfs_api::CommitResponse, CoreError> {
-    submit_intent(
+    submit_operation(
         store,
         namespace_id,
-        PathMutationIntent::DeletePath {
-            commit_id: test_commit_id(commit_id),
-            message: None,
+        test_commit_id(commit_id),
+        FilesystemOperation::DeletePath {
             absolute_path: AbsolutePath::parse(absolute_path).expect("path"),
             behavior: DeleteDirectoryBehavior::NonRecursive,
             expected_inode_id: None,
@@ -85,12 +79,11 @@ async fn move_path<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     commit_id: Option<&str>,
 ) -> Result<loonfs_api::CommitResponse, CoreError> {
-    submit_intent(
+    submit_operation(
         store,
         namespace_id,
-        PathMutationIntent::MovePath {
-            commit_id: test_commit_id(commit_id),
-            message: None,
+        test_commit_id(commit_id),
+        FilesystemOperation::MovePath {
             from_path: AbsolutePath::parse(from_path).expect("path"),
             to_path: AbsolutePath::parse(to_path).expect("path"),
             behavior: DestinationBehavior::NoReplace,
@@ -108,12 +101,11 @@ async fn copy_file_path<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     commit_id: Option<&str>,
 ) -> Result<loonfs_api::CommitResponse, CoreError> {
-    submit_intent(
+    submit_operation(
         store,
         namespace_id,
-        PathMutationIntent::CopyFilePath {
-            commit_id: test_commit_id(commit_id),
-            message: None,
+        test_commit_id(commit_id),
+        FilesystemOperation::CopyFilePath {
             from_path: AbsolutePath::parse(from_path).expect("path"),
             to_path: AbsolutePath::parse(to_path).expect("path"),
             behavior: DestinationBehavior::NoReplace,
@@ -131,12 +123,11 @@ async fn restore_file_revision<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     commit_id: Option<&str>,
 ) -> Result<loonfs_api::CommitResponse, CoreError> {
-    submit_intent(
+    submit_operation(
         store,
         namespace_id,
-        PathMutationIntent::RestoreRevision {
-            commit_id: test_commit_id(commit_id),
-            message: None,
+        test_commit_id(commit_id),
+        FilesystemOperation::RestoreRevision {
             absolute_path: AbsolutePath::parse(absolute_path).expect("path"),
             source_revision_no,
         },
@@ -978,7 +969,7 @@ async fn revision_queries_read_historical_bytes_and_path_restore_appends_revisio
 }
 
 #[tokio::test]
-async fn wire_name_key_stays_typed_through_planning_and_fingerprint() {
+async fn name_key_stays_typed_through_planning_and_fingerprint() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
@@ -986,33 +977,25 @@ async fn wire_name_key_stays_typed_through_planning_and_fingerprint() {
     bootstrap_namespace(&store, &namespace_id, &context, false)
         .await
         .expect("bootstrap");
-    let request: ApiCommitRequest = serde_json::from_slice(
-        br#"{
-            "commit_id":"typed-name-key",
-            "preconditions":[{
-                "kind":"child_name_absent",
-                "parent_inode_id":1,
-                "name_key":"caf\u00e9"
-            }],
-            "ops":[{
-                "kind":"create_directory",
-                "parent_inode_id":1,
-                "display_name":"Caf\u00e9"
-            }],
-            "message":"typed boundary"
-        }"#,
-    )
-    .expect("deserialize wire commit request");
-    let expected_name_key = NameKey::parse("café").expect("valid name key");
-    assert!(matches!(
-        request.preconditions.as_slice(),
-        [CommitPrecondition::ChildNameAbsent { name_key, .. }]
-            if name_key == &expected_name_key
-    ));
-    let expected_fingerprint = core_commit_fingerprint_for_v0_request(&namespace_id, &request)
-        .expect("fingerprint wire request");
+    // A spelling whose canonical lookup key differs from it: planning must
+    // derive the key from the path component and carry it typed all the way
+    // into the durable binding.
+    let request = MutationRequest::single(
+        CommitId::parse("typed-name-key").expect("valid commit id"),
+        Some("typed boundary".to_owned()),
+        FilesystemOperation::CreateDir {
+            absolute_path: AbsolutePath::parse("/Caf\u{e9}").expect("path"),
+            parents: false,
+        },
+    );
+    let expected_name_key = NameKey::parse("caf\u{e9}").expect("valid name key");
+    // Identity is computed from the request alone, before anything is
+    // published, so the committed record must carry exactly this value.
+    let expected_fingerprint = MutationCandidate::new(request.clone())
+        .semantic_identity(&namespace_id)
+        .expect("fingerprint mutation request");
 
-    commit_operations(&store, &namespace_id, request, &context)
+    submit_mutation(&store, &namespace_id, request, &context)
         .await
         .expect("commit typed name key");
 
@@ -1054,12 +1037,11 @@ async fn path_intents_cover_basic_mutations() {
     let content = store_bytes_as_content(&store, &namespace_id, b"hello")
         .await
         .expect("stage content");
-    let put = submit_intent_async(
+    let put = submit_operation(
         &store,
         &namespace_id,
-        PathMutationIntent::PutFile {
-            commit_id: CommitId::parse("put-path").expect("valid commit id"),
-            message: None,
+        CommitId::parse("put-path").expect("valid commit id"),
+        FilesystemOperation::PutFile {
             absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
             content_ref: content.content_ref.clone(),
             behavior: DestinationBehavior::NoReplace,
@@ -1071,12 +1053,11 @@ async fn path_intents_cover_basic_mutations() {
     .expect("put path");
     assert_eq!(put.committed_seq, ChangeSeq(1));
 
-    let moved = submit_intent_async(
+    let moved = submit_operation(
         &store,
         &namespace_id,
-        PathMutationIntent::MovePath {
-            commit_id: CommitId::parse("move-path").expect("valid commit id"),
-            message: None,
+        CommitId::parse("move-path").expect("valid commit id"),
+        FilesystemOperation::MovePath {
             from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
             behavior: DestinationBehavior::NoReplace,
@@ -1087,12 +1068,11 @@ async fn path_intents_cover_basic_mutations() {
     .expect("move path");
     assert_eq!(moved.committed_seq, ChangeSeq(2));
 
-    let copied = submit_intent_async(
+    let copied = submit_operation(
         &store,
         &namespace_id,
-        PathMutationIntent::CopyFilePath {
-            commit_id: CommitId::parse("copy-path").expect("valid commit id"),
-            message: None,
+        CommitId::parse("copy-path").expect("valid commit id"),
+        FilesystemOperation::CopyFilePath {
             from_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/c.txt").expect("path"),
             behavior: DestinationBehavior::NoReplace,
@@ -1103,12 +1083,11 @@ async fn path_intents_cover_basic_mutations() {
     .expect("copy path");
     assert_eq!(copied.committed_seq, ChangeSeq(3));
 
-    let deleted = submit_intent_async(
+    let deleted = submit_operation(
         &store,
         &namespace_id,
-        PathMutationIntent::DeletePath {
-            commit_id: CommitId::parse("delete-path").expect("valid commit id"),
-            message: None,
+        CommitId::parse("delete-path").expect("valid commit id"),
+        FilesystemOperation::DeletePath {
             absolute_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
             behavior: DeleteDirectoryBehavior::NonRecursive,
             expected_inode_id: None,
@@ -1142,26 +1121,30 @@ async fn path_intents_in_one_batch_see_tentative_state() {
         &store,
         &namespace_id,
         vec![
-            admitted_candidate(
+            prepared_candidate(
                 &store,
                 &namespace_id,
-                PathMutationIntent::PutFile {
-                    commit_id: CommitId::parse("put-batched-path").expect("valid commit id"),
-                    message: None,
-                    absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
-                    content_ref: content.content_ref,
-                    behavior: DestinationBehavior::NoReplace,
-                    expected_revision_no: None,
-                },
+                MutationRequest::single(
+                    CommitId::parse("put-batched-path").expect("valid commit id"),
+                    None,
+                    FilesystemOperation::PutFile {
+                        absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
+                        content_ref: content.content_ref,
+                        behavior: DestinationBehavior::NoReplace,
+                        expected_revision_no: None,
+                    },
+                ),
             )
             .await,
-            NamespaceMutationCandidate::path(PathMutationIntent::MovePath {
-                commit_id: CommitId::parse("move-batched-path").expect("valid commit id"),
-                message: None,
-                from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
-                to_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
-                behavior: DestinationBehavior::NoReplace,
-            }),
+            MutationCandidate::new(MutationRequest::single(
+                CommitId::parse("move-batched-path").expect("valid commit id"),
+                None,
+                FilesystemOperation::MovePath {
+                    from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
+                    to_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
+                    behavior: DestinationBehavior::NoReplace,
+                },
+            )),
         ],
         &context,
     )
@@ -1426,7 +1409,7 @@ async fn create_directory_path_creates_directory_without_auto_parents() {
 }
 
 #[tokio::test]
-async fn path_move_writes_unbind_and_stale_binding_is_fails() {
+async fn path_move_writes_unbind_and_old_binding_stops_resolving() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let context = mutation_context();
@@ -1446,7 +1429,6 @@ async fn path_move_writes_unbind_and_stale_binding_is_fails() {
     let file = resolve_path(&store, &namespace_id("demo"), "/docs/a.txt")
         .await
         .expect("resolve file");
-    let old_binding = current_binding_for_child(&store, &namespace_id("demo"), file.inode_id).await;
 
     move_path(
         &store,
@@ -1474,28 +1456,37 @@ async fn path_move_writes_unbind_and_stale_binding_is_fails() {
         .await
         .expect("new path visible");
 
-    let stale_binding = commit_operations(
+    // The unbind is what makes the old binding dead: an operation aimed at
+    // the source path finds nothing, while the same inode is still reachable
+    // — and still deletable under a guard naming it — at the destination.
+    let stale_binding = submit_operation(
         &store,
         &namespace_id("demo"),
-        ApiCommitRequest {
-            commit_id: CommitId::parse("delete-with-stale-binding").expect("valid commit id"),
-            preconditions: vec![CommitPrecondition::BindingIs {
-                parent_inode_id: old_binding.parent_inode_id,
-                name_key: old_binding.name_key.clone(),
-                child_inode_id: old_binding.child_inode_id,
-                bind_seq: old_binding.bind_seq,
-                bind_delta_index: old_binding.bind_delta_index,
-            }],
-            ops: vec![ApiCommitOp::DeleteFile {
-                inode_id: file.inode_id,
-            }],
-            message: None,
+        CommitId::parse("delete-old-binding").expect("valid commit id"),
+        FilesystemOperation::DeletePath {
+            absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
+            behavior: DeleteDirectoryBehavior::NonRecursive,
+            expected_inode_id: Some(file.inode_id),
         },
         &context,
     )
     .await
-    .expect_err("stale binding should fail");
-    assert_eq!(stale_binding.code(), ErrorCode::PathConflict);
+    .expect_err("the pre-move binding should no longer resolve");
+    assert_eq!(stale_binding.code(), ErrorCode::PathNotFound);
+
+    submit_operation(
+        &store,
+        &namespace_id("demo"),
+        CommitId::parse("delete-new-binding").expect("valid commit id"),
+        FilesystemOperation::DeletePath {
+            absolute_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
+            behavior: DeleteDirectoryBehavior::NonRecursive,
+            expected_inode_id: Some(file.inode_id),
+        },
+        &context,
+    )
+    .await
+    .expect("the moved inode keeps its identity under the new binding");
 }
 
 #[tokio::test]
@@ -1790,12 +1781,11 @@ async fn move_replace_atomically_replaces_a_file_destination() {
     .expect("put b");
 
     // The default stays create-only: an occupied destination is a conflict.
-    let error = submit_intent(
+    let error = submit_operation(
         &store,
         &namespace_id,
-        PathMutationIntent::MovePath {
-            commit_id: CommitId::parse("move-no-replace").expect("valid commit id"),
-            message: None,
+        CommitId::parse("move-no-replace").expect("valid commit id"),
+        FilesystemOperation::MovePath {
             from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
             behavior: DestinationBehavior::NoReplace,
@@ -1808,12 +1798,11 @@ async fn move_replace_atomically_replaces_a_file_destination() {
 
     // Replace compiles to one commit: the destination file's delete and the
     // source's rebind land atomically.
-    submit_intent(
+    submit_operation(
         &store,
         &namespace_id,
-        PathMutationIntent::MovePath {
-            commit_id: CommitId::parse("move-replace").expect("valid commit id"),
-            message: None,
+        CommitId::parse("move-replace").expect("valid commit id"),
+        FilesystemOperation::MovePath {
             from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
             behavior: DestinationBehavior::Replace,
@@ -1858,12 +1847,11 @@ async fn move_replace_rejects_directory_destinations_and_self_moves() {
         .expect("mkdir");
 
     // Mirrors put: only a file destination can be replaced.
-    let error = submit_intent(
+    let error = submit_operation(
         &store,
         &namespace_id,
-        PathMutationIntent::MovePath {
-            commit_id: CommitId::parse("move-onto-dir").expect("valid commit id"),
-            message: None,
+        CommitId::parse("move-onto-dir").expect("valid commit id"),
+        FilesystemOperation::MovePath {
             from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/dir").expect("path"),
             behavior: DestinationBehavior::Replace,
@@ -1875,12 +1863,11 @@ async fn move_replace_rejects_directory_destinations_and_self_moves() {
     assert!(matches!(error, CoreError::ExpectedFile { .. }));
 
     // A path never replaces itself, force or not.
-    let error = submit_intent(
+    let error = submit_operation(
         &store,
         &namespace_id,
-        PathMutationIntent::MovePath {
-            commit_id: CommitId::parse("move-onto-self").expect("valid commit id"),
-            message: None,
+        CommitId::parse("move-onto-self").expect("valid commit id"),
+        FilesystemOperation::MovePath {
             from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
             behavior: DestinationBehavior::Replace,
@@ -1928,12 +1915,11 @@ async fn copy_replace_appends_a_revision_to_the_destination_inode() {
         .await
         .expect("destination revisions before");
 
-    submit_intent(
+    submit_operation(
         &store,
         &namespace_id,
-        PathMutationIntent::CopyFilePath {
-            commit_id: CommitId::parse("copy-replace").expect("valid commit id"),
-            message: None,
+        CommitId::parse("copy-replace").expect("valid commit id"),
+        FilesystemOperation::CopyFilePath {
             from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
             behavior: DestinationBehavior::Replace,

@@ -1,41 +1,44 @@
 //! Behavior tests for the runtime core.
 
-use crate::{
-    ChangeSeq, CommitId, CommitOp, CommitPrecondition, CommitRequest, InodeId, NameKey, RevisionNo,
-};
-use loonfs_api::DisplayName;
+use crate::publish::{parse_mutation_path, FilesystemOperation, MutationRequest};
+use crate::{CommitId, DestinationBehavior, RevisionNo};
 
 #[test]
-fn explicit_commit_facade_exports_constructor_types() {
-    let display_name = DisplayName::parse("Report.txt").expect("valid display name");
-    let name_key = NameKey::for_display_name(&display_name);
-    let precondition = CommitPrecondition::BindingIs {
-        parent_inode_id: InodeId(1),
-        name_key,
-        child_inode_id: InodeId(2),
-        bind_seq: ChangeSeq(3),
-        bind_delta_index: 4,
-    };
-
-    let request = CommitRequest {
+fn mutation_facade_exports_constructor_types() {
+    // An embedded caller builds a whole multi-operation request from the
+    // crate's own facade: nothing here reaches into loonfs-core.
+    let request = MutationRequest {
         commit_id: CommitId::generate(),
-        preconditions: vec![precondition],
-        ops: vec![
-            CommitOp::RestoreRevision {
-                inode_id: InodeId(2),
+        message: None,
+        operations: vec![
+            FilesystemOperation::RestoreRevision {
+                absolute_path: parse_mutation_path("/docs/Report.txt")
+                    .expect("valid mutation path"),
                 source_revision_no: RevisionNo(1),
-                base_revision_no: RevisionNo(2),
             },
-            CommitOp::Rename {
-                inode_id: InodeId(2),
-                new_parent_inode_id: InodeId(1),
-                new_display_name: loonfs_api::DisplayName::parse("report.txt")
-                    .expect("valid display name"),
+            FilesystemOperation::MovePath {
+                from_path: parse_mutation_path("/docs/Report.txt").expect("valid mutation path"),
+                to_path: parse_mutation_path("/docs/report.txt").expect("valid mutation path"),
+                behavior: DestinationBehavior::NoReplace,
             },
         ],
-        message: None,
     };
 
-    assert_eq!(request.preconditions.len(), 1);
-    assert_eq!(request.ops.len(), 2);
+    assert_eq!(request.operations.len(), 2);
+}
+
+#[test]
+fn single_operation_request_carries_exactly_one_operation() {
+    let operation = FilesystemOperation::CreateDir {
+        absolute_path: parse_mutation_path("/docs").expect("valid mutation path"),
+        parents: false,
+    };
+    let request = MutationRequest::single(
+        CommitId::generate(),
+        Some("create docs".to_owned()),
+        operation.clone(),
+    );
+
+    assert_eq!(request.operations, vec![operation]);
+    assert_eq!(request.message.as_deref(), Some("create docs"));
 }

@@ -2781,6 +2781,15 @@
               }
             ]
           },
+          "operation_index": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Position, in the request's operation list, of the operation that\nfailed. A mutation commits all of its operations or none of them, so\nthis names the one that stopped the whole request.",
+            "minimum": 0
+          },
           "requested_deletion_seq": {
             "oneOf": [
               {

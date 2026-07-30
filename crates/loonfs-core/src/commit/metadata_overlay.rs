@@ -11,6 +11,7 @@ pub(super) struct CommitOverlayRows {
 }
 
 impl CommitOverlayRows {
+    #[cfg(test)]
     pub(super) fn new() -> Self {
         Self {
             rows: MetadataState::default(),

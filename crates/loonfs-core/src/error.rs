@@ -186,6 +186,20 @@ pub enum CoreError {
     NamespaceExists { namespace_id: NamespaceId },
     #[error("namespace `{namespace_id}` is deleted")]
     NamespaceDeleted { namespace_id: NamespaceId },
+    /// A batch stopped at one of its operations. A mutation commits all of
+    /// its operations or none of them, so this names the operation that
+    /// stopped the request and carries the failure it produced. The wire code
+    /// stays the inner failure's; the position joins the message and the
+    /// structured details.
+    ///
+    /// Only a request with more than one operation is wrapped: a
+    /// single-operation request has one place to fail, so its error stays
+    /// exactly what the operation produced.
+    #[error("operation {operation_index}: {source}")]
+    FailedOperation {
+        operation_index: u32,
+        source: Box<CoreError>,
+    },
 }
 
 /// Failures specific to manifest-plus-tail metadata views.
@@ -386,6 +400,21 @@ impl CoreError {
             CoreError::TombstoneConflict { .. } => ErrorCode::TombstoneConflict,
             CoreError::WriterFenced(_) => ErrorCode::WriterFenced,
             CoreError::NamespaceCorrupt(_) => ErrorCode::NamespaceCorrupt,
+            // Naming which operation stopped a batch says nothing new about
+            // what went wrong, so the code stays the failure's own.
+            CoreError::FailedOperation { source, .. } => source.code(),
+        }
+    }
+
+    /// Attributes this failure to the operation at `operation_index` of a
+    /// multi-operation request.
+    pub(crate) fn at_operation(self, operation_index: usize) -> Self {
+        let Ok(operation_index) = u32::try_from(operation_index) else {
+            return self;
+        };
+        Self::FailedOperation {
+            operation_index,
+            source: Box::new(self),
         }
     }
 
@@ -418,6 +447,13 @@ impl CoreError {
                 ..ErrorDetails::default()
             }),
             CoreError::CommitValidation(error) => commit_validation_details(error),
+            CoreError::FailedOperation {
+                operation_index,
+                source,
+            } => Some(ErrorDetails {
+                operation_index: Some(*operation_index),
+                ..source.details().unwrap_or_default()
+            }),
             _ => None,
         }
     }

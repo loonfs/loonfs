@@ -8,11 +8,12 @@ use crate::common::GrepHost;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
+use loonfs::publish::{FilesystemOperation, MutationRequest};
 use loonfs::{
-    ChangeSeq, CommitId, CommitOp, CommitRequest, CreateNamespaceOptions, ErrorCode, FsWriter,
-    InodeId, NamespaceId, PutFileOptions, SharedObjectStore,
+    ChangeSeq, CommitId, CreateNamespaceOptions, DestinationBehavior, ErrorCode, FsWriter,
+    NamespaceId, PutFileOptions, SharedObjectStore,
 };
-use loonfs_api::{decode_cursor, GrepPageCursor, GrepRequest};
+use loonfs_api::{decode_cursor, AbsolutePath, GrepPageCursor, GrepRequest};
 use loonfs_grep::codec::INDEX_GRAMS_MAX_FILE_BYTES;
 use loonfs_grep::{GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepWorker};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -381,7 +382,7 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
         max_l0_runs: nonzero_usize(usize::MAX),
         ..GramIndexBuildPolicy::default()
     };
-    let mut ops = Vec::with_capacity(FILES);
+    let mut operations = Vec::with_capacity(FILES);
     let mut prepared = Vec::with_capacity(FILES);
     for index in 0..FILES {
         let bytes = format!("bounded needle file {index:04}\n");
@@ -390,22 +391,22 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
             .prepare_file_bytes(&namespace_id, bytes.as_bytes())
             .await
             .expect("prepare atomic-commit content");
-        ops.push(CommitOp::CreateFile {
-            parent_inode_id: InodeId(1),
-            display_name: loonfs_api::DisplayName::parse(format!("bounded-{index:04}.txt"))
-                .expect("valid display name"),
+        operations.push(FilesystemOperation::PutFile {
+            absolute_path: AbsolutePath::parse(format!("/bounded-{index:04}.txt"))
+                .expect("valid absolute path"),
             content_ref: content.content_ref().clone(),
+            behavior: DestinationBehavior::NoReplace,
+            expected_revision_no: None,
         });
         prepared.push(content);
     }
     let commit = writer
-        .commit_operations_prepared(
+        .mutate_prepared(
             &namespace_id,
-            CommitRequest {
+            MutationRequest {
                 commit_id: CommitId::parse("thousand-file-atomic").expect("commit id"),
-                preconditions: Vec::new(),
-                ops,
                 message: None,
+                operations,
             },
             prepared,
         )

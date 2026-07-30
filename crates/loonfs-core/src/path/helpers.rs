@@ -8,7 +8,7 @@ pub(crate) fn parse_absolute_path_for_core(absolute_path: &str) -> Result<Absolu
 }
 
 /// Parses a raw string into the validated, normalized path a
-/// [`PathMutationIntent`](crate::path::write::PathMutationIntent) carries:
+/// [`MutationRequest`](crate::path::write::MutationRequest) carries:
 /// absolute, normalized, and not the root.
 ///
 /// This is the one named home for the invariant. Every surface that accepts

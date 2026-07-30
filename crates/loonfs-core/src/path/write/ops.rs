@@ -2,8 +2,8 @@
 //! the same pipeline production batches use.
 
 use super::content_write::store_file_bytes_before_metadata_publish;
-use super::intent::PathMutationIntent;
-use crate::commit_engine::NamespaceMutationCandidate;
+use super::intent::{FilesystemOperation, MutationRequest};
+use crate::commit_engine::MutationCandidate;
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
 use crate::path::helpers::parse_mutation_path;
@@ -17,17 +17,19 @@ fn normalized_commit_id(commit_id: Option<&CommitId>) -> CommitId {
     commit_id.cloned().unwrap_or_else(CommitId::generate)
 }
 
-async fn submit_path_intent<S: ObjectStore + ?Sized>(
+async fn submit_operation<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    intent: PathMutationIntent,
+    commit_id: CommitId,
+    operation: FilesystemOperation,
     prepared_content: Vec<PreparedContent>,
     context: &MutationContext,
 ) -> Result<CommitResponse> {
+    let request = MutationRequest::single(commit_id, None, operation);
     let candidate = if prepared_content.is_empty() {
-        NamespaceMutationCandidate::path(intent)
+        MutationCandidate::new(request)
     } else {
-        NamespaceMutationCandidate::path_prepared(intent, prepared_content)
+        MutationCandidate::prepared(request, prepared_content)
     };
     let mut results = crate::commit_engine::publish_namespace_mutations_batch(
         store,
@@ -100,12 +102,11 @@ async fn put_prepared_file_content<S: ObjectStore + ?Sized>(
     commit_id: Option<&CommitId>,
 ) -> Result<CommitResponse> {
     let content_ref = prepared_content.content_ref().clone();
-    submit_path_intent(
+    submit_operation(
         store,
         namespace_id,
-        PathMutationIntent::PutFile {
-            commit_id: normalized_commit_id(commit_id),
-            message: None,
+        normalized_commit_id(commit_id),
+        FilesystemOperation::PutFile {
             absolute_path: parse_mutation_path(absolute_path)?,
             content_ref,
             behavior,
@@ -144,12 +145,11 @@ async fn delete_path_with_behavior<S: ObjectStore + ?Sized>(
     commit_id: Option<&CommitId>,
 ) -> Result<CommitResponse> {
     let commit_id = normalized_commit_id(commit_id);
-    submit_path_intent(
+    submit_operation(
         store,
         namespace_id,
-        PathMutationIntent::DeletePath {
-            commit_id,
-            message: None,
+        commit_id,
+        FilesystemOperation::DeletePath {
             absolute_path: parse_mutation_path(absolute_path)?,
             behavior,
             expected_inode_id: None,
@@ -169,12 +169,11 @@ pub(crate) async fn move_path<S: ObjectStore + ?Sized>(
     commit_id: Option<&CommitId>,
 ) -> Result<CommitResponse> {
     let commit_id = normalized_commit_id(commit_id);
-    submit_path_intent(
+    submit_operation(
         store,
         namespace_id,
-        PathMutationIntent::MovePath {
-            commit_id,
-            message: None,
+        commit_id,
+        FilesystemOperation::MovePath {
             from_path: parse_mutation_path(from_path)?,
             to_path: parse_mutation_path(to_path)?,
             behavior: DestinationBehavior::NoReplace,
@@ -194,12 +193,11 @@ pub(crate) async fn restore_file_revision<S: ObjectStore + ?Sized>(
     commit_id: Option<&CommitId>,
 ) -> Result<CommitResponse> {
     let commit_id = normalized_commit_id(commit_id);
-    submit_path_intent(
+    submit_operation(
         store,
         namespace_id,
-        PathMutationIntent::RestoreRevision {
-            commit_id,
-            message: None,
+        commit_id,
+        FilesystemOperation::RestoreRevision {
             absolute_path: parse_mutation_path(absolute_path)?,
             source_revision_no,
         },

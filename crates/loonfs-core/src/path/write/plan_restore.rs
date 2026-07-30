@@ -1,26 +1,20 @@
 //! Publish plans that restore an earlier file revision.
 
 use super::planning_helpers::{
-    publish_binding_is_precondition, publish_reject_tombstoned_path_ancestor,
+    publish_binding_is_precondition, publish_reject_tombstoned_path_ancestor, PlannedOperation,
     PublishPathPlanningView,
 };
+use crate::commit::{CommitOp as ApiCommitOp, CommitPrecondition as ApiCommitPrecondition};
 use crate::error::{CoreError, Result};
 use crate::path::helpers::ensure_mutation_path;
-use loonfs_api::{
-    v0::{
-        CommitOp as ApiCommitOp, CommitPrecondition as ApiCommitPrecondition,
-        CommitRequest as ApiCommitRequest,
-    },
-    AbsolutePath, CommitId, InodeKind, RevisionNo,
-};
+use loonfs_api::{AbsolutePath, InodeKind, RevisionNo};
 use loonfs_objectstore::ObjectStore;
 
 pub(super) async fn plan_publish_restore_revision<S: ObjectStore + ?Sized>(
     absolute_path: &AbsolutePath,
     source_revision_no: RevisionNo,
-    commit_id: &CommitId,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
-) -> Result<ApiCommitRequest> {
+) -> Result<PlannedOperation> {
     ensure_mutation_path(absolute_path)?;
     publish_reject_tombstoned_path_ancestor(view, absolute_path).await?;
     let target = view
@@ -39,14 +33,13 @@ pub(super) async fn plan_publish_restore_revision<S: ObjectStore + ?Sized>(
         .await?
         .ok_or_else(|| CoreError::PathNotFound(absolute_path.as_str().to_owned()))?;
 
-    Ok(ApiCommitRequest {
-        commit_id: commit_id.to_owned(),
-        ops: vec![ApiCommitOp::RestoreRevision {
+    Ok(PlannedOperation::new(
+        vec![ApiCommitOp::RestoreRevision {
             inode_id: target.inode_id,
             source_revision_no,
             base_revision_no: revision.revision_no,
         }],
-        preconditions: vec![
+        vec![
             publish_binding_is_precondition(view, &target).await?,
             ApiCommitPrecondition::InodeRevisionIs {
                 inode_id: target.inode_id,
@@ -56,6 +49,5 @@ pub(super) async fn plan_publish_restore_revision<S: ObjectStore + ?Sized>(
                 inode_id: target.inode_id,
             },
         ],
-        message: None,
-    })
+    ))
 }

@@ -42,7 +42,9 @@ pub use self::rows::{
 
 pub(crate) use self::durable_cache::DurableVisibilityCache;
 pub(crate) use self::rows::active_tombstone_from_records;
-pub(crate) use self::view::{InMemoryMetadataView, MetadataView};
+#[cfg(test)]
+pub(crate) use self::view::InMemoryMetadataView;
+pub(crate) use self::view::MetadataView;
 pub(crate) use self::view_session::VisibleChildEntry;
 pub use self::view_session::{LeafRevisionPrefetch, MetadataViewSession};
 pub(crate) use self::visibility::{unbind_matches_binding, BindingIdentity};

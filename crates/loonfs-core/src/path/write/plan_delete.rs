@@ -1,14 +1,13 @@
 //! Publish plans that delete visible paths.
 
-use super::planning_helpers::{publish_binding_is_precondition, PublishPathPlanningView};
+use super::planning_helpers::{
+    publish_binding_is_precondition, PlannedOperation, PublishPathPlanningView,
+};
+use crate::commit::{CommitOp as ApiCommitOp, CommitPrecondition as ApiCommitPrecondition};
 use crate::error::{CoreError, Result};
 use crate::path::helpers::ensure_mutation_path;
 use loonfs_api::{
-    v0::{
-        CommitOp as ApiCommitOp, CommitPrecondition as ApiCommitPrecondition,
-        CommitRequest as ApiCommitRequest,
-    },
-    AbsolutePath, CommitId, DeleteDirectoryBehavior, InodeId, InodeKind, NameKey, ROOT_INODE_ID,
+    AbsolutePath, DeleteDirectoryBehavior, InodeId, InodeKind, NameKey, ROOT_INODE_ID,
 };
 use loonfs_objectstore::ObjectStore;
 
@@ -16,9 +15,8 @@ pub(super) async fn plan_publish_delete_path<S: ObjectStore + ?Sized>(
     absolute_path: &AbsolutePath,
     behavior: DeleteDirectoryBehavior,
     expected_inode_id: Option<InodeId>,
-    commit_id: &CommitId,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
-) -> Result<ApiCommitRequest> {
+) -> Result<PlannedOperation> {
     ensure_mutation_path(absolute_path)?;
     let resolved = view
         .metadata_state
@@ -76,10 +74,5 @@ pub(super) async fn plan_publish_delete_path<S: ObjectStore + ?Sized>(
             inode_id: resolved.inode_id,
         });
     }
-    Ok(ApiCommitRequest {
-        commit_id: commit_id.to_owned(),
-        ops: vec![op],
-        preconditions,
-        message: None,
-    })
+    Ok(PlannedOperation::new(vec![op], preconditions))
 }

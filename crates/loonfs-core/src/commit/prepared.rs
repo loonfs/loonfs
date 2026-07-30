@@ -1,35 +1,16 @@
 //! [`PreparedCommit`]: a validated request paired with its plan and
 //! semantic identity, ready for publication.
 
-use super::{
-    core_commit_fingerprint, CommitFingerprintError, CommitPlan, CommitRequest,
-    PathIntentFingerprint, SemanticMutationIdentity,
-};
-use loonfs_api::{NamespaceId, WriterEpoch};
+use super::{CommitPlan, CommitRequest, MutationFingerprint};
+use loonfs_api::NamespaceId;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-/// Execution-only commit context, kept separate from the canonical API
-/// operation and precondition vocabulary. Writer epoch and commit time never
-/// enter those vocabulary types or the semantic fingerprint; namespace scopes
-/// the fingerprint separately.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CommitExecutionContext {
-    pub namespace_id: NamespaceId,
-    pub writer_epoch: WriterEpoch,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum CommitIdentitySource {
-    CoreCommitRequest,
-    PathIntent(PathIntentFingerprint),
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PreparedCommit {
-    pub request: CommitRequest,
-    pub plan: CommitPlan,
-    pub semantic_identity: SemanticMutationIdentity,
+pub(crate) struct PreparedCommit {
+    pub(crate) request: CommitRequest,
+    pub(crate) plan: CommitPlan,
+    pub(crate) semantic_identity: MutationFingerprint,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -41,19 +22,13 @@ pub enum CommitPrepareError {
     },
     #[error("prepared commit id mismatch")]
     CommitIdMismatch,
-    #[error(transparent)]
-    Fingerprint(#[from] CommitFingerprintError),
 }
 
 impl PreparedCommit {
-    pub fn new(request: CommitRequest, plan: CommitPlan) -> Result<Self, CommitPrepareError> {
-        Self::prepare(request, plan, CommitIdentitySource::CoreCommitRequest)
-    }
-
-    pub(crate) fn prepare(
+    pub(crate) fn new(
         request: CommitRequest,
         plan: CommitPlan,
-        identity_source: CommitIdentitySource,
+        semantic_identity: MutationFingerprint,
     ) -> Result<Self, CommitPrepareError> {
         if request.namespace_id != plan.namespace_id {
             return Err(CommitPrepareError::NamespaceMismatch {
@@ -64,14 +39,6 @@ impl PreparedCommit {
         if request.commit_id != plan.commit_id {
             return Err(CommitPrepareError::CommitIdMismatch);
         }
-        let semantic_identity = match identity_source {
-            CommitIdentitySource::CoreCommitRequest => {
-                SemanticMutationIdentity::CoreCommit(core_commit_fingerprint(&request)?)
-            }
-            CommitIdentitySource::PathIntent(fingerprint) => {
-                SemanticMutationIdentity::PathIntent(fingerprint)
-            }
-        };
 
         Ok(Self {
             request,
@@ -84,22 +51,25 @@ impl PreparedCommit {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commit::{materialize_commit, CommitOpResult, ValidatedOp};
-    use loonfs_api::v0::CommitOp;
+    use crate::commit::{materialize_commit, CommitOpResult, PlannedOp, ValidatedOp};
+    use crate::commit::{CommitOp, MutationFingerprint};
     use loonfs_api::wire::wal::WalDelta;
     use loonfs_api::NameKey;
-    use loonfs_api::{ChangeSeq, CommitId, InodeId};
+    use loonfs_api::{ChangeSeq, CommitId, InodeId, WriterEpoch};
+
+    fn fingerprint() -> MutationFingerprint {
+        MutationFingerprint::new_unchecked("v0:sha256:test".to_owned())
+    }
 
     fn request() -> CommitRequest {
         CommitRequest {
             namespace_id: NamespaceId::parse("demo").expect("valid namespace id"),
             commit_id: CommitId::parse("commit-a").expect("valid commit id"),
             writer_epoch: WriterEpoch(1),
-            ops: vec![CommitOp::CreateDirectory {
+            ops: vec![PlannedOp::unchecked(CommitOp::CreateDirectory {
                 parent_inode_id: InodeId(1),
                 display_name: loonfs_api::DisplayName::parse("docs").expect("valid display name"),
-            }],
-            preconditions: Vec::new(),
+            })],
             message: None,
         }
     }
@@ -129,7 +99,7 @@ mod tests {
         plan.namespace_id = NamespaceId::parse("other").expect("valid namespace id");
 
         assert!(matches!(
-            PreparedCommit::new(request(), plan),
+            PreparedCommit::new(request(), plan, fingerprint()),
             Err(CommitPrepareError::NamespaceMismatch { .. })
         ));
     }
@@ -140,7 +110,7 @@ mod tests {
         plan.commit_id = CommitId::parse("commit-b").expect("valid commit id");
 
         assert!(matches!(
-            PreparedCommit::new(request(), plan),
+            PreparedCommit::new(request(), plan, fingerprint()),
             Err(CommitPrepareError::CommitIdMismatch)
         ));
     }
@@ -150,29 +120,21 @@ mod tests {
         let mut plan = plan();
         plan.apply_after_seq = ChangeSeq(9);
 
-        PreparedCommit::new(request(), plan).expect("prepare commit");
+        PreparedCommit::new(request(), plan, fingerprint()).expect("prepare commit");
     }
 
     #[test]
-    fn prepared_commit_uses_path_intent_identity() {
-        let fingerprint = PathIntentFingerprint::new_unchecked("path-intent".to_owned());
-        let prepared = PreparedCommit::prepare(
-            request(),
-            plan(),
-            CommitIdentitySource::PathIntent(fingerprint.clone()),
-        )
-        .expect("prepare commit");
+    fn prepared_commit_carries_the_request_fingerprint() {
+        let prepared =
+            PreparedCommit::new(request(), plan(), fingerprint()).expect("prepare commit");
 
-        assert_eq!(
-            prepared.semantic_identity,
-            SemanticMutationIdentity::PathIntent(fingerprint)
-        );
+        assert_eq!(prepared.semantic_identity, fingerprint());
     }
 
     #[test]
     fn materialize_commit_outputs_wal_ops_and_results_once() {
         let materialized = materialize_commit(
-            PreparedCommit::new(request(), plan()).expect("prepare commit"),
+            PreparedCommit::new(request(), plan(), fingerprint()).expect("prepare commit"),
             4_200,
         );
 

@@ -1,308 +1,383 @@
-//! Path-intent fingerprinting and dispatch to responsibility-specific planners.
+//! Mutation fingerprinting and sequential resolution of a request's
+//! operations into one commit's operations.
 
-use super::intent::PathMutationIntent;
+use super::intent::{FilesystemOperation, MutationRequest};
 use super::plan_create::{
     plan_publish_create_directory, plan_publish_put_file_content_ref, plan_publish_undelete,
 };
 use super::plan_delete::plan_publish_delete_path;
 use super::plan_restore::plan_publish_restore_revision;
 use super::plan_transfer::{plan_publish_copy_file_path, plan_publish_move_path};
-use super::planning_helpers::PublishPathPlanningView;
-use crate::commit::{fingerprint_digest, PathIntentFingerprint, PATH_INTENT_FINGERPRINT_DOMAIN};
+use super::planning_helpers::{PlannedOperation, PublishPathPlanningView};
+use crate::commit::{
+    allocates_inode, fingerprint_digest, validate_ops, CommitOp, MutationFingerprint,
+    OpValidationCursor, PlannedOp, PublishValidationView, MUTATION_FINGERPRINT_DOMAIN,
+};
 use crate::error::{CoreError, Result};
-use crate::metadata::MetadataView;
+use crate::metadata::{MetadataState, MetadataView};
 use loonfs_api::wire::control::HeadState;
 use loonfs_api::ChangeSeq;
 use loonfs_api::{
-    v0::CommitRequest as ApiCommitRequest, CommitId, ContentRef, DeleteDirectoryBehavior,
-    DestinationBehavior, InodeId, NamespaceId, RevisionNo,
+    ContentRef, DeleteDirectoryBehavior, DestinationBehavior, InodeId, NamespaceId, RevisionNo,
 };
 use loonfs_objectstore::ObjectStore;
 use serde::Serialize;
 
+/// One mutation request compiled into a commit's operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PlannedPathMutation {
-    pub commit_id: CommitId,
-    pub path_intent_fingerprint: PathIntentFingerprint,
-    pub commit_request: ApiCommitRequest,
+pub(crate) struct PlannedMutation {
+    pub(crate) ops: Vec<PlannedOp>,
+    /// The next free inode id the planner predicted while resolving. The
+    /// commit plan recomputes it from the operation list; a disagreement
+    /// means prediction and allocation drifted.
+    pub(crate) resulting_next_inode_id: InodeId,
 }
 
-/// Canonical preimage for path-intent fingerprints.
+/// Canonical preimage for one operation inside a mutation fingerprint.
 ///
 /// The serde representation is durable contract (format spec, "Commit
-/// identity fingerprints"): the same
-/// normalized intent must fingerprint identically across releases. A
-/// pinned-value test below fails if the encoding drifts.
+/// identity fingerprints"): the same normalized request must fingerprint
+/// identically across releases. A pinned-value test below fails if the
+/// encoding drifts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-enum PathFingerprintInput {
+enum OperationFingerprintInput<'a> {
     CreateDir {
-        namespace_id: NamespaceId,
-        message: Option<String>,
-        absolute_path: String,
+        absolute_path: &'a str,
         parents: bool,
     },
+    // The put guard joins the preimage for the same reason as the delete
+    // guard below: a changed expected revision is a different logical
+    // request and must conflict rather than replay a receipt.
     PutFile {
-        namespace_id: NamespaceId,
-        message: Option<String>,
-        absolute_path: String,
+        absolute_path: &'a str,
         behavior: DestinationBehavior,
-        content_ref: ContentRef,
+        content_ref: &'a ContentRef,
         expected_revision_no: Option<RevisionNo>,
     },
+    // Identity covers the complete caller-visible logical request. A changed
+    // delete guard must conflict instead of replaying the old receipt
+    // without checking the new guard.
     DeletePath {
-        namespace_id: NamespaceId,
-        message: Option<String>,
-        absolute_path: String,
+        absolute_path: &'a str,
         behavior: DeleteDirectoryBehavior,
         expected_inode_id: Option<InodeId>,
     },
     MovePath {
-        namespace_id: NamespaceId,
-        message: Option<String>,
-        from_path: String,
-        to_path: String,
+        from_path: &'a str,
+        to_path: &'a str,
         behavior: DestinationBehavior,
     },
     CopyFilePath {
-        namespace_id: NamespaceId,
-        message: Option<String>,
-        from_path: String,
-        to_path: String,
+        from_path: &'a str,
+        to_path: &'a str,
         behavior: DestinationBehavior,
     },
     RestoreRevision {
-        namespace_id: NamespaceId,
-        message: Option<String>,
-        absolute_path: String,
+        absolute_path: &'a str,
         source_revision_no: RevisionNo,
     },
     Undelete {
-        namespace_id: NamespaceId,
-        message: Option<String>,
         inode_id: InodeId,
         deleted_at_seq: ChangeSeq,
-        absolute_path: String,
+        absolute_path: &'a str,
     },
 }
 
-fn fingerprint_path_input(identity: &PathFingerprintInput) -> Result<PathIntentFingerprint> {
-    #[derive(Serialize)]
-    struct CanonicalPathIntent<'a> {
-        domain: &'static str,
-        intent: &'a PathFingerprintInput,
-    }
-
-    fingerprint_digest(&CanonicalPathIntent {
-        domain: PATH_INTENT_FINGERPRINT_DOMAIN,
-        intent: identity,
-    })
-    .map(PathIntentFingerprint::new_unchecked)
-    .map_err(|err| CoreError::Internal(format!("failed to fingerprint path intent: {err}")))
-}
-
-pub(crate) fn path_intent_fingerprint(
-    namespace_id: &NamespaceId,
-    intent: &PathMutationIntent,
-) -> Result<PathIntentFingerprint> {
-    let message = intent.message().map(ToOwned::to_owned);
-    let identity = match intent {
-        PathMutationIntent::CreateDir {
+fn operation_fingerprint_input(operation: &FilesystemOperation) -> OperationFingerprintInput<'_> {
+    match operation {
+        FilesystemOperation::CreateDir {
             absolute_path,
             parents,
-            ..
-        } => PathFingerprintInput::CreateDir {
-            namespace_id: namespace_id.clone(),
-            message: message.clone(),
-            absolute_path: absolute_path.as_str().to_owned(),
+        } => OperationFingerprintInput::CreateDir {
+            absolute_path: absolute_path.as_str(),
             parents: *parents,
         },
-        // The put guard joins the preimage for the same reason as the
-        // delete guard below: a changed expected revision is a different
-        // logical request and must conflict rather than replay a receipt.
-        PathMutationIntent::PutFile {
+        FilesystemOperation::PutFile {
             absolute_path,
-            behavior,
             content_ref,
+            behavior,
             expected_revision_no,
-            ..
-        } => PathFingerprintInput::PutFile {
-            namespace_id: namespace_id.clone(),
-            message: message.clone(),
-            absolute_path: absolute_path.as_str().to_owned(),
+        } => OperationFingerprintInput::PutFile {
+            absolute_path: absolute_path.as_str(),
             behavior: *behavior,
-            content_ref: content_ref.clone(),
+            content_ref,
             expected_revision_no: *expected_revision_no,
         },
-        // Path-intent identity covers the complete caller-visible logical
-        // request. A changed delete guard must conflict instead of replaying
-        // the old receipt without checking the new guard, and including it
-        // matches explicit-commit identity, which already covers request
-        // preconditions.
-        PathMutationIntent::DeletePath {
+        FilesystemOperation::DeletePath {
             absolute_path,
             behavior,
             expected_inode_id,
-            ..
-        } => PathFingerprintInput::DeletePath {
-            namespace_id: namespace_id.clone(),
-            message: message.clone(),
-            absolute_path: absolute_path.as_str().to_owned(),
+        } => OperationFingerprintInput::DeletePath {
+            absolute_path: absolute_path.as_str(),
             behavior: *behavior,
             expected_inode_id: *expected_inode_id,
         },
-        PathMutationIntent::MovePath {
+        FilesystemOperation::MovePath {
             from_path,
             to_path,
             behavior,
-            ..
-        } => PathFingerprintInput::MovePath {
-            namespace_id: namespace_id.clone(),
-            message: message.clone(),
-            from_path: from_path.as_str().to_owned(),
-            to_path: to_path.as_str().to_owned(),
+        } => OperationFingerprintInput::MovePath {
+            from_path: from_path.as_str(),
+            to_path: to_path.as_str(),
             behavior: *behavior,
         },
-        PathMutationIntent::CopyFilePath {
+        FilesystemOperation::CopyFilePath {
             from_path,
             to_path,
             behavior,
-            ..
-        } => PathFingerprintInput::CopyFilePath {
-            namespace_id: namespace_id.clone(),
-            message: message.clone(),
-            from_path: from_path.as_str().to_owned(),
-            to_path: to_path.as_str().to_owned(),
+        } => OperationFingerprintInput::CopyFilePath {
+            from_path: from_path.as_str(),
+            to_path: to_path.as_str(),
             behavior: *behavior,
         },
-        PathMutationIntent::RestoreRevision {
+        FilesystemOperation::RestoreRevision {
             absolute_path,
             source_revision_no,
-            ..
-        } => PathFingerprintInput::RestoreRevision {
-            namespace_id: namespace_id.clone(),
-            message: message.clone(),
-            absolute_path: absolute_path.as_str().to_owned(),
+        } => OperationFingerprintInput::RestoreRevision {
+            absolute_path: absolute_path.as_str(),
             source_revision_no: *source_revision_no,
         },
-        PathMutationIntent::Undelete {
+        FilesystemOperation::Undelete {
             inode_id,
             deleted_at_seq,
             absolute_path,
-            ..
-        } => PathFingerprintInput::Undelete {
-            namespace_id: namespace_id.clone(),
-            message: message.clone(),
+        } => OperationFingerprintInput::Undelete {
             inode_id: *inode_id,
             deleted_at_seq: *deleted_at_seq,
-            absolute_path: absolute_path.as_str().to_owned(),
+            absolute_path: absolute_path.as_str(),
         },
-    };
-    fingerprint_path_input(&identity)
+    }
 }
 
-pub(crate) async fn plan_path_mutation_against_publish_view<S: ObjectStore + ?Sized>(
+/// The semantic identity of one mutation request.
+///
+/// A one-operation convenience call and a one-element batch are the same
+/// type, so they reach this function with the same shape and fingerprint
+/// identically; there is no separate single-operation form to keep in step.
+pub(crate) fn mutation_fingerprint(
     namespace_id: &NamespaceId,
-    intent: &PathMutationIntent,
+    request: &MutationRequest,
+) -> Result<MutationFingerprint> {
+    #[derive(Serialize)]
+    struct CanonicalMutation<'a> {
+        domain: &'static str,
+        namespace_id: &'a str,
+        operations: Vec<OperationFingerprintInput<'a>>,
+        message: Option<&'a str>,
+    }
+
+    fingerprint_digest(&CanonicalMutation {
+        domain: MUTATION_FINGERPRINT_DOMAIN,
+        namespace_id: namespace_id.as_str(),
+        operations: request
+            .operations
+            .iter()
+            .map(operation_fingerprint_input)
+            .collect(),
+        message: request.message.as_deref(),
+    })
+    .map(MutationFingerprint::new_unchecked)
+    .map_err(|err| CoreError::Internal(format!("failed to fingerprint mutation: {err}")))
+}
+
+/// Compiles one mutation request into the operations of a single commit.
+///
+/// Operations resolve in order. Operation `k` reads a metadata view that
+/// already carries what operations `0..k` would persist, so a request can
+/// create a directory and write into it, or delete a path and recreate it.
+/// Those effects are computed by the same op validation the commit plan
+/// performs, so resolution and validation cannot disagree about them.
+///
+/// The first operation that fails aborts the whole request, and its error
+/// names the operation's position. Naming the position is why a batch
+/// validates each operation here as well as in the commit plan: the plan
+/// validates the whole operation list at once and has no request-level
+/// position to report. A one-operation request skips the extra pass — it has
+/// one place to fail, and the plan is the only validation it needs.
+pub(crate) async fn plan_mutation_against_publish_view<S: ObjectStore + ?Sized>(
+    request: &MutationRequest,
     head: &HeadState,
-    metadata_state: &MetadataView<'_, '_, S>,
-) -> Result<PlannedPathMutation> {
-    let commit_id = intent.commit_id().clone();
-    let path_intent_fingerprint = path_intent_fingerprint(namespace_id, intent)?;
-    let view = PublishPathPlanningView {
-        head,
-        metadata_state,
-    };
-    let mut commit_request = match intent {
-        PathMutationIntent::CreateDir {
+    base_view: MetadataView<'_, '_, S>,
+    accepted_rows: &MetadataState,
+    committed_at_ms: u64,
+) -> Result<PlannedMutation> {
+    if request.operations.is_empty() {
+        return Err(CoreError::InvalidCommitRequest(
+            "mutation request carries no operations".to_owned(),
+        ));
+    }
+    let committed_seq = head
+        .seq
+        .0
+        .checked_add(1)
+        .map(ChangeSeq)
+        .ok_or_else(|| CoreError::Internal("namespace sequence overflow".to_owned()))?;
+
+    let mut resolved = PublishValidationView::new(base_view, accepted_rows, committed_seq);
+    let mut cursor = OpValidationCursor::new();
+    let mut next_inode_id = head.next_inode_id;
+    let mut ops: Vec<PlannedOp> = Vec::new();
+    let operation_count = request.operations.len();
+    for (index, operation) in request.operations.iter().enumerate() {
+        let unit = {
+            let resolution_view = resolved.view();
+            let view = PublishPathPlanningView {
+                next_inode_id,
+                metadata_state: &resolution_view,
+            };
+            plan_operation(operation, &view)
+                .await
+                .map_err(|error| attribute(error, index, operation_count))?
+        };
+        let unit_ops = unit.into_planned_ops();
+        let allocated = allocate_inode_ids(&unit_ops, &mut next_inode_id)?;
+        debug_assert_parents_are_allocated(&unit_ops, next_inode_id);
+        if operation_count > 1 {
+            validate_ops(
+                &unit_ops,
+                &mut resolved,
+                &mut cursor,
+                committed_seq,
+                committed_at_ms,
+                &mut allocated.iter().copied(),
+            )
+            .await
+            .map_err(|error| attribute(error, index, operation_count))?;
+        }
+        ops.extend(unit_ops);
+    }
+
+    Ok(PlannedMutation {
+        ops,
+        resulting_next_inode_id: next_inode_id,
+    })
+}
+
+async fn plan_operation<S: ObjectStore + ?Sized>(
+    operation: &FilesystemOperation,
+    view: &PublishPathPlanningView<'_, '_, '_, S>,
+) -> Result<PlannedOperation> {
+    match operation {
+        FilesystemOperation::CreateDir {
             absolute_path,
             parents,
-            ..
-        } => plan_publish_create_directory(absolute_path, *parents, &commit_id, &view).await?,
-        PathMutationIntent::PutFile {
+        } => plan_publish_create_directory(absolute_path, *parents, view).await,
+        FilesystemOperation::PutFile {
             absolute_path,
             content_ref,
             behavior,
             expected_revision_no,
-            ..
         } => {
             plan_publish_put_file_content_ref(
                 absolute_path,
                 content_ref.clone(),
                 *behavior,
                 *expected_revision_no,
-                &commit_id,
-                &view,
+                view,
             )
-            .await?
+            .await
         }
-        PathMutationIntent::DeletePath {
+        FilesystemOperation::DeletePath {
             absolute_path,
             behavior,
             expected_inode_id,
-            ..
-        } => {
-            plan_publish_delete_path(
-                absolute_path,
-                *behavior,
-                *expected_inode_id,
-                &commit_id,
-                &view,
-            )
-            .await?
-        }
-        PathMutationIntent::MovePath {
+        } => plan_publish_delete_path(absolute_path, *behavior, *expected_inode_id, view).await,
+        FilesystemOperation::MovePath {
             from_path,
             to_path,
             behavior,
-            ..
-        } => plan_publish_move_path(from_path, to_path, *behavior, &commit_id, &view).await?,
-        PathMutationIntent::CopyFilePath {
+        } => plan_publish_move_path(from_path, to_path, *behavior, view).await,
+        FilesystemOperation::CopyFilePath {
             from_path,
             to_path,
             behavior,
-            ..
-        } => plan_publish_copy_file_path(from_path, to_path, *behavior, &commit_id, &view).await?,
-        PathMutationIntent::RestoreRevision {
+        } => plan_publish_copy_file_path(from_path, to_path, *behavior, view).await,
+        FilesystemOperation::RestoreRevision {
             absolute_path,
             source_revision_no,
-            ..
-        } => {
-            plan_publish_restore_revision(absolute_path, *source_revision_no, &commit_id, &view)
-                .await?
-        }
-        PathMutationIntent::Undelete {
+        } => plan_publish_restore_revision(absolute_path, *source_revision_no, view).await,
+        FilesystemOperation::Undelete {
             inode_id,
             deleted_at_seq,
             absolute_path,
-            ..
-        } => {
-            plan_publish_undelete(*inode_id, *deleted_at_seq, absolute_path, &commit_id, &view)
-                .await?
+        } => plan_publish_undelete(*inode_id, *deleted_at_seq, absolute_path, view).await,
+    }
+}
+
+/// Names the operation a batch stopped at.
+///
+/// A one-operation request has one place to fail, so its error stays exactly
+/// what the operation produced; there is nothing to disambiguate.
+fn attribute(error: CoreError, index: usize, operation_count: usize) -> CoreError {
+    if operation_count < 2 {
+        return error;
+    }
+    error.at_operation(index)
+}
+
+/// Hands out the inode ids the commit plan will allocate for `ops`, in
+/// operation order, and advances the running counter.
+///
+/// One counter serves the whole request: it is what the planner predicts
+/// parent ids from and what the commit plan re-derives, so the two cannot
+/// number the same creation differently.
+fn allocate_inode_ids(ops: &[PlannedOp], next_inode_id: &mut InodeId) -> Result<Vec<InodeId>> {
+    let mut allocated = Vec::new();
+    for planned in ops {
+        if !allocates_inode(&planned.op) {
+            continue;
         }
-    };
-    // The annotation rides the commit request from one place; the plan
-    // functions stay focused on semantics.
-    commit_request.message = intent.message().map(ToOwned::to_owned);
-    Ok(PlannedPathMutation {
-        commit_id,
-        path_intent_fingerprint,
-        commit_request,
-    })
+        allocated.push(*next_inode_id);
+        *next_inode_id = next_inode_id
+            .0
+            .checked_add(1)
+            .map(InodeId)
+            .ok_or_else(|| CoreError::Internal("next inode id counter overflow".to_owned()))?;
+    }
+    Ok(allocated)
+}
+
+/// Every parent an operation names is either an inode that existed before
+/// this request or one the request has already allocated, so no parent id can
+/// be at or past the running counter. A violation would mean the planner
+/// predicted an id the commit plan never hands out, and the operation would
+/// be parented under nothing.
+fn debug_assert_parents_are_allocated(ops: &[PlannedOp], next_inode_id: InodeId) {
+    debug_assert!(
+        ops.iter().all(|planned| {
+            let parent = match &planned.op {
+                CommitOp::CreateDirectory {
+                    parent_inode_id, ..
+                }
+                | CommitOp::CreateFile {
+                    parent_inode_id, ..
+                }
+                | CommitOp::Undelete {
+                    parent_inode_id, ..
+                } => *parent_inode_id,
+                CommitOp::Rename {
+                    new_parent_inode_id,
+                    ..
+                } => *new_parent_inode_id,
+                _ => return true,
+            };
+            parent < next_inode_id
+        }),
+        "planner predicted an inode id the commit plan has not allocated"
+    );
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commit::core_commit_fingerprint_for_v0_request;
+    use crate::commit::CommitPrecondition;
     use crate::context::MutationContext;
-    use crate::metadata::MetadataState;
     use crate::namespace::bootstrap::bootstrap_namespace;
     use crate::path::write::ops::{delete_path, put_file_bytes};
     use crate::protocol::{load_publish_metadata_view, PublishTailOptions};
     use crate::storage::content::store_bytes_as_content;
-    use loonfs_api::v0::{CommitOp, CommitPrecondition, CommitRequest as ApiCommitRequest};
-    use loonfs_api::{AbsolutePath, RevisionNo};
+    use loonfs_api::{AbsolutePath, CommitId, RevisionNo};
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use tempfile::tempdir;
 
@@ -313,72 +388,154 @@ mod tests {
         }
     }
 
-    /// Pins the exact stored fingerprint for a fixed path intent.
-    ///
-    /// If this fails, the canonical preimage changed (format spec, "Commit
-    /// identity fingerprints") and every
-    /// persisted fingerprint would disagree with recomputed ones, breaking
-    /// retry idempotency across versions. Do not update the literal without
-    /// bumping the fingerprint scheme tag.
-    #[test]
-    fn a_message_changes_path_intent_identity() {
-        // The annotation is part of what the caller asked for: replaying a
-        // commit id with a different message must conflict, exactly as it
-        // does for explicit commits, so the message joins the preimage.
-        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let intent = |message: Option<&str>| PathMutationIntent::CreateDir {
-            commit_id: CommitId::parse("mkdir-docs").expect("valid commit id"),
-            message: message.map(ToOwned::to_owned),
-            absolute_path: AbsolutePath::parse("/docs").expect("valid path"),
-            parents: false,
-        };
-        let without = path_intent_fingerprint(&namespace_id, &intent(None)).expect("fingerprint");
-        let with = path_intent_fingerprint(&namespace_id, &intent(Some("import batch")))
-            .expect("fingerprint");
-        assert_ne!(without.as_str(), with.as_str());
+    fn request(operation: FilesystemOperation) -> MutationRequest {
+        MutationRequest::single(
+            CommitId::parse("plan-request").expect("valid commit id"),
+            None,
+            operation,
+        )
     }
 
-    #[test]
-    fn path_intent_fingerprint_value_is_pinned() {
-        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let intent = PathMutationIntent::CreateDir {
-            commit_id: CommitId::parse("c_00000000000000000000000000000042").expect("commit id"),
-            message: None,
-            absolute_path: AbsolutePath::parse("/docs").expect("path"),
+    fn create_dir(path: &str) -> FilesystemOperation {
+        FilesystemOperation::CreateDir {
+            absolute_path: AbsolutePath::parse(path).expect("path"),
             parents: false,
-        };
+        }
+    }
 
-        let fingerprint = path_intent_fingerprint(&namespace_id, &intent).expect("fingerprint");
+    /// Pins the exact stored fingerprint for a fixed one-operation request.
+    ///
+    /// If this fails, the canonical preimage changed (format spec, "Commit
+    /// identity fingerprints") and every persisted fingerprint would disagree
+    /// with recomputed ones, breaking retry idempotency across versions. Do
+    /// not update the literal without bumping the fingerprint scheme tag.
+    #[test]
+    fn mutation_fingerprint_value_is_pinned() {
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let mut fixed = request(create_dir("/docs"));
+        fixed.commit_id = CommitId::parse("c_00000000000000000000000000000042").expect("commit id");
+
+        let fingerprint = mutation_fingerprint(&namespace_id, &fixed).expect("fingerprint");
 
         assert_eq!(
             fingerprint.as_str(),
-            // Updated pre-release when `CreateDir` gained the `parents`
-            // semantic parameter (no deployed namespaces hold the prior
-            // value); post-release this literal only moves with a scheme
-            // tag bump.
-            "v0:sha256:2de2ea1159b7b8ed3fb97d77f9c7b01e7b873bb45cf5b53c1116ecfad0a51cc0"
+            "v0:sha256:86733fff7c94ceddc8df941814b5f14dfa4ed444935117565cf622841a90dc98"
         );
     }
 
     /// Pins the exact stored fingerprint encoding for a guarded delete.
     #[test]
-    fn guarded_delete_path_fingerprint_value_is_pinned() {
+    fn guarded_delete_fingerprint_value_is_pinned() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let intent = PathMutationIntent::DeletePath {
-            commit_id: CommitId::parse("c_00000000000000000000000000000043").expect("commit id"),
-            message: None,
+        let mut fixed = request(FilesystemOperation::DeletePath {
             absolute_path: AbsolutePath::parse("/docs").expect("path"),
             behavior: DeleteDirectoryBehavior::NonRecursive,
             expected_inode_id: Some(InodeId(42)),
-        };
+        });
+        fixed.commit_id = CommitId::parse("c_00000000000000000000000000000043").expect("commit id");
 
-        let fingerprint = path_intent_fingerprint(&namespace_id, &intent).expect("fingerprint");
+        let fingerprint = mutation_fingerprint(&namespace_id, &fixed).expect("fingerprint");
 
         assert_eq!(
             fingerprint.as_str(),
-            // Added pre-release when the delete guard became semantic
-            // request content; no deployed receipts use the prior preimage.
-            "v0:sha256:34056f22715e481a182484d34704685c8afa7469fbe737dbae67f7d93d9fcec1"
+            "v0:sha256:14fc728b480d726b506d98ce300ccd315720ef78cf3f31c592a65a53e75b0d97"
+        );
+    }
+
+    #[test]
+    fn a_message_changes_mutation_identity() {
+        // The annotation is part of what the caller asked for: replaying a
+        // commit id with a different message must conflict, so the message
+        // joins the preimage.
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let build = |message: Option<&str>| {
+            MutationRequest::single(
+                CommitId::parse("mkdir-docs").expect("valid commit id"),
+                message.map(ToOwned::to_owned),
+                create_dir("/docs"),
+            )
+        };
+        let without = mutation_fingerprint(&namespace_id, &build(None)).expect("fingerprint");
+        let with =
+            mutation_fingerprint(&namespace_id, &build(Some("import batch"))).expect("fingerprint");
+        assert_ne!(without.as_str(), with.as_str());
+    }
+
+    #[test]
+    fn mutation_fingerprint_is_stable_for_canonical_paths() {
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let left = mutation_fingerprint(
+            &namespace_id,
+            &MutationRequest::single(
+                CommitId::parse("mkdir-docs-a").expect("valid commit id"),
+                None,
+                create_dir("/docs/a"),
+            ),
+        )
+        .expect("left fingerprint");
+        let right = mutation_fingerprint(
+            &namespace_id,
+            &MutationRequest::single(
+                CommitId::parse("mkdir-docs-b").expect("valid commit id"),
+                None,
+                create_dir("/docs/a"),
+            ),
+        )
+        .expect("right fingerprint");
+
+        assert_eq!(left, right);
+    }
+
+    #[test]
+    fn mutation_fingerprint_changes_when_logical_inputs_change() {
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let baseline =
+            mutation_fingerprint(&namespace_id, &request(create_dir("/docs"))).expect("baseline");
+        let changed =
+            mutation_fingerprint(&namespace_id, &request(create_dir("/drafts"))).expect("changed");
+
+        assert_ne!(baseline, changed);
+    }
+
+    /// A one-operation convenience call and a one-element batch are the same
+    /// request, so they cannot fingerprint differently.
+    #[test]
+    fn one_operation_request_and_one_element_batch_share_identity() {
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let commit_id = CommitId::parse("mkdir-docs").expect("valid commit id");
+        let convenience = MutationRequest::single(commit_id.clone(), None, create_dir("/docs"));
+        let batch = MutationRequest {
+            commit_id,
+            message: None,
+            operations: vec![create_dir("/docs")],
+        };
+
+        assert_eq!(
+            mutation_fingerprint(&namespace_id, &convenience).expect("convenience fingerprint"),
+            mutation_fingerprint(&namespace_id, &batch).expect("batch fingerprint")
+        );
+    }
+
+    /// Operation order is part of the request: reordering is a different
+    /// logical mutation, so it must not replay the first one's receipt.
+    #[test]
+    fn operation_order_changes_mutation_identity() {
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let commit_id = CommitId::parse("two-ops").expect("valid commit id");
+        let forward = MutationRequest {
+            commit_id: commit_id.clone(),
+            message: None,
+            operations: vec![create_dir("/a"), create_dir("/b")],
+        };
+        let reversed = MutationRequest {
+            commit_id,
+            message: None,
+            operations: vec![create_dir("/b"), create_dir("/a")],
+        };
+
+        assert_ne!(
+            mutation_fingerprint(&namespace_id, &forward).expect("forward fingerprint"),
+            mutation_fingerprint(&namespace_id, &reversed).expect("reversed fingerprint")
         );
     }
 
@@ -401,8 +558,8 @@ mod tests {
     async fn try_plan_against_current_state(
         store: &LocalFsStore,
         namespace_id: &NamespaceId,
-        intent: &PathMutationIntent,
-    ) -> Result<PlannedPathMutation> {
+        request: &MutationRequest,
+    ) -> Result<PlannedMutation> {
         let (view, _projection) = load_publish_metadata_view(
             store,
             None,
@@ -414,131 +571,41 @@ mod tests {
         .await
         .expect("publish view");
         let empty_overlay = MetadataState::default();
-        let base_view = view.metadata_view();
-        let metadata_view = base_view.with_overlay(&empty_overlay, view.head().seq);
-        plan_path_mutation_against_publish_view(namespace_id, intent, view.head(), &metadata_view)
-            .await
+        plan_mutation_against_publish_view(
+            request,
+            view.head(),
+            view.metadata_view(),
+            &empty_overlay,
+            1,
+        )
+        .await
     }
 
     async fn plan_against_current_state(
         store: &LocalFsStore,
         namespace_id: &NamespaceId,
-        intent: &PathMutationIntent,
-    ) -> PlannedPathMutation {
-        try_plan_against_current_state(store, namespace_id, intent)
+        request: &MutationRequest,
+    ) -> PlannedMutation {
+        try_plan_against_current_state(store, namespace_id, request)
             .await
             .expect("plan")
     }
 
     #[tokio::test]
-    async fn path_intent_fingerprint_is_stable_for_canonical_paths() {
-        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let left = path_intent_fingerprint(
-            &namespace_id,
-            &PathMutationIntent::CreateDir {
-                commit_id: CommitId::parse("mkdir-docs-a").expect("valid commit id"),
-                message: None,
-                absolute_path: AbsolutePath::parse("/docs/a").expect("path"),
-                parents: false,
-            },
-        )
-        .expect("left fingerprint");
-        let right = path_intent_fingerprint(
-            &namespace_id,
-            &PathMutationIntent::CreateDir {
-                commit_id: CommitId::parse("mkdir-docs-b").expect("valid commit id"),
-                message: None,
-                absolute_path: AbsolutePath::parse("/docs/a").expect("path"),
-                parents: false,
-            },
-        )
-        .expect("right fingerprint");
-
-        assert_eq!(left, right);
-    }
-
-    #[tokio::test]
-    async fn path_intent_fingerprint_changes_when_logical_inputs_change() {
-        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let baseline = path_intent_fingerprint(
-            &namespace_id,
-            &PathMutationIntent::CreateDir {
-                commit_id: CommitId::parse("mkdir-docs").expect("valid commit id"),
-                message: None,
-                absolute_path: AbsolutePath::parse("/docs").expect("path"),
-                parents: false,
-            },
-        )
-        .expect("baseline fingerprint");
-        let changed = path_intent_fingerprint(
-            &namespace_id,
-            &PathMutationIntent::CreateDir {
-                commit_id: CommitId::parse("mkdir-drafts").expect("valid commit id"),
-                message: None,
-                absolute_path: AbsolutePath::parse("/drafts").expect("path"),
-                parents: false,
-            },
-        )
-        .expect("changed fingerprint");
-
-        assert_ne!(baseline, changed);
-    }
-
-    #[tokio::test]
-    async fn path_intent_and_core_commit_fingerprints_use_distinct_domains() {
-        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-        let path_fingerprint = path_intent_fingerprint(
-            &namespace_id,
-            &PathMutationIntent::CreateDir {
-                commit_id: CommitId::parse("mkdir-docs").expect("valid commit id"),
-                message: None,
-                absolute_path: AbsolutePath::parse("/docs").expect("path"),
-                parents: false,
-            },
-        )
-        .expect("path fingerprint");
-        let core_fingerprint = core_commit_fingerprint_for_v0_request(
-            &namespace_id,
-            &ApiCommitRequest {
-                commit_id: CommitId::parse("mkdir-docs").expect("valid commit id"),
-                preconditions: Vec::new(),
-                ops: vec![CommitOp::CreateDirectory {
-                    parent_inode_id: InodeId(1),
-                    display_name: loonfs_api::DisplayName::parse("docs")
-                        .expect("valid display name"),
-                }],
-                message: None,
-            },
-        )
-        .expect("core fingerprint");
-
-        assert_ne!(path_fingerprint.as_str(), core_fingerprint.as_str());
-    }
-
-    #[tokio::test]
     async fn create_directory_plan_contains_semantic_op_and_target_absence_precondition() {
         let (_temp_dir, store, namespace_id, _context) = setup_namespace().await;
-        let planned = plan_against_current_state(
-            &store,
-            &namespace_id,
-            &PathMutationIntent::CreateDir {
-                commit_id: CommitId::parse("mkdir-docs").expect("valid commit id"),
-                message: None,
-                absolute_path: AbsolutePath::parse("/docs").expect("path"),
-                parents: false,
-            },
-        )
-        .await;
+        let planned =
+            plan_against_current_state(&store, &namespace_id, &request(create_dir("/docs"))).await;
 
+        assert_eq!(planned.ops.len(), 1);
         assert_eq!(
-            planned.commit_request.ops,
-            vec![CommitOp::CreateDirectory {
+            planned.ops[0].op,
+            CommitOp::CreateDirectory {
                 parent_inode_id: InodeId(1),
                 display_name: loonfs_api::DisplayName::parse("docs").expect("valid display name"),
-            }]
+            }
         );
-        assert!(planned
-            .commit_request
+        assert!(planned.ops[0]
             .preconditions
             .iter()
             .any(|precondition| matches!(
@@ -559,31 +626,29 @@ mod tests {
         let planned = plan_against_current_state(
             &store,
             &namespace_id,
-            &PathMutationIntent::PutFile {
-                commit_id: CommitId::parse("put-nested").expect("valid commit id"),
-                message: None,
+            &request(FilesystemOperation::PutFile {
                 absolute_path: AbsolutePath::parse("/docs/nested/a.txt").expect("path"),
                 content_ref: staged.content_ref.clone(),
                 behavior: DestinationBehavior::NoReplace,
                 expected_revision_no: None,
-            },
+            }),
         )
         .await;
 
-        assert_eq!(planned.commit_request.ops.len(), 3);
+        assert_eq!(planned.ops.len(), 3);
         assert!(matches!(
-            &planned.commit_request.ops[0],
+            &planned.ops[0].op,
             CommitOp::CreateDirectory {
                 parent_inode_id: InodeId(1),
                 display_name,
             } if display_name.as_str() == "docs"
         ));
         assert!(matches!(
-            &planned.commit_request.ops[1],
+            &planned.ops[1].op,
             CommitOp::CreateDirectory { display_name, .. } if display_name.as_str() == "nested"
         ));
         assert!(matches!(
-            &planned.commit_request.ops[2],
+            &planned.ops[2].op,
             CommitOp::CreateFile {
                 display_name,
                 content_ref,
@@ -611,30 +676,29 @@ mod tests {
         let planned = plan_against_current_state(
             &store,
             &namespace_id,
-            &PathMutationIntent::MovePath {
-                commit_id: CommitId::parse("move-file").expect("valid commit id"),
-                message: None,
+            &request(FilesystemOperation::MovePath {
                 from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
                 to_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
                 behavior: DestinationBehavior::NoReplace,
-            },
+            }),
         )
         .await;
 
         assert!(matches!(
-            planned.commit_request.ops.as_slice(),
-            [CommitOp::Rename {
-                new_display_name,
+            planned.ops.as_slice(),
+            [PlannedOp {
+                op: CommitOp::Rename {
+                    new_display_name,
+                    ..
+                },
                 ..
             }] if new_display_name.as_str() == "b.txt"
         ));
-        assert!(planned
-            .commit_request
+        assert!(planned.ops[0]
             .preconditions
             .iter()
             .any(|precondition| matches!(precondition, CommitPrecondition::BindingIs { .. })));
-        assert!(planned
-            .commit_request
+        assert!(planned.ops[0]
             .preconditions
             .iter()
             .any(|precondition| matches!(
@@ -662,22 +726,22 @@ mod tests {
         let planned = plan_against_current_state(
             &store,
             &namespace_id,
-            &PathMutationIntent::CopyFilePath {
-                commit_id: CommitId::parse("copy-file").expect("valid commit id"),
-                message: None,
+            &request(FilesystemOperation::CopyFilePath {
                 from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
                 to_path: AbsolutePath::parse("/docs/copy.txt").expect("path"),
                 behavior: DestinationBehavior::NoReplace,
-            },
+            }),
         )
         .await;
 
         assert!(matches!(
-            planned.commit_request.ops.as_slice(),
-            [CommitOp::CreateFile { display_name, .. }] if display_name.as_str() == "copy.txt"
+            planned.ops.as_slice(),
+            [PlannedOp {
+                op: CommitOp::CreateFile { display_name, .. },
+                ..
+            }] if display_name.as_str() == "copy.txt"
         ));
-        assert!(planned
-            .commit_request
+        assert!(planned.ops[0]
             .preconditions
             .iter()
             .any(|precondition| matches!(
@@ -687,8 +751,7 @@ mod tests {
                     ..
                 }
             )));
-        assert!(planned
-            .commit_request
+        assert!(planned.ops[0]
             .preconditions
             .iter()
             .any(|precondition| matches!(
@@ -770,16 +833,160 @@ mod tests {
         try_plan_against_current_state(
             &store,
             &namespace_id,
-            &PathMutationIntent::PutFile {
-                commit_id: CommitId::parse("put-under-dead").expect("valid commit id"),
-                message: None,
+            &request(FilesystemOperation::PutFile {
                 absolute_path: AbsolutePath::parse("/dead/new.txt").expect("path"),
                 content_ref: staged.content_ref,
                 behavior: DestinationBehavior::NoReplace,
                 expected_revision_no: None,
-            },
+            }),
         )
         .await
         .expect("recreating a deleted subtree plans as fresh state");
+    }
+
+    /// A batch resolves each operation against what the earlier ones did:
+    /// the put walks into a directory that only exists because of the
+    /// create ahead of it, and both land in one commit.
+    #[tokio::test]
+    async fn later_operations_resolve_against_earlier_ones() {
+        let (_temp_dir, store, namespace_id, _context) = setup_namespace().await;
+        let staged = store_bytes_as_content(&store, &namespace_id, b"hello")
+            .await
+            .expect("stage");
+        let planned = plan_against_current_state(
+            &store,
+            &namespace_id,
+            &MutationRequest {
+                commit_id: CommitId::parse("batch-create-then-put").expect("valid commit id"),
+                message: None,
+                operations: vec![
+                    create_dir("/reports"),
+                    FilesystemOperation::PutFile {
+                        absolute_path: AbsolutePath::parse("/reports/a.txt").expect("path"),
+                        content_ref: staged.content_ref.clone(),
+                        behavior: DestinationBehavior::NoReplace,
+                        expected_revision_no: None,
+                    },
+                ],
+            },
+        )
+        .await;
+
+        assert_eq!(planned.ops.len(), 2);
+        // The put binds under the directory the create allocated rather than
+        // re-creating it.
+        assert!(matches!(
+            &planned.ops[1].op,
+            CommitOp::CreateFile {
+                parent_inode_id,
+                display_name,
+                ..
+            } if *parent_inode_id == InodeId(2) && display_name.as_str() == "a.txt"
+        ));
+        assert_eq!(planned.resulting_next_inode_id, InodeId(4));
+    }
+
+    /// A batch that deletes a path and recreates it resolves the create
+    /// against the delete, not against the state the request started from.
+    #[tokio::test]
+    async fn delete_then_create_resolves_against_the_delete() {
+        let (_temp_dir, store, namespace_id, context) = setup_namespace().await;
+        put_file_bytes(
+            &store,
+            &namespace_id,
+            "/docs/tmp.txt",
+            b"first",
+            DestinationBehavior::NoReplace,
+            &context,
+            Some(&CommitId::parse("seed-replaceable").expect("valid commit id")),
+        )
+        .await
+        .expect("seed file");
+        let staged = store_bytes_as_content(&store, &namespace_id, b"second")
+            .await
+            .expect("stage");
+
+        let planned = plan_against_current_state(
+            &store,
+            &namespace_id,
+            &MutationRequest {
+                commit_id: CommitId::parse("batch-delete-then-create").expect("valid commit id"),
+                message: None,
+                operations: vec![
+                    FilesystemOperation::DeletePath {
+                        absolute_path: AbsolutePath::parse("/docs/tmp.txt").expect("path"),
+                        behavior: DeleteDirectoryBehavior::NonRecursive,
+                        expected_inode_id: None,
+                    },
+                    FilesystemOperation::PutFile {
+                        absolute_path: AbsolutePath::parse("/docs/tmp.txt").expect("path"),
+                        content_ref: staged.content_ref.clone(),
+                        behavior: DestinationBehavior::NoReplace,
+                        expected_revision_no: None,
+                    },
+                ],
+            },
+        )
+        .await;
+
+        // The name is free once the delete is applied, so the put creates a
+        // fresh file rather than failing with a destination conflict.
+        assert!(matches!(planned.ops[0].op, CommitOp::DeleteFile { .. }));
+        assert!(matches!(
+            &planned.ops[1].op,
+            CommitOp::CreateFile { display_name, .. } if display_name.as_str() == "tmp.txt"
+        ));
+    }
+
+    /// The first failing operation aborts the request and names its own
+    /// position.
+    #[tokio::test]
+    async fn a_failing_operation_names_its_position() {
+        let (_temp_dir, store, namespace_id, _context) = setup_namespace().await;
+        let error = try_plan_against_current_state(
+            &store,
+            &namespace_id,
+            &MutationRequest {
+                commit_id: CommitId::parse("batch-with-a-bad-op").expect("valid commit id"),
+                message: None,
+                operations: vec![
+                    create_dir("/first"),
+                    FilesystemOperation::DeletePath {
+                        absolute_path: AbsolutePath::parse("/missing").expect("path"),
+                        behavior: DeleteDirectoryBehavior::NonRecursive,
+                        expected_inode_id: None,
+                    },
+                    create_dir("/third"),
+                ],
+            },
+        )
+        .await
+        .expect_err("the delete cannot resolve");
+
+        assert_eq!(
+            error
+                .details()
+                .expect("failing-operation details")
+                .operation_index,
+            Some(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn an_empty_request_is_rejected() {
+        let (_temp_dir, store, namespace_id, _context) = setup_namespace().await;
+        let error = try_plan_against_current_state(
+            &store,
+            &namespace_id,
+            &MutationRequest {
+                commit_id: CommitId::parse("empty-request").expect("valid commit id"),
+                message: None,
+                operations: Vec::new(),
+            },
+        )
+        .await
+        .expect_err("an empty request has nothing to commit");
+
+        assert_eq!(error.code(), crate::error::ErrorCode::InvalidRequest);
     }
 }

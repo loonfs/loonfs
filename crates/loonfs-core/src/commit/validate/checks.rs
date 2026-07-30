@@ -4,52 +4,74 @@
 //! only differ by error vocabulary take error-constructor closures so each
 //! call site keeps its exact wire-visible variant.
 
-use super::super::{CommitRequest, CommitValidationError, ResolvedBinding, ValidatedOp};
+use super::super::{
+    CommitOp, CommitPrecondition, CommitValidationError, PlannedOp, ResolvedBinding, ValidatedOp,
+};
 use super::view::CommitValidationView;
 use crate::metadata::{BindingIdentity, InodeRecord, RevisionRecord, SubtreeTombstoneRecord};
-use loonfs_api::v0::{CommitOp, CommitPrecondition};
 use loonfs_api::{ChangeSeq, DisplayName, InodeId, InodeKind, NameKey, RevisionNo};
 
-pub(super) struct ValidatedMetadataOps {
-    pub(super) validated_ops: Vec<ValidatedOp>,
+/// Running counters shared by every validation pass over one commit's
+/// operations, so a pass that validates the operations in slices numbers
+/// delta positions exactly as a pass over the whole list does.
+pub(crate) struct OpValidationCursor {
+    op_index: u32,
+    next_delta_index: u32,
 }
 
-pub(super) async fn validate_metadata_preconditions<V: CommitValidationView>(
-    request: &CommitRequest,
-    mut metadata_state: V,
+impl OpValidationCursor {
+    pub(crate) fn new() -> Self {
+        Self {
+            op_index: 0,
+            next_delta_index: 0,
+        }
+    }
+}
+
+/// Validates `ops` in order against `metadata_state`, folding each accepted
+/// operation into it so the next one observes what the previous would
+/// persist.
+pub(crate) async fn validate_ops<V: CommitValidationView>(
+    ops: &[PlannedOp],
+    metadata_state: &mut V,
+    cursor: &mut OpValidationCursor,
     committed_seq: ChangeSeq,
     committed_at_ms: u64,
-    allocated_inode_ids: &[InodeId],
-) -> Result<ValidatedMetadataOps, V::Error> {
-    let mut allocated_inode_ids = allocated_inode_ids.iter().copied();
-    let mut validated_ops = Vec::with_capacity(request.ops.len());
-    let mut next_delta_index = 0u32;
+    allocated_inode_ids: &mut impl Iterator<Item = InodeId>,
+) -> Result<Vec<ValidatedOp>, V::Error> {
+    let mut validated_ops = Vec::with_capacity(ops.len());
+    let next_delta_index = &mut cursor.next_delta_index;
 
-    validate_explicit_preconditions(&request.preconditions, &metadata_state).await?;
-
-    for (op_index, op) in request.ops.iter().enumerate() {
-        let op_index =
-            u32::try_from(op_index).map_err(|_| CommitValidationError::OpIndexOverflow)?;
-        let validated_op = match op {
+    for planned in ops {
+        let op_index = cursor.op_index;
+        cursor.op_index = op_index
+            .checked_add(1)
+            .ok_or(CommitValidationError::OpIndexOverflow)?;
+        // Race checks belong to the operation that carries them and are
+        // evaluated where it runs: an operation's checks describe the state
+        // its own planning observed, which includes everything the earlier
+        // operations of the same commit did.
+        validate_explicit_preconditions(&planned.preconditions, metadata_state).await?;
+        let validated_op = match &planned.op {
             CommitOp::CreateDirectory {
                 parent_inode_id,
                 display_name,
             } => {
                 let name_key =
-                    validate_child_name_absent(&metadata_state, *parent_inode_id, display_name)
+                    validate_child_name_absent(metadata_state, *parent_inode_id, display_name)
                         .await?;
-                validate_create_parent_not_covered(&metadata_state, *parent_inode_id).await?;
+                validate_create_parent_not_covered(metadata_state, *parent_inode_id).await?;
                 ValidatedOp::CreateDir {
                     op_index,
                     parent_inode_id: *parent_inode_id,
                     display_name: display_name.clone(),
                     name_key,
                     child_inode_id: next_allocated_inode(
-                        &mut allocated_inode_ids,
+                        allocated_inode_ids,
                         CommitValidationError::NextInodeOverflow,
                     )?,
-                    create_inode_delta_index: reserve_delta_index(&mut next_delta_index)?,
-                    bind_delta_index: reserve_delta_index(&mut next_delta_index)?,
+                    create_inode_delta_index: reserve_delta_index(next_delta_index)?,
+                    bind_delta_index: reserve_delta_index(next_delta_index)?,
                 }
             }
             CommitOp::CreateFile {
@@ -58,22 +80,22 @@ pub(super) async fn validate_metadata_preconditions<V: CommitValidationView>(
                 content_ref,
             } => {
                 let name_key =
-                    validate_child_name_absent(&metadata_state, *parent_inode_id, display_name)
+                    validate_child_name_absent(metadata_state, *parent_inode_id, display_name)
                         .await?;
-                validate_create_parent_not_covered(&metadata_state, *parent_inode_id).await?;
+                validate_create_parent_not_covered(metadata_state, *parent_inode_id).await?;
                 ValidatedOp::CreateFile {
                     op_index,
                     parent_inode_id: *parent_inode_id,
                     display_name: display_name.clone(),
                     name_key,
                     child_inode_id: next_allocated_inode(
-                        &mut allocated_inode_ids,
+                        allocated_inode_ids,
                         CommitValidationError::NextInodeOverflow,
                     )?,
                     content_ref: content_ref.clone(),
-                    create_inode_delta_index: reserve_delta_index(&mut next_delta_index)?,
-                    bind_delta_index: reserve_delta_index(&mut next_delta_index)?,
-                    revision_delta_index: reserve_delta_index(&mut next_delta_index)?,
+                    create_inode_delta_index: reserve_delta_index(next_delta_index)?,
+                    bind_delta_index: reserve_delta_index(next_delta_index)?,
+                    revision_delta_index: reserve_delta_index(next_delta_index)?,
                 }
             }
             CommitOp::ReplaceFile {
@@ -81,7 +103,7 @@ pub(super) async fn validate_metadata_preconditions<V: CommitValidationView>(
                 base_revision_no,
                 content_ref,
             } => {
-                validate_inode_revision_is(&metadata_state, *inode_id, *base_revision_no).await?;
+                validate_inode_revision_is(metadata_state, *inode_id, *base_revision_no).await?;
                 let revision_no = next_revision_no(
                     *inode_id,
                     *base_revision_no,
@@ -92,13 +114,13 @@ pub(super) async fn validate_metadata_preconditions<V: CommitValidationView>(
                         }
                     },
                 )?;
-                validate_replace_target_not_covered(&metadata_state, *inode_id).await?;
+                validate_replace_target_not_covered(metadata_state, *inode_id).await?;
                 ValidatedOp::ReplaceFile {
                     op_index,
                     inode_id: *inode_id,
                     revision_no,
                     content_ref: content_ref.clone(),
-                    revision_delta_index: reserve_delta_index(&mut next_delta_index)?,
+                    revision_delta_index: reserve_delta_index(next_delta_index)?,
                 }
             }
             CommitOp::RestoreRevision {
@@ -106,9 +128,9 @@ pub(super) async fn validate_metadata_preconditions<V: CommitValidationView>(
                 source_revision_no,
                 base_revision_no,
             } => {
-                validate_restore_target(&metadata_state, *inode_id, *base_revision_no).await?;
+                validate_restore_target(metadata_state, *inode_id, *base_revision_no).await?;
                 let source_revision = validate_restore_source_revision(
-                    &metadata_state,
+                    metadata_state,
                     *inode_id,
                     *source_revision_no,
                 )
@@ -121,7 +143,7 @@ pub(super) async fn validate_metadata_preconditions<V: CommitValidationView>(
                         base_revision_no,
                     },
                 )?;
-                validate_not_covered_by_tombstone(&metadata_state, *inode_id, |tombstone| {
+                validate_not_covered_by_tombstone(metadata_state, *inode_id, |tombstone| {
                     CommitValidationError::RestoreRevisionUnderSubtreeTombstone {
                         inode_id: *inode_id,
                         root_inode_id: tombstone.root_inode_id,
@@ -135,14 +157,14 @@ pub(super) async fn validate_metadata_preconditions<V: CommitValidationView>(
                     source_revision_no: *source_revision_no,
                     revision_no,
                     content_ref: source_revision.content_ref,
-                    revision_delta_index: reserve_delta_index(&mut next_delta_index)?,
+                    revision_delta_index: reserve_delta_index(next_delta_index)?,
                 }
             }
             CommitOp::DeleteFile { inode_id } => {
                 let source_binding =
-                    resolve_current_binding_for_mutation(&metadata_state, *inode_id).await?;
+                    resolve_current_binding_for_mutation(metadata_state, *inode_id).await?;
                 validate_inode_kind(
-                    &metadata_state,
+                    metadata_state,
                     *inode_id,
                     InodeKind::File,
                     || CommitValidationError::DeleteFileInodeMissing {
@@ -154,7 +176,7 @@ pub(super) async fn validate_metadata_preconditions<V: CommitValidationView>(
                     },
                 )
                 .await?;
-                validate_not_covered_by_tombstone(&metadata_state, *inode_id, |tombstone| {
+                validate_not_covered_by_tombstone(metadata_state, *inode_id, |tombstone| {
                     CommitValidationError::DeleteFileCoveredByTombstone {
                         inode_id: *inode_id,
                         covering_root_inode_id: tombstone.root_inode_id,
@@ -166,8 +188,8 @@ pub(super) async fn validate_metadata_preconditions<V: CommitValidationView>(
                     op_index,
                     inode_id: *inode_id,
                     source_binding,
-                    unbind_delta_index: reserve_delta_index(&mut next_delta_index)?,
-                    tombstone_delta_index: reserve_delta_index(&mut next_delta_index)?,
+                    unbind_delta_index: reserve_delta_index(next_delta_index)?,
+                    tombstone_delta_index: reserve_delta_index(next_delta_index)?,
                 }
             }
             CommitOp::Rename {
@@ -176,18 +198,18 @@ pub(super) async fn validate_metadata_preconditions<V: CommitValidationView>(
                 new_display_name,
             } => {
                 let source_binding =
-                    resolve_current_binding_for_mutation(&metadata_state, *inode_id).await?;
-                validate_rename_source(&metadata_state, *inode_id).await?;
+                    resolve_current_binding_for_mutation(metadata_state, *inode_id).await?;
+                validate_rename_source(metadata_state, *inode_id).await?;
                 let new_name_key = validate_rename_target_name_absent(
-                    &metadata_state,
+                    metadata_state,
                     *inode_id,
                     *new_parent_inode_id,
                     new_display_name,
                 )
                 .await?;
-                validate_rename_does_not_cycle(&metadata_state, *inode_id, *new_parent_inode_id)
+                validate_rename_does_not_cycle(metadata_state, *inode_id, *new_parent_inode_id)
                     .await?;
-                validate_not_covered_by_tombstone(&metadata_state, *inode_id, |tombstone| {
+                validate_not_covered_by_tombstone(metadata_state, *inode_id, |tombstone| {
                     CommitValidationError::RenameInodeUnderSubtreeTombstone {
                         inode_id: *inode_id,
                         root_inode_id: tombstone.root_inode_id,
@@ -196,7 +218,7 @@ pub(super) async fn validate_metadata_preconditions<V: CommitValidationView>(
                 })
                 .await?;
                 validate_not_covered_by_tombstone(
-                    &metadata_state,
+                    metadata_state,
                     *new_parent_inode_id,
                     |tombstone| CommitValidationError::RenameTargetParentUnderSubtreeTombstone {
                         parent_inode_id: *new_parent_inode_id,
@@ -212,15 +234,15 @@ pub(super) async fn validate_metadata_preconditions<V: CommitValidationView>(
                     new_parent_inode_id: *new_parent_inode_id,
                     new_display_name: new_display_name.clone(),
                     new_name_key,
-                    unbind_delta_index: reserve_delta_index(&mut next_delta_index)?,
-                    bind_delta_index: reserve_delta_index(&mut next_delta_index)?,
+                    unbind_delta_index: reserve_delta_index(next_delta_index)?,
+                    bind_delta_index: reserve_delta_index(next_delta_index)?,
                 }
             }
             CommitOp::DeleteSubtree { root_inode_id } => {
                 let source_binding =
-                    resolve_current_binding_for_mutation(&metadata_state, *root_inode_id).await?;
+                    resolve_current_binding_for_mutation(metadata_state, *root_inode_id).await?;
                 validate_inode_kind(
-                    &metadata_state,
+                    metadata_state,
                     *root_inode_id,
                     InodeKind::Directory,
                     || CommitValidationError::DeleteSubtreeRootMissing {
@@ -232,7 +254,7 @@ pub(super) async fn validate_metadata_preconditions<V: CommitValidationView>(
                     },
                 )
                 .await?;
-                validate_not_covered_by_tombstone(&metadata_state, *root_inode_id, |tombstone| {
+                validate_not_covered_by_tombstone(metadata_state, *root_inode_id, |tombstone| {
                     CommitValidationError::DeleteSubtreeRootCoveredByTombstone {
                         root_inode_id: *root_inode_id,
                         covering_root_inode_id: tombstone.root_inode_id,
@@ -244,8 +266,8 @@ pub(super) async fn validate_metadata_preconditions<V: CommitValidationView>(
                     op_index,
                     root_inode_id: *root_inode_id,
                     source_binding,
-                    unbind_delta_index: reserve_delta_index(&mut next_delta_index)?,
-                    tombstone_delta_index: reserve_delta_index(&mut next_delta_index)?,
+                    unbind_delta_index: reserve_delta_index(next_delta_index)?,
+                    tombstone_delta_index: reserve_delta_index(next_delta_index)?,
                 }
             }
             CommitOp::Undelete {
@@ -302,9 +324,9 @@ pub(super) async fn validate_metadata_preconditions<V: CommitValidationView>(
                 // inside the recovered subtree, so the bind cannot cycle),
                 // a free name, and no covering tombstone over the parent.
                 let name_key =
-                    validate_child_name_absent(&metadata_state, *parent_inode_id, display_name)
+                    validate_child_name_absent(metadata_state, *parent_inode_id, display_name)
                         .await?;
-                validate_create_parent_not_covered(&metadata_state, *parent_inode_id).await?;
+                validate_create_parent_not_covered(metadata_state, *parent_inode_id).await?;
                 ValidatedOp::Undelete {
                     op_index,
                     inode_id: *inode_id,
@@ -313,8 +335,8 @@ pub(super) async fn validate_metadata_preconditions<V: CommitValidationView>(
                     name_key,
                     target_seq: active.tombstone_seq,
                     target_delta_index: active.tombstone_delta_index,
-                    revoke_tombstone_delta_index: reserve_delta_index(&mut next_delta_index)?,
-                    bind_delta_index: reserve_delta_index(&mut next_delta_index)?,
+                    revoke_tombstone_delta_index: reserve_delta_index(next_delta_index)?,
+                    bind_delta_index: reserve_delta_index(next_delta_index)?,
                 }
             }
         };
@@ -322,7 +344,7 @@ pub(super) async fn validate_metadata_preconditions<V: CommitValidationView>(
         validated_ops.push(validated_op);
     }
 
-    Ok(ValidatedMetadataOps { validated_ops })
+    Ok(validated_ops)
 }
 
 async fn validate_explicit_preconditions<V: CommitValidationView>(

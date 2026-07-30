@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
 use loonfs_api::{
-    v0::{CommitOp as ApiCommitOp, CommitRequest as ApiCommitRequest, FilesystemChange},
+    v0::FilesystemChange,
     wire::control::{decode_control_object, ControlObjectKind, HeadState, HeadStateEnvelope},
     wire::wal::{decode_wal_segment_envelope_zstd, WalDelta},
     AbsolutePath, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeId,
@@ -19,7 +19,8 @@ use loonfs_core::commit::CommitValidationError;
 use loonfs_core::content::{prepare_existing_content_ref, store_bytes_as_content};
 use loonfs_core::control::load_namespace_head_control;
 use loonfs_core::publish::{
-    NamespaceCommitEngine, NamespaceMutationCandidate, PathMutationIntent, PublishTailOptions,
+    FilesystemOperation, MutationCandidate, MutationRequest, NamespaceCommitEngine,
+    PublishTailOptions,
 };
 use loonfs_core::{Error as CoreError, ErrorCode, MutationContext};
 use loonfs_objectstore::keys::wal_head;
@@ -41,12 +42,11 @@ async fn delete_path_non_recursive_expecting<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     commit_id: &str,
 ) -> Result<loonfs_api::CommitResponse, CoreError> {
-    submit_intent(
+    submit_operation(
         store,
         namespace_id,
-        PathMutationIntent::DeletePath {
-            commit_id: CommitId::parse(commit_id).expect("valid test commit id"),
-            message: None,
+        CommitId::parse(commit_id).expect("valid test commit id"),
+        FilesystemOperation::DeletePath {
             absolute_path: AbsolutePath::parse(absolute_path).expect("path"),
             behavior: DeleteDirectoryBehavior::NonRecursive,
             expected_inode_id,
@@ -54,6 +54,16 @@ async fn delete_path_non_recursive_expecting<S: ObjectStore + ?Sized>(
         context,
     )
     .await
+}
+
+/// Builds a single-operation request the way every fixture below wants it:
+/// a fixed commit id so retries replay, and no caller annotation.
+fn mutation_request(commit_id: &str, operation: FilesystemOperation) -> MutationRequest {
+    MutationRequest::single(
+        CommitId::parse(commit_id).expect("valid test commit id"),
+        None,
+        operation,
+    )
 }
 
 #[derive(Debug)]
@@ -365,24 +375,26 @@ async fn batch_delete_then_recreate_of_a_durable_file_layers_over_cached_state()
         .expect("stage recreated content");
     let results = namespace_engine(&store, &namespace_id, &context)
         .publish_namespace_mutations_batch(vec![
-            NamespaceMutationCandidate::path(PathMutationIntent::DeletePath {
-                commit_id: CommitId::parse("delete-cycled").expect("valid commit id"),
-                message: None,
-                absolute_path: AbsolutePath::parse("/docs/cycled.txt").expect("path"),
-                behavior: DeleteDirectoryBehavior::NonRecursive,
-                expected_inode_id: None,
-            }),
-            admitted_candidate(
+            MutationCandidate::new(mutation_request(
+                "delete-cycled",
+                FilesystemOperation::DeletePath {
+                    absolute_path: AbsolutePath::parse("/docs/cycled.txt").expect("path"),
+                    behavior: DeleteDirectoryBehavior::NonRecursive,
+                    expected_inode_id: None,
+                },
+            )),
+            prepared_candidate(
                 &store,
                 &namespace_id,
-                PathMutationIntent::PutFile {
-                    commit_id: CommitId::parse("recreate-cycled").expect("valid commit id"),
-                    message: None,
-                    absolute_path: AbsolutePath::parse("/docs/cycled.txt").expect("path"),
-                    content_ref: staged.content_ref,
-                    behavior: DestinationBehavior::NoReplace,
-                    expected_revision_no: None,
-                },
+                mutation_request(
+                    "recreate-cycled",
+                    FilesystemOperation::PutFile {
+                        absolute_path: AbsolutePath::parse("/docs/cycled.txt").expect("path"),
+                        content_ref: staged.content_ref,
+                        behavior: DestinationBehavior::NoReplace,
+                        expected_revision_no: None,
+                    },
+                ),
             )
             .await,
         ])
@@ -410,28 +422,24 @@ async fn batch_commit_writes_one_segment_and_expands_change_feed() {
         .await
         .expect("bootstrap");
 
-    let responses = commit_operations_batch(
+    let responses = submit_mutations_batch(
         &store,
         &namespace_id,
         vec![
-            ApiCommitRequest {
-                commit_id: CommitId::parse("req-batch-a").expect("valid commit id"),
-                preconditions: Vec::new(),
-                ops: vec![ApiCommitOp::CreateDirectory {
-                    parent_inode_id: InodeId(1),
-                    display_name: test_display_name("alpha"),
-                }],
-                message: None,
-            },
-            ApiCommitRequest {
-                commit_id: CommitId::parse("req-batch-b").expect("valid commit id"),
-                preconditions: Vec::new(),
-                ops: vec![ApiCommitOp::CreateDirectory {
-                    parent_inode_id: InodeId(1),
-                    display_name: test_display_name("beta"),
-                }],
-                message: None,
-            },
+            mutation_request(
+                "req-batch-a",
+                FilesystemOperation::CreateDir {
+                    absolute_path: AbsolutePath::parse("/alpha").expect("path"),
+                    parents: false,
+                },
+            ),
+            mutation_request(
+                "req-batch-b",
+                FilesystemOperation::CreateDir {
+                    absolute_path: AbsolutePath::parse("/beta").expect("path"),
+                    parents: false,
+                },
+            ),
         ],
         &context,
     )
@@ -550,18 +558,21 @@ async fn ack_lost_head_cas_reports_unknown_outcome_and_replays_idempotently() {
     let content = store_bytes_as_content(&store, &namespace_id, b"ack lost")
         .await
         .expect("stage content");
-    let intent = || PathMutationIntent::PutFile {
-        commit_id: CommitId::parse("ack-lost-put").expect("valid commit id"),
-        message: None,
-        absolute_path: AbsolutePath::parse("/ack.txt").expect("path"),
-        content_ref: content.content_ref.clone(),
-        behavior: DestinationBehavior::NoReplace,
-        expected_revision_no: None,
+    let put = || {
+        mutation_request(
+            "ack-lost-put",
+            FilesystemOperation::PutFile {
+                absolute_path: AbsolutePath::parse("/ack.txt").expect("path"),
+                content_ref: content.content_ref.clone(),
+                behavior: DestinationBehavior::NoReplace,
+                expected_revision_no: None,
+            },
+        )
     };
 
     // The CAS landed but its acknowledgment was lost: this must surface as
     // an unknown outcome, never as definite failure.
-    let error = submit_intent_async(&store, &namespace_id, intent(), &context)
+    let error = submit_mutation(&store, &namespace_id, put(), &context)
         .await
         .expect_err("ack-lost head CAS is not definite failure");
     assert_eq!(error.code(), ErrorCode::CommitOutcomeUnknown);
@@ -569,7 +580,7 @@ async fn ack_lost_head_cas_reports_unknown_outcome_and_replays_idempotently() {
 
     // The documented remedy: retry with the same commit id. The commit is
     // already visible, so the retry replays it instead of double-committing.
-    let result = submit_intent_async(&store, &namespace_id, intent(), &context)
+    let result = submit_mutation(&store, &namespace_id, put(), &context)
         .await
         .expect("same-commit-id retry replays the committed mutation");
     assert_eq!(result.committed_seq, ChangeSeq(1));
@@ -592,15 +603,16 @@ async fn retry_succeeds_after_wal_orphaned_by_stale_head_cas() {
     let content = store_bytes_as_content(&store, &namespace_id, b"retry")
         .await
         .expect("stage content");
-    let intent = PathMutationIntent::PutFile {
-        commit_id: CommitId::parse("retry-after-orphan").expect("valid commit id"),
-        message: None,
-        absolute_path: AbsolutePath::parse("/retry.txt").expect("path"),
-        content_ref: content.content_ref,
-        behavior: DestinationBehavior::NoReplace,
-        expected_revision_no: None,
-    };
-    let error = submit_intent_async(&store, &namespace_id, intent.clone(), &context)
+    let put = mutation_request(
+        "retry-after-orphan",
+        FilesystemOperation::PutFile {
+            absolute_path: AbsolutePath::parse("/retry.txt").expect("path"),
+            content_ref: content.content_ref,
+            behavior: DestinationBehavior::NoReplace,
+            expected_revision_no: None,
+        },
+    );
+    let error = submit_mutation(&store, &namespace_id, put.clone(), &context)
         .await
         .expect_err("injected stale head surfaces to the caller");
     assert_eq!(error.code(), ErrorCode::StaleHead);
@@ -608,7 +620,7 @@ async fn retry_succeeds_after_wal_orphaned_by_stale_head_cas() {
 
     // The orphaned segment from the failed attempt must not block a retry
     // with the same commit id.
-    let result = submit_intent_async(&store, &namespace_id, intent, &context)
+    let result = submit_mutation(&store, &namespace_id, put, &context)
         .await
         .expect("retry after the orphaned segment");
     assert_eq!(result.committed_seq, ChangeSeq(1));
@@ -689,50 +701,54 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
     let batch = || async {
         vec![
             // Rejected against the durable materialization: nothing was accepted yet.
-            NamespaceMutationCandidate::path(PathMutationIntent::DeletePath {
-                commit_id: CommitId::parse("reject-materialization").expect("valid commit id"),
-                message: None,
-                absolute_path: AbsolutePath::parse("/missing.txt").expect("path"),
-                behavior: DeleteDirectoryBehavior::NonRecursive,
-                expected_inode_id: None,
-            }),
+            MutationCandidate::new(mutation_request(
+                "reject-materialization",
+                FilesystemOperation::DeletePath {
+                    absolute_path: AbsolutePath::parse("/missing.txt").expect("path"),
+                    behavior: DeleteDirectoryBehavior::NonRecursive,
+                    expected_inode_id: None,
+                },
+            )),
             // Accepted into the batch.
-            admitted_candidate(
+            prepared_candidate(
                 &store,
                 &namespace_id,
-                PathMutationIntent::PutFile {
-                    commit_id: CommitId::parse("accept-a").expect("valid commit id"),
-                    message: None,
-                    absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
-                    content_ref: content.content_ref.clone(),
-                    behavior: DestinationBehavior::NoReplace,
-                    expected_revision_no: None,
-                },
+                mutation_request(
+                    "accept-a",
+                    FilesystemOperation::PutFile {
+                        absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
+                        content_ref: content.content_ref.clone(),
+                        behavior: DestinationBehavior::NoReplace,
+                        expected_revision_no: None,
+                    },
+                ),
             )
             .await,
             // Rejected only because of the accepted candidate's speculative
             // in-batch create.
-            admitted_candidate(
+            prepared_candidate(
                 &store,
                 &namespace_id,
-                PathMutationIntent::PutFile {
-                    commit_id: CommitId::parse("reject-speculative").expect("valid commit id"),
-                    message: None,
-                    absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
-                    content_ref: content.content_ref.clone(),
-                    behavior: DestinationBehavior::NoReplace,
-                    expected_revision_no: None,
-                },
+                mutation_request(
+                    "reject-speculative",
+                    FilesystemOperation::PutFile {
+                        absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
+                        content_ref: content.content_ref.clone(),
+                        behavior: DestinationBehavior::NoReplace,
+                        expected_revision_no: None,
+                    },
+                ),
             )
             .await,
             // Alias of the materialization-decided rejection.
-            NamespaceMutationCandidate::path(PathMutationIntent::DeletePath {
-                commit_id: CommitId::parse("reject-materialization").expect("valid commit id"),
-                message: None,
-                absolute_path: AbsolutePath::parse("/missing.txt").expect("path"),
-                behavior: DeleteDirectoryBehavior::NonRecursive,
-                expected_inode_id: None,
-            }),
+            MutationCandidate::new(mutation_request(
+                "reject-materialization",
+                FilesystemOperation::DeletePath {
+                    absolute_path: AbsolutePath::parse("/missing.txt").expect("path"),
+                    behavior: DeleteDirectoryBehavior::NonRecursive,
+                    expected_inode_id: None,
+                },
+            )),
         ]
     };
 
@@ -801,37 +817,40 @@ async fn stale_head_cas_fails_rejections_decided_against_in_batch_state() {
 
     let batch = || async {
         vec![
-            NamespaceMutationCandidate::path(PathMutationIntent::DeletePath {
-                commit_id: CommitId::parse("reject-materialization").expect("valid commit id"),
-                message: None,
-                absolute_path: AbsolutePath::parse("/missing.txt").expect("path"),
-                behavior: DeleteDirectoryBehavior::NonRecursive,
-                expected_inode_id: None,
-            }),
-            admitted_candidate(
+            MutationCandidate::new(mutation_request(
+                "reject-materialization",
+                FilesystemOperation::DeletePath {
+                    absolute_path: AbsolutePath::parse("/missing.txt").expect("path"),
+                    behavior: DeleteDirectoryBehavior::NonRecursive,
+                    expected_inode_id: None,
+                },
+            )),
+            prepared_candidate(
                 &store,
                 &namespace_id,
-                PathMutationIntent::PutFile {
-                    commit_id: CommitId::parse("accept-a").expect("valid commit id"),
-                    message: None,
-                    absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
-                    content_ref: content.content_ref.clone(),
-                    behavior: DestinationBehavior::NoReplace,
-                    expected_revision_no: None,
-                },
+                mutation_request(
+                    "accept-a",
+                    FilesystemOperation::PutFile {
+                        absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
+                        content_ref: content.content_ref.clone(),
+                        behavior: DestinationBehavior::NoReplace,
+                        expected_revision_no: None,
+                    },
+                ),
             )
             .await,
-            admitted_candidate(
+            prepared_candidate(
                 &store,
                 &namespace_id,
-                PathMutationIntent::PutFile {
-                    commit_id: CommitId::parse("reject-speculative").expect("valid commit id"),
-                    message: None,
-                    absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
-                    content_ref: content.content_ref.clone(),
-                    behavior: DestinationBehavior::NoReplace,
-                    expected_revision_no: None,
-                },
+                mutation_request(
+                    "reject-speculative",
+                    FilesystemOperation::PutFile {
+                        absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
+                        content_ref: content.content_ref.clone(),
+                        behavior: DestinationBehavior::NoReplace,
+                        expected_revision_no: None,
+                    },
+                ),
             )
             .await,
         ]
@@ -940,16 +959,17 @@ async fn retry_succeeds_after_stale_head_get_during_publish_view_load() {
     // failure. The engine acquires once, on this warm-up publish.
     let mut engine = NamespaceCommitEngine::new(namespace_id.clone());
     let publish = async |engine: &mut NamespaceCommitEngine, path: &str, commit_id: &str| {
-        let intent = PathMutationIntent::CreateDir {
-            commit_id: CommitId::parse(commit_id).expect("valid test commit id"),
-            message: None,
-            absolute_path: AbsolutePath::parse(path).expect("path"),
-            parents: false,
-        };
+        let mkdir = mutation_request(
+            commit_id,
+            FilesystemOperation::CreateDir {
+                absolute_path: AbsolutePath::parse(path).expect("path"),
+                parents: false,
+            },
+        );
         engine
             .publish_batch(
                 &store,
-                vec![NamespaceMutationCandidate::path(intent)],
+                vec![MutationCandidate::new(mkdir)],
                 &context,
                 &PublishTailOptions::default(),
             )
@@ -1002,20 +1022,18 @@ async fn batch_commit_aliases_duplicate_commit_id_with_same_fingerprint() {
         .await
         .expect("bootstrap");
 
-    let request = ApiCommitRequest {
-        commit_id: CommitId::parse("req-duplicate").expect("valid commit id"),
-        preconditions: Vec::new(),
-        ops: vec![ApiCommitOp::CreateDirectory {
-            parent_inode_id: InodeId(1),
-            display_name: test_display_name("alpha"),
-        }],
-        message: None,
-    };
+    let duplicated = mutation_request(
+        "req-duplicate",
+        FilesystemOperation::CreateDir {
+            absolute_path: AbsolutePath::parse("/alpha").expect("path"),
+            parents: false,
+        },
+    );
 
-    let responses = commit_operations_batch(
+    let responses = submit_mutations_batch(
         &store,
         &namespace_id,
-        vec![request.clone(), request],
+        vec![duplicated.clone(), duplicated],
         &context,
     )
     .await;
@@ -1064,22 +1082,21 @@ async fn oversized_prepared_proof_candidate_replays_receipt_but_new_request_is_r
     let prepared = prepare_existing_content_ref(&store, &catalog, stored.content_ref.clone())
         .await
         .expect("prepare content");
-    let request = ApiCommitRequest {
-        commit_id: CommitId::parse("over-proof-replay").expect("valid commit id"),
-        preconditions: Vec::new(),
-        ops: vec![ApiCommitOp::CreateFile {
-            parent_inode_id: InodeId(1),
-            display_name: test_display_name("proof-replay.txt"),
+    let put = mutation_request(
+        "over-proof-replay",
+        FilesystemOperation::PutFile {
+            absolute_path: AbsolutePath::parse("/proof-replay.txt").expect("path"),
             content_ref: stored.content_ref,
-        }],
-        message: None,
-    };
+            behavior: DestinationBehavior::NoReplace,
+            expected_revision_no: None,
+        },
+    );
 
     let original = publish_namespace_mutations_batch(
         &store,
         &namespace_id,
-        vec![NamespaceMutationCandidate::commit_prepared(
-            request.clone(),
+        vec![MutationCandidate::prepared(
+            put.clone(),
             vec![prepared.clone()],
         )],
         &context,
@@ -1092,8 +1109,8 @@ async fn oversized_prepared_proof_candidate_replays_receipt_but_new_request_is_r
     let replay = publish_namespace_mutations_batch(
         &store,
         &namespace_id,
-        vec![NamespaceMutationCandidate::commit_prepared(
-            request.clone(),
+        vec![MutationCandidate::prepared(
+            put.clone(),
             oversized_proofs.clone(),
         )],
         &context,
@@ -1103,15 +1120,12 @@ async fn oversized_prepared_proof_candidate_replays_receipt_but_new_request_is_r
     .expect("durable receipt must win over current proof limit");
     assert_eq!(replay, original);
 
-    let mut new_request = request;
+    let mut new_request = put;
     new_request.commit_id = CommitId::parse("over-proof-new").expect("valid commit id");
     let error = publish_namespace_mutations_batch(
         &store,
         &namespace_id,
-        vec![NamespaceMutationCandidate::commit_prepared(
-            new_request,
-            oversized_proofs,
-        )],
+        vec![MutationCandidate::prepared(new_request, oversized_proofs)],
         &context,
     )
     .await
@@ -1138,24 +1152,23 @@ async fn same_batch_over_limit_proof_duplicate_joins_its_primary() {
     let prepared = prepare_existing_content_ref(&store, &catalog, stored.content_ref.clone())
         .await
         .expect("prepare content");
-    let request = ApiCommitRequest {
-        commit_id: CommitId::parse("over-proof-duplicate").expect("valid commit id"),
-        preconditions: Vec::new(),
-        ops: vec![ApiCommitOp::CreateFile {
-            parent_inode_id: InodeId(1),
-            display_name: test_display_name("batch-proof.txt"),
+    let put = mutation_request(
+        "over-proof-duplicate",
+        FilesystemOperation::PutFile {
+            absolute_path: AbsolutePath::parse("/batch-proof.txt").expect("path"),
             content_ref: stored.content_ref,
-        }],
-        message: None,
-    };
+            behavior: DestinationBehavior::NoReplace,
+            expected_revision_no: None,
+        },
+    );
 
     let responses = publish_namespace_mutations_batch(
         &store,
         &namespace_id,
         vec![
-            NamespaceMutationCandidate::commit_prepared(request.clone(), vec![prepared.clone()]),
-            NamespaceMutationCandidate::commit_prepared(
-                request,
+            MutationCandidate::prepared(put.clone(), vec![prepared.clone()]),
+            MutationCandidate::prepared(
+                put,
                 vec![prepared; loonfs_core::limits::MAX_COMMIT_CONTENT_TOKENS + 1],
             ),
         ],
@@ -1179,16 +1192,16 @@ async fn new_candidate_with_4097_operations_is_rejected_after_identity_computati
     bootstrap_namespace(&store, &namespace_id, &context, false)
         .await
         .expect("bootstrap");
-    let candidate = NamespaceMutationCandidate::commit(ApiCommitRequest {
+    let candidate = MutationCandidate::new(MutationRequest {
         commit_id: CommitId::parse("over-operation-new").expect("valid commit id"),
-        preconditions: Vec::new(),
-        ops: (0..=loonfs_core::limits::MAX_COMMIT_OPERATIONS)
-            .map(|index| ApiCommitOp::CreateDirectory {
-                parent_inode_id: InodeId(1),
-                display_name: test_display_name(format!("over-operation-{index}")),
+        message: None,
+        operations: (0..=loonfs_core::limits::MAX_COMMIT_OPERATIONS)
+            .map(|index| FilesystemOperation::CreateDir {
+                absolute_path: AbsolutePath::parse(format!("/over-operation-{index}"))
+                    .expect("path"),
+                parents: false,
             })
             .collect(),
-        message: None,
     });
 
     // A later release may lower the operation limit below a durable request;
@@ -1213,17 +1226,15 @@ async fn visible_commit_id_retry_aliases_across_writer_takeover() {
         .await
         .expect("bootstrap");
 
-    let request = ApiCommitRequest {
-        commit_id: CommitId::parse("retry-across-writer").expect("valid commit id"),
-        preconditions: Vec::new(),
-        ops: vec![ApiCommitOp::CreateDirectory {
-            parent_inode_id: InodeId(1),
-            display_name: test_display_name("alpha"),
-        }],
-        message: None,
-    };
+    let mkdir = mutation_request(
+        "retry-across-writer",
+        FilesystemOperation::CreateDir {
+            absolute_path: AbsolutePath::parse("/alpha").expect("path"),
+            parents: false,
+        },
+    );
 
-    let first = commit_operations(&store, &namespace_id, request.clone(), &writer_a)
+    let first = submit_mutation(&store, &namespace_id, mkdir.clone(), &writer_a)
         .await
         .expect("writer a commit");
     let writer_b = MutationContext {
@@ -1231,7 +1242,7 @@ async fn visible_commit_id_retry_aliases_across_writer_takeover() {
         now_ms: writer_a.now_ms.saturating_add(1),
     };
 
-    let retry = commit_operations(&store, &namespace_id, request, &writer_b)
+    let retry = submit_mutation(&store, &namespace_id, mkdir, &writer_b)
         .await
         .expect("writer b retry");
 
@@ -1248,28 +1259,24 @@ async fn batch_commit_rejects_duplicate_commit_id_with_different_fingerprint() {
         .await
         .expect("bootstrap");
 
-    let responses = commit_operations_batch(
+    let responses = submit_mutations_batch(
         &store,
         &namespace_id,
         vec![
-            ApiCommitRequest {
-                commit_id: CommitId::parse("req-conflict").expect("valid commit id"),
-                preconditions: Vec::new(),
-                ops: vec![ApiCommitOp::CreateDirectory {
-                    parent_inode_id: InodeId(1),
-                    display_name: test_display_name("alpha"),
-                }],
-                message: None,
-            },
-            ApiCommitRequest {
-                commit_id: CommitId::parse("req-conflict").expect("valid commit id"),
-                preconditions: Vec::new(),
-                ops: vec![ApiCommitOp::CreateDirectory {
-                    parent_inode_id: InodeId(1),
-                    display_name: test_display_name("beta"),
-                }],
-                message: None,
-            },
+            mutation_request(
+                "req-conflict",
+                FilesystemOperation::CreateDir {
+                    absolute_path: AbsolutePath::parse("/alpha").expect("path"),
+                    parents: false,
+                },
+            ),
+            mutation_request(
+                "req-conflict",
+                FilesystemOperation::CreateDir {
+                    absolute_path: AbsolutePath::parse("/beta").expect("path"),
+                    parents: false,
+                },
+            ),
         ],
         &context,
     )
@@ -1318,44 +1325,34 @@ async fn path_publishes_use_durable_path_commit_receipt_index() {
         .await
         .expect("stage content");
 
-    let intent = PathMutationIntent::PutFile {
-        commit_id: CommitId::parse("same-path-request").expect("valid commit id"),
-        message: None,
-        absolute_path: AbsolutePath::parse("/same/path.txt").expect("path"),
-        content_ref: content.content_ref.clone(),
-        behavior: DestinationBehavior::NoReplace,
-        expected_revision_no: None,
-    };
-    let first = submit_intent_async(&store, &namespace_id, intent.clone(), &context)
-        .await
-        .expect("first publish");
-    let retry = submit_intent_async(
-        &store,
-        &namespace_id,
-        PathMutationIntent::PutFile {
-            commit_id: CommitId::parse("same-path-request").expect("valid commit id"),
-            message: None,
+    let put = mutation_request(
+        "same-path-request",
+        FilesystemOperation::PutFile {
             absolute_path: AbsolutePath::parse("/same/path.txt").expect("path"),
             content_ref: content.content_ref.clone(),
             behavior: DestinationBehavior::NoReplace,
             expected_revision_no: None,
         },
-        &context,
-    )
-    .await
-    .expect("idempotent retry");
+    );
+    let first = submit_mutation(&store, &namespace_id, put.clone(), &context)
+        .await
+        .expect("first publish");
+    let retry = submit_mutation(&store, &namespace_id, put, &context)
+        .await
+        .expect("idempotent retry");
     assert_eq!(retry.committed_seq, first.committed_seq);
 
-    let conflict = submit_intent_async(
+    let conflict = submit_mutation(
         &store,
         &namespace_id,
-        PathMutationIntent::DeletePath {
-            commit_id: CommitId::parse("same-path-request").expect("valid commit id"),
-            message: None,
-            absolute_path: AbsolutePath::parse("/same/path.txt").expect("path"),
-            behavior: DeleteDirectoryBehavior::NonRecursive,
-            expected_inode_id: None,
-        },
+        mutation_request(
+            "same-path-request",
+            FilesystemOperation::DeletePath {
+                absolute_path: AbsolutePath::parse("/same/path.txt").expect("path"),
+                behavior: DeleteDirectoryBehavior::NonRecursive,
+                expected_inode_id: None,
+            },
+        ),
         &context,
     )
     .await
@@ -1590,17 +1587,19 @@ async fn idempotent_path_retry_returns_receipt_before_content_validation() {
         &store,
         &namespace_id("demo"),
         vec![
-            admitted_candidate(
+            prepared_candidate(
                 &store,
                 &namespace_id("demo"),
-                PathMutationIntent::PutFile {
-                    commit_id: commit_id.clone(),
-                    message: None,
-                    absolute_path: AbsolutePath::parse("/docs/idempotent.txt").expect("path"),
-                    content_ref: content.content_ref.clone(),
-                    behavior: DestinationBehavior::NoReplace,
-                    expected_revision_no: None,
-                },
+                MutationRequest::single(
+                    commit_id.clone(),
+                    None,
+                    FilesystemOperation::PutFile {
+                        absolute_path: AbsolutePath::parse("/docs/idempotent.txt").expect("path"),
+                        content_ref: content.content_ref.clone(),
+                        behavior: DestinationBehavior::NoReplace,
+                        expected_revision_no: None,
+                    },
+                ),
             )
             .await,
         ],
@@ -1616,19 +1615,22 @@ async fn idempotent_path_retry_returns_receipt_before_content_validation() {
         .await
         .expect("delete committed content blob");
 
+    // The retry carries no preparation proof at all, so a receipt miss would
+    // fail it: returning the first commit's sequence is what proves the
+    // receipt is consulted before content is validated.
     let retry = publish_namespace_mutations_batch(
         &store,
         &namespace_id("demo"),
-        vec![NamespaceMutationCandidate::path(
-            PathMutationIntent::PutFile {
-                commit_id,
-                message: None,
+        vec![MutationCandidate::new(MutationRequest::single(
+            commit_id,
+            None,
+            FilesystemOperation::PutFile {
                 absolute_path: AbsolutePath::parse("/docs/idempotent.txt").expect("path"),
                 content_ref: content.content_ref,
                 behavior: DestinationBehavior::NoReplace,
                 expected_revision_no: None,
             },
-        )],
+        ))],
         &context,
     )
     .await
