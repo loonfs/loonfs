@@ -1,4 +1,11 @@
-![LoonFS Logo](assets/loonfs-wordmark-black.svg)
+<div align="center">
+  <picture>
+    <source media="(prefers-color-scheme: light)" srcset="assets/loonfs-wordmark-black.svg">
+    <source media="(prefers-color-scheme: dark)" srcset="assets/loonfs-wordmark-white.svg">
+    <img alt="LoonFS logo" src="assets/loonfs-wordmark-black.svg" height="100">
+  </picture>
+</div>
+<br>
 
 LoonFS is a durable filesystem built on object storage. It can be used to store, manage, index, and retrieve files and folders for a variety of use cases. Object storage is the only durable dependency from which LoonFS derives virtually unlimited storage and a high throughput ceiling. It uses a single-writer, multi-reader model and can be used across sessions and clients as an embedded engine or through a remote server connection.
 
