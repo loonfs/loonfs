@@ -40,10 +40,7 @@ impl FsReader {
         self.core.record_trace_context(&span);
         let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
         let entry = engine.resolve_path(absolute_path, &read_context).await?;
-        tracing::Span::current().record(
-            "cache_path",
-            crate::trace::CachePath::MaterializedTables.as_str(),
-        );
+        tracing::Span::current().record("cache_path", crate::trace::CACHE_MATERIALIZED_TABLES);
         self.core
             .inner
             .cache_stats
