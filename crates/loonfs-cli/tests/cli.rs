@@ -418,7 +418,7 @@ fn commit_messages_ride_the_feed_and_bind_identity() {
         "put",
         payload.to_str().expect("utf-8 path"),
         "/doc.txt",
-        "--message",
+        "-m",
         "initial import",
     ]));
     // The audit's motivating case: a restore is indistinguishable from an
@@ -436,7 +436,7 @@ fn commit_messages_ride_the_feed_and_bind_identity() {
         "--revision",
         "1",
         "/doc.txt",
-        "--message",
+        "-m",
         "roll back to the imported copy",
     ]));
 
@@ -496,6 +496,127 @@ fn commit_messages_ride_the_feed_and_bind_identity() {
         "{}",
         json_error(&conflicted)
     );
+}
+
+/// Every mutating command takes `-m`, and each one lands its annotation on
+/// its own commit. Reading the feed back through `loon changes` covers the
+/// flag, the threading, and the rendering in a single pass.
+#[test]
+fn every_mutating_command_records_its_message() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+
+    let payload = harness.temp_dir.path().join("doc.txt");
+    fs::write(&payload, b"body").expect("write payload");
+    let local = payload.to_str().expect("utf-8 path");
+
+    assert_success(&harness.run(&["mkdir", "/dir", "-m", "mkdir message"]));
+    assert_success(&harness.run(&["put", local, "/dir/doc.txt", "-m", "put message"]));
+    assert_success(&harness.run(&["cp", "/dir/doc.txt", "/dir/copy.txt", "-m", "cp message"]));
+    assert_success(&harness.run(&["mv", "/dir/copy.txt", "/dir/moved.txt", "-m", "mv message"]));
+    assert_success(&harness.run(&[
+        "put",
+        local,
+        "/dir/doc.txt",
+        "--force",
+        "-m",
+        "second put message",
+    ]));
+    assert_success(&harness.run(&[
+        "restore",
+        "--revision",
+        "1",
+        "/dir/doc.txt",
+        "-m",
+        "restore message",
+    ]));
+    let removed = harness.run(&["--json", "rm", "/dir/moved.txt", "-m", "rm message"]);
+    assert_success(&removed);
+    let inode_id = json_data(&removed)["inode_id"]
+        .as_u64()
+        .expect("rm reports the deleted inode id");
+    let deleted_at = json_data(&removed)["committed_seq"]
+        .as_u64()
+        .expect("rm reports the committed seq");
+    assert_success(&harness.run(&[
+        "undelete",
+        "/dir/moved.txt",
+        "--inode",
+        &inode_id.to_string(),
+        "--deleted-at",
+        &deleted_at.to_string(),
+        "-m",
+        "undelete message",
+    ]));
+
+    assert_eq!(
+        feed_messages(&harness),
+        vec![
+            "mkdir message",
+            "put message",
+            "cp message",
+            "mv message",
+            "second put message",
+            "restore message",
+            "rm message",
+            "undelete message",
+        ]
+    );
+}
+
+/// The remote arm has to hand the message to the client's mutation options,
+/// not just the embedded arm. Same flag, same feed rows, over HTTP.
+#[test]
+fn commit_messages_ride_the_feed_over_the_remote_transport() {
+    let harness = Harness::new();
+    let remote_server =
+        harness.start_external_server(harness.write_server_config("remote", "message-remote"));
+    let add_remote = harness.run(&[
+        "--json",
+        "profile",
+        "create",
+        "default",
+        "--mode",
+        "remote",
+        "--server-url",
+        &remote_server.server_url,
+        "--auth-token",
+        "test-token",
+    ]);
+    assert_success(&add_remote);
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+
+    let payload = harness.temp_dir.path().join("doc.txt");
+    fs::write(&payload, b"body").expect("write payload");
+    assert_success(&harness.run(&[
+        "put",
+        payload.to_str().expect("utf-8 path"),
+        "/doc.txt",
+        "-m",
+        "landed over http",
+    ]));
+    assert_success(&harness.run(&["mkdir", "/dir", "-m", "made over http"]));
+
+    assert_eq!(
+        feed_messages(&harness),
+        vec!["landed over http", "made over http"]
+    );
+}
+
+/// Reads the namespace's change feed through the CLI and returns the
+/// annotations in commit order, dropping the rows that carry none.
+fn feed_messages(harness: &Harness) -> Vec<String> {
+    let changes = harness.run(&["--json", "changes"]);
+    assert_success(&changes);
+    json_data(&changes)["changes"]
+        .as_array()
+        .expect("changes array")
+        .iter()
+        .filter_map(|row| row["message"].as_str().map(ToOwned::to_owned))
+        .collect()
 }
 
 #[test]
