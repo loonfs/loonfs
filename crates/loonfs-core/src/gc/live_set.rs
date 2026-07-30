@@ -1,8 +1,8 @@
 //! Collects the live set: every object the current namespace state
 //! can still reach, re-verified in chunks as the sweep advances.
 
-use super::config::GcConfig;
 use super::fork_checkpoints::fork_target_proven_gone;
+use super::reap::lease_expired;
 use crate::checkpoint::load_namespace_manifest_envelope_if_present;
 use crate::context::MutationContext;
 use crate::error::{CoreError, MetadataProjectionLoadError, Result};
@@ -60,11 +60,10 @@ impl SweepVerifier {
         &mut self,
         store: &S,
         namespace_id: &NamespaceId,
-        config: &GcConfig,
         context: &MutationContext,
     ) -> Result<()> {
         if self.decided_since_collect >= self.reverify_chunk {
-            self.live = Arc::new(collect_live_set(store, namespace_id, config, context).await?);
+            self.live = Arc::new(collect_live_set(store, namespace_id, context).await?);
             self.degraded |= self.live.degraded;
             self.decided_since_collect = 0;
         }
@@ -76,7 +75,6 @@ impl SweepVerifier {
 pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
-    config: &GcConfig,
     context: &MutationContext,
 ) -> Result<LiveSet> {
     let now_ms = context.now_ms;
@@ -123,14 +121,14 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
     }
     let mut active_record_bases: BTreeMap<ManifestObjectId, Vec<String>> = BTreeMap::new();
 
-    // Every readable non-condemned checkpoint record roots its basis, no
-    // matter its lifecycle, expiry, or owner: a revivable record must never
-    // outlive its manifest. Released records can come back through
-    // deterministic create or fork freshen. Condemned is the sole exception:
-    // it is absorbing, so a crash between condemn and delete leaves no future
-    // revival to protect. The basis becomes collectable after condemnation,
-    // while records-last ordering keeps a newly condemned record's basis
-    // alive through the pass that performed the CAS.
+    // Every readable checkpoint record roots its basis, no matter its
+    // lifecycle, expiry, or owner — no exceptions. An active record roots it
+    // because it still serves reads, expiry or not: turning a passed expiry
+    // into a release is the compare-and-swap below, and until that lands the
+    // record is a pin. A released record roots it because deletion runs data
+    // first and records last, so a record still on the store never has its
+    // basis pulled out from under it inside a pass. State, expiry, and owner
+    // fate gate only whether the record itself is a candidate.
     let checkpoints_prefix = checkpoint_prefix(namespace_id.as_str());
     let mut checkpoint_keys = store.list_prefix_stream(&checkpoints_prefix);
     while let Some(item) = checkpoint_keys.next().await {
@@ -148,39 +146,30 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
         ) {
             Ok(envelope) => {
                 let record = envelope.state;
-                if record.state == CheckpointRecordLifecycle::Condemned {
-                    continue;
-                }
-                let expired = record
-                    .expires_at_ms
-                    .is_some_and(|expires_at_ms| expires_at_ms <= now_ms);
-                if namespace_deleted {
-                    // On a terminal namespace only a still-active fork
-                    // record with a live target roots anything; every
-                    // other record is an ordinary age-gated candidate,
-                    // and its basis is not rooted (revival is impossible
-                    // once epoch acquire refuses the tombstone).
-                    if record.state != CheckpointRecordLifecycle::Active || expired {
-                        continue;
-                    }
-                    let CheckpointOwner::Fork {
+                // What makes a record a candidate depends on who owns it.
+                // A user pin answers to its own expiry. A fork pin answers
+                // to its target's fate, and only to that: the lease is one
+                // input to proving an attempt abandoned, never a reason to
+                // drop a pin whose target is alive and reading through it.
+                // Every check here is repeated at decision time; this only
+                // selects candidates.
+                let candidate = match &record.owner {
+                    _ if record.state != CheckpointRecordLifecycle::Active => true,
+                    CheckpointOwner::User { .. } => lease_expired(&record, now_ms),
+                    CheckpointOwner::Fork {
                         target_namespace_id,
-                    } = &record.owner
-                    else {
+                    } => {
+                        fork_target_proven_gone(store, target_namespace_id, &record, context)
+                            .await?
+                    }
+                };
+                if namespace_deleted {
+                    // On a terminal namespace only a fork record with a live
+                    // target roots anything; every other record is an
+                    // ordinary candidate, and its basis is not rooted (no
+                    // reader can reach a tombstone).
+                    if candidate || matches!(record.owner, CheckpointOwner::User { .. }) {
                         continue;
-                    };
-                    if let Some(last_modified_ms) = body.metadata.last_modified_ms {
-                        if fork_target_proven_gone(
-                            store,
-                            target_namespace_id,
-                            last_modified_ms,
-                            config,
-                            context,
-                        )
-                        .await?
-                        {
-                            continue;
-                        }
                     }
                     live.manifests.insert(record.manifest_object_id.clone());
                     active_record_bases
@@ -191,30 +180,10 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
                     continue;
                 }
                 live.manifests.insert(record.manifest_object_id.clone());
-                if record.state != CheckpointRecordLifecycle::Active || expired {
+                // A candidate still roots its basis above; it is only kept
+                // out of the protected key set so the sweep can act on it.
+                if candidate {
                     continue;
-                }
-                // An active fork-owned record whose target is provably gone
-                // is no longer a root: it becomes a sweep candidate for the
-                // compare-and-swap release. Every check here is repeated at
-                // decision time; this only selects candidates.
-                if let CheckpointOwner::Fork {
-                    target_namespace_id,
-                } = &record.owner
-                {
-                    if let Some(last_modified_ms) = body.metadata.last_modified_ms {
-                        if fork_target_proven_gone(
-                            store,
-                            target_namespace_id,
-                            last_modified_ms,
-                            config,
-                            context,
-                        )
-                        .await?
-                        {
-                            continue;
-                        }
-                    }
                 }
                 active_record_bases
                     .entry(record.manifest_object_id)

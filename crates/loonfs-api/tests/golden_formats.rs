@@ -485,7 +485,7 @@ fn control_objects_match_golden_bytes() {
         },
     );
     // The fork owner is a durable encoding of its own: the tagged `owner`
-    // changes the document.
+    // changes the document, and a fork record always carries its lease.
     check_control_golden(
         "control_checkpoint_record_fork.v1.json",
         ControlObjectKind::CheckpointRecord,
@@ -499,7 +499,7 @@ fn control_objects_match_golden_bytes() {
                 "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_owned(),
             head_commit_id: commit_id(),
             created_at_ms: 3_000,
-            expires_at_ms: None,
+            expires_at_ms: Some(2_463_000),
             owner: CheckpointOwner::Fork {
                 target_namespace_id: NamespaceId::parse("clone").expect("valid namespace id"),
             },
@@ -524,7 +524,9 @@ fn control_objects_match_golden_bytes() {
         },
     );
     // The released lifecycle and the direct-put session shape are durable
-    // encodings of their own: `state` and `mode` change the document.
+    // encodings of their own: `state` and `mode` change the document. A
+    // released record carries the instant its grace window runs from, and
+    // there is no third checkpoint state to pin.
     check_control_golden(
         "control_checkpoint_record_released.v1.json",
         ControlObjectKind::CheckpointRecord,
@@ -542,27 +544,9 @@ fn control_objects_match_golden_bytes() {
             owner: CheckpointOwner::User {
                 name: "nightly".to_owned(),
             },
-            state: CheckpointRecordLifecycle::Released,
-        },
-    );
-    check_control_golden(
-        "control_checkpoint_record_condemned.v1.json",
-        ControlObjectKind::CheckpointRecord,
-        CheckpointRecordState {
-            checkpoint_id: checkpoint_id("chk_00000000000000000000000000000005"),
-            namespace_id: namespace_id(),
-            manifest_id: ManifestId(5),
-            manifest_object_id: manifest_object_id(5, "0123456789abcdef"),
-            manifest_head_seq: ChangeSeq(5),
-            manifest_payload_checksum:
-                "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_owned(),
-            head_commit_id: commit_id(),
-            created_at_ms: 3_000,
-            expires_at_ms: None,
-            owner: CheckpointOwner::User {
-                name: "nightly".to_owned(),
+            state: CheckpointRecordLifecycle::Released {
+                released_at_ms: 9_000,
             },
-            state: CheckpointRecordLifecycle::Condemned,
         },
     );
     check_control_golden(
@@ -672,6 +656,33 @@ fn mutable_control_nested_structs_reject_unknown_fields_as_corruption() {
     );
 }
 
+/// The monotonic checkpoint lifecycle is a hard cutover. The pre-cutover
+/// encoding wrote `state` as a bare string over three variants; the current
+/// decoder takes a tagged object over two, so no record written before the
+/// change reads as one written after it — not even an `active` one.
+#[test]
+fn checkpoint_records_reject_the_pre_monotonic_lifecycle_encoding() {
+    for legacy_state in ["active", "released", "condemned"] {
+        assert_control_payload_edit_is_corrupt::<CheckpointRecordState>(
+            "control_checkpoint_record.v1.json",
+            ControlObjectKind::CheckpointRecord,
+            |payload| payload["state"] = serde_json::Value::from(legacy_state),
+        );
+    }
+    // The deleted third state is not a tag this format knows either.
+    assert_control_payload_edit_is_corrupt::<CheckpointRecordState>(
+        "control_checkpoint_record.v1.json",
+        ControlObjectKind::CheckpointRecord,
+        |payload| payload["state"]["kind"] = serde_json::Value::from("condemned"),
+    );
+    // A release without its stamp cannot be aged, so it is not a release.
+    assert_control_payload_edit_is_corrupt::<CheckpointRecordState>(
+        "control_checkpoint_record.v1.json",
+        ControlObjectKind::CheckpointRecord,
+        |payload| payload["state"]["kind"] = serde_json::Value::from("released"),
+    );
+}
+
 #[test]
 fn mutable_control_enums_fail_closed_on_unknown_variants() {
     assert_control_payload_edit_is_corrupt::<HeadState>(
@@ -722,7 +733,9 @@ fn checkpoint_and_upload_decoders_reject_wrong_format_version_without_fallback()
                 owner: CheckpointOwner::User {
                     name: "nightly".to_owned(),
                 },
-                state: CheckpointRecordLifecycle::Condemned,
+                state: CheckpointRecordLifecycle::Released {
+                    released_at_ms: 4_000,
+                },
             })
             .expect("checkpoint state"),
         ),

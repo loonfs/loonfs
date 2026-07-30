@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 /// Grace and reap windows for the sweep (format spec, "Garbage collection").
 /// Both are wall-clock cleanup policy, never validity inputs. The defaults
 /// are conservative: every object gets one hour of unconditional protection,
-/// while old upload sessions and abandoned fork records wait seven days.
+/// while old upload sessions wait seven days. Abandoned fork records are not
+/// under either window — a fork attempt carries its own lease, and letting
+/// that pass is the whole proof (`gc/fork_checkpoints.rs`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GcConfig {
     pub grace_window_ms: u64,

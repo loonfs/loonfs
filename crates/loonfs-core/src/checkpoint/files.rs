@@ -75,20 +75,25 @@ pub struct CheckpointFilesPage {
 /// or any of its ancestors — evaluated against that manifest. Directories
 /// are not returned.
 ///
-/// A record that is missing, released, condemned, or expired answers
-/// `checkpoint_unavailable`, and so does a pinned manifest that is already
-/// gone. There is no fallback to current state: a consumer that lost its
-/// checkpoint takes a new one and starts over.
+/// A record that is missing or released answers `checkpoint_unavailable`,
+/// and so does a pinned manifest that is already gone. There is no fallback
+/// to current state: a consumer that lost its checkpoint takes a new one and
+/// starts over.
+///
+/// Release is the whole authority here — no clock. An active record whose
+/// expiry has passed still pins its basis and still serves: garbage
+/// collection is what turns a passed expiry into a release, and until it
+/// does, the record is a root, so answering from it is answering from state
+/// that is provably still there.
 pub(crate) async fn list_checkpoint_files_page<S: ObjectStore + ?Sized>(
     store: &S,
     table_cache: Option<&MetadataTableCache>,
     namespace_id: &NamespaceId,
     checkpoint_id: &CheckpointId,
     name_policy: NamePolicy,
-    now_ms: u64,
     request: PageRequest<CheckpointFilesPageCursor>,
 ) -> Result<CheckpointFilesPage> {
-    let record = read_pinning_checkpoint_record(store, namespace_id, checkpoint_id, now_ms).await?;
+    let record = read_pinning_checkpoint_record(store, namespace_id, checkpoint_id).await?;
     let tables = load_verified_manifest_tables_with_cache(
         store,
         table_cache,
@@ -196,14 +201,13 @@ pub(crate) async fn list_checkpoint_files_page<S: ObjectStore + ?Sized>(
     })
 }
 
-/// Loads the record and refuses every lifecycle that does not still pin its
+/// Loads the record and refuses the one lifecycle that no longer pins its
 /// basis, so a caller never reads state garbage collection may already be
 /// reclaiming.
 async fn read_pinning_checkpoint_record<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     checkpoint_id: &CheckpointId,
-    now_ms: u64,
 ) -> Result<CheckpointRecordState> {
     let Some(record) = read_checkpoint_record(store, namespace_id, checkpoint_id)
         .await?
@@ -217,14 +221,6 @@ async fn read_pinning_checkpoint_record<S: ObjectStore + ?Sized>(
         return Err(CoreError::CheckpointUnavailable(format!(
             "checkpoint `{checkpoint_id}` is `{}` and no longer pins its basis",
             record.state
-        )));
-    }
-    if record
-        .expires_at_ms
-        .is_some_and(|expires_at_ms| now_ms >= expires_at_ms)
-    {
-        return Err(CoreError::CheckpointUnavailable(format!(
-            "checkpoint `{checkpoint_id}` expired and no longer pins its basis"
         )));
     }
     Ok(record)

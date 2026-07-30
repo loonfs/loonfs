@@ -332,7 +332,7 @@ pub struct CreateCheckpointRequest {
     pub ttl_ms: Option<u64>,
 }
 
-/// Result of creating or reusing a checkpoint.
+/// Result of creating a checkpoint.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct CreateCheckpointResponse {
@@ -405,8 +405,8 @@ pub struct GcRequest {
     /// deadlines); a smaller value is rejected as `invalid_request`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grace_window_ms: Option<u64>,
-    /// Old upload sessions and abandoned fork records older than this may be
-    /// reaped or released. Must be at least the grace window.
+    /// Upload sessions older than this may be reaped. Must be at least the
+    /// grace window.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reap_window_ms: Option<u64>,
     /// Maximum candidates examined by this invocation. Omit to retain the
@@ -431,11 +431,15 @@ pub struct GcResponse {
     pub deleted_metadata_tables: u64,
     /// Unreferenced manifests deleted.
     pub deleted_manifests: u64,
-    /// Released or expired checkpoint records deleted.
+    /// Released checkpoint records deleted after their grace window.
     pub deleted_checkpoint_records: u64,
     /// Fork-owned checkpoint records released because their target namespace
     /// is provably gone.
     pub released_fork_checkpoints: u64,
+    /// Checkpoint records released because their expiry passed, or because
+    /// they sit on a terminally deleted namespace.
+    #[serde(default)]
+    pub released_expired_checkpoints: u64,
     /// Upload-session control objects deleted after the reap window.
     #[serde(default)]
     pub deleted_upload_sessions: u64,
@@ -465,6 +469,7 @@ impl GcResponse {
             deleted_manifests: 0,
             deleted_checkpoint_records: 0,
             released_fork_checkpoints: 0,
+            released_expired_checkpoints: 0,
             deleted_upload_sessions: 0,
             released_missing_basis_checkpoints: 0,
             retained_candidates: 0,

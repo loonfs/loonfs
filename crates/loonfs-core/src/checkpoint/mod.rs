@@ -65,7 +65,7 @@ pub(crate) use self::load::{
     head_from_manifest, load_basis_metadata_tables, load_namespace_manifest_envelope,
     load_namespace_manifest_envelope_if_present,
 };
-pub(crate) use self::record::{freshen_fork_checkpoint, read_checkpoint_record};
+pub(crate) use self::record::read_checkpoint_record;
 pub(crate) use self::release::release_checkpoint;
 pub(crate) use self::reorganize::reorganize_metadata_step;
 pub(crate) use self::retention::advance_retention_floor;

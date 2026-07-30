@@ -2,10 +2,7 @@
 //! then pin the resulting manifest under one durable checkpoint record.
 
 use super::flush::{try_flush_wal, TryFlushWal};
-use super::record::{
-    deterministic_checkpoint_id, renew_checkpoint_record, set_checkpoint_record_state,
-    verify_checkpoint_basis, write_checkpoint_record, CheckpointRecordWrite,
-};
+use super::record::{release_checkpoint_record, verify_checkpoint_basis, write_checkpoint_record};
 #[cfg(test)]
 use super::row::manifest_rows_for_family;
 #[cfg(test)]
@@ -21,7 +18,7 @@ use loonfs_api::wire::control::HeadState;
 use loonfs_api::wire::control::{
     CheckpointOwner, CheckpointRecordLifecycle, CheckpointRecordState,
 };
-use loonfs_api::{CreateCheckpointResponse, NamespaceId};
+use loonfs_api::{CheckpointId, CreateCheckpointResponse, NamespaceId};
 use loonfs_objectstore::ObjectStore;
 
 #[cfg(test)]
@@ -47,13 +44,14 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
     //
     // 1. Choose a basis manifest that the metadata root references,
     //    flushing the WAL tail first when it lags the head (`flush.rs`).
-    // 2. Write `checkpoints/{id}.json` with state = active.
+    // 2. Write `checkpoints/{id}.json` with state = active, under a freshly
+    //    generated id — one logical pin, one record, never a reuse of some
+    //    earlier record's key.
     // 3. Verify, after the write is durable, that the floor has not passed
     //    the basis and the basis manifest still loads, under the verify
     //    budget.
-    // 4. On verification failure, flip the record to released and retry
-    //    against a newer basis. An existing condemned record is absorbing:
-    //    renewal refuses it until the next GC pass deletes the name.
+    // 4. On verification failure, release the record — terminally — and
+    //    retry against a newer basis under a new id.
     validate_checkpoint_owner(&owner, expires_at_ms)?;
     let timer = StdMonotonicTimer::default();
     let mut saw_root_cas_race = false;
@@ -66,13 +64,7 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
             }
         };
 
-        let checkpoint_id = deterministic_checkpoint_id(
-            namespace_id,
-            basis.manifest_id,
-            &basis.manifest_object_id,
-            &basis.manifest_payload_checksum,
-            &owner,
-        );
+        let checkpoint_id = CheckpointId::generate();
         let record = CheckpointRecordState {
             checkpoint_id: checkpoint_id.clone(),
             namespace_id: namespace_id.clone(),
@@ -87,28 +79,12 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
             state: CheckpointRecordLifecycle::Active,
         };
         let verify_started_ms = timer.monotonic_now_ms();
-        let written = write_checkpoint_record(store, &record, &context.writer_version).await?;
+        write_checkpoint_record(store, &record, &context.writer_version).await?;
 
         let verified = verify_checkpoint_basis(store, &record).await?;
         let within_budget = timer.monotonic_now_ms().saturating_sub(verify_started_ms)
             <= CHECKPOINT_VERIFY_BUDGET_MS;
         if verified && within_budget {
-            if let CheckpointRecordWrite::Existing = written {
-                // Deterministic ids make re-creation a renewal: the durable
-                // expiry becomes exactly what this create requested (last
-                // write wins, shrink and clear included), and a released
-                // record for the same verified basis and owner is revived
-                // rather than duplicated — so the response below always
-                // echoes the durable state.
-                renew_checkpoint_record(
-                    store,
-                    namespace_id,
-                    &checkpoint_id,
-                    expires_at_ms,
-                    &context.writer_version,
-                )
-                .await?;
-            }
             return Ok(CreateCheckpointResponse {
                 namespace_id: namespace_id.clone(),
                 checkpoint_id,
@@ -121,11 +97,11 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
 
         // Overrunning the budget counts as verification failure: the record
         // may have raced the grace window, so it must not stand as a root.
-        set_checkpoint_record_state(
+        release_checkpoint_record(
             store,
             namespace_id,
             &checkpoint_id,
-            CheckpointRecordLifecycle::Released,
+            context.now_ms,
             &context.writer_version,
         )
         .await?;
@@ -156,11 +132,14 @@ fn validate_checkpoint_owner(owner: &CheckpointOwner, expires_at_ms: Option<u64>
             Ok(())
         }
         CheckpointOwner::Fork { .. } => {
-            // A fork pin lives exactly as long as its target may read the
-            // basis; wall-clock expiry can never bound that.
-            if expires_at_ms.is_some() {
+            // A fork record is leased: the expiry bounds the attempt, not
+            // the finished fork. Once the target head exists, the live
+            // target protects the record whatever the lease says, and an
+            // attempt that never got that far is exactly what the lease is
+            // for (`namespace/fork.rs`).
+            if expires_at_ms.is_none() {
                 return Err(CoreError::InvalidCheckpointRequest(
-                    "fork-owned checkpoints must not carry an expiry".to_owned(),
+                    "fork-owned checkpoints must carry a lease expiry".to_owned(),
                 ));
             }
             Ok(())

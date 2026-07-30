@@ -248,7 +248,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `commit_queue_full` | 503 | The namespace write queue is full; back off and retry. |
 | `server_busy` | 503 | The server is at its configured concurrency limit for this kind of work (proxied upload bodies or proxied content reads); back off and retry. |
 | `shutting_down` | 503 | The serving process closed admission for shutdown; work admitted earlier still settles. Retry against a live instance. |
-| `checkpoint_unavailable` | 503 | Required checkpoint state is unavailable: not yet published, changed during the operation, condemned pending GC deletion, or referenced material is missing. Retry after maintenance. |
+| `checkpoint_unavailable` | 503 | Required checkpoint state is unavailable: not yet published, released during the operation, or referenced material is missing. Retry after maintenance. |
 | `maintenance_required` | 503 | Namespace metadata requires maintenance before the request can be served; run maintenance and retry. |
 | `index_lagging` | 503 | The grep index trails the head past the exhaustive-scan budget; let the grep worker catch up (or set `allow_stale`) and retry. |
 | `index_corrupt` | 500 | The grep index's derived state failed validation. Disable and re-enable grep on the namespace to rebuild it; core filesystem state remains available. |
@@ -428,8 +428,8 @@ A representative v0 binding is shown below.
 | Read committed changes | `GET /v0/namespaces/{ns}/changes?after_seq=123&limit=100` |
 | Fork a namespace | `POST /v0/namespaces/{source_ns}/forks` |
 | Delete a namespace | `DELETE /v0/namespaces/{ns}?expected_head_seq=418` (feature `core.namespaces.delete`; the precondition is optional) |
-| Create a checkpoint | `POST /v0/admin/namespaces/{ns}/checkpoints` (body carries the required `name` and optional `ttl_ms`; the record is user-owned and a GC root until released or expired) |
-| Release a checkpoint | `POST /v0/admin/namespaces/{ns}/checkpoints/{checkpoint_id}/release` (idempotent; fork-owned records are rejected) |
+| Create a checkpoint | `POST /v0/admin/namespaces/{ns}/checkpoints` (body carries the required `name` and optional `ttl_ms`; every call mints a new user-owned record under a new id, and that record is a GC root until it is released) |
+| Release a checkpoint | `POST /v0/admin/namespaces/{ns}/checkpoints/{checkpoint_id}/release` (idempotent and one-way; fork-owned records are rejected) |
 | Run a maintenance step | `POST /v0/admin/namespaces/{ns}/maintenance/step` (the one maintenance entry point; see below) |
 | Content search | `POST /v0/namespaces/{ns}/query/grep` (feature `query.grep`; requires a materialized steady-state grep root) |
 | Enable the grep index | `POST /v0/admin/namespaces/{ns}/grep/index/enable` (CAS-publishes the independent grep root into checkpointed backfill; embedded mode starts that namespace's event-driven driver; idempotent) |
@@ -1072,9 +1072,12 @@ shares the source namespace's content store and starts with independent future
 namespace metadata. The fork creates a fork-owned source checkpoint so the
 source-owned immutable metadata files stay available for as long as the
 target may still read them, then installs the target namespace's head in one
-conditional write. That head carries the fork provenance for the target's
-whole life. A fork answers `namespace_exists` and `namespace_deleted` on the
-target id exactly as create does.
+conditional write, then checks that the source checkpoint still holds. That
+head carries the fork provenance for the target's whole life. A fork answers
+`namespace_exists` and `namespace_deleted` on the target id exactly as create
+does, and `checkpoint_unavailable` when the source pin did not survive the
+attempt — in which case the target it published is deleted before the error
+comes back.
 
 ### 6.12 `POST /query/grep`
 

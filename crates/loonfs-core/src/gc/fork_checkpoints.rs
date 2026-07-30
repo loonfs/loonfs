@@ -1,7 +1,7 @@
 //! Release rules for fork-owned and missing-basis checkpoint records.
 
-use super::config::GcConfig;
-use crate::checkpoint::record::{encode_checkpoint_record, set_checkpoint_record_state};
+use super::reap::lease_expired;
+use crate::checkpoint::record::{encode_checkpoint_record, release_checkpoint_record};
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
 use crate::namespace::control::{read_head_object, ControlObjectLoadError};
@@ -16,8 +16,8 @@ use loonfs_objectstore::ObjectStore;
 pub(super) enum ForkCheckpointSweep {
     /// The record was flipped `active -> released` under its etag.
     Released,
-    /// The record must survive this pass (young, target ambiguous, or the
-    /// release compare-and-swap lost a race).
+    /// The record must survive this pass (target ambiguous or still live, or
+    /// the release compare-and-swap lost a race).
     Retained,
     /// Not an active fork-owned record; the normal delete path decides.
     NotAnActiveFork,
@@ -25,16 +25,16 @@ pub(super) enum ForkCheckpointSweep {
 
 /// Releases a still-active record whose basis manifest is verifiably gone.
 /// Every check runs against fresh reads at decision time: the record must
-/// still be active and unexpired, older than the grace window (an in-flight
-/// create is never raced), and the basis manifest must still be absent.
-/// The release is the compare-and-swap the creator's own verification
-/// failure would have performed; the released record then ages out through
-/// the normal delete path on a later pass.
+/// still be active, older than the grace window by its own `created_at_ms`
+/// (an in-flight create is never raced), and the basis manifest must still
+/// be absent. The release is the compare-and-swap the creator's own
+/// verification failure would have performed; the released record then ages
+/// out through the normal delete path on a later pass.
 pub(super) async fn release_missing_basis_checkpoint<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     key: &str,
-    config: &GcConfig,
+    grace_window_ms: u64,
     context: &MutationContext,
 ) -> Result<bool> {
     let Some(body) = store
@@ -52,16 +52,10 @@ pub(super) async fn release_missing_basis_checkpoint<S: ObjectStore + ?Sized>(
         return Ok(false);
     };
     let record = envelope.state;
-    let expired = record
-        .expires_at_ms
-        .is_some_and(|expires_at_ms| expires_at_ms <= context.now_ms);
-    if record.state != CheckpointRecordLifecycle::Active || expired {
+    if record.state != CheckpointRecordLifecycle::Active {
         return Ok(false);
     }
-    let Some(last_modified_ms) = body.metadata.last_modified_ms else {
-        return Ok(false);
-    };
-    if context.now_ms.saturating_sub(last_modified_ms) < config.grace_window_ms {
+    if context.now_ms.saturating_sub(record.created_at_ms) < grace_window_ms {
         return Ok(false);
     }
     let manifest_key = metadata_manifest_object(namespace_id.as_str(), &record.manifest_object_id);
@@ -73,11 +67,11 @@ pub(super) async fn release_missing_basis_checkpoint<S: ObjectStore + ?Sized>(
     {
         return Ok(false);
     }
-    set_checkpoint_record_state(
+    release_checkpoint_record(
         store,
         namespace_id,
         &record.checkpoint_id,
-        CheckpointRecordLifecycle::Released,
+        context.now_ms,
         &context.writer_version,
     )
     .await?;
@@ -87,12 +81,11 @@ pub(super) async fn release_missing_basis_checkpoint<S: ObjectStore + ?Sized>(
 /// Decides one active fork-owned sweep candidate immediately before acting
 /// (rule 3): re-reads the record, re-proves the target namespace is gone,
 /// and releases the record by compare-and-swap on the just-observed etag.
-/// The etag check means a concurrent fork freshen either wins the swap
-/// outright or observes the release — the two can never both succeed.
+/// The etag check means one pass releases and any other observes it; the
+/// forking side is serialized by its own lease, not by this swap.
 pub(super) async fn maybe_release_fork_checkpoint<S: ObjectStore + ?Sized>(
     store: &S,
     key: &str,
-    config: &GcConfig,
     context: &MutationContext,
 ) -> Result<ForkCheckpointSweep> {
     let Some(body) = store
@@ -119,35 +112,21 @@ pub(super) async fn maybe_release_fork_checkpoint<S: ObjectStore + ?Sized>(
     else {
         return Ok(ForkCheckpointSweep::NotAnActiveFork);
     };
-    // Rule 1 applies to state changes too: GC leaves objects younger than
-    // the grace window alone.
-    let Some(last_modified_ms) = body.metadata.last_modified_ms else {
-        return Ok(ForkCheckpointSweep::Retained);
-    };
-    if context.now_ms.saturating_sub(last_modified_ms) < config.grace_window_ms {
-        return Ok(ForkCheckpointSweep::Retained);
-    }
-    if !fork_target_proven_gone(
-        store,
-        target_namespace_id,
-        last_modified_ms,
-        config,
-        context,
-    )
-    .await?
-    {
+    if !fork_target_proven_gone(store, target_namespace_id, &record, context).await? {
         return Ok(ForkCheckpointSweep::Retained);
     }
     let Some(etag) = body.metadata.etag.as_deref() else {
         return Ok(ForkCheckpointSweep::Retained);
     };
     let mut released = record;
-    released.state = CheckpointRecordLifecycle::Released;
+    released.state = CheckpointRecordLifecycle::Released {
+        released_at_ms: context.now_ms,
+    };
     let encoded = encode_checkpoint_record(&released, &context.writer_version)?;
     match store.compare_and_swap(key, etag, encoded).await {
         Ok(_) => Ok(ForkCheckpointSweep::Released),
-        // A fork freshen (or another pass) won the record; retain and let a
-        // later pass re-decide against the fresh state.
+        // Another pass won the record; retain and let a later pass re-decide
+        // against the fresh state.
         Err(loonfs_objectstore::ObjectStoreError::PreconditionFailed { .. }) => {
             Ok(ForkCheckpointSweep::Retained)
         }
@@ -160,22 +139,26 @@ pub(super) async fn maybe_release_fork_checkpoint<S: ObjectStore + ?Sized>(
 /// and since the head is the target's only installation write, an absent
 /// head means the fork never landed.
 ///
-/// The absent case is still age-gated: a fork in flight right now has not
-/// written its head yet, and a live retry would have freshened this record.
-/// An old record with no target head means the fork was abandoned. Other
-/// objects under the target prefix prove nothing either way, because no
-/// installation writes any before the head.
+/// The absent case waits for the record's lease. A fork in flight right now
+/// has not written its head yet, and its lease covers the whole attempt with
+/// margin to spare, so only an attempt that is really gone can have let the
+/// lease pass. Other objects under the target prefix prove nothing either
+/// way, because no installation writes any before the head.
+///
+/// A live target is the other half of the rule, and it is unconditional: a
+/// target head that exists and is not deleted keeps the record whatever the
+/// lease says. That is what protects a fork that published just before its
+/// lease ran out, and it is why nothing has to clear the lease afterwards.
 pub(super) async fn fork_target_proven_gone<S: ObjectStore + ?Sized>(
     store: &S,
     target_namespace_id: &NamespaceId,
-    record_last_modified_ms: u64,
-    config: &GcConfig,
+    record: &CheckpointRecordState,
     context: &MutationContext,
 ) -> Result<bool> {
     match read_head_object(store, target_namespace_id).await {
         Ok(loaded) => Ok(loaded.envelope.state.state == NamespaceState::Deleted),
         Err(ControlObjectLoadError::MissingObject { .. }) => {
-            Ok(context.now_ms.saturating_sub(record_last_modified_ms) >= config.reap_window_ms)
+            Ok(lease_expired(record, context.now_ms))
         }
         // An unreadable target head is not verifiably deleted; retain.
         Err(_) => Ok(false),
