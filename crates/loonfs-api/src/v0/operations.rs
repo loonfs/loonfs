@@ -744,7 +744,7 @@ mod tests {
             "path": "/docs/a.txt",
             "content_ref": {
                 "kind": "blob_v1",
-                "content_id": "cnt_0123456789abcdef0123456789abcdef",
+                "content_id": "con_0123456789abcdef0123456789abcdef",
                 "size_bytes": 1,
                 "storage_checksum": {
                     "algorithm": "sha256",

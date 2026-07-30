@@ -216,7 +216,7 @@ mod tests {
 
         assert!(
             serde_json::from_str::<DirectPutContentClaim>(
-                r#"{"size_bytes":5,"sha256":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824","content_id":"cnt_0123456789abcdef0123456789abcdef"}"#
+                r#"{"size_bytes":5,"sha256":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824","content_id":"con_0123456789abcdef0123456789abcdef"}"#
             )
             .is_err(),
             "a client must not be able to name the content object"

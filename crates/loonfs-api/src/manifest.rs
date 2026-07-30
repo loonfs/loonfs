@@ -875,7 +875,7 @@ mod tests {
             committed_at_ms: 12_000,
             revision_delta_index: 3,
             content_ref: crate::ContentRef::blob_v1(
-                crate::ContentId::parse("cnt_0123456789abcdef0123456789abcdef")
+                crate::ContentId::parse("con_0123456789abcdef0123456789abcdef")
                     .expect("valid content id"),
                 b"row key sample",
             ),

@@ -122,7 +122,7 @@ fn content_id(value: &str) -> ContentId {
 
 fn sample_content_ref() -> ContentRef {
     ContentRef::blob_v1(
-        content_id("cnt_0123456789abcdef0123456789abcdef"),
+        content_id("con_0123456789abcdef0123456789abcdef"),
         b"golden bytes",
     )
 }
@@ -134,7 +134,7 @@ fn sample_content_ref() -> ContentRef {
 fn sample_crc_content_ref() -> ContentRef {
     ContentRef {
         kind: ContentRefKind::BlobV1,
-        content_id: content_id("cnt_fedcba9876543210fedcba9876543210"),
+        content_id: content_id("con_fedcba9876543210fedcba9876543210"),
         size_bytes: 11_534_336,
         storage_checksum: StorageChecksum {
             algorithm: ChecksumAlgorithm::Crc64nvme,
@@ -158,7 +158,7 @@ fn content_ref_matches_golden_bytes_for_every_checksum_algorithm() {
         sample_crc_content_ref(),
         ContentRef {
             kind: ContentRefKind::BlobV1,
-            content_id: content_id("cnt_00112233445566778899aabbccddeeff"),
+            content_id: content_id("con_00112233445566778899aabbccddeeff"),
             size_bytes: 4_096,
             storage_checksum: StorageChecksum {
                 algorithm: ChecksumAlgorithm::Crc32c,
@@ -571,7 +571,7 @@ fn control_objects_match_golden_bytes() {
             upload_id: UploadId::parse("upl_0123456789abcdef0123456789abcdef")
                 .expect("valid upload id"),
             mode: UploadMode::ServiceProxied,
-            content_id: content_id("cnt_0123456789abcdef0123456789abcdef"),
+            content_id: content_id("con_0123456789abcdef0123456789abcdef"),
             claimed_checksum: None,
             direct_put_content_ref: None,
             staged_content_ref: Some(sample_content_ref()),
@@ -616,7 +616,7 @@ fn control_objects_match_golden_bytes() {
             upload_id: UploadId::parse("upl_abcdef0123456789abcdef0123456789")
                 .expect("valid upload id"),
             mode: UploadMode::DirectPut,
-            content_id: content_id("cnt_0123456789abcdef0123456789abcdef"),
+            content_id: content_id("con_0123456789abcdef0123456789abcdef"),
             claimed_checksum: Some(sample_content_ref().storage_checksum),
             direct_put_content_ref: Some(sample_content_ref()),
             staged_content_ref: None,
@@ -633,7 +633,7 @@ fn control_objects_match_golden_bytes() {
             upload_id: UploadId::parse("upl_11111111111111111111111111111111")
                 .expect("valid upload id"),
             mode: UploadMode::ServiceProxied,
-            content_id: content_id("cnt_11111111111111111111111111111111"),
+            content_id: content_id("con_11111111111111111111111111111111"),
             claimed_checksum: None,
             direct_put_content_ref: None,
             staged_content_ref: None,
@@ -809,7 +809,7 @@ fn checkpoint_and_upload_decoders_reject_wrong_format_version_without_fallback()
                 upload_id: UploadId::parse("upl_11111111111111111111111111111111")
                     .expect("valid upload id"),
                 mode: UploadMode::ServiceProxied,
-                content_id: content_id("cnt_11111111111111111111111111111111"),
+                content_id: content_id("con_11111111111111111111111111111111"),
                 claimed_checksum: None,
                 direct_put_content_ref: None,
                 staged_content_ref: None,

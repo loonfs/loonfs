@@ -483,7 +483,7 @@ mod tests {
         let mut fixed = request(FilesystemOperation::PutFile {
             absolute_path: AbsolutePath::parse("/docs/report.txt").expect("path"),
             content_ref: ContentRef::blob_v1(
-                loonfs_api::ContentId::parse("cnt_0123456789abcdef0123456789abcdef")
+                loonfs_api::ContentId::parse("con_0123456789abcdef0123456789abcdef")
                     .expect("content id"),
                 b"pinned put bytes",
             ),
@@ -496,7 +496,7 @@ mod tests {
 
         assert_eq!(
             fingerprint.as_str(),
-            "v0:sha256:473996eb05a5899a9cda36b68aeec7ef7e8e1e3e06e75bba91dcec2ff1ae4016"
+            "v0:sha256:3febc279ebb36c013f734095bebdba3c0a59bf8cbd82d205b53adbf00c112d59"
         );
     }
 
@@ -507,7 +507,7 @@ mod tests {
     fn checksum_evidence_is_outside_mutation_identity() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let content_ref = ContentRef::blob_v1(
-            loonfs_api::ContentId::parse("cnt_0123456789abcdef0123456789abcdef")
+            loonfs_api::ContentId::parse("con_0123456789abcdef0123456789abcdef")
                 .expect("content id"),
             b"pinned put bytes",
         );

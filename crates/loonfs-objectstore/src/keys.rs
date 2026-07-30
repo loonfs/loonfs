@@ -126,7 +126,7 @@ mod tests {
     use crate::layout::ObjectLayout;
     use loonfs_api::{ContentId, ManifestObjectId, NamespaceId};
 
-    const CONTENT_ID: &str = "cnt_abcdef0123456789abcdef0123456789";
+    const CONTENT_ID: &str = "con_abcdef0123456789abcdef0123456789";
 
     fn content_id() -> ContentId {
         ContentId::parse(CONTENT_ID).expect("valid content id")
@@ -278,7 +278,7 @@ mod tests {
         );
         assert_eq!(
             content_blob("cs_00000000000000000000000000000001", &content_id()),
-            "content-stores/cs_00000000000000000000000000000001/objects/ab/cnt_abcdef0123456789abcdef0123456789"
+            "content-stores/cs_00000000000000000000000000000001/objects/ab/con_abcdef0123456789abcdef0123456789"
         );
         assert_eq!(
             upload_session("ns-1", "upl_00000000000000000000000000000001"),

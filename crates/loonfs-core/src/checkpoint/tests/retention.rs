@@ -63,7 +63,7 @@ fn metadata_states_equivalent_ignoring_content_identity(
                             revision_delta_index,
                             content_ref: loonfs_api::ContentRef {
                                 content_id: loonfs_api::ContentId::parse(
-                                    "cnt_00000000000000000000000000000000",
+                                    "con_00000000000000000000000000000000",
                                 )
                                 .expect("placeholder content id"),
                                 ..content_ref

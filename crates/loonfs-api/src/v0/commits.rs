@@ -150,11 +150,11 @@ mod tests {
     #[test]
     fn filesystem_change_events_use_snake_case_kind_tags() {
         let sample_content_ref = crate::ContentRef::blob_v1(
-            crate::ContentId::parse("cnt_0123456789abcdef0123456789abcdef")
+            crate::ContentId::parse("con_0123456789abcdef0123456789abcdef")
                 .expect("valid content id"),
             b"hello",
         );
-        let sample_content_ref_json = r#"{"kind":"blob_v1","content_id":"cnt_0123456789abcdef0123456789abcdef","size_bytes":5,"storage_checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"},"whole_file_sha256":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}"#;
+        let sample_content_ref_json = r#"{"kind":"blob_v1","content_id":"con_0123456789abcdef0123456789abcdef","size_bytes":5,"storage_checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"},"whole_file_sha256":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}"#;
 
         let created = FilesystemChange::Created {
             inode_id: InodeId(2),
