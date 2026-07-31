@@ -42,10 +42,12 @@ pub struct ServerConfig {
     /// Grep serving mode plus worker pacing and bounded-step budgets.
     #[serde(default)]
     pub grep: GrepConfig,
-    /// Whether the server writer schedules maintenance (checkpoints and
-    /// reorganization folds) after writes that cross the WAL-tail
-    /// threshold. On by default; set `false` on write-serving nodes when a
-    /// dedicated maintenance process owns steps for these namespaces.
+    /// Whether the server writer runs a maintenance runner: metadata steps
+    /// after writes that cross the WAL-tail threshold, and collection
+    /// passes for the upload sessions it opened once their leases pass. It
+    /// never advances the retention floor. On by default; set `false` on
+    /// write-serving nodes when a dedicated maintenance process owns steps
+    /// for these namespaces.
     #[serde(default = "default_background_maintenance")]
     pub background_maintenance: bool,
     /// Minimum interval between publication starts per namespace, in
@@ -83,10 +85,10 @@ pub struct ServerConfig {
     #[serde(default = "default_max_concurrent_downloads")]
     pub max_concurrent_downloads: usize,
     /// How many writer-scheduled maintenance steps may run at once across
-    /// all namespaces. Each namespace runs at most one step at a time; this
-    /// bounds the fan-out when a write burst crosses thresholds in many
-    /// namespaces together. Skipped steps are rescheduled by the next
-    /// over-threshold publish.
+    /// every job and namespace. Each job runs at most one step per
+    /// namespace at a time; this bounds the fan-out when a write burst
+    /// crosses thresholds in many namespaces together. A step that waits
+    /// for a permit takes the next one that frees.
     #[serde(default = "default_max_concurrent_maintenance")]
     pub max_concurrent_maintenance: usize,
     /// Allows serving on a non-loopback address with `auth_token` unset.

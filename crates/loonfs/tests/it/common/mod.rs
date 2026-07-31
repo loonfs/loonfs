@@ -14,7 +14,7 @@ use loonfs::{
     DirectoryPageCursor, ErrorCode, FsAdmin, FsReader, FsWriter, FsWriterBuilder,
     ListChangesOptions, MaintenanceStepOptions, MaintenanceStepResponse, MoveOptions, NamespaceId,
     NamespaceStatusResponse, PageRequest, PutFileOptions, RuntimeError, SharedObjectStore,
-    UploadContentResponse, UploadId,
+    UploadContentResponse, UploadId, WalFlushStepOutcome,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::block_on::block_on;
@@ -225,6 +225,8 @@ pub(crate) trait RuntimeTestExt {
         namespace_id: &NamespaceId,
         options: MaintenanceStepOptions,
     ) -> loonfs::Result<MaintenanceStepResponse>;
+    fn flush_wal_blocking(&self, namespace_id: &NamespaceId)
+        -> loonfs::Result<WalFlushStepOutcome>;
     fn stat_path_blocking(
         &self,
         namespace_id: &NamespaceId,
@@ -344,6 +346,13 @@ impl RuntimeTestExt for TestRuntime {
         options: MaintenanceStepOptions,
     ) -> loonfs::Result<MaintenanceStepResponse> {
         block_on(self.admin.maintenance_step_namespace(namespace_id, options))
+    }
+
+    fn flush_wal_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> loonfs::Result<WalFlushStepOutcome> {
+        block_on(self.admin.flush_wal(namespace_id))
     }
 
     fn stat_path_blocking(

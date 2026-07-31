@@ -102,21 +102,28 @@ fn background_step_conclusions_emit_debug_events() {
 
     let log = String::from_utf8(captured.lock().expect("capture lock").clone())
         .expect("captured log is utf8");
-    let conclusion = log
-        .lines()
-        .find(|line| line.contains("background maintenance step concluded"))
-        .unwrap_or_else(|| {
-            panic!("background step conclusion missing from captured tracing:\n{log}")
-        });
+    // Two records, one per layer: what the executor did, and what the runner
+    // made of it.
+    let step = find_event(&log, "metadata maintenance step concluded");
     for field in [
         "wal_flush",
         "reorganize",
         "wal_tail_segments_before",
-        "elapsed_ms",
+        "conclusion",
     ] {
+        assert!(step.contains(field), "missing `{field}` in: {step}");
+    }
+    let admission = find_event(&log, "maintenance step settled");
+    for field in ["job", "namespace_id", "conclusion", "elapsed_ms"] {
         assert!(
-            conclusion.contains(field),
-            "missing `{field}` in: {conclusion}"
+            admission.contains(field),
+            "missing `{field}` in: {admission}"
         );
     }
+}
+
+fn find_event<'log>(log: &'log str, message: &str) -> &'log str {
+    log.lines()
+        .find(|line| line.contains(message))
+        .unwrap_or_else(|| panic!("`{message}` missing from captured tracing:\n{log}"))
 }

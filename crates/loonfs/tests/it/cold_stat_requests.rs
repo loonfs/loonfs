@@ -11,6 +11,7 @@
 
 use loonfs::{
     CreateNamespaceOptions, FsAdmin, FsReader, FsWriter, MaintenanceStepOptions, NamespaceId,
+    PutFileOptions,
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
 use loonfs_api::AbsolutePath;
@@ -64,7 +65,19 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
         .await
         .expect("create namespace");
     // Publish the namespace's first manifest up front, so each maintenance
-    // step below adds exactly one L0 run to it.
+    // step below adds exactly one L0 run to it. A flush needs a tail to
+    // flush, so one seed commit comes first; its run holds a single name
+    // that sorts past every name looked up below, so range pruning rules it
+    // out of those lookups.
+    writer
+        .put_file_bytes(
+            &namespace_id,
+            "/tree/dir-000000/seed.txt",
+            b"seed",
+            PutFileOptions::default(),
+        )
+        .await
+        .expect("seed the first manifest");
     admin
         .flush_wal(&namespace_id)
         .await

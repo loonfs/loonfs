@@ -2,10 +2,10 @@
 //! writer-side state — actor identity, background work, publish observer —
 //! that only a write-capable handle owns on top of it.
 
-use crate::background::BackgroundWork;
 use crate::cache::{RuntimeCacheStatsInner, RuntimeControlCache};
 use crate::config::{validate_writer_id, ReadConfig};
-use crate::publisher::{PublishObserver, PublisherRegistry};
+use crate::maintenance_runner::MaintenanceRunner;
+use crate::publisher::PublishObserver;
 use crate::time::current_time_ms;
 use crate::{
     ChangeSeq, CoreError, ErrorCode, InodeId, ListFileRevisionsResponse, NamespaceId, ObjectStore,
@@ -60,7 +60,10 @@ pub(crate) struct WriterIdentity {
 /// under an identity nobody owns any more.
 pub(crate) struct WriterBits {
     pub(crate) identity: WriterIdentity,
-    pub(crate) background: Arc<BackgroundWork>,
+    /// Admission for every background maintenance step this writer
+    /// schedules. Write paths reach it through a nudge-only handle; only
+    /// the writer shuts it down.
+    pub(crate) maintenance: MaintenanceRunner,
     /// Optional synchronous notification after a mutation batch durably
     /// advances a namespace. Callers promise that it does not block.
     pub(crate) publish_observer: Option<PublishObserver>,
@@ -224,25 +227,6 @@ impl ReadCore {
             .writer_id(actor.writer_id.clone())
             .build()
             .expect("a validated actor identity should build a namespace engine")
-    }
-}
-
-/// Holds a background singleflight claim across a spawned step. Dropping —
-/// on completion, panic, or a task discarded with its runtime — releases the
-/// namespace for the next scheduling decision.
-///
-/// The claim holds the writer's bits strongly on purpose: a scheduled step is
-/// the writer's own work, and it dies with the task that runs it.
-pub(super) struct BackgroundStepClaim {
-    pub(super) core: ReadCore,
-    pub(super) bits: Arc<WriterBits>,
-    pub(super) publisher: PublisherRegistry,
-    pub(super) namespace_id: NamespaceId,
-}
-
-impl Drop for BackgroundStepClaim {
-    fn drop(&mut self) {
-        self.bits.background.release(&self.namespace_id);
     }
 }
 

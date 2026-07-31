@@ -1,13 +1,14 @@
 //! The write-capable runtime handle.
 
 use super::{owning_runtime, FsReader, HandleBuilderCore};
-use crate::background::{BackgroundWork, FsBackgroundWork};
 use crate::fs::{ReadCore, WriterBits, WriterIdentity};
+use crate::maintenance_runner::{register_core_jobs, MaintenanceRunner};
 use crate::metrics::ObjectStoreMetricsRecorder;
 use crate::publisher::{PublishObserver, PublisherRegistry};
 use crate::{
-    CapabilityDocument, ChangeSeq, NamespaceId, Result, RuntimeCacheConfig, RuntimeCacheStats,
-    RuntimeError, SharedObjectStore, StoreConfig, TraceMode, TraceStoreKind,
+    CapabilityDocument, ChangeSeq, FsBackgroundWork, MaintenanceHandle, MaintenanceJob,
+    MaintenanceJobId, NamespaceId, Result, RuntimeCacheConfig, RuntimeCacheStats, RuntimeError,
+    SharedObjectStore, StoreConfig, TraceMode, TraceStoreKind,
 };
 use loonfs_core::cache::MetadataTableCache;
 use std::num::NonZeroUsize;
@@ -17,10 +18,11 @@ use std::sync::Arc;
 ///
 /// `FsWriter` owns a writer identity and the full mutation surface:
 /// file and directory mutations, commit publication, uploads, and namespace
-/// lifecycle. With [`FsBackgroundWork::Enabled`] it may also schedule
-/// non-destructive maintenance after writes, spawned on its owning runtime.
-/// Retention advancement and garbage collection stay explicit
-/// [`FsAdmin`](crate::FsAdmin) work.
+/// lifecycle. With [`FsBackgroundWork::Enabled`] it also owns a maintenance
+/// runner, spawned on its owning runtime: metadata steps after writes that
+/// cross the WAL-tail threshold, and collection passes for the upload
+/// sessions it opened once their leases pass. Advancing the retention floor
+/// stays explicit [`FsAdmin`](crate::FsAdmin) work.
 ///
 /// The handle is runtime-bound: open it with `build().await` inside the
 /// long-lived Tokio runtime that will drive it, and do not share one writer
@@ -30,10 +32,9 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct FsWriter {
     pub(crate) core: ReadCore,
-    /// The writer half of the runtime: the writer identity, the
-    /// background-work policy, and the publish observer. Publisher workers
-    /// hold this weakly, so dropping every clone of this handle stops new
-    /// publication work.
+    /// The writer half of the runtime: the writer identity, the maintenance
+    /// runner, and the publish observer. Publisher workers hold this weakly,
+    /// so dropping every clone of this handle stops new publication work.
     pub(crate) bits: Arc<WriterBits>,
     pub(crate) publisher: PublisherRegistry,
 }
@@ -105,11 +106,34 @@ impl FsWriter {
     // Namespace lifecycle lives in `fs/namespaces.rs`; mutation, commit,
     // and upload operations in `fs/writes.rs` and `fs/uploads.rs`.
 
+    /// A nudge-only view of this writer's maintenance runner.
+    ///
+    /// Hosts that compose an extension — a derived index, say — hand this to
+    /// whatever observes change, so their triggers reach the same admission
+    /// the runtime's own jobs go through. Nudges never block and are ignored
+    /// under [`FsBackgroundWork::ManualOnly`] and after shutdown.
+    pub fn maintenance(&self) -> MaintenanceHandle {
+        self.bits.maintenance.handle()
+    }
+
+    /// Registers an extension's maintenance executor alongside the runtime's
+    /// own, under the job's own id.
+    ///
+    /// The registered job shares this writer's permit pool, backoff, and
+    /// shutdown; [`Self::maintenance`] is how its work gets admitted.
+    /// Registering the same id twice is a configuration error.
+    pub fn register_maintenance_job(
+        &self,
+        job: Arc<dyn MaintenanceJob>,
+    ) -> Result<MaintenanceJobId> {
+        self.bits.maintenance.register(job)
+    }
+
     /// Waits until every writer-scheduled maintenance task has finished,
     /// without closing the handle. Panicked tasks surface as a runtime-task
     /// error.
     pub async fn wait_for_background_work(&self) -> Result<()> {
-        self.bits.background.drain().await
+        self.bits.maintenance.drain().await
     }
 
     /// Shuts down writer-scheduled background work: rejects new maintenance
@@ -135,13 +159,13 @@ impl FsWriter {
         // straight to a queued namespace — spawning the exact work the
         // shutdown decided to drop. Closing first makes that transfer
         // impossible for the whole drain.
-        self.bits.background.shut_down();
+        self.bits.maintenance.shut_down();
         // Publications second: an in-flight step still has one to settle, and
         // settling it is what lets that step's task end. Draining without
         // closing admission keeps the handle usable; a caller that keeps
         // submitting concurrently just keeps the drain waiting.
         self.publisher.drain().await?;
-        self.bits.background.drain().await
+        self.bits.maintenance.drain().await
     }
 }
 
@@ -153,6 +177,7 @@ pub struct FsWriterBuilder {
     max_concurrent_maintenance: usize,
     min_publish_interval_ms: u64,
     publish_observer: Option<PublishObserver>,
+    maintenance_clock: Option<Arc<dyn crate::maintenance_runner::MaintenanceClock>>,
 }
 
 impl FsWriterBuilder {
@@ -164,7 +189,20 @@ impl FsWriterBuilder {
             max_concurrent_maintenance: crate::config::DEFAULT_MAX_CONCURRENT_MAINTENANCE,
             min_publish_interval_ms: crate::config::DEFAULT_MIN_PUBLISH_INTERVAL_MS,
             publish_observer: None,
+            maintenance_clock: None,
         }
+    }
+
+    /// Substitutes the clock the maintenance runner schedules against, so a
+    /// test can assert on the times a write path plants without waiting for
+    /// them. Scheduling only: no durable stamp comes from here.
+    #[cfg(test)]
+    pub(crate) fn maintenance_clock(
+        mut self,
+        clock: Arc<dyn crate::maintenance_runner::MaintenanceClock>,
+    ) -> Self {
+        self.maintenance_clock = Some(clock);
+        self
     }
 
     /// Sets the writer id used by namespace mutations. Required.
@@ -184,10 +222,10 @@ impl FsWriterBuilder {
     }
 
     /// Caps how many writer-scheduled maintenance steps may run at once
-    /// across all namespaces this writer serves. Each namespace already runs
-    /// at most one step at a time; this bounds the fan-out when many
-    /// namespaces cross their thresholds together. Requests beyond the cap
-    /// are coalesced by namespace and run as permits become available. Defaults to
+    /// across every job and namespace this writer serves. Each job already
+    /// runs at most one step per namespace at a time; this bounds the
+    /// fan-out when many namespaces need work together. Requests beyond the
+    /// cap coalesce per job and namespace and run as permits free. Defaults to
     /// [`crate::DEFAULT_MAX_CONCURRENT_MAINTENANCE`]. The limit must be
     /// greater than zero; [`FsBackgroundWork::ManualOnly`] is the only way
     /// to disable scheduling.
@@ -284,15 +322,22 @@ impl FsWriterBuilder {
                         .to_owned(),
                 )
             })?;
-        let background = Arc::new(BackgroundWork::new(
-            self.background_work,
-            Some(owning_runtime()?),
-            max_concurrent_maintenance,
-        ));
+        let runtime = Some(owning_runtime()?);
+        let maintenance = match self.maintenance_clock {
+            Some(clock) => MaintenanceRunner::with_clock(
+                self.background_work,
+                runtime,
+                max_concurrent_maintenance,
+                clock,
+            ),
+            None => {
+                MaintenanceRunner::new(self.background_work, runtime, max_concurrent_maintenance)
+            }
+        };
         let core = self.core.open_read_core()?;
         let bits = Arc::new(WriterBits {
             identity,
-            background,
+            maintenance,
             publish_observer: self.publish_observer,
         });
         let publisher = PublisherRegistry::new(
@@ -302,6 +347,9 @@ impl FsWriterBuilder {
             core.trace_mode(),
             core.trace_store_kind(),
         );
+        // The runtime's own executors register last: they run as an admin
+        // over this writer's parts, so both have to exist first.
+        register_core_jobs(&bits.maintenance, &core, &bits, &publisher)?;
         Ok(FsWriter {
             core,
             bits,
@@ -312,7 +360,9 @@ impl FsWriterBuilder {
 
 #[cfg(test)]
 mod tests {
-    use crate::{CreateNamespaceOptions, FsBackgroundWork, FsWriter, PutFileOptions};
+    use crate::{
+        CreateNamespaceOptions, FsBackgroundWork, FsWriter, MaintenanceJobId, PutFileOptions,
+    };
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_test_support::ids::namespace_id;
     use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationClass};
@@ -370,8 +420,16 @@ mod tests {
             futures::poll!(shutdown.as_mut()).is_pending(),
             "the parked publication must keep the shutdown pending"
         );
+        // Behavioral, not a flag read: a nudge lands after the first poll
+        // and must leave nothing admitted behind it.
+        writer
+            .maintenance()
+            .nudge(MaintenanceJobId::METADATA, &namespace_id);
         assert!(
-            !writer.bits.background.try_claim(&namespace_id),
+            !writer
+                .bits
+                .maintenance
+                .is_pending(MaintenanceJobId::METADATA, &namespace_id),
             "maintenance admission must already be closed while publications drain"
         );
 

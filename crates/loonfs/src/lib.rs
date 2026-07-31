@@ -24,17 +24,21 @@
 //! ```
 //!
 //! Background work belongs to the writer — publications, and the maintenance
-//! a publication schedules. LoonFS never creates a hidden maintenance
-//! runtime: that work is spawned on the writer's own owning runtime, and
+//! a publication schedules. One [`MaintenanceJob`] runner admits every
+//! background step: the writer nudges it, it decides when to run, and the
+//! executors re-read durable state each time. It covers the namespaces this
+//! process touches and the ones a host explicitly assigns to it, and it
+//! discovers none. LoonFS never creates a hidden maintenance runtime: that
+//! work is spawned on the writer's own owning runtime, and
 //! [`FsWriter::shutdown_background`] settles it. Readers and admins start no
 //! background work at all, so they have nothing to shut down.
 #![warn(missing_docs)]
 
-mod background;
 mod cache;
 mod config;
 mod fs;
 mod handle;
+mod maintenance_runner;
 mod options;
 pub mod publisher;
 mod time;
@@ -131,10 +135,13 @@ pub use loonfs_objectstore::{
     ByteStream, ObjectStore, ObjectStoreError, SharedObjectStore, StoreConfig,
 };
 
-pub use background::FsBackgroundWork;
 pub use cache::RuntimeCacheStats;
 pub use config::{RuntimeCacheConfig, DEFAULT_MAX_CONCURRENT_MAINTENANCE};
 pub use handle::{FsAdmin, FsAdminBuilder, FsReader, FsReaderBuilder, FsWriter, FsWriterBuilder};
+pub use maintenance_runner::{
+    FsBackgroundWork, MaintenanceHandle, MaintenanceJob, MaintenanceJobId, MaintenanceProbe,
+    MaintenanceStepConclusion, MaintenanceStepResult,
+};
 pub use options::{
     gc_config_from_request, CopyOptions, CreateCheckpointOptions, CreateDirectoryOptions,
     CreateNamespaceOptions, DeleteOptions, ListChangesOptions, MaintenanceStepOptions, MoveOptions,
