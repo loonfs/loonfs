@@ -103,11 +103,13 @@ impl<S: ObjectStore + Clone + Send + Sync + 'static> MaintenanceJob for GrepMain
             GrepLifecycle::Backfilling { .. } => Ok(MaintenanceProbe::Due),
             // A watermark inside a commit has the rest of that commit left,
             // which no question about later commits would reveal.
-            GrepLifecycle::Steady if root.state().index().next_event_index != 0 => {
-                Ok(MaintenanceProbe::Due)
-            }
-            GrepLifecycle::Steady => {
-                let built_through_seq = root.state().index().built_through_seq;
+            GrepLifecycle::Steady {
+                next_event_index, ..
+            } if *next_event_index != 0 => Ok(MaintenanceProbe::Due),
+            GrepLifecycle::Steady {
+                built_through_seq, ..
+            } => {
+                let built_through_seq = *built_through_seq;
                 match self
                     .worker
                     .reads(namespace_id)

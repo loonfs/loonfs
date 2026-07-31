@@ -610,10 +610,45 @@ pub(crate) enum AdminCommand {
     Step(AdminStepArgs),
     /// Run a mark-and-sweep garbage-collection pass.
     Gc(AdminGcArgs),
-    /// Enable the gram content index and start its backfill.
-    IndexEnable(AdminNamespaceArgs),
+    /// Enable the gram content index and wait for its backfill to reach the
+    /// sequence the namespace was at when this command started.
+    IndexEnable(AdminIndexEnableArgs),
     /// Disable the gram content index.
     IndexDisable(AdminNamespaceArgs),
+    /// Report where the gram content index is: disabled, backfilling, or
+    /// steady at a watermark.
+    IndexStatus(AdminNamespaceArgs),
+    /// Collect the namespace's unreferenced gram-index objects.
+    IndexGc(AdminIndexGcArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct AdminIndexEnableArgs {
+    #[command(flatten)]
+    pub target: TargetSelectorArgs,
+    /// Return as soon as the index is enabled, without waiting for the
+    /// backfill.
+    #[arg(long)]
+    pub no_wait: bool,
+    /// Give up after this many steps: one bounded index step where the
+    /// profile is embedded, one status check where it is remote. Exits
+    /// nonzero and reports how far the index got.
+    #[arg(long)]
+    pub max_steps: Option<u64>,
+    /// Give up after this many milliseconds. Exits nonzero and reports how
+    /// far the index got.
+    #[arg(long)]
+    pub deadline_ms: Option<u64>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct AdminIndexGcArgs {
+    #[command(flatten)]
+    pub target: TargetSelectorArgs,
+    /// Spend at most this many reads and return after one bounded pass.
+    /// Omit to loop bounded passes through completion.
+    #[arg(long)]
+    pub max_objects: Option<u64>,
 }
 
 #[derive(Debug, Args)]
@@ -740,6 +775,8 @@ pub(crate) enum CommandKind {
     AdminGc,
     AdminIndexEnable,
     AdminIndexDisable,
+    AdminIndexStatus,
+    AdminIndexGc,
     ConfigPath,
     ConfigShow,
     Version,
@@ -783,6 +820,8 @@ impl CommandKind {
             CommandKind::AdminGc => "admin_gc",
             CommandKind::AdminIndexEnable => "admin_index_enable",
             CommandKind::AdminIndexDisable => "admin_index_disable",
+            CommandKind::AdminIndexStatus => "admin_index_status",
+            CommandKind::AdminIndexGc => "admin_index_gc",
             CommandKind::ConfigPath => "config_path",
             CommandKind::ConfigShow => "config_show",
             CommandKind::Version => "version",
@@ -837,6 +876,8 @@ impl Cli {
                 AdminCommand::Gc(_) => CommandKind::AdminGc,
                 AdminCommand::IndexEnable(_) => CommandKind::AdminIndexEnable,
                 AdminCommand::IndexDisable(_) => CommandKind::AdminIndexDisable,
+                AdminCommand::IndexStatus(_) => CommandKind::AdminIndexStatus,
+                AdminCommand::IndexGc(_) => CommandKind::AdminIndexGc,
             },
             Command::Config { command } => match command {
                 ConfigCommand::Path => CommandKind::ConfigPath,

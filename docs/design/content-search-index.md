@@ -113,14 +113,21 @@ Segments live under
 `namespaces/{namespace}/extensions/grep/segments/`. The small mutable
 `extensions/grep/root.json` pointer names an immutable, content-derived
 manifest under `extensions/grep/manifests/`; that manifest records the
-query-visible segments, the incremental
-`(built_through_seq, next_event_index)` cursor, lifecycle, run-ordinal
-allocation, and any in-progress reorganization snapshot, outputs, and cursor. A zero
-or absent `next_event_index` is the commit boundary; a nonzero value resumes
-at that offset in the watermark commit's ordered change events, one per
-committed operation. The pointer and manifests are independent of the
-namespace manifest, so core never has to understand grep state to read the
-filesystem.
+query-visible segments, the lifecycle, run-ordinal allocation, and any
+in-progress reorganization snapshot, outputs, and cursor. The pointer and
+manifests are independent of the namespace manifest, so core never has to
+understand grep state to read the filesystem.
+
+Each lifecycle phase carries its own position and nothing else's. A
+`backfilling` root carries the namespace sequence its checkpoint captured
+and the inode its walk resumes after; a `steady` root carries the
+incremental `(built_through_seq, next_event_index)` cursor. A zero or absent
+`next_event_index` is the commit boundary; a nonzero value resumes at that
+offset in the watermark commit's ordered change events, one per committed
+operation. Neither phase can report the other's sequence, because neither
+has a field to put it in — which is what lets a status reader trust the
+number it sees. A finished backfill turns steady at exactly the sequence it
+walked to, and the change feed takes over from there.
 
 Publication writes the immutable manifest first and installs the pointer by
 one etag CAS. A CAS loser's manifest and segments are unreachable derived
@@ -131,7 +138,15 @@ Disabling writes a manifest with lifecycle `disabled` and no segment
 references, then CAS-publishes its pointer. The old objects become candidates for grep-owned collection;
 the disable call never deletes them synchronously. Grep GC retains every
 object named by a verified live root and deletes unreferenced grep objects
-only after its grace window. A fork does not copy a grep root, so it begins
+only after its grace window. It walks the prefix as a stream under a read
+budget, like core collection: `max_objects` bounds what one pass spends —
+each key's listing plus the liveness or root re-read that authorizes its
+deletion and the probe that reads its age — and the pass answers an opaque,
+namespace-bound cursor when keys remain. That cursor skips enumeration and
+nothing else: every resumed pass re-reads liveness and the root before it
+deletes anything, so losing it costs a repeated walk and never a wrong
+delete. Collection stays explicit and per namespace; it is not registered
+with the runner. A fork does not copy a grep root, so it begins
 unmaterialized and can be enabled independently.
 
 ## Building
@@ -173,11 +188,17 @@ namespace. A server that only serves queries registers no job and refuses
 the routes that would mutate a grep root.
 
 A library-embedded host (the CLI's embedded mode) schedules nothing, so
-enabling the index is the schedule: the host calls
-`GrepWorker::run_to_quiescence`, the same build-and-fold pair loop run
-synchronously until the index is caught up, and re-running enable on an
-already-enabled namespace drives catch-up the same way. Between enables, small write tails are served by the query-time
-exhaustive tail scan within its budget.
+enabling the index is the schedule: `loonfs admin index-enable` captures one
+namespace sequence before it starts — the target a fresh backfill's
+checkpoint pinned, or the namespace's current head for an index that is
+already steady — and then runs the same job's bounded steps itself until the
+index has built through that sequence. It stops there even if writes keep
+landing, so a busy namespace cannot keep the command running; `--no-wait`
+skips the waiting entirely, and `--max-steps` and `--deadline-ms` bound it,
+reporting how far the index got and exiting nonzero rather than pretending
+to have finished. Re-running enable on an already-enabled namespace is how
+an embedded operator advances a lagging index. Between enables, small write
+tails are served by the query-time exhaustive tail scan within its budget.
 
 Detached maintenance is explicitly assigned with repeatable
 `loonfs-grep --namespace <id>` flags. `--once` catches up only those namespaces

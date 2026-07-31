@@ -1,7 +1,7 @@
 //! Content search (grep) request and response shapes: the `query/v0`
 //! plane's first operation (API spec, "Content search").
 
-use crate::{AbsolutePath, ChangeSeq, InodeId, NamespaceId, RevisionNo};
+use crate::{AbsolutePath, ChangeSeq, CheckpointId, InodeId, NamespaceId, RevisionNo};
 use serde::{Deserialize, Serialize};
 use xxhash_rust::xxh64::xxh64;
 
@@ -110,19 +110,93 @@ pub struct GrepResponse {
     pub next_cursor: Option<String>,
 }
 
+/// Where a namespace's grep index is in its lifecycle.
+///
+/// The phases carry different facts and never share a field: a backfill
+/// reports the sequence it is walking toward and how far the walk got, and
+/// only a steady index reports a watermark it has actually built through.
+/// A reader that wants "is this searchable, and through what?" asks the
+/// `steady` phase and nothing else.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(tag = "phase", rename_all = "snake_case")]
+pub enum GrepIndexLifecycle {
+    /// No index is maintained for this namespace.
+    Disabled,
+    /// The initial walk over a pinned checkpoint is running. Nothing is
+    /// searchable yet.
+    Backfilling {
+        /// Namespace sequence the pinned checkpoint captured. Reaching it
+        /// is what completes the backfill.
+        target_seq: ChangeSeq,
+        /// Inode the walk resumes strictly after. Absent before the first
+        /// page.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cursor_inode_id: Option<InodeId>,
+        /// Checkpoint pinning the state being walked.
+        checkpoint_id: CheckpointId,
+    },
+    /// The index follows the change feed. Commits at or below the watermark
+    /// are searchable.
+    Steady {
+        /// Sequence of the commit at the index cursor.
+        built_through_seq: ChangeSeq,
+        /// Offset of the next change event within `built_through_seq`, or
+        /// zero when the whole commit is represented.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        next_event_index: u32,
+    },
+}
+
+impl GrepIndexLifecycle {
+    /// Whether every commit at or below `target_seq` is represented.
+    ///
+    /// A watermark inside a commit (`next_event_index` above zero) has that
+    /// commit only partly indexed, so it counts as reached only for earlier
+    /// sequences.
+    pub fn is_built_through(&self, target_seq: ChangeSeq) -> bool {
+        match self {
+            Self::Disabled | Self::Backfilling { .. } => false,
+            Self::Steady {
+                built_through_seq,
+                next_event_index,
+            } => {
+                *built_through_seq > target_seq
+                    || (*built_through_seq == target_seq && *next_event_index == 0)
+            }
+        }
+    }
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
+}
+
 /// Result of enabling the grep index on a namespace (admin plane).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct EnableGrepIndexResponse {
     /// Namespace whose grep root was enabled.
     pub namespace_id: NamespaceId,
-    /// Sequence the index is built through when the enabling host reports
-    /// completion (an embedded host drives the backfill inside the call);
-    /// on a hosted server the backfill continues in its driver and this is
-    /// the sequence it targets.
-    pub built_through_seq: ChangeSeq,
     /// True when the namespace already carried an enabled grep root.
     pub already_enabled: bool,
+    /// The durable lifecycle this call published or found.
+    pub state: GrepIndexLifecycle,
+}
+
+/// The namespace's grep-index lifecycle and its cheap bookkeeping (admin
+/// plane).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct GrepIndexStatusResponse {
+    /// Namespace the status describes.
+    pub namespace_id: NamespaceId,
+    /// Where the index is in its lifecycle.
+    pub state: GrepIndexLifecycle,
+    /// Next logical run ordinal the index will allocate.
+    pub next_run_ordinal: u64,
+    /// True while a partitioned segment reorganization is in progress.
+    pub reorganize_pending: bool,
 }
 
 /// Result of disabling the grep index on a namespace (admin plane).
@@ -133,6 +207,20 @@ pub struct DisableGrepIndexResponse {
     pub namespace_id: NamespaceId,
     /// False when the namespace had no enabled grep root.
     pub was_enabled: bool,
+}
+
+/// One explicit grep-index garbage-collection pass (admin plane).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct GrepGcRequest {
+    /// Reads this pass may spend before returning with a `next_cursor`.
+    /// Omit to walk the whole grep keyspace in one call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_objects: Option<u64>,
+    /// Opaque resume token returned as `next_cursor` by an earlier pass
+    /// against the same namespace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
 }
 
 /// Result of one explicit grep-index garbage-collection pass (admin plane).
@@ -151,6 +239,9 @@ pub struct GrepGcResponse {
     pub retained_candidates: u64,
     /// Whether unreadable namespace or grep state forced conservative retention.
     pub namespace_degraded: bool,
+    /// Present when the budget stopped the pass with keys left to examine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
 }
 
 #[cfg(test)]
@@ -200,6 +291,68 @@ mod tests {
                 "line_truncated": false
             })
         );
+    }
+
+    #[test]
+    fn the_lifecycle_phases_never_share_a_sequence_field() {
+        let backfilling = GrepIndexLifecycle::Backfilling {
+            target_seq: ChangeSeq(9),
+            cursor_inode_id: Some(InodeId(4)),
+            checkpoint_id: CheckpointId::parse("chk_00000000000000000000000000000009")
+                .expect("checkpoint id"),
+        };
+        assert_eq!(
+            serde_json::to_value(&backfilling).expect("serialize backfilling"),
+            serde_json::json!({
+                "phase": "backfilling",
+                "target_seq": 9,
+                "cursor_inode_id": 4,
+                "checkpoint_id": "chk_00000000000000000000000000000009"
+            }),
+            "a backfill reports its target and its walk, never a watermark"
+        );
+
+        assert_eq!(
+            serde_json::to_value(GrepIndexLifecycle::Steady {
+                built_through_seq: ChangeSeq(9),
+                next_event_index: 0,
+            })
+            .expect("serialize steady"),
+            serde_json::json!({"phase": "steady", "built_through_seq": 9}),
+            "a steady index reports its watermark and no target"
+        );
+
+        assert_eq!(
+            serde_json::to_value(GrepIndexLifecycle::Disabled).expect("serialize disabled"),
+            serde_json::json!({"phase": "disabled"})
+        );
+    }
+
+    #[test]
+    fn only_a_steady_index_has_built_through_a_sequence() {
+        let backfilling = GrepIndexLifecycle::Backfilling {
+            target_seq: ChangeSeq(9),
+            cursor_inode_id: None,
+            checkpoint_id: CheckpointId::parse("chk_00000000000000000000000000000009")
+                .expect("checkpoint id"),
+        };
+        assert!(
+            !backfilling.is_built_through(ChangeSeq(0)),
+            "a backfill has indexed nothing until it turns steady"
+        );
+        assert!(!GrepIndexLifecycle::Disabled.is_built_through(ChangeSeq(0)));
+
+        let steady = |built_through_seq, next_event_index| GrepIndexLifecycle::Steady {
+            built_through_seq,
+            next_event_index,
+        };
+        assert!(steady(ChangeSeq(9), 0).is_built_through(ChangeSeq(9)));
+        assert!(steady(ChangeSeq(9), 0).is_built_through(ChangeSeq(8)));
+        assert!(!steady(ChangeSeq(9), 0).is_built_through(ChangeSeq(10)));
+        // A watermark inside a commit leaves the rest of that commit
+        // unindexed, so only earlier sequences count as reached.
+        assert!(!steady(ChangeSeq(9), 3).is_built_through(ChangeSeq(9)));
+        assert!(steady(ChangeSeq(9), 3).is_built_through(ChangeSeq(8)));
     }
 
     #[test]

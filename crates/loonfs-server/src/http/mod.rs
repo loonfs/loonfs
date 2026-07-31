@@ -34,7 +34,7 @@ use self::handlers_namespace::{
 };
 use self::handlers_query::{
     disable_grep_index, enable_grep_index, gc_grep_index, grep, grep_index_not_maintained,
-    grep_queries_not_served,
+    grep_index_status, grep_queries_not_served,
 };
 use self::handlers_uploads::{
     abort_upload, begin_upload, complete_upload, read_upload_status, sign_upload_parts,
@@ -108,6 +108,14 @@ fn router(state: AppState) -> Router {
     } else {
         post(grep_index_not_maintained)
     };
+    // Reading the index's lifecycle is administering it, not serving it: a
+    // deployment that only answers searches has no authority over the state
+    // this reports, so it gates with the mutating three.
+    let grep_status_route = if maintains_index {
+        get(grep_index_status)
+    } else {
+        get(grep_index_not_maintained)
+    };
     Router::new()
         .route("/health", get(health))
         .route("/readiness", get(readiness))
@@ -128,6 +136,10 @@ fn router(state: AppState) -> Router {
             get(get_file_bytes),
         )
         .route("/v0/namespaces/:namespace/query/grep", grep_route)
+        .route(
+            "/v0/admin/namespaces/:namespace/grep/index",
+            grep_status_route,
+        )
         .route(
             "/v0/admin/namespaces/:namespace/grep/index/enable",
             enable_grep_route,

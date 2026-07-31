@@ -54,10 +54,19 @@ async fn standalone_once_after_external_enable_indexes_in_one_sweep_and_is_idemp
         .await
         .expect("load root")
         .expect("root exists");
-    assert_eq!(first_root.state().index().built_through_seq.0, 1);
+    assert_eq!(
+        first_root
+            .state()
+            .lifecycle()
+            .steady_watermark()
+            .expect("the first root is steady")
+            .0
+             .0,
+        1
+    );
     assert!(matches!(
         first_root.state().lifecycle(),
-        GrepLifecycle::Steady
+        GrepLifecycle::Steady { .. }
     ));
     assert!(!first_root.state().segments().is_empty());
     let first_root_bytes = store
@@ -194,7 +203,7 @@ async fn standalone_namespace_list_is_exact_and_long_running_poll_catches_new_wr
         .expect("assigned root");
     assert!(matches!(
         assigned_root.state().lifecycle(),
-        GrepLifecycle::Steady
+        GrepLifecycle::Steady { .. }
     ));
     let unassigned_root = load_grep_root(&*store, &unassigned)
         .await
@@ -321,7 +330,12 @@ async fn wait_for_watermark(store: &Arc<LocalFsStore>, namespace_id: &NamespaceI
             .await
             .expect("load polled root")
             .expect("polled root");
-        if root.state().index().built_through_seq.0 >= target {
+        if root
+            .state()
+            .lifecycle()
+            .steady_watermark()
+            .is_some_and(|(reached, _)| reached.0 >= target)
+        {
             return;
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;

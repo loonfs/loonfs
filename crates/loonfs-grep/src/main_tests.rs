@@ -8,7 +8,7 @@
 use super::{maintain_namespace, NamespaceJob, PollShutdown};
 use loonfs::{FsAdmin, FsReader, FsWriter};
 use loonfs_api::{ChangeSeq, GrepRequest, NamespaceId};
-use loonfs_grep::root::{load_grep_root, GrepLifecycle};
+use loonfs_grep::root::load_grep_root;
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepIndexSnapshot, GrepMaintenanceJob, GrepService, GrepWorker,
     NamespaceReads,
@@ -193,9 +193,7 @@ async fn wait_for_steady(
                 .await
                 .expect("load polled root")
             {
-                if matches!(root.state().lifecycle(), GrepLifecycle::Steady)
-                    && root.state().index().built_through_seq == built_through_seq
-                {
+                if root.state().lifecycle().steady_watermark() == Some((built_through_seq, 0)) {
                     return;
                 }
             }

@@ -77,8 +77,10 @@ async fn grams_built_through_seq(
         .expect("load grep root")
         .expect("grep root exists")
         .state()
-        .index()
-        .built_through_seq
+        .lifecycle()
+        .steady_watermark()
+        .expect("a steady grep root has a watermark")
+        .0
 }
 
 #[tokio::test]
@@ -437,12 +439,14 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
         .await
         .expect("load partial grep root")
         .expect("partial grep root");
-    assert_eq!(
-        partial.state().index().built_through_seq,
-        commit.committed_seq
-    );
+    let (partial_seq, partial_event_index) = partial
+        .state()
+        .lifecycle()
+        .steady_watermark()
+        .expect("the partial root is steady");
+    assert_eq!(partial_seq, commit.committed_seq);
     assert!(
-        partial.state().index().next_event_index > 0,
+        partial_event_index > 0,
         "the first step must stop within the atomic commit"
     );
     let prefix_segment_ids: BTreeSet<_> = partial
@@ -510,10 +514,13 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
         .expect("load complete grep root")
         .expect("complete grep root");
     assert_eq!(
-        complete.state().index().built_through_seq,
-        commit.committed_seq
+        complete
+            .state()
+            .lifecycle()
+            .steady_watermark()
+            .expect("the complete root is steady"),
+        (commit.committed_seq, 0)
     );
-    assert_eq!(complete.state().index().next_event_index, 0);
     let complete_segment_ids: BTreeSet<_> = complete
         .state()
         .segments()

@@ -13,7 +13,13 @@ const SHA256_PREFIX: &str = "sha256:";
 const SHA256_HEX_LEN: usize = 64;
 
 /// Version of the grep index state nested inside a v1 manifest.
-pub const GREP_INDEX_FORMAT_VERSION: u32 = 1;
+///
+/// Version 2 moved the phase-only watermark fields out of the index-wide
+/// bookkeeping and into the lifecycle variant that owns them. A version-1
+/// root is rejected outright: it spelled a backfill's target and a steady
+/// index's real progress with the same field, and nothing can tell those
+/// apart after the fact.
+pub const GREP_INDEX_FORMAT_VERSION: u32 = 2;
 
 /// Content-derived identity of one immutable grep manifest payload.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -147,23 +153,87 @@ impl GrepRootPointer {
 }
 
 /// Durable lifecycle of grep indexing for one namespace.
+///
+/// Each phase carries its own position and nothing else's. A backfill knows
+/// the sequence it is walking toward and how far the walk got; a steady
+/// index knows the sequence it has really built through. Neither can report
+/// the other's number, because neither has a field to put it in.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum GrepLifecycle {
     /// Initial materialization is walking the checkpointed file set.
     Backfilling {
+        /// Namespace sequence the pinned checkpoint captured. The walk ends
+        /// at exactly this state however far the namespace has moved since.
+        target_seq: ChangeSeq,
         /// Inode the next backfill step resumes strictly after; absent means
         /// the start. Checkpoint file enumeration is ordered by ascending
         /// inode id, so one id is the whole resume position.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        backfill_cursor: Option<InodeId>,
+        cursor: Option<InodeId>,
         /// User-checkpoint pin backing this immutable manifest walk.
         checkpoint_id: CheckpointId,
     },
     /// Backfill is complete and changes are consumed incrementally.
-    Steady,
+    Steady {
+        /// Sequence of the commit at the index cursor. Everything at or
+        /// below it is indexed, subject to `next_event_index`.
+        built_through_seq: ChangeSeq,
+        /// Offset of the next change event within `built_through_seq`, or
+        /// zero when the cursor is at the commit boundary and the whole
+        /// commit is represented.
+        ///
+        /// A commit's events are one per committed operation in request
+        /// order, derived from its durable delta vector; incremental
+        /// indexing relies on that stable order when a step's budget stops
+        /// it inside a commit.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        next_event_index: u32,
+    },
     /// Grep indexing and queries are disabled for this namespace.
     Disabled,
+}
+
+impl GrepLifecycle {
+    /// The steady watermark pair, or `None` in any phase that has none.
+    pub fn steady_watermark(&self) -> Option<(ChangeSeq, u32)> {
+        match self {
+            Self::Steady {
+                built_through_seq,
+                next_event_index,
+            } => Some((*built_through_seq, *next_event_index)),
+            Self::Backfilling { .. } | Self::Disabled => None,
+        }
+    }
+}
+
+/// The durable lifecycle as the admin plane reports it.
+///
+/// The wire enum mirrors the durable one phase for phase, so a reader of
+/// either sees the same facts under the same names and no host has to
+/// invent a number for a phase that does not have one.
+impl From<&GrepLifecycle> for loonfs_api::v0::GrepIndexLifecycle {
+    fn from(lifecycle: &GrepLifecycle) -> Self {
+        match lifecycle {
+            GrepLifecycle::Disabled => Self::Disabled,
+            GrepLifecycle::Backfilling {
+                target_seq,
+                cursor,
+                checkpoint_id,
+            } => Self::Backfilling {
+                target_seq: *target_seq,
+                cursor_inode_id: *cursor,
+                checkpoint_id: checkpoint_id.clone(),
+            },
+            GrepLifecycle::Steady {
+                built_through_seq,
+                next_event_index,
+            } => Self::Steady {
+                built_through_seq: *built_through_seq,
+                next_event_index: *next_event_index,
+            },
+        }
+    }
 }
 
 /// Resumable state for one partitioned segment reorganize.
@@ -182,21 +252,15 @@ pub struct GrepReorganizeState {
 }
 
 /// Durable index bookkeeping paired with the visible segment set.
+///
+/// What lives here is what every phase has: segments are written and folded
+/// during a backfill and during steady indexing alike, so the reorganize
+/// state and the run allocator belong to the index rather than to a phase.
+/// Anything only one phase has lives in [`GrepLifecycle`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GrepIndexState {
     /// Version of this nested index-state schema.
     pub format_version: u32,
-    /// Sequence of the commit at the index cursor.
-    pub built_through_seq: ChangeSeq,
-    /// Offset of the next change event within `built_through_seq`, or zero
-    /// when the cursor is at the commit boundary and the whole commit is
-    /// represented.
-    ///
-    /// A commit's events are one per committed operation in request order,
-    /// derived from its durable delta vector; incremental indexing relies on
-    /// that stable order when a step's budget stops it inside a commit.
-    #[serde(default, skip_serializing_if = "is_zero")]
-    pub next_event_index: u32,
     /// One in-progress partitioned reorganize, if present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reorganize: Option<GrepReorganizeState>,
@@ -250,16 +314,9 @@ impl ChangeFeedResume {
 
 impl GrepIndexState {
     /// Creates index bookkeeping in the current grep-owned format.
-    pub fn new(
-        built_through_seq: ChangeSeq,
-        next_event_index: u32,
-        reorganize: Option<GrepReorganizeState>,
-        next_run_ordinal: u64,
-    ) -> Self {
+    pub fn new(reorganize: Option<GrepReorganizeState>, next_run_ordinal: u64) -> Self {
         Self {
             format_version: GREP_INDEX_FORMAT_VERSION,
-            built_through_seq,
-            next_event_index,
             reorganize,
             next_run_ordinal,
         }

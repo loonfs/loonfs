@@ -35,8 +35,8 @@ pub use reads::{
     TrashEntry,
 };
 pub use search::{
-    DisableGrepIndexResponse, EnableGrepIndexResponse, GrepGcResponse, GrepMatch, GrepRequest,
-    GrepResponse,
+    DisableGrepIndexResponse, EnableGrepIndexResponse, GrepGcRequest, GrepGcResponse,
+    GrepIndexLifecycle, GrepIndexStatusResponse, GrepMatch, GrepRequest, GrepResponse,
 };
 pub use uploads::{
     AbortUploadResponse, BeginUploadRequest, BeginUploadResponse, CompleteUploadRequest,

@@ -236,6 +236,79 @@
         }
       }
     },
+    "/v0/admin/namespaces/{namespace}/grep/index": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Read the grep index's lifecycle",
+        "description": "Reports where the namespace's grep index is: `disabled`, `backfilling` with the sequence it walks toward and how far the walk got, or `steady` with the watermark it has built through. One grep root read, no side effects. A namespace that never enabled the index reads as `disabled`. Requires this deployment to maintain the grep index.",
+        "operationId": "grep_index_status",
+        "parameters": [
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "Namespace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The index's lifecycle and bookkeeping",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GrepIndexStatusResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The backing store rejected its configured credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The grep index is corrupt or its backing store is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "This deployment does not maintain the grep index",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v0/admin/namespaces/{namespace}/grep/index/disable": {
       "post": {
         "tags": [
@@ -335,7 +408,7 @@
           "admin"
         ],
         "summary": "Enable the grep index",
-        "description": "Enables the namespace's grep root and asks this deployment's maintenance runner for the backfill's first step. Idempotent. Requires this deployment to maintain the grep index.",
+        "description": "Enables the namespace's grep root and asks this deployment's maintenance runner for the backfill's first step. The response reports the durable lifecycle it published or found: a fresh enable is `backfilling` with the sequence its checkpoint captured, while an already-enabled namespace answers with whichever phase it is in. Idempotent. Requires this deployment to maintain the grep index.",
         "operationId": "enable_grep_index",
         "parameters": [
           {
@@ -428,7 +501,7 @@
           "admin"
         ],
         "summary": "Collect grep-index garbage",
-        "description": "Runs one explicit garbage-collection pass over only this namespace's grep-owned extension keyspace. A tombstoned or absent namespace has aged extension state reaped; no grep garbage collection runs implicitly. Requires this deployment to maintain the grep index.",
+        "description": "Runs one explicit garbage-collection pass over only this namespace's grep-owned extension keyspace. A tombstoned or absent namespace has aged extension state reaped; no grep garbage collection runs implicitly. `max_objects` bounds the reads the pass spends and returns a `next_cursor` when keys remain; resuming re-reads liveness and the grep root, so a cursor only skips enumeration. Requires this deployment to maintain the grep index.",
         "operationId": "gc_grep_index",
         "parameters": [
           {
@@ -441,6 +514,16 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GrepGcRequest"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "description": "Namespace grep garbage collection completed",
@@ -448,6 +531,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/GrepGcResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid budget or cursor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
                 }
               }
             }
@@ -3184,21 +3277,21 @@
         "description": "Result of enabling the grep index on a namespace (admin plane).",
         "required": [
           "namespace_id",
-          "built_through_seq",
-          "already_enabled"
+          "already_enabled",
+          "state"
         ],
         "properties": {
           "already_enabled": {
             "type": "boolean",
             "description": "True when the namespace already carried an enabled grep root."
           },
-          "built_through_seq": {
-            "$ref": "#/components/schemas/ChangeSeq",
-            "description": "Sequence the index is built through when the enabling host reports\ncompletion (an embedded host drives the backfill inside the call);\non a hosted server the backfill continues in its driver and this is\nthe sequence it targets."
-          },
           "namespace_id": {
             "$ref": "#/components/schemas/NamespaceId",
             "description": "Namespace whose grep root was enabled."
+          },
+          "state": {
+            "$ref": "#/components/schemas/GrepIndexLifecycle",
+            "description": "The durable lifecycle this call published or found."
           }
         }
       },
@@ -3961,6 +4054,28 @@
           }
         }
       },
+      "GrepGcRequest": {
+        "type": "object",
+        "description": "One explicit grep-index garbage-collection pass (admin plane).",
+        "properties": {
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Opaque resume token returned as `next_cursor` by an earlier pass\nagainst the same namespace."
+          },
+          "max_objects": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Reads this pass may spend before returning with a `next_cursor`.\nOmit to walk the whole grep keyspace in one call.",
+            "minimum": 0
+          }
+        }
+      },
       "GrepGcResponse": {
         "type": "object",
         "description": "Result of one explicit grep-index garbage-collection pass (admin plane).",
@@ -3997,11 +4112,130 @@
             "type": "boolean",
             "description": "Whether an absent or tombstoned namespace had extension state reaped."
           },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Present when the budget stopped the pass with keys left to examine."
+          },
           "retained_candidates": {
             "type": "integer",
             "format": "int64",
             "description": "Young or concurrently revived candidates retained by the pass.",
             "minimum": 0
+          }
+        }
+      },
+      "GrepIndexLifecycle": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "No index is maintained for this namespace.",
+            "required": [
+              "phase"
+            ],
+            "properties": {
+              "phase": {
+                "type": "string",
+                "enum": [
+                  "disabled"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The initial walk over a pinned checkpoint is running. Nothing is\nsearchable yet.",
+            "required": [
+              "target_seq",
+              "checkpoint_id",
+              "phase"
+            ],
+            "properties": {
+              "checkpoint_id": {
+                "$ref": "#/components/schemas/CheckpointId",
+                "description": "Checkpoint pinning the state being walked."
+              },
+              "cursor_inode_id": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/InodeId",
+                    "description": "Inode the walk resumes strictly after. Absent before the first\npage."
+                  }
+                ]
+              },
+              "phase": {
+                "type": "string",
+                "enum": [
+                  "backfilling"
+                ]
+              },
+              "target_seq": {
+                "$ref": "#/components/schemas/ChangeSeq",
+                "description": "Namespace sequence the pinned checkpoint captured. Reaching it\nis what completes the backfill."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The index follows the change feed. Commits at or below the watermark\nare searchable.",
+            "required": [
+              "built_through_seq",
+              "phase"
+            ],
+            "properties": {
+              "built_through_seq": {
+                "$ref": "#/components/schemas/ChangeSeq",
+                "description": "Sequence of the commit at the index cursor."
+              },
+              "next_event_index": {
+                "type": "integer",
+                "format": "int32",
+                "description": "Offset of the next change event within `built_through_seq`, or\nzero when the whole commit is represented.",
+                "minimum": 0
+              },
+              "phase": {
+                "type": "string",
+                "enum": [
+                  "steady"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Where a namespace's grep index is in its lifecycle.\n\nThe phases carry different facts and never share a field: a backfill\nreports the sequence it is walking toward and how far the walk got, and\nonly a steady index reports a watermark it has actually built through.\nA reader that wants \"is this searchable, and through what?\" asks the\n`steady` phase and nothing else."
+      },
+      "GrepIndexStatusResponse": {
+        "type": "object",
+        "description": "The namespace's grep-index lifecycle and its cheap bookkeeping (admin\nplane).",
+        "required": [
+          "namespace_id",
+          "state",
+          "next_run_ordinal",
+          "reorganize_pending"
+        ],
+        "properties": {
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace the status describes."
+          },
+          "next_run_ordinal": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Next logical run ordinal the index will allocate.",
+            "minimum": 0
+          },
+          "reorganize_pending": {
+            "type": "boolean",
+            "description": "True while a partitioned segment reorganization is in progress."
+          },
+          "state": {
+            "$ref": "#/components/schemas/GrepIndexLifecycle",
+            "description": "Where the index is in its lifecycle."
           }
         }
       },

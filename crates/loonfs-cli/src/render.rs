@@ -3,9 +3,41 @@
 use crate::args::CommandKind;
 use crate::commands::{CommandData, CommandFailure, CommandOutput};
 use crate::error::CliError;
+use loonfs_api::v0::GrepIndexLifecycle;
 use loonfs_api::{GcResponse, ReorganizeStepOutcome, WalFlushStepOutcome};
 use serde::Serialize;
 use std::io::{self, Write};
+
+/// One phrase for where the index is, in the terms that phase actually has.
+fn grep_index_state_summary(state: &GrepIndexLifecycle) -> String {
+    match state {
+        GrepIndexLifecycle::Disabled => "disabled".to_owned(),
+        GrepIndexLifecycle::Backfilling {
+            target_seq,
+            cursor_inode_id,
+            ..
+        } => match cursor_inode_id {
+            Some(inode_id) => format!(
+                "backfilling toward seq {}, walked through inode {}",
+                target_seq.0, inode_id.0
+            ),
+            None => format!("backfilling toward seq {}, not yet started", target_seq.0),
+        },
+        GrepIndexLifecycle::Steady {
+            built_through_seq,
+            next_event_index,
+        } => {
+            if *next_event_index == 0 {
+                format!("steady, built through seq {}", built_through_seq.0)
+            } else {
+                format!(
+                    "steady, built through seq {} up to event {}",
+                    built_through_seq.0, next_event_index
+                )
+            }
+        }
+    }
+}
 
 fn gc_summary(report: &GcResponse) -> String {
     let mut summary = format!(
@@ -395,17 +427,28 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             })
             .collect::<Vec<_>>()
             .join("\n"),
-        CommandData::GrepIndexEnabled(response) => {
-            if response.already_enabled {
+        CommandData::GrepIndexEnabled {
+            namespace_id,
+            already_enabled,
+            state,
+            waited_for_seq,
+            steps,
+            budget_exhausted,
+        } => {
+            let opening = if *already_enabled {
+                format!("grep index already enabled on {namespace_id}")
+            } else {
+                format!("grep index enabled on {namespace_id}")
+            };
+            if *budget_exhausted {
+                let target = waited_for_seq
+                    .map_or_else(|| "its target".to_owned(), |seq| format!("seq {}", seq.0));
                 format!(
-                    "grep index already enabled on {}; caught up through seq {}",
-                    response.namespace_id, response.built_through_seq.0
+                    "{opening}; gave up waiting for {target} after {steps} steps — {}",
+                    grep_index_state_summary(state)
                 )
             } else {
-                format!(
-                    "grep index enabled on {}; built through seq {}",
-                    response.namespace_id, response.built_through_seq.0
-                )
+                format!("{opening}; {}", grep_index_state_summary(state))
             }
         }
         CommandData::GrepIndexDisabled(response) => {
@@ -414,6 +457,36 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             } else {
                 format!("grep index was not enabled on {}", response.namespace_id)
             }
+        }
+        CommandData::GrepIndexStatus(response) => {
+            let mut summary = format!(
+                "grep index on {}: {}",
+                response.namespace_id,
+                grep_index_state_summary(&response.state)
+            );
+            if response.reorganize_pending {
+                summary.push_str("; a reorganization is in progress");
+            }
+            summary
+        }
+        CommandData::GrepIndexCollected(response) => {
+            let mut summary = format!(
+                "index-gc for {}: {} segments, {} other objects deleted, {} retained",
+                response.namespace_id,
+                response.deleted_segments,
+                response.deleted_other_objects,
+                response.retained_candidates
+            );
+            if response.namespace_reaped {
+                summary.push_str("; the namespace's grep state was reaped");
+            }
+            if response.namespace_degraded {
+                summary.push_str("; unreadable state forced conservative retention");
+            }
+            if let Some(cursor) = &response.next_cursor {
+                summary.push_str(&format!("; more to examine (next_cursor: {cursor})"));
+            }
+            summary
         }
         CommandData::GrepMatches {
             pattern,

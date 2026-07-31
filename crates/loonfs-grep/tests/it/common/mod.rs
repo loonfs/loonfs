@@ -7,12 +7,13 @@
 
 #![allow(dead_code)]
 
-use loonfs::{FsAdmin, FsReader, SharedObjectStore};
-use loonfs_api::v0::{DisableGrepIndexResponse, EnableGrepIndexResponse};
-use loonfs_api::{GrepRequest, GrepResponse, NamespaceId};
+use loonfs::{FsAdmin, FsReader, MaintenanceJob, MaintenanceStepConclusion, SharedObjectStore};
+use loonfs_api::v0::{DisableGrepIndexResponse, EnableGrepIndexResponse, GrepIndexLifecycle};
+use loonfs_api::{ChangeSeq, GrepRequest, GrepResponse, NamespaceId};
+use loonfs_grep::root::GrepLifecycle;
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepDisableOutcome, GrepEnableOutcome, GrepError, GrepIndexSnapshot,
-    GrepService, GrepWorker, NamespaceReads,
+    GrepMaintenanceJob, GrepService, GrepWorker, NamespaceReads,
 };
 
 pub(crate) struct GrepHost {
@@ -61,30 +62,71 @@ impl GrepHost {
         .await
     }
 
-    /// Enables grep and drives the backfill to quiescence, the way a host
-    /// with no driver runtime does.
+    /// Enables grep and drives the index up to the namespace's current
+    /// sequence, the way a host with no maintenance runner does.
+    ///
+    /// The target is captured once, before any stepping, so this returns
+    /// even while another writer keeps committing — the same captured-target
+    /// wait `loonfs admin index-enable` performs, minus its budgets, so a
+    /// test surfaces the first failure instead of retrying it.
     pub(crate) async fn enable_grep_index(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<EnableGrepIndexResponse, GrepError> {
-        let already_enabled = match self.worker.enable(namespace_id).await? {
-            GrepEnableOutcome::Enabled { .. } => false,
-            GrepEnableOutcome::AlreadyEnabled { .. } => true,
+        let (already_enabled, lifecycle) = match self.worker.enable(namespace_id).await? {
+            GrepEnableOutcome::Enabled { state } => (false, state),
+            GrepEnableOutcome::AlreadyEnabled { state } => (true, state),
             GrepEnableOutcome::Superseded => {
                 return Err(GrepError::PublicationConflict {
                     object_key: loonfs_grep::keyspace::root_key(namespace_id),
                 })
             }
         };
-        let built_through_seq = self
-            .worker
-            .run_to_quiescence(namespace_id, GramIndexBuildPolicy::default())
-            .await?;
+        let target_seq = match &lifecycle {
+            GrepLifecycle::Disabled => None,
+            GrepLifecycle::Backfilling { target_seq, .. } => Some(*target_seq),
+            GrepLifecycle::Steady { .. } => Some(
+                NamespaceReads::new(&self.reader, namespace_id)
+                    .head_seq()
+                    .await?,
+            ),
+        };
+        let state = match target_seq {
+            Some(target_seq) => self.catch_up_grep_index(namespace_id, target_seq).await?,
+            None => lifecycle,
+        };
         Ok(EnableGrepIndexResponse {
             namespace_id: namespace_id.clone(),
-            built_through_seq,
             already_enabled,
+            state: GrepIndexLifecycle::from(&state),
         })
+    }
+
+    /// Runs the index job's bounded steps until the index has built through
+    /// `target_seq`, or until a step settles short of it.
+    pub(crate) async fn catch_up_grep_index(
+        &self,
+        namespace_id: &NamespaceId,
+        target_seq: ChangeSeq,
+    ) -> Result<GrepLifecycle, GrepError> {
+        let job = GrepMaintenanceJob::new(self.worker.clone(), GramIndexBuildPolicy::default());
+        loop {
+            let lifecycle = self.worker.lifecycle(namespace_id).await?;
+            if GrepIndexLifecycle::from(&lifecycle).is_built_through(target_seq) {
+                return Ok(lifecycle);
+            }
+            match job
+                .step(namespace_id, None)
+                .await
+                .map_err(GrepError::Runtime)?
+                .conclusion
+            {
+                MaintenanceStepConclusion::Progressed | MaintenanceStepConclusion::Superseded => {}
+                // Nothing this loop does next would move the index, so the
+                // caller sees where it stopped rather than a spin.
+                _ => return self.worker.lifecycle(namespace_id).await,
+            }
+        }
     }
 
     pub(crate) async fn disable_grep_index(

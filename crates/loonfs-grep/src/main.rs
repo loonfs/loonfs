@@ -9,7 +9,7 @@
 use clap::Parser;
 use loonfs::{FsAdmin, FsReader, MaintenanceJob, MaintenanceProbe, MaintenanceStepConclusion};
 use loonfs_api::NamespaceId;
-use loonfs_grep::{GrepMaintenanceJob, GrepWorker, GrepWorkerConfig};
+use loonfs_grep::{GrepGcRequest, GrepMaintenanceJob, GrepWorker, GrepWorkerConfig};
 use loonfs_objectstore::{SharedObjectStore, StoreConfig};
 use serde::Deserialize;
 use std::collections::BTreeSet;
@@ -281,8 +281,10 @@ async fn collect_assigned(
 ) -> Result<(), StandaloneError> {
     let now_ms = current_time_ms()?;
     for namespace_id in namespace_ids {
+        // An assigned host collects the whole keyspace: it has no operator
+        // waiting on the call, so it spends no budget and takes no cursor.
         let report = worker
-            .garbage_collect_namespace(namespace_id, now_ms)
+            .garbage_collect_namespace(namespace_id, now_ms, &GrepGcRequest::default())
             .await?;
         tracing::info!(
             namespace_id = %namespace_id,

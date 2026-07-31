@@ -139,7 +139,10 @@ async fn racing_advancers_have_one_winner_and_loser_can_reload_and_retry() {
         .await
         .expect("final load succeeds")
         .expect("root exists");
-    assert_eq!(final_root.state().index().built_through_seq, ChangeSeq(3));
+    assert_eq!(
+        final_root.state().lifecycle().steady_watermark(),
+        Some((ChangeSeq(3), 0))
+    );
 }
 
 #[tokio::test]
@@ -163,8 +166,11 @@ async fn stale_etag_advance_fails_after_concurrent_advance() {
 fn root(namespace_id: NamespaceId, built_through_seq: ChangeSeq) -> GrepRootState {
     GrepRootState::new(
         namespace_id,
-        GrepLifecycle::Steady,
-        GrepIndexState::new(built_through_seq, 0, None, 0),
+        GrepLifecycle::Steady {
+            built_through_seq,
+            next_event_index: 0,
+        },
+        GrepIndexState::new(None, 0),
         Vec::new(),
     )
     .expect("valid root")

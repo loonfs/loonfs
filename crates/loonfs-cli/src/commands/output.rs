@@ -4,7 +4,10 @@ use crate::args::CommandKind;
 use crate::config::{CliConfig, ProfileConfig};
 use crate::error::CliError;
 use crate::profiles::ProfileSummary;
-use loonfs_api::v0::{ChangesResponse, DisableGrepIndexResponse, EnableGrepIndexResponse};
+use loonfs_api::v0::{
+    ChangesResponse, DisableGrepIndexResponse, GrepGcResponse, GrepIndexLifecycle,
+    GrepIndexStatusResponse,
+};
 use loonfs_api::{
     AuthoritativePathEntry, ChangeSeq, CommitId, CreateCheckpointResponse, DeleteNamespaceResponse,
     FileRevision, GcResponse, GrepMatch, InodeId, MaintenanceStepResponse, NamespaceId,
@@ -63,8 +66,26 @@ pub(crate) enum CommandData {
     CheckpointReleased(ReleaseCheckpointResponse),
     MaintenanceStepped(MaintenanceStepResponse),
     GarbageCollected(GcResponse),
-    GrepIndexEnabled(EnableGrepIndexResponse),
+    GrepIndexEnabled {
+        namespace_id: NamespaceId,
+        /// True when the namespace already carried an enabled grep root.
+        already_enabled: bool,
+        /// The lifecycle last observed: what enable published with
+        /// `--no-wait`, otherwise where the wait stopped.
+        state: GrepIndexLifecycle,
+        /// The sequence the wait drove toward. Absent with `--no-wait` and
+        /// on a namespace whose index is disabled.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        waited_for_seq: Option<ChangeSeq>,
+        /// Steps the wait spent: bounded index steps in embedded mode,
+        /// status checks in remote mode.
+        steps: u64,
+        /// True when a budget stopped the wait before the target.
+        budget_exhausted: bool,
+    },
     GrepIndexDisabled(DisableGrepIndexResponse),
+    GrepIndexStatus(GrepIndexStatusResponse),
+    GrepIndexCollected(GrepGcResponse),
     Changes(ChangesResponse),
     Trash(loonfs_api::ListTrashResponse),
     PathEntries {
@@ -145,6 +166,15 @@ impl CommandData {
     /// the process can exit nonzero without discarding the structured
     /// results a partial failure produced.
     pub(crate) fn reports_failures(&self) -> bool {
-        matches!(self, CommandData::TreeTransfer { failures, .. } if !failures.is_empty())
+        match self {
+            CommandData::TreeTransfer { failures, .. } => !failures.is_empty(),
+            // A wait that ran out of budget renders where the index got to
+            // — real data, not an error — and still exits nonzero, because
+            // the caller asked for a target that was not reached.
+            CommandData::GrepIndexEnabled {
+                budget_exhausted, ..
+            } => *budget_exhausted,
+            _ => false,
+        }
     }
 }

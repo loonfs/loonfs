@@ -23,8 +23,8 @@ use loonfs_grep::root::{
     GrepRootState,
 };
 use loonfs_grep::{
-    GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepReorganizeOutcome, GrepService,
-    GrepWorker, GREP_GC_GRACE_WINDOW_MS,
+    GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepGcReport, GrepGcRequest,
+    GrepReorganizeOutcome, GrepService, GrepWorker, GREP_GC_GRACE_WINDOW_MS,
 };
 use loonfs_objectstore::keys::{
     checkpoint_prefix, checkpoint_record, metadata_manifest_object, metadata_manifest_prefix,
@@ -294,7 +294,7 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
         loonfs_grep::GrepDisableOutcome::Disabled
     );
     worker
-        .garbage_collect_namespace(&namespace_id, u64::MAX)
+        .garbage_collect_namespace(&namespace_id, u64::MAX, &GrepGcRequest::default())
         .await
         .expect("collect disabled segments");
     assert!(
@@ -521,14 +521,15 @@ async fn assert_fresh_backfill_attempt(
         .expect("load grep root")
         .expect("grep root exists");
     let GrepLifecycle::Backfilling {
-        backfill_cursor,
+        cursor,
         checkpoint_id,
+        ..
     } = root.state().lifecycle()
     else {
         panic!("expected a checkpointed backfill: {:?}", root.state());
     };
     assert_eq!(
-        *backfill_cursor, None,
+        *cursor, None,
         "a rebootstrap restarts the walk from the beginning"
     );
     assert!(
@@ -572,8 +573,10 @@ async fn grep_built_through_seq(
         .expect("load grep root")
         .expect("grep root exists")
         .state()
-        .index()
-        .built_through_seq
+        .lifecycle()
+        .steady_watermark()
+        .expect("a steady grep root has a watermark")
+        .0
 }
 
 fn matched_paths(response: &GrepResponse) -> Vec<String> {
@@ -1118,8 +1121,8 @@ async fn planless_scan_covers_wal_revisions_at_or_below_index_watermark() {
         .expect("load grep root")
         .expect("grep root exists");
     assert_eq!(
-        grep_root.state().index().built_through_seq,
-        head.seq,
+        grep_root.state().lifecycle().steady_watermark(),
+        Some((head.seq, 0)),
         "the independent worker can advance past metadata materialization"
     );
 
@@ -1525,8 +1528,6 @@ async fn pointer_advance_heals_a_manifest_deleted_after_already_exists() {
         namespace_id.clone(),
         current_state.lifecycle().clone(),
         GrepIndexState::new(
-            current_state.index().built_through_seq,
-            current_state.index().next_event_index,
             current_state.index().reorganize.clone(),
             current_state.index().next_run_ordinal + 1,
         ),
@@ -1552,7 +1553,7 @@ async fn pointer_advance_heals_a_manifest_deleted_after_already_exists() {
         blocking.wait_until_blocked().await;
         let report = worker(&store)
             .await
-            .garbage_collect_namespace(&namespace_id, u64::MAX)
+            .garbage_collect_namespace(&namespace_id, u64::MAX, &GrepGcRequest::default())
             .await;
         let candidate_after_gc = store.head(&candidate_key).await;
         blocking.unblock();
@@ -1749,19 +1750,35 @@ async fn grep_gc_retains_live_roots_reaps_deleted_namespaces_and_never_crosses_k
         .await
         .expect("delete namespace");
     let live_report = worker
-        .garbage_collect_namespace(&live_namespace, GREP_GC_GRACE_WINDOW_MS + 1)
+        .garbage_collect_namespace(
+            &live_namespace,
+            GREP_GC_GRACE_WINDOW_MS + 1,
+            &GrepGcRequest::default(),
+        )
         .await
         .expect("collect live namespace");
     let deleted_report = worker
-        .garbage_collect_namespace(&deleted_namespace, GREP_GC_GRACE_WINDOW_MS + 1)
+        .garbage_collect_namespace(
+            &deleted_namespace,
+            GREP_GC_GRACE_WINDOW_MS + 1,
+            &GrepGcRequest::default(),
+        )
         .await
         .expect("collect deleted namespace");
     let corrupt_report = worker
-        .garbage_collect_namespace(&corrupt_namespace, GREP_GC_GRACE_WINDOW_MS + 1)
+        .garbage_collect_namespace(
+            &corrupt_namespace,
+            GREP_GC_GRACE_WINDOW_MS + 1,
+            &GrepGcRequest::default(),
+        )
         .await
         .expect("collect corrupt namespace");
     let absent_report = worker
-        .garbage_collect_namespace(&absent_namespace, GREP_GC_GRACE_WINDOW_MS + 1)
+        .garbage_collect_namespace(
+            &absent_namespace,
+            GREP_GC_GRACE_WINDOW_MS + 1,
+            &GrepGcRequest::default(),
+        )
         .await
         .expect("collect absent namespace");
     assert!(live_report.deleted_segments >= 1);
@@ -1851,5 +1868,403 @@ async fn grep_gc_retains_live_roots_reaps_deleted_namespaces_and_never_crosses_k
             .is_some(),
         "core GC must not learn grep keys"
     );
+    writer.shutdown_background().await.expect("shutdown");
+}
+
+/// Seeds one namespace with an index plus a fixed set of aged orphans, so
+/// two stores can be built identically and collected differently.
+async fn seed_collectable_namespace(root: &Path, namespace_id: &NamespaceId) -> SharedObjectStore {
+    let store: SharedObjectStore = Arc::new(AgedMetadataStore::new(root));
+    let writer = FsWriter::builder_with_store(store.clone())
+        .writer_id("gc-budget-writer")
+        .min_publish_interval_ms(0)
+        .build()
+        .await
+        .expect("writer");
+    writer
+        .create_namespace(namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
+    for index in 0..4u32 {
+        writer
+            .put_file_bytes(
+                namespace_id,
+                &format!("/file-{index}.txt"),
+                format!("budget needle {index}\n").as_bytes(),
+                PutFileOptions::default(),
+            )
+            .await
+            .expect("write file");
+    }
+    let worker = worker(&store).await;
+    worker.enable(namespace_id).await.expect("enable");
+    drive_worker_to_current(&worker, namespace_id, GramIndexBuildPolicy::default()).await;
+    for orphan_key in orphan_keys(namespace_id) {
+        store
+            .put(
+                &orphan_key,
+                Bytes::from_static(b"orphan"),
+                PutMode::CreateIfAbsent,
+            )
+            .await
+            .expect("write orphan");
+    }
+    writer.shutdown_background().await.expect("shutdown");
+    store
+}
+
+/// Aged, unreferenced segment keys with fixed ids, so two independently
+/// seeded stores hold the same collectable garbage under the same names —
+/// the live segment and manifest ids are content-derived and cannot match.
+fn orphan_keys(namespace_id: &NamespaceId) -> Vec<String> {
+    (0..6u8)
+        .map(|index| {
+            let orphan =
+                IndexSegmentId::parse(format!("idx_{index:032x}")).expect("orphan segment id");
+            segment_key(namespace_id, &orphan)
+        })
+        .collect()
+}
+
+/// A budgeted, resumed collection reaches everything one unbudgeted pass
+/// would.
+///
+/// Two identically seeded stores are collected two ways: one whole-prefix
+/// pass, and a cursor loop with a budget small enough that a page cannot
+/// even finish deciding one key. The counters and the surviving keys must
+/// agree — that is what makes the cursor an enumeration shortcut rather
+/// than a second opinion about what is live.
+#[tokio::test]
+async fn a_budgeted_grep_collection_walks_everything_an_unbudgeted_one_does() {
+    let namespace_id = NamespaceId::parse("gc-budget").expect("namespace id");
+    let whole_dir = tempdir().expect("tempdir");
+    let paged_dir = tempdir().expect("tempdir");
+    let whole_store = seed_collectable_namespace(whole_dir.path(), &namespace_id).await;
+    let paged_store = seed_collectable_namespace(paged_dir.path(), &namespace_id).await;
+    let now_ms = GREP_GC_GRACE_WINDOW_MS + 1;
+    let orphans = orphan_keys(&namespace_id);
+    let whole_before = whole_store
+        .list_prefix(&namespace_prefix(&namespace_id))
+        .await
+        .expect("list whole-store keys");
+    let paged_before = paged_store
+        .list_prefix(&namespace_prefix(&namespace_id))
+        .await
+        .expect("list paged-store keys");
+    // The live segment and manifest ids are content-derived and differ
+    // between the two stores; what must match is how many keys there are
+    // and which of them are collectable.
+    assert_eq!(
+        whole_before.len(),
+        paged_before.len(),
+        "the two stores must start alike for the comparison to mean anything"
+    );
+    for orphan in &orphans {
+        assert!(whole_before.contains(orphan) && paged_before.contains(orphan));
+    }
+
+    let whole = worker(&whole_store)
+        .await
+        .garbage_collect_namespace(&namespace_id, now_ms, &GrepGcRequest::default())
+        .await
+        .expect("collect the whole prefix");
+    assert_eq!(whole.next_cursor, None);
+    assert!(whole.deleted_segments >= 6, "{whole:?}");
+
+    let paged_worker = worker(&paged_store).await;
+    let mut paged = GrepGcReport::default();
+    let mut request = GrepGcRequest {
+        max_objects: Some(1),
+        cursor: None,
+    };
+    let mut passes = 0;
+    loop {
+        let pass = paged_worker
+            .garbage_collect_namespace(&namespace_id, now_ms, &request)
+            .await
+            .expect("collect one page");
+        passes += 1;
+        assert!(passes < 256, "the cursor loop must terminate");
+        paged.deleted_segments += pass.deleted_segments;
+        paged.deleted_other_objects += pass.deleted_other_objects;
+        paged.retained_candidates += pass.retained_candidates;
+        paged.namespace_reaped |= pass.namespace_reaped;
+        paged.namespace_degraded |= pass.namespace_degraded;
+        let Some(next_cursor) = pass.next_cursor else {
+            break;
+        };
+        request.cursor = Some(next_cursor);
+    }
+    assert!(
+        passes > 1,
+        "a one-read budget must stop the pass before the prefix ends"
+    );
+
+    assert_eq!(
+        (
+            paged.deleted_segments,
+            paged.deleted_other_objects,
+            paged.retained_candidates,
+            paged.namespace_reaped,
+            paged.namespace_degraded,
+        ),
+        (
+            whole.deleted_segments,
+            whole.deleted_other_objects,
+            whole.retained_candidates,
+            whole.namespace_reaped,
+            whole.namespace_degraded,
+        ),
+        "resuming under a budget must decide exactly what one pass decides"
+    );
+    let whole_after = whole_store
+        .list_prefix(&namespace_prefix(&namespace_id))
+        .await
+        .expect("list surviving whole-store keys");
+    let paged_after = paged_store
+        .list_prefix(&namespace_prefix(&namespace_id))
+        .await
+        .expect("list surviving paged-store keys");
+    assert_eq!(
+        whole_after.len(),
+        paged_after.len(),
+        "the two collections must leave the same amount behind"
+    );
+    for orphan in &orphans {
+        assert!(
+            !whole_after.contains(orphan) && !paged_after.contains(orphan),
+            "both collections must reach `{orphan}`"
+        );
+    }
+}
+
+/// The budget counts reads, not listed keys.
+///
+/// Deciding one key costs three: its listing, the liveness or root re-read
+/// that authorizes the decision, and the age probe. A deleted namespace is
+/// where that is countable — every key there is decided and deleted — so a
+/// budget of seven reaps exactly two keys, where a budget that only counted
+/// listings would have reaped seven.
+#[tokio::test]
+async fn the_collection_budget_charges_each_key_the_reads_it_costs() {
+    let namespace_id = NamespaceId::parse("gc-charge").expect("namespace id");
+    let temp_dir = tempdir().expect("tempdir");
+    let store = seed_collectable_namespace(temp_dir.path(), &namespace_id).await;
+    let writer = FsWriter::builder_with_store(store.clone())
+        .writer_id("gc-charge-writer")
+        .min_publish_interval_ms(0)
+        .build()
+        .await
+        .expect("writer");
+    writer
+        .delete_namespace(&namespace_id, DeleteNamespaceOptions::default())
+        .await
+        .expect("delete namespace");
+    writer.shutdown_background().await.expect("shutdown");
+    let keys_before = store
+        .list_prefix(&namespace_prefix(&namespace_id))
+        .await
+        .expect("list keys");
+    assert!(keys_before.len() > 2, "{keys_before:?}");
+
+    let pass = worker(&store)
+        .await
+        .garbage_collect_namespace(
+            &namespace_id,
+            GREP_GC_GRACE_WINDOW_MS + 1,
+            &GrepGcRequest {
+                // One for the pass's liveness read, then three per key.
+                max_objects: Some(7),
+                cursor: None,
+            },
+        )
+        .await
+        .expect("collect under a seven-read budget");
+    assert_eq!(
+        pass.deleted_segments + pass.deleted_other_objects,
+        2,
+        "the budget must pay for each key's own reads, not just its listing: {pass:?}"
+    );
+    assert!(pass.next_cursor.is_some(), "{pass:?}");
+    assert_eq!(
+        store
+            .list_prefix(&namespace_prefix(&namespace_id))
+            .await
+            .expect("list keys after the bounded pass")
+            .len(),
+        keys_before.len() - 2
+    );
+}
+
+/// However small the budget, a pass examines one key — otherwise a caller
+/// looping the cursor would never finish.
+#[tokio::test]
+async fn a_budget_too_small_for_one_key_still_advances_the_cursor() {
+    let namespace_id = NamespaceId::parse("gc-progress").expect("namespace id");
+    let temp_dir = tempdir().expect("tempdir");
+    let store = seed_collectable_namespace(temp_dir.path(), &namespace_id).await;
+    let worker = worker(&store).await;
+    let first = worker
+        .garbage_collect_namespace(
+            &namespace_id,
+            GREP_GC_GRACE_WINDOW_MS + 1,
+            &GrepGcRequest {
+                max_objects: Some(1),
+                cursor: None,
+            },
+        )
+        .await
+        .expect("collect under a one-read budget");
+    let cursor = first.next_cursor.expect("a stopped pass resumes somewhere");
+    let second = worker
+        .garbage_collect_namespace(
+            &namespace_id,
+            GREP_GC_GRACE_WINDOW_MS + 1,
+            &GrepGcRequest {
+                max_objects: Some(1),
+                cursor: Some(cursor.clone()),
+            },
+        )
+        .await
+        .expect("collect the next page");
+    assert_ne!(
+        second.next_cursor.as_ref(),
+        Some(&cursor),
+        "a resumed pass must not hand back the position it was given"
+    );
+}
+
+/// A cursor is bound to the namespace that minted it and to grep's own
+/// prefix; anything else is refused as an invalid request.
+#[tokio::test]
+async fn a_collection_cursor_is_refused_outside_the_namespace_that_minted_it() {
+    let namespace_id = NamespaceId::parse("gc-cursor").expect("namespace id");
+    let other_namespace = NamespaceId::parse("gc-cursor-other").expect("namespace id");
+    let temp_dir = tempdir().expect("tempdir");
+    let store = seed_collectable_namespace(temp_dir.path(), &namespace_id).await;
+    let worker = worker(&store).await;
+    let cursor = worker
+        .garbage_collect_namespace(
+            &namespace_id,
+            GREP_GC_GRACE_WINDOW_MS + 1,
+            &GrepGcRequest {
+                max_objects: Some(1),
+                cursor: None,
+            },
+        )
+        .await
+        .expect("collect one page")
+        .next_cursor
+        .expect("a stopped pass carries a resume cursor");
+
+    for (namespace, token) in [
+        (&other_namespace, cursor.clone()),
+        (&namespace_id, "not-a-cursor".to_owned()),
+    ] {
+        let error = worker
+            .garbage_collect_namespace(
+                namespace,
+                GREP_GC_GRACE_WINDOW_MS + 1,
+                &GrepGcRequest {
+                    max_objects: None,
+                    cursor: Some(token),
+                },
+            )
+            .await
+            .expect_err("a foreign or malformed cursor is refused");
+        assert_eq!(error.code(), ErrorCode::InvalidRequest);
+    }
+}
+
+/// A backfilling root has no watermark, and nothing on the way out invents
+/// one for it.
+#[tokio::test]
+async fn a_backfilling_root_never_reports_a_built_through_sequence() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store: SharedObjectStore =
+        Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
+    let namespace_id = NamespaceId::parse("enable-honesty").expect("namespace id");
+    let writer = FsWriter::builder_with_store(store.clone())
+        .writer_id("enable-honesty-writer")
+        .min_publish_interval_ms(0)
+        .build()
+        .await
+        .expect("writer");
+    writer
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
+    writer
+        .put_file_bytes(
+            &namespace_id,
+            "/note.txt",
+            b"honest needle\n",
+            PutFileOptions::default(),
+        )
+        .await
+        .expect("write file");
+    let worker = worker(&store).await;
+
+    let loonfs_grep::GrepEnableOutcome::Enabled { state } =
+        worker.enable(&namespace_id).await.expect("enable")
+    else {
+        panic!("a fresh enable publishes a backfill");
+    };
+    let backfilling = loonfs_api::v0::GrepIndexLifecycle::from(&state);
+    assert_eq!(
+        backfilling,
+        loonfs_api::v0::GrepIndexLifecycle::Backfilling {
+            target_seq: ChangeSeq(1),
+            cursor_inode_id: None,
+            checkpoint_id: match &state {
+                GrepLifecycle::Backfilling { checkpoint_id, .. } => checkpoint_id.clone(),
+                other => panic!("expected a backfill: {other:?}"),
+            },
+        }
+    );
+    let rendered = serde_json::to_string(&backfilling).expect("serialize the reported lifecycle");
+    assert!(
+        !rendered.contains("built_through_seq"),
+        "a backfill must not report a watermark anywhere: {rendered}"
+    );
+    assert_eq!(
+        worker
+            .lifecycle(&namespace_id)
+            .await
+            .expect("read lifecycle"),
+        state,
+        "the enable response reports the lifecycle it published"
+    );
+
+    // Re-enabling an active root reports the same phase, still without a
+    // watermark.
+    let loonfs_grep::GrepEnableOutcome::AlreadyEnabled { state: again } = worker
+        .enable(&namespace_id)
+        .await
+        .expect("idempotent enable")
+    else {
+        panic!("re-enabling an active root reports it as already enabled");
+    };
+    assert_eq!(again, state);
+
+    // Once the walk finishes, the steady root carries the target it reached
+    // as its own watermark, and no target field survives.
+    drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
+    let steady = loonfs_api::v0::GrepIndexLifecycle::from(
+        &worker
+            .lifecycle(&namespace_id)
+            .await
+            .expect("read steady lifecycle"),
+    );
+    assert_eq!(
+        steady,
+        loonfs_api::v0::GrepIndexLifecycle::Steady {
+            built_through_seq: ChangeSeq(1),
+            next_event_index: 0,
+        }
+    );
+    assert!(!serde_json::to_string(&steady)
+        .expect("serialize the steady lifecycle")
+        .contains("target_seq"));
     writer.shutdown_background().await.expect("shutdown");
 }
