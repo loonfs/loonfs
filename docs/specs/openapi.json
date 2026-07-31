@@ -4028,6 +4028,15 @@
             ],
             "description": "Opaque resume token when more candidates remain. Resuming rebuilds\nevery safety proof; the token carries enumeration position only and\nis valid only against the same namespace."
           },
+          "next_reclamation_at_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The soonest instant still ahead of this pass at which something it\nretained becomes reclaimable: an open session's lease plus the grace\nwindow, an aborted session's grace, or a completed session's derived\ncontent-reclamation grace. A scheduler reads this to decide when to\ncome back, so a namespace needs no other side channel to have its\nreclamation happen.\n\nIt reports what this pass saw and nothing more. A pass that stopped\non `next_cursor` examined only part of the keyspace, and candidates\nthat age out under a plain grace window on their object timestamps\ncarry no deadline here at all, so `None` is never a claim that\nnothing is owed.\n\nAlways serialized, `null` included, unlike `next_cursor` beside it:\na cursor's presence is what says the enumeration is unfinished,\nwhile this is an answer every pass has — and one whose absence\notherwise makes the response's shape depend on what happened to be\nin the namespace.",
+            "minimum": 0
+          },
           "released_expired_checkpoints": {
             "type": "integer",
             "format": "int64",

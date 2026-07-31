@@ -16,7 +16,7 @@ use loonfs_grep::{GrepMaintenanceJob, GrepService, GrepWorker, GREP_INDEX_JOB};
 use loonfs_objectstore::presign::ObjectTransferIssuer;
 use std::ffi::OsString;
 use std::net::SocketAddr;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::Semaphore;
 
@@ -114,8 +114,9 @@ impl ServerLifecycle {
     /// Maintenance admission closes first because draining publications is
     /// an await, and until it returns the runner is still live. Its timer
     /// promotes keys whose deadlines have arrived, each publication that
-    /// lands fires the publish observer that nudges the grep index, and a
-    /// finishing step hands its permit straight to the next queued key.
+    /// lands nudges the jobs subscribed to publications — the grep index
+    /// among them — and a finishing step hands its permit straight to the
+    /// next queued key.
     /// Everything admitted in that window is work this shutdown already
     /// decided to drop, and none of it is free: a metadata step advances
     /// the metadata root, a collection pass deletes provider objects, an
@@ -217,24 +218,17 @@ pub(super) async fn app_with_store_and_transfer_issuer(
         store,
         std::env::var_os(OBJECT_STORE_METRICS_JSONL_ENV),
     )?;
-    // Grep reads and checkpoints through the same handles the HTTP planes
-    // use, so it has to be composed after them — but the publish observer
-    // that nudges its indexing is set on the writer's builder, before the
-    // runner it nudges exists. The observer therefore resolves its handle
-    // through a slot this function fills the moment the writer is built,
-    // before anything can publish through it.
-    let maintenance_slot: Arc<OnceLock<MaintenanceHandle>> = Arc::new(OnceLock::new());
     // Two switches decide automatic grep indexing and nothing else does:
     // whether this server maintains anything automatically, and whether its
     // grep mode maintains the index.
     let maintains_grep_index =
         config.maintenance.registers_automatic_jobs() && config.grep.mode.maintains_index();
-    let (writer, reader, admin) = build_handles(
-        &config,
-        store.clone(),
-        maintains_grep_index.then(|| maintenance_slot.clone()),
-    )
-    .await?;
+    // Grep reads and checkpoints through the same handles the HTTP planes
+    // use, so it is composed after them. Nothing has to be wired back into
+    // the writer for its publications to reach the index: the job says on
+    // the trait that publications concern it, and registering it is what
+    // subscribes it.
+    let (writer, reader, admin) = build_handles(&config, store.clone()).await?;
     // A deployment that maintains the index needs a worker whether or not it
     // answers queries with one.
     let grep_worker = (config.grep.mode.serves_grep() || config.grep.mode.maintains_index())
@@ -266,9 +260,10 @@ pub(super) async fn app_with_store_and_transfer_issuer(
                 field: "grep",
                 reason: error.to_string(),
             })?;
-        let handle = writer.maintenance();
-        let _ = maintenance_slot.set(handle.clone());
-        Some(GrepMaintenance { handle, job })
+        Some(GrepMaintenance {
+            handle: writer.maintenance(),
+            job,
+        })
     } else {
         None
     };
@@ -322,13 +317,12 @@ pub(super) async fn build_handles_with_metrics_jsonl_path(
     metrics_jsonl_path: Option<OsString>,
 ) -> Result<(FsWriter, FsReader, FsAdmin), ServerConfigError> {
     let store = instrumented_store(config, store, metrics_jsonl_path)?;
-    build_handles(config, store, None).await
+    build_handles(config, store).await
 }
 
 async fn build_handles(
     config: &ServerConfig,
     store: SharedObjectStore,
-    grep_maintenance: Option<Arc<OnceLock<MaintenanceHandle>>>,
 ) -> Result<(FsWriter, FsReader, FsAdmin), ServerConfigError> {
     let trace_store_kind = TraceStoreKind::from(config.store.kind());
     let runtime_error = |error: loonfs::RuntimeError| ServerConfigError::InvalidField {
@@ -336,7 +330,7 @@ async fn build_handles(
         reason: error.to_string(),
     };
 
-    let mut writer_builder = FsWriter::builder_with_store(store.clone())
+    let writer_builder = FsWriter::builder_with_store(store.clone())
         .writer_id(config.writer_id.clone())
         .background_work(config.maintenance.background_work())
         .min_publish_interval_ms(config.min_publish_interval_ms)
@@ -347,17 +341,6 @@ async fn build_handles(
         .runtime_cache(config.runtime_cache_config())
         .trace_mode(TraceMode::Remote)
         .trace_store_kind(trace_store_kind);
-    if let Some(maintenance) = grep_maintenance {
-        // A publish is the index's one real trigger, and the cheapest
-        // possible hint: no blocking, no permit, nothing owed. The runner
-        // decides when the step runs, and the step re-reads what this
-        // publish committed rather than trusting it.
-        writer_builder = writer_builder.publish_observer(move |namespace_id, _committed_seq| {
-            if let Some(maintenance) = maintenance.get() {
-                maintenance.nudge(GREP_INDEX_JOB, namespace_id);
-            }
-        });
-    }
     let writer = writer_builder.build().await.map_err(runtime_error)?;
     let reader = writer.reader();
 

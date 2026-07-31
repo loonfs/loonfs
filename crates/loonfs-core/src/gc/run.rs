@@ -319,7 +319,10 @@ async fn process_upload_session<S: ObjectStore + ?Sized>(
                 report.deleted_content_objects += 1;
             }
         }
-        UploadSessionSweep::Retain => report.retained_candidates += 1,
+        UploadSessionSweep::Retain { reclaimable_at_ms } => {
+            report.retained_candidates += 1;
+            note_reclamation_deadline(report, reclaimable_at_ms, context.now_ms);
+        }
         UploadSessionSweep::ContentReclamationDeferred => {
             // Retained for the same reason any undecidable session is,
             // plus a flag, so a caller can tell a pass that swept
@@ -330,6 +333,23 @@ async fn process_upload_session<S: ObjectStore + ?Sized>(
         }
     }
     Ok(())
+}
+
+/// Folds one retained candidate's deadline into the soonest the pass will
+/// report.
+///
+/// Only deadlines still ahead of this pass's own clock are kept. One
+/// already past is not an obligation this pass is leaving behind — it is
+/// something the pass just decided against for another reason — and
+/// reporting it would only ask a scheduler to come straight back.
+fn note_reclamation_deadline(report: &mut GcResponse, at_ms: Option<u64>, now_ms: u64) {
+    let Some(at_ms) = at_ms.filter(|at_ms| *at_ms > now_ms) else {
+        return;
+    };
+    report.next_reclamation_at_ms = Some(match report.next_reclamation_at_ms {
+        Some(soonest_ms) => soonest_ms.min(at_ms),
+        None => at_ms,
+    });
 }
 
 fn upload_id_of(key: &str) -> Option<UploadId> {

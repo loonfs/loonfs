@@ -248,6 +248,22 @@ pub trait MaintenanceJob: Send + Sync + 'static {
     /// Answers whether `namespace_id` has work waiting, as cheaply as this
     /// job can. Called only by reconciliation, never on the hot path.
     async fn probe(&self, namespace_id: &NamespaceId) -> Result<MaintenanceProbe>;
+
+    /// Whether a landed publication is a reason to look at this job's work
+    /// for the namespace that published it.
+    ///
+    /// A job that derives something from the namespace's own history — an
+    /// index, a projection — says `true` and is nudged after every
+    /// publication the writer commits, so it needs no hook of its own on
+    /// the write path. The nudge is a hint like any other: it is dropped
+    /// when admission is closed, and the step it suggests re-reads what the
+    /// publication committed rather than trusting it.
+    ///
+    /// Jobs that answer to durable deadlines rather than to writes leave
+    /// this `false`, which is why it is the default.
+    fn nudged_by_publications(&self) -> bool {
+        false
+    }
 }
 
 /// Wall-clock milliseconds the runner schedules against.
@@ -392,6 +408,28 @@ pub(crate) struct MaintenanceRunner {
     inner: Arc<RunnerInner>,
 }
 
+/// Running totals a trace reports beside the event that moved them.
+///
+/// Counters rather than a metrics framework, and process-wide rather than
+/// per key: what an operator asks of them is whether backoffs and timed
+/// wakes are happening at all and roughly how often, which a monotonic
+/// number on an existing event answers without any new cardinality.
+#[derive(Debug, Default)]
+struct RunnerCounters {
+    /// Steps that failed and were scheduled for a backoff retry.
+    backoff_scheduled: std::sync::atomic::AtomicU64,
+    /// Timer wakes that found at least one not-before deadline arrived.
+    not_before_wakes: std::sync::atomic::AtomicU64,
+}
+
+impl RunnerCounters {
+    fn bump(counter: &std::sync::atomic::AtomicU64) -> u64 {
+        counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .saturating_add(1)
+    }
+}
+
 struct RunnerInner {
     policy: FsBackgroundWork,
     /// Runtime that owns spawned work. Handle builders pin the runtime they
@@ -406,6 +444,7 @@ struct RunnerInner {
     /// a spawn into running unobserved.
     state: Mutex<RunnerState>,
     wake: Arc<Notify>,
+    counters: RunnerCounters,
 }
 
 struct RunnerState {
@@ -452,6 +491,7 @@ impl MaintenanceRunner {
                 }),
                 clock,
                 wake: Arc::new(Notify::new()),
+                counters: RunnerCounters::default(),
             }),
         }
     }
@@ -542,6 +582,31 @@ impl MaintenanceRunner {
             )));
         }
         Ok(())
+    }
+
+    /// Tells every job that subscribes to publications that `namespace_id`
+    /// just committed one.
+    ///
+    /// The write path calls this instead of knowing which jobs care, so a
+    /// job that wants publication nudges gets them by saying so on the
+    /// trait rather than by a host wiring an observer to it. Each nudge is
+    /// an ordinary one: non-blocking, coalescing, and dropped once
+    /// admission is closed or the policy is
+    /// [`FsBackgroundWork::ManualOnly`].
+    pub(crate) fn nudge_publication_subscribers(&self, namespace_id: &NamespaceId) {
+        // The subscriber list is read out from under the job lock before
+        // any nudge takes the scheduling lock: the two are never held
+        // together anywhere, and this is the one place that would.
+        let subscribers: Vec<MaintenanceJobId> = self
+            .inner
+            .lock_jobs()
+            .iter()
+            .filter(|(_, job)| job.nudged_by_publications())
+            .map(|(id, _)| *id)
+            .collect();
+        for job in subscribers {
+            nudge_at(&self.inner, job, namespace_id, None);
+        }
     }
 
     /// Whether the key is admitted with work still owed to it. Test and
@@ -669,13 +734,29 @@ fn nudge_at(
 
 /// Claims every permit the ready keys can fill and spawns a chain for each.
 fn dispatch_ready(inner: &Arc<RunnerInner>) {
+    let mut dispatched = 0usize;
     loop {
         let now_ms = inner.clock.now_ms();
-        let dispatched = inner.lock_state().admission.try_dispatch(now_ms);
-        let Some(key) = dispatched else {
+        let claimed = inner.lock_state().admission.try_dispatch(now_ms);
+        let Some(key) = claimed else {
             break;
         };
+        dispatched += 1;
         spawn_chain(inner, key);
+    }
+    if dispatched > 0 {
+        // What is left behind is the useful half: a queue that keeps
+        // growing, or an oldest wait that keeps climbing, is the permit
+        // pool being too small for what this process admits. Queue-wide
+        // numbers, so no key names appear.
+        let now_ms = inner.clock.now_ms();
+        let state = inner.lock_state();
+        tracing::debug!(
+            dispatched,
+            ready_queued = state.admission.ready_queued(),
+            oldest_queued_ms = state.admission.oldest_queued_ms(now_ms),
+            "maintenance keys dispatched"
+        );
     }
 }
 
@@ -735,7 +816,13 @@ async fn run_step(inner: &Arc<RunnerInner>, key: &MaintenanceKey) -> StepOutcome
     // Read under the same lock every scheduling decision takes, and only
     // this key's own: a step that resumes is resuming from what this
     // runner stored for it when its last step ended.
-    let continuation = inner.lock_state().admission.continuation(key);
+    let (continuation, queued_ms) = {
+        let state = inner.lock_state();
+        (
+            state.admission.continuation(key),
+            state.admission.queue_wait_ms(key),
+        )
+    };
     let started = tokio::time::Instant::now();
     match job.step(&key.namespace_id, continuation.as_deref()).await {
         Ok(result) => {
@@ -746,6 +833,9 @@ async fn run_step(inner: &Arc<RunnerInner>, key: &MaintenanceKey) -> StepOutcome
                 resumed = continuation.is_some(),
                 continues = result.continuation.is_some(),
                 not_before_ms = ?result.not_before_ms,
+                // The two halves of what a step cost: how long it waited
+                // for a permit, and how long it then took.
+                queued_ms,
                 elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
                 "maintenance step settled"
             );
@@ -757,6 +847,8 @@ async fn run_step(inner: &Arc<RunnerInner>, key: &MaintenanceKey) -> StepOutcome
                 namespace_id = %key.namespace_id,
                 result = "error",
                 error = %error,
+                queued_ms,
+                backoff_scheduled = RunnerCounters::bump(&inner.counters.backoff_scheduled),
                 "maintenance step failed; backing off"
             );
             StepOutcome::Failed
@@ -803,7 +895,16 @@ async fn scheduler_loop(inner: Weak<RunnerInner>, wake: Arc<Notify>) {
             break;
         }
         let now_ms = inner.clock.now_ms();
-        inner.lock_state().admission.promote_due(now_ms);
+        let promoted = inner.lock_state().admission.promote_due(now_ms);
+        if promoted > 0 {
+            // Distinguishes a wake a durable deadline caused from the far
+            // more common one a nudge or the reconciliation interval did.
+            tracing::debug!(
+                promoted,
+                not_before_wakes = RunnerCounters::bump(&inner.counters.not_before_wakes),
+                "maintenance deadlines arrived"
+            );
+        }
         if take_reconcile_turn(&inner, now_ms) {
             reconcile(&inner).await;
         }
@@ -866,13 +967,17 @@ async fn reconcile(inner: &Arc<RunnerInner>) {
         .lock_state()
         .admission
         .reconcile_batch(MAX_RECONCILE_PROBES_PER_SWEEP);
+    let mut probes = 0usize;
+    let mut re_admitted = 0usize;
     for key in batch {
         let Some(job) = inner.job(key.job) else {
             inner.lock_state().admission.forget(&key);
             continue;
         };
+        probes += 1;
         match job.probe(&key.namespace_id).await {
             Ok(MaintenanceProbe::Due) => {
+                re_admitted += 1;
                 tracing::debug!(
                     job = %key.job,
                     namespace_id = %key.namespace_id,
@@ -897,4 +1002,13 @@ async fn reconcile(inner: &Arc<RunnerInner>) {
             ),
         }
     }
+    // What one sweep cost, against the probe budget above: a sweep that
+    // keeps hitting the cap is an admitted set larger than one interval can
+    // walk.
+    tracing::debug!(
+        probes,
+        re_admitted,
+        probe_budget = MAX_RECONCILE_PROBES_PER_SWEEP,
+        "maintenance reconciliation swept"
+    );
 }

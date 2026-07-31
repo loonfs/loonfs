@@ -46,6 +46,14 @@ impl<S: ObjectStore + Clone + Send + Sync + 'static> MaintenanceJob for GrepMain
         GREP_INDEX_JOB
     }
 
+    /// The index is a projection of the namespace's own history, so a
+    /// publication is its one real trigger and the cheapest possible hint.
+    /// Subscribing here is all it takes: no host wires anything to the
+    /// write path on grep's behalf.
+    fn nudged_by_publications(&self) -> bool {
+        true
+    }
+
     /// Builds one bounded unit, and folds one only when there is nothing
     /// left to build.
     ///

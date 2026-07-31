@@ -610,6 +610,16 @@ Routes under `/v0/admin/` belong to the `admin/v0` profile and routes under
 `/v0/namespaces/{ns}/query/` to `query/v0`; everything else shown belongs to
 `core/v0`.
 
+Every GC response carries `next_reclamation_at_ms`, which is the soonest
+time still ahead of the pass at which something it retained becomes
+reclaimable: an open upload session's lease plus the grace window, an
+aborted session's grace, or a completed session's derived
+content-reclamation grace. A scheduler reads it to decide when to run the
+namespace again rather than tracking upload deadlines itself. It describes
+only what this pass examined — a pass that stopped on `next_cursor` saw part
+of the keyspace, and candidates that age out on their object timestamps
+carry no time here — so `null` is not a claim that nothing is owed.
+
 GC responses carry `next_cursor` only when more candidate enumeration remains.
 The token is opaque, tolerant of additive fields when decoded, and valid only
 against the namespace that issued it. It encodes the last examined key and

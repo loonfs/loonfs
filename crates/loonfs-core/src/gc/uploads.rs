@@ -44,7 +44,16 @@ const REVISION_SCAN_WAVE_ROWS: usize = 1024;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum UploadSessionSweep {
     /// The session key survives this pass. It may have advanced a state.
-    Retain,
+    Retain {
+        /// When the wait this pass was too early for ends, for the three
+        /// retentions a clock decides: an open session's lease plus the
+        /// grace window, an aborted session's grace, a completed session's
+        /// derived content-reclamation grace. `None` for a retention no
+        /// clock resolves — a lost compare-and-swap, a reference set this
+        /// pass could not establish — where there is no time to come back
+        /// at, only a next pass to look again.
+        reclaimable_at_ms: Option<u64>,
+    },
     /// The session has nothing left to say and its key may be deleted.
     Delete {
         /// This sweep also removed the content object the session
@@ -83,7 +92,7 @@ pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
     // changes underneath the read is decided correctly anyway.
     let state = match read_upload_session_state(store, namespace_id, upload_id).await {
         Ok(state) => state,
-        Err(CoreError::UploadNotFound { .. }) => return Ok(UploadSessionSweep::Retain),
+        Err(CoreError::UploadNotFound { .. }) => return Ok(retain_undated()),
         Err(error) => return Err(error),
     };
 
@@ -102,7 +111,7 @@ pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
         }
         UploadSessionLifecycle::Aborted { aborted_at_ms } => {
             if context.now_ms.saturating_sub(aborted_at_ms) < grace_window_ms {
-                return Ok(UploadSessionSweep::Retain);
+                return Ok(retain_until(aborted_at_ms.saturating_add(grace_window_ms)));
             }
             // Repeating the abort's own cleanup is what makes a crash
             // between the abort swap and its provider work cost nothing.
@@ -124,13 +133,15 @@ pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
             content_ref,
         } => {
             if context.now_ms.saturating_sub(completed_at_ms) < CONTENT_RECLAMATION_GRACE_MS {
-                return Ok(UploadSessionSweep::Retain);
+                return Ok(retain_until(
+                    completed_at_ms.saturating_add(CONTENT_RECLAMATION_GRACE_MS),
+                ));
             }
             match references
                 .lookup(store, namespace_id, &content_ref.content_id, budget)
                 .await?
             {
-                ContentReference::Unknown => Ok(UploadSessionSweep::Retain),
+                ContentReference::Unknown => Ok(retain_undated()),
                 ContentReference::Deferred => Ok(UploadSessionSweep::ContentReclamationDeferred),
                 // Published content answers to metadata now, not to the
                 // session that uploaded it, so the record is all that goes.
@@ -153,6 +164,20 @@ pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
     }
 }
 
+/// A session held over for a wait that ends at `at_ms`.
+fn retain_until(at_ms: u64) -> UploadSessionSweep {
+    UploadSessionSweep::Retain {
+        reclaimable_at_ms: Some(at_ms),
+    }
+}
+
+/// A session held over for a reason no clock resolves.
+fn retain_undated() -> UploadSessionSweep {
+    UploadSessionSweep::Retain {
+        reclaimable_at_ms: None,
+    }
+}
+
 /// Aborts one session whose lease has passed, then deletes what it was
 /// writing.
 ///
@@ -169,7 +194,7 @@ async fn abort_expired_session<S: ObjectStore + ?Sized>(
     context: &MutationContext,
 ) -> Result<UploadSessionSweep> {
     if context.now_ms.saturating_sub(expires_at_ms) < grace_window_ms {
-        return Ok(UploadSessionSweep::Retain);
+        return Ok(retain_until(expires_at_ms.saturating_add(grace_window_ms)));
     }
     let aborted = try_update_upload_session(
         store,
@@ -191,20 +216,22 @@ async fn abort_expired_session<S: ObjectStore + ?Sized>(
     )
     .await;
     match aborted {
+        // The record this pass just aborted is retained under the aborted
+        // arm's own grace from here, and that is the next thing it owes.
         Ok(UploadSessionCas::Applied(Some(abandoned))) => {
             abandoned.release(store, content_store_id).await;
-            Ok(UploadSessionSweep::Retain)
+            Ok(retain_until(context.now_ms.saturating_add(grace_window_ms)))
         }
-        Ok(UploadSessionCas::Applied(None)) => Ok(UploadSessionSweep::Retain),
+        Ok(UploadSessionCas::Applied(None)) => Ok(retain_undated()),
         Ok(UploadSessionCas::Conflict) => {
             tracing::debug!(
                 namespace_id = %namespace_id,
                 upload_id = %upload_id,
                 "upload-session abort lost its inspected etag; retaining"
             );
-            Ok(UploadSessionSweep::Retain)
+            Ok(retain_undated())
         }
-        Err(CoreError::UploadNotFound { .. }) => Ok(UploadSessionSweep::Retain),
+        Err(CoreError::UploadNotFound { .. }) => Ok(retain_undated()),
         Err(error) => Err(error),
     }
 }

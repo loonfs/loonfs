@@ -509,6 +509,26 @@ pub struct GcResponse {
     /// is valid only against the same namespace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
+    /// The soonest instant still ahead of this pass at which something it
+    /// retained becomes reclaimable: an open session's lease plus the grace
+    /// window, an aborted session's grace, or a completed session's derived
+    /// content-reclamation grace. A scheduler reads this to decide when to
+    /// come back, so a namespace needs no other side channel to have its
+    /// reclamation happen.
+    ///
+    /// It reports what this pass saw and nothing more. A pass that stopped
+    /// on `next_cursor` examined only part of the keyspace, and candidates
+    /// that age out under a plain grace window on their object timestamps
+    /// carry no deadline here at all, so `None` is never a claim that
+    /// nothing is owed.
+    ///
+    /// Always serialized, `null` included, unlike `next_cursor` beside it:
+    /// a cursor's presence is what says the enumeration is unfinished,
+    /// while this is an answer every pass has — and one whose absence
+    /// otherwise makes the response's shape depend on what happened to be
+    /// in the namespace.
+    #[serde(default)]
+    pub next_reclamation_at_ms: Option<u64>,
 }
 
 impl GcResponse {
@@ -529,6 +549,7 @@ impl GcResponse {
             degraded_retention: false,
             content_reclamation_deferred: false,
             next_cursor: None,
+            next_reclamation_at_ms: None,
         }
     }
 }
