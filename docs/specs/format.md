@@ -1783,11 +1783,11 @@ decoded manifests may be cached by manifest id.
 
 The namespace-scoped layout is maintained only when that namespace is named
 by an enable, publish, query, detached assignment, or explicit GC operation;
-grep never enumerates namespaces. Embedded drivers are event-driven and use
-no recurring timer. A detached `loonfs-grep` deployment polls the head of each
-explicitly assigned namespace at its configured `poll_interval_ms`. Grep GC
-is explicit and per namespace: it retains the verified pointer, referenced
-manifest, and referenced segments,
+grep never enumerates namespaces. Every host schedules the index through the
+runtime's maintenance runner, which is nudged by those events and otherwise
+reconciles only the keys it has admitted. Grep GC is explicit and per
+namespace: it retains the verified pointer, referenced manifest, and
+referenced segments,
 degrades to retention on corruption or ambiguity, and reaps the whole
 `extensions/grep/` prefix when explicitly pointed at a tombstoned or absent
 namespace. Core maintenance does not recognize or collect `extensions/` keys,
@@ -1843,10 +1843,10 @@ Maintenance keeps read cost bounded, retention safe, and durable state clean.
 Maintenance **effects** are normative format semantics; maintenance
 **scheduling and triggering** are not. Two behaviors keep an un-administered
 deployment's read costs bounded regardless of scheduling: the reference
-implementation schedules a background maintenance step after any runtime
-publish that observes the WAL tail at or past the WAL-tail policy's
-checkpoint threshold (32 segments at defaults), and every publish surface
-rejects with `maintenance_required` once the tail exceeds the same policy's
+implementation nudges its maintenance runner after any runtime publish that
+observes the WAL tail at or past the WAL-tail policy's checkpoint threshold
+(32 segments at defaults), and every publish surface rejects with
+`maintenance_required` once the tail exceeds the same policy's
 write-rejection threshold (128 at defaults). Reads never gate on tail
 length. Bounded reads are the
 automatic half only: the retention floor never advances on its own, so

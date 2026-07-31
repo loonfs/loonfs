@@ -9,8 +9,4 @@ mod grep_worker;
 mod maintenance;
 mod root_format;
 mod root_store;
-mod standalone;
-
-// Seeding helpers the standalone binary shares with its own tests.
-#[path = "../../src/test_seeding.rs"]
 mod test_seeding;

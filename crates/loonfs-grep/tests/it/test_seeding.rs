@@ -1,5 +1,5 @@
-//! Namespace seeding for the standalone binary's own tests, through the
-//! same public writer any embedded host uses.
+//! Namespace seeding for this crate's integration tests, through the same
+//! public writer any embedded host uses.
 
 use loonfs::{
     CreateNamespaceOptions, DestinationBehavior, FsWriter, PutFileOptions, SharedObjectStore,

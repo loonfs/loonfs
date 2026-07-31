@@ -211,15 +211,11 @@ a namespace merely touched and not enough for one an operator named. Repeat
 assignment up and exits instead of hosting until a signal, bounded by
 `--max-steps` and `--deadline-ms`, and reports where every key stopped. A
 namespace with no grep root settles `not_enabled`, so assigning one costs a
-read and nothing else.
-
-Detached maintenance is also explicitly assigned with repeatable
-`loonfs-grep --namespace <id>` flags. `--once` catches up only those namespaces
-and exits. The long-running form runs the same job's probe for each assigned
-namespace at `poll_interval_ms` (default 1000, zero rejected) — the
-manifest-poll analog for this derived index — and steps the ones it reports
-work for. It hosts no writer and therefore no runner, and it never lists a
-namespace prefix.
+read and nothing else. That command is also the whole detached deployment
+story: the index needs no host of its own, because a process that serves
+nothing and maintains assigned namespaces is what `admin run` already is.
+Grep has no private poller, no private timer, and no private configuration
+file; it never lists a namespace prefix.
 
 Steady-state build steps read the change feed after `built_through_seq` as
 semantic events, collect the file revisions those events published, read
@@ -317,14 +313,16 @@ reporting its checkpoint no longer pins a manifest, and the feed reporting
 the watermark below the retention floor — and both discard the incomplete
 projection and start again from a fresh checkpoint.
 
-Grep garbage collection is also explicit and per namespace. The standalone
-binary runs it only when passed `--gc`; the server exposes
+Grep garbage collection is also explicit and per namespace. It is never an
+automatic job: `loonfs admin index-gc` asks for one namespace's pass and
+loops its cursor, and the server exposes
 `POST /v0/admin/namespaces/{ns}/grep/index/gc`, a sibling of core's explicit
 per-namespace GC endpoint. Pointing that operation at an absent or tombstoned
 namespace reaps its aged `extensions/grep/` state. The core namespace head's
 deleted tombstone is already the absorbing gate: enable refuses it, so pointer
 deletion under a reverified tombstone needs no grep-specific condemned state.
-Driver activity never runs GC.
+The index job never collects: a build or fold step writes and publishes, and
+reclaiming what it orphaned is a separate operation somebody asks for.
 
 Grep manifests are content-addressed, so two identical builders derive the
 same manifest id. A worker that observes its create-if-absent as already
