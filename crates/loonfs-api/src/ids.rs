@@ -480,14 +480,14 @@ string_id! {
     /// rides [`crate::ContentRef`] beside it.
     ContentId,
     error = GeneratedIdValidationError,
-    validate = |value: &str| validate_generated_id("cnt", value)
+    validate = |value: &str| validate_generated_id("con", value)
 }
 
 impl ContentId {
     /// Generates an id from 128 fresh random bits.
     pub fn generate() -> Self {
         Self(format!(
-            "cnt_{}",
+            "con_{}",
             crate::hex::hex_encode_bytes(&random_128())
         ))
     }
@@ -501,8 +501,8 @@ impl ContentId {
     }
 }
 
-/// Byte length of the `cnt_` marker that precedes a content id's hex body.
-const CONTENT_ID_PREFIX_LEN: usize = "cnt_".len();
+/// Byte length of the `con_` marker that precedes a content id's hex body.
+const CONTENT_ID_PREFIX_LEN: usize = "con_".len();
 /// Number of leading body characters that select a content object's shard.
 const CONTENT_ID_SHARD_LEN: usize = 2;
 
@@ -939,10 +939,10 @@ mod tests {
         let mut shards = BTreeSet::new();
         for _ in 0..512 {
             let id = ContentId::generate();
-            assert_generated_id_shape(id.as_str(), "cnt");
+            assert_generated_id_shape(id.as_str(), "con");
             assert_eq!(
                 id.shard_prefix(),
-                &id.as_str()["cnt_".len().."cnt_".len() + 2]
+                &id.as_str()["con_".len().."con_".len() + 2]
             );
             shards.insert(id.shard_prefix().to_owned());
             assert!(
@@ -961,12 +961,12 @@ mod tests {
 
     #[test]
     fn content_id_parse_requires_the_generated_id_shape() {
-        assert!(ContentId::parse("cnt_0123456789abcdef0123456789abcdef").is_ok());
+        assert!(ContentId::parse("con_0123456789abcdef0123456789abcdef").is_ok());
         for value in [
-            "cnt_",
-            "cnt_abcdef",
-            "cnt_0123456789ABCDEF0123456789abcdef",
-            "cnt_0123456789abcdef0123456789abcde",
+            "con_",
+            "con_abcdef",
+            "con_0123456789ABCDEF0123456789abcdef",
+            "con_0123456789abcdef0123456789abcde",
             "upl_0123456789abcdef0123456789abcdef",
             "0123456789abcdef0123456789abcdef",
         ] {

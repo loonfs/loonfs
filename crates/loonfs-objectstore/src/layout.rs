@@ -223,7 +223,7 @@ mod tests {
     use loonfs_api::{ContentId, ManifestObjectId};
 
     fn content_id() -> ContentId {
-        ContentId::parse("cnt_abcdef0123456789abcdef0123456789").expect("valid content id")
+        ContentId::parse("con_abcdef0123456789abcdef0123456789").expect("valid content id")
     }
 
     #[test]
@@ -279,7 +279,7 @@ mod tests {
             layout
                 .content_blob("cs_00000000000000000000000000000001", &content_id())
                 .as_str(),
-            "content-stores/cs_00000000000000000000000000000001/objects/ab/cnt_abcdef0123456789abcdef0123456789"
+            "content-stores/cs_00000000000000000000000000000001/objects/ab/con_abcdef0123456789abcdef0123456789"
         );
     }
 

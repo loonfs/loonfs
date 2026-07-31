@@ -268,7 +268,7 @@ mod tests {
     use crate::ids::ContentId;
 
     fn content_id() -> ContentId {
-        ContentId::parse("cnt_0123456789abcdef0123456789abcdef").expect("valid content id")
+        ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("valid content id")
     }
 
     #[test]
@@ -310,7 +310,7 @@ mod tests {
     fn a_content_ref_rejects_unknown_fields() {
         let json = r#"{
             "kind": "blob_v1",
-            "content_id": "cnt_0123456789abcdef0123456789abcdef",
+            "content_id": "con_0123456789abcdef0123456789abcdef",
             "size_bytes": 5,
             "storage_checksum": {"algorithm": "sha256", "value": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"},
             "checksum_type": "full_object"

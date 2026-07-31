@@ -543,7 +543,7 @@ The response includes only a short-lived transfer capability, never raw object-s
   "direct_put": {
     "content_ref": {
       "kind": "blob_v1",
-      "content_id": "cnt_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
+      "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
       "size_bytes": 1234,
       "storage_checksum": { "algorithm": "sha256", "value": "<64 lowercase hex>" },
       "whole_file_sha256": "<64 lowercase hex>"
@@ -603,7 +603,7 @@ content ref; the token is opaque to clients.
 {
   "namespace_id": "demo",
   "upload_id": "upl_...",
-  "content_ref": { "kind": "blob_v1", "content_id": "cnt_9f2a...", "size_bytes": 1234, "storage_checksum": { "algorithm": "sha256", "value": "..." }, "whole_file_sha256": "..." }
+  "content_ref": { "kind": "blob_v1", "content_id": "con_9f2a...", "size_bytes": 1234, "storage_checksum": { "algorithm": "sha256", "value": "..." }, "whole_file_sha256": "..." }
 }
 ```
 
@@ -620,7 +620,7 @@ ignored.
   "commit_id": "commit-a",
   "content_tokens": [
     {
-      "content_ref": { "kind": "blob_v1", "content_id": "cnt_9f2a...", "size_bytes": 1234, "storage_checksum": { "algorithm": "sha256", "value": "..." }, "whole_file_sha256": "..." },
+      "content_ref": { "kind": "blob_v1", "content_id": "con_9f2a...", "size_bytes": 1234, "storage_checksum": { "algorithm": "sha256", "value": "..." }, "whole_file_sha256": "..." },
       "token": "opaque-server-token"
     }
   ],
@@ -628,7 +628,7 @@ ignored.
     {
       "kind": "put_file",
       "path": "/docs/report.pdf",
-      "content_ref": { "kind": "blob_v1", "content_id": "cnt_9f2a...", "size_bytes": 1234, "storage_checksum": { "algorithm": "sha256", "value": "..." }, "whole_file_sha256": "..." },
+      "content_ref": { "kind": "blob_v1", "content_id": "con_9f2a...", "size_bytes": 1234, "storage_checksum": { "algorithm": "sha256", "value": "..." }, "whole_file_sha256": "..." },
       "behavior": "no_replace"
     }
   ]
@@ -749,7 +749,7 @@ the durable naming rules (`format.md`, "Durable naming conventions").
   "size_bytes": 19482,
   "content_ref": {
     "kind": "blob_v1",
-    "content_id": "cnt_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
+    "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
     "size_bytes": 19482,
     "storage_checksum": { "algorithm": "sha256", "value": "42d..." },
     "whole_file_sha256": "42d..."
@@ -814,7 +814,7 @@ stays `invalid_request`.)
       "size_bytes": 19482,
       "content_ref": {
         "kind": "blob_v1",
-        "content_id": "cnt_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
+        "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
         "size_bytes": 19482,
         "storage_checksum": { "algorithm": "sha256", "value": "42d..." },
         "whole_file_sha256": "42d..."
@@ -870,7 +870,7 @@ the retention floor has advanced.
       "committed_at_ms": 1752624000000,
       "content_ref": {
         "kind": "blob_v1",
-        "content_id": "cnt_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
+        "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
         "size_bytes": 19482,
         "storage_checksum": { "algorithm": "sha256", "value": "42d..." },
         "whole_file_sha256": "42d..."
@@ -919,7 +919,7 @@ create a directory and write into it:
   "message": "import the January report",
   "content_tokens": [
     {
-      "content_ref": { "kind": "blob_v1", "content_id": "cnt_9f2a...", "size_bytes": 1234, "storage_checksum": { "algorithm": "sha256", "value": "..." }, "whole_file_sha256": "..." },
+      "content_ref": { "kind": "blob_v1", "content_id": "con_9f2a...", "size_bytes": 1234, "storage_checksum": { "algorithm": "sha256", "value": "..." }, "whole_file_sha256": "..." },
       "token": "opaque-server-token"
     }
   ],
@@ -928,7 +928,7 @@ create a directory and write into it:
     {
       "kind": "put_file",
       "path": "/reports/2026/january.pdf",
-      "content_ref": { "kind": "blob_v1", "content_id": "cnt_9f2a...", "size_bytes": 1234, "storage_checksum": { "algorithm": "sha256", "value": "..." }, "whole_file_sha256": "..." },
+      "content_ref": { "kind": "blob_v1", "content_id": "con_9f2a...", "size_bytes": 1234, "storage_checksum": { "algorithm": "sha256", "value": "..." }, "whole_file_sha256": "..." },
       "behavior": "no_replace"
     },
     {
@@ -1085,7 +1085,7 @@ Representative content-upload response:
   "upload_id": "upl_4d8f2c91a7b34e0f9c6d1a2b3e5f708c",
   "content_ref": {
     "kind": "blob_v1",
-    "content_id": "cnt_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
+    "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
     "size_bytes": 20591,
     "storage_checksum": { "algorithm": "sha256", "value": "7ab..." },
     "whole_file_sha256": "7ab..."
@@ -1099,7 +1099,7 @@ Representative complete-upload request:
 {
   "content_ref": {
     "kind": "blob_v1",
-    "content_id": "cnt_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
+    "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
     "size_bytes": 20591,
     "storage_checksum": { "algorithm": "sha256", "value": "7ab..." },
     "whole_file_sha256": "7ab..."
@@ -1115,7 +1115,7 @@ Representative complete-upload response:
   "upload_id": "upl_4d8f2c91a7b34e0f9c6d1a2b3e5f708c",
   "content_ref": {
     "kind": "blob_v1",
-    "content_id": "cnt_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
+    "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
     "size_bytes": 20591,
     "storage_checksum": { "algorithm": "sha256", "value": "7ab..." },
     "whole_file_sha256": "7ab..."
@@ -1149,7 +1149,7 @@ committed operation, in request-operation order.
           "revision_no": 8,
           "content_ref": {
             "kind": "blob_v1",
-            "content_id": "cnt_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
+            "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
             "size_bytes": 20591,
             "storage_checksum": { "algorithm": "sha256", "value": "7ab..." },
             "whole_file_sha256": "7ab..."

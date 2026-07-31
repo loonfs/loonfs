@@ -440,7 +440,7 @@ The revision row for the current file contents:
   "committed_seq": 91,
   "content_ref": {
     "kind": "blob_v1",
-    "content_id": "cnt_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
+    "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
     "size_bytes": 19482,
     "storage_checksum": { "algorithm": "sha256", "value": "42d..." },
     "whole_file_sha256": "42d..."
@@ -546,7 +546,7 @@ content-stores/{content_store_id}/objects/{content_id[4..6]}/{content_id}
 The core rules are:
 
 - `content_ref.kind` is `blob_v1` for the current content strategy;
-- `content_id` is `cnt_` followed by 32 lowercase hex characters — 128 fully
+- `content_id` is `con_` followed by 32 lowercase hex characters — 128 fully
   random bits, with no time component. The shard directory is the first two
   characters of that body, so ingest spreads evenly across provider
   partitions; a clock-derived prefix would put every upload in a window into
@@ -569,7 +569,7 @@ not define is corruption, not a future extension:
 ```json
 {
   "kind": "blob_v1",
-  "content_id": "cnt_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
+  "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
   "size_bytes": 19482,
   "storage_checksum": { "algorithm": "sha256", "value": "<64 lowercase hex>" },
   "whole_file_sha256": "<64 lowercase hex>"
@@ -926,7 +926,7 @@ Content must be durable before any metadata change can reference it.
    ```json
    {
      "kind": "blob_v1",
-     "content_id": "cnt_<32hex>",
+     "content_id": "con_<32hex>",
      "size_bytes": 123,
      "storage_checksum": { "algorithm": "sha256", "value": "<64hex>" },
      "whole_file_sha256": "<64hex>"
@@ -1194,7 +1194,7 @@ identically no matter who retries it or when.
 A content reference enters the preimage as exactly:
 
 ```json
-{ "kind": "blob_v1", "content_id": "cnt_<32hex>", "size_bytes": 123 }
+{ "kind": "blob_v1", "content_id": "con_<32hex>", "size_bytes": 123 }
 ```
 
 The checksums are excluded on purpose. They are evidence about the object,
