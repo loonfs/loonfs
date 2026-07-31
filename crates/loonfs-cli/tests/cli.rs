@@ -2108,11 +2108,14 @@ fn embedded_grep_works_after_index_enable() {
     assert_failure(&before);
     assert_eq!(json_error(&before)["code"], "not_supported");
 
-    // Enable drives the backfill to completion in-process: the one-shot
-    // CLI is its own grep maintenance, so the query works immediately —
-    // no server, no driver, no state that never resolves.
+    // Enable waits for the backfill in-process: the one-shot CLI is its own
+    // grep maintenance, so the query works immediately — no server, no
+    // driver, no state that never resolves.
     let enabled = harness.run(&["--json", "admin", "index-enable"]);
     assert_success(&enabled);
+    assert_eq!(json_data(&enabled)["state"]["phase"], "steady");
+    assert_eq!(json_data(&enabled)["waited_for_seq"], 1);
+    assert_eq!(json_data(&enabled)["budget_exhausted"], false);
     let found = harness.run(&["--json", "grep", "TODO"]);
     assert_success(&found);
     assert_eq!(
@@ -2156,6 +2159,220 @@ fn index_enable_leaves_core_maintenance_decoupled() {
     assert_success(&retried);
     assert_eq!(json_data(&retried)["already_enabled"], true);
     assert!(json_data(&retried).get("backfill_step").is_none());
+}
+
+/// The index reports the phase it is in, and the phases do not share a
+/// field: a backfill names its target, a steady index names its watermark.
+#[test]
+fn index_status_reports_each_phase_in_its_own_terms() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+
+    let disabled = harness.run(&["--json", "admin", "index-status"]);
+    assert_success(&disabled);
+    assert_eq!(json_data(&disabled)["state"]["phase"], "disabled");
+    assert!(json_data(&disabled)["state"]
+        .get("built_through_seq")
+        .is_none());
+
+    // `--no-wait` returns with the root the enable published: a backfill,
+    // naming the sequence it will walk to and nothing it has indexed.
+    let enabled = harness.run(&["--json", "admin", "index-enable", "--no-wait"]);
+    assert_success(&enabled);
+    let state = &json_data(&enabled)["state"];
+    assert_eq!(state["phase"], "backfilling");
+    assert_eq!(state["target_seq"], 0);
+    assert!(state.get("built_through_seq").is_none());
+    assert!(json_data(&enabled).get("waited_for_seq").is_none());
+    assert_eq!(json_data(&enabled)["steps"], 0);
+
+    let backfilling = harness.run(&["--json", "admin", "index-status"]);
+    assert_success(&backfilling);
+    assert_eq!(json_data(&backfilling)["state"]["phase"], "backfilling");
+    assert_eq!(json_data(&backfilling)["reorganize_pending"], false);
+    assert!(backfilling_text_names_no_watermark(&harness));
+
+    // Waiting takes it steady, and only then is there a watermark.
+    assert_success(&harness.run(&["admin", "index-enable"]));
+    let steady = harness.run(&["--json", "admin", "index-status"]);
+    assert_success(&steady);
+    assert_eq!(json_data(&steady)["state"]["phase"], "steady");
+    assert_eq!(json_data(&steady)["state"]["built_through_seq"], 0);
+    assert!(json_data(&steady)["state"].get("target_seq").is_none());
+}
+
+fn backfilling_text_names_no_watermark(harness: &Harness) -> bool {
+    let rendered = stdout_string(&harness.run(&["admin", "index-status"]));
+    rendered.contains("backfilling toward seq") && !rendered.contains("built through")
+}
+
+/// The wait stops at the sequence it captured, even while a writer keeps
+/// committing past it.
+#[test]
+fn index_enable_waits_to_its_captured_target_and_not_the_live_head() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+    let payload = harness.temp_dir.path().join("one.txt");
+    fs::write(&payload, b"needle one\n").expect("write payload");
+    assert_success(&harness.run(&["put", payload.to_str().expect("utf-8 path"), "/one.txt"]));
+
+    let enabled = harness.run(&["--json", "admin", "index-enable"]);
+    assert_success(&enabled);
+    assert_eq!(json_data(&enabled)["waited_for_seq"], 1);
+
+    // A commit that lands after the capture is not waited for: the next
+    // enable is what picks it up.
+    let more = harness.temp_dir.path().join("two.txt");
+    fs::write(&more, b"needle two\n").expect("write payload");
+    assert_success(&harness.run(&["put", more.to_str().expect("utf-8 path"), "/two.txt"]));
+    let status = harness.run(&["--json", "admin", "index-status"]);
+    assert_success(&status);
+    assert_eq!(
+        json_data(&status)["state"]["built_through_seq"],
+        1,
+        "the earlier wait stopped at the target it captured"
+    );
+
+    // An index already at the namespace head returns without stepping.
+    assert_success(&harness.run(&["admin", "index-enable"]));
+    let caught_up = harness.run(&["--json", "admin", "index-enable"]);
+    assert_success(&caught_up);
+    assert_eq!(json_data(&caught_up)["already_enabled"], true);
+    assert_eq!(json_data(&caught_up)["waited_for_seq"], 2);
+    assert_eq!(
+        json_data(&caught_up)["steps"],
+        0,
+        "an index already at the captured target takes no steps"
+    );
+}
+
+/// A wait that runs out of budget reports where the index got to and exits
+/// nonzero — real progress, not an error-shaped lie.
+#[test]
+fn index_enable_budgets_exit_nonzero_and_report_progress() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+    let payload = harness.temp_dir.path().join("one.txt");
+    fs::write(&payload, b"needle\n").expect("write payload");
+    assert_success(&harness.run(&["put", payload.to_str().expect("utf-8 path"), "/one.txt"]));
+
+    for budget in [vec!["--max-steps", "0"], vec!["--deadline-ms", "0"]] {
+        let mut args = vec!["--json", "admin", "index-enable"];
+        args.extend(budget.iter().copied());
+        let stopped = harness.run(&args);
+        assert_failure(&stopped);
+        let data = json_data(&stopped);
+        assert_eq!(data["budget_exhausted"], true, "{budget:?}");
+        assert_eq!(data["steps"], 0, "{budget:?}");
+        assert_eq!(data["waited_for_seq"], 1, "{budget:?}");
+        assert_eq!(
+            data["state"]["phase"], "backfilling",
+            "the report must say where the index actually is: {budget:?}"
+        );
+    }
+
+    // The index is untouched by the give-up, and a plain wait still lands.
+    assert_success(&harness.run(&["admin", "index-enable"]));
+    let found = harness.run(&["--json", "grep", "needle"]);
+    assert_success(&found);
+}
+
+/// The remote arm answers the same questions the embedded one does, and
+/// waits the same way: the server drives its own index, so the command only
+/// watches the status endpoint until the captured target is reached.
+#[test]
+fn index_status_and_enable_answer_the_same_over_the_remote_transport() {
+    let harness = Harness::new();
+    // A config with no `[grep]` table composes no grep at all, so this
+    // deployment says so explicitly.
+    let remote_server = harness.start_external_server(harness.write_server_config_with(
+        "remote",
+        "index-remote",
+        "\n[grep]\nmode = \"serve_and_maintain\"\n",
+    ));
+    assert_success(&harness.run(&[
+        "--json",
+        "profile",
+        "create",
+        "default",
+        "--mode",
+        "remote",
+        "--server-url",
+        &remote_server.server_url,
+        "--auth-token",
+        "test-token",
+    ]));
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+    let payload = harness.temp_dir.path().join("one.txt");
+    fs::write(&payload, b"remote needle\n").expect("write payload");
+    assert_success(&harness.run(&["put", payload.to_str().expect("utf-8 path"), "/one.txt"]));
+
+    let disabled = harness.run(&["--json", "admin", "index-status"]);
+    assert_success(&disabled);
+    assert_eq!(json_data(&disabled)["state"]["phase"], "disabled");
+
+    let enabled = harness.run(&["--json", "admin", "index-enable"]);
+    assert_success(&enabled);
+    assert_eq!(json_data(&enabled)["waited_for_seq"], 1);
+    assert_eq!(json_data(&enabled)["budget_exhausted"], false);
+    assert_eq!(json_data(&enabled)["state"]["phase"], "steady");
+
+    let steady = harness.run(&["--json", "admin", "index-status"]);
+    assert_success(&steady);
+    assert_eq!(json_data(&steady)["state"]["built_through_seq"], 1);
+
+    let found = harness.run(&["--json", "grep", "remote needle"]);
+    assert_success(&found);
+    assert_eq!(
+        json_data(&found)["matches"]
+            .as_array()
+            .expect("json array")
+            .len(),
+        1
+    );
+
+    let collected = harness.run(&["--json", "admin", "index-gc"]);
+    assert_success(&collected);
+    assert_eq!(json_data(&collected)["namespace_reaped"], false);
+}
+
+/// `index-gc` loops the cursor like `admin gc`: one accumulated result out
+/// of however many bounded passes it took.
+#[test]
+fn index_gc_loops_its_cursor_and_accumulates() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+    let payload = harness.temp_dir.path().join("one.txt");
+    fs::write(&payload, b"needle\n").expect("write payload");
+    assert_success(&harness.run(&["put", payload.to_str().expect("utf-8 path"), "/one.txt"]));
+    assert_success(&harness.run(&["admin", "index-enable"]));
+
+    // Nothing here is past its grace window, so a full loop retains what it
+    // examines and, having walked to the end, carries no resume cursor.
+    let collected = harness.run(&["--json", "admin", "index-gc"]);
+    assert_success(&collected);
+    let data = json_data(&collected);
+    assert_eq!(data["deleted_segments"], 0);
+    assert_eq!(data["namespace_reaped"], false);
+    assert!(data.get("next_cursor").is_none(), "{data}");
+
+    // One bounded pass stops early and hands back where to resume.
+    let single = harness.run(&["--json", "admin", "index-gc", "--max-objects", "1"]);
+    assert_success(&single);
+    assert!(
+        json_data(&single)["next_cursor"].is_string(),
+        "{}",
+        json_data(&single)
+    );
 }
 
 #[test]
@@ -2218,6 +2435,8 @@ fn every_advertised_capability_maps_to_a_cli_command_path() {
                 &["admin", "gc"],
                 &["admin", "index-enable"],
                 &["admin", "index-disable"],
+                &["admin", "index-status"],
+                &["admin", "index-gc"],
             ],
         ),
     ];
@@ -2572,6 +2791,12 @@ impl Harness {
     }
 
     fn write_server_config(&self, name: &str, key_prefix: &str) -> PathBuf {
+        self.write_server_config_with(name, key_prefix, "")
+    }
+
+    /// A server config with `extra` appended, for tests that need a table
+    /// the default deployment leaves out.
+    fn write_server_config_with(&self, name: &str, key_prefix: &str, extra: &str) -> PathBuf {
         let bind = format!("127.0.0.1:{}", available_port());
         let path = self
             .temp_dir
@@ -2589,7 +2814,7 @@ writer_id = "{name}"
 kind = "local-fs"
 root = "{}"
 key_prefix = "{key_prefix}"
-"#,
+{extra}"#,
             store_root.display()
         );
         fs::write(&path, contents).expect("write server config");

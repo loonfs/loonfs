@@ -61,6 +61,7 @@ pub fn openapi_json_pretty() -> Result<String, serde_json::Error> {
         crate::http::handlers_namespace::release_checkpoint,
         crate::http::handlers_namespace::maintenance_step,
         crate::http::handlers_query::grep,
+        crate::http::handlers_query::grep_index_status,
         crate::http::handlers_query::enable_grep_index,
         crate::http::handlers_query::disable_grep_index,
         crate::http::handlers_query::gc_grep_index
@@ -131,8 +132,11 @@ pub fn openapi_json_pretty() -> Result<String, serde_json::Error> {
         loonfs_api::v0::GrepRequest,
         loonfs_api::v0::GrepMatch,
         loonfs_api::v0::GrepResponse,
+        loonfs_api::v0::GrepIndexLifecycle,
+        loonfs_api::v0::GrepIndexStatusResponse,
         loonfs_api::v0::EnableGrepIndexResponse,
         loonfs_api::v0::DisableGrepIndexResponse,
+        loonfs_api::v0::GrepGcRequest,
         loonfs_api::v0::GrepGcResponse
     )),
     tags(

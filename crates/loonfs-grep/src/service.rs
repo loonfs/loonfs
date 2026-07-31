@@ -181,13 +181,17 @@ impl GrepIndexSnapshot {
     }
 
     fn from_state(root: &GrepRootState) -> Self {
-        match root.lifecycle() {
+        // Only a steady root has a watermark, and only a watermark makes an
+        // index answerable: the other two phases refuse the query outright
+        // rather than borrow a sequence they do not own.
+        let (built_through_seq, next_event_index) = match root.lifecycle() {
             GrepLifecycle::Disabled => return Self::from_error(GrepError::NotEnabled),
-            GrepLifecycle::Backfilling { .. } => {
-                return Self::from_error(GrepError::Backfilling);
-            }
-            GrepLifecycle::Steady => {}
-        }
+            GrepLifecycle::Backfilling { .. } => return Self::from_error(GrepError::Backfilling),
+            GrepLifecycle::Steady {
+                built_through_seq,
+                next_event_index,
+            } => (*built_through_seq, *next_event_index),
+        };
         let segments = root
             .segments()
             .iter()
@@ -203,8 +207,8 @@ impl GrepIndexSnapshot {
             .collect();
         Self {
             state: Ok(MaterializedGrepIndexSnapshot {
-                built_through_seq: root.index().built_through_seq,
-                next_event_index: root.index().next_event_index,
+                built_through_seq,
+                next_event_index,
                 segments,
             }),
         }

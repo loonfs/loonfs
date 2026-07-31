@@ -532,9 +532,24 @@ A representative v0 binding is shown below.
 | Release a checkpoint | `POST /v0/admin/namespaces/{ns}/checkpoints/{checkpoint_id}/release` (idempotent and one-way; fork-owned records are rejected) |
 | Run a maintenance step | `POST /v0/admin/namespaces/{ns}/maintenance/step` (the one maintenance entry point; see below) |
 | Content search | `POST /v0/namespaces/{ns}/query/grep` (feature `query.grep`; requires a materialized steady-state grep root) |
+| Read the grep index's lifecycle | `GET /v0/admin/namespaces/{ns}/grep/index` (one grep root read, no side effects; requires a deployment that maintains the index) |
 | Enable the grep index | `POST /v0/admin/namespaces/{ns}/grep/index/enable` (CAS-publishes the independent grep root into checkpointed backfill and nudges the deployment's maintenance runner; requires a deployment that maintains the index; idempotent) |
 | Disable the grep index | `POST /v0/admin/namespaces/{ns}/grep/index/disable` (CAS-publishes the grep root as disabled; grep-owned garbage collection later reclaims unreferenced segments; idempotent) |
-| Collect grep-index garbage | `POST /v0/admin/namespaces/{ns}/grep/index/gc` (one explicit pass over only that namespace's grep extension; also reaps aged state for an absent or tombstoned namespace) |
+| Collect grep-index garbage | `POST /v0/admin/namespaces/{ns}/grep/index/gc` (one explicit pass over only that namespace's grep extension; `max_objects` bounds the reads it spends and returns a `next_cursor` when keys remain; also reaps aged state for an absent or tombstoned namespace) |
+
+The status route and the enable response both report the index's lifecycle
+as a tagged `state`, and the phases never share a field:
+
+| `phase` | Carries | Means |
+| --- | --- | --- |
+| `disabled` | — | No index is maintained here. Also the answer for a namespace that never enabled one. |
+| `backfilling` | `target_seq`, `cursor_inode_id`, `checkpoint_id` | The initial walk over a pinned checkpoint is running. `target_seq` is the namespace sequence that checkpoint captured; reaching it completes the backfill. Nothing is searchable yet, and no watermark exists to report. |
+| `steady` | `built_through_seq`, `next_event_index` | The index follows the change feed. Commits at or below `built_through_seq` are searchable, except that a non-zero `next_event_index` leaves the rest of that one commit unindexed. |
+
+A backfill therefore never reports a `built_through_seq`, and a steady index
+never reports a `target_seq`. A client waiting for the index to catch up
+captures one sequence before it starts waiting and stops there, rather than
+chasing a head that keeps moving.
 
 One maintenance step does four things in order: folds the visible WAL tail
 into metadata tables and advances the metadata root once the tail reaches

@@ -9,11 +9,15 @@ use crate::render::write_stderr_warning;
 use loonfs::{
     ByteStream, ChangesResponse, CopyOptions, CreateCheckpointOptions, CreateDirectoryOptions,
     CreateNamespaceOptions, DeleteNamespaceOptions, DeleteNamespaceResponse, DeleteOptions,
-    FsAdmin, FsReader, FsWriter, ListChangesOptions, MaintenanceStepOptions, MoveOptions,
-    PutFileOptions, RestoreRevisionOptions, RuntimeError, SharedObjectStore, UndeleteOptions,
+    FsAdmin, FsReader, FsWriter, ListChangesOptions, MaintenanceJob, MaintenanceStepConclusion,
+    MaintenanceStepOptions, MoveOptions, PutFileOptions, RestoreRevisionOptions, RuntimeError,
+    SharedObjectStore, UndeleteOptions,
 };
 use loonfs_api::{
-    v0::{DisableGrepIndexResponse, EnableGrepIndexResponse},
+    v0::{
+        DisableGrepIndexResponse, EnableGrepIndexResponse, GrepGcRequest, GrepGcResponse,
+        GrepIndexLifecycle, GrepIndexStatusResponse,
+    },
     AuthoritativePathEntry, ChangeSeq, CheckpointId, CommitResponse, CreateCheckpointRequest,
     CreateCheckpointResponse, DestinationBehavior, EffectiveLimit, ErrorCode, GrepRequest,
     GrepResponse, InodeId, ListFileRevisionsResponse, ListTrashResponse, MaintenanceStepRequest,
@@ -23,8 +27,11 @@ use loonfs_api::{
 use loonfs_client::{CommitOptions, NamespacePath};
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepDisableOutcome, GrepEnableOutcome, GrepError, GrepIndexSnapshot,
-    GrepService, GrepWorker, NamespaceReads,
+    GrepMaintenanceJob, GrepService, GrepWorker, NamespaceReads,
 };
+use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
+
+use super::{GrepWaitBudget, GrepWaitProgress};
 
 /// Purpose-specific handles over one shared store client: reads go through
 /// the reader, mutations through the writer, and maintenance through the
@@ -219,31 +226,136 @@ impl EmbeddedBackend {
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<EnableGrepIndexResponse, BackendError> {
-        let worker = self.grep_worker();
         let grep_error = |error| map_namespace_scoped_grep_error(namespace_id, error);
-        let already_enabled = match worker.enable(namespace_id).await.map_err(grep_error)? {
-            GrepEnableOutcome::Enabled { .. } => false,
-            GrepEnableOutcome::AlreadyEnabled { .. } => true,
+        let (already_enabled, lifecycle) = match self
+            .grep_worker()
+            .enable(namespace_id)
+            .await
+            .map_err(grep_error)?
+        {
+            GrepEnableOutcome::Enabled { state } => (false, state),
+            GrepEnableOutcome::AlreadyEnabled { state } => (true, state),
             GrepEnableOutcome::Superseded => {
                 return Err(grep_error(GrepError::PublicationConflict {
                     object_key: loonfs_grep::keyspace::root_key(namespace_id),
                 }))
             }
         };
-        // A one-shot command has no driver runtime, so enable is the
-        // driver: without this the root would stay `Backfilling` and every
-        // query would answer `not_supported`. Re-running enable on an
-        // already-enabled namespace drives catch-up the same way, which is
-        // how an embedded operator advances a lagging index.
-        let built_through_seq = worker
-            .run_to_quiescence(namespace_id, GramIndexBuildPolicy::default())
-            .await
-            .map_err(grep_error)?;
+        // Enabling is one compare-and-swap and nothing else, here as on a
+        // server. Driving the backfill afterwards is the command's job, not
+        // this call's, so an embedded caller and a remote one get the same
+        // answer to the same question.
         Ok(EnableGrepIndexResponse {
             namespace_id: namespace_id.clone(),
-            built_through_seq,
             already_enabled,
+            state: GrepIndexLifecycle::from(&lifecycle),
         })
+    }
+
+    pub(super) async fn grep_index_status(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<GrepIndexStatusResponse, BackendError> {
+        let root = self
+            .grep_worker()
+            .root_state(namespace_id)
+            .await
+            .map_err(|error| map_namespace_scoped_grep_error(namespace_id, error))?;
+        let (state, next_run_ordinal, reorganize_pending) = match &root {
+            Some(root) => (
+                GrepIndexLifecycle::from(root.lifecycle()),
+                root.index().next_run_ordinal,
+                root.index().reorganize.is_some(),
+            ),
+            None => (GrepIndexLifecycle::Disabled, 0, false),
+        };
+        Ok(GrepIndexStatusResponse {
+            namespace_id: namespace_id.clone(),
+            state,
+            next_run_ordinal,
+            reorganize_pending,
+        })
+    }
+
+    pub(super) async fn gc_grep_index(
+        &self,
+        namespace_id: &NamespaceId,
+        request: &GrepGcRequest,
+    ) -> Result<GrepGcResponse, BackendError> {
+        let report = self
+            .grep_worker()
+            .garbage_collect_namespace(
+                namespace_id,
+                current_unix_ms()?,
+                &loonfs_grep::GrepGcRequest {
+                    max_objects: request.max_objects,
+                    cursor: request.cursor.clone(),
+                },
+            )
+            .await
+            .map_err(|error| map_namespace_scoped_grep_error(namespace_id, error))?;
+        Ok(GrepGcResponse {
+            namespace_id: namespace_id.clone(),
+            deleted_segments: report.deleted_segments,
+            deleted_other_objects: report.deleted_other_objects,
+            namespace_reaped: report.namespace_reaped,
+            retained_candidates: report.retained_candidates,
+            namespace_degraded: report.namespace_degraded,
+            next_cursor: report.next_cursor,
+        })
+    }
+
+    /// Runs the grep-index job's bounded steps until the index has built
+    /// through `target_seq`, or until the budget runs out.
+    ///
+    /// A one-shot command hosts no maintenance runner, so it runs the job
+    /// itself — the same executor a server registers, minus admission and
+    /// backoff, so the first failure surfaces instead of being retried. The
+    /// target is fixed before the first step, so a namespace that keeps
+    /// being written to cannot keep this loop running.
+    pub(super) async fn drive_grep_index(
+        &self,
+        namespace_id: &NamespaceId,
+        target_seq: ChangeSeq,
+        budget: GrepWaitBudget,
+    ) -> Result<GrepWaitProgress, BackendError> {
+        let worker = self.grep_worker();
+        let job = GrepMaintenanceJob::new(worker.clone(), GramIndexBuildPolicy::default());
+        let timer = StdMonotonicTimer::default();
+        let started_ms = timer.monotonic_now_ms();
+        let mut steps = 0;
+        let mut settled = false;
+        loop {
+            let state = GrepIndexLifecycle::from(
+                &worker
+                    .lifecycle(namespace_id)
+                    .await
+                    .map_err(|error| map_namespace_scoped_grep_error(namespace_id, error))?,
+            );
+            let reached = state.is_built_through(target_seq);
+            let elapsed_ms = timer.monotonic_now_ms().saturating_sub(started_ms);
+            if reached || settled || budget.spent(steps, elapsed_ms) {
+                return Ok(GrepWaitProgress {
+                    state,
+                    steps,
+                    reached,
+                });
+            }
+            let conclusion = job
+                .step(namespace_id, None)
+                .await
+                .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))?
+                .conclusion;
+            steps += 1;
+            // A step that settled short of the target says the index has
+            // nothing more to do — disabled underneath us, or blocked on a
+            // budget of its own. Repeating it would only spin, so the next
+            // turn of this loop reports where it stopped.
+            settled = !matches!(
+                conclusion,
+                MaintenanceStepConclusion::Progressed | MaintenanceStepConclusion::Superseded
+            );
+        }
     }
 
     pub(super) async fn disable_grep_index(
@@ -542,6 +654,20 @@ impl EmbeddedBackend {
             .await
             .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
     }
+}
+
+/// Grace windows are wall-clock policy, and this is where an embedded
+/// command enters wall time — the same boundary the server's HTTP handler
+/// is. Nothing durable replays through it.
+#[allow(clippy::disallowed_methods)]
+fn current_unix_ms() -> Result<u64, BackendError> {
+    let server_error =
+        |message: String| BackendError::new(ErrorCode::ServerError.as_str(), message);
+    let elapsed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| server_error(format!("system time is before unix epoch: {error}")))?;
+    u64::try_from(elapsed.as_millis())
+        .map_err(|error| server_error(format!("system time does not fit in milliseconds: {error}")))
 }
 
 fn resolve_cli_page_limit(limit: Option<u32>) -> Result<EffectiveLimit, BackendError> {

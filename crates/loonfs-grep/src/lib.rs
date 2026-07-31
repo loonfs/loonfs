@@ -43,10 +43,10 @@
 //! grep in-process and registers [`GrepMaintenanceJob`] with the writer's
 //! maintenance runner, nudged by the publish observer; a query-serving
 //! deployment answers searches while an external `loonfs-grep` process runs
-//! the same bounded steps; a one-shot host (the CLI) calls
-//! [`GrepWorker::run_to_quiescence`] where a scheduler would be. All three
-//! run the identical durable protocol, so which one is running is a
-//! deployment choice, not a format.
+//! the same bounded steps; a one-shot host (the CLI) runs that same job's
+//! steps itself, until the index reaches a sequence it captured before it
+//! started. All three run the identical durable protocol, so which one is
+//! running is a deployment choice, not a format.
 //!
 //! **An extension owns its keyspace and its garbage.** Grep's durable state
 //! lives under each namespace's `extensions/grep/` prefix and is
@@ -86,6 +86,6 @@ pub use service::{
 };
 pub use worker::{
     GramIndexBuildPolicy, GrepBuildOutcome, GrepBuildReport, GrepDisableOutcome, GrepEnableOutcome,
-    GrepGcReport, GrepReorganizeOutcome, GrepReorganizeReport, GrepWorker,
+    GrepGcReport, GrepGcRequest, GrepReorganizeOutcome, GrepReorganizeReport, GrepWorker,
     GREP_BACKFILL_CHECKPOINT_TTL_MS, GREP_GC_GRACE_WINDOW_MS,
 };

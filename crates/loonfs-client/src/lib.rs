@@ -24,9 +24,10 @@ use loonfs_api::{
         CommitResponse as ApiCommitResponse, CommittedChange, CompleteUploadRequest,
         CompleteUploadResponse, CompletedUploadPart, DirectMultipartContentClaim,
         DirectMultipartUploadOptions, DirectPutContentClaim, DisableGrepIndexResponse,
-        EnableGrepIndexResponse, FilesystemChange, GrepGcResponse, ObjectTransferAccess,
-        SignUploadPartsRequest, SignUploadPartsResponse, SignedUploadPart, UploadContentResponse,
-        UploadMode, UploadPartChecksumClaim, ValidatedContentToken,
+        EnableGrepIndexResponse, FilesystemChange, GrepGcRequest, GrepGcResponse,
+        GrepIndexStatusResponse, ObjectTransferAccess, SignUploadPartsRequest,
+        SignUploadPartsResponse, SignedUploadPart, UploadContentResponse, UploadMode,
+        UploadPartChecksumClaim, ValidatedContentToken,
     },
     AbsolutePath, AuthoritativePathEntry, CapabilityDocument, ChangeSeq, CheckpointId,
     ChecksumAlgorithm, CommitId, CommitRequest, ContentRef, Crc64Nvme, CreateCheckpointRequest,
@@ -854,6 +855,21 @@ impl Client {
         self.request_json(self.post(&url), Some(request)).await
     }
 
+    /// Reads the namespace's grep-index lifecycle (admin plane): disabled,
+    /// backfilling toward a captured sequence, or steady at a watermark.
+    /// One grep root read on the server, with no side effects.
+    pub async fn grep_index_status(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<GrepIndexStatusResponse> {
+        let url = format!(
+            "{}/v0/admin/namespaces/{namespace_id}/grep/index",
+            self.base_url
+        );
+        self.request_json::<(), GrepIndexStatusResponse>(self.get(&url), None)
+            .await
+    }
+
     /// Enables the namespace's grep root (admin plane); embedded mode starts
     /// that namespace's event-driven backfill. Idempotent.
     pub async fn enable_grep_index(
@@ -883,13 +899,19 @@ impl Client {
     }
 
     /// Runs one explicit grep-index garbage-collection pass for a namespace.
-    pub async fn gc_grep_index(&self, namespace_id: &NamespaceId) -> Result<GrepGcResponse> {
+    ///
+    /// `max_objects` bounds the reads the pass spends; when keys remain the
+    /// response carries a `next_cursor` to resume from.
+    pub async fn gc_grep_index(
+        &self,
+        namespace_id: &NamespaceId,
+        request: &GrepGcRequest,
+    ) -> Result<GrepGcResponse> {
         let url = format!(
             "{}/v0/admin/namespaces/{namespace_id}/grep/index/gc",
             self.base_url
         );
-        self.request_json::<(), GrepGcResponse>(self.post(&url), None)
-            .await
+        self.request_json(self.post(&url), Some(request)).await
     }
 
     /// Applies one commit: its operations land together, in order, under

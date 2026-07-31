@@ -4,9 +4,12 @@
 use super::context::resolve_command_context;
 use super::output::{CommandData, CommandFailure, CommandOutput};
 use crate::args::{
-    AdminCheckpointArgs, AdminCheckpointReleaseArgs, AdminCommand, AdminGcArgs, AdminNamespaceArgs,
-    AdminStepArgs, ChangesArgs, CommandKind,
+    AdminCheckpointArgs, AdminCheckpointReleaseArgs, AdminCommand, AdminGcArgs,
+    AdminIndexEnableArgs, AdminIndexGcArgs, AdminNamespaceArgs, AdminStepArgs, ChangesArgs,
+    CommandKind,
 };
+use crate::backend::GrepWaitBudget;
+use loonfs_api::v0::{GrepGcRequest, GrepIndexLifecycle};
 use loonfs_api::{
     ChangeSeq, CheckpointId, CreateCheckpointRequest, ErrorCode, GcRequest, MaintenanceStepKind,
     MaintenanceStepRequest,
@@ -27,6 +30,8 @@ pub(crate) async fn run_admin_command(
         AdminCommand::Gc(args) => run_admin_gc(kind, args).await,
         AdminCommand::IndexEnable(args) => run_admin_index_enable(kind, args).await,
         AdminCommand::IndexDisable(args) => run_admin_index_disable(kind, args).await,
+        AdminCommand::IndexStatus(args) => run_admin_index_status(kind, args).await,
+        AdminCommand::IndexGc(args) => run_admin_index_gc(kind, args).await,
     }
 }
 
@@ -242,9 +247,15 @@ pub(crate) async fn run_admin_changes(
     })
 }
 
+/// Enables the index and, by default, waits for it to catch up to one fixed
+/// sequence.
+///
+/// The sequence is captured before any waiting starts and never re-read:
+/// writes that land afterwards are not waited for, so a namespace that is
+/// being written to cannot keep this command running.
 async fn run_admin_index_enable(
     kind: CommandKind,
-    args: AdminNamespaceArgs,
+    args: AdminIndexEnableArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, &args.target).await?;
     let response = context
@@ -252,12 +263,128 @@ async fn run_admin_index_enable(
         .enable_grep_index(&context.namespace)
         .await
         .map_err(|error| context.fail(kind, error))?;
+    let target_seq = match (args.no_wait, &response.state) {
+        // Nothing to wait for: the caller opted out, or the index is
+        // disabled, which enable would have changed if it could.
+        (true, _) | (_, GrepIndexLifecycle::Disabled) => None,
+        // A backfill already names the namespace sequence its checkpoint
+        // captured, and reaching it is what completes the backfill.
+        (_, GrepIndexLifecycle::Backfilling { target_seq, .. }) => Some(*target_seq),
+        // A steady index is asked to catch up to where the namespace is
+        // now: one read, before any stepping, so an index that is already
+        // there returns without doing anything.
+        (_, GrepIndexLifecycle::Steady { .. }) => Some(
+            context
+                .target
+                .namespace_status(&context.namespace)
+                .await
+                .map_err(|error| context.fail(kind, error))?
+                .head_seq,
+        ),
+    };
+    let waited = match target_seq {
+        Some(target_seq) => Some(
+            context
+                .target
+                .wait_for_grep_index(
+                    &context.namespace,
+                    target_seq,
+                    GrepWaitBudget {
+                        max_steps: args.max_steps,
+                        deadline_ms: args.deadline_ms,
+                    },
+                )
+                .await
+                .map_err(|error| context.fail(kind, error))?,
+        ),
+        None => None,
+    };
+
     Ok(CommandOutput {
         kind,
         profile: Some(context.profile_name),
         mode: Some(context.mode),
-        data: CommandData::GrepIndexEnabled(response),
+        data: CommandData::GrepIndexEnabled {
+            namespace_id: response.namespace_id,
+            already_enabled: response.already_enabled,
+            state: waited
+                .as_ref()
+                .map_or(response.state, |waited| waited.state.clone()),
+            waited_for_seq: target_seq,
+            steps: waited.as_ref().map_or(0, |waited| waited.steps),
+            budget_exhausted: waited.is_some_and(|waited| !waited.reached),
+        },
     })
+}
+
+async fn run_admin_index_status(
+    kind: CommandKind,
+    args: AdminNamespaceArgs,
+) -> Result<CommandOutput, CommandFailure> {
+    let context = resolve_command_context(kind, &args.target).await?;
+    let response = context
+        .target
+        .grep_index_status(&context.namespace)
+        .await
+        .map_err(|error| context.fail(kind, error))?;
+    Ok(CommandOutput {
+        kind,
+        profile: Some(context.profile_name),
+        mode: Some(context.mode),
+        data: CommandData::GrepIndexStatus(response),
+    })
+}
+
+/// Collects the namespace's grep keyspace, looping the cursor exactly like
+/// `admin gc`: bounded passes through completion, unless `--max-objects`
+/// asks for one pass and its resume token.
+async fn run_admin_index_gc(
+    kind: CommandKind,
+    args: AdminIndexGcArgs,
+) -> Result<CommandOutput, CommandFailure> {
+    let context = resolve_command_context(kind, &args.target).await?;
+    let single_pass = args.max_objects.is_some();
+    let mut request = GrepGcRequest {
+        max_objects: Some(args.max_objects.unwrap_or(loonfs::DEFAULT_GC_MAX_OBJECTS)),
+        cursor: None,
+    };
+    let mut response: Option<loonfs_api::v0::GrepGcResponse> = None;
+    loop {
+        let pass = context
+            .target
+            .gc_grep_index(&context.namespace, &request)
+            .await
+            .map_err(|error| context.fail(kind, error))?;
+        let next_cursor = pass.next_cursor.clone();
+        match &mut response {
+            Some(total) => accumulate_grep_gc_response(total, pass),
+            None => response = Some(pass),
+        }
+        if single_pass || next_cursor.is_none() {
+            break;
+        }
+        request.cursor = next_cursor;
+    }
+    let response = response.expect("grep GC loop should run at least once");
+
+    Ok(CommandOutput {
+        kind,
+        profile: Some(context.profile_name),
+        mode: Some(context.mode),
+        data: CommandData::GrepIndexCollected(response),
+    })
+}
+
+fn accumulate_grep_gc_response(
+    total: &mut loonfs_api::v0::GrepGcResponse,
+    pass: loonfs_api::v0::GrepGcResponse,
+) {
+    total.deleted_segments += pass.deleted_segments;
+    total.deleted_other_objects += pass.deleted_other_objects;
+    total.retained_candidates += pass.retained_candidates;
+    total.namespace_reaped |= pass.namespace_reaped;
+    total.namespace_degraded |= pass.namespace_degraded;
+    total.next_cursor = pass.next_cursor;
 }
 
 async fn run_admin_index_disable(

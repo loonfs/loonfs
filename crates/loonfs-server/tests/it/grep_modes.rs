@@ -7,7 +7,9 @@ use axum::http::{Method, Request, StatusCode};
 use axum::Router;
 use loonfs::{CreateNamespaceOptions, FsWriter, PutFileOptions};
 use loonfs::{FsAdmin, FsReader};
-use loonfs_api::v0::GrepGcResponse;
+use loonfs_api::v0::{
+    EnableGrepIndexResponse, GrepGcResponse, GrepIndexLifecycle, GrepIndexStatusResponse,
+};
 use loonfs_api::{
     ApiError, CapabilityDocument, ChangeSeq, GrepRequest, GrepResponse, NamespaceId,
     FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
@@ -57,6 +59,8 @@ async fn disabled_mode_returns_not_supported_and_omits_grep_capabilities() {
         assert_eq!(error.code, "not_supported");
         assert_eq!(error.feature.as_deref(), Some(FEATURE_QUERY_GREP));
     }
+    let status = send(&router, Method::GET, &status_path(&namespace_id), None).await;
+    assert_eq!(status.status(), StatusCode::NOT_IMPLEMENTED);
     lifecycle.shutdown().await.expect("drain lifecycle");
 }
 
@@ -68,9 +72,68 @@ async fn serving_and_maintaining_enables_queries_nudges_and_disables_per_namespa
         .await
         .expect("build app");
     assert!(lifecycle.maintains_grep_index());
-    assert_eq!(enable_grep(&router, &namespace_id).await, StatusCode::OK);
+    // Before anything is enabled the status route answers honestly rather
+    // than inventing a namespace-not-found.
+    assert_eq!(
+        index_status(&router, &namespace_id).await.state,
+        GrepIndexLifecycle::Disabled
+    );
+
+    let enabled: EnableGrepIndexResponse = response_json(
+        send(
+            &router,
+            Method::POST,
+            &format!("/v0/admin/namespaces/{namespace_id}/grep/index/enable"),
+            None,
+        )
+        .await,
+    )
+    .await;
+    assert!(!enabled.already_enabled);
+    // A fresh enable publishes a backfill and reports the sequence its
+    // checkpoint captured — not a watermark it has not reached.
+    assert!(
+        matches!(
+            enabled.state,
+            GrepIndexLifecycle::Backfilling {
+                target_seq: ChangeSeq(0),
+                cursor_inode_id: None,
+                ..
+            }
+        ),
+        "{:?}",
+        enabled.state
+    );
+    assert_eq!(
+        index_status(&router, &namespace_id).await.state,
+        enabled.state,
+        "the status route and the enable response describe the same root"
+    );
     settle(&lifecycle).await;
     assert_eq!(watermark(&store, &namespace_id).await, ChangeSeq(0));
+    let steady = index_status(&router, &namespace_id).await;
+    assert_eq!(
+        steady.state,
+        GrepIndexLifecycle::Steady {
+            built_through_seq: ChangeSeq(0),
+            next_event_index: 0,
+        }
+    );
+    assert!(!steady.reorganize_pending);
+
+    // Re-enabling an active root reports the phase it found, still tagged.
+    let again: EnableGrepIndexResponse = response_json(
+        send(
+            &router,
+            Method::POST,
+            &format!("/v0/admin/namespaces/{namespace_id}/grep/index/enable"),
+            None,
+        )
+        .await,
+    )
+    .await;
+    assert!(again.already_enabled);
+    assert_eq!(again.state, steady.state);
 
     // The file lands through a writer of its own, so nothing in this server
     // observed the publish: the index stays where it was until a request
@@ -136,12 +199,16 @@ async fn serving_and_maintaining_enables_queries_nudges_and_disables_per_namespa
             &router,
             Method::POST,
             &format!("/v0/admin/namespaces/{namespace_id}/grep/index/gc"),
-            None,
+            Some(b"{}".to_vec()),
         )
         .await,
     )
     .await;
     assert_eq!(gc.namespace_id, namespace_id);
+    assert_eq!(
+        gc.next_cursor, None,
+        "an unbudgeted pass walks the whole grep keyspace"
+    );
 
     assert_eq!(enable_grep(&router, &namespace_id).await, StatusCode::OK);
     settle(&lifecycle).await;
@@ -287,6 +354,16 @@ async fn serve_only_answers_searches_over_an_index_it_refuses_to_administer() {
             error.message
         );
     }
+    // Reading the index's lifecycle is administering it: a deployment that
+    // maintains nothing has no authority over the state it would report.
+    let status = send(&router, Method::GET, &status_path(&namespace_id), None).await;
+    assert_eq!(status.status(), StatusCode::NOT_IMPLEMENTED);
+    let error: ApiError = response_json(status).await;
+    assert!(
+        error.message.contains("does not maintain"),
+        "{}",
+        error.message
+    );
 
     let worker = grep_worker(&store, "external-grep-worker").await;
     worker.enable(&namespace_id).await.expect("enable grep");
@@ -301,9 +378,9 @@ async fn serve_only_answers_searches_over_an_index_it_refuses_to_administer() {
         .expect("write file");
     settle(&lifecycle).await;
     assert_eq!(
-        watermark(&store, &namespace_id).await,
-        ChangeSeq(0),
-        "a deployment that maintains nothing must not advance the watermark"
+        lifecycle_of(&store, &namespace_id).await.steady_watermark(),
+        None,
+        "a deployment that maintains nothing must leave the backfill where it was"
     );
 
     drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
@@ -361,7 +438,10 @@ async fn maintain_only_keeps_the_index_built_without_serving_searches() {
         .await
         .expect("load root")
         .expect("maintained root");
-    assert!(matches!(root.state().lifecycle(), GrepLifecycle::Steady));
+    assert!(matches!(
+        root.state().lifecycle(),
+        GrepLifecycle::Steady { .. }
+    ));
     assert!(
         !root.state().segments().is_empty(),
         "the index this deployment maintains holds real segments"
@@ -420,16 +500,24 @@ async fn settle(lifecycle: &ServerLifecycle) {
         .expect("settle maintenance");
 }
 
-/// The sequence this namespace's index is built through, or `None` when it
-/// has no grep root at all.
+/// The sequence this namespace's index is built through.
 async fn watermark(store: &SharedObjectStore, namespace_id: &NamespaceId) -> ChangeSeq {
+    lifecycle_of(store, namespace_id)
+        .await
+        .steady_watermark()
+        .expect("a steady grep root has a watermark")
+        .0
+}
+
+/// This namespace's durable grep lifecycle, read where an operator reads it.
+async fn lifecycle_of(store: &SharedObjectStore, namespace_id: &NamespaceId) -> GrepLifecycle {
     load_grep_root(&**store, namespace_id)
         .await
         .expect("load grep root")
         .expect("an enabled namespace has a grep root")
         .state()
-        .index()
-        .built_through_seq
+        .lifecycle()
+        .clone()
 }
 
 fn grep_paths(namespace_id: &NamespaceId) -> Vec<String> {
@@ -443,6 +531,16 @@ fn admin_grep_paths(namespace_id: &NamespaceId) -> Vec<String> {
         .into_iter()
         .map(|action| format!("/v0/admin/namespaces/{namespace_id}/grep/index/{action}"))
         .collect()
+}
+
+fn status_path(namespace_id: &NamespaceId) -> String {
+    format!("/v0/admin/namespaces/{namespace_id}/grep/index")
+}
+
+async fn index_status(router: &Router, namespace_id: &NamespaceId) -> GrepIndexStatusResponse {
+    let response = send(router, Method::GET, &status_path(namespace_id), None).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    response_json(response).await
 }
 
 async fn enable_grep(router: &Router, namespace_id: &NamespaceId) -> StatusCode {

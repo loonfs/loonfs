@@ -20,7 +20,10 @@ use crate::backend_error::BackendError;
 use crate::payload::LocalPayload;
 use crate::resolve::ResolvedTarget;
 use loonfs_api::{
-    v0::{ChangesResponse, DisableGrepIndexResponse, EnableGrepIndexResponse},
+    v0::{
+        ChangesResponse, DisableGrepIndexResponse, EnableGrepIndexResponse, GrepGcRequest,
+        GrepGcResponse, GrepIndexLifecycle, GrepIndexStatusResponse,
+    },
     AuthoritativePathEntry, ChangeSeq, CheckpointId, CommitResponse, CreateCheckpointRequest,
     CreateCheckpointResponse, DeleteNamespaceResponse, DestinationBehavior, GrepRequest,
     GrepResponse, InodeId, ListFileRevisionsResponse, ListTrashResponse, MaintenanceStepRequest,
@@ -30,8 +33,58 @@ use loonfs_api::{
 use loonfs_client::{
     CommitOptions, CreateDirectoryOptions, DeleteOptions, NamespacePath, PutFileOptions,
 };
+use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
 
 pub(crate) use embedded::EmbeddedBackend;
+
+/// How long a remote wait rests between status checks.
+///
+/// A hosted server drives its own index, so this is only how often the
+/// command asks. Modest and fixed: the wait is bounded by the caller's own
+/// budgets, not by how fast it polls.
+const REMOTE_STATUS_POLL_INTERVAL_MS: u64 = 250;
+
+/// What a caller will spend waiting for the index to reach a target.
+///
+/// A step is one bounded index step where the profile is embedded and one
+/// status check where it is remote — the two arms do different work to
+/// advance the same wait.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct GrepWaitBudget {
+    pub max_steps: Option<u64>,
+    pub deadline_ms: Option<u64>,
+}
+
+impl GrepWaitBudget {
+    fn spent(&self, steps: u64, elapsed_ms: u64) -> bool {
+        self.max_steps.is_some_and(|max_steps| steps >= max_steps)
+            || self
+                .deadline_ms
+                .is_some_and(|deadline_ms| elapsed_ms >= deadline_ms)
+    }
+}
+
+/// Where a wait stopped and what it cost.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GrepWaitProgress {
+    /// The lifecycle last observed.
+    pub state: GrepIndexLifecycle,
+    /// Steps this wait spent.
+    pub steps: u64,
+    /// True when the index reached the target sequence.
+    pub reached: bool,
+}
+
+/// The one timer this CLI owns: how long a remote wait rests between status
+/// checks. Nothing durable depends on it — it only decides how often a
+/// command that is already waiting asks again.
+#[allow(clippy::disallowed_methods)]
+async fn rest_between_status_checks() {
+    tokio::time::sleep(std::time::Duration::from_millis(
+        REMOTE_STATUS_POLL_INTERVAL_MS,
+    ))
+    .await;
+}
 
 /// One logical LoonFS API over two transports.
 ///
@@ -170,6 +223,73 @@ impl ResolvedTarget {
         match self {
             Self::Embedded(target) => target.backend.disable_grep_index(namespace_id).await,
             Self::Remote(target) => Ok(target.client.disable_grep_index(namespace_id).await?),
+        }
+    }
+
+    /// Reads the namespace's grep-index lifecycle (admin plane).
+    pub(crate) async fn grep_index_status(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<GrepIndexStatusResponse, BackendError> {
+        match self {
+            Self::Embedded(target) => target.backend.grep_index_status(namespace_id).await,
+            Self::Remote(target) => Ok(target.client.grep_index_status(namespace_id).await?),
+        }
+    }
+
+    /// Runs one bounded grep-index garbage-collection pass (admin plane).
+    pub(crate) async fn gc_grep_index(
+        &self,
+        namespace_id: &NamespaceId,
+        request: &GrepGcRequest,
+    ) -> Result<GrepGcResponse, BackendError> {
+        match self {
+            Self::Embedded(target) => target.backend.gc_grep_index(namespace_id, request).await,
+            Self::Remote(target) => Ok(target.client.gc_grep_index(namespace_id, request).await?),
+        }
+    }
+
+    /// Waits until the grep index has built through `target_seq`, or until
+    /// the budget runs out.
+    ///
+    /// The two arms advance the same wait differently, and that is the whole
+    /// difference between them. An embedded profile has no maintenance host,
+    /// so it *is* the host: it runs the index job's bounded steps itself. A
+    /// remote profile's server drives its own index, so this only watches
+    /// the status endpoint. Both stop at the target they were given and
+    /// never chase a head that keeps moving.
+    pub(crate) async fn wait_for_grep_index(
+        &self,
+        namespace_id: &NamespaceId,
+        target_seq: ChangeSeq,
+        budget: GrepWaitBudget,
+    ) -> Result<GrepWaitProgress, BackendError> {
+        match self {
+            Self::Embedded(target) => {
+                target
+                    .backend
+                    .drive_grep_index(namespace_id, target_seq, budget)
+                    .await
+            }
+            Self::Remote(target) => {
+                let timer = StdMonotonicTimer::default();
+                let started_ms = timer.monotonic_now_ms();
+                let mut steps = 0;
+                loop {
+                    let state = target.client.grep_index_status(namespace_id).await?.state;
+                    let reached = state.is_built_through(target_seq);
+                    let elapsed_ms = timer.monotonic_now_ms().saturating_sub(started_ms);
+                    if reached || budget.spent(steps, elapsed_ms) {
+                        return Ok(GrepWaitProgress {
+                            state,
+                            steps,
+                            reached,
+                        });
+                    }
+                    rest_between_status_checks().await;
+                    steps += 1;
+                }
+            }
         }
     }
 

@@ -469,8 +469,10 @@ async fn built_through_seq(state: &AppState, namespace_id: &NamespaceId) -> Chan
         .expect("load grep root")
         .expect("an enabled namespace has a grep root")
         .state()
-        .index()
-        .built_through_seq
+        .lifecycle()
+        .steady_watermark()
+        .expect("a steady grep root has a watermark")
+        .0
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -7,7 +7,8 @@ use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::Json;
 use loonfs_api::v0::{
-    DisableGrepIndexResponse, EnableGrepIndexResponse, GrepGcResponse, GrepRequest, GrepResponse,
+    DisableGrepIndexResponse, EnableGrepIndexResponse, GrepGcRequest, GrepGcResponse,
+    GrepIndexLifecycle, GrepIndexStatusResponse, GrepRequest, GrepResponse,
 };
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
@@ -104,7 +105,7 @@ pub(super) async fn grep_index_not_maintained(
         path = "/v0/admin/namespaces/{namespace}/grep/index/enable",
         tag = "admin",
         summary = "Enable the grep index",
-        description = "Enables the namespace's grep root and asks this deployment's maintenance runner for the backfill's first step. Idempotent. Requires this deployment to maintain the grep index.",
+        description = "Enables the namespace's grep root and asks this deployment's maintenance runner for the backfill's first step. The response reports the durable lifecycle it published or found: a fresh enable is `backfilling` with the sequence its checkpoint captured, while an already-enabled namespace answers with whichever phase it is in. Idempotent. Requires this deployment to maintain the grep index.",
         params(("namespace" = String, Path, description = "Namespace id")),
         responses(
             (status = 200, description = "Grep root enabled or already enabled", body = EnableGrepIndexResponse),
@@ -131,17 +132,12 @@ pub(super) async fn enable_grep_index(
         .enable(&namespace_id)
         .await
         .map_err(|error| map_grep_error(&namespace_id, error))?;
-    let response = match outcome {
-        GrepEnableOutcome::Enabled { target_seq } => EnableGrepIndexResponse {
-            namespace_id: namespace_id.clone(),
-            built_through_seq: target_seq,
-            already_enabled: false,
-        },
-        GrepEnableOutcome::AlreadyEnabled { built_through_seq } => EnableGrepIndexResponse {
-            namespace_id: namespace_id.clone(),
-            built_through_seq,
-            already_enabled: true,
-        },
+    // The two settled outcomes differ in one bit — whether this call did the
+    // enabling — and report the same durable lifecycle either way. Nothing
+    // here converts a backfill target into a watermark.
+    let (already_enabled, lifecycle) = match outcome {
+        GrepEnableOutcome::Enabled { state } => (false, state),
+        GrepEnableOutcome::AlreadyEnabled { state } => (true, state),
         GrepEnableOutcome::Superseded => {
             return Err(map_grep_error(
                 &namespace_id,
@@ -151,11 +147,66 @@ pub(super) async fn enable_grep_index(
             ));
         }
     };
+    let response = EnableGrepIndexResponse {
+        namespace_id: namespace_id.clone(),
+        already_enabled,
+        state: GrepIndexLifecycle::from(&lifecycle),
+    };
     // The root is durable now; the backfill is one nudge away from starting.
     if let Some(maintenance) = &state.grep_maintenance {
         maintenance.nudge(&namespace_id);
     }
     Ok(Json(response))
+}
+
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        get,
+        path = "/v0/admin/namespaces/{namespace}/grep/index",
+        tag = "admin",
+        summary = "Read the grep index's lifecycle",
+        description = "Reports where the namespace's grep index is: `disabled`, `backfilling` with the sequence it walks toward and how far the walk got, or `steady` with the watermark it has built through. One grep root read, no side effects. A namespace that never enabled the index reads as `disabled`. Requires this deployment to maintain the grep index.",
+        params(("namespace" = String, Path, description = "Namespace id")),
+        responses(
+            (status = 200, description = "The index's lifecycle and bookkeeping", body = GrepIndexStatusResponse),
+            (status = 401, description = "Unauthorized", body = ApiError),
+            (status = 403, description = "The backing store rejected its configured credentials", body = ApiError),
+            (status = 501, description = "This deployment does not maintain the grep index", body = ApiError),
+            (status = 500, description = "The grep index is corrupt or its backing store is unavailable", body = ApiError)
+        )
+    )
+)]
+pub(super) async fn grep_index_status(
+    State(state): State<AppState>,
+    namespace: NamespaceIdPath,
+    headers: HeaderMap,
+) -> Result<Json<GrepIndexStatusResponse>, ApiResponseError> {
+    authorize(&state.config, &headers)?;
+    let namespace_id = namespace.into_id()?;
+    let root = state
+        .grep_worker
+        .as_ref()
+        .expect("grep routes should carry a grep worker")
+        .root_state(&namespace_id)
+        .await
+        .map_err(|error| map_grep_error(&namespace_id, error))?;
+    let (lifecycle, next_run_ordinal, reorganize_pending) = match &root {
+        Some(root) => (
+            GrepIndexLifecycle::from(root.lifecycle()),
+            root.index().next_run_ordinal,
+            root.index().reorganize.is_some(),
+        ),
+        // No root was ever published, which is the same answer as a root
+        // that was disabled: nothing is being maintained here.
+        None => (GrepIndexLifecycle::Disabled, 0, false),
+    };
+    Ok(Json(GrepIndexStatusResponse {
+        namespace_id,
+        state: lifecycle,
+        next_run_ordinal,
+        reorganize_pending,
+    }))
 }
 
 #[cfg_attr(
@@ -225,10 +276,12 @@ pub(super) async fn disable_grep_index(
         path = "/v0/admin/namespaces/{namespace}/grep/index/gc",
         tag = "admin",
         summary = "Collect grep-index garbage",
-        description = "Runs one explicit garbage-collection pass over only this namespace's grep-owned extension keyspace. A tombstoned or absent namespace has aged extension state reaped; no grep garbage collection runs implicitly. Requires this deployment to maintain the grep index.",
+        description = "Runs one explicit garbage-collection pass over only this namespace's grep-owned extension keyspace. A tombstoned or absent namespace has aged extension state reaped; no grep garbage collection runs implicitly. `max_objects` bounds the reads the pass spends and returns a `next_cursor` when keys remain; resuming re-reads liveness and the grep root, so a cursor only skips enumeration. Requires this deployment to maintain the grep index.",
         params(("namespace" = String, Path, description = "Namespace id")),
+        request_body = GrepGcRequest,
         responses(
             (status = 200, description = "Namespace grep garbage collection completed", body = GrepGcResponse),
+            (status = 400, description = "Invalid budget or cursor", body = ApiError),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 403, description = "The backing store rejected its configured credentials", body = ApiError),
             (status = 501, description = "This deployment does not maintain the grep index", body = ApiError),
@@ -240,6 +293,7 @@ pub(super) async fn gc_grep_index(
     State(state): State<AppState>,
     namespace: NamespaceIdPath,
     headers: HeaderMap,
+    AppJson(request): AppJson<GrepGcRequest>,
 ) -> Result<Json<GrepGcResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let namespace_id = namespace.into_id()?;
@@ -247,7 +301,14 @@ pub(super) async fn gc_grep_index(
         .grep_worker
         .as_ref()
         .expect("grep routes should carry a grep worker")
-        .garbage_collect_namespace(&namespace_id, current_unix_ms()?)
+        .garbage_collect_namespace(
+            &namespace_id,
+            current_unix_ms()?,
+            &loonfs_grep::GrepGcRequest {
+                max_objects: request.max_objects,
+                cursor: request.cursor,
+            },
+        )
         .await
         .map_err(|error| map_grep_error(&namespace_id, error))?;
     Ok(Json(GrepGcResponse {
@@ -257,6 +318,7 @@ pub(super) async fn gc_grep_index(
         namespace_reaped: report.namespace_reaped,
         retained_candidates: report.retained_candidates,
         namespace_degraded: report.namespace_degraded,
+        next_cursor: report.next_cursor,
     }))
 }
 
