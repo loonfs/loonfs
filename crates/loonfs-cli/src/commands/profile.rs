@@ -1,4 +1,4 @@
-//! `loon profile` commands: list, show, create, update, and delete.
+//! `loonfs profile` commands: list, show, create, update, and delete.
 
 use super::context::fail;
 use super::output::{CommandData, CommandFailure, CommandOutput};

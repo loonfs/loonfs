@@ -13,5 +13,5 @@ region = "us-east-1"
 # regional endpoint like "https://s3.us-east-1.amazonaws.com".
 access_key_id = "YOUR_ACCESS_KEY_ID"
 secret_access_key = "YOUR_SECRET_ACCESS_KEY"
-key_prefix = "loon-demo"
+key_prefix = "loonfs-demo"
 force_path_style = false

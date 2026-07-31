@@ -20,20 +20,20 @@ LoonFS is a durable filesystem built on object storage. It can be used to store,
 
 ## Download
 
-You can use the [install script](https://github.com/loonfs/loonfs/blob/main/scripts/install-loon.sh) by running
+You can use the [install script](https://github.com/loonfs/loonfs/blob/main/scripts/install-loonfs.sh) by running
 ```bash
 curl -fsSL https://install.loonfs.com | sh
 ```
 
 If you use Homebrew as your package manager, you can also install it by running
 ```bash
-brew install loonfs/tap/loon
+brew install loonfs/tap/loonfs
 ```
 
 Or compile directly from source by checking out this repository and running
 ```bash
 cargo build -p loonfs-cli                     # compile from source
-cp ./target/debug/loon ~/.local/bin/loon    # copy it to somewhere in your $PATH
+cp ./target/debug/loonfs ~/.local/bin/loonfs    # copy it to somewhere in your $PATH
 ```
 
 ## Quickstart
@@ -43,18 +43,18 @@ This example uses S3 in embedded mode, where the CLI talks directly to the bucke
 ```bash
 export AWS_ACCESS_KEY_ID={access_key_id}
 export AWS_SECRET_ACCESS_KEY={secret_access_key}
-loon init default --no-input \
+loonfs init default --no-input \
   --mode embedded \
   --store-kind aws-s3 \
   --bucket {bucket_name} \
   --region {aws_region}
-loon namespace create {namespace_id}
-loon use {namespace_id}
+loonfs namespace create {namespace_id}
+loonfs use {namespace_id}
 ```
 
 ## Running a server
 
-Embedded mode gives one process at a time direct object-store access. Concurrent `loon` invocations against one namespace contend for the writer role: whichever acquires it last wins, and a command that loses fails with `writer_fenced`, naming both sessions. A fenced command commits nothing, so rerunning it is always safe — but fencing is a stop signal, not a retry loop, so put bulk work in one process or run the server for concurrent writers. To share a deployment across machines and let many clients write concurrently, run the reference server and point remote profiles at it:
+Embedded mode gives one process at a time direct object-store access. Concurrent `loonfs` invocations against one namespace contend for the writer role: whichever acquires it last wins, and a command that loses fails with `writer_fenced`, naming both sessions. A fenced command commits nothing, so rerunning it is always safe — but fencing is a stop signal, not a retry loop, so put bulk work in one process or run the server for concurrent writers. To share a deployment across machines and let many clients write concurrently, run the reference server and point remote profiles at it:
 
 ```bash
 cargo build -p loonfs-server
@@ -65,7 +65,7 @@ Commented example configs for every supported store live in [configs/](configs) 
 
 ```bash
 export LOONFS_AUTH_TOKEN={auth_token}
-loon init default --no-input --mode remote --server-url http://127.0.0.1:9400
+loonfs init default --no-input --mode remote --server-url http://127.0.0.1:9400
 ```
 
 ## Documentation

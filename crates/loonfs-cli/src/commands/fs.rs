@@ -44,7 +44,7 @@ pub(super) fn write_local_file_atomically(
         .ok_or_else(|| std::io::Error::other("destination has no file name"))?;
     let mut prefix = std::ffi::OsString::from(".");
     prefix.push(file_name);
-    prefix.push(".loon-partial-");
+    prefix.push(".loonfs-partial-");
     let parent = destination
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
@@ -258,7 +258,7 @@ pub(crate) async fn run_filesystem_get(
         return Err(context.fail(
             kind,
             CliError::invalid_input(format!(
-                "`{}` is a directory; use `loon get -r` to download the tree",
+                "`{}` is a directory; use `loonfs get -r` to download the tree",
                 spec.absolute_path()
             )),
         ));
@@ -409,7 +409,7 @@ pub(crate) async fn run_filesystem_put(
         return Err(context.fail(
             kind,
             CliError::invalid_input(format!(
-                "`{}` is a directory; use `loon put -r` to upload the tree",
+                "`{}` is a directory; use `loonfs put -r` to upload the tree",
                 local_path.display()
             )),
         ));
@@ -440,7 +440,7 @@ pub(crate) async fn run_filesystem_put(
     commit_put(kind, &context, &spec, &payload, &options).await
 }
 
-/// `loon put - <remote>`: standard input, whose length is not knowable, so
+/// `loonfs put - <remote>`: standard input, whose length is not knowable, so
 /// it is always read once and never held.
 ///
 /// The remote path has to be spelled out. Every other `put` derives a
@@ -537,7 +537,7 @@ pub(crate) async fn run_filesystem_rm(
     let commit_id = parse_commit_id_arg(args.commit_id.as_deref())
         .map_err(|error| context.fail(kind, error))?;
     // Resolve the inode before deleting: the id is half of the recovery
-    // handle `loon undelete` needs. The delete then carries it as an
+    // handle `loonfs undelete` needs. The delete then carries it as an
     // expectation, so a rebinding racing this command fails the delete
     // instead of removing (and mis-reporting) a different inode.
     let deleted_inode = context
@@ -776,7 +776,7 @@ async fn run_filesystem_transfer(
             return Err(context.fail(
                 kind,
                 CliError::invalid_input(format!(
-                    "`{}` is a directory; use `loon cp -r` to copy the tree",
+                    "`{}` is a directory; use `loonfs cp -r` to copy the tree",
                     from.absolute_path()
                 )),
             ));

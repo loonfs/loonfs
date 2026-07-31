@@ -86,4 +86,4 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-dist-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-dist-
-      - run: scripts/test-install-loon.sh
+      - run: scripts/test-install-loonfs.sh

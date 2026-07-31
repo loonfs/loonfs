@@ -4,7 +4,7 @@ set -eu
 
 usage() {
     cat <<'EOF'
-Usage: package-loon-release.sh --target <target> --version <version> --artifact-dir <dir>
+Usage: package-loonfs-release.sh --target <target> --version <version> --artifact-dir <dir>
 EOF
 }
 
@@ -44,19 +44,19 @@ if [ -z "$target" ] || [ -z "$version" ] || [ -z "$artifact_dir" ]; then
 fi
 
 repo_root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
-binary_path="$repo_root/target/$target/release/loon"
-archive_name="loon-$target.tar.gz"
+binary_path="$repo_root/target/$target/release/loonfs"
+archive_name="loonfs-$target.tar.gz"
 stage_dir="$artifact_dir/package/$target"
 
 if [ ! -x "$binary_path" ]; then
-    echo "missing compiled loon binary at $binary_path" >&2
+    echo "missing compiled loonfs binary at $binary_path" >&2
     exit 1
 fi
 
 mkdir -p "$stage_dir"
 rm -rf "$stage_dir"/*
 
-cp "$binary_path" "$stage_dir/loon"
+cp "$binary_path" "$stage_dir/loonfs"
 cp "$repo_root/README.md" "$stage_dir/README.md"
 cp "$repo_root/LICENSE" "$stage_dir/LICENSE"
 printf '%s\n' "$version" > "$stage_dir/VERSION"

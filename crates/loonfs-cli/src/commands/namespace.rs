@@ -1,4 +1,4 @@
-//! `loon namespace` commands: create, fork, delete, use, and current.
+//! `loonfs namespace` commands: create, fork, delete, use, and current.
 
 use super::context::{fail, fail_for};
 use super::output::{CommandData, CommandFailure, CommandOutput};

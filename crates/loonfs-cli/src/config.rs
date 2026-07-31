@@ -590,7 +590,7 @@ secret_access_key = "secret"
             let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
                 continue;
             };
-            if !name.starts_with("loon.") || !name.ends_with(".example.toml") {
+            if !name.starts_with("loonfs.") || !name.ends_with(".example.toml") {
                 continue;
             }
             let contents = std::fs::read_to_string(&path).expect("read example config");

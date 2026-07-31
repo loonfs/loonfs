@@ -5,7 +5,7 @@
 //! in-process `loonfs` runtime, the remote arm drives a `loonfs-client` over
 //! HTTP — and the commands above this seam cannot tell which they got.
 //!
-//! The seam is private to this crate on purpose. It exists so `loon` can run
+//! The seam is private to this crate on purpose. It exists so `loonfs` can run
 //! its features against either transport, not as an extension point: an
 //! application embedding LoonFS programs against `loonfs` (runtime) or
 //! `loonfs-client` (HTTP) directly, and neither needs a seam between.

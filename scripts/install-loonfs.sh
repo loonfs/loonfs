@@ -1,15 +1,15 @@
 #!/bin/sh
 
 if [ -n "${BASH_VERSION:-}" ] && [ "${BASH_SOURCE:-$0}" != "$0" ]; then
-    echo "error: install-loon.sh must be executed, not sourced" >&2
-    echo "run it with: curl -fsSL https://raw.githubusercontent.com/loonfs/loonfs/main/scripts/install-loon.sh | sh" >&2
+    echo "error: install-loonfs.sh must be executed, not sourced" >&2
+    echo "run it with: curl -fsSL https://raw.githubusercontent.com/loonfs/loonfs/main/scripts/install-loonfs.sh | sh" >&2
     return 1
 fi
 
 case "${ZSH_EVAL_CONTEXT:-}" in
     *:file)
-        echo "error: install-loon.sh must be executed, not sourced" >&2
-        echo "run it with: curl -fsSL https://raw.githubusercontent.com/loonfs/loonfs/main/scripts/install-loon.sh | sh" >&2
+        echo "error: install-loonfs.sh must be executed, not sourced" >&2
+        echo "run it with: curl -fsSL https://raw.githubusercontent.com/loonfs/loonfs/main/scripts/install-loonfs.sh | sh" >&2
         return 1
         ;;
 esac
@@ -23,11 +23,11 @@ tmpdir=""
 
 usage() {
     cat <<'EOF'
-Usage: install-loon.sh [--version <tag>] [--install-dir <path>]
+Usage: install-loonfs.sh [--version <tag>] [--install-dir <path>]
 
 Options:
   --version <tag>          Install a specific release tag (default: latest)
-  --install-dir <path>     Where to install the loon binary (default: $HOME/.local/bin)
+  --install-dir <path>     Where to install the loonfs binary (default: $HOME/.local/bin)
 EOF
 }
 
@@ -139,7 +139,7 @@ main() {
     need_cmd mktemp
 
     target=$(detect_target)
-    archive_name="loon-$target.tar.gz"
+    archive_name="loonfs-$target.tar.gz"
 
     if [ -n "$VERSION" ]; then
         base_url="${LOONFS_RELEASE_URL_ROOT:-https://github.com/$REPO_SLUG/releases}/download/$VERSION"
@@ -157,18 +157,18 @@ main() {
 
     mkdir -p "$INSTALL_DIR"
     tar -xzf "$archive_path" -C "$tmpdir"
-    install_path="$INSTALL_DIR/loon"
-    cp "$tmpdir/loon" "$install_path"
+    install_path="$INSTALL_DIR/loonfs"
+    cp "$tmpdir/loonfs" "$install_path"
     chmod 755 "$install_path"
 
-    printf 'installed loon to %s\n' "$install_path"
+    printf 'installed loonfs to %s\n' "$install_path"
     "$install_path" version
 
     case ":$PATH:" in
         *:"$INSTALL_DIR":*)
             ;;
         *)
-            printf 'add %s to PATH to run `loon` directly\n' "$INSTALL_DIR"
+            printf 'add %s to PATH to run `loonfs` directly\n' "$INSTALL_DIR"
             ;;
     esac
 }

@@ -662,7 +662,7 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
 
 /// The one-pass path, against the provider that has to accept it.
 ///
-/// Both puts here are what `loon put` runs: a payload that is never held
+/// Both puts here are what `loonfs put` runs: a payload that is never held
 /// whole, cut into parts as it is read, with the object's length and digest
 /// discovered on the way past and claimed at completion. The first reads a
 /// real file from disk — the size that matters is the file's, not this
