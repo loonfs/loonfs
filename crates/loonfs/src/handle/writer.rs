@@ -150,6 +150,26 @@ impl FsWriter {
         self.bits.maintenance.drain().await
     }
 
+    /// Closes maintenance admission and drops what is still queued, without
+    /// waiting for anything.
+    ///
+    /// The first half of [`Self::shutdown_background`] on its own, for a
+    /// host with work to do between closing the front door and waiting at
+    /// it. The reference server is that host: it closes this, closes
+    /// publisher admission, drains publications, and only then runs the
+    /// full shutdown — because draining publications is an await, and until
+    /// it returns an open runner keeps admitting steps this shutdown has
+    /// already decided to drop.
+    ///
+    /// Synchronous and idempotent, so it is safe before
+    /// [`Self::shutdown_background`], which closes again and then drains.
+    /// After it, nudges are dropped and work still waiting for a permit is
+    /// discarded; steps already running are untouched, and the drain is
+    /// what settles them.
+    pub fn close_maintenance_admission(&self) {
+        self.bits.maintenance.shut_down();
+    }
+
     /// Shuts down writer-scheduled background work: rejects new maintenance
     /// scheduling, then settles admitted publications whose callers are gone
     /// and waits for in-flight maintenance tasks to settle, surfacing panics.
@@ -160,11 +180,11 @@ impl FsWriter {
     /// handle-owned background work, and with
     /// [`FsBackgroundWork::ManualOnly`] it is nearly trivial. For a
     /// terminal shutdown that also refuses later submissions with
-    /// `shutting_down`, call
+    /// `shutting_down`, call [`Self::close_maintenance_admission`] and then
     /// [`PublisherRegistry::close_admission`](crate::publisher::PublisherRegistry::close_admission)
-    /// via [`Self::publisher`] first, as the reference server does.
-    /// Dropping the handle without calling this is best-effort cleanup,
-    /// not the documented graceful shutdown path.
+    /// via [`Self::publisher`] first, in that order, as the reference
+    /// server does. Dropping the handle without calling this is best-effort
+    /// cleanup, not the documented graceful shutdown path.
     pub async fn shutdown_background(&self) -> Result<()> {
         // Closing maintenance admission has to come first, and has to happen
         // before this future's first await. A maintenance step parked in its
