@@ -3,7 +3,9 @@
 #![allow(dead_code)]
 
 use loonfs_client::{Client, ClientConfig};
-use loonfs_server::{app, GrepConfig, RuntimeCacheConfigOverrides, ServerConfig, StoreConfig};
+use loonfs_server::{
+    app, GrepConfig, MaintenanceMode, RuntimeCacheConfigOverrides, ServerConfig, StoreConfig,
+};
 use std::path::PathBuf;
 
 pub(crate) struct TestServer {
@@ -67,7 +69,7 @@ pub(crate) fn test_config(
         writer_id: writer_id.to_owned(),
         runtime_cache: RuntimeCacheConfigOverrides::default(),
         grep: GrepConfig::default(),
-        background_maintenance: true,
+        maintenance: MaintenanceMode::Automatic,
         min_publish_interval_ms: 0,
         max_upload_bytes: 256 * 1024 * 1024,
         max_download_bytes: 256 * 1024 * 1024,

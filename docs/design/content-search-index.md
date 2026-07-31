@@ -200,7 +200,20 @@ to have finished. Re-running enable on an already-enabled namespace is how
 an embedded operator advances a lagging index. Between enables, small write
 tails are served by the query-time exhaustive tail scan within its budget.
 
-Detached maintenance is explicitly assigned with repeatable
+Automatic maintenance covers the namespaces a process touches and the ones a
+host is explicitly assigned, and `loonfs admin run --namespace <id>` is how a
+namespace nobody is writing to gets assigned. It opens an embedded runtime,
+hosts that runtime's runner, registers this job beside the runtime's own, and
+tells the runner about every assigned key at start-up and again on an
+interval — the runner forgets a key its probe found idle, which is right for
+a namespace merely touched and not enough for one an operator named. Repeat
+`--job grep-index` to narrow the host to this job. `--drain` catches the
+assignment up and exits instead of hosting until a signal, bounded by
+`--max-steps` and `--deadline-ms`, and reports where every key stopped. A
+namespace with no grep root settles `not_enabled`, so assigning one costs a
+read and nothing else.
+
+Detached maintenance is also explicitly assigned with repeatable
 `loonfs-grep --namespace <id>` flags. `--once` catches up only those namespaces
 and exits. The long-running form runs the same job's probe for each assigned
 namespace at `poll_interval_ms` (default 1000, zero rejected) — the

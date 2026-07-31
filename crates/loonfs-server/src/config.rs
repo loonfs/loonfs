@@ -45,14 +45,10 @@ pub struct ServerConfig {
     /// queries and maintains the index.
     #[serde(default = "grep_absent")]
     pub grep: GrepConfig,
-    /// Whether the server writer runs a maintenance runner: metadata steps
-    /// after writes that cross the WAL-tail threshold, and collection
-    /// passes for the upload sessions it opened once their leases pass. It
-    /// never advances the retention floor. On by default; set `false` on
-    /// write-serving nodes when a dedicated maintenance process owns steps
-    /// for these namespaces.
-    #[serde(default = "default_background_maintenance")]
-    pub background_maintenance: bool,
+    /// Whether this server maintains the namespaces it touches by itself.
+    /// Automatic by default; see [`MaintenanceMode`].
+    #[serde(default)]
+    pub maintenance: MaintenanceMode,
     /// Minimum interval between publication starts per namespace, in
     /// milliseconds. A cold namespace publishes immediately; the interval
     /// paces follow-up batches so hot namespaces amortize into fewer,
@@ -103,10 +99,6 @@ pub struct ServerConfig {
     pub store: StoreConfig,
 }
 
-fn default_background_maintenance() -> bool {
-    true
-}
-
 fn default_min_publish_interval_ms() -> u64 {
     1_000
 }
@@ -151,6 +143,48 @@ pub struct RuntimeCacheConfigOverrides {
     pub max_cached_wal_tail_projection_rows: Option<usize>,
     pub max_cached_wal_tail_projection_decoded_bytes: Option<usize>,
     pub metadata_table_cache_max_decoded_bytes: Option<usize>,
+}
+
+/// Whether this server maintains the namespaces it touches.
+///
+/// One word decides it, and it is the only switch: `automatic` registers the
+/// runtime's own jobs — metadata upkeep and collection — and the grep index
+/// job when `[grep]`'s mode maintains, and lets the writer's runner schedule
+/// all of them; `manual` registers nothing automatic and schedules nothing.
+/// Explicit admin operations work identically either way, and the retention
+/// floor is never advanced automatically under either.
+///
+/// Set `manual` on a write-serving node when a dedicated maintenance
+/// process — `loonfs admin run --namespace ...`, or another server — owns
+/// upkeep for these namespaces. Automatic maintenance covers namespaces
+/// touched by the running process and namespaces explicitly assigned to a
+/// maintenance host, so a deployment that switches this off has to assign
+/// its namespaces somewhere.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MaintenanceMode {
+    /// The writer schedules its own metadata and collection steps, and the
+    /// grep index job when the grep mode maintains.
+    #[default]
+    Automatic,
+    /// Nothing is scheduled and no automatic job is registered. Explicit
+    /// admin operations remain available.
+    Manual,
+}
+
+impl MaintenanceMode {
+    /// Whether this server registers automatic maintenance jobs at all.
+    pub fn registers_automatic_jobs(self) -> bool {
+        matches!(self, Self::Automatic)
+    }
+
+    /// The writer policy this mode selects.
+    pub fn background_work(self) -> loonfs::FsBackgroundWork {
+        match self {
+            Self::Automatic => loonfs::FsBackgroundWork::Enabled,
+            Self::Manual => loonfs::FsBackgroundWork::ManualOnly,
+        }
+    }
 }
 
 /// What this server does about grep: answer queries, keep the index built,
@@ -352,7 +386,7 @@ impl ServerConfig {
             return Err(ServerConfigError::InvalidField {
                 field: "max_concurrent_maintenance",
                 reason: "must be greater than zero; \
-                         set `background_maintenance = false` to disable scheduling"
+                         set `maintenance = \"manual\"` to disable scheduling"
                     .to_owned(),
             });
         }
@@ -440,7 +474,7 @@ mod tests {
         "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==";
 
     #[test]
-    fn background_maintenance_defaults_on_and_accepts_false() {
+    fn maintenance_defaults_to_automatic_and_accepts_manual() {
         let path = write_config(
             r#"
 bind = "127.0.0.1:9400"
@@ -453,11 +487,43 @@ root = "/tmp/loonfs-server"
 "#,
         );
         let config = load_server_config(&path).expect("valid config");
-        assert!(
-            config.background_maintenance,
-            "background maintenance defaults on"
+        assert_eq!(config.maintenance, super::MaintenanceMode::Automatic);
+        assert!(config.maintenance.registers_automatic_jobs());
+        assert_eq!(
+            config.maintenance.background_work(),
+            loonfs::FsBackgroundWork::Enabled
         );
 
+        let path = write_config(
+            r#"
+bind = "127.0.0.1:9400"
+auth_token = "dev-token"
+writer_id = "loonfs-server"
+maintenance = "manual"
+
+[store]
+kind = "local-fs"
+root = "/tmp/loonfs-server"
+"#,
+        );
+        let config = load_server_config(&path).expect("valid config");
+        assert_eq!(
+            config.maintenance,
+            super::MaintenanceMode::Manual,
+            "write-serving nodes can hand maintenance to a dedicated process"
+        );
+        assert!(!config.maintenance.registers_automatic_jobs());
+        assert_eq!(
+            config.maintenance.background_work(),
+            loonfs::FsBackgroundWork::ManualOnly
+        );
+    }
+
+    #[test]
+    fn the_retired_background_maintenance_key_is_no_longer_a_key() {
+        // One word decides automatic maintenance now, and `maintenance` is
+        // the word. The boolean it replaced fails through strict decoding
+        // like any other unknown key.
         let path = write_config(
             r#"
 bind = "127.0.0.1:9400"
@@ -470,11 +536,37 @@ kind = "local-fs"
 root = "/tmp/loonfs-server"
 "#,
         );
-        let config = load_server_config(&path).expect("valid config");
+
+        let error = load_server_config(&path).expect_err("retired key must not load");
         assert!(
-            !config.background_maintenance,
-            "write-serving nodes can hand maintenance to a dedicated process"
+            error.to_string().contains("background_maintenance"),
+            "{error}"
         );
+    }
+
+    #[test]
+    fn an_unknown_maintenance_word_is_rejected() {
+        let path = write_config(
+            r#"
+bind = "127.0.0.1:9400"
+auth_token = "dev-token"
+writer_id = "loonfs-server"
+maintenance = "sometimes"
+
+[store]
+kind = "local-fs"
+root = "/tmp/loonfs-server"
+"#,
+        );
+
+        let error = load_server_config(&path).expect_err("unknown mode must not load");
+        match error {
+            ServerConfigError::Decode(message) => {
+                assert!(message.contains("automatic"), "{message}");
+                assert!(message.contains("manual"), "{message}");
+            }
+            other => panic!("expected decode error naming the modes, got {other:?}"),
+        }
     }
 
     #[test]

@@ -1,19 +1,24 @@
 //! `loonfs admin` commands: checkpoints, retention, GC, indexes, and the
 //! change feed.
 
-use super::context::resolve_command_context;
-use super::output::{CommandData, CommandFailure, CommandOutput};
+use super::context::{fail, fail_for, resolve_command_context};
+use super::output::{CommandData, CommandFailure, CommandOutput, MaintenanceKeyReport};
 use crate::args::{
     AdminCheckpointArgs, AdminCheckpointReleaseArgs, AdminCommand, AdminGcArgs,
-    AdminIndexEnableArgs, AdminIndexGcArgs, AdminNamespaceArgs, AdminStepArgs, ChangesArgs,
-    CommandKind,
+    AdminIndexEnableArgs, AdminIndexGcArgs, AdminNamespaceArgs, AdminRunArgs, AdminStepArgs,
+    ChangesArgs, CommandKind, MaintenanceJobArg,
 };
-use crate::backend::GrepWaitBudget;
+use crate::backend::{MaintenanceKeyProgress, StepBudget};
+use crate::resolve::{parse_namespace_id, resolve_target_profile};
+use clap::ValueEnum;
+use loonfs::{MaintenanceJobId, NamespaceId};
 use loonfs_api::v0::{GrepGcRequest, GrepIndexLifecycle};
 use loonfs_api::{
     ChangeSeq, CheckpointId, CreateCheckpointRequest, ErrorCode, GcRequest, MaintenanceStepKind,
     MaintenanceStepRequest,
 };
+use loonfs_grep::GREP_INDEX_JOB;
+use std::collections::BTreeSet;
 
 // --- maintenance/admin plane ---
 
@@ -26,6 +31,7 @@ pub(crate) async fn run_admin_command(
         AdminCommand::CheckpointRelease(args) => run_admin_checkpoint_release(kind, args).await,
         AdminCommand::Flush(args) => run_admin_flush(kind, args).await,
         AdminCommand::RetentionAdvance(args) => run_admin_retention_advance(kind, args).await,
+        AdminCommand::Run(args) => run_admin_run(kind, args).await,
         AdminCommand::Step(args) => run_admin_step(kind, args).await,
         AdminCommand::Gc(args) => run_admin_gc(kind, args).await,
         AdminCommand::IndexEnable(args) => run_admin_index_enable(kind, args).await,
@@ -227,6 +233,129 @@ async fn run_admin_retention_advance(
     })
 }
 
+/// Hosts maintenance for the namespaces named on the command line.
+///
+/// Nothing here discovers a namespace, because LoonFS has no operation that
+/// enumerates them. The flags are the assignment, and the assignment is what
+/// brings a namespace no process is writing to under automatic maintenance:
+/// continuously until a signal, or as one bounded catch-up with `--drain`.
+async fn run_admin_run(
+    kind: CommandKind,
+    args: AdminRunArgs,
+) -> Result<CommandOutput, CommandFailure> {
+    let explicit_profile = args.profile.profile.as_deref();
+    let resolved = resolve_target_profile(explicit_profile, args.profile.no_retry)
+        .await
+        .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
+    let mode = resolved.target.mode_str().to_owned();
+    let namespaces = args
+        .namespaces
+        .iter()
+        .map(|namespace| parse_namespace_id(namespace))
+        .collect::<Result<BTreeSet<_>, _>>()
+        .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
+    // Sorted and deduplicated, so the keys are driven in the order the
+    // runner itself keys them and two spellings of one assignment produce
+    // one report.
+    let namespaces: Vec<NamespaceId> = namespaces.into_iter().collect();
+    let jobs = selected_jobs(&args.jobs);
+    let fail_here = |error| fail_for(kind, &resolved.profile_name, &mode, error);
+
+    let (keys, steps, budget_exhausted) = if args.drain {
+        let budget = StepBudget {
+            max_steps: args.max_steps,
+            deadline_ms: args.deadline_ms,
+        };
+        let progress = resolved
+            .target
+            .drain_maintenance(&namespaces, &jobs, budget)
+            .await
+            .map_err(fail_here)?;
+        (
+            progress.keys.iter().map(key_report).collect(),
+            progress.steps,
+            progress.budget_exhausted(),
+        )
+    } else {
+        resolved
+            .target
+            .host_maintenance(&namespaces, &jobs, shutdown_signal())
+            .await
+            .map_err(fail_here)?;
+        // A hosted run reports no per-key outcome: the runner ran the steps,
+        // and where each namespace got to is durable state to read, not a
+        // tally this process kept.
+        (Vec::new(), 0, false)
+    };
+
+    Ok(CommandOutput {
+        kind,
+        profile: Some(resolved.profile_name),
+        mode: Some(mode),
+        data: CommandData::MaintenanceHosted {
+            namespaces,
+            jobs: jobs.iter().map(|job| job.as_str().to_owned()).collect(),
+            drained: args.drain,
+            keys,
+            steps,
+            budget_exhausted,
+        },
+    })
+}
+
+/// The jobs to host, in the order the runner keys them, with no repeats.
+/// An empty selection is every job this host knows how to run.
+fn selected_jobs(requested: &[MaintenanceJobArg]) -> Vec<MaintenanceJobId> {
+    MaintenanceJobArg::value_variants()
+        .iter()
+        .filter(|job| requested.is_empty() || requested.contains(job))
+        .map(|job| job_id(*job))
+        .collect()
+}
+
+fn job_id(job: MaintenanceJobArg) -> MaintenanceJobId {
+    match job {
+        MaintenanceJobArg::Metadata => MaintenanceJobId::METADATA,
+        MaintenanceJobArg::CoreGc => MaintenanceJobId::GC,
+        MaintenanceJobArg::GrepIndex => GREP_INDEX_JOB,
+    }
+}
+
+fn key_report(key: &MaintenanceKeyProgress) -> MaintenanceKeyReport {
+    MaintenanceKeyReport {
+        namespace_id: key.namespace_id.clone(),
+        job: key.job.as_str().to_owned(),
+        steps: key.steps,
+        conclusion: key
+            .conclusion
+            .map(|conclusion| conclusion.as_str().to_owned()),
+        settled: key.settled(),
+    }
+}
+
+/// Resolves on ctrl-c or, on unix, SIGTERM — the stop an orchestrator sends
+/// before a kill. The clean shutdown behind it is the writer's own.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("ctrl-c handler should install");
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("SIGTERM handler should install")
+            .recv()
+            .await;
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        () = ctrl_c => {}
+        _ = terminate => {}
+    }
+}
+
 pub(crate) async fn run_admin_changes(
     kind: CommandKind,
     args: ChangesArgs,
@@ -289,7 +418,7 @@ async fn run_admin_index_enable(
                 .wait_for_grep_index(
                     &context.namespace,
                     target_seq,
-                    GrepWaitBudget {
+                    StepBudget {
                         max_steps: args.max_steps,
                         deadline_ms: args.deadline_ms,
                     },

@@ -36,6 +36,7 @@ use loonfs_client::{
 use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
 
 pub(crate) use embedded::EmbeddedBackend;
+use loonfs::{MaintenanceJobId, MaintenanceStepConclusion};
 
 /// How long a remote wait rests between status checks.
 ///
@@ -44,24 +45,88 @@ pub(crate) use embedded::EmbeddedBackend;
 /// budgets, not by how fast it polls.
 const REMOTE_STATUS_POLL_INTERVAL_MS: u64 = 250;
 
-/// What a caller will spend waiting for the index to reach a target.
+/// What a caller will spend driving bounded steps toward something.
 ///
-/// A step is one bounded index step where the profile is embedded and one
-/// status check where it is remote — the two arms do different work to
-/// advance the same wait.
+/// What one step is depends on what is being driven: one bounded index step
+/// where an embedded profile waits for the index, one status check where a
+/// remote one does, one bounded maintenance step where `admin run` drains an
+/// assignment. The accounting is the same in every case, and both bounds are
+/// optional — an unbudgeted caller runs until the work settles.
 #[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct GrepWaitBudget {
+pub(crate) struct StepBudget {
     pub max_steps: Option<u64>,
     pub deadline_ms: Option<u64>,
 }
 
-impl GrepWaitBudget {
+impl StepBudget {
     fn spent(&self, steps: u64, elapsed_ms: u64) -> bool {
         self.max_steps.is_some_and(|max_steps| steps >= max_steps)
             || self
                 .deadline_ms
                 .is_some_and(|deadline_ms| elapsed_ms >= deadline_ms)
     }
+}
+
+/// One assigned `{job, namespace}` key, as a drain left it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MaintenanceKeyProgress {
+    pub job: MaintenanceJobId,
+    pub namespace_id: NamespaceId,
+    /// Steps this drain ran for this key.
+    pub steps: u64,
+    /// What its last step concluded, absent when the budget ran out before
+    /// the key took one.
+    pub conclusion: Option<MaintenanceStepConclusion>,
+}
+
+impl MaintenanceKeyProgress {
+    /// Whether this key has nothing left for a drain to drive.
+    ///
+    /// Progress and a lost race both leave work behind, so a drain keeps
+    /// going. Everything else is where it stops — including `Blocked`, which
+    /// says there is work this step's policy cannot move: repeating it would
+    /// spin rather than finish.
+    pub(crate) fn settled(&self) -> bool {
+        match self.conclusion {
+            Some(
+                MaintenanceStepConclusion::Idle
+                | MaintenanceStepConclusion::Blocked
+                | MaintenanceStepConclusion::NotEnabled,
+            ) => true,
+            Some(MaintenanceStepConclusion::Progressed | MaintenanceStepConclusion::Superseded)
+            | None => false,
+        }
+    }
+}
+
+/// Where a drain stopped and what it cost.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MaintenanceDrainProgress {
+    /// Every assigned key, in the order the drain drove them.
+    pub keys: Vec<MaintenanceKeyProgress>,
+    /// Steps this drain ran across every key.
+    pub steps: u64,
+}
+
+impl MaintenanceDrainProgress {
+    /// Whether the budget stopped the drain before every key settled. A key
+    /// only goes unsettled that way: the loop that drives it ends at a
+    /// settled conclusion or at a spent budget, and at nothing else.
+    pub(crate) fn budget_exhausted(&self) -> bool {
+        !self.keys.iter().all(MaintenanceKeyProgress::settled)
+    }
+}
+
+/// Refuses a maintenance host to a profile that has no runtime to host it
+/// in. Remote profiles are served by a server that runs its own runner;
+/// stepping one from here would be a second scheduler over the same
+/// namespaces, and there is no remote step to drive anyway.
+fn maintenance_host_needs_an_embedded_profile() -> BackendError {
+    BackendError::new(
+        loonfs_api::ErrorCode::NotSupported.as_str(),
+        "`admin run` hosts maintenance in this process and needs an embedded profile; \
+         a remote profile's server runs its own maintenance",
+    )
 }
 
 /// Where a wait stopped and what it cost.
@@ -262,7 +327,7 @@ impl ResolvedTarget {
         &self,
         namespace_id: &NamespaceId,
         target_seq: ChangeSeq,
-        budget: GrepWaitBudget,
+        budget: StepBudget,
     ) -> Result<GrepWaitProgress, BackendError> {
         match self {
             Self::Embedded(target) => {
@@ -551,6 +616,50 @@ impl ResolvedTarget {
                 .client
                 .maintenance_step(namespace_id, &request)
                 .await?),
+        }
+    }
+
+    /// Hosts `jobs` for `namespaces` until `shutdown` resolves, then settles
+    /// what it admitted.
+    ///
+    /// This is the explicit half of the coverage contract: automatic
+    /// maintenance reaches the namespaces a process touches and the ones a
+    /// host is assigned, and this is where a namespace nobody is writing to
+    /// gets assigned. Only an embedded profile can host it — a remote
+    /// profile's server is already hosting its own.
+    pub(crate) async fn host_maintenance(
+        &self,
+        namespaces: &[NamespaceId],
+        jobs: &[MaintenanceJobId],
+        shutdown: impl std::future::Future<Output = ()>,
+    ) -> Result<(), BackendError> {
+        match self {
+            Self::Embedded(target) => {
+                target
+                    .backend
+                    .host_maintenance(namespaces, jobs, shutdown)
+                    .await
+            }
+            Self::Remote(_) => Err(maintenance_host_needs_an_embedded_profile()),
+        }
+    }
+
+    /// Runs every `{job, namespace}` key to a settled conclusion, or until
+    /// `budget` runs out, and reports where each one got to.
+    pub(crate) async fn drain_maintenance(
+        &self,
+        namespaces: &[NamespaceId],
+        jobs: &[MaintenanceJobId],
+        budget: StepBudget,
+    ) -> Result<MaintenanceDrainProgress, BackendError> {
+        match self {
+            Self::Embedded(target) => {
+                target
+                    .backend
+                    .drain_maintenance(namespaces, jobs, budget)
+                    .await
+            }
+            Self::Remote(_) => Err(maintenance_host_needs_an_embedded_profile()),
         }
     }
 

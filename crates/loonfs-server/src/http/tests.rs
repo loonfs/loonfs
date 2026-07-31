@@ -1964,7 +1964,7 @@ fn test_config(root: &Path, writer_id: &str) -> ServerConfig {
         writer_id: writer_id.to_owned(),
         runtime_cache: RuntimeCacheConfigOverrides::default(),
         grep: crate::config::GrepConfig::default(),
-        background_maintenance: true,
+        maintenance: crate::config::MaintenanceMode::Automatic,
         min_publish_interval_ms: 0,
         max_upload_bytes: 256 * 1024 * 1024,
         max_download_bytes: 256 * 1024 * 1024,

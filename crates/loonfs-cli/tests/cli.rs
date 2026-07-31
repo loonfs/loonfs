@@ -2375,6 +2375,182 @@ fn index_gc_loops_its_cursor_and_accumulates() {
     );
 }
 
+/// `admin run --drain` is the assigned host's catch-up: every
+/// `{job, namespace}` key it was given reaches a settled conclusion, it
+/// exits zero, and the work it did is in durable state rather than in its
+/// output.
+#[test]
+fn admin_run_drains_an_assignment_and_leaves_the_work_done() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    for namespace in ["alpha", "beta"] {
+        assert_success(&harness.run(&["namespace", "create", namespace]));
+        let payload = harness.temp_dir.path().join(format!("{namespace}.txt"));
+        fs::write(&payload, b"assigned needle\n").expect("write payload");
+        assert_success(&harness.run(&[
+            "put",
+            "--namespace",
+            namespace,
+            payload.to_str().expect("utf-8 path"),
+            "/note.txt",
+        ]));
+        // Enabled and deliberately left behind: catching it up is what the
+        // assignment is for.
+        assert_success(&harness.run(&[
+            "admin",
+            "index-enable",
+            "--namespace",
+            namespace,
+            "--no-wait",
+        ]));
+    }
+
+    let drained = harness.run(&[
+        "--json",
+        "admin",
+        "run",
+        "--namespace",
+        "alpha",
+        "--namespace",
+        "beta",
+        "--drain",
+    ]);
+    assert_success(&drained);
+    let data = json_data(&drained);
+    assert_eq!(data["drained"], true);
+    assert_eq!(data["budget_exhausted"], false);
+    let keys = data["keys"].as_array().expect("json array");
+    assert_eq!(keys.len(), 6, "three jobs over two namespaces: {data}");
+    assert!(
+        keys.iter().all(|key| key["settled"] == true),
+        "an unbudgeted drain settles every key: {data}"
+    );
+    assert_eq!(
+        data["jobs"],
+        serde_json::json!(["metadata", "gc", "grep-index"])
+    );
+
+    for namespace in ["alpha", "beta"] {
+        let status = harness.run(&["--json", "admin", "index-status", "--namespace", namespace]);
+        assert_success(&status);
+        assert_eq!(
+            json_data(&status)["state"]["built_through_seq"],
+            1,
+            "the assigned index must reach the head it was behind: {namespace}"
+        );
+    }
+}
+
+/// A drain that runs out of budget reports where every key got to — the one
+/// it stopped inside and the ones it never reached — and exits nonzero.
+#[test]
+fn admin_run_budgets_exit_nonzero_and_report_per_key_progress() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "alpha"]));
+
+    let unstarted = harness.run(&[
+        "--json",
+        "admin",
+        "run",
+        "--namespace",
+        "alpha",
+        "--drain",
+        "--max-steps",
+        "0",
+    ]);
+    assert_failure(&unstarted);
+    let data = json_data(&unstarted);
+    assert_eq!(data["budget_exhausted"], true);
+    assert_eq!(data["steps"], 0);
+    for key in data["keys"].as_array().expect("json array") {
+        assert_eq!(key["settled"], false, "{data}");
+        assert_eq!(key["steps"], 0, "{data}");
+        assert!(key.get("conclusion").is_none(), "{data}");
+    }
+
+    // One step is enough for the first key on a quiet namespace and reaches
+    // no other, which is exactly what the report has to say.
+    let partial = harness.run(&[
+        "admin",
+        "run",
+        "--namespace",
+        "alpha",
+        "--drain",
+        "--max-steps",
+        "1",
+    ]);
+    assert_failure(&partial);
+    let rendered = stdout_string(&partial);
+    assert!(
+        rendered.contains("alpha/metadata: idle after 1 step"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("alpha/gc: not started; the budget ran out first"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("gave up"), "{rendered}");
+}
+
+/// The assignment is explicit and the job names are a closed set: neither is
+/// something the command guesses at.
+#[test]
+fn admin_run_requires_an_assignment_and_names_the_jobs_it_hosts() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+
+    let unassigned = harness.run(&["admin", "run"]);
+    assert_failure(&unassigned);
+    assert!(
+        stderr_string(&unassigned).contains("--namespace"),
+        "{}",
+        stderr_string(&unassigned)
+    );
+
+    let unknown_job = harness.run(&["admin", "run", "--namespace", "alpha", "--job", "bogus"]);
+    assert_failure(&unknown_job);
+    let message = stderr_string(&unknown_job);
+    for job in ["metadata", "core-gc", "grep-index"] {
+        assert!(
+            message.contains(job),
+            "the valid set must be listed: {message}"
+        );
+    }
+}
+
+/// A remote profile's server hosts its own runner. Stepping one from here
+/// would be a second scheduler over the same namespaces, so the command
+/// refuses instead of pretending it can.
+#[test]
+fn admin_run_refuses_a_remote_profile() {
+    let harness = Harness::new();
+    assert_success(&harness.run(&[
+        "--json",
+        "profile",
+        "create",
+        "default",
+        "--mode",
+        "remote",
+        "--server-url",
+        "http://127.0.0.1:9",
+        "--auth-token",
+        "test-token",
+    ]));
+
+    let refused = harness.run(&["--json", "admin", "run", "--namespace", "demo", "--drain"]);
+    assert_failure(&refused);
+    let error = json_error(&refused);
+    assert_eq!(error["code"], "not_supported");
+    assert!(
+        error["message"]
+            .as_str()
+            .expect("message")
+            .contains("embedded profile"),
+        "{error}"
+    );
+}
+
 #[test]
 fn help_lists_the_context_commands() {
     let harness = Harness::new();
@@ -2431,6 +2607,7 @@ fn every_advertised_capability_maps_to_a_cli_command_path() {
                 &["admin", "checkpoint-release"],
                 &["admin", "flush"],
                 &["admin", "retention-advance"],
+                &["admin", "run"],
                 &["admin", "step"],
                 &["admin", "gc"],
                 &["admin", "index-enable"],
