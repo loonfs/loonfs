@@ -10,8 +10,8 @@
 //! wave count.
 
 use loonfs::{
-    CreateNamespaceOptions, FsAdmin, FsReader, FsWriter, MaintenanceStepKind,
-    MaintenanceStepOptions, NamespaceId, PutFileOptions,
+    CreateNamespaceOptions, FsAdmin, FsReader, FsWriter, MaintenanceStepOptions, NamespaceId,
+    PutFileOptions,
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
 use loonfs_api::AbsolutePath;
@@ -79,15 +79,7 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
         .await
         .expect("seed the first manifest");
     admin
-        .maintenance_step_namespace(
-            &namespace_id,
-            MaintenanceStepOptions {
-                // The explicit flush an operator asks for: whatever the tail.
-                max_wal_tail_segments: 1,
-                only: Some(MaintenanceStepKind::WalFlush),
-                ..MaintenanceStepOptions::default()
-            },
-        )
+        .flush_wal(&namespace_id)
         .await
         .expect("publish first manifest");
     let catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &namespace_id)

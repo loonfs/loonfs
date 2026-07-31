@@ -353,12 +353,64 @@ impl FsAdmin {
         self.finish_namespace_mutation(namespace_id, result)
     }
 
-    /// Flushes the WAL tail and advances the metadata root, creating no
-    /// checkpoint record.
+    /// Flushes the visible WAL tail into metadata tables and advances the
+    /// metadata root, creating no checkpoint record.
     ///
-    /// Not a surface of its own: a caller asks for exactly this with
-    /// [`MaintenanceStepKind::WalFlush`], which is the same request with a
-    /// threshold attached.
+    /// One name over the one step path: exactly
+    /// [`Self::maintenance_step_namespace`] restricted to
+    /// [`MaintenanceStepKind::WalFlush`], with the threshold at a single
+    /// segment so any visible tail is folded. A namespace with an empty
+    /// tail has nothing to fold and reports
+    /// [`WalFlushStepOutcome::NotNeeded`]: this is the flush an operator
+    /// asks for, not a way to publish a manifest for a namespace that has
+    /// never been written to.
+    pub async fn flush_wal(&self, namespace_id: &NamespaceId) -> Result<WalFlushStepOutcome> {
+        let step = self
+            .maintenance_step_namespace(
+                namespace_id,
+                MaintenanceStepOptions {
+                    max_wal_tail_segments: 1,
+                    only: Some(MaintenanceStepKind::WalFlush),
+                    ..MaintenanceStepOptions::default()
+                },
+            )
+            .await?;
+        Ok(step.wal_flush)
+    }
+
+    /// Advances the namespace retention floor when a verified checkpoint
+    /// makes it safe.
+    ///
+    /// One name over the one step path: exactly
+    /// [`Self::maintenance_step_namespace`] restricted to
+    /// [`MaintenanceStepKind::Retention`]. It keeps a name of its own
+    /// because of what it costs — advancing the floor abandons the replay
+    /// history below it, which is a decision rather than upkeep. Nothing
+    /// schedules it: no maintenance job exists for retention, so an
+    /// unattended deployment keeps its whole history until a call arrives
+    /// here.
+    pub async fn advance_retention_floor(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<AdvanceRetentionResponse> {
+        let step = self
+            .maintenance_step_namespace(
+                namespace_id,
+                MaintenanceStepOptions {
+                    only: Some(MaintenanceStepKind::Retention),
+                    ..MaintenanceStepOptions::default()
+                },
+            )
+            .await?;
+        Ok(AdvanceRetentionResponse {
+            namespace_id: step.namespace_id,
+            retention_floor_seq: step.retention_floor_seq,
+        })
+    }
+
+    /// The one implementation both the full step and [`Self::flush_wal`]
+    /// reach: fold the tail, advance the root, invalidate what the fold
+    /// invalidated.
     #[tracing::instrument(
         level = "info",
         name = "loonfs.compaction",
@@ -381,8 +433,8 @@ impl FsAdmin {
         self.finish_namespace_mutation(namespace_id, result)
     }
 
-    /// Advances the namespace retention floor when a verified checkpoint
-    /// makes it safe. Reached only through
+    /// The one implementation both the full step and
+    /// [`Self::advance_retention_floor`] reach. Reached only through
     /// [`MaintenanceStepKind::Retention`] or `options.retention`: nothing
     /// surrenders replay history without being asked.
     async fn run_step_retention(

@@ -10,7 +10,10 @@
 //! replay history, which is a decision rather than upkeep, so it stays an
 //! explicit call with no scheduler behind it.
 
-use super::{MaintenanceJob, MaintenanceJobId, MaintenanceProbe, MaintenanceStepConclusion};
+use super::{
+    MaintenanceJob, MaintenanceJobId, MaintenanceProbe, MaintenanceStepConclusion,
+    MaintenanceStepResult,
+};
 use crate::fs::{ReadCore, WriterBits};
 use crate::publisher::PublisherRegistry;
 use crate::{
@@ -21,8 +24,7 @@ use crate::{
 use loonfs_core::limits::{
     CONTENT_RECLAMATION_GRACE_MS, GC_SAFETY_MARGIN_MS, UPLOAD_SESSION_LEASE_MS,
 };
-use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Weak};
 
 /// Registers the jobs the runtime owns. Called once, after the writer's
 /// publication service exists.
@@ -38,10 +40,7 @@ pub(crate) fn register_core_jobs(
         publisher: publisher.clone(),
     };
     runner.register(Arc::new(MetadataJob { context: context() }))?;
-    runner.register(Arc::new(GcJob {
-        context: context(),
-        cursors: Mutex::new(BTreeMap::new()),
-    }))?;
+    runner.register(Arc::new(GcJob { context: context() }))?;
     Ok(())
 }
 
@@ -108,9 +107,18 @@ impl MaintenanceJob for MetadataJob {
         MaintenanceJobId::METADATA
     }
 
-    async fn step(&self, namespace_id: &NamespaceId) -> Result<MaintenanceStepConclusion> {
+    /// Carries no continuation: what is left to flush or fold is what the
+    /// next step's own read of durable state reports, so there is no
+    /// position for the runner to hold on this job's behalf.
+    async fn step(
+        &self,
+        namespace_id: &NamespaceId,
+        _continuation: Option<&str>,
+    ) -> Result<MaintenanceStepResult> {
         let Some((_writer, admin)) = self.context.admin() else {
-            return Ok(MaintenanceStepConclusion::NotEnabled);
+            return Ok(MaintenanceStepResult::concluded(
+                MaintenanceStepConclusion::NotEnabled,
+            ));
         };
         // The default step: no retention, no garbage collection. Both are
         // other decisions, and one of them is another job.
@@ -133,11 +141,11 @@ impl MaintenanceJob for MetadataJob {
                     conclusion = conclusion.as_str(),
                     "metadata maintenance step concluded"
                 );
-                Ok(conclusion)
+                Ok(MaintenanceStepResult::concluded(conclusion))
             }
-            Err(error) if metadata_has_nothing_to_maintain(&error) => {
-                Ok(MaintenanceStepConclusion::NotEnabled)
-            }
+            Err(error) if metadata_has_nothing_to_maintain(&error) => Ok(
+                MaintenanceStepResult::concluded(MaintenanceStepConclusion::NotEnabled),
+            ),
             Err(error) => Err(error),
         }
     }
@@ -167,35 +175,15 @@ impl MaintenanceJob for MetadataJob {
 
 /// Runs one bounded mark-and-sweep pass, resuming the enumeration the last
 /// pass stopped at.
+///
+/// The enumeration cursor is the runner's, not this job's: it arrives as
+/// the step's `continuation` and leaves as the result's. That keeps one
+/// place holding what a key is waiting for, and it costs nothing here
+/// because the cursor was never authority — a resumed pass rebuilds the
+/// live set exactly as a fresh one does, so a cursor lost with the process
+/// costs re-enumeration and can never authorize a deletion.
 struct GcJob {
     context: StepContext,
-    /// Where each namespace's bounded pass stopped. In-process scheduling
-    /// state and nothing more: resuming rebuilds every safety proof from
-    /// scratch, so a cursor lost with the process costs re-enumeration and
-    /// never authorizes a deletion.
-    cursors: Mutex<BTreeMap<NamespaceId, String>>,
-}
-
-impl GcJob {
-    fn lock_cursors(&self) -> std::sync::MutexGuard<'_, BTreeMap<NamespaceId, String>> {
-        self.cursors.lock().expect("gc cursor lock poisoned")
-    }
-
-    fn cursor(&self, namespace_id: &NamespaceId) -> Option<String> {
-        self.lock_cursors().get(namespace_id).cloned()
-    }
-
-    fn remember(&self, namespace_id: &NamespaceId, cursor: Option<String>) {
-        let mut cursors = self.lock_cursors();
-        match cursor {
-            Some(cursor) => {
-                cursors.insert(namespace_id.clone(), cursor);
-            }
-            None => {
-                cursors.remove(namespace_id);
-            }
-        }
-    }
 }
 
 #[async_trait::async_trait]
@@ -204,15 +192,20 @@ impl MaintenanceJob for GcJob {
         MaintenanceJobId::GC
     }
 
-    async fn step(&self, namespace_id: &NamespaceId) -> Result<MaintenanceStepConclusion> {
+    async fn step(
+        &self,
+        namespace_id: &NamespaceId,
+        continuation: Option<&str>,
+    ) -> Result<MaintenanceStepResult> {
         let Some((_writer, admin)) = self.context.admin() else {
-            return Ok(MaintenanceStepConclusion::NotEnabled);
+            return Ok(MaintenanceStepResult::concluded(
+                MaintenanceStepConclusion::NotEnabled,
+            ));
         };
-        let submitted_cursor = self.cursor(namespace_id);
         let options = MaintenanceStepOptions {
             only: Some(MaintenanceStepKind::Gc),
             gc: Some(GcConfig {
-                cursor: submitted_cursor.clone(),
+                cursor: continuation.map(str::to_owned),
                 // The step resolves the absent candidate budget to the
                 // per-step default, which is what bounds this pass.
                 ..GcConfig::default()
@@ -227,26 +220,36 @@ impl MaintenanceJob for GcJob {
             Err(error) if error.code() == ErrorCode::NamespaceNotFound => {
                 // A deleted namespace still owns reclaimable state, so only
                 // one that was never created is nothing to collect.
-                self.remember(namespace_id, None);
-                return Ok(MaintenanceStepConclusion::NotEnabled);
+                return Ok(MaintenanceStepResult::concluded(
+                    MaintenanceStepConclusion::NotEnabled,
+                ));
             }
-            Err(error) => {
+            Err(error) if continuation.is_some() && error.code() == ErrorCode::InvalidRequest => {
                 // With every other option fixed, the one thing this step
                 // can be asked to reject is the cursor it was resumed with.
-                // Dropping it restarts enumeration, which is always sound.
-                if error.code() == ErrorCode::InvalidRequest {
-                    self.remember(namespace_id, None);
-                }
-                return Err(error);
+                // Concluding without one hands the runner an empty
+                // continuation and takes the key again, which restarts
+                // enumeration — always sound, because every pass rebuilds
+                // its own safety proof from durable state.
+                tracing::info!(
+                    namespace_id = %namespace_id,
+                    error = %error,
+                    "collection rejected its resume position; restarting the pass"
+                );
+                return Ok(MaintenanceStepResult::concluded(
+                    MaintenanceStepConclusion::Superseded,
+                ));
             }
+            Err(error) => return Err(error),
         };
         let Some(gc) = step.gc else {
             // A gc-only step always reports its pass; nothing to conclude
             // from otherwise.
-            return Ok(MaintenanceStepConclusion::Idle);
+            return Ok(MaintenanceStepResult::concluded(
+                MaintenanceStepConclusion::Idle,
+            ));
         };
-        self.remember(namespace_id, gc.next_cursor.clone());
-        Ok(gc_conclusion(&gc, submitted_cursor.as_deref()))
+        Ok(gc_step_result(gc, continuation))
     }
 
     async fn probe(&self, _namespace_id: &NamespaceId) -> Result<MaintenanceProbe> {
@@ -300,6 +303,27 @@ fn conclusion_precedence(conclusion: MaintenanceStepConclusion) -> u8 {
         MaintenanceStepConclusion::Superseded => 2,
         MaintenanceStepConclusion::Blocked => 1,
         MaintenanceStepConclusion::Idle | MaintenanceStepConclusion::NotEnabled => 0,
+    }
+}
+
+/// One collection pass, read as everything the runner needs: what to do
+/// with the key, and where the next pass picks up.
+///
+/// `submitted_cursor` is what the runner handed this step; the pass's own
+/// `next_cursor` is what it hands back. Comparing the two is how a pass
+/// that walked keyspace is told apart from one that decided nothing, and
+/// handing the second one back is what lets a retry resume rather than
+/// restart.
+fn gc_step_result(gc: GcResponse, submitted_cursor: Option<&str>) -> MaintenanceStepResult {
+    MaintenanceStepResult {
+        conclusion: gc_conclusion(&gc, submitted_cursor),
+        continuation: gc.next_cursor,
+        // A pass reports what it retained, never when that retention
+        // lapses: the lease and grace deadlines it compares against live
+        // inside the sweep and are not in `GcResponse`. Surfacing them
+        // would be new core plumbing, and this job does not need it — the
+        // upload paths plant the deadlines they create as they create them.
+        not_before_ms: None,
     }
 }
 
@@ -499,6 +523,43 @@ mod tests {
             gc_conclusion(&parked, Some("first")),
             MaintenanceStepConclusion::Blocked,
             "a pass whose budget died before it decided anything must not requeue hot"
+        );
+    }
+
+    /// The cursor is the runner's now: it arrives as the step's
+    /// continuation and leaves as the result's, with no map on this job's
+    /// side of the seam.
+    #[test]
+    fn a_collection_pass_hands_its_cursor_back_to_the_runner() {
+        let mut walked = GcResponse::empty(namespace_id("demo"));
+        walked.next_cursor = Some("page-2".to_owned());
+
+        let first = gc_step_result(walked.clone(), None);
+        assert_eq!(first.conclusion, MaintenanceStepConclusion::Progressed);
+        assert_eq!(
+            first.continuation,
+            Some("page-2".to_owned()),
+            "the runner stores where the pass stopped"
+        );
+        assert_eq!(
+            first.not_before_ms, None,
+            "a pass reports no deadline of its own; the upload paths plant those"
+        );
+
+        // The resumed step is handed that cursor back. One that cannot get
+        // past it decided nothing, and parks still holding it, so a retry
+        // with room to work resumes instead of walking the same ground.
+        let parked = gc_step_result(walked, Some("page-2"));
+        assert_eq!(parked.conclusion, MaintenanceStepConclusion::Blocked);
+        assert_eq!(parked.continuation, Some("page-2".to_owned()));
+
+        let mut finished = GcResponse::empty(namespace_id("demo"));
+        finished.deleted_wal_segments = 3;
+        let cleared = gc_step_result(finished, Some("page-2"));
+        assert_eq!(cleared.conclusion, MaintenanceStepConclusion::Progressed);
+        assert_eq!(
+            cleared.continuation, None,
+            "a pass that reached the end of the keyspace carries nothing forward"
         );
     }
 

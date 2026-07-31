@@ -1,21 +1,34 @@
 //! Admission state: which `{job, namespace}` keys may run, which are
-//! running, and when a parked key becomes eligible again.
+//! running, where each one's job stopped, and when a parked key becomes
+//! eligible again.
 //!
 //! Everything here is synchronous and guarded by the runner's one lock, so
 //! every scheduling decision — singleflight, coalescing, fairness, backoff,
-//! not-before times, shutdown — can be reasoned about and tested without a
-//! runtime. The async half (permits held across a step, spawning, timers)
-//! lives in the parent module.
+//! not-before times, continuations, shutdown — can be reasoned about and
+//! tested without a runtime. The async half (permits held across a step,
+//! spawning, timers) lives in the parent module.
 
-use super::{MaintenanceJobId, MaintenanceStepConclusion};
+use super::{MaintenanceClock, MaintenanceJobId, MaintenanceStepConclusion, MaintenanceStepResult};
 use crate::NamespaceId;
 use std::collections::BTreeMap;
 use std::ops::Bound;
+use std::sync::Arc;
 
-/// First error backoff delay for one key.
+/// Smallest error backoff window, and the one a first failure draws from.
+///
+/// Small on purpose: one flaky call should come back quickly.
 const ERROR_BACKOFF_BASE_MS: u64 = 10;
-/// Ceiling the per-key error backoff doubles up to.
-const ERROR_BACKOFF_CAP_MS: u64 = 1_000;
+/// Ceiling the per-key error backoff window doubles up to.
+///
+/// A minute, not the one second the grep driver used. That cap was written
+/// for a single namespace's indexer, where retrying every second costs
+/// nothing. This backoff is fleet-wide: it governs every key this process
+/// has admitted, so a provider outage under a one-second cap turns into
+/// every namespace retrying every second for as long as the outage lasts —
+/// a second outage stacked on the first. A minute is small enough that
+/// recovery is picked up within one reconciliation interval and large
+/// enough that a long outage costs a trickle.
+const ERROR_BACKOFF_CAP_MS: u64 = 60_000;
 
 /// One admitted unit of maintenance: a registered job, and the namespace it
 /// runs against.
@@ -38,11 +51,14 @@ impl MaintenanceKey {
 }
 
 /// How one step ended, from admission's point of view.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum StepOutcome {
-    /// The executor answered. The conclusion decides what happens to the key.
-    Concluded(MaintenanceStepConclusion),
-    /// The executor failed. The key is retried after its backoff.
+    /// The executor answered. The result decides what happens to the key:
+    /// its conclusion when to run again, its continuation where to resume,
+    /// its not-before time when a deadline it saw comes due.
+    Concluded(MaintenanceStepResult),
+    /// The executor failed. The key is retried after its backoff, from
+    /// wherever its last step left it.
     Failed,
 }
 
@@ -73,6 +89,14 @@ struct KeyState {
     retry_at_ms: Option<u64>,
     /// Consecutive failed steps since the last conclusion, for the backoff.
     consecutive_failures: u32,
+    /// Where this key's job said its last step stopped, opaque here and
+    /// handed straight back to the next step.
+    ///
+    /// It lives with the rest of the key's scheduling state so no job has
+    /// to keep a map of its own beside this one. Losing it costs a
+    /// restarted pass and nothing else: a step re-derives what it may do
+    /// from durable state whatever position it starts from.
+    continuation: Option<String>,
     /// A step for this key is running right now (the singleflight).
     inflight: bool,
 }
@@ -117,10 +141,14 @@ pub(crate) struct Admission {
     /// Where the next reconciliation sweep resumes, so a probe budget
     /// cannot starve the tail of a large admitted set.
     reconcile_cursor: Option<MaintenanceKey>,
+    /// Here for one thing: the draw the error backoff jitters with. Every
+    /// `now_ms` a decision needs is still passed in, so the tests below can
+    /// move time by hand and name the delay they expect.
+    clock: Arc<dyn MaintenanceClock>,
 }
 
 impl Admission {
-    pub(crate) fn new(max_concurrent: usize) -> Self {
+    pub(crate) fn new(max_concurrent: usize, clock: Arc<dyn MaintenanceClock>) -> Self {
         Self {
             closed: false,
             next_ticket: 0,
@@ -128,6 +156,7 @@ impl Admission {
             running: 0,
             keys: BTreeMap::new(),
             reconcile_cursor: None,
+            clock,
         }
     }
 
@@ -152,6 +181,13 @@ impl Admission {
     #[cfg(test)]
     pub(crate) fn not_before_ms(&self, key: &MaintenanceKey) -> Option<u64> {
         self.keys.get(key).and_then(|state| state.not_before_ms)
+    }
+
+    /// Where the key's job stopped last time, for the step about to run.
+    pub(crate) fn continuation(&self, key: &MaintenanceKey) -> Option<String> {
+        self.keys
+            .get(key)
+            .and_then(|state| state.continuation.clone())
     }
 
     fn take_ticket(&mut self) -> u64 {
@@ -367,44 +403,74 @@ impl Admission {
     }
 
     fn apply(&mut self, key: &MaintenanceKey, outcome: StepOutcome, now_ms: u64) {
-        if outcome == StepOutcome::Concluded(MaintenanceStepConclusion::NotEnabled) {
+        let result = match outcome {
+            StepOutcome::Failed => {
+                self.record_failure(key, now_ms);
+                return;
+            }
+            StepOutcome::Concluded(result) => result,
+        };
+        if result.conclusion == MaintenanceStepConclusion::NotEnabled {
             // The job has nothing to maintain here at all. Drop the key —
-            // its obligations included — rather than reconcile it forever.
+            // its continuation and its obligations included — rather than
+            // reconcile it forever.
             self.keys.remove(key);
             return;
         }
         let ticket = self.take_ticket();
+        if let Some(state) = self.keys.get_mut(key) {
+            state.consecutive_failures = 0;
+            state.retry_at_ms = None;
+            match result.conclusion {
+                // Work happened, or the step lost a race it should simply
+                // take again: eligible immediately, behind whatever else is
+                // waiting, resuming from wherever this step stopped.
+                MaintenanceStepConclusion::Progressed | MaintenanceStepConclusion::Superseded => {
+                    state.continuation = result.continuation;
+                    if state.ready_ticket.is_none() {
+                        state.ready_ticket = Some(ticket);
+                    }
+                }
+                // Work is left and this step's policy could not move it.
+                // Parks like `Idle` — requeueing zero-progress work would
+                // only spin — but keeps where the step stopped, so a retry
+                // with room to work resumes instead of walking the same
+                // ground again.
+                MaintenanceStepConclusion::Blocked => state.continuation = result.continuation,
+                // Nothing to do. Whatever the last pass was carrying is
+                // spent, and the next step starts a fresh one.
+                MaintenanceStepConclusion::Idle => state.continuation = None,
+                MaintenanceStepConclusion::NotEnabled => {}
+            }
+        }
+        // A deadline the step itself observed joins the ones triggers
+        // plant, under the same merge: soonest is when to wake, latest is
+        // when the key stops owing anything.
+        if let Some(at_ms) = result.not_before_ms {
+            self.nudge_not_before(key.clone(), at_ms, now_ms);
+        }
+    }
+
+    /// Backs a failed key off and leaves its continuation alone: a failure
+    /// says nothing about where the last step stopped, and the retry should
+    /// pick up from the same place.
+    fn record_failure(&mut self, key: &MaintenanceKey, now_ms: u64) {
+        let ticket = self.take_ticket();
+        let Some(failures) = self
+            .keys
+            .get(key)
+            .map(|state| state.consecutive_failures.saturating_add(1))
+        else {
+            return;
+        };
+        let delay_ms = backoff_delay_ms(failures, self.clock.as_ref());
         let Some(state) = self.keys.get_mut(key) else {
             return;
         };
-        match outcome {
-            StepOutcome::Failed => {
-                state.consecutive_failures = state.consecutive_failures.saturating_add(1);
-                state.retry_at_ms =
-                    Some(now_ms.saturating_add(backoff_delay_ms(state.consecutive_failures)));
-                if state.ready_ticket.is_none() {
-                    state.ready_ticket = Some(ticket);
-                }
-            }
-            StepOutcome::Concluded(conclusion) => {
-                state.consecutive_failures = 0;
-                state.retry_at_ms = None;
-                match conclusion {
-                    // Work happened, or the step lost a race it should
-                    // simply take again: eligible immediately, behind
-                    // whatever else is waiting.
-                    MaintenanceStepConclusion::Progressed
-                    | MaintenanceStepConclusion::Superseded => {
-                        if state.ready_ticket.is_none() {
-                            state.ready_ticket = Some(ticket);
-                        }
-                    }
-                    // Nothing to do, or nothing this step's policy can do.
-                    // Both park: requeueing zero-progress work would spin.
-                    MaintenanceStepConclusion::Idle | MaintenanceStepConclusion::Blocked => {}
-                    MaintenanceStepConclusion::NotEnabled => {}
-                }
-            }
+        state.consecutive_failures = failures;
+        state.retry_at_ms = Some(now_ms.saturating_add(delay_ms));
+        if state.ready_ticket.is_none() {
+            state.ready_ticket = Some(ticket);
         }
     }
 
@@ -442,9 +508,22 @@ impl Admission {
     }
 }
 
-/// Per-key error backoff: 10 ms doubling to a one-second ceiling, the shape
-/// the grep driver settled on.
-fn backoff_delay_ms(consecutive_failures: u32) -> u64 {
+/// How long a key waits after `consecutive_failures` failed steps.
+///
+/// Full jitter over the exponential window: the delay is drawn uniformly
+/// from inside [`backoff_window_ms`] rather than being the window itself.
+/// Drawing is what keeps a provider outage from becoming a synchronized
+/// retry wave — keys that failed in the same millisecond come back spread
+/// across the window instead of together at the end of it — and it is the
+/// half of the policy that matters most at fleet scale, where the same
+/// error arrives for every admitted key at once.
+fn backoff_delay_ms(consecutive_failures: u32, clock: &dyn MaintenanceClock) -> u64 {
+    clock.jitter_below_ms(backoff_window_ms(consecutive_failures))
+}
+
+/// The window that delay is drawn from: [`ERROR_BACKOFF_BASE_MS`] doubling
+/// per consecutive failure, up to [`ERROR_BACKOFF_CAP_MS`].
+fn backoff_window_ms(consecutive_failures: u32) -> u64 {
     let shift = consecutive_failures.saturating_sub(1).min(16);
     ERROR_BACKOFF_BASE_MS
         .saturating_mul(1_u64 << shift)
@@ -455,8 +534,54 @@ fn backoff_delay_ms(consecutive_failures: u32) -> u64 {
 mod tests {
     use super::*;
     use loonfs_test_support::ids::namespace_id;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     const NOW: u64 = 1_000_000;
+
+    /// The clock these tests inject.
+    ///
+    /// Every scheduling decision takes its `now_ms` as an argument, so this
+    /// exists for one thing: naming the draw the backoff jitters with.
+    /// `Top` puts every delay at the last millisecond of its window, which
+    /// makes an expected retry time something a test can write down;
+    /// `Walking` draws a different value each time, which is what a real
+    /// full-jitter clock does and what desynchronization needs.
+    #[derive(Debug)]
+    enum TestClock {
+        Top,
+        Walking(AtomicU64),
+    }
+
+    impl TestClock {
+        fn top() -> Arc<Self> {
+            Arc::new(Self::Top)
+        }
+
+        fn walking() -> Arc<Self> {
+            Arc::new(Self::Walking(AtomicU64::new(0)))
+        }
+    }
+
+    impl MaintenanceClock for TestClock {
+        fn now_ms(&self) -> u64 {
+            NOW
+        }
+
+        fn jitter_below_ms(&self, span_ms: u64) -> u64 {
+            if span_ms == 0 {
+                return 0;
+            }
+            match self {
+                Self::Top => span_ms - 1,
+                Self::Walking(draws) => draws.fetch_add(1, Ordering::Relaxed) % span_ms,
+            }
+        }
+    }
+
+    /// An admission book whose backoff lands at the top of every window.
+    fn book(max_concurrent: usize) -> Admission {
+        Admission::new(max_concurrent, TestClock::top())
+    }
 
     fn metadata(name: &str) -> MaintenanceKey {
         MaintenanceKey::new(MaintenanceJobId::METADATA, &namespace_id(name))
@@ -466,15 +591,33 @@ mod tests {
         MaintenanceKey::new(MaintenanceJobId::GC, &namespace_id(name))
     }
 
+    fn concluded(conclusion: MaintenanceStepConclusion) -> StepOutcome {
+        StepOutcome::Concluded(MaintenanceStepResult::concluded(conclusion))
+    }
+
+    /// A conclusion that also tells the runner where the step stopped.
+    fn continuing(conclusion: MaintenanceStepConclusion, continuation: &str) -> StepOutcome {
+        StepOutcome::Concluded(MaintenanceStepResult {
+            conclusion,
+            continuation: Some(continuation.to_owned()),
+            not_before_ms: None,
+        })
+    }
+
     fn idle() -> StepOutcome {
-        StepOutcome::Concluded(MaintenanceStepConclusion::Idle)
+        concluded(MaintenanceStepConclusion::Idle)
+    }
+
+    /// The delay the `Top` clock produces for the nth consecutive failure.
+    fn top_delay_ms(consecutive_failures: u32) -> u64 {
+        backoff_window_ms(consecutive_failures) - 1
     }
 
     /// Ported from the previous scheduler: a request arriving during an
     /// active step defers and reruns exactly once.
     #[test]
     fn a_request_during_an_active_step_defers_and_reruns_exactly_once() {
-        let mut admission = Admission::new(8);
+        let mut admission = book(8);
         let key = metadata("demo");
 
         admission.nudge(key.clone());
@@ -506,7 +649,7 @@ mod tests {
     /// Ported: shutdown wins over a deferred rerun.
     #[test]
     fn shutdown_wins_over_a_deferred_rerun() {
-        let mut admission = Admission::new(8);
+        let mut admission = book(8);
         let key = metadata("demo");
 
         admission.nudge(key.clone());
@@ -523,7 +666,7 @@ mod tests {
     /// Ported: claims are singleflight and refused after shutdown.
     #[test]
     fn claims_are_singleflight_and_refused_after_shut_down() {
-        let mut admission = Admission::new(8);
+        let mut admission = book(8);
         let key = metadata("demo");
 
         admission.nudge(key.clone());
@@ -549,7 +692,7 @@ mod tests {
     /// Ported: a freed slot claims the next key waiting at the global cap.
     #[test]
     fn a_freed_slot_claims_the_next_key_at_the_global_cap() {
-        let mut admission = Admission::new(2);
+        let mut admission = book(2);
         let (first, second, third) = (metadata("first"), metadata("second"), metadata("third"));
 
         for key in [&first, &second, &third] {
@@ -572,7 +715,7 @@ mod tests {
     /// Ported: repeated requests for one queued key coalesce to one run.
     #[test]
     fn repeated_requests_for_one_queued_key_coalesce_to_one_run() {
-        let mut admission = Admission::new(1);
+        let mut admission = book(1);
         let (active, queued) = (metadata("active"), metadata("queued"));
 
         admission.nudge(active.clone());
@@ -600,7 +743,7 @@ mod tests {
     /// Ported: shutdown clears keys waiting at the global cap.
     #[test]
     fn shutdown_clears_keys_waiting_at_the_global_cap() {
-        let mut admission = Admission::new(1);
+        let mut admission = book(1);
         let (active, queued) = (metadata("active"), metadata("queued"));
 
         admission.nudge(active.clone());
@@ -622,18 +765,14 @@ mod tests {
 
     #[test]
     fn progressed_requeues_behind_a_waiting_peer() {
-        let mut admission = Admission::new(1);
+        let mut admission = book(1);
         let (busy, peer) = (metadata("busy"), metadata("peer"));
 
         admission.nudge(busy.clone());
         admission.nudge(peer.clone());
         assert_eq!(admission.try_dispatch(NOW), Some(busy.clone()));
         assert_eq!(
-            admission.finish(
-                &busy,
-                StepOutcome::Concluded(MaintenanceStepConclusion::Progressed),
-                NOW
-            ),
+            admission.finish(&busy, concluded(MaintenanceStepConclusion::Progressed), NOW),
             Some(peer.clone()),
             "one unit per step: the peer runs before the busy key folds again"
         );
@@ -646,17 +785,13 @@ mod tests {
 
     #[test]
     fn progressed_keeps_running_when_nothing_else_waits() {
-        let mut admission = Admission::new(1);
+        let mut admission = book(1);
         let key = metadata("alone");
 
         admission.nudge(key.clone());
         assert_eq!(admission.try_dispatch(NOW), Some(key.clone()));
         assert_eq!(
-            admission.finish(
-                &key,
-                StepOutcome::Concluded(MaintenanceStepConclusion::Progressed),
-                NOW
-            ),
+            admission.finish(&key, concluded(MaintenanceStepConclusion::Progressed), NOW),
             Some(key.clone()),
             "a sole progressing key folds its backlog without waiting"
         );
@@ -665,17 +800,13 @@ mod tests {
 
     #[test]
     fn blocked_parks_and_a_later_nudge_retries() {
-        let mut admission = Admission::new(1);
+        let mut admission = book(1);
         let key = metadata("blocked");
 
         admission.nudge(key.clone());
         assert_eq!(admission.try_dispatch(NOW), Some(key.clone()));
         assert_eq!(
-            admission.finish(
-                &key,
-                StepOutcome::Concluded(MaintenanceStepConclusion::Blocked),
-                NOW
-            ),
+            admission.finish(&key, concluded(MaintenanceStepConclusion::Blocked), NOW),
             None,
             "zero-progress work must not requeue itself"
         );
@@ -690,17 +821,13 @@ mod tests {
 
     #[test]
     fn superseded_requeues_immediately() {
-        let mut admission = Admission::new(1);
+        let mut admission = book(1);
         let key = metadata("raced");
 
         admission.nudge(key.clone());
         assert_eq!(admission.try_dispatch(NOW), Some(key.clone()));
         assert_eq!(
-            admission.finish(
-                &key,
-                StepOutcome::Concluded(MaintenanceStepConclusion::Superseded),
-                NOW
-            ),
+            admission.finish(&key, concluded(MaintenanceStepConclusion::Superseded), NOW),
             Some(key),
             "a superseded step takes the race again"
         );
@@ -708,18 +835,14 @@ mod tests {
 
     #[test]
     fn not_enabled_evicts_the_key_and_its_obligation() {
-        let mut admission = Admission::new(1);
+        let mut admission = book(1);
         let key = gc("gone");
 
         admission.nudge_not_before(key.clone(), NOW + 5_000, NOW);
         admission.nudge(key.clone());
         assert_eq!(admission.try_dispatch(NOW), Some(key.clone()));
         assert_eq!(
-            admission.finish(
-                &key,
-                StepOutcome::Concluded(MaintenanceStepConclusion::NotEnabled),
-                NOW
-            ),
+            admission.finish(&key, concluded(MaintenanceStepConclusion::NotEnabled), NOW),
             None
         );
         assert!(!admission.is_pending(&key), "the key is forgotten");
@@ -731,9 +854,178 @@ mod tests {
         );
     }
 
+    /// The whole continuation contract in one place: a progressing step's
+    /// position is stored and handed to the next one, a blocked step's is
+    /// kept for a retry with room to work, an idle step's is spent, and an
+    /// evicted key takes its position with it.
+    #[test]
+    fn the_runner_carries_a_continuation_between_steps() {
+        let mut admission = book(1);
+        let key = gc("paged");
+
+        admission.nudge(key.clone());
+        assert_eq!(admission.try_dispatch(NOW), Some(key.clone()));
+        assert_eq!(
+            admission.continuation(&key),
+            None,
+            "a first step starts a fresh pass"
+        );
+
+        assert_eq!(
+            admission.finish(
+                &key,
+                continuing(MaintenanceStepConclusion::Progressed, "page-1"),
+                NOW
+            ),
+            Some(key.clone()),
+            "a progressing key is eligible again"
+        );
+        assert_eq!(
+            admission.continuation(&key),
+            Some("page-1".to_owned()),
+            "and the next step resumes where this one stopped"
+        );
+
+        assert_eq!(
+            admission.finish(
+                &key,
+                continuing(MaintenanceStepConclusion::Blocked, "page-2"),
+                NOW
+            ),
+            None,
+            "a blocked key parks"
+        );
+        assert_eq!(
+            admission.continuation(&key),
+            Some("page-2".to_owned()),
+            "keeping its position, so a retry with a bigger budget resumes"
+        );
+
+        admission.nudge(key.clone());
+        assert_eq!(admission.try_dispatch(NOW), Some(key.clone()));
+        assert_eq!(
+            admission.continuation(&key),
+            Some("page-2".to_owned()),
+            "the parked position is what the resumed step is handed"
+        );
+        assert_eq!(admission.finish(&key, idle(), NOW), None);
+        assert_eq!(
+            admission.continuation(&key),
+            None,
+            "an idle pass is a finished one: the next step starts over"
+        );
+    }
+
+    #[test]
+    fn an_evicted_key_drops_its_continuation() {
+        let mut admission = book(1);
+        let key = gc("gone");
+
+        admission.nudge(key.clone());
+        assert_eq!(admission.try_dispatch(NOW), Some(key.clone()));
+        assert_eq!(
+            admission.finish(
+                &key,
+                continuing(MaintenanceStepConclusion::Progressed, "page-1"),
+                NOW
+            ),
+            Some(key.clone())
+        );
+        assert_eq!(
+            admission.finish(&key, concluded(MaintenanceStepConclusion::NotEnabled), NOW),
+            None
+        );
+        assert_eq!(
+            admission.continuation(&key),
+            None,
+            "the key's whole state went with it"
+        );
+
+        admission.nudge(key.clone());
+        assert_eq!(admission.try_dispatch(NOW), Some(key.clone()));
+        assert_eq!(
+            admission.continuation(&key),
+            None,
+            "and a re-admitted key starts a fresh pass"
+        );
+    }
+
+    #[test]
+    fn a_failed_step_keeps_where_its_last_one_stopped() {
+        let mut admission = book(1);
+        let key = gc("flaky");
+
+        admission.nudge(key.clone());
+        assert_eq!(admission.try_dispatch(NOW), Some(key.clone()));
+        assert_eq!(
+            admission.finish(
+                &key,
+                continuing(MaintenanceStepConclusion::Progressed, "page-1"),
+                NOW
+            ),
+            Some(key.clone())
+        );
+        assert_eq!(admission.finish(&key, StepOutcome::Failed, NOW), None);
+        assert_eq!(
+            admission.continuation(&key),
+            Some("page-1".to_owned()),
+            "a failure says nothing about where the last step stopped"
+        );
+    }
+
+    /// A deadline the step itself observed is planted the same way a
+    /// trigger's is, and merges with what is already there.
+    #[test]
+    fn a_step_can_report_its_own_next_eligible_time() {
+        let mut admission = book(1);
+        let key = gc("leased");
+
+        admission.nudge(key.clone());
+        assert_eq!(admission.try_dispatch(NOW), Some(key.clone()));
+        assert_eq!(
+            admission.finish(
+                &key,
+                StepOutcome::Concluded(MaintenanceStepResult {
+                    conclusion: MaintenanceStepConclusion::Idle,
+                    continuation: None,
+                    not_before_ms: Some(NOW + 60_000),
+                }),
+                NOW
+            ),
+            None,
+            "an idle step with a deadline still parks until that deadline"
+        );
+        assert_eq!(admission.not_before_ms(&key), Some(NOW + 60_000));
+
+        admission.promote_due(NOW + 60_000);
+        assert_eq!(
+            admission.try_dispatch(NOW + 60_000),
+            Some(key.clone()),
+            "the observed deadline brings the key back on its own"
+        );
+        assert_eq!(
+            admission.finish(
+                &key,
+                StepOutcome::Concluded(MaintenanceStepResult {
+                    conclusion: MaintenanceStepConclusion::Progressed,
+                    continuation: None,
+                    not_before_ms: Some(NOW + 30_000),
+                }),
+                NOW + 60_000
+            ),
+            Some(key.clone()),
+            "a deadline already past is just a nudge, and this step progressed"
+        );
+        assert_eq!(
+            admission.not_before_ms(&key),
+            None,
+            "nothing future is owed"
+        );
+    }
+
     #[test]
     fn a_not_before_key_does_not_fire_early_and_fires_after() {
-        let mut admission = Admission::new(1);
+        let mut admission = book(1);
         let key = gc("leased");
 
         admission.nudge_not_before(key.clone(), NOW + 60_000, NOW);
@@ -755,7 +1047,7 @@ mod tests {
 
     #[test]
     fn the_soonest_of_two_not_before_times_wins() {
-        let mut admission = Admission::new(1);
+        let mut admission = book(1);
         let key = gc("leased");
 
         admission.nudge_not_before(key.clone(), NOW + 90_000, NOW);
@@ -769,7 +1061,7 @@ mod tests {
 
     #[test]
     fn an_unrelated_run_never_cancels_a_lease_obligation() {
-        let mut admission = Admission::new(1);
+        let mut admission = book(1);
         let key = gc("leased");
 
         admission.nudge_not_before(key.clone(), NOW + 60_000, NOW);
@@ -791,7 +1083,7 @@ mod tests {
 
     #[test]
     fn a_past_not_before_time_is_just_a_nudge() {
-        let mut admission = Admission::new(1);
+        let mut admission = book(1);
         let key = gc("overdue");
 
         admission.nudge_not_before(key.clone(), NOW - 1, NOW);
@@ -801,7 +1093,7 @@ mod tests {
 
     #[test]
     fn a_failed_step_backs_off_before_its_retry() {
-        let mut admission = Admission::new(1);
+        let mut admission = book(1);
         let key = metadata("flaky");
 
         admission.nudge(key.clone());
@@ -813,40 +1105,106 @@ mod tests {
         );
         assert_eq!(admission.try_dispatch(NOW), None);
         assert_eq!(
-            admission.try_dispatch(NOW + ERROR_BACKOFF_BASE_MS),
+            admission.try_dispatch(NOW + top_delay_ms(1)),
             Some(key.clone())
         );
         assert_eq!(admission.finish(&key, StepOutcome::Failed, NOW), None);
         assert_eq!(
             admission.earliest_deadline_ms(NOW),
-            Some(NOW + 2 * ERROR_BACKOFF_BASE_MS),
-            "consecutive failures double the delay"
+            Some(NOW + top_delay_ms(2)),
+            "consecutive failures draw from a window twice as wide"
         );
         assert_eq!(
-            admission.earliest_deadline_ms(NOW + 2 * ERROR_BACKOFF_BASE_MS),
+            admission.earliest_deadline_ms(NOW + top_delay_ms(2)),
             None,
             "a backoff that has already expired is not something to wake for"
         );
     }
 
     #[test]
-    fn backoff_doubles_to_a_one_second_ceiling() {
-        assert_eq!(backoff_delay_ms(1), ERROR_BACKOFF_BASE_MS);
-        assert_eq!(backoff_delay_ms(2), 2 * ERROR_BACKOFF_BASE_MS);
-        assert_eq!(backoff_delay_ms(4), 8 * ERROR_BACKOFF_BASE_MS);
-        assert_eq!(backoff_delay_ms(30), ERROR_BACKOFF_CAP_MS);
+    fn the_backoff_window_doubles_to_a_one_minute_ceiling() {
+        assert_eq!(backoff_window_ms(1), ERROR_BACKOFF_BASE_MS);
+        assert_eq!(backoff_window_ms(2), 2 * ERROR_BACKOFF_BASE_MS);
+        assert_eq!(backoff_window_ms(4), 8 * ERROR_BACKOFF_BASE_MS);
+        assert_eq!(
+            backoff_window_ms(30),
+            ERROR_BACKOFF_CAP_MS,
+            "a long outage is retried once a minute, not once a second"
+        );
+        assert_eq!(backoff_window_ms(u32::MAX), ERROR_BACKOFF_CAP_MS);
+    }
+
+    #[test]
+    fn every_drawn_delay_stays_inside_its_window() {
+        let clock = TestClock::walking();
+        for failures in 1..24_u32 {
+            let window_ms = backoff_window_ms(failures);
+            for _ in 0..64 {
+                assert!(
+                    backoff_delay_ms(failures, clock.as_ref()) < window_ms,
+                    "full jitter draws from inside the window, never past it"
+                );
+            }
+        }
+    }
+
+    /// The property a provider outage depends on: keys that failed in the
+    /// same millisecond must not all come back in the same millisecond.
+    #[test]
+    fn a_burst_of_failures_does_not_come_back_synchronized() {
+        let mut admission = Admission::new(8, TestClock::walking());
+        let keys = [
+            metadata("one"),
+            metadata("two"),
+            metadata("three"),
+            metadata("four"),
+        ];
+        for key in &keys {
+            admission.nudge(key.clone());
+        }
+        // Every key failing at the same instant, six times over, which is
+        // what one unreachable object store looks like from here. Six so
+        // the window is wide enough for four draws to be distinguishable —
+        // a first failure only has ten milliseconds to spread across.
+        for _ in 0..6 {
+            for key in &keys {
+                admission.record_failure(key, NOW);
+            }
+        }
+
+        let deadlines: std::collections::BTreeSet<u64> = keys
+            .iter()
+            .map(|key| {
+                admission
+                    .keys
+                    .get(key)
+                    .and_then(|state| state.retry_at_ms)
+                    .expect("a failed key carries a retry deadline")
+            })
+            .collect();
+        assert_eq!(
+            deadlines.len(),
+            keys.len(),
+            "keys that failed together must not retry together"
+        );
+        for deadline_ms in deadlines {
+            assert!(
+                deadline_ms < NOW + backoff_window_ms(6),
+                "and every one of them inside the window it drew from"
+            );
+        }
     }
 
     #[test]
     fn a_conclusion_clears_the_failure_streak() {
-        let mut admission = Admission::new(1);
+        let mut admission = book(1);
         let key = metadata("recovered");
 
         admission.nudge(key.clone());
         assert_eq!(admission.try_dispatch(NOW), Some(key.clone()));
         assert_eq!(admission.finish(&key, StepOutcome::Failed, NOW), None);
         assert_eq!(
-            admission.try_dispatch(NOW + ERROR_BACKOFF_BASE_MS),
+            admission.try_dispatch(NOW + top_delay_ms(1)),
             Some(key.clone())
         );
         assert_eq!(admission.finish(&key, idle(), NOW), None);
@@ -860,7 +1218,7 @@ mod tests {
 
     #[test]
     fn reconciliation_visits_admitted_keys_in_bounded_slices() {
-        let mut admission = Admission::new(1);
+        let mut admission = book(1);
         let keys = [metadata("a"), metadata("b"), metadata("c")];
         for key in &keys {
             admission.nudge(key.clone());
@@ -881,7 +1239,7 @@ mod tests {
 
     #[test]
     fn reconciliation_never_visits_a_key_that_was_never_admitted() {
-        let mut admission = Admission::new(1);
+        let mut admission = book(1);
         let touched = metadata("touched");
         admission.nudge(touched.clone());
         assert_eq!(admission.try_dispatch(NOW), Some(touched.clone()));
@@ -896,7 +1254,7 @@ mod tests {
 
     #[test]
     fn reconciliation_skips_running_and_already_queued_keys() {
-        let mut admission = Admission::new(1);
+        let mut admission = book(1);
         let (running, queued, parked) = (metadata("a"), metadata("b"), metadata("c"));
         admission.nudge(parked.clone());
         assert_eq!(admission.try_dispatch(NOW), Some(parked.clone()));
@@ -914,7 +1272,7 @@ mod tests {
 
     #[test]
     fn an_idle_probe_evicts_only_a_key_that_owes_nothing() {
-        let mut admission = Admission::new(1);
+        let mut admission = book(1);
         let (quiet, leased) = (metadata("quiet"), gc("leased"));
         admission.nudge(quiet.clone());
         assert_eq!(admission.try_dispatch(NOW), Some(quiet.clone()));
@@ -938,7 +1296,7 @@ mod tests {
 
     #[test]
     fn a_later_obligation_re_arms_after_the_soonest_one_fires() {
-        let mut admission = Admission::new(1);
+        let mut admission = book(1);
         let key = gc("leased");
 
         // What an upload session and its completion plant: a lease that
@@ -976,7 +1334,7 @@ mod tests {
 
     #[test]
     fn shutdown_clears_pending_obligations() {
-        let mut admission = Admission::new(1);
+        let mut admission = book(1);
         let key = gc("leased");
         admission.nudge_not_before(key.clone(), NOW + 60_000, NOW);
         admission.shut_down();

@@ -3,15 +3,34 @@
 //! A [`MaintenanceJob`] knows how to do one bounded piece of upkeep for one
 //! namespace: it re-reads durable state, does at most one unit of work,
 //! publishes through a compare-and-swap, and reports a
-//! [`MaintenanceStepConclusion`]. It decides nothing about when to run.
+//! [`MaintenanceStepResult`]. It decides nothing about when to run.
 //!
 //! The [`MaintenanceRunner`] decides that, and it is the only thing that
 //! does. It holds the pending `{job, namespace}` keys, the one permit pool
 //! every job shares, the per-key error backoff, the not-before times a
-//! wall-clock obligation plants, and a bounded sweep over the keys it has
-//! admitted. Triggers — a publish crossing a threshold, an upload session
-//! opening — are hints: level-triggered, never authoritative, and safe to
-//! lose because the durable state a step re-reads is the truth.
+//! wall-clock obligation plants, the opaque continuation a bounded job
+//! stopped at, and a bounded sweep over the keys it has admitted. Triggers
+//! — a publish crossing a threshold, an upload session opening — are hints:
+//! level-triggered, never authoritative, and safe to lose because the
+//! durable state a step re-reads is the truth.
+//!
+//! A job keeps no scheduling state of its own. Where its last bounded step
+//! stopped comes back to it as the `continuation` argument of the next one,
+//! so there is one place that knows what a key is waiting for. That state
+//! is in memory and performance-only: a step rebuilds every safety proof
+//! from durable state whatever position it starts from, so a continuation
+//! lost with the process costs a restarted pass and authorizes nothing.
+//!
+//! ## What automatic maintenance covers
+//!
+//! Automatic maintenance covers namespaces touched by the running process
+//! and namespaces explicitly assigned to a maintenance host. It never
+//! discovers namespaces: LoonFS has no operation that enumerates them, and
+//! this runner introduces none. A namespace enters the admitted set by
+//! being nudged — by a write, a query, a timed obligation, or an explicit
+//! assignment — and reconciliation revisits exactly that set. A namespace
+//! that no process has touched and no host has been assigned is outside
+//! this guarantee, and an operator brings it back in by assigning it.
 //!
 //! LoonFS never creates a hidden runtime for maintenance. Steps are spawned
 //! on the writer's own owning runtime and stay visible to shutdown through
@@ -66,6 +85,9 @@ const MAX_RECONCILE_PROBES_PER_SWEEP: usize = 64;
 pub enum FsBackgroundWork {
     /// The writer may schedule non-destructive maintenance for itself,
     /// spawned on the writer's owning runtime.
+    ///
+    /// The namespaces it covers are the ones this process touches and the
+    /// ones a host explicitly assigns to it — never a discovered set.
     Enabled,
     /// The writer never auto-schedules maintenance. Jobs may still be
     /// registered, and explicit [`FsAdmin`](crate::FsAdmin) maintenance
@@ -143,6 +165,46 @@ impl MaintenanceStepConclusion {
     }
 }
 
+/// Everything one bounded step tells the runner.
+///
+/// A job returns this instead of a bare conclusion so that the scheduling
+/// state it produces — where it stopped, and when it should next be looked
+/// at — lives in the runner rather than in a map beside it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaintenanceStepResult {
+    /// What the step accomplished.
+    pub conclusion: MaintenanceStepConclusion,
+    /// Where this step stopped, for the next one to resume from. Opaque to
+    /// the runner, which stores it and hands it straight back.
+    ///
+    /// The runner keeps it while the key is making progress or waiting for
+    /// room to work, clears it on [`MaintenanceStepConclusion::Idle`], and
+    /// drops it with the key on [`MaintenanceStepConclusion::NotEnabled`].
+    /// It never crosses a process boundary: a job that cannot restart its
+    /// pass from the beginning safely must not use this.
+    pub continuation: Option<String>,
+    /// The earliest wall-clock millisecond this step saw work becoming
+    /// eligible — a lease that will expire, a grace window that will pass.
+    ///
+    /// It joins the deadlines triggers plant, under the same rule: the
+    /// soonest of them is when the runner wakes, the latest is when the key
+    /// stops owing anything. `None` when the step observed no deadline,
+    /// which is not a claim that there is none.
+    pub not_before_ms: Option<u64>,
+}
+
+impl MaintenanceStepResult {
+    /// A conclusion with nothing to resume from and no deadline observed —
+    /// what a job whose whole position is durable returns.
+    pub fn concluded(conclusion: MaintenanceStepConclusion) -> Self {
+        Self {
+            conclusion,
+            continuation: None,
+            not_before_ms: None,
+        }
+    }
+}
+
 /// What a reconciliation probe found.
 ///
 /// A probe is the cheapest question a job can answer — one status read, or
@@ -170,7 +232,17 @@ pub trait MaintenanceJob: Send + Sync + 'static {
     fn id(&self) -> MaintenanceJobId;
 
     /// Runs one bounded step against `namespace_id`'s durable state.
-    async fn step(&self, namespace_id: &NamespaceId) -> Result<MaintenanceStepConclusion>;
+    ///
+    /// `continuation` is whatever this job's last step for this namespace
+    /// returned, or `None` for a fresh pass — after a restart, after an
+    /// idle conclusion, or the first time the key is admitted. A job that
+    /// has no position to carry ignores it and returns
+    /// [`MaintenanceStepResult::concluded`].
+    async fn step(
+        &self,
+        namespace_id: &NamespaceId,
+        continuation: Option<&str>,
+    ) -> Result<MaintenanceStepResult>;
 
     /// Answers whether `namespace_id` has work waiting, as cheaply as this
     /// job can. Called only by reconciliation, never on the hot path.
@@ -189,11 +261,40 @@ pub trait MaintenanceJob: Send + Sync + 'static {
 pub(crate) trait MaintenanceClock: fmt::Debug + Send + Sync {
     /// Unix milliseconds.
     fn now_ms(&self) -> u64;
+
+    /// A draw uniform in `0..span_ms`, and `0` when `span_ms` is zero.
+    ///
+    /// The error backoff jitters with this. It rides on the clock because
+    /// it answers the same kind of question — when to look again — and
+    /// because a test that substitutes one has to be able to name the
+    /// delays it asserts on.
+    fn jitter_below_ms(&self, span_ms: u64) -> u64;
 }
 
 /// The process clock.
-#[derive(Debug, Default)]
-pub(crate) struct SystemMaintenanceClock;
+#[derive(Debug)]
+pub(crate) struct SystemMaintenanceClock {
+    /// Counter behind the backoff jitter, advanced once per draw.
+    jitter: std::sync::atomic::AtomicU64,
+}
+
+/// The odd increment SplitMix64 walks its counter by.
+const JITTER_GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;
+
+impl Default for SystemMaintenanceClock {
+    fn default() -> Self {
+        // Seeded per instance, so two hosts riding out one provider outage
+        // do not draw the same retry sequence. The standard library's own
+        // randomly keyed hasher is the seed: this decides when to look
+        // again and nothing else, so it needs spread rather than secrecy.
+        use std::hash::{BuildHasher, Hasher};
+        let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+        hasher.write_u64(JITTER_GAMMA);
+        Self {
+            jitter: std::sync::atomic::AtomicU64::new(hasher.finish()),
+        }
+    }
+}
 
 impl MaintenanceClock for SystemMaintenanceClock {
     fn now_ms(&self) -> u64 {
@@ -202,6 +303,27 @@ impl MaintenanceClock for SystemMaintenanceClock {
         // durable path already refuses such a clock outright.
         crate::time::current_time_ms().unwrap_or(0)
     }
+
+    fn jitter_below_ms(&self, span_ms: u64) -> u64 {
+        if span_ms == 0 {
+            return 0;
+        }
+        let counter = self
+            .jitter
+            .fetch_add(JITTER_GAMMA, std::sync::atomic::Ordering::Relaxed);
+        split_mix_64(counter) % span_ms
+    }
+}
+
+/// SplitMix64's finalizer: three xor-shift-multiply rounds over a counter.
+///
+/// Two keys that fail in the same millisecond draw consecutive counters,
+/// and this is what makes those two draws land far apart.
+fn split_mix_64(counter: u64) -> u64 {
+    let mut mixed = counter;
+    mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    mixed ^ (mixed >> 31)
 }
 
 /// Cloneable, non-blocking way to tell the runner a key may have work.
@@ -230,7 +352,7 @@ impl MaintenanceHandle {
     pub fn now_ms(&self) -> u64 {
         match self.inner.upgrade() {
             Some(inner) => inner.clock.now_ms(),
-            None => SystemMaintenanceClock.now_ms(),
+            None => SystemMaintenanceClock::default().now_ms(),
         }
     }
 
@@ -305,7 +427,7 @@ impl MaintenanceRunner {
             policy,
             runtime,
             max_concurrent,
-            Arc::new(SystemMaintenanceClock),
+            Arc::new(SystemMaintenanceClock::default()),
         )
     }
 
@@ -320,14 +442,14 @@ impl MaintenanceRunner {
             inner: Arc::new(RunnerInner {
                 policy,
                 runtime,
-                clock,
                 jobs: Mutex::new(BTreeMap::new()),
                 state: Mutex::new(RunnerState {
-                    admission: Admission::new(max_concurrent.get()),
+                    admission: Admission::new(max_concurrent.get(), Arc::clone(&clock)),
                     tasks: Vec::new(),
                     scheduler: None,
                     next_reconcile_ms,
                 }),
+                clock,
                 wake: Arc::new(Notify::new()),
             }),
         }
@@ -595,19 +717,28 @@ async fn run_step(inner: &Arc<RunnerInner>, key: &MaintenanceKey) -> StepOutcome
     let Some(job) = inner.job(key.job) else {
         // Nudged for a job nobody registered: there is nothing to run and
         // nothing to reconcile.
-        return StepOutcome::Concluded(MaintenanceStepConclusion::NotEnabled);
+        return StepOutcome::Concluded(MaintenanceStepResult::concluded(
+            MaintenanceStepConclusion::NotEnabled,
+        ));
     };
+    // Read under the same lock every scheduling decision takes, and only
+    // this key's own: a step that resumes is resuming from what this
+    // runner stored for it when its last step ended.
+    let continuation = inner.lock_state().admission.continuation(key);
     let started = tokio::time::Instant::now();
-    match job.step(&key.namespace_id).await {
-        Ok(conclusion) => {
+    match job.step(&key.namespace_id, continuation.as_deref()).await {
+        Ok(result) => {
             tracing::debug!(
                 job = %key.job,
                 namespace_id = %key.namespace_id,
-                conclusion = conclusion.as_str(),
+                conclusion = result.conclusion.as_str(),
+                resumed = continuation.is_some(),
+                continues = result.continuation.is_some(),
+                not_before_ms = ?result.not_before_ms,
                 elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
                 "maintenance step settled"
             );
-            StepOutcome::Concluded(conclusion)
+            StepOutcome::Concluded(result)
         }
         Err(error) => {
             tracing::info!(
@@ -713,10 +844,12 @@ fn take_reconcile_turn(inner: &Arc<RunnerInner>, now_ms: u64) -> bool {
 /// Asks a bounded slice of the admitted keys whether they have work.
 ///
 /// Scope is what this process admitted and nothing else: no namespace
-/// discovery, no listing. Across a restart that scope is empty, so recovery
-/// of work admitted by a previous process is best-effort until an external
-/// queue owns admission; within one process lifetime nothing admitted is
-/// permanently lost.
+/// discovery, no listing. Automatic maintenance therefore covers the
+/// namespaces this process has touched and the ones a host has explicitly
+/// assigned to it — a set that starts empty at every start-up and grows
+/// only by being nudged. Nothing admitted is lost within one process
+/// lifetime; a namespace outside that set is outside the guarantee until
+/// something touches it or an operator assigns it.
 async fn reconcile(inner: &Arc<RunnerInner>) {
     let batch = inner
         .lock_state()

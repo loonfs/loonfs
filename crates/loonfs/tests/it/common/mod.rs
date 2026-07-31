@@ -7,14 +7,14 @@
 use loonfs::publish::CommitRequest;
 use loonfs::DirectPutContentClaim;
 use loonfs::{
-    AuthoritativeFileBytes, AuthoritativePathEntry, BeginUploadRequest, BeginUploadResponse,
-    ChangeSeq, ChangesResponse, CommitResponse, CompleteUploadRequest, CompleteUploadResponse,
-    ContentRef, CopyOptions, CreateCheckpointOptions, CreateCheckpointResponse,
-    CreateDirectoryOptions, CreateNamespaceOptions, DeleteOptions, DirectoryPageCursor, ErrorCode,
-    FsAdmin, FsReader, FsWriter, FsWriterBuilder, ListChangesOptions, MaintenanceStepKind,
-    MaintenanceStepOptions, MaintenanceStepResponse, MoveOptions, NamespaceId,
+    AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, BeginUploadRequest,
+    BeginUploadResponse, ChangeSeq, ChangesResponse, CommitResponse, CompleteUploadRequest,
+    CompleteUploadResponse, ContentRef, CopyOptions, CreateCheckpointOptions,
+    CreateCheckpointResponse, CreateDirectoryOptions, CreateNamespaceOptions, DeleteOptions,
+    DirectoryPageCursor, ErrorCode, FsAdmin, FsReader, FsWriter, FsWriterBuilder,
+    ListChangesOptions, MaintenanceStepOptions, MaintenanceStepResponse, MoveOptions, NamespaceId,
     NamespaceStatusResponse, PageRequest, PutFileOptions, RuntimeError, SharedObjectStore,
-    UploadContentResponse, UploadId,
+    UploadContentResponse, UploadId, WalFlushStepOutcome,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_test_support::block_on::block_on;
@@ -225,6 +225,8 @@ pub(crate) trait RuntimeTestExt {
         namespace_id: &NamespaceId,
         options: MaintenanceStepOptions,
     ) -> loonfs::Result<MaintenanceStepResponse>;
+    fn flush_wal_blocking(&self, namespace_id: &NamespaceId)
+        -> loonfs::Result<WalFlushStepOutcome>;
     fn stat_path_blocking(
         &self,
         namespace_id: &NamespaceId,
@@ -311,7 +313,7 @@ pub(crate) trait RuntimeTestExt {
     fn advance_retention_floor_blocking(
         &self,
         namespace_id: &NamespaceId,
-    ) -> loonfs::Result<MaintenanceStepResponse>;
+    ) -> loonfs::Result<AdvanceRetentionResponse>;
 }
 
 impl RuntimeTestExt for TestRuntime {
@@ -344,6 +346,13 @@ impl RuntimeTestExt for TestRuntime {
         options: MaintenanceStepOptions,
     ) -> loonfs::Result<MaintenanceStepResponse> {
         block_on(self.admin.maintenance_step_namespace(namespace_id, options))
+    }
+
+    fn flush_wal_blocking(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> loonfs::Result<WalFlushStepOutcome> {
+        block_on(self.admin.flush_wal(namespace_id))
     }
 
     fn stat_path_blocking(
@@ -523,14 +532,8 @@ impl RuntimeTestExt for TestRuntime {
     fn advance_retention_floor_blocking(
         &self,
         namespace_id: &NamespaceId,
-    ) -> loonfs::Result<MaintenanceStepResponse> {
-        block_on(self.admin.maintenance_step_namespace(
-            namespace_id,
-            MaintenanceStepOptions {
-                only: Some(MaintenanceStepKind::Retention),
-                ..MaintenanceStepOptions::default()
-            },
-        ))
+    ) -> loonfs::Result<AdvanceRetentionResponse> {
+        block_on(self.admin.advance_retention_floor(namespace_id))
     }
 }
 

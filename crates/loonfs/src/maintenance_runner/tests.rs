@@ -41,12 +41,20 @@ impl MaintenanceClock for ManualClock {
     fn now_ms(&self) -> u64 {
         self.now_ms.load(Ordering::SeqCst)
     }
+
+    fn jitter_below_ms(&self, span_ms: u64) -> u64 {
+        // The whole window, deterministically: these tests assert on when a
+        // key comes back, and admission's own tests cover the draw.
+        span_ms.saturating_sub(1)
+    }
 }
 
 /// What one scripted step does.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum StepAnswer {
     Conclude(MaintenanceStepConclusion),
+    /// Conclude, and tell the runner where this step stopped.
+    Continue(MaintenanceStepConclusion, Option<String>),
     Fail,
     Panic,
 }
@@ -98,6 +106,8 @@ struct TestJob {
     trailing_answer: StepAnswer,
     probe_answer: StdMutex<MaintenanceProbe>,
     steps: StdMutex<Vec<NamespaceId>>,
+    /// The continuation each step was handed, in order.
+    resumed_from: StdMutex<Vec<Option<String>>>,
     probes: StdMutex<Vec<NamespaceId>>,
     gate: Option<Gate>,
 }
@@ -109,6 +119,7 @@ impl TestJob {
             trailing_answer,
             probe_answer: StdMutex::new(MaintenanceProbe::Idle),
             steps: StdMutex::new(Vec::new()),
+            resumed_from: StdMutex::new(Vec::new()),
             probes: StdMutex::new(Vec::new()),
             gate: None,
         })
@@ -130,6 +141,7 @@ impl TestJob {
             trailing_answer: trailing,
             probe_answer: StdMutex::new(MaintenanceProbe::Idle),
             steps: StdMutex::new(Vec::new()),
+            resumed_from: StdMutex::new(Vec::new()),
             probes: StdMutex::new(Vec::new()),
             gate: None,
         };
@@ -147,6 +159,11 @@ impl TestJob {
 
     fn stepped(&self) -> Vec<String> {
         names(&self.steps)
+    }
+
+    /// What the runner handed each step, in order.
+    fn resumed_from(&self) -> Vec<Option<String>> {
+        self.resumed_from.lock().expect("resumed from").clone()
     }
 
     fn probed(&self) -> Vec<String> {
@@ -168,19 +185,32 @@ impl MaintenanceJob for TestJob {
         TEST_JOB
     }
 
-    async fn step(&self, namespace_id: &NamespaceId) -> Result<MaintenanceStepConclusion> {
+    async fn step(
+        &self,
+        namespace_id: &NamespaceId,
+        continuation: Option<&str>,
+    ) -> Result<MaintenanceStepResult> {
         if let Some(gate) = &self.gate {
             gate.enter().await;
         }
         self.steps.lock().expect("steps").push(namespace_id.clone());
+        self.resumed_from
+            .lock()
+            .expect("resumed from")
+            .push(continuation.map(str::to_owned));
         let answer = self
             .answers
             .lock()
             .expect("answers")
             .pop_front()
-            .unwrap_or(self.trailing_answer);
+            .unwrap_or_else(|| self.trailing_answer.clone());
         match answer {
-            StepAnswer::Conclude(conclusion) => Ok(conclusion),
+            StepAnswer::Conclude(conclusion) => Ok(MaintenanceStepResult::concluded(conclusion)),
+            StepAnswer::Continue(conclusion, continuation) => Ok(MaintenanceStepResult {
+                conclusion,
+                continuation,
+                not_before_ms: None,
+            }),
             StepAnswer::Fail => Err(RuntimeError::Config("scripted step failure".to_owned())),
             StepAnswer::Panic => panic!("injected maintenance step panic"),
         }
@@ -213,7 +243,7 @@ fn runner_with(
 fn enabled_runner(job: Arc<dyn MaintenanceJob>) -> MaintenanceRunner {
     runner_with(
         FsBackgroundWork::Enabled,
-        Arc::new(SystemMaintenanceClock),
+        Arc::new(SystemMaintenanceClock::default()),
         job,
     )
 }
@@ -276,6 +306,102 @@ async fn progressed_requeues_immediately_and_stays_fair_at_the_cap() {
             "busy".to_owned()
         ],
         "one unit per step: the waiting peer runs between the busy namespace's units"
+    );
+}
+
+/// The continuation round trip over a live runner: what a step hands back
+/// is what the next step is handed, without the job holding a map of its
+/// own.
+#[tokio::test]
+async fn a_progressing_job_resumes_from_where_its_last_step_stopped() {
+    let job = TestJob::scripted(
+        [
+            StepAnswer::Continue(
+                MaintenanceStepConclusion::Progressed,
+                Some("page-1".to_owned()),
+            ),
+            StepAnswer::Continue(
+                MaintenanceStepConclusion::Progressed,
+                Some("page-2".to_owned()),
+            ),
+        ],
+        StepAnswer::Conclude(MaintenanceStepConclusion::Idle),
+    );
+    let runner = enabled_runner(job.clone());
+    let namespace_id = namespace_id("paged");
+
+    runner.handle().nudge(TEST_JOB, &namespace_id);
+    runner.drain().await.expect("the pass settles");
+
+    assert_eq!(
+        job.resumed_from(),
+        vec![None, Some("page-1".to_owned()), Some("page-2".to_owned())],
+        "a fresh pass, then each step resuming from the one before it"
+    );
+
+    // The idle step that ended the pass spent the position, so the next
+    // nudge starts over rather than resuming a finished walk.
+    runner.handle().nudge(TEST_JOB, &namespace_id);
+    runner.drain().await.expect("the fresh pass settles");
+    assert_eq!(
+        job.resumed_from().last().expect("a fourth step ran"),
+        &None,
+        "an idle conclusion clears the continuation"
+    );
+}
+
+/// A step that ran out of budget keeps its position, so the retry picks up
+/// there instead of walking the same ground again.
+#[tokio::test]
+async fn a_blocked_job_resumes_from_where_it_parked() {
+    let job = TestJob::scripted(
+        [StepAnswer::Continue(
+            MaintenanceStepConclusion::Blocked,
+            Some("page-7".to_owned()),
+        )],
+        StepAnswer::Conclude(MaintenanceStepConclusion::Idle),
+    );
+    let runner = enabled_runner(job.clone());
+    let namespace_id = namespace_id("parked");
+
+    runner.handle().nudge(TEST_JOB, &namespace_id);
+    runner.drain().await.expect("the blocked step settles");
+    runner.handle().nudge(TEST_JOB, &namespace_id);
+    runner.drain().await.expect("the retry settles");
+
+    assert_eq!(
+        job.resumed_from(),
+        vec![None, Some("page-7".to_owned())],
+        "a retry with room to work resumes where the blocked step stopped"
+    );
+}
+
+/// An evicted key takes its position with it: nothing survives the job
+/// saying it has nothing to maintain here.
+#[tokio::test]
+async fn a_not_enabled_conclusion_drops_the_continuation() {
+    let job = TestJob::scripted(
+        [
+            StepAnswer::Continue(
+                MaintenanceStepConclusion::Progressed,
+                Some("page-1".to_owned()),
+            ),
+            StepAnswer::Conclude(MaintenanceStepConclusion::NotEnabled),
+        ],
+        StepAnswer::Conclude(MaintenanceStepConclusion::Idle),
+    );
+    let runner = enabled_runner(job.clone());
+    let namespace_id = namespace_id("gone");
+
+    runner.handle().nudge(TEST_JOB, &namespace_id);
+    runner.drain().await.expect("both steps settle");
+    runner.handle().nudge(TEST_JOB, &namespace_id);
+    runner.drain().await.expect("the re-admitted step settles");
+
+    assert_eq!(
+        job.resumed_from(),
+        vec![None, Some("page-1".to_owned()), None],
+        "a key re-admitted after eviction starts a fresh pass"
     );
 }
 
@@ -477,7 +603,7 @@ async fn manual_only_ignores_nudges_but_still_registers_jobs() {
     let job = TestJob::idle();
     let runner = runner_with(
         FsBackgroundWork::ManualOnly,
-        Arc::new(SystemMaintenanceClock),
+        Arc::new(SystemMaintenanceClock::default()),
         job.clone(),
     );
     let namespace_id = namespace_id("manual");

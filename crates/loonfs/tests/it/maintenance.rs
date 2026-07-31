@@ -304,6 +304,100 @@ fn maintenance_step_advances_the_floor_only_when_retention_opts_in() {
     assert_eq!(step.retention_floor_seq, ChangeSeq(2));
 }
 
+/// The typed names are one name each over the one step path: what they do
+/// is exactly the `only:`-restricted step, and what they report agrees
+/// with it.
+#[test]
+fn the_typed_wrappers_are_the_only_restricted_steps() {
+    let temp_dir = tempdir().expect("tempdir");
+    let fs = runtime(temp_dir.path(), "typed-wrapper-test");
+    let namespace_id = namespace_id("demo");
+
+    fs.create_namespace_blocking(&namespace_id, CreateNamespaceOptions::default())
+        .expect("create namespace");
+    assert_eq!(
+        fs.flush_wal_blocking(&namespace_id)
+            .expect("flush an empty tail"),
+        WalFlushStepOutcome::NotNeeded,
+        "the wrapper folds a tail; it does not publish a manifest for a namespace with none"
+    );
+
+    fs.put_file_bytes_blocking(
+        &namespace_id,
+        "/docs/first.txt",
+        b"first",
+        PutFileOptions::default(),
+    )
+    .expect("put first file");
+    assert_eq!(
+        fs.flush_wal_blocking(&namespace_id)
+            .expect("flush the tail"),
+        WalFlushStepOutcome::Flushed {
+            manifest_head_seq: ChangeSeq(1)
+        }
+    );
+
+    // The same request written out longhand: a one-segment threshold and
+    // the flush sub-step, which is all the wrapper is.
+    fs.put_file_bytes_blocking(
+        &namespace_id,
+        "/docs/second.txt",
+        b"second",
+        PutFileOptions::default(),
+    )
+    .expect("put second file");
+    let longhand = fs
+        .maintenance_step_namespace_blocking(
+            &namespace_id,
+            MaintenanceStepOptions {
+                max_wal_tail_segments: 1,
+                retention: false,
+                gc: None,
+                only: Some(MaintenanceStepKind::WalFlush),
+            },
+        )
+        .expect("flush-only step");
+    assert_eq!(
+        longhand.wal_flush,
+        WalFlushStepOutcome::Flushed {
+            manifest_head_seq: ChangeSeq(2)
+        },
+        "the wrapper and the step it delegates to are the same request"
+    );
+
+    // Retention keeps a name of its own because of what it costs, and the
+    // floor it reports is the one the restricted step reports.
+    let checkpoint = fs
+        .create_checkpoint_blocking(&namespace_id)
+        .expect("create checkpoint");
+    let advanced = fs
+        .advance_retention_floor_blocking(&namespace_id)
+        .expect("advance retention");
+    assert_eq!(advanced.namespace_id, namespace_id);
+    assert_eq!(advanced.retention_floor_seq, checkpoint.checkpoint_seq);
+    let longhand = fs
+        .maintenance_step_namespace_blocking(
+            &namespace_id,
+            MaintenanceStepOptions {
+                max_wal_tail_segments: 1,
+                retention: false,
+                gc: None,
+                only: Some(MaintenanceStepKind::Retention),
+            },
+        )
+        .expect("retention-only step");
+    assert_eq!(
+        longhand.retention_floor_seq, advanced.retention_floor_seq,
+        "advancing an already-advanced floor is idempotent through either name"
+    );
+    assert_eq!(
+        fs.namespace_status_blocking(&namespace_id)
+            .expect("status")
+            .retention_floor_seq,
+        advanced.retention_floor_seq
+    );
+}
+
 #[test]
 fn maintenance_step_after_existing_manifest_writes_l0_manifest() {
     let temp_dir = tempdir().expect("tempdir");
