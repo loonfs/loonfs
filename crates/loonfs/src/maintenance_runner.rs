@@ -153,8 +153,9 @@ pub enum MaintenanceStepConclusion {
 }
 
 impl MaintenanceStepConclusion {
-    /// The label traces use.
-    pub(crate) fn as_str(self) -> &'static str {
+    /// The label traces use, and the one a host reporting a step it drove
+    /// itself should use with it.
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Progressed => "progressed",
             Self::Idle => "idle",
@@ -461,6 +462,16 @@ impl MaintenanceRunner {
         MaintenanceHandle {
             inner: Arc::downgrade(&self.inner),
         }
+    }
+
+    /// The executor registered under `id`.
+    ///
+    /// For a host that drives bounded steps itself instead of through
+    /// admission — a catch-up command with a caller's budget on it. The
+    /// steps are the same bounded, compare-and-swap-published units this
+    /// runner admits; they simply have no scheduler in front of them.
+    pub(crate) fn job(&self, id: MaintenanceJobId) -> Option<Arc<dyn MaintenanceJob>> {
+        self.inner.job(id)
     }
 
     /// Registers an executor under its own id.

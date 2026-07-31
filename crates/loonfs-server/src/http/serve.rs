@@ -8,8 +8,8 @@ use loonfs::metrics::{
 };
 use loonfs::publisher::PublisherRegistry;
 use loonfs::{
-    FsAdmin, FsBackgroundWork, FsReader, FsWriter, MaintenanceHandle, MaintenanceJob,
-    MaintenanceProbe, SharedObjectStore, TraceMode, TraceStoreKind,
+    FsAdmin, FsReader, FsWriter, MaintenanceHandle, MaintenanceJob, MaintenanceProbe,
+    SharedObjectStore, TraceMode, TraceStoreKind,
 };
 use loonfs_api::NamespaceId;
 use loonfs_grep::{GrepMaintenanceJob, GrepService, GrepWorker, GREP_INDEX_JOB};
@@ -41,8 +41,10 @@ pub(super) struct AppState {
     /// grep's own segments, held here because grep is a composed extension
     /// rather than part of the runtime the handles come from.
     pub(super) grep_service: Option<Arc<GrepService>>,
-    /// Present when this deployment maintains the index: how a request tells
-    /// the writer's runner a namespace may have indexing to do.
+    /// Present when this deployment maintains the index automatically: how a
+    /// request tells the writer's runner a namespace may have indexing to
+    /// do. Absent under `maintenance = "manual"`, where the mutating index
+    /// routes still work and nothing schedules itself behind them.
     pub(super) grep_maintenance: Option<GrepMaintenance>,
     /// Bounds concurrently buffered proxied-upload bodies; with the
     /// per-request body limit this makes worst-case upload memory
@@ -197,14 +199,15 @@ pub(super) async fn app_with_store_and_transfer_issuer(
     // through a slot this function fills the moment the writer is built,
     // before anything can publish through it.
     let maintenance_slot: Arc<OnceLock<MaintenanceHandle>> = Arc::new(OnceLock::new());
+    // Two switches decide automatic grep indexing and nothing else does:
+    // whether this server maintains anything automatically, and whether its
+    // grep mode maintains the index.
+    let maintains_grep_index =
+        config.maintenance.registers_automatic_jobs() && config.grep.mode.maintains_index();
     let (writer, reader, admin) = build_handles(
         &config,
         store.clone(),
-        config
-            .grep
-            .mode
-            .maintains_index()
-            .then(|| maintenance_slot.clone()),
+        maintains_grep_index.then(|| maintenance_slot.clone()),
     )
     .await?;
     // A deployment that maintains the index needs a worker whether or not it
@@ -216,7 +219,7 @@ pub(super) async fn app_with_store_and_transfer_issuer(
         .mode
         .serves_grep()
         .then(|| Arc::new(GrepService::new()));
-    let grep_maintenance = if config.grep.mode.maintains_index() {
+    let grep_maintenance = if maintains_grep_index {
         let policy = config
             .grep
             .worker_config()
@@ -310,11 +313,7 @@ async fn build_handles(
 
     let mut writer_builder = FsWriter::builder_with_store(store.clone())
         .writer_id(config.writer_id.clone())
-        .background_work(if config.background_maintenance {
-            FsBackgroundWork::Enabled
-        } else {
-            FsBackgroundWork::ManualOnly
-        })
+        .background_work(config.maintenance.background_work())
         .min_publish_interval_ms(config.min_publish_interval_ms)
         // The reader below shares this core, so the read cap covers every
         // proxied content read the server serves.

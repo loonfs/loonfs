@@ -1,6 +1,6 @@
 //! The clap argument grammar for every `loonfs` command.
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::io::IsTerminal;
 
 /// `loonfs x.y.z (commit date)`: the string served by both `--version` and
@@ -606,6 +606,9 @@ pub(crate) enum AdminCommand {
     /// Advance the retention floor, surrendering replay history below the
     /// flushed manifest head. File revision history is never affected.
     RetentionAdvance(AdminNamespaceArgs),
+    /// Host maintenance for explicitly assigned namespaces: continuously
+    /// until a signal, or as one bounded catch-up with --drain.
+    Run(AdminRunArgs),
     /// Run one core maintenance step (WAL flush and metadata folds).
     Step(AdminStepArgs),
     /// Run a mark-and-sweep garbage-collection pass.
@@ -620,6 +623,46 @@ pub(crate) enum AdminCommand {
     IndexStatus(AdminNamespaceArgs),
     /// Collect the namespace's unreferenced gram-index objects.
     IndexGc(AdminIndexGcArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct AdminRunArgs {
+    #[command(flatten)]
+    pub profile: ProfileSelectorArgs,
+    /// Namespace this host maintains. Repeat the flag to assign more; at
+    /// least one is required, because this command never discovers
+    /// namespaces.
+    #[arg(long = "namespace", required = true)]
+    pub namespaces: Vec<String>,
+    /// Maintenance job to host. Repeat the flag to select more; all three
+    /// when omitted. `core-gc` selects the runtime's collection job, which
+    /// logs and settles under its own name, `gc`.
+    #[arg(long = "job")]
+    pub jobs: Vec<MaintenanceJobArg>,
+    /// Catch every assigned namespace up and exit, instead of hosting until
+    /// a signal.
+    #[arg(long)]
+    pub drain: bool,
+    /// Give up after this many steps across the whole drain. Exits nonzero
+    /// and reports where every key got to. Requires --drain.
+    #[arg(long, requires = "drain")]
+    pub max_steps: Option<u64>,
+    /// Give up after this many milliseconds across the whole drain. Exits
+    /// nonzero and reports where every key got to. Requires --drain.
+    #[arg(long, requires = "drain")]
+    pub deadline_ms: Option<u64>,
+}
+
+/// The maintenance jobs `admin run` can host, as an operator names them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum MaintenanceJobArg {
+    /// Flush the WAL tail past its threshold and fold one reorganization
+    /// unit per step.
+    Metadata,
+    /// Run one bounded mark-and-sweep collection pass per step.
+    CoreGc,
+    /// Build and fold the gram content index.
+    GrepIndex,
 }
 
 #[derive(Debug, Args)]
@@ -771,6 +814,7 @@ pub(crate) enum CommandKind {
     AdminCheckpointRelease,
     AdminFlush,
     AdminRetentionAdvance,
+    AdminRun,
     AdminStep,
     AdminGc,
     AdminIndexEnable,
@@ -816,6 +860,7 @@ impl CommandKind {
             CommandKind::AdminCheckpointRelease => "admin_checkpoint_release",
             CommandKind::AdminFlush => "admin_flush",
             CommandKind::AdminRetentionAdvance => "admin_retention_advance",
+            CommandKind::AdminRun => "admin_run",
             CommandKind::AdminStep => "admin_step",
             CommandKind::AdminGc => "admin_gc",
             CommandKind::AdminIndexEnable => "admin_index_enable",
@@ -872,6 +917,7 @@ impl Cli {
                 AdminCommand::CheckpointRelease(_) => CommandKind::AdminCheckpointRelease,
                 AdminCommand::Flush(_) => CommandKind::AdminFlush,
                 AdminCommand::RetentionAdvance(_) => CommandKind::AdminRetentionAdvance,
+                AdminCommand::Run(_) => CommandKind::AdminRun,
                 AdminCommand::Step(_) => CommandKind::AdminStep,
                 AdminCommand::Gc(_) => CommandKind::AdminGc,
                 AdminCommand::IndexEnable(_) => CommandKind::AdminIndexEnable,

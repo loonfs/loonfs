@@ -10,8 +10,8 @@ mod http;
 mod trace;
 
 pub use config::{
-    load_server_config, GrepConfig, GrepMode, RuntimeCacheConfigOverrides, ServerConfig,
-    ServerConfigError, StoreConfig,
+    load_server_config, GrepConfig, GrepMode, MaintenanceMode, RuntimeCacheConfigOverrides,
+    ServerConfig, ServerConfigError, StoreConfig,
 };
 pub use http::{app, serve, serve_with_shutdown, ServeError, ServerLifecycle};
 #[cfg(feature = "openapi")]

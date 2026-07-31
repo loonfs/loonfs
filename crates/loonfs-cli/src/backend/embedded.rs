@@ -9,9 +9,9 @@ use crate::render::write_stderr_warning;
 use loonfs::{
     ByteStream, ChangesResponse, CopyOptions, CreateCheckpointOptions, CreateDirectoryOptions,
     CreateNamespaceOptions, DeleteNamespaceOptions, DeleteNamespaceResponse, DeleteOptions,
-    FsAdmin, FsReader, FsWriter, ListChangesOptions, MaintenanceJob, MaintenanceStepConclusion,
-    MaintenanceStepOptions, MoveOptions, PutFileOptions, RestoreRevisionOptions, RuntimeError,
-    SharedObjectStore, UndeleteOptions,
+    FsAdmin, FsReader, FsWriter, ListChangesOptions, MaintenanceHandle, MaintenanceJob,
+    MaintenanceJobId, MaintenanceStepConclusion, MaintenanceStepOptions, MoveOptions,
+    PutFileOptions, RestoreRevisionOptions, RuntimeError, SharedObjectStore, UndeleteOptions,
 };
 use loonfs_api::{
     v0::{
@@ -27,11 +27,12 @@ use loonfs_api::{
 use loonfs_client::{CommitOptions, NamespacePath};
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepDisableOutcome, GrepEnableOutcome, GrepError, GrepIndexSnapshot,
-    GrepMaintenanceJob, GrepService, GrepWorker, NamespaceReads,
+    GrepMaintenanceJob, GrepService, GrepWorker, NamespaceReads, GREP_INDEX_JOB,
 };
 use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
+use std::sync::Arc;
 
-use super::{GrepWaitBudget, GrepWaitProgress};
+use super::{GrepWaitProgress, MaintenanceDrainProgress, MaintenanceKeyProgress, StepBudget};
 
 /// Purpose-specific handles over one shared store client: reads go through
 /// the reader, mutations through the writer, and maintenance through the
@@ -57,6 +58,10 @@ pub(crate) struct EmbeddedBackend {
 /// step it scheduled. One recovery is the normal case; the second covers a
 /// step that raced another writer's debt. Past that the error surfaces.
 const MAX_MAINTENANCE_RECOVERIES: usize = 2;
+
+/// One job `admin run` was asked to host, and the executor registered under
+/// it.
+type HostedJob = (MaintenanceJobId, Arc<dyn MaintenanceJob>);
 
 impl EmbeddedBackend {
     /// Waits out writer-scheduled maintenance so a one-shot command never
@@ -317,7 +322,7 @@ impl EmbeddedBackend {
         &self,
         namespace_id: &NamespaceId,
         target_seq: ChangeSeq,
-        budget: GrepWaitBudget,
+        budget: StepBudget,
     ) -> Result<GrepWaitProgress, BackendError> {
         let worker = self.grep_worker();
         let job = GrepMaintenanceJob::new(worker.clone(), GramIndexBuildPolicy::default());
@@ -356,6 +361,116 @@ impl EmbeddedBackend {
                 MaintenanceStepConclusion::Progressed | MaintenanceStepConclusion::Superseded
             );
         }
+    }
+
+    /// Registers the jobs this process composes itself, then resolves every
+    /// selected job's executor from the writer that owns it.
+    ///
+    /// The runtime's own jobs are registered by the writer; grep's is
+    /// registered here, over the same worker every other index command in
+    /// this process uses. After this, one lookup answers for all three.
+    fn hosted_jobs(&self, jobs: &[MaintenanceJobId]) -> Result<Vec<HostedJob>, BackendError> {
+        if jobs.contains(&GREP_INDEX_JOB) {
+            self.writer
+                .register_maintenance_job(Arc::new(GrepMaintenanceJob::new(
+                    self.grep_worker(),
+                    GramIndexBuildPolicy::default(),
+                )))
+                .map_err(map_runtime_error)?;
+        }
+        jobs.iter()
+            .map(|job| {
+                let executor = self.writer.maintenance_job(*job).ok_or_else(|| {
+                    BackendError::runtime_error(format!(
+                        "no maintenance job is registered under `{job}`"
+                    ))
+                })?;
+                Ok((*job, executor))
+            })
+            .collect()
+    }
+
+    /// Hosts `jobs` for `namespaces` until `shutdown` resolves.
+    ///
+    /// The runner does the work; this command's job is the assignment. It
+    /// nudges every key once at start-up and again on an interval, and the
+    /// runner decides when each step runs, how many run at once, and what
+    /// happens when one fails. The shutdown is the writer's own: maintenance
+    /// admission closes before publications drain, so nothing admitted is
+    /// left running behind a publisher that is already gone.
+    pub(super) async fn host_maintenance(
+        &self,
+        namespaces: &[NamespaceId],
+        jobs: &[MaintenanceJobId],
+        shutdown: impl std::future::Future<Output = ()>,
+    ) -> Result<(), BackendError> {
+        let hosted = self.hosted_jobs(jobs)?;
+        let maintenance = self.writer.maintenance();
+        assign(&maintenance, &hosted, namespaces);
+        let mut shutdown = std::pin::pin!(shutdown);
+        loop {
+            tokio::select! {
+                () = &mut shutdown => break,
+                () = rest_between_assignments() => assign(&maintenance, &hosted, namespaces),
+            }
+        }
+        self.writer
+            .shutdown_background()
+            .await
+            .map_err(map_runtime_error)
+    }
+
+    /// Runs every `{job, namespace}` key to a settled conclusion, or until
+    /// `budget` runs out.
+    ///
+    /// A drain hosts the steps itself rather than nudging the runner: it has
+    /// a budget to spend and per-key progress to report, and admission
+    /// offers neither. So it closes the runner down first — a second
+    /// scheduler over the same keys would race these steps and make the
+    /// counts below a lie — and then walks the assignment, carrying each
+    /// key's continuation from one step to the next exactly as the runner
+    /// would have.
+    pub(super) async fn drain_maintenance(
+        &self,
+        namespaces: &[NamespaceId],
+        jobs: &[MaintenanceJobId],
+        budget: StepBudget,
+    ) -> Result<MaintenanceDrainProgress, BackendError> {
+        let hosted = self.hosted_jobs(jobs)?;
+        self.writer
+            .shutdown_background()
+            .await
+            .map_err(map_runtime_error)?;
+        let timer = StdMonotonicTimer::default();
+        let started_ms = timer.monotonic_now_ms();
+        let mut steps = 0;
+        let mut keys = Vec::with_capacity(hosted.len() * namespaces.len());
+        for (job, executor) in &hosted {
+            for namespace_id in namespaces {
+                let mut key = MaintenanceKeyProgress {
+                    job: *job,
+                    namespace_id: namespace_id.clone(),
+                    steps: 0,
+                    conclusion: None,
+                };
+                let mut continuation = None;
+                while !budget.spent(steps, timer.monotonic_now_ms().saturating_sub(started_ms)) {
+                    let result = executor
+                        .step(namespace_id, continuation.as_deref())
+                        .await
+                        .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))?;
+                    steps += 1;
+                    key.steps += 1;
+                    key.conclusion = Some(result.conclusion);
+                    continuation = result.continuation;
+                    if key.settled() {
+                        break;
+                    }
+                }
+                keys.push(key);
+            }
+        }
+        Ok(MaintenanceDrainProgress { keys, steps })
     }
 
     pub(super) async fn disable_grep_index(
@@ -656,6 +771,40 @@ impl EmbeddedBackend {
     }
 }
 
+/// How long an assignment rests before it is asserted again.
+///
+/// The runner forgets a key whose probe found it idle, which is right for a
+/// namespace this process merely touched and not enough for one an operator
+/// assigned: an assigned namespace must stay covered while it is quiet. So
+/// the host says so again on this interval, and the runner does the rest —
+/// one bounded step per key, which reads durable state, finds nothing, and
+/// concludes idle when there is nothing to do. It matches the runner's own
+/// reconciliation cadence: a shorter one would only ask the same question
+/// sooner, and a longer one would leave a cold namespace uncovered for
+/// longer than the runner's own sweep would.
+const ASSIGNMENT_INTERVAL_MS: u64 = 60_000;
+
+/// Tells the runner every assigned key may have work.
+///
+/// Nudges are hints and never block: what this asserts is the assignment,
+/// and every step that follows re-reads durable state to find out whether
+/// there was anything to it.
+fn assign(maintenance: &MaintenanceHandle, jobs: &[HostedJob], namespaces: &[NamespaceId]) {
+    for (job, _) in jobs {
+        for namespace_id in namespaces {
+            maintenance.nudge(*job, namespace_id);
+        }
+    }
+}
+
+/// The one timer a maintenance host owns: how long an assignment rests
+/// before it is asserted again. Nothing durable depends on it — it decides
+/// when to look, never what is true.
+#[allow(clippy::disallowed_methods)]
+async fn rest_between_assignments() {
+    tokio::time::sleep(std::time::Duration::from_millis(ASSIGNMENT_INTERVAL_MS)).await;
+}
+
 /// Grace windows are wall-clock policy, and this is where an embedded
 /// command enters wall time — the same boundary the server's HTTP handler
 /// is. Nothing durable replays through it.
@@ -681,13 +830,14 @@ fn resolve_cli_page_limit(limit: Option<u32>) -> Result<EffectiveLimit, BackendE
 #[cfg(test)]
 #[allow(clippy::panic)]
 mod tests {
-    use super::{map_runtime_error, resolve_cli_page_limit, GrepError};
+    use super::{map_runtime_error, resolve_cli_page_limit, GrepError, StepBudget, GREP_INDEX_JOB};
     use crate::backend_error::map_namespace_scoped_grep_error;
     use crate::config::StoreConfig;
     use crate::resolve::EmbeddedTarget;
     use loonfs::{
         BootstrapNamespaceError, CoreError, CreateNamespaceOptions, FsBackgroundWork, FsWriter,
-        PutFileOptions, RuntimeError, SharedObjectStore,
+        MaintenanceJobId, MaintenanceStepConclusion, PutFileOptions, RuntimeError,
+        SharedObjectStore,
     };
     use loonfs_api::{
         ChangeSeq, CreateCheckpointRequest, DestinationBehavior, ErrorCode, InodeId, NamespaceId,
@@ -699,6 +849,263 @@ mod tests {
 
     fn namespace_id(value: &str) -> NamespaceId {
         NamespaceId::parse(value).expect("valid namespace id")
+    }
+
+    /// The three jobs `admin run` hosts by default, in the order it drives
+    /// them.
+    fn every_job() -> [MaintenanceJobId; 3] {
+        [
+            MaintenanceJobId::METADATA,
+            MaintenanceJobId::GC,
+            GREP_INDEX_JOB,
+        ]
+    }
+
+    /// Leaves a namespace with a metadata backlog no scheduler will touch:
+    /// a `ManualOnly` writer publishes past the WAL-tail checkpoint
+    /// threshold, which is exactly the state a cold namespace is in when the
+    /// process that wrote it went away.
+    async fn seed_wal_backlog(store: &SharedObjectStore, namespace_id: &NamespaceId) {
+        const PUBLISHES_PAST_THE_CHECKPOINT_THRESHOLD: usize = 34;
+        let writer = FsWriter::builder_with_store(store.clone())
+            .writer_id(format!("{namespace_id}-backlog"))
+            .background_work(FsBackgroundWork::ManualOnly)
+            .min_publish_interval_ms(0)
+            .build()
+            .await
+            .expect("build backlog writer");
+        writer
+            .create_namespace(namespace_id, CreateNamespaceOptions::default())
+            .await
+            .expect("create namespace");
+        for index in 0..PUBLISHES_PAST_THE_CHECKPOINT_THRESHOLD {
+            writer
+                .put_file_bytes(
+                    namespace_id,
+                    &format!("/notes/note-{index}.txt"),
+                    b"assigned needle\n",
+                    PutFileOptions::default(),
+                )
+                .await
+                .unwrap_or_else(|error| panic!("seed put {index} failed: {error}"));
+        }
+    }
+
+    fn local_store(temp_dir: &std::path::Path) -> (StoreConfig, SharedObjectStore) {
+        let config = StoreConfig::LocalFs {
+            root: temp_dir.display().to_string(),
+            key_prefix: None,
+        };
+        let store: SharedObjectStore =
+            Arc::new(config.configured_object_store().expect("configure store"));
+        (config, store)
+    }
+
+    /// A drain is the assigned host's catch-up: it walks every
+    /// `{job, namespace}` key it was given to a settled conclusion and does
+    /// the work it finds on the way. Two namespaces here, one with an index
+    /// to build and one with none at all.
+    #[tokio::test]
+    async fn a_drain_settles_every_assigned_key_and_does_the_work_it_finds() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let (store_config, store) = local_store(temp_dir.path());
+        let indexed = namespace_id("alpha");
+        let unindexed = namespace_id("beta");
+        seed_wal_backlog(&store, &indexed).await;
+        seed_wal_backlog(&store, &unindexed).await;
+
+        let target = EmbeddedTarget::new(&store_config, None)
+            .await
+            .expect("build embedded target");
+        target
+            .backend
+            .enable_grep_index(&indexed)
+            .await
+            .expect("enable the index without driving it");
+        let head_seq = target
+            .backend
+            .namespace_status(&indexed)
+            .await
+            .expect("status before the drain")
+            .head_seq;
+
+        let progress = target
+            .backend
+            .drain_maintenance(
+                &[indexed.clone(), unindexed.clone()],
+                &every_job(),
+                StepBudget::default(),
+            )
+            .await
+            .expect("drain the assignment");
+
+        assert!(
+            !progress.budget_exhausted(),
+            "an unbudgeted drain settles every key: {:?}",
+            progress.keys
+        );
+        assert_eq!(progress.keys.len(), 6, "three jobs over two namespaces");
+        assert!(progress.steps >= 6, "every key took at least one step");
+        // A namespace with no grep root has nothing for that job to
+        // maintain, and saying so is a settled conclusion like any other.
+        let unindexed_grep = progress
+            .keys
+            .iter()
+            .find(|key| key.job == GREP_INDEX_JOB && key.namespace_id == unindexed)
+            .expect("the unindexed namespace's grep key");
+        assert_eq!(
+            unindexed_grep.conclusion,
+            Some(MaintenanceStepConclusion::NotEnabled)
+        );
+
+        // The work is durable, not a tally: both backlogs are flushed and
+        // the one index there was is at the namespace head.
+        for namespace_id in [&indexed, &unindexed] {
+            let status = target
+                .backend
+                .namespace_status(namespace_id)
+                .await
+                .expect("status after the drain");
+            assert!(
+                status.wal_tail_segments < 32,
+                "`{namespace_id}` kept a WAL tail of {} segments past the checkpoint threshold",
+                status.wal_tail_segments
+            );
+            assert!(status.current_manifest_id.is_some(), "{namespace_id}");
+        }
+        let indexed_status = target
+            .backend
+            .grep_index_status(&indexed)
+            .await
+            .expect("index status after the drain");
+        assert!(
+            indexed_status.state.is_built_through(head_seq),
+            "the assigned index must reach the head it was behind: {:?}",
+            indexed_status.state
+        );
+    }
+
+    /// A budget that runs out mid-assignment reports where every key got to
+    /// — including the ones it never reached — instead of claiming the
+    /// assignment is caught up.
+    #[tokio::test]
+    async fn a_spent_drain_budget_reports_the_keys_it_left_unsettled() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let (store_config, store) = local_store(temp_dir.path());
+        let namespace = namespace_id("alpha");
+        seed_wal_backlog(&store, &namespace).await;
+        let target = EmbeddedTarget::new(&store_config, None)
+            .await
+            .expect("build embedded target");
+
+        let progress = target
+            .backend
+            .drain_maintenance(
+                std::slice::from_ref(&namespace),
+                &[MaintenanceJobId::METADATA, MaintenanceJobId::GC],
+                StepBudget {
+                    max_steps: Some(1),
+                    deadline_ms: None,
+                },
+            )
+            .await
+            .expect("drain within a budget");
+
+        assert!(progress.budget_exhausted());
+        assert_eq!(progress.steps, 1);
+        let metadata = &progress.keys[0];
+        assert_eq!(metadata.job, MaintenanceJobId::METADATA);
+        assert_eq!(metadata.steps, 1);
+        assert_eq!(
+            metadata.conclusion,
+            Some(MaintenanceStepConclusion::Progressed),
+            "one step of a real backlog moves durable state and leaves more behind"
+        );
+        assert!(!metadata.settled());
+        let collection = &progress.keys[1];
+        assert_eq!(collection.job, MaintenanceJobId::GC);
+        assert_eq!(collection.steps, 0);
+        assert_eq!(
+            collection.conclusion, None,
+            "a key the budget never reached reports no conclusion rather than a made-up one"
+        );
+        assert!(!collection.settled());
+    }
+
+    /// Hosting is the other half: the runner runs the steps, the assignment
+    /// is what admits them, and the signal is what stops it. Nothing here
+    /// discovered the namespace — the assignment did.
+    #[tokio::test]
+    async fn hosting_an_assignment_maintains_a_cold_namespace_until_the_signal() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let (store_config, store) = local_store(temp_dir.path());
+        let namespace = namespace_id("alpha");
+        seed_wal_backlog(&store, &namespace).await;
+        let target = EmbeddedTarget::new(&store_config, None)
+            .await
+            .expect("build embedded target");
+        target
+            .backend
+            .enable_grep_index(&namespace)
+            .await
+            .expect("enable the index without driving it");
+        let head_seq = target
+            .backend
+            .namespace_status(&namespace)
+            .await
+            .expect("status before hosting")
+            .head_seq;
+
+        // The stop signal a test can drive: the host runs until the work it
+        // was assigned is observable in durable state, which is all an
+        // operator watching this process would have to go on either.
+        let stop = async {
+            wait_until(|| async {
+                target
+                    .backend
+                    .grep_index_status(&namespace)
+                    .await
+                    .expect("index status while hosting")
+                    .state
+                    .is_built_through(head_seq)
+            })
+            .await;
+        };
+        target
+            .backend
+            .host_maintenance(std::slice::from_ref(&namespace), &every_job(), stop)
+            .await
+            .expect("the host shuts down cleanly on its signal");
+
+        // The shutdown settled what it admitted, so this is the state the
+        // host left rather than a race with it.
+        let status = target
+            .backend
+            .namespace_status(&namespace)
+            .await
+            .expect("status after hosting");
+        assert!(
+            status.wal_tail_segments < 32,
+            "the hosted runner left a WAL tail of {} segments",
+            status.wal_tail_segments
+        );
+    }
+
+    /// Bounded observation of work the runner publishes durably and reports
+    /// nothing about in-process.
+    #[allow(clippy::disallowed_methods)]
+    async fn wait_until<F, Fut>(condition: F)
+    where
+        F: Fn() -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            while !condition().await {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the hosted runner never reached the state it was assigned");
     }
 
     #[test]

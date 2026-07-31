@@ -1,10 +1,10 @@
 //! Renders command outcomes as human-readable text or `--json`.
 
 use crate::args::CommandKind;
-use crate::commands::{CommandData, CommandFailure, CommandOutput};
+use crate::commands::{CommandData, CommandFailure, CommandOutput, MaintenanceKeyReport};
 use crate::error::CliError;
 use loonfs_api::v0::GrepIndexLifecycle;
-use loonfs_api::{GcResponse, ReorganizeStepOutcome, WalFlushStepOutcome};
+use loonfs_api::{GcResponse, NamespaceId, ReorganizeStepOutcome, WalFlushStepOutcome};
 use serde::Serialize;
 use std::io::{self, Write};
 
@@ -36,6 +36,36 @@ fn grep_index_state_summary(state: &GrepIndexLifecycle) -> String {
                 )
             }
         }
+    }
+}
+
+/// One line for where a drain left one assigned key.
+fn maintenance_key_line(key: &MaintenanceKeyReport) -> String {
+    let Some(conclusion) = &key.conclusion else {
+        return format!(
+            "{}/{}: not started; the budget ran out first",
+            key.namespace_id, key.job
+        );
+    };
+    let spent = steps_phrase(key.steps);
+    if key.settled {
+        format!(
+            "{}/{}: {conclusion} after {spent}",
+            key.namespace_id, key.job
+        )
+    } else {
+        format!(
+            "{}/{}: {conclusion} after {spent}, still not settled",
+            key.namespace_id, key.job
+        )
+    }
+}
+
+fn steps_phrase(steps: u64) -> String {
+    if steps == 1 {
+        "1 step".to_owned()
+    } else {
+        format!("{steps} steps")
     }
 }
 
@@ -449,6 +479,43 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
                 )
             } else {
                 format!("{opening}; {}", grep_index_state_summary(state))
+            }
+        }
+        CommandData::MaintenanceHosted {
+            namespaces,
+            jobs,
+            drained,
+            keys,
+            steps,
+            budget_exhausted,
+        } => {
+            let assignment = format!(
+                "{} for {}",
+                jobs.join(", "),
+                namespaces
+                    .iter()
+                    .map(NamespaceId::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            if !*drained {
+                format!("hosted {assignment}; stopped on signal")
+            } else {
+                let settled = keys.iter().filter(|key| key.settled).count();
+                let mut lines: Vec<String> = keys.iter().map(maintenance_key_line).collect();
+                lines.push(if *budget_exhausted {
+                    format!(
+                        "gave up on {assignment}: {settled} of {} keys settled after {}",
+                        keys.len(),
+                        steps_phrase(*steps)
+                    )
+                } else {
+                    format!(
+                        "drained {assignment}: {settled} keys settled after {}",
+                        steps_phrase(*steps)
+                    )
+                });
+                lines.join("\n")
             }
         }
         CommandData::GrepIndexDisabled(response) => {

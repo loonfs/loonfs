@@ -24,6 +24,22 @@ pub(crate) struct TreeTransferFailure {
     pub error: CliError,
 }
 
+/// One assigned `{job, namespace}` key, as a drain left it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct MaintenanceKeyReport {
+    pub namespace_id: NamespaceId,
+    /// The job as the runner names it in its own traces.
+    pub job: String,
+    /// Steps the drain ran for this key.
+    pub steps: u64,
+    /// What its last step concluded. Absent when the budget ran out before
+    /// this key took a step.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conclusion: Option<String>,
+    /// True when the key reached a conclusion with nothing left to drive.
+    pub settled: bool,
+}
+
 pub(crate) struct CommandOutput {
     pub kind: CommandKind,
     pub profile: Option<String>,
@@ -81,6 +97,22 @@ pub(crate) enum CommandData {
         /// status checks in remote mode.
         steps: u64,
         /// True when a budget stopped the wait before the target.
+        budget_exhausted: bool,
+    },
+    /// What an assigned-namespace maintenance host did.
+    MaintenanceHosted {
+        /// The assignment, sorted and deduplicated.
+        namespaces: Vec<NamespaceId>,
+        jobs: Vec<String>,
+        /// True when the host caught the assignment up and exited instead of
+        /// hosting until a signal.
+        drained: bool,
+        /// Where each key got to. Empty for a hosted run: the runner ran
+        /// those steps, and durable state is what reports them.
+        keys: Vec<MaintenanceKeyReport>,
+        /// Steps the drain ran across every key.
+        steps: u64,
+        /// True when a budget stopped the drain before every key settled.
         budget_exhausted: bool,
     },
     GrepIndexDisabled(DisableGrepIndexResponse),
@@ -172,6 +204,12 @@ impl CommandData {
             // — real data, not an error — and still exits nonzero, because
             // the caller asked for a target that was not reached.
             CommandData::GrepIndexEnabled {
+                budget_exhausted, ..
+            }
+            // Same for a drain that ran out of budget: the per-key progress
+            // it prints is real, and the assignment it was asked to catch
+            // up is not caught up.
+            | CommandData::MaintenanceHosted {
                 budget_exhausted, ..
             } => *budget_exhausted,
             _ => false,

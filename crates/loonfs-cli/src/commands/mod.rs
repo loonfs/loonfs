@@ -10,7 +10,7 @@ mod profile;
 mod profile_config;
 mod recursive;
 
-pub(crate) use self::output::{CommandData, CommandFailure, CommandOutput};
+pub(crate) use self::output::{CommandData, CommandFailure, CommandOutput, MaintenanceKeyReport};
 
 use crate::args::{Cli, Command, RuntimeBehavior};
 

@@ -129,6 +129,20 @@ impl FsWriter {
         self.bits.maintenance.register(job)
     }
 
+    /// The executor registered under `job`, runtime-owned or extension-owned
+    /// alike, or `None` when nothing claims that id.
+    ///
+    /// For a host that drives bounded steps itself rather than through
+    /// admission: `loonfs admin run --drain` runs each key to a settled
+    /// conclusion under the operator's budget, and a caller with its own
+    /// budget needs the executor, not a nudge. What it gets is the same
+    /// bounded, compare-and-swap-published unit the runner admits — running
+    /// one here duplicates work at worst, because delivery is at-least-once
+    /// either way.
+    pub fn maintenance_job(&self, job: MaintenanceJobId) -> Option<Arc<dyn MaintenanceJob>> {
+        self.bits.maintenance.job(job)
+    }
+
     /// Waits until every writer-scheduled maintenance task has finished,
     /// without closing the handle. Panicked tasks surface as a runtime-task
     /// error.

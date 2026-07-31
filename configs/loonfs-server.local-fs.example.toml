@@ -8,10 +8,15 @@ auth_token = "dev-token"
 content_token_secret = "dev-content-token-secret"
 writer_id = "loonfs-server-local"
 
-# Whether this server schedules background maintenance (checkpoints and
-# reorganization folds) after writes; on by default. Set false on
-# write-serving nodes when a dedicated maintenance process owns ticks.
-#background_maintenance = true
+# Whether this server maintains the namespaces it touches by itself:
+# "automatic" (the default) registers the metadata, collection, and — when
+# the grep mode below maintains — index jobs, and lets the writer schedule
+# them; "manual" registers none of them and schedules nothing, leaving every
+# `loonfs admin` operation working exactly as before. Set "manual" on a
+# write-serving node when a dedicated maintenance process owns these
+# namespaces, and assign them to it with `loonfs admin run --namespace ...`.
+# This word and the grep mode are the only maintenance switches.
+#maintenance = "automatic"
 
 # Largest request body accepted for service-proxied upload content, in
 # bytes; the server buffers each upload in memory. Advertised to clients as

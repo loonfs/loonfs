@@ -21,8 +21,8 @@ use loonfs_grep::{GramIndexBuildPolicy, GrepBuildOutcome, GrepWorker};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::SharedObjectStore;
 use loonfs_server::{
-    app, GrepConfig, GrepMode, RuntimeCacheConfigOverrides, ServerConfig, ServerLifecycle,
-    StoreConfig,
+    app, GrepConfig, GrepMode, MaintenanceMode, RuntimeCacheConfigOverrides, ServerConfig,
+    ServerLifecycle, StoreConfig,
 };
 use serde::de::DeserializeOwned;
 use std::num::NonZeroUsize;
@@ -449,6 +449,65 @@ async fn maintain_only_keeps_the_index_built_without_serving_searches() {
     lifecycle.shutdown().await.expect("drain lifecycle");
 }
 
+/// `maintenance = "manual"` registers no automatic job — the grep index's
+/// included, whatever the grep mode says — and changes nothing an operator
+/// may ask for. Who schedules is the only difference.
+#[tokio::test]
+async fn manual_maintenance_registers_no_index_job_and_still_administers_one() {
+    let temp_dir = tempdir().expect("store tempdir");
+    let (store, writer, namespace_id) = seed_namespace(temp_dir.path(), "manual-maintenance").await;
+    let (router, lifecycle) = app(ServerConfig {
+        maintenance: MaintenanceMode::Manual,
+        ..test_config(temp_dir.path(), GrepMode::ServeAndMaintain)
+    })
+    .await
+    .expect("build app");
+    assert!(
+        !lifecycle.maintains_grep_index(),
+        "a manual deployment registers no automatic index job, whatever the grep mode maintains"
+    );
+
+    writer
+        .put_file_bytes(
+            &namespace_id,
+            "/note.txt",
+            b"unscheduled needle\n",
+            PutFileOptions::default(),
+        )
+        .await
+        .expect("write file");
+    // Every index route still answers: manual maintenance withdraws the
+    // scheduler, not the operator's reach.
+    assert_eq!(enable_grep(&router, &namespace_id).await, StatusCode::OK);
+    assert!(
+        matches!(
+            index_status(&router, &namespace_id).await.state,
+            GrepIndexLifecycle::Backfilling { .. }
+        ),
+        "the enable published a backfill this deployment left for someone else"
+    );
+
+    settle(&lifecycle).await;
+    assert_eq!(
+        lifecycle_of(&store, &namespace_id).await.steady_watermark(),
+        None,
+        "nothing here schedules the backfill it published"
+    );
+
+    // And an assigned host — or an operator — carries it the rest of the way.
+    let worker = grep_worker(&store, "assigned-grep-host").await;
+    drive_worker_to_current(&worker, &namespace_id, GramIndexBuildPolicy::default()).await;
+    assert_eq!(watermark(&store, &namespace_id).await, ChangeSeq(1));
+    assert_eq!(
+        grep(&router, &namespace_id, "unscheduled needle")
+            .await
+            .matches
+            .len(),
+        1
+    );
+    lifecycle.shutdown().await.expect("drain lifecycle");
+}
+
 async fn seed_namespace(root: &Path, name: &str) -> (SharedObjectStore, FsWriter, NamespaceId) {
     let store = Arc::new(LocalFsStore::new(root).expect("store")) as SharedObjectStore;
     let writer = FsWriter::builder_with_store(store.clone())
@@ -476,7 +535,7 @@ fn test_config(store_root: &Path, mode: GrepMode) -> ServerConfig {
             mode,
             ..GrepConfig::default()
         },
-        background_maintenance: true,
+        maintenance: MaintenanceMode::Automatic,
         min_publish_interval_ms: 0,
         max_upload_bytes: 1024 * 1024,
         max_download_bytes: 1024 * 1024,
