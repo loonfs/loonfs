@@ -36,6 +36,12 @@ pub struct ClientConfig {
     /// and upload-session creation are always single-attempt.
     #[serde(default)]
     pub disable_transient_retry: bool,
+    /// PEM bundle of extra certificate authorities to trust for `https`
+    /// server URLs, for a server whose certificate a private CA issued.
+    /// Added to the platform trust store rather than replacing it, so a
+    /// client configured this way still reaches publicly-trusted servers.
+    #[serde(default)]
+    pub ca_cert_path: Option<String>,
 }
 
 impl ClientConfig {
@@ -71,7 +77,44 @@ impl ClientConfig {
                 reason: "must be greater than zero; omit it for no deadline".to_owned(),
             });
         }
+        if let Some(path) = &self.ca_cert_path {
+            if path.trim().is_empty() {
+                return Err(ClientError::ConfigValidation {
+                    field: "ca_cert_path",
+                    reason: "must not be empty; omit it to trust only the platform roots"
+                        .to_owned(),
+                });
+            }
+        }
         Ok(())
+    }
+
+    /// Reads the configured CA bundle into the certificates reqwest adds to
+    /// the trust store. A path that cannot be read or does not hold PEM
+    /// certificates fails here, before any request: a client that silently
+    /// fell back to the platform roots would fail later and somewhere else.
+    pub(crate) fn extra_root_certificates(&self) -> Result<Vec<reqwest::Certificate>> {
+        let Some(path) = &self.ca_cert_path else {
+            return Ok(Vec::new());
+        };
+        let path = path.trim();
+        let pem = fs::read(path).map_err(|err| ClientError::ConfigValidation {
+            field: "ca_cert_path",
+            reason: format!("failed to read `{path}`: {err}"),
+        })?;
+        let certificates = reqwest::Certificate::from_pem_bundle(&pem).map_err(|err| {
+            ClientError::ConfigValidation {
+                field: "ca_cert_path",
+                reason: format!("`{path}` is not a PEM certificate bundle: {err}"),
+            }
+        })?;
+        if certificates.is_empty() {
+            return Err(ClientError::ConfigValidation {
+                field: "ca_cert_path",
+                reason: format!("`{path}` holds no CERTIFICATE section"),
+            });
+        }
+        Ok(certificates)
     }
 }
 

@@ -42,6 +42,10 @@ pub(crate) enum ProfileConfig {
         default_namespace: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         auth_token: Option<SecretString>,
+        /// PEM bundle of extra certificate authorities to trust, for a
+        /// server whose certificate a private CA issued.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ca_cert_path: Option<String>,
     },
 }
 
@@ -131,7 +135,7 @@ impl ProfileConfig {
                 server_url,
                 default_namespace,
                 auth_token,
-                ..
+                ca_cert_path,
             } => {
                 if let Some(namespace) = default_namespace {
                     validate_default_namespace(
@@ -142,6 +146,9 @@ impl ProfileConfig {
                 validate_http_url(&profile_field(name, "server_url"), server_url)?;
                 if let Some(token) = auth_token {
                     require_non_empty(&profile_field(name, "auth_token"), token.expose())?;
+                }
+                if let Some(path) = ca_cert_path {
+                    require_non_empty(&profile_field(name, "ca_cert_path"), path)?;
                 }
                 Ok(())
             }
@@ -163,10 +170,12 @@ impl ProfileConfig {
                 server_url,
                 default_namespace,
                 auth_token,
+                ca_cert_path,
             } => ProfileConfig::Remote {
                 server_url: server_url.clone(),
                 default_namespace: default_namespace.clone(),
                 auth_token: auth_token.as_ref().map(SecretString::masked),
+                ca_cert_path: ca_cert_path.clone(),
             },
         }
     }
@@ -426,6 +435,7 @@ fn validate_http_url(field: &str, value: &str) -> Result<(), CliError> {
         auth_token: None,
         request_timeout_ms: None,
         disable_transient_retry: false,
+        ca_cert_path: None,
     }
     .validate()
     .map_err(|error| CliError::invalid_config(format!("invalid `{field}`: {error}")))

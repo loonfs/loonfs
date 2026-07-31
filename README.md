@@ -68,6 +68,45 @@ export LOONFS_AUTH_TOKEN={auth_token}
 loonfs init default --no-input --mode remote --server-url http://127.0.0.1:9400
 ```
 
+### Running a server in production
+
+Two things travel over the connection that must not travel in the clear: the
+bearer token on every request, and the presigned object-store URLs the upload
+routes return in response bodies. Each of those URLs is a capability to write
+into your bucket, so anyone who can read the traffic can both impersonate the
+client and write objects directly. A server that binds anything other than
+loopback therefore refuses to start unless it either terminates TLS itself or
+says out loud that something else does.
+
+Terminate TLS in the server by adding a `[tls]` table:
+
+```toml
+bind = "0.0.0.0:9400"
+
+[tls]
+cert_path = "/etc/loonfs/tls/server.crt"   # PEM chain, leaf first
+key_path  = "/etc/loonfs/tls/server.key"   # PEM PKCS#8, RSA, or EC key
+```
+
+Both files are read once at startup, before the port is bound: a missing or
+malformed one fails the process instead of quietly serving plaintext. Clients
+then use an `https://` server URL. For a certificate a private CA issued,
+point the client at the CA bundle with `--ca-cert-path` (or `ca_cert_path` in
+the profile); it is added to the platform trust store rather than replacing
+it.
+
+If TLS terminates in front of LoonFS — a load balancer, an ingress
+controller, a sidecar — leave `[tls]` out and declare that:
+
+```toml
+bind = "0.0.0.0:9400"
+allow_remote_without_tls = true
+```
+
+A loopback bind never requires either, so local development is unchanged. The
+same shape governs authentication: a non-loopback bind with no `auth_token`
+refuses to start unless `allow_unauthenticated_remote = true`.
+
 ## Documentation
 
 Visit loonfs.com/docs to learn more.

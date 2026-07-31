@@ -96,7 +96,32 @@ pub struct ServerConfig {
     /// explicitly set.
     #[serde(default)]
     pub allow_unauthenticated_remote: bool,
+    /// Allows serving on a non-loopback address in plaintext. Off by
+    /// default for the same reason as `allow_unauthenticated_remote`: the
+    /// wire carries the bearer token and the presigned object-store URLs
+    /// the upload routes hand back, so plaintext beyond localhost is almost
+    /// always a misconfiguration rather than a choice. Set it where TLS
+    /// terminates in front of this process.
+    #[serde(default)]
+    pub allow_remote_without_tls: bool,
+    /// Terminates TLS in this process when present. Absent means plaintext
+    /// HTTP, which validation only accepts on a loopback bind or with
+    /// `allow_remote_without_tls`.
+    #[serde(default)]
+    pub tls: Option<TlsServerConfig>,
     pub store: StoreConfig,
+}
+
+/// The server's TLS identity: one certificate chain and its private key,
+/// both read at startup. A file that is missing, unreadable, or not the PEM
+/// it claims to be fails the process rather than degrading to plaintext.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TlsServerConfig {
+    /// PEM certificate chain, leaf first.
+    pub cert_path: String,
+    /// PEM private key: PKCS#8, PKCS#1 (RSA), or SEC1.
+    pub key_path: String,
 }
 
 fn default_min_publish_interval_ms() -> u64 {
@@ -355,6 +380,21 @@ impl ServerConfig {
                      authentication; set `auth_token` (or `LOONFS_AUTH_TOKEN`), \
                      or set `allow_unauthenticated_remote = true` to serve open \
                      on purpose"
+                ),
+            });
+        }
+        if let Some(tls) = &self.tls {
+            require_non_empty("tls.cert_path", &tls.cert_path)?;
+            require_non_empty("tls.key_path", &tls.key_path)?;
+        } else if bind_serves_beyond_localhost(&bind) && !self.allow_remote_without_tls {
+            return Err(ServerConfigError::InvalidField {
+                field: "tls",
+                reason: format!(
+                    "bind `{bind}` serves the network in plaintext, exposing the \
+                     bearer token and the presigned object-store URLs in upload \
+                     responses; configure `[tls]` with `cert_path` and `key_path`, \
+                     or set `allow_remote_without_tls = true` when TLS terminates \
+                     in front of this process"
                 ),
             });
         }
@@ -803,6 +843,7 @@ root = "/tmp/loonfs-server"
             r#"
 bind = "0.0.0.0:9400"
 allow_unauthenticated_remote = true
+allow_remote_without_tls = true
 writer_id = "loonfs-server"
 
 [store]
@@ -828,6 +869,144 @@ root = "/tmp/loonfs-server"
         );
 
         load_server_config(&path).expect("loopback-only config loads");
+    }
+
+    #[test]
+    fn load_rejects_non_loopback_bind_without_tls() {
+        for bind in ["0.0.0.0:9400", "[::]:9400", "10.1.2.3:9400"] {
+            let path = write_config(&format!(
+                r#"
+bind = "{bind}"
+auth_token = "dev-token"
+writer_id = "loonfs-server"
+
+[store]
+kind = "local-fs"
+root = "/tmp/loonfs-server"
+"#
+            ));
+
+            let error = load_server_config(&path).expect_err("plaintext network bind");
+
+            assert_invalid_field(error, "tls");
+        }
+    }
+
+    #[test]
+    fn allow_remote_without_tls_permits_a_plaintext_network_bind() {
+        let path = write_config(
+            r#"
+bind = "0.0.0.0:9400"
+auth_token = "dev-token"
+allow_remote_without_tls = true
+writer_id = "loonfs-server"
+
+[store]
+kind = "local-fs"
+root = "/tmp/loonfs-server"
+"#,
+        );
+
+        load_server_config(&path).expect("proxy-terminated config loads");
+    }
+
+    #[test]
+    fn tls_satisfies_the_network_bind_requirement() {
+        let path = write_config(
+            r#"
+bind = "0.0.0.0:9400"
+auth_token = "dev-token"
+writer_id = "loonfs-server"
+
+[tls]
+cert_path = "/etc/loonfs/tls/server.crt"
+key_path = "/etc/loonfs/tls/server.key"
+
+[store]
+kind = "local-fs"
+root = "/tmp/loonfs-server"
+"#,
+        );
+
+        let config = load_server_config(&path).expect("tls-terminating config loads");
+
+        let tls = config.tls.expect("tls table decodes");
+        assert_eq!(tls.cert_path, "/etc/loonfs/tls/server.crt");
+        assert_eq!(tls.key_path, "/etc/loonfs/tls/server.key");
+    }
+
+    #[test]
+    fn loopback_bind_accepts_tls() {
+        let path = write_config(
+            r#"
+bind = "127.0.0.1:9400"
+writer_id = "loonfs-server"
+
+[tls]
+cert_path = "/etc/loonfs/tls/server.crt"
+key_path = "/etc/loonfs/tls/server.key"
+
+[store]
+kind = "local-fs"
+root = "/tmp/loonfs-server"
+"#,
+        );
+
+        load_server_config(&path).expect("loopback tls config loads");
+    }
+
+    #[test]
+    fn load_rejects_blank_tls_paths() {
+        for (cert_path, key_path, field) in [
+            (" ", "/etc/loonfs/tls/server.key", "tls.cert_path"),
+            ("/etc/loonfs/tls/server.crt", "", "tls.key_path"),
+        ] {
+            let path = write_config(&format!(
+                r#"
+bind = "127.0.0.1:9400"
+writer_id = "loonfs-server"
+
+[tls]
+cert_path = "{cert_path}"
+key_path = "{key_path}"
+
+[store]
+kind = "local-fs"
+root = "/tmp/loonfs-server"
+"#
+            ));
+
+            let error = load_server_config(&path).expect_err("blank tls path");
+
+            assert_missing_field(error, field);
+        }
+    }
+
+    #[test]
+    fn load_rejects_unknown_tls_keys() {
+        let path = write_config(
+            r#"
+bind = "127.0.0.1:9400"
+writer_id = "loonfs-server"
+
+[tls]
+cert_path = "/etc/loonfs/tls/server.crt"
+key_path = "/etc/loonfs/tls/server.key"
+client_ca_path = "/etc/loonfs/tls/clients.crt"
+
+[store]
+kind = "local-fs"
+root = "/tmp/loonfs-server"
+"#,
+        );
+
+        match load_server_config(&path).expect_err("unknown tls key") {
+            ServerConfigError::Decode(message) => assert!(
+                message.contains("client_ca_path"),
+                "decode error must name the unknown key, got: {message}"
+            ),
+            other => panic!("expected a decode error, got {other:?}"),
+        }
     }
 
     #[test]

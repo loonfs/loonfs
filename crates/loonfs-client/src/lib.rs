@@ -305,6 +305,11 @@ impl Client {
         if let Some(timeout_ms) = config.request_timeout_ms {
             builder = builder.timeout(std::time::Duration::from_millis(timeout_ms));
         }
+        // Additive: the platform roots stay in place, so one configured
+        // private CA does not cost this client every public one.
+        for certificate in config.extra_root_certificates()? {
+            builder = builder.add_root_certificate(certificate);
+        }
         Ok(Self {
             base_url: config.server_url.trim().trim_end_matches('/').to_owned(),
             auth_token: config.auth_token,
@@ -1711,6 +1716,7 @@ mod tests {
             auth_token: None,
             request_timeout_ms: None,
             disable_transient_retry: false,
+            ca_cert_path: None,
         })
         .expect_err("ftp scheme must be rejected");
         assert!(
@@ -1723,6 +1729,39 @@ mod tests {
             ),
             "unexpected error: {error:?}"
         );
+    }
+
+    /// A CA bundle that cannot be read or is not PEM fails at construction,
+    /// naming the path. Falling back to the platform roots would move the
+    /// failure to the first request and blame the server for it.
+    #[test]
+    fn an_unusable_ca_bundle_fails_construction_and_names_the_path() {
+        let dir = tempdir().expect("tempdir");
+        let missing = dir.path().join("absent.crt");
+        let garbage = dir.path().join("garbage.crt");
+        fs::write(&garbage, b"this is not a certificate\n").expect("write garbage");
+
+        for path in [missing, garbage] {
+            let display = path.display().to_string();
+            let error = super::Client::new(super::ClientConfig {
+                server_url: "https://example.com".to_owned(),
+                auth_token: None,
+                request_timeout_ms: None,
+                disable_transient_retry: false,
+                ca_cert_path: Some(display.clone()),
+            })
+            .expect_err("unusable ca bundle");
+            match &error {
+                super::ClientError::ConfigValidation {
+                    field: "ca_cert_path",
+                    reason,
+                } => assert!(
+                    reason.contains(&display),
+                    "the reason must name the path, got: {reason}"
+                ),
+                other => unreachable!("unexpected error: {other:?}"),
+            }
+        }
     }
 
     /// Configs are strict like everywhere else in the workspace: a typo'd
@@ -1780,6 +1819,7 @@ mod tests {
             auth_token: None,
             request_timeout_ms: None,
             disable_transient_retry: false,
+            ca_cert_path: None,
         })
         .expect("valid client config");
         let error = retrying
@@ -1796,6 +1836,7 @@ mod tests {
             auth_token: None,
             request_timeout_ms: None,
             disable_transient_retry: true,
+            ca_cert_path: None,
         })
         .expect("valid client config");
         single_shot
@@ -1811,6 +1852,7 @@ mod tests {
             auth_token: None,
             request_timeout_ms: None,
             disable_transient_retry: false,
+            ca_cert_path: None,
         })
         .expect("valid client config")
     }

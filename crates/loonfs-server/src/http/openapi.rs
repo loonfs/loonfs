@@ -144,6 +144,11 @@ pub fn openapi_json_pretty() -> Result<String, serde_json::Error> {
         loonfs_api::v0::StoreProbeCheckResult,
         loonfs_api::v0::StoreProbeResponse
     )),
+    // Applies to every operation that does not override it. `/health` and
+    // `/readiness` do, with `security(())`: they are the probe surface and
+    // answer unauthenticated by design.
+    security(("bearer_auth" = [])),
+    modifiers(&BearerAuth),
     tags(
         (name = "health", description = "Server health"),
         (name = "capabilities", description = "Capability discovery"),
@@ -155,3 +160,33 @@ pub fn openapi_json_pretty() -> Result<String, serde_json::Error> {
     )
 )]
 struct LoonfsOpenApi;
+
+/// Declares the scheme the global requirement above names.
+///
+/// This adds to the components the derive already built rather than
+/// replacing them, so the schema set survives.
+struct BearerAuth;
+
+impl utoipa::Modify for BearerAuth {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
+
+        openapi
+            .components
+            .get_or_insert_with(Default::default)
+            .add_security_scheme(
+                "bearer_auth",
+                SecurityScheme::Http(
+                    HttpBuilder::new()
+                        .scheme(HttpAuthScheme::Bearer)
+                        .description(Some(
+                            "The deployment's `auth_token`, sent as \
+                             `Authorization: Bearer <token>`. A server configured \
+                             without a token accepts every request; one configured \
+                             with a token answers 401 `unauthorized` without it.",
+                        ))
+                        .build(),
+                ),
+            );
+    }
+}

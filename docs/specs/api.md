@@ -515,6 +515,31 @@ content-durability, and visibility rules.
 HTTP is one transport binding for these abstract operations. It is not the
 underlying semantics.
 
+### Authentication and transport
+
+A deployment that sets a token authenticates every request with an HTTP
+bearer credential:
+
+```
+Authorization: Bearer <auth_token>
+```
+
+A request without it, or with the wrong value, answers 401 `unauthorized`.
+Authorization is checked before the request is otherwise parsed, so a
+malformed body from an unauthenticated caller still answers 401 rather than
+400. Two routes are exempt and always answer unauthenticated, because they
+are what a load balancer probes: `GET /health` and `GET /readiness`.
+Everything else, `GET /v0/capabilities` included, requires the token. The
+generated `openapi.json` states this as a global `bearer_auth` requirement
+with those two operations overriding it.
+
+The token is a bearer credential and so is everything the upload routes hand
+back: a presigned direct-upload URL is a capability to write to the
+deployment's bucket, carried in an ordinary response body. Both are readable
+by anyone who can read the connection. Serve `https` for any deployment
+reachable beyond localhost — either terminated by the server itself or by a
+proxy in front of it.
+
 A representative v0 binding is shown below.
 
 | Purpose | Representative HTTP shape |

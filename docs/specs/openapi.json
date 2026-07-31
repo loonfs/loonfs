@@ -5343,8 +5343,20 @@
         "description": "Monotonically increasing writer epoch for namespace write fencing.",
         "minimum": 0
       }
+    },
+    "securitySchemes": {
+      "bearer_auth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "The deployment's `auth_token`, sent as `Authorization: Bearer <token>`. A server configured without a token accepts every request; one configured with a token answers 401 `unauthorized` without it."
+      }
     }
   },
+  "security": [
+    {
+      "bearer_auth": []
+    }
+  ],
   "tags": [
     {
       "name": "health",

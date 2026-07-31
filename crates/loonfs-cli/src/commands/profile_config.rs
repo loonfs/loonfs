@@ -107,6 +107,12 @@ const PROVIDER_FLAGS: &[ProviderFlag] = &[
         update_set: Some(|args| args.auth_token.is_some()),
     },
     ProviderFlag {
+        flag: "ca-cert-path",
+        allowed: &[Remote],
+        create_set: |spec| spec.ca_cert_path.is_some(),
+        update_set: Some(|args| args.ca_cert_path.is_some()),
+    },
+    ProviderFlag {
         flag: "store-kind",
         allowed: EMBEDDED_TARGETS,
         create_set: |spec| spec.store_kind.is_some(),
@@ -265,6 +271,7 @@ pub(super) struct CreateProfileSpec {
     service_account_key_path: Option<String>,
     server_url: Option<String>,
     auth_token: Option<String>,
+    ca_cert_path: Option<String>,
 }
 
 pub(super) fn create_profile_spec_from_init(args: InitArgs) -> CreateProfileSpec {
@@ -287,6 +294,7 @@ pub(super) fn create_profile_spec_from_init(args: InitArgs) -> CreateProfileSpec
         service_account_key_path: args.service_account_key_path,
         server_url: args.server_url,
         auth_token: args.auth_token,
+        ca_cert_path: args.ca_cert_path,
     }
 }
 
@@ -310,6 +318,7 @@ pub(super) fn create_profile_spec_from_create(args: ProfileCreateArgs) -> Create
         service_account_key_path: args.service_account_key_path,
         server_url: args.server_url,
         auth_token: args.auth_token,
+        ca_cert_path: args.ca_cert_path,
     }
 }
 
@@ -456,7 +465,14 @@ fn build_remote_profile(
             Some(token) if token.trim().is_empty() => None,
             other => other.map(SecretString::from),
         },
+        ca_cert_path: blank_to_none(spec.ca_cert_path),
     })
+}
+
+/// An explicitly-blank flag value clears the field rather than storing the
+/// empty string, which would then fail profile validation.
+fn blank_to_none(value: Option<String>) -> Option<String> {
+    value.filter(|value| !value.trim().is_empty())
 }
 
 fn require_or_prompt(
@@ -616,6 +632,7 @@ pub(super) fn apply_update_flags(
             server_url,
             default_namespace,
             auth_token,
+            ca_cert_path,
         } => Ok(ProfileConfig::Remote {
             server_url: args.server_url.clone().unwrap_or(server_url),
             default_namespace,
@@ -624,6 +641,7 @@ pub(super) fn apply_update_flags(
                 .clone()
                 .map(SecretString::from)
                 .or(auth_token),
+            ca_cert_path: blank_to_none(args.ca_cert_path.clone()).or(ca_cert_path),
         }),
     }
 }
@@ -738,6 +756,7 @@ pub(super) fn apply_update_interactive(existing: ProfileConfig) -> Result<Profil
             server_url,
             default_namespace,
             auth_token,
+            ca_cert_path,
         } => Ok(ProfileConfig::Remote {
             server_url: prompt::prompt_line_default("server-url", &server_url)?,
             default_namespace,
@@ -746,6 +765,7 @@ pub(super) fn apply_update_interactive(existing: ProfileConfig) -> Result<Profil
                 auth_token.as_ref().map(SecretString::expose),
             )?
             .map(SecretString::from),
+            ca_cert_path: prompt::prompt_optional("ca cert path", ca_cert_path.as_deref())?,
         }),
     }
 }
@@ -900,6 +920,7 @@ mod tests {
             server_url: "http://127.0.0.1:9400".to_owned(),
             default_namespace: None,
             auth_token: None,
+            ca_cert_path: None,
         };
 
         let updated = apply_update_flags(
@@ -942,6 +963,7 @@ mod tests {
             service_account_key_path: None,
             server_url: None,
             auth_token: None,
+            ca_cert_path: None,
         }
     }
 
@@ -963,6 +985,7 @@ mod tests {
             service_account_key_path: None,
             server_url: None,
             auth_token: None,
+            ca_cert_path: None,
         }
     }
 

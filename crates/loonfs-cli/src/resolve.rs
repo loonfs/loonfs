@@ -112,10 +112,12 @@ impl ResolvedTarget {
             ProfileConfig::Remote {
                 server_url,
                 auth_token,
+                ca_cert_path,
                 ..
             } => Ok(Self::Remote(RemoteTarget::new(
                 server_url,
                 auth_token.as_ref().map(|token| token.expose()),
+                ca_cert_path.as_deref(),
                 no_retry,
             )?)),
         }
@@ -179,12 +181,18 @@ impl EmbeddedTarget {
 }
 
 impl RemoteTarget {
-    fn new(server_url: &str, auth_token: Option<&str>, no_retry: bool) -> Result<Self, CliError> {
+    fn new(
+        server_url: &str,
+        auth_token: Option<&str>,
+        ca_cert_path: Option<&str>,
+        no_retry: bool,
+    ) -> Result<Self, CliError> {
         let client = Client::new(ClientConfig {
             server_url: server_url.to_owned(),
             auth_token: auth_token.map(ToOwned::to_owned),
             request_timeout_ms: None,
             disable_transient_retry: no_retry,
+            ca_cert_path: ca_cert_path.map(ToOwned::to_owned),
         })
         .map_err(|error| CliError::invalid_config(error.to_string()))?;
         Ok(Self { client })
