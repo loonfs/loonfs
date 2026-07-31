@@ -135,6 +135,61 @@ async fn same_length_different_bytes_conflict() {
     assert_eq!(error.code(), ErrorCode::CommitIdReuseConflict);
 }
 
+/// Reconciliation reads the feed at the sequence the conflict reported, so
+/// once retention has surrendered the replay promise below that sequence
+/// there is no committed content left to compare against. Identical bytes
+/// and all, the conflict stands: a comparison that cannot be made is never
+/// reported as success.
+#[tokio::test]
+async fn a_retention_trimmed_commit_seq_leaves_the_conflict_standing() {
+    let temp_dir = tempdir().expect("tempdir");
+    let runtime = open_runtime_async(store(temp_dir.path()), "writer-a").await;
+    let namespace_id = namespace(&runtime).await;
+    let commit_id = CommitId::parse("pinned-put").expect("valid commit id");
+
+    let first = runtime
+        .put_file_bytes(&namespace_id, PATH, b"stable bytes\n", options(&commit_id))
+        .await
+        .expect("first put");
+
+    // Pin the head, then give up incremental replay below it. The commit's
+    // receipt still binds the id, so a rerun still conflicts and the
+    // conflict still names where the commit landed — but the change feed no
+    // longer answers for that sequence.
+    runtime
+        .create_checkpoint(&namespace_id)
+        .await
+        .expect("create checkpoint");
+    let advanced = runtime
+        .admin
+        .advance_retention_floor(&namespace_id)
+        .await
+        .expect("advance retention floor");
+    assert!(
+        advanced.retention_floor_seq >= first.committed_seq,
+        "the floor must cover the commit for this to test anything: floor {:?}, commit {:?}",
+        advanced.retention_floor_seq,
+        first.committed_seq
+    );
+
+    let error = runtime
+        .put_file_bytes(&namespace_id, PATH, b"stable bytes\n", options(&commit_id))
+        .await
+        .expect_err("evidence that cannot be read cannot reconcile to success");
+
+    assert_eq!(error.code(), ErrorCode::CommitIdReuseConflict);
+    assert_eq!(
+        runtime
+            .reader
+            .get_file_bytes(&namespace_id, PATH)
+            .await
+            .expect("read file")
+            .bytes,
+        b"stable bytes\n",
+        "the refused rerun changed nothing"
+    );
+}
+
 /// A commit id that never committed anything is not a retry of anything,
 /// so a rerun against an unrelated id behaves like a first run.
 #[tokio::test]

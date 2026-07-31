@@ -76,8 +76,14 @@ impl BatchDedup {
             return None;
         };
         if existing.semantic_identity != *semantic_identity {
+            // Neither claim has committed, so there is no landed commit to
+            // name: the caller cannot reconcile this one by reading the
+            // feed, and the conflict is the whole answer.
             return Some(CandidateAdmission::Settled(Err(
-                CoreError::CommitIdReuseConflict(commit_id.to_string()),
+                CoreError::CommitIdReuseConflict {
+                    commit_id: commit_id.to_string(),
+                    committed_seq: None,
+                },
             )));
         }
         Some(CandidateAdmission::AliasOf(existing.primary_index))
@@ -194,7 +200,12 @@ async fn resolve_commit_id_reuse<S: ObjectStore + ?Sized>(
     if let Some(existing) = view.find_commit_receipt(commit_id).await? {
         return Ok(Some(CandidateAdmission::Settled(
             if existing.semantic_commit_fingerprint != semantic_identity.as_str() {
-                Err(CoreError::CommitIdReuseConflict(commit_id.to_string()))
+                // The receipt holds where the id landed; reporting it is
+                // what turns a caller's reconciliation into one feed read.
+                Err(CoreError::CommitIdReuseConflict {
+                    commit_id: commit_id.to_string(),
+                    committed_seq: Some(existing.committed_seq),
+                })
             } else {
                 Ok(commit_response_from_commit_receipt(namespace_id, &existing))
             },

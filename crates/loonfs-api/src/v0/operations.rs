@@ -53,6 +53,12 @@ pub struct ErrorDetails {
     /// Idempotency key of the commit the error concerns.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit_id: Option<CommitId>,
+    /// Sequence at which that commit id already landed. Present when the
+    /// failure was decided against a durable commit receipt, which is what
+    /// holds the sequence; absent when nothing has committed under the id
+    /// yet and two live requests are simply claiming it at once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub committed_seq: Option<ChangeSeq>,
     /// Position, in the request's operation list, of the operation that
     /// failed. A commit applies all of its operations or none of them, so
     /// this names the one that stopped the whole request.

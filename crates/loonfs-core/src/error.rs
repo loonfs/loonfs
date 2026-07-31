@@ -109,8 +109,16 @@ pub enum CoreError {
         /// and the two spellings can look identical.
         existing_display_name: Option<String>,
     },
-    #[error("commit id conflict for `{0}`")]
-    CommitIdReuseConflict(String),
+    #[error("commit id conflict for `{commit_id}`")]
+    CommitIdReuseConflict {
+        commit_id: String,
+        /// Sequence the commit id already landed at, when the conflict was
+        /// decided against a durable receipt — the receipt is what holds
+        /// it. Absent when nothing has committed under the id yet and two
+        /// live requests are claiming it at once, which is the one case a
+        /// caller cannot reconcile by reading the feed.
+        committed_seq: Option<ChangeSeq>,
+    },
     #[error(transparent)]
     ContentPreparation(#[from] ContentPreparationError),
     #[error("commit queue is full; slow down and retry")]
@@ -369,7 +377,7 @@ impl CoreError {
             CoreError::ContentTooLarge { .. } => ErrorCode::ContentTooLarge,
             CoreError::NamespaceExists { .. } => ErrorCode::NamespaceExists,
             CoreError::NamespaceDeleted { .. } => ErrorCode::NamespaceDeleted,
-            CoreError::CommitIdReuseConflict(_) => ErrorCode::CommitIdReuseConflict,
+            CoreError::CommitIdReuseConflict { .. } => ErrorCode::CommitIdReuseConflict,
             CoreError::ContentPreparation(_) => ErrorCode::ContentNotPrepared,
             CoreError::CommitQueueFull => ErrorCode::CommitQueueFull,
             CoreError::ShuttingDown => ErrorCode::ShuttingDown,
@@ -426,8 +434,12 @@ impl CoreError {
                 active_acquired_at_ms: fence.active_acquired_at_ms,
                 ..ErrorDetails::default()
             }),
-            CoreError::CommitIdReuseConflict(commit_id) => Some(ErrorDetails {
+            CoreError::CommitIdReuseConflict {
+                commit_id,
+                committed_seq,
+            } => Some(ErrorDetails {
                 commit_id: CommitId::parse(commit_id).ok(),
+                committed_seq: *committed_seq,
                 ..ErrorDetails::default()
             }),
             CoreError::RebootstrapRequired {
@@ -884,12 +896,26 @@ mod tests {
             .to_string()
             .ends_with("epoch 3 was fenced by epoch 4"));
 
-        let reuse = CoreError::CommitIdReuseConflict("retry-key-1".to_owned());
+        // A conflict decided against a durable receipt names where the
+        // commit id landed, which is what a retry reads back.
+        let reuse = CoreError::CommitIdReuseConflict {
+            commit_id: "retry-key-1".to_owned(),
+            committed_seq: Some(ChangeSeq(9)),
+        };
         let details = reuse.details().expect("reuse details");
         assert_eq!(
             details.commit_id,
             Some(CommitId::parse("retry-key-1").expect("valid commit id"))
         );
+        assert_eq!(details.committed_seq, Some(ChangeSeq(9)));
+
+        // A conflict between two live claims has no landed commit to name.
+        let contended = CoreError::CommitIdReuseConflict {
+            commit_id: "retry-key-1".to_owned(),
+            committed_seq: None,
+        };
+        let details = contended.details().expect("reuse details");
+        assert_eq!(details.committed_seq, None);
 
         let stale =
             CoreError::CommitValidation(CommitValidationError::ReplaceFileBaseRevisionMismatch {

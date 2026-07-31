@@ -1283,9 +1283,12 @@ async fn batch_commit_rejects_duplicate_commit_id_with_different_fingerprint() {
 
     responses[0].as_ref().expect("primary commit");
     let error = responses[1].as_ref().expect_err("duplicate conflict");
+    // Neither claim had committed when the batch admitted them, so the
+    // conflict has no landed sequence to name.
     assert!(matches!(
         error,
-        CoreError::CommitIdReuseConflict(commit_id) if commit_id == "req-conflict"
+        CoreError::CommitIdReuseConflict { commit_id, committed_seq: None }
+            if commit_id == "req-conflict"
     ));
 
     let wal_keys = store
@@ -1356,9 +1359,12 @@ async fn path_publishes_use_durable_path_commit_receipt_index() {
     )
     .await
     .expect_err("conflicting retry");
+    // The receipt decided this one, so the conflict names where the id
+    // landed — the sequence a retry reads back to reconcile.
     assert!(matches!(
         conflict,
-        CoreError::CommitIdReuseConflict(commit_id) if commit_id == "same-path-request"
+        CoreError::CommitIdReuseConflict { commit_id, committed_seq }
+            if commit_id == "same-path-request" && committed_seq == Some(first.committed_seq)
     ));
 
     let wal_keys = store
@@ -1479,7 +1485,8 @@ async fn delete_path_commit_id_reuse_includes_expected_inode_id() {
         .expect_err("changed guard must conflict");
         assert!(matches!(
             error,
-            CoreError::CommitIdReuseConflict(reused) if reused == commit_id
+            CoreError::CommitIdReuseConflict { commit_id: reused, committed_seq: Some(_) }
+                if reused == commit_id
         ));
     }
 

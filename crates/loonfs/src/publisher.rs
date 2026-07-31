@@ -517,7 +517,12 @@ impl NamespacePublisher {
         }
         if let Some(existing) = state.in_flight.get_mut(&commit_id) {
             if existing.semantic_identity != semantic_identity {
-                return Err(CoreError::CommitIdReuseConflict(commit_id.to_string()));
+                // Both claims are still in flight, so nothing has landed
+                // under this id for the caller to read back.
+                return Err(CoreError::CommitIdReuseConflict {
+                    commit_id: commit_id.to_string(),
+                    committed_seq: None,
+                });
             }
             existing.waiters.push(waiter);
             self.trace_enqueue(queued_candidates(&state), "duplicate");
