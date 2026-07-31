@@ -6,10 +6,10 @@
 
 use crate::error::CoreError;
 use crate::metadata::{
-    CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord, InodeRecord, RevisionRecord,
-    SubtreeTombstoneRecord,
+    ActiveDeletionAction, ActiveDeletionRecord, CommitReceiptRecord, DirentryBindRecord,
+    DirentryUnbindRecord, InodeRecord, RevisionRecord, SubtreeTombstoneRecord,
 };
-use loonfs_api::wire::manifest::MetadataRow;
+use loonfs_api::wire::manifest::{ActiveDeletionRowAction, MetadataRow};
 
 /// The scanned table can only hold `expected_kind` rows; the foreign row's
 /// self-keyed row key names its actual kind and identity.
@@ -147,6 +147,38 @@ pub(crate) fn tombstone_from_manifest_row(
             action: subtree_tombstone_action(&action),
         }),
         other => Err(foreign_row("tombstone", &other)),
+    }
+}
+
+pub(crate) fn active_deletion_from_manifest_row(
+    row: MetadataRow,
+) -> Result<ActiveDeletionRecord, CoreError> {
+    match row {
+        MetadataRow::ActiveDeletion {
+            root_inode_id,
+            deleted_at_seq,
+            action,
+        } => Ok(ActiveDeletionRecord {
+            root_inode_id,
+            deleted_at_seq,
+            action: match action {
+                ActiveDeletionRowAction::Listed {
+                    deleted_at_ms,
+                    parent_inode_id,
+                    name_key,
+                    display_name,
+                } => ActiveDeletionAction::Listed {
+                    deleted_at_ms,
+                    parent_inode_id,
+                    name_key,
+                    display_name,
+                },
+                ActiveDeletionRowAction::Removed { revoked_at_seq } => {
+                    ActiveDeletionAction::Removed { revoked_at_seq }
+                }
+            },
+        }),
+        other => Err(foreign_row("active_deletion", &other)),
     }
 }
 

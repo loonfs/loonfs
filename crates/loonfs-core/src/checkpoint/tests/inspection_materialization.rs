@@ -308,6 +308,12 @@ pub(crate) fn append_rows_to_metadata(
             MetadataTableFamily::Tombstones => metadata_state.push_subtree_tombstone(
                 row_decode::tombstone_from_manifest_row(row.clone()).map_err(mismatch)?,
             ),
+            // Derived from the tombstone rows above, like the secondary
+            // indexes: decoding proves the row belongs to the family, and
+            // materialization re-derives it.
+            MetadataTableFamily::ActiveDeletions => {
+                row_decode::active_deletion_from_manifest_row(row.clone()).map_err(mismatch)?;
+            }
             MetadataTableFamily::CommitReceipts => metadata_state.push_commit_receipt(
                 row_decode::commit_receipt_from_manifest_row(row.clone()).map_err(mismatch)?,
             ),

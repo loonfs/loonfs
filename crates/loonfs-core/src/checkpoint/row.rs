@@ -1,8 +1,8 @@
 //! Converts in-memory metadata state into manifest rows, per family and in
 //! row-key order.
 
-use crate::metadata::MetadataState;
-use loonfs_api::wire::manifest::{MetadataRow, MetadataTableFamily};
+use crate::metadata::{active_deletion_from_tombstone, ActiveDeletionAction, MetadataState};
+use loonfs_api::wire::manifest::{ActiveDeletionRowAction, MetadataRow, MetadataTableFamily};
 use loonfs_api::ChangeSeq;
 
 #[cfg(test)]
@@ -28,6 +28,33 @@ fn tombstone_row_action(
         } => TombstoneRowAction::Revoke {
             target_seq: *target_seq,
             target_delta_index: *target_delta_index,
+        },
+    }
+}
+
+/// Projects one tombstone event onto its derived active-deletion row. The
+/// reducer itself lives beside the tombstone rules in `metadata::rows`; this
+/// is only the record-to-wire half.
+fn active_deletion_row(tombstone: &crate::metadata::SubtreeTombstoneRecord) -> MetadataRow {
+    let record = active_deletion_from_tombstone(tombstone);
+    MetadataRow::ActiveDeletion {
+        root_inode_id: record.root_inode_id,
+        deleted_at_seq: record.deleted_at_seq,
+        action: match record.action {
+            ActiveDeletionAction::Listed {
+                deleted_at_ms,
+                parent_inode_id,
+                name_key,
+                display_name,
+            } => ActiveDeletionRowAction::Listed {
+                deleted_at_ms,
+                parent_inode_id,
+                name_key,
+                display_name,
+            },
+            ActiveDeletionAction::Removed { revoked_at_seq } => {
+                ActiveDeletionRowAction::Removed { revoked_at_seq }
+            }
         },
     }
 }
@@ -102,6 +129,11 @@ pub(super) fn manifest_rows_for_family(
                 display_name: tombstone.display_name.clone(),
             })
             .collect::<Vec<_>>(),
+        MetadataTableFamily::ActiveDeletions => metadata_state
+            .subtree_tombstones()
+            .iter()
+            .map(active_deletion_row)
+            .collect::<Vec<_>>(),
         MetadataTableFamily::CommitReceipts => metadata_state
             .commit_receipts()
             .iter()
@@ -136,6 +168,16 @@ pub(super) fn manifest_row_commit_seq(row: &MetadataRow) -> ChangeSeq {
         MetadataRow::DirentryUnbind { unbind_seq, .. } => *unbind_seq,
         MetadataRow::Revision { committed_seq, .. } => *committed_seq,
         MetadataRow::Tombstone { tombstone_seq, .. } => *tombstone_seq,
+        // A removal marker belongs to the run of the undelete that produced
+        // it, not to the run of the deletion whose key it repeats.
+        MetadataRow::ActiveDeletion {
+            deleted_at_seq,
+            action,
+            ..
+        } => match action {
+            ActiveDeletionRowAction::Listed { .. } => *deleted_at_seq,
+            ActiveDeletionRowAction::Removed { revoked_at_seq } => *revoked_at_seq,
+        },
         MetadataRow::CommitReceipt { committed_seq, .. } => *committed_seq,
     }
 }
@@ -148,6 +190,7 @@ pub(super) fn manifest_row_kind(row: &MetadataRow) -> &'static str {
         MetadataRow::DirentryUnbind { .. } => "direntry_unbind",
         MetadataRow::Revision { .. } => "revision",
         MetadataRow::Tombstone { .. } => "tombstone",
+        MetadataRow::ActiveDeletion { .. } => "active_deletion",
         MetadataRow::CommitReceipt { .. } => "commit_receipt",
     }
 }

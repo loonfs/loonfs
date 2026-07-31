@@ -920,6 +920,7 @@ fn metadata_table_family_wire_tags_are_pinned() {
         MetadataTableFamily::Revisions,
         MetadataTableFamily::RevisionsByInodeDesc,
         MetadataTableFamily::Tombstones,
+        MetadataTableFamily::ActiveDeletions,
         MetadataTableFamily::CommitReceipts,
     ]
     .iter()
@@ -935,6 +936,7 @@ fn metadata_table_family_wire_tags_are_pinned() {
             "\"revisions\"",
             "\"revisions_by_inode_desc\"",
             "\"tombstones\"",
+            "\"active_deletions\"",
             "\"commit_receipts\"",
         ],
         "family tags are durable bytes in every manifest descriptor"

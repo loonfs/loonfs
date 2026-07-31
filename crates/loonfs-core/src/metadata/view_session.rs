@@ -13,12 +13,12 @@ use super::manifest_index;
 use super::view::DIRECTORY_PAGE_RAW_SCAN_LIMIT;
 use super::visibility::{self, MetadataVisibilityReads};
 use super::{
-    DirentryBindRecord, InodeRecord, MetadataView, ResolvedVisiblePath, RevisionRecord,
-    SubtreeTombstoneRecord,
+    DirentryBindRecord, InodeRecord, MetadataView, RecoverableDeletion, ResolvedVisiblePath,
+    RevisionRecord, SubtreeTombstoneRecord,
 };
 use crate::error::CoreError;
 use loonfs_api::wire::manifest::{MetadataRow, MetadataTableFamily};
-use loonfs_api::{AbsolutePath, InodeId, InodeKind, NameKey, ROOT_INODE_ID};
+use loonfs_api::{AbsolutePath, ChangeSeq, InodeId, InodeKind, NameKey, ROOT_INODE_ID};
 use loonfs_objectstore::ObjectStore;
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -733,16 +733,15 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataViewSession<'a, 'store, S> {
         Ok(tombstone)
     }
 
-    /// Every tombstone event in the namespace, durable and overlay merged.
-    /// Uncached: one call serves one trash listing page request.
-    pub(crate) async fn all_tombstone_records(
+    /// One page of the namespace's recoverable deletions, oldest deletion
+    /// first. Uncached: one call serves one trash listing page request.
+    pub(crate) async fn active_deletions_page(
         &mut self,
-    ) -> Result<Vec<SubtreeTombstoneRecord>, CoreError> {
-        self.counters.scan_prefix_calls = self.counters.scan_prefix_calls.saturating_add(1);
-        let rows = self.base.all_tombstones().await?;
-        let mut merged: Vec<SubtreeTombstoneRecord> = rows.durable.as_ref().clone();
-        merged.extend(rows.overlay.iter().cloned());
-        Ok(merged)
+        start_after: Option<(ChangeSeq, InodeId)>,
+        limit: usize,
+    ) -> Result<Vec<RecoverableDeletion>, CoreError> {
+        self.counters.scan_range_page_calls = self.counters.scan_range_page_calls.saturating_add(1);
+        self.base.active_deletions_page(start_after, limit).await
     }
 
     pub(crate) async fn active_subtree_tombstone(

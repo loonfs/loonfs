@@ -5,7 +5,9 @@ use super::block_load::SessionBlockMemo;
 use super::cache::{DecodedMetadataTableBlock, MetadataTableBlockKind, MetadataTableCache};
 use super::error::ManifestLoadError;
 use crate::metadata::content_ref_evidence_bytes;
-use loonfs_api::wire::manifest::{MetadataFileRef, MetadataRow, MetadataTableFamily};
+use loonfs_api::wire::manifest::{
+    ActiveDeletionRowAction, MetadataFileRef, MetadataRow, MetadataTableFamily,
+};
 use loonfs_api::wire::sst_blocks::{decode_data_block, DecodedDataBlock, SegmentIndexEntry};
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
@@ -246,6 +248,22 @@ pub(super) fn decoded_manifest_row_weight(row: &MetadataRow) -> usize {
             ALLOCATED_ROW_OVERHEAD + content_ref_evidence_bytes(content_ref)
         }
         MetadataRow::Tombstone { .. } => FIXED_ROW_OVERHEAD,
+        MetadataRow::ActiveDeletion { action, .. } => match action {
+            ActiveDeletionRowAction::Listed {
+                name_key,
+                display_name,
+                ..
+            } => {
+                ALLOCATED_ROW_OVERHEAD
+                    + name_key
+                        .as_ref()
+                        .map_or(0, |name_key| name_key.as_str().len())
+                    + display_name
+                        .as_ref()
+                        .map_or(0, |display_name| display_name.as_str().len())
+            }
+            ActiveDeletionRowAction::Removed { .. } => FIXED_ROW_OVERHEAD,
+        },
         MetadataRow::CommitReceipt {
             commit_id,
             semantic_commit_fingerprint,

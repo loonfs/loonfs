@@ -9,8 +9,9 @@ use super::visibility::{self, MetadataVisibilityReads};
 use crate::checkpoint::VerifiedMetadataTables;
 use crate::error::CoreError;
 use crate::metadata::{
-    unbind_matches_binding, CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord,
-    InodeRecord, MetadataState, ResolvedVisiblePath, RevisionRecord, SubtreeTombstoneRecord,
+    active_deletion_from_tombstone, unbind_matches_binding, ActiveDeletionRecord,
+    CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord, InodeRecord, MetadataState,
+    RecoverableDeletion, ResolvedVisiblePath, RevisionRecord, SubtreeTombstoneRecord,
 };
 #[cfg(test)]
 use async_trait::async_trait;
@@ -19,13 +20,50 @@ use bytes::Bytes;
 #[cfg(test)]
 use futures::stream::{self, BoxStream};
 use loonfs_api::wire::control::HeadState;
+use loonfs_api::wire::manifest::lookup_keys;
+use loonfs_api::wire::sst_blocks::string_prefix_upper_bound;
 use loonfs_api::{AbsolutePath, ChangeSeq, CommitId, InodeId, InodeKind, NameKey, RevisionNo};
 use loonfs_objectstore::ObjectStore;
 #[cfg(test)]
 use loonfs_objectstore::{ByteRange, ObjectBody, ObjectMetadata, ObjectStoreError, PutMode};
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 pub(super) const DIRECTORY_PAGE_RAW_SCAN_LIMIT: usize = 64;
+
+/// Rows one trash page fetches per manifest round-trip. A page's entries are
+/// listed rows; undelete markers share the range until reorganization folds
+/// each pair away, so the raw scan runs a little ahead of the page.
+const ACTIVE_DELETION_RAW_SCAN_LIMIT: usize = 64;
+
+/// The manifest half of the active-deletion merge: a key-ordered cursor that
+/// refills from range scans and reports when the range is spent.
+struct ActiveDeletionScan {
+    lower_bound: String,
+    exhausted: bool,
+    buffered: VecDeque<(String, ActiveDeletionRecord)>,
+}
+
+impl ActiveDeletionScan {
+    fn new(lower_bound: String, exhausted: bool) -> Self {
+        Self {
+            lower_bound,
+            exhausted,
+            buffered: VecDeque::new(),
+        }
+    }
+
+    /// Takes one fetched page. A short page is the end of the range; a full
+    /// one leaves the cursor just past its last row.
+    fn absorb(&mut self, page: Vec<(String, ActiveDeletionRecord)>, requested: usize) {
+        if page.len() < requested {
+            self.exhausted = true;
+        } else if let Some((last_row_key, _)) = page.last() {
+            self.lower_bound = format!("{last_row_key}\0");
+        }
+        self.buffered.extend(page);
+    }
+}
 
 #[derive(Clone, Copy)]
 pub(crate) struct MetadataSnapshot {
@@ -711,30 +749,92 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
         revisions
     }
 
-    /// Every tombstone event in the namespace, merged across manifest
-    /// tables and row states. Uncached: the trash listing is a cold read
-    /// over a family that per-root probes never enumerate.
-    pub(super) async fn all_tombstones(
+    /// One page of the namespace's recoverable deletions, oldest deletion
+    /// first, resuming strictly after `start_after`.
+    ///
+    /// Manifest rows merge with the rows the WAL tail derives, so a deletion
+    /// committed seconds ago lists like a fresh file appears in `ls`. Both
+    /// sides arrive in row-key order and a removal marker sorts ahead of the
+    /// row it removes, so one ascending walk decides the page: a marker hides
+    /// the generation whose key it repeats, and every other listed row is an
+    /// entry. Reads stop as soon as `limit` entries are in hand.
+    pub(super) async fn active_deletions_page(
         &self,
-    ) -> Result<SharedRows<SubtreeTombstoneRecord>, CoreError> {
-        let mut durable = if let Some(tables) = self.manifest_tables() {
-            manifest_index::all_subtree_tombstones(tables).await?
-        } else {
-            Vec::new()
+        start_after: Option<(ChangeSeq, InodeId)>,
+        limit: usize,
+    ) -> Result<Vec<RecoverableDeletion>, CoreError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let visible_seq = self.visible_seq();
+        let lower_bound = match start_after {
+            Some((deleted_at_seq, root_inode_id)) => {
+                lookup_keys::active_deletion_key_after(deleted_at_seq, root_inode_id)
+            }
+            None => lookup_keys::ACTIVE_DELETION_ROW_PREFIX.to_owned(),
         };
-        durable.extend(
-            self.durable_row_states()
-                .flat_map(|state| state.subtree_tombstones().iter().cloned()),
-        );
-        let overlay = self
-            .overlay_state()
-            .into_iter()
-            .flat_map(|state| state.subtree_tombstones().iter().cloned())
+        let upper_bound = string_prefix_upper_bound(lookup_keys::ACTIVE_DELETION_ROW_PREFIX);
+
+        let mut tail: Vec<(String, ActiveDeletionRecord)> = self
+            .row_states()
+            .flat_map(|state| state.subtree_tombstones())
+            .filter(|tombstone| tombstone.tombstone_seq <= visible_seq)
+            .map(active_deletion_from_tombstone)
+            .map(|record| (record.row_key(), record))
+            .filter(|(row_key, _)| row_key.as_str() >= lower_bound.as_str())
             .collect();
-        Ok(SharedRows {
-            durable: Arc::new(durable),
-            overlay,
-        })
+        tail.sort_by(|(left, _), (right, _)| left.cmp(right));
+
+        let mut durable = ActiveDeletionScan::new(lower_bound, self.manifest_tables().is_none());
+        let mut tail_index = 0usize;
+        let mut entries = Vec::with_capacity(limit);
+        let mut removed_generation: Option<(ChangeSeq, InodeId)> = None;
+        let mut last_row_key: Option<String> = None;
+        while entries.len() < limit {
+            if durable.buffered.is_empty() && !durable.exhausted {
+                let raw_limit = limit.max(ACTIVE_DELETION_RAW_SCAN_LIMIT);
+                let tables = self
+                    .manifest_tables()
+                    .expect("a view without manifest tables starts its scan exhausted");
+                let page = manifest_index::active_deletions_page(
+                    tables,
+                    &durable.lower_bound,
+                    upper_bound.as_deref(),
+                    raw_limit,
+                )
+                .await?;
+                durable.absorb(page, raw_limit);
+                continue;
+            }
+            let take_tail = match (durable.buffered.front(), tail.get(tail_index)) {
+                (Some((durable_key, _)), Some((tail_key, _))) => tail_key <= durable_key,
+                (None, Some(_)) => true,
+                (Some(_), None) => false,
+                (None, None) => break,
+            };
+            let (row_key, record) = if take_tail {
+                tail_index += 1;
+                tail[tail_index - 1].clone()
+            } else {
+                durable
+                    .buffered
+                    .pop_front()
+                    .expect("a non-empty buffer yields a row")
+            };
+            // A row present in both the manifest and the replayed tail is one
+            // deletion, not two.
+            if last_row_key.as_deref() == Some(row_key.as_str()) {
+                continue;
+            }
+            last_row_key = Some(row_key);
+            let generation = (record.deleted_at_seq, record.root_inode_id);
+            match record.into_recoverable() {
+                None => removed_generation = Some(generation),
+                Some(deletion) if removed_generation != Some(generation) => entries.push(deletion),
+                Some(_) => {}
+            }
+        }
+        Ok(entries)
     }
 
     pub(super) async fn tombstones_for_root(

@@ -252,11 +252,13 @@ checksum an implementation cannot recompute must fail its reads rather than
 pass them unverified.
 
 Metadata materialization tables include canonical metadata families and
-validated secondary indexes. The canonical families are `inodes`,
+validated derived families. The canonical families are `inodes`,
 `direntry-binds`, `direntry-unbinds`, `revisions`, `tombstones`, and
 `commit-receipts`. The `direntry-child-binds` family is a secondary index over
 the same direntry bind rows, keyed by child inode, and must be present and
-verified before a namespace manifest is trusted.
+verified before a namespace manifest is trusted. The `active-deletions` family
+is derived from the tombstone rows and holds current state rather than events
+(section 2.5).
 
 ETags remain opaque compare tokens. They may be used for object freshness or
 compare-and-swap, but they are not content digests unless a provider-specific
@@ -646,6 +648,19 @@ committed sequence, and validation refuses (`not_deleted`) unless that
 exact generation is the active one, so a stale recovery request can never
 cancel a later deletion. Only the root of a deletion can be undeleted —
 descendants are covered by the root's tombstone, not their own.
+
+Which deletions are recoverable *right now* is a separate question from the
+event history that decides it, and it has its own family. Materialization
+derives an `active-deletions` row from every tombstone event: a `set` adds a
+`listed` row keyed by `(deleted_at_seq, root_inode_id)` — the exact handle
+`undelete` takes — carrying the deletion's wall-clock stamp and the deleted
+binding's name, and a `revoke` adds a `removed` row repeating its target's
+key. The two rows for one deletion sort together with `removed` first, so an
+ascending scan sees a removal before the row it removes and reorganization
+drops the pair. Reading the recoverable set is therefore a range scan in
+deletion order, not a walk over every deletion the namespace ever recorded.
+Because the family is derived, the tombstone rows stay authoritative: a
+disagreement between the two is corruption of the derived family.
 
 A namespace head has exactly two recorded states: `active` (the default; an
 absent field reads as active) and terminal `deleted`. There is no
@@ -1894,6 +1909,17 @@ retained in full regardless of the floor, and a revisions listing is always
 complete. Tombstone rows — set and revoke events alike — and inode rows are
 always retained for now; reachability-based dropping for them is future
 work.
+
+The `active-deletions` family holds current state rather than history, so the
+retention floor has no say over it at all: a `listed` row is never dropped
+however far the floor advances, because a deletion stays recoverable
+indefinitely and dropping the row would silently retire it. The only rows a
+rebuild removes there are the cancelled pairs — a `removed` row and the
+`listed` row whose key it repeats, dropped together, since a deletion that was
+undeleted is not state any reader can still observe. A `removed` row can never
+outlive the row it names: the deletion commits before the undelete, runs merge
+oldest-first, and a rebuild's input is a prefix of that order, so both rows are
+always in the same merge.
 
 Invariants:
 
