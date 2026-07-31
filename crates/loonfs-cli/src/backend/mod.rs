@@ -627,17 +627,21 @@ impl ResolvedTarget {
     /// host is assigned, and this is where a namespace nobody is writing to
     /// gets assigned. Only an embedded profile can host it — a remote
     /// profile's server is already hosting its own.
+    ///
+    /// `poll_interval_ms` overrides how long an assignment rests before it
+    /// is asserted again; `None` keeps the host's own cadence.
     pub(crate) async fn host_maintenance(
         &self,
         namespaces: &[NamespaceId],
         jobs: &[MaintenanceJobId],
+        poll_interval_ms: Option<u64>,
         shutdown: impl std::future::Future<Output = ()>,
     ) -> Result<(), BackendError> {
         match self {
             Self::Embedded(target) => {
                 target
                     .backend
-                    .host_maintenance(namespaces, jobs, shutdown)
+                    .host_maintenance(namespaces, jobs, poll_interval_ms, shutdown)
                     .await
             }
             Self::Remote(_) => Err(maintenance_host_needs_an_embedded_profile()),

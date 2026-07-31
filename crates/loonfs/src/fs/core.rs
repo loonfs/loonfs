@@ -16,7 +16,9 @@ use loonfs_api::{
     encode_cursor, CapabilityDocument, EffectiveLimit, FileRevision, FileRevisionsPageCursor, Page,
     PaginationPolicy, FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE,
     FEATURE_NAMESPACES_FORK, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
-    LIMIT_GC_MIN_GRACE_WINDOW_MS, PROFILE_ADMIN_V0, PROFILE_CORE_V0, PROTOCOL_VERSION,
+    LIMIT_COMMIT_MAX_CONTENT_TOKENS, LIMIT_COMMIT_MAX_EXTERNAL_CONTENT_REFS,
+    LIMIT_COMMIT_MAX_MESSAGE_BYTES, LIMIT_COMMIT_MAX_OPERATIONS, LIMIT_GC_MIN_GRACE_WINDOW_MS,
+    PROFILE_ADMIN_V0, PROFILE_CORE_V0, PROTOCOL_VERSION,
 };
 use loonfs_core::cache::{
     MetadataTableCache, WalTailProjectionCache, WalTailProjectionCacheConfig,
@@ -181,6 +183,31 @@ impl ReadCore {
                     LIMIT_GC_MIN_GRACE_WINDOW_MS.to_owned(),
                     loonfs_core::limits::GC_MIN_GRACE_WINDOW_MS,
                 );
+                // The commit ceilings are this crate's, enforced before
+                // planning on every transport, so a client can pre-validate a
+                // batch instead of discovering the bound on rejection. A host
+                // adds its own transport limits on top; these are not its to
+                // set.
+                for (key, value) in [
+                    (
+                        LIMIT_COMMIT_MAX_OPERATIONS,
+                        loonfs_core::limits::MAX_COMMIT_OPERATIONS,
+                    ),
+                    (
+                        LIMIT_COMMIT_MAX_CONTENT_TOKENS,
+                        loonfs_core::limits::MAX_COMMIT_CONTENT_TOKENS,
+                    ),
+                    (
+                        LIMIT_COMMIT_MAX_EXTERNAL_CONTENT_REFS,
+                        loonfs_core::limits::MAX_COMMIT_EXTERNAL_CONTENT_REFS,
+                    ),
+                    (
+                        LIMIT_COMMIT_MAX_MESSAGE_BYTES,
+                        loonfs_core::limits::MAX_COMMIT_MESSAGE_BYTES,
+                    ),
+                ] {
+                    limits.insert(key.to_owned(), value as u64);
+                }
                 limits
             },
         }

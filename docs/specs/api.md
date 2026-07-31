@@ -83,6 +83,10 @@ profile nor its `query.*` keys — clients gate on the document either way.
     "query.grep": true
   },
   "limits": {
+    "commit.max_content_tokens": 4096,
+    "commit.max_external_content_refs": 4096,
+    "commit.max_message_bytes": 4096,
+    "commit.max_operations": 4096,
     "maintenance.gc.min_grace_window_ms": 1230000,
     "pagination.default_limit": 1000,
     "pagination.max_limit": 1000,
@@ -123,6 +127,10 @@ Registered limit keys:
 | `download.max_content_bytes` | Largest file content a service-proxied read (`GET .../filesystem/content`, inode revision content) will buffer and return in one response. Over-limit reads answer `content_too_large`; v0 has no proxied streaming or range reads. |
 | `upload.max_concurrent` | How many service-proxied upload bodies the deployment buffers at once; requests past the cap answer `server_busy`. |
 | `download.max_concurrent` | How many service-proxied content reads the deployment materializes at once; requests past the cap answer `server_busy`. |
+| `commit.max_operations` | Most path operations one commit may carry. A longer list answers `invalid_request` before planning, on every transport. |
+| `commit.max_content_tokens` | Most content tokens one commit may carry. Over-limit requests answer `invalid_request` before planning. |
+| `commit.max_external_content_refs` | Most distinct external content refs one commit's operations may name. Over-limit requests answer `invalid_request` before planning. |
+| `commit.max_message_bytes` | Largest accepted commit `message`, in bytes; a longer one answers `invalid_request` before planning. |
 | `maintenance.gc.min_grace_window_ms` | Smallest accepted `grace_window_ms` on a `gc` request; smaller values answer `invalid_request`. Derived from the publication budgets, not tuned. |
 | `query.grep.default_limit` | Matches per grep page when the request omits `limit`. |
 | `query.grep.max_limit` | Largest accepted grep page limit; invalid limits are rejected as `invalid_request`. Distinct from the pagination keys because a grep item costs a verified file read, not a row. |

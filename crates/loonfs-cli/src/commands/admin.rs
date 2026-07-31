@@ -279,7 +279,7 @@ async fn run_admin_run(
     } else {
         resolved
             .target
-            .host_maintenance(&namespaces, &jobs, shutdown_signal())
+            .host_maintenance(&namespaces, &jobs, args.poll_interval_ms, shutdown_signal())
             .await
             .map_err(fail_here)?;
         // A hosted run reports no per-key outcome: the runner ran the steps,

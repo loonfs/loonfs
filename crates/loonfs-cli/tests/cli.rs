@@ -2519,6 +2519,68 @@ fn admin_run_requires_an_assignment_and_names_the_jobs_it_hosts() {
     }
 }
 
+/// The re-assertion cadence is the one timer a hosted run owns, so an
+/// operator may shorten it — down to a floor, below which a nudge per
+/// assigned key only spends provider requests. A drain never rests between
+/// keys, so the flag is inert there.
+#[test]
+fn admin_run_takes_a_poll_interval_with_a_floor_that_a_drain_ignores() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    for namespace in ["alpha", "beta"] {
+        assert_success(&harness.run(&["namespace", "create", namespace]));
+    }
+
+    let too_fast = harness.run(&[
+        "admin",
+        "run",
+        "--namespace",
+        "alpha",
+        "--poll-interval-ms",
+        "99",
+    ]);
+    assert_failure(&too_fast);
+    let message = stderr_string(&too_fast);
+    assert!(
+        message.contains("poll-interval-ms"),
+        "the rejection must name the flag: {message}"
+    );
+    assert!(
+        message.contains("100"),
+        "the rejection must name the floor: {message}"
+    );
+
+    let plain = harness.run(&["--json", "admin", "run", "--namespace", "alpha", "--drain"]);
+    assert_success(&plain);
+    let paced = harness.run(&[
+        "--json",
+        "admin",
+        "run",
+        "--namespace",
+        "beta",
+        "--drain",
+        "--poll-interval-ms",
+        "100",
+    ]);
+    assert_success(&paced);
+    let (plain, paced) = (json_data(&plain), json_data(&paced));
+    for field in ["drained", "budget_exhausted", "jobs"] {
+        assert_eq!(
+            paced[field], plain[field],
+            "a drain reports the same `{field}` with the cadence flag as without it"
+        );
+    }
+    let keys = paced["keys"].as_array().expect("json array");
+    assert_eq!(
+        keys.len(),
+        plain["keys"].as_array().expect("json array").len()
+    );
+    assert!(
+        keys.iter().all(|key| key["settled"] == true),
+        "the drain still settles every key: {paced}"
+    );
+}
+
 /// A remote profile's server hosts its own runner. Stepping one from here
 /// would be a second scheduler over the same namespaces, so the command
 /// refuses instead of pretending it can.
