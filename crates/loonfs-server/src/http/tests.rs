@@ -315,6 +315,7 @@ async fn graceful_shutdown_drains_requests_and_settles_the_writer() {
         auth_token: Some("test-token".to_owned()),
         request_timeout_ms: None,
         disable_transient_retry: false,
+        ca_cert_path: None,
     })
     .expect("valid client config");
     client
@@ -1162,6 +1163,7 @@ async fn http_answers_401_in_envelope_for_missing_and_wrong_tokens() {
             auth_token,
             request_timeout_ms: None,
             disable_transient_retry: false,
+            ca_cert_path: None,
         })
         .expect("valid client config");
         assert_api_error(
@@ -1310,6 +1312,7 @@ async fn http_upload_body_over_the_limit_answers_content_too_large() {
         auth_token: Some("test-token".to_owned()),
         request_timeout_ms: None,
         disable_transient_retry: false,
+        ca_cert_path: None,
     })
     .expect("valid client config");
     let target = NamespacePath::parse("demo", "/big.bin").expect("target");
@@ -1687,6 +1690,7 @@ async fn http_uploads_answer_server_busy_at_the_concurrency_cap() {
         // These tests assert the raw concurrency-cap answer; the client's
         // transient retry would otherwise sleep through it.
         disable_transient_retry: true,
+        ca_cert_path: None,
     };
     let config_for_busy = client_config.clone();
     let client = Client::new(config_for_busy).expect("valid client config");
@@ -1748,6 +1752,7 @@ async fn client_transient_retry_rides_out_a_briefly_full_upload_slot() {
         auth_token: Some("test-token".to_owned()),
         request_timeout_ms: None,
         disable_transient_retry: false,
+        ca_cert_path: None,
     })
     .expect("valid client config");
     let target = NamespacePath::parse("demo", "/retried.bin").expect("target");
@@ -1798,6 +1803,7 @@ async fn http_content_reads_answer_server_busy_at_the_concurrency_cap() {
         // These tests assert the raw concurrency-cap answer; the client's
         // transient retry would otherwise sleep through it.
         disable_transient_retry: true,
+        ca_cert_path: None,
     };
     let config_for_busy = client_config.clone();
     let client = Client::new(config_for_busy).expect("valid client config");
@@ -1858,6 +1864,7 @@ async fn http_content_read_over_the_download_limit_answers_content_too_large() {
         auth_token: Some("test-token".to_owned()),
         request_timeout_ms: None,
         disable_transient_retry: false,
+        ca_cert_path: None,
     })
     .expect("valid client config");
     assert_api_error(
@@ -2094,6 +2101,7 @@ async fn start_server_with_config(store: SharedObjectStore, config: ServerConfig
             auth_token: Some("test-token".to_owned()),
             request_timeout_ms: None,
             disable_transient_retry: false,
+            ca_cert_path: None,
         })
         .expect("valid client config"),
         server,
@@ -2126,6 +2134,8 @@ fn test_config(root: &Path, writer_id: &str) -> ServerConfig {
         max_concurrent_downloads: 16,
         max_concurrent_maintenance: loonfs::DEFAULT_MAX_CONCURRENT_MAINTENANCE,
         allow_unauthenticated_remote: false,
+        allow_remote_without_tls: false,
+        tls: None,
         store: StoreConfig::LocalFs {
             root: root.display().to_string(),
             key_prefix: Some("http-tests".to_owned()),

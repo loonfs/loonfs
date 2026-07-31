@@ -131,6 +131,7 @@ fn client() -> Client {
         auth_token: None,
         request_timeout_ms: None,
         disable_transient_retry: false,
+        ca_cert_path: None,
     })
     .expect("valid client config")
 }
@@ -388,6 +389,7 @@ async fn request_head_for(source: PayloadSource) -> String {
         auth_token: None,
         request_timeout_ms: None,
         disable_transient_retry: true,
+        ca_cert_path: None,
     })
     .expect("valid client config");
     // The response is not the point; the request head is.

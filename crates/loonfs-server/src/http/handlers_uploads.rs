@@ -2,10 +2,12 @@
 //! backing them.
 
 use super::error::ApiResponseError;
-use super::{AppJson, AppPath, AppState, NamespaceIdPath, OptionalAppJson, UploadBodyStream};
+use super::{
+    authorize, AppJson, AppPath, AppState, NamespaceIdPath, OptionalAppJson, UploadBodyStream,
+};
 use crate::config::ServerConfig;
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
 use loonfs::content_tokens::{mint_content_token, CompletedUploadReceipt, ContentTokenError};
 use loonfs::publish::PreparedContent;
@@ -491,9 +493,14 @@ pub(super) async fn complete_upload(
 )]
 pub(super) async fn read_upload_status(
     State(state): State<AppState>,
+    headers: HeaderMap,
     namespace: NamespaceIdPath,
     path: AppPath<UploadPathParams>,
 ) -> Result<Json<UploadStatusResponse>, ApiResponseError> {
+    // A completed session answers with a freshly minted content-validation
+    // token, which is a capability to commit that content. Authorization
+    // runs before the id is even parsed, as everywhere else.
+    authorize(&state.config, &headers)?;
     let namespace_id = namespace.into_id()?;
     let UploadPathParams { upload_id } = path.into_params()?;
     let upload_id = parse_upload_id(&upload_id)?;
@@ -536,9 +543,11 @@ pub(super) async fn read_upload_status(
 )]
 pub(super) async fn abort_upload(
     State(state): State<AppState>,
+    headers: HeaderMap,
     namespace: NamespaceIdPath,
     path: AppPath<UploadPathParams>,
 ) -> Result<Json<AbortUploadResponse>, ApiResponseError> {
+    authorize(&state.config, &headers)?;
     let namespace_id = namespace.into_id()?;
     let UploadPathParams { upload_id } = path.into_params()?;
     let upload_id = parse_upload_id(&upload_id)?;

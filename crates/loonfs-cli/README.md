@@ -268,6 +268,9 @@ Profile options
   Remote profile:
     --server-url <url>
     --auth-token <token>               optional, env LOONFS_AUTH_TOKEN
+    --ca-cert-path <path>              optional, PEM bundle of extra
+                                       certificate authorities to trust for
+                                       an https server url
 
 Update options
   Used by:
@@ -311,6 +314,7 @@ Update options
   Remote profile updates:
     --server-url <url>
     --auth-token <token>
+    --ca-cert-path <path>
 
 Behavior notes
   `loonfs cat` always streams raw bytes to stdout

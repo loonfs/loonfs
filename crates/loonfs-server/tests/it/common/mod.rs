@@ -4,9 +4,12 @@
 
 use loonfs_client::{Client, ClientConfig};
 use loonfs_server::{
-    app, GrepConfig, MaintenanceMode, RuntimeCacheConfigOverrides, ServerConfig, StoreConfig,
+    app, serve_with_shutdown, GrepConfig, MaintenanceMode, RuntimeCacheConfigOverrides, ServeError,
+    ServerConfig, StoreConfig, TlsServerConfig,
 };
+use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::time::Duration;
 
 pub(crate) struct TestServer {
     pub(crate) client: Client,
@@ -47,6 +50,7 @@ pub(crate) async fn start_server(config: ServerConfig) -> TestServer {
             auth_token,
             request_timeout_ms: None,
             disable_transient_retry: false,
+            ca_cert_path: None,
         })
         .expect("valid client config"),
         server_url,
@@ -54,6 +58,95 @@ pub(crate) async fn start_server(config: ServerConfig) -> TestServer {
         store_key_prefix,
         server,
     }
+}
+
+/// A server terminating TLS on loopback with a certificate generated for
+/// this test, plus the CA path a client needs to trust it.
+///
+/// Unlike [`start_server`] this goes through [`serve_with_shutdown`], the
+/// same entry point the binary uses: the identity load, the bind, and the
+/// TLS listener are the deployed ones rather than a test-only assembly.
+pub(crate) struct TlsTestServer {
+    pub(crate) client: Client,
+    pub(crate) server_url: String,
+    pub(crate) addr: SocketAddr,
+    pub(crate) ca_cert_path: String,
+    pub(crate) auth_token: Option<String>,
+    pub(crate) shutdown: tokio::sync::oneshot::Sender<()>,
+    pub(crate) server: tokio::task::JoinHandle<Result<(), ServeError>>,
+    /// Holds the generated certificate and key on disk for the server's
+    /// lifetime.
+    _identity_dir: tempfile::TempDir,
+}
+
+pub(crate) async fn start_tls_server(mut config: ServerConfig) -> TlsTestServer {
+    let identity_dir = tempfile::tempdir().expect("tls identity dir");
+    let cert_path = identity_dir.path().join("server.crt");
+    let key_path = identity_dir.path().join("server.key");
+    let identity =
+        rcgen::generate_simple_self_signed(vec!["localhost".to_owned(), "127.0.0.1".to_owned()])
+            .expect("generate self-signed identity");
+    std::fs::write(&cert_path, identity.cert.pem()).expect("write certificate");
+    std::fs::write(&key_path, identity.signing_key.serialize_pem()).expect("write private key");
+
+    let addr = reserve_loopback_addr().await;
+    config.bind = addr.to_string();
+    config.tls = Some(TlsServerConfig {
+        cert_path: cert_path.display().to_string(),
+        key_path: key_path.display().to_string(),
+    });
+    let auth_token = config
+        .auth_token
+        .as_ref()
+        .map(|token| token.expose().to_owned());
+
+    let (shutdown, shutdown_signal) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(serve_with_shutdown(config, async move {
+        let _ = shutdown_signal.await;
+    }));
+    wait_until_listening(addr).await;
+
+    let server_url = format!("https://{addr}");
+    let ca_cert_path = cert_path.display().to_string();
+    TlsTestServer {
+        client: Client::new(ClientConfig {
+            server_url: server_url.clone(),
+            auth_token: auth_token.clone(),
+            request_timeout_ms: None,
+            disable_transient_retry: false,
+            ca_cert_path: Some(ca_cert_path.clone()),
+        })
+        .expect("valid client config"),
+        server_url,
+        addr,
+        ca_cert_path,
+        auth_token,
+        shutdown,
+        server,
+        _identity_dir: identity_dir,
+    }
+}
+
+/// Picks a free loopback port by binding one and letting it go. The server
+/// binds it itself, because `serve_with_shutdown` owns that step and the
+/// point of this harness is to exercise it.
+async fn reserve_loopback_addr() -> SocketAddr {
+    let probe = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("probe bind");
+    probe.local_addr().expect("probe addr")
+}
+
+#[allow(clippy::disallowed_methods, clippy::panic)]
+// Test-harness polling for a port the server binds on its own schedule.
+async fn wait_until_listening(addr: SocketAddr) {
+    for _ in 0..500 {
+        if tokio::net::TcpStream::connect(addr).await.is_ok() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("server never started listening on {addr}");
 }
 
 pub(crate) fn test_config(
@@ -77,6 +170,8 @@ pub(crate) fn test_config(
         max_concurrent_downloads: 16,
         max_concurrent_maintenance: loonfs::DEFAULT_MAX_CONCURRENT_MAINTENANCE,
         allow_unauthenticated_remote: false,
+        allow_remote_without_tls: false,
+        tls: None,
         store,
     }
 }

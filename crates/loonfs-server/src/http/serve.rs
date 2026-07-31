@@ -1,6 +1,7 @@
 //! HTTP application construction, listener service, and shutdown lifecycle.
 
 use super::router;
+use super::tls::{self, TlsConfigError, TlsListener};
 use crate::config::{ServerConfig, ServerConfigError};
 use axum::Router;
 use loonfs::metrics::{
@@ -388,6 +389,8 @@ pub enum ServeError {
         #[source]
         source: std::io::Error,
     },
+    #[error("failed to load the configured TLS identity: {0}")]
+    Tls(#[source] TlsConfigError),
     #[error("server failed while serving requests: {0}")]
     Serve(#[source] std::io::Error),
     #[error("background work did not settle during shutdown: {0}")]
@@ -409,17 +412,35 @@ pub async fn serve_with_shutdown(
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<(), ServeError> {
     let bind = config.bind_addr()?;
+    // The identity is loaded before the bind, so a deployment with an
+    // unreadable certificate fails without ever having held the port.
+    let tls = config
+        .tls
+        .as_ref()
+        .map(tls::server_config)
+        .transpose()
+        .map_err(ServeError::Tls)?;
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .map_err(|source| ServeError::Bind { addr: bind, source })?;
-    serve_on(listener, config, shutdown).await
+    match tls {
+        Some(tls) => serve_on(TlsListener::new(listener, tls), config, shutdown).await,
+        None => serve_on(listener, config, shutdown).await,
+    }
 }
 
-pub(super) async fn serve_on(
-    listener: tokio::net::TcpListener,
+/// The one serving body, over whichever listener the deployment configured.
+/// Plaintext and TLS differ in what `accept` returns and in nothing else:
+/// the same router, the same graceful shutdown, and the same lifecycle
+/// settle after the listener has drained.
+pub(super) async fn serve_on<L>(
+    listener: L,
     config: ServerConfig,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
-) -> Result<(), ServeError> {
+) -> Result<(), ServeError>
+where
+    L: axum::serve::Listener<Addr = SocketAddr>,
+{
     let (router, lifecycle) = app(config).await?;
     axum::serve(listener, router)
         .with_graceful_shutdown(shutdown)

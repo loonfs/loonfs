@@ -4,10 +4,12 @@ use crate::common::http_split_support::*;
 use crate::common::start_server;
 use loonfs_api::ContentId;
 use loonfs_api::{
-    v0::ValidatedContentToken, AbsolutePath, ApiError, ChangeSeq, CommitId, CommitRequest,
-    CommitResponse, ContentRef, DestinationBehavior, ErrorCode, FilesystemOperation,
+    v0::{BeginUploadRequest, ValidatedContentToken},
+    AbsolutePath, ApiError, ChangeSeq, CommitId, CommitRequest, CommitResponse, ContentRef,
+    DestinationBehavior, ErrorCode, FilesystemOperation,
 };
 use loonfs_client::NamespacePath;
+use loonfs_test_support::http::raw_agent;
 use loonfs_test_support::ids::namespace_id;
 use serde_json::json;
 use std::io::Read as _;
@@ -407,6 +409,50 @@ async fn bare_operation_body_without_content_tokens_still_parses_and_commits_mkd
         .stat_path(&NamespacePath::parse("demo", "/docs").expect("path"))
         .await
         .expect("mkdir committed");
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_upload_session_route_requires_the_bearer_token() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loonfs-server-current",
+        "http-upload-auth",
+    ))
+    .await;
+
+    let namespace = namespace_id("demo");
+    harness
+        .client
+        .create_namespace(&namespace)
+        .await
+        .expect("create namespace");
+    let begin = harness
+        .client
+        .begin_upload(&namespace, &BeginUploadRequest::default())
+        .await
+        .expect("begin upload");
+    let upload_id = begin.upload_id;
+    let base = format!(
+        "{}/v0/namespaces/{namespace}/uploads/{upload_id}",
+        harness.server_url
+    );
+
+    // Reading a session mints a fresh content-validation token, and aborting
+    // one destroys another client's in-flight upload. Neither is reachable
+    // without the deployment's token.
+    for (method, url) in [("GET", base.clone()), ("POST", format!("{base}/abort"))] {
+        match raw_agent().request(method, &url).call() {
+            Err(ureq::Error::Status(401, response)) => {
+                let error: ApiError =
+                    serde_json::from_reader(response.into_reader()).expect("decode api error");
+                assert_eq!(error.code, ErrorCode::Unauthorized.as_str());
+            }
+            other => unreachable!("expected 401 for `{method} {url}`, got {other:?}"),
+        }
+    }
 
     harness.server.abort();
 }

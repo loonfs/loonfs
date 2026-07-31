@@ -3,6 +3,16 @@ auth_token = "dev-token"
 content_token_secret = "dev-content-token-secret"
 writer_id = "loonfs-server-gcp"
 
+# Serving beyond loopback requires TLS. Either terminate it here by
+# uncommenting [tls] below, or set allow_remote_without_tls = true when a
+# proxy in front of LoonFS terminates it.
+#allow_remote_without_tls = true
+
+# PEM chain (leaf first) and its private key, read once at startup.
+#[tls]
+#cert_path = "/etc/loonfs/tls/server.crt"
+#key_path = "/etc/loonfs/tls/server.key"
+
 [store]
 kind = "gcp-gcs"
 bucket = "your-bucket"

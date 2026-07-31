@@ -14,10 +14,12 @@ mod openapi;
 mod serve;
 #[cfg(test)]
 mod tests;
+mod tls;
 
 #[cfg(feature = "openapi")]
 pub use self::openapi::{openapi_document, openapi_json_pretty};
 pub use self::serve::{app, serve, serve_with_shutdown, ServeError, ServerLifecycle};
+pub use self::tls::TlsConfigError;
 
 use self::error::ApiResponseError;
 use self::extractors::{

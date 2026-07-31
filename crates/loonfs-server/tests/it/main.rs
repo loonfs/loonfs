@@ -13,6 +13,7 @@ mod http_pagination;
 mod http_paths;
 mod http_retry;
 mod http_smoke;
+mod http_tls;
 mod http_uploads;
 
 // The OpenAPI document only exists behind the feature that generates it.

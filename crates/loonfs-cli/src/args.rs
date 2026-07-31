@@ -150,6 +150,10 @@ pub(crate) struct InitArgs {
     /// Remote LoonFS bearer token.
     #[arg(long, env = "LOONFS_AUTH_TOKEN")]
     pub auth_token: Option<String>,
+    /// PEM bundle of extra certificate authorities to trust for an
+    /// https server URL, when a private CA issued the certificate.
+    #[arg(long)]
+    pub ca_cert_path: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -226,6 +230,10 @@ pub(crate) struct ProfileCreateArgs {
     /// Remote LoonFS bearer token.
     #[arg(long, env = "LOONFS_AUTH_TOKEN")]
     pub auth_token: Option<String>,
+    /// PEM bundle of extra certificate authorities to trust for an
+    /// https server URL, when a private CA issued the certificate.
+    #[arg(long)]
+    pub ca_cert_path: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -276,6 +284,10 @@ pub(crate) struct ProfileUpdateArgs {
     /// Remote LoonFS bearer token.
     #[arg(long)]
     pub auth_token: Option<String>,
+    /// PEM bundle of extra certificate authorities to trust for an
+    /// https server URL, when a private CA issued the certificate.
+    #[arg(long)]
+    pub ca_cert_path: Option<String>,
 }
 
 #[derive(Debug, Args, Clone)]

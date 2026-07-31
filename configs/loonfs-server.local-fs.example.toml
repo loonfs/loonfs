@@ -8,6 +8,13 @@ auth_token = "dev-token"
 content_token_secret = "dev-content-token-secret"
 writer_id = "loonfs-server-local"
 
+# Terminating TLS in this process. Uncomment the [tls] table at the bottom of
+# this file to turn it on. A non-loopback bind refuses to load without it,
+# because the wire carries the bearer token and the presigned object-store
+# URLs the upload routes hand back. Set this instead when TLS terminates in
+# front of LoonFS — a load balancer, an ingress controller, a sidecar.
+#allow_remote_without_tls = true
+
 # Whether this server maintains the namespaces it touches by itself:
 # "automatic" (the default) registers the metadata, collection, and — when
 # the grep mode below maintains — index jobs, and lets the writer schedule
@@ -67,6 +74,15 @@ writer_id = "loonfs-server-local"
 #max_l0_runs = 8
 #max_mid_runs = 8
 #max_decoded_input_rows_per_step = 131072
+
+# The server's TLS identity, read once at startup: a file that is missing or
+# is not the PEM it claims to be fails the process rather than falling back
+# to plaintext. The chain is leaf first; the key may be PKCS#8, RSA, or EC.
+# Clients then use an https:// server URL, and a client that must trust a
+# private CA points at its bundle with `ca_cert_path`.
+#[tls]
+#cert_path = "/etc/loonfs/tls/server.crt"
+#key_path = "/etc/loonfs/tls/server.key"
 
 [store]
 kind = "local-fs"
