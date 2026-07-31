@@ -1,4 +1,4 @@
-//! `loon config` commands: init and config-file inspection.
+//! `loonfs config` commands: init and config-file inspection.
 
 use super::context::fail;
 use super::output::{CommandData, CommandFailure, CommandOutput};

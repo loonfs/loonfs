@@ -93,7 +93,7 @@ impl CliError {
         Self::new(
             "no_default_namespace",
             format!(
-                "no default namespace is set for profile `{profile}`; use `loon use <namespace>` or `--namespace`"
+                "no default namespace is set for profile `{profile}`; use `loonfs use <namespace>` or `--namespace`"
             ),
         )
     }
@@ -109,7 +109,7 @@ impl CliError {
         Self::new(
             "config_already_exists",
             format!(
-                "config file already exists at `{path}`. use `loon profile create` to create a new profile, `loon profile update` to modify an existing profile, or `loon profile use` to change the default profile"
+                "config file already exists at `{path}`. use `loonfs profile create` to create a new profile, `loonfs profile update` to modify an existing profile, or `loonfs profile use` to change the default profile"
             ),
         )
     }

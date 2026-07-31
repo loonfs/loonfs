@@ -34,7 +34,7 @@ use loonfs_grep::{
 /// scheduled work before the one-shot process exits. A publish gated on
 /// `maintenance_required` waits for the step that same gated publish
 /// scheduled, then resubmits, so embedded writes recover from WAL debt
-/// instead of hard-stopping. `loon admin` commands remain the explicit path
+/// instead of hard-stopping. `loonfs admin` commands remain the explicit path
 /// for everything else (GC, retention, forced steps).
 pub(crate) struct EmbeddedBackend {
     pub(crate) writer: FsWriter,
@@ -738,7 +738,7 @@ mod tests {
         // More publishes than the WAL backpressure cap: the Enabled policy
         // must keep stepping the tail down so no write ever stalls on
         // `maintenance_required` (each stall used to require a manual
-        // `loon admin step`).
+        // `loonfs admin step`).
         for index in 0..140 {
             target
                 .backend
@@ -835,7 +835,7 @@ mod tests {
             root: temp_dir.path().display().to_string(),
             key_prefix: None,
         };
-        // Two backends over one store model two concurrent `loon` processes:
+        // Two backends over one store model two concurrent `loonfs` processes:
         // the writer id is shared (the CLI defaults it to the hostname), so
         // the epochs are what tell the two apart in the fence.
         let first = EmbeddedTarget::new(&store, Some("shared-host"))

@@ -363,7 +363,7 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
                     .map(|name| format!("/{name}"))
                     .unwrap_or_else(|| "<path>".to_owned());
                 lines.push(format!(
-                    "{}\t{}\t{}\t{}\tloon undelete {} --inode {} --deleted-at {}",
+                    "{}\t{}\t{}\t{}\tloonfs undelete {} --inode {} --deleted-at {}",
                     format_utc_ms(entry.deleted_at_ms),
                     name,
                     entry.root_inode_id,
@@ -530,7 +530,7 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             CommandKind::FilesystemRm => match inode_id {
                 Some(inode_id) => format!(
                     "removed {target} @ seq {committed_seq} (commit {commit_id}); \
-                     recover with `loon undelete <path> --inode {inode_id} \
+                     recover with `loonfs undelete <path> --inode {inode_id} \
                      --deleted-at {committed_seq}`"
                 ),
                 None => format!("removed {target} @ seq {committed_seq} (commit {commit_id})"),

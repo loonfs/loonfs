@@ -1,4 +1,4 @@
-//! `loon admin` commands: checkpoints, retention, GC, indexes, and the
+//! `loonfs admin` commands: checkpoints, retention, GC, indexes, and the
 //! change feed.
 
 use super::context::resolve_command_context;

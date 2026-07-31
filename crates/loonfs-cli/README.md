@@ -1,6 +1,6 @@
 # loonfs-cli
 
-`loonfs-cli` provides the `loon` command for managing profiles, namespaces, and path-based
+`loonfs-cli` provides the `loonfs` command for managing profiles, namespaces, and path-based
 filesystem operations against LoonFS.
 
 ## Command Reference
@@ -8,7 +8,7 @@ filesystem operations against LoonFS.
 ```text
 Loon CLI Command Reference
 
-`loon` works with profiles, namespaces, and path-based filesystem operations.
+`loonfs` works with profiles, namespaces, and path-based filesystem operations.
 
 Global flags
   --json
@@ -21,45 +21,45 @@ Global flags
     Show command help
 
 Setup and configuration
-  loon init [name] [profile-options]
+  loonfs init [name] [profile-options]
     Create the initial CLI config and default profile
 
-  loon config path
+  loonfs config path
     Print the path to the CLI config file
 
-  loon config show
+  loonfs config show
     Show the current CLI config with sensitive values redacted
 
-  loon version
+  loonfs version
     Print the installed CLI version
 
 Profile management
-  loon profile create <name> [profile-options]
+  loonfs profile create <name> [profile-options]
     Create a profile
 
-  loon profile list
+  loonfs profile list
     List configured profiles
 
-  loon profile show [name]
+  loonfs profile show [name]
     Show one profile, or the default profile if omitted
 
-  loon profile update <name> [update-options]
+  loonfs profile update <name> [update-options]
     Update an existing profile
 
-  loon profile remove <name>
+  loonfs profile remove <name>
     Remove a profile
 
-  loon profile use <name>
+  loonfs profile use <name>
     Make a profile the default
 
 Namespace management
-  loon namespace create [--profile <name>] <namespace>
+  loonfs namespace create [--profile <name>] <namespace>
     Create a namespace in a profile
 
-  loon use [--profile <name>] <namespace>
+  loonfs use [--profile <name>] <namespace>
     Set the default namespace for a profile
 
-  loon current [--profile <name>]
+  loonfs current [--profile <name>]
     Show the active profile and default namespace
 
 Filesystem operations
@@ -69,45 +69,45 @@ Filesystem operations
 
   Commands that commit (put, mkdir, rm, mv, cp, restore) also accept:
     -m, --message <message>
-      Annotation recorded on the commit and shown by `loon changes`
+      Annotation recorded on the commit and shown by `loonfs changes`
 
-  loon ls [--profile <name>] [--namespace <name>] [path]
+  loonfs ls [--profile <name>] [--namespace <name>] [path]
     List entries at a path
 
-  loon stat [--profile <name>] [--namespace <name>] <path>
+  loonfs stat [--profile <name>] [--namespace <name>] <path>
     Show metadata for a path
 
-  loon cat [--profile <name>] [--namespace <name>] [--revision <n>] <path>
+  loonfs cat [--profile <name>] [--namespace <name>] [--revision <n>] <path>
     Print file contents to stdout
 
-  loon get [--profile <name>] [--namespace <name>] [--revision <n>] <remote-path> [local-destination]
+  loonfs get [--profile <name>] [--namespace <name>] [--revision <n>] <remote-path> [local-destination]
     Download a remote file
 
-  loon put [--profile <name>] [--namespace <name>] <local-path|-> [remote-path] [--force] [-m <message>]
+  loonfs put [--profile <name>] [--namespace <name>] <local-path|-> [remote-path] [--force] [-m <message>]
     Upload a local file, or standard input when <local-path> is `-`
 
-  loon revisions [--profile <name>] [--namespace <name>] [--limit <n>] [--cursor <cursor>] <path>
+  loonfs revisions [--profile <name>] [--namespace <name>] [--limit <n>] [--cursor <cursor>] <path>
     List file revisions newest-first
 
-  loon mkdir [--profile <name>] [--namespace <name>] [-m <message>] <path>
+  loonfs mkdir [--profile <name>] [--namespace <name>] [-m <message>] <path>
     Create a directory
 
-  loon restore [--profile <name>] [--namespace <name>] [-m <message>] --revision <n> <path>
+  loonfs restore [--profile <name>] [--namespace <name>] [-m <message>] --revision <n> <path>
     Restore a file to a prior revision
 
-  loon rm [--profile <name>] [--namespace <name>] [-m <message>] <path>
+  loonfs rm [--profile <name>] [--namespace <name>] [-m <message>] <path>
     Remove a path
 
-  loon mv [--profile <name>] [--namespace <name>] [-m <message>] <source-path> <dest-path>
+  loonfs mv [--profile <name>] [--namespace <name>] [-m <message>] <source-path> <dest-path>
     Move or rename a path
 
-  loon cp [--profile <name>] [--namespace <name>] [-m <message>] <source-path> <dest-path>
+  loonfs cp [--profile <name>] [--namespace <name>] [-m <message>] <source-path> <dest-path>
     Copy a path
 
 Profile options
   Used by:
-    loon init
-    loon profile create
+    loonfs init
+    loonfs profile create
 
   Generic profile selection:
     --mode <embedded|remote>
@@ -141,7 +141,7 @@ Profile options
 
 Update options
   Used by:
-    loon profile update <name>
+    loonfs profile update <name>
 
   Shared:
     --key-prefix <prefix>
@@ -171,22 +171,22 @@ Update options
     --auth-token <token>
 
 Behavior notes
-  `loon cat` always streams raw bytes to stdout
+  `loonfs cat` always streams raw bytes to stdout
 
-  `loon get ... -` streams raw bytes to stdout
+  `loonfs get ... -` streams raw bytes to stdout
 
   `--json` is rejected for streaming output commands
 
-  If `loon put` omits the remote path, the CLI uses `/<local-filename>`
+  If `loonfs put` omits the remote path, the CLI uses `/<local-filename>`
 
-  `loon put -` reads standard input and needs an explicit remote path,
+  `loonfs put -` reads standard input and needs an explicit remote path,
   because a pipe has no local name to derive one from
 
-  `loon put` reads a large file or a pipe once, a piece at a time, so what
+  `loonfs put` reads a large file or a pipe once, a piece at a time, so what
   it costs in memory follows the transfer and not the payload's size; a
   file small enough to hold is still uploaded in one request
 
-  If `loon get` omits the local destination, the CLI writes to `./<remote-filename>`
+  If `loonfs get` omits the local destination, the CLI writes to `./<remote-filename>`
 
   File-oriented commands do not support directory transfers
 ```

@@ -378,12 +378,12 @@ fn concurrent_embedded_puts_land_or_report_the_fence() {
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
                 .spawn()
-                .expect("spawn loon put")
+                .expect("spawn loonfs put")
         })
         .collect();
     let mut landed = Vec::new();
     for (index, child) in children.into_iter().enumerate() {
-        let output = child.wait_with_output().expect("join loon put");
+        let output = child.wait_with_output().expect("join loonfs put");
         if output.status.success() {
             landed.push(index);
         } else {
@@ -496,7 +496,7 @@ fn commit_messages_ride_the_feed_and_bind_identity() {
     );
 
     // A put's identity includes *which* content object it attaches, and
-    // `loon put` uploads its file every time it runs, so a rerun under the
+    // `loonfs put` uploads its file every time it runs, so a rerun under the
     // same commit id is a different mutation as far as the server is
     // concerned. What makes rerunning safe anyway is the client comparing
     // the bytes it just sent against what that commit id actually
@@ -684,7 +684,7 @@ fn large_and_piped_puts_round_trip_over_the_remote_transport() {
 }
 
 /// Every mutating command takes `-m`, and each one lands its annotation on
-/// its own commit. Reading the feed back through `loon changes` covers the
+/// its own commit. Reading the feed back through `loonfs changes` covers the
 /// flag, the threading, and the rendering in a single pass.
 #[test]
 fn every_mutating_command_records_its_message() {
@@ -846,7 +846,7 @@ fn trash_lists_recoverable_deletions_with_their_handles() {
         "{table}"
     );
     assert!(table.contains("Quarterly Report.PDF"), "{table}");
-    assert!(table.contains("loon undelete "), "{table}");
+    assert!(table.contains("loonfs undelete "), "{table}");
 
     // Recovering through the listed handle empties that entry out of trash.
     let inode = report["root_inode_id"].as_u64().expect("inode");
@@ -1450,9 +1450,9 @@ root = "{}"
     let error = json_error(&init);
     assert_eq!(error["code"], "config_already_exists");
     let message = error["message"].as_str().expect("json string");
-    assert!(message.contains("loon profile create"));
-    assert!(message.contains("loon profile update"));
-    assert!(message.contains("loon profile use"));
+    assert!(message.contains("loonfs profile create"));
+    assert!(message.contains("loonfs profile update"));
+    assert!(message.contains("loonfs profile use"));
     assert_eq!(
         fs::read_to_string(&harness.config_path).expect("read unchanged config"),
         existing
@@ -2522,7 +2522,7 @@ impl Harness {
             .env("HOME", &self.home_dir)
             .args(args)
             .output()
-            .expect("run loon")
+            .expect("run loonfs")
     }
 
     /// Runs the CLI with a payload on standard input, which is the one
@@ -2535,14 +2535,14 @@ impl Harness {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .expect("spawn loon");
+            .expect("spawn loonfs");
         child
             .stdin
             .take()
             .expect("piped stdin")
             .write_all(stdin)
             .expect("write stdin");
-        child.wait_with_output().expect("run loon")
+        child.wait_with_output().expect("run loonfs")
     }
 
     fn store_root(&self, name: &str) -> PathBuf {
@@ -2634,7 +2634,7 @@ impl Drop for ExternalServer {
 }
 
 fn loon_binary_path() -> PathBuf {
-    if let Some(path) = env::var_os("CARGO_BIN_EXE_loon") {
+    if let Some(path) = env::var_os("CARGO_BIN_EXE_loonfs") {
         return PathBuf::from(path);
     }
 
@@ -2643,10 +2643,14 @@ fn loon_binary_path() -> PathBuf {
         .parent()
         .and_then(|path| path.parent())
         .expect("target debug dir");
-    let candidate = debug_dir.join(if cfg!(windows) { "loon.exe" } else { "loon" });
+    let candidate = debug_dir.join(if cfg!(windows) {
+        "loonfs.exe"
+    } else {
+        "loonfs"
+    });
     assert!(
         candidate.exists(),
-        "expected loon binary at {}",
+        "expected loonfs binary at {}",
         candidate.display()
     );
     candidate
@@ -2779,7 +2783,7 @@ fn sorted_object_keys(value: &Value) -> Vec<String> {
 /// What an embedded profile serves: the runtime's own capability document
 /// (`crates/loonfs/tests/capability_conformance.rs` pins it to the spec
 /// text) plus the query plane the CLI composes from `loonfs-grep`, which is
-/// how `loon grep` and `loon admin index-*` reach a store at all.
+/// how `loonfs grep` and `loonfs admin index-*` reach a store at all.
 fn embedded_capability_document() -> loonfs::CapabilityDocument {
     let temp_dir = tempfile::tempdir().expect("tempdir");
     let store = std::sync::Arc::new(
@@ -2807,7 +2811,7 @@ fn assert_cli_command_path_exists(harness: &Harness, command_path: &[&str]) {
     let output = harness.run(&args);
     assert!(
         output.status.success(),
-        "no CLI command path `loon {}`:\n{}",
+        "no CLI command path `loonfs {}`:\n{}",
         command_path.join(" "),
         stderr_string(&output)
     );

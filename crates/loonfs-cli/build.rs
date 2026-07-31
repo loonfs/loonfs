@@ -1,4 +1,4 @@
-//! Embeds the git commit and commit date so `loon version` distinguishes
+//! Embeds the git commit and commit date so `loonfs version` distinguishes
 //! builds that share a crate version (pre-release binaries move much faster
 //! than the version number). Builds without git (release tarballs) fall
 //! back to "unknown".

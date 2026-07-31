@@ -1,9 +1,9 @@
-//! The clap argument grammar for every `loon` command.
+//! The clap argument grammar for every `loonfs` command.
 
 use clap::{Args, Parser, Subcommand};
 use std::io::IsTerminal;
 
-/// `loon x.y.z (commit date)`: the string served by both `--version` and
+/// `loonfs x.y.z (commit date)`: the string served by both `--version` and
 /// the `version` subcommand, built from the metadata `build.rs` embeds.
 pub(crate) const LONG_VERSION: &str = concat!(
     env!("CARGO_PKG_VERSION"),
@@ -15,7 +15,7 @@ pub(crate) const LONG_VERSION: &str = concat!(
 );
 
 #[derive(Debug, Parser)]
-#[command(name = "loon", version = LONG_VERSION)]
+#[command(name = "loonfs", version = LONG_VERSION)]
 pub(crate) struct Cli {
     /// Emit machine-readable JSON instead of human output.
     #[arg(long, global = true)]
@@ -371,7 +371,7 @@ pub(crate) struct FilesystemRmArgs {
     /// subtree stays recoverable through the printed undelete handle.
     #[arg(short, long)]
     pub recursive: bool,
-    /// Annotation recorded on the commit and shown by `loon changes`. Part
+    /// Annotation recorded on the commit and shown by `loonfs changes`. Part
     /// of the commit's identity: resubmitting the same --commit-id with a
     /// different message is a commit id conflict.
     #[arg(short = 'm', long)]
@@ -390,7 +390,7 @@ pub(crate) struct FilesystemMkdirArgs {
     /// Create missing parent directories as well.
     #[arg(short = 'p', long)]
     pub parents: bool,
-    /// Annotation recorded on the commit and shown by `loon changes`. Part
+    /// Annotation recorded on the commit and shown by `loonfs changes`. Part
     /// of the commit's identity: resubmitting the same --commit-id with a
     /// different message is a commit id conflict.
     #[arg(short = 'm', long)]
@@ -491,7 +491,7 @@ pub(crate) struct FilesystemPutArgs {
     /// (implies --force); a raced write fails instead of stacking on it.
     #[arg(long)]
     pub expected_revision: Option<u64>,
-    /// Annotation recorded on the commit and shown by `loon changes`. Part
+    /// Annotation recorded on the commit and shown by `loonfs changes`. Part
     /// of the commit's identity: resubmitting the same --commit-id with a
     /// different message is a commit id conflict.
     #[arg(short = 'm', long)]
@@ -515,7 +515,7 @@ pub(crate) struct FilesystemTransferArgs {
     /// Replace the destination if it already exists.
     #[arg(long)]
     pub force: bool,
-    /// Annotation recorded on the commit and shown by `loon changes`. Part
+    /// Annotation recorded on the commit and shown by `loonfs changes`. Part
     /// of the commit's identity: resubmitting the same --commit-id with a
     /// different message is a commit id conflict.
     #[arg(short = 'm', long)]
@@ -533,7 +533,7 @@ pub(crate) struct FilesystemRestoreArgs {
     pub path: String,
     #[arg(long)]
     pub revision: u64,
-    /// Annotation recorded on the commit and shown by `loon changes`. Part
+    /// Annotation recorded on the commit and shown by `loonfs changes`. Part
     /// of the commit's identity: resubmitting the same --commit-id with a
     /// different message is a commit id conflict.
     #[arg(short = 'm', long)]
@@ -559,7 +559,7 @@ pub(crate) struct FilesystemUndeleteArgs {
     /// so a stale command cannot cancel a later delete.
     #[arg(long)]
     pub deleted_at: u64,
-    /// Annotation recorded on the commit and shown by `loon changes`. Part
+    /// Annotation recorded on the commit and shown by `loonfs changes`. Part
     /// of the commit's identity: resubmitting the same --commit-id with a
     /// different message is a commit id conflict.
     #[arg(short = 'm', long)]

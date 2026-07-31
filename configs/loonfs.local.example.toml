@@ -1,5 +1,5 @@
 # Example LoonFS CLI configuration for a local embedded profile.
-# The CLI reads this file from ~/.loonfs/config.toml; `loon init` writes it.
+# The CLI reads this file from ~/.loonfs/config.toml; `loonfs init` writes it.
 
 config_version = 1
 default_profile = "local"

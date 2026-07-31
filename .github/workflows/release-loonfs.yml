@@ -65,15 +65,15 @@ jobs:
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: release-loon-${{ matrix.target }}
+          shared-key: release-loonfs-${{ matrix.target }}
 
-      - name: Build loon release binary
+      - name: Build loonfs release binary
         run: cargo build --release -p loonfs-cli --target ${{ matrix.target }}
 
       - name: Package release artifact
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
-        run: scripts/package-loon-release.sh --target "${{ matrix.target }}" --version "$VERSION" --artifact-dir dist
+        run: scripts/package-loonfs-release.sh --target "${{ matrix.target }}" --version "$VERSION" --artifact-dir dist
 
       - name: Sanity check packaged binary
         env:
@@ -81,22 +81,22 @@ jobs:
         shell: bash
         run: |
           tmpdir="$(mktemp -d)"
-          tar -xzf "dist/loon-${{ matrix.target }}.tar.gz" -C "$tmpdir"
+          tar -xzf "dist/loonfs-${{ matrix.target }}.tar.gz" -C "$tmpdir"
           if [ ! -f "$tmpdir/LICENSE" ]; then
             echo "expected LICENSE in release archive" >&2
             exit 1
           fi
-          actual="$("$tmpdir/loon" version)"
+          actual="$("$tmpdir/loonfs" version)"
           if [ "$actual" != "$VERSION" ]; then
-            echo "expected loon version $VERSION, got $actual" >&2
+            echo "expected loonfs version $VERSION, got $actual" >&2
             exit 1
           fi
 
       - name: Upload packaged artifact
         uses: actions/upload-artifact@v4
         with:
-          name: loon-${{ matrix.target }}
-          path: dist/loon-${{ matrix.target }}.tar.gz
+          name: loonfs-${{ matrix.target }}
+          path: dist/loonfs-${{ matrix.target }}.tar.gz
           if-no-files-found: error
 
   publish:
@@ -109,7 +109,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: dist
-          pattern: loon-*
+          pattern: loonfs-*
           merge-multiple: true
 
       - name: Verify release artifacts exist
@@ -117,7 +117,7 @@ jobs:
         working-directory: dist
         run: |
           shopt -s nullglob
-          files=(loon-*.tar.gz)
+          files=(loonfs-*.tar.gz)
           if [ "${#files[@]}" -eq 0 ]; then
             echo "no release artifacts were produced" >&2
             exit 1
@@ -125,13 +125,13 @@ jobs:
 
       - name: Generate checksums
         working-directory: dist
-        run: sha256sum loon-*.tar.gz > SHA256SUMS
+        run: sha256sum loonfs-*.tar.gz > SHA256SUMS
 
       - name: Upload assets to GitHub release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.release.tag_name }}
           files: |
-            dist/loon-*.tar.gz
+            dist/loonfs-*.tar.gz
             dist/SHA256SUMS
           fail_on_unmatched_files: true

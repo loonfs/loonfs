@@ -1,4 +1,4 @@
-//! The `loon` CLI binary: parse arguments, run the command, render the
+//! The `loonfs` CLI binary: parse arguments, run the command, render the
 //! result.
 
 use std::process::ExitCode;
