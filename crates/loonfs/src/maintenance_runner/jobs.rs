@@ -318,12 +318,14 @@ fn gc_step_result(gc: GcResponse, submitted_cursor: Option<&str>) -> Maintenance
     MaintenanceStepResult {
         conclusion: gc_conclusion(&gc, submitted_cursor),
         continuation: gc.next_cursor,
-        // A pass reports what it retained, never when that retention
-        // lapses: the lease and grace deadlines it compares against live
-        // inside the sweep and are not in `GcResponse`. Surfacing them
-        // would be new core plumbing, and this job does not need it — the
-        // upload paths plant the deadlines they create as they create them.
-        not_before_ms: None,
+        // The pass itself is the source of truth for when it should be run
+        // again: it compared every retained candidate against its own
+        // clock, so it knows the soonest of those waits without being told.
+        // Handing it back here is what makes a pass self-scheduling —
+        // reclamation an upload path never planted a deadline for, and the
+        // deadlines a restart forgot, both come back through the next pass
+        // over the namespace rather than through a side channel.
+        not_before_ms: gc.next_reclamation_at_ms,
     }
 }
 
@@ -543,7 +545,7 @@ mod tests {
         );
         assert_eq!(
             first.not_before_ms, None,
-            "a pass reports no deadline of its own; the upload paths plant those"
+            "a pass that retained nothing on a clock has no deadline to report"
         );
 
         // The resumed step is handed that cursor back. One that cannot get
@@ -560,6 +562,27 @@ mod tests {
         assert_eq!(
             cleared.continuation, None,
             "a pass that reached the end of the keyspace carries nothing forward"
+        );
+    }
+
+    /// The deadline a pass reports for what it retained becomes the key's
+    /// own, which is what makes a pass schedule its own successor.
+    #[test]
+    fn a_collection_pass_hands_its_soonest_retained_deadline_to_the_runner() {
+        let mut retained = GcResponse::empty(namespace_id("demo"));
+        retained.retained_candidates = 2;
+        retained.next_reclamation_at_ms = Some(1_700_000_600_000);
+
+        let result = gc_step_result(retained, None);
+        assert_eq!(
+            result.conclusion,
+            MaintenanceStepConclusion::Idle,
+            "a candidate inside its grace window is still not work to redo now"
+        );
+        assert_eq!(
+            result.not_before_ms,
+            Some(1_700_000_600_000),
+            "the runner parks the key on the pass's own soonest retention"
         );
     }
 

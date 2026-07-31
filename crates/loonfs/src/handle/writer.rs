@@ -186,18 +186,21 @@ impl FsWriter {
     /// server does. Dropping the handle without calling this is best-effort
     /// cleanup, not the documented graceful shutdown path.
     pub async fn shutdown_background(&self) -> Result<()> {
-        // Closing maintenance admission has to come first, and has to happen
-        // before this future's first await. A maintenance step parked in its
-        // own publication only finishes once the drain below settles it, and
-        // a step that finishes while the queue is still open hands its slot
-        // straight to a queued namespace — spawning the exact work the
-        // shutdown decided to drop. Closing first makes that transfer
-        // impossible for the whole drain.
+        // Closing maintenance admission has to come first, and before this
+        // future's first await. The drain below is that await: while it is
+        // pending the runtime keeps polling the runner, so a nudge landing
+        // in the window is admitted and its step does real durable work
+        // after the shutdown began — and a finishing step hands its slot
+        // straight to the next queued key rather than releasing it. Closing
+        // first leaves that window empty.
         self.bits.maintenance.shut_down();
-        // Publications second: an in-flight step still has one to settle, and
-        // settling it is what lets that step's task end. Draining without
-        // closing admission keeps the handle usable; a caller that keeps
-        // submitting concurrently just keeps the drain waiting.
+        // Publications second, and this order cannot wedge: no maintenance
+        // step submits to the publication service at all — every job
+        // compare-and-swaps the namespace head through `FsAdmin` — so the
+        // drain waits only on client work and its pending set can only
+        // shrink. Draining without closing admission keeps the handle
+        // usable; a caller that keeps submitting concurrently just keeps
+        // the drain waiting.
         self.publisher.drain().await?;
         self.bits.maintenance.drain().await
     }
@@ -404,12 +407,12 @@ mod tests {
     use tempfile::tempdir;
 
     /// Maintenance admission must close on the shutdown's first poll, before
-    /// it starts draining publications. A step parked in its own publication
-    /// only finishes once that drain settles it, so a queue still open here
-    /// lets the finishing step hand its slot on and spawn work the shutdown
-    /// already decided to drop. Asserting on the first poll pins the order
-    /// on every machine; the integration coverage in `tests/it/handles.rs`
-    /// only loses the race on some.
+    /// it starts draining publications. The drain is a wait, and the runner
+    /// stays live across it: a queue still open here lets a nudge landing in
+    /// that window be admitted, and lets a finishing step hand its slot on
+    /// and spawn work the shutdown already decided to drop. Asserting on the
+    /// first poll pins the order on every machine; the integration coverage
+    /// in `tests/it/handles.rs` only loses the race on some.
     #[tokio::test]
     async fn shutdown_closes_maintenance_admission_before_draining_publications() {
         let temp_dir = tempdir().expect("tempdir");

@@ -55,6 +55,10 @@ enum StepAnswer {
     Conclude(MaintenanceStepConclusion),
     /// Conclude, and tell the runner where this step stopped.
     Continue(MaintenanceStepConclusion, Option<String>),
+    /// Conclude, and tell the runner when what this step left behind
+    /// becomes eligible — what a collection pass reports for what it
+    /// retained.
+    Due(MaintenanceStepConclusion, u64),
     Fail,
     Panic,
 }
@@ -211,6 +215,11 @@ impl MaintenanceJob for TestJob {
                 continuation,
                 not_before_ms: None,
             }),
+            StepAnswer::Due(conclusion, not_before_ms) => Ok(MaintenanceStepResult {
+                conclusion,
+                continuation: None,
+                not_before_ms: Some(not_before_ms),
+            }),
             StepAnswer::Fail => Err(RuntimeError::Config("scripted step failure".to_owned())),
             StepAnswer::Panic => panic!("injected maintenance step panic"),
         }
@@ -222,6 +231,47 @@ impl MaintenanceJob for TestJob {
             .expect("probes")
             .push(namespace_id.clone());
         Ok(*self.probe_answer.lock().expect("probe answer"))
+    }
+}
+
+const SUBSCRIBING_JOB: MaintenanceJobId = MaintenanceJobId::new("subscribing");
+
+/// A job that says publications concern it, and records which namespaces
+/// it was told about.
+#[derive(Default)]
+struct SubscribingJob {
+    steps: StdMutex<Vec<NamespaceId>>,
+}
+
+impl SubscribingJob {
+    fn stepped(&self) -> Vec<String> {
+        names(&self.steps)
+    }
+}
+
+#[async_trait::async_trait]
+impl MaintenanceJob for SubscribingJob {
+    fn id(&self) -> MaintenanceJobId {
+        SUBSCRIBING_JOB
+    }
+
+    fn nudged_by_publications(&self) -> bool {
+        true
+    }
+
+    async fn step(
+        &self,
+        namespace_id: &NamespaceId,
+        _continuation: Option<&str>,
+    ) -> Result<MaintenanceStepResult> {
+        self.steps.lock().expect("steps").push(namespace_id.clone());
+        Ok(MaintenanceStepResult::concluded(
+            MaintenanceStepConclusion::Idle,
+        ))
+    }
+
+    async fn probe(&self, _namespace_id: &NamespaceId) -> Result<MaintenanceProbe> {
+        Ok(MaintenanceProbe::Idle)
     }
 }
 
@@ -509,6 +559,66 @@ async fn a_key_planted_in_the_future_does_not_fire_early() {
         job.stepped(),
         vec!["leased".to_owned()],
         "the key fires once its time arrives"
+    );
+}
+
+/// The other end of the same mechanism: a step that reports a deadline
+/// arms its own key with it. This is what makes a pass self-scheduling —
+/// reclamation nothing planted a deadline for, and deadlines a restart
+/// forgot, both come back through the next pass over the namespace.
+#[tokio::test]
+async fn a_step_that_reports_a_deadline_re_arms_its_own_key() {
+    let clock = ManualClock::at(1_000_000);
+    let job = TestJob::scripted(
+        [StepAnswer::Due(MaintenanceStepConclusion::Idle, 1_060_000)],
+        StepAnswer::Conclude(MaintenanceStepConclusion::Idle),
+    );
+    let runner = runner_with(FsBackgroundWork::Enabled, clock.clone(), job.clone());
+    let namespace_id = namespace_id("retained");
+
+    runner.handle().nudge(TEST_JOB, &namespace_id);
+    runner.drain().await.expect("the first pass settles");
+    assert_eq!(job.stepped().len(), 1);
+    assert_eq!(
+        runner.not_before_ms(TEST_JOB, &namespace_id),
+        Some(1_060_000),
+        "an idle conclusion still parks on the deadline the step reported"
+    );
+
+    clock.advance_to(1_060_000);
+    runner.tick_now();
+    runner.drain().await.expect("the re-armed pass settles");
+    assert_eq!(
+        job.stepped().len(),
+        2,
+        "the deadline the step reported is what brought the key back, with nothing else asking"
+    );
+    assert_eq!(
+        runner.not_before_ms(TEST_JOB, &namespace_id),
+        None,
+        "the second pass reported nothing left to wait for"
+    );
+}
+
+/// Publications reach the jobs that asked for them and no others, so a
+/// host wires nothing into the write path on any job's behalf.
+#[tokio::test]
+async fn a_publication_nudges_only_the_jobs_that_subscribe_to_it() {
+    let quiet = TestJob::idle();
+    let subscriber = Arc::new(SubscribingJob::default());
+    let runner = enabled_runner(quiet.clone());
+    runner
+        .register(subscriber.clone())
+        .expect("register the subscribing job");
+    let namespace_id = namespace_id("published");
+
+    runner.nudge_publication_subscribers(&namespace_id);
+    runner.drain().await.expect("the subscriber's step settles");
+
+    assert_eq!(subscriber.stepped(), vec!["published".to_owned()]);
+    assert!(
+        quiet.stepped().is_empty(),
+        "a job that did not subscribe hears nothing from a publication"
     );
 }
 

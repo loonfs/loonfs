@@ -819,25 +819,34 @@ pub(crate) async fn publish_batch_with_engine(
         .into_iter()
         .map(|result| result.map_err(RuntimeError::Core))
         .collect::<Vec<_>>();
-    notify_publish_observer(writer, namespace_id, &results);
+    // One reading of what landed serves both the host's observer and the
+    // jobs that asked to hear about publications.
+    if let Some(committed_seq) = landed_commit_seq(&results) {
+        notify_publish_observer(writer, namespace_id, committed_seq);
+        writer
+            .maintenance
+            .nudge_publication_subscribers(namespace_id);
+    }
     maybe_auto_step_after_publish(writer, namespace_id, wal_tail_segments);
     results
+}
+
+/// The furthest sequence this batch actually committed, or `None` when
+/// nothing in it landed.
+fn landed_commit_seq(results: &[Result<CommitResponse>]) -> Option<ChangeSeq> {
+    results
+        .iter()
+        .filter_map(|result| result.as_ref().ok())
+        .map(|response| response.committed_seq)
+        .max()
 }
 
 fn notify_publish_observer(
     writer: &WriterBits,
     namespace_id: &NamespaceId,
-    results: &[Result<CommitResponse>],
+    committed_seq: ChangeSeq,
 ) {
-    let Some(observer) = &writer.publish_observer else {
-        return;
-    };
-    if let Some(committed_seq) = results
-        .iter()
-        .filter_map(|result| result.as_ref().ok())
-        .map(|response| response.committed_seq)
-        .max()
-    {
+    if let Some(observer) = &writer.publish_observer {
         observer(namespace_id, committed_seq);
     }
 }

@@ -177,10 +177,12 @@ read the grep root, and — only for a steady root sitting at a commit
 boundary — ask the change feed for one commit after its watermark. Two small
 reads answer whether the index trails its namespace.
 
-A server that maintains the index registers that job on its writer. Enable
-nudges the namespace so the backfill starts at once; every successful
-runtime publication nudges it through the writer's publish observer; and a
-grep query nudges a namespace whose probe says it is behind, which is what
+A server that maintains the index registers that job on its writer, and
+registering it is all the wiring there is: the job says on the maintenance
+trait that publications concern it, so the runtime nudges it after every
+publication the writer commits without the host connecting anything to the
+write path. Enable nudges the namespace so the backfill starts at once, and
+a grep query nudges a namespace whose probe says it is behind, which is what
 resumes durable work after a restart without a scan. Disable is one durable
 compare-and-swap and nothing else: a step already running loses its own root
 publication to it, retries, reads a disabled root, and the runner forgets the

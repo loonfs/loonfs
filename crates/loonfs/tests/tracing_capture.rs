@@ -119,11 +119,23 @@ fn background_step_conclusions_emit_debug_events() {
         assert!(step.contains(field), "missing `{field}` in: {step}");
     }
     let admission = find_event(&log, "maintenance step settled");
-    for field in ["job=", "namespace_id=", "conclusion=", "elapsed_ms="] {
+    // What the step cost, in both halves: waiting for a permit, then running.
+    for field in [
+        "job=",
+        "namespace_id=",
+        "conclusion=",
+        "queued_ms=",
+        "elapsed_ms=",
+    ] {
         assert!(
             admission.contains(field),
             "missing `{field}` in: {admission}"
         );
+    }
+    // What the queue looked like when the runner claimed permits.
+    let dispatch = find_event(&log, "maintenance keys dispatched");
+    for field in ["dispatched=", "ready_queued=", "oldest_queued_ms="] {
+        assert!(dispatch.contains(field), "missing `{field}` in: {dispatch}");
     }
     // The spans this work runs under say maintenance, which is what it is.
     for span in ["loonfs.maintenance.step", "loonfs.maintenance.wal_flush"] {

@@ -68,6 +68,13 @@ struct KeyState {
     /// Ticket order is the fairness rule: among eligible keys the one that
     /// has waited longest takes the next free slot.
     ready_ticket: Option<u64>,
+    /// When the ticket above was taken. Observability only — the ticket is
+    /// what orders the queue — and it is what lets a trace say how long a
+    /// key has been waiting rather than only that it is.
+    ready_at_ms: Option<u64>,
+    /// How long the last dispatch of this key waited between taking its
+    /// ticket and holding a permit. Read by the step's own trace.
+    queue_wait_ms: u64,
     /// Wall-clock millisecond the next planted obligation comes due. Not a
     /// gate on a key some other trigger already made ready — a scheduled
     /// future readiness of its own, so an unrelated run never cancels a
@@ -108,6 +115,7 @@ impl KeyState {
 
     fn clear_schedule(&mut self) {
         self.ready_ticket = None;
+        self.ready_at_ms = None;
         self.not_before_ms = None;
         self.obligation_until_ms = None;
         self.retry_at_ms = None;
@@ -115,6 +123,16 @@ impl KeyState {
 
     fn owes_an_obligation(&self) -> bool {
         self.not_before_ms.is_some() || self.obligation_until_ms.is_some()
+    }
+
+    /// Takes a queue ticket unless the key already holds one, so repeated
+    /// requests coalesce into the one run the first ticket bought.
+    fn queue(&mut self, ticket: u64, now_ms: u64) {
+        if self.ready_ticket.is_some() {
+            return;
+        }
+        self.ready_ticket = Some(ticket);
+        self.ready_at_ms = Some(now_ms);
     }
 }
 
@@ -140,9 +158,11 @@ pub(crate) struct Admission {
     /// Where the next reconciliation sweep resumes, so a probe budget
     /// cannot starve the tail of a large admitted set.
     reconcile_cursor: Option<MaintenanceKey>,
-    /// Here for one thing: the draw the error backoff jitters with. Every
-    /// `now_ms` a decision needs is still passed in, so the tests below can
-    /// move time by hand and name the delay they expect.
+    /// Here for the draw the error backoff jitters with, and for the queue
+    /// timestamp [`Self::nudge`] stamps — an observability field, not an
+    /// input to anything. Every `now_ms` a decision needs is still passed
+    /// in, so the tests below can move time by hand and name the delay they
+    /// expect.
     clock: Arc<dyn MaintenanceClock>,
 }
 
@@ -189,6 +209,31 @@ impl Admission {
             .and_then(|state| state.continuation.clone())
     }
 
+    /// How long the step about to run waited for its permit.
+    pub(crate) fn queue_wait_ms(&self, key: &MaintenanceKey) -> u64 {
+        self.keys.get(key).map_or(0, |state| state.queue_wait_ms)
+    }
+
+    /// Keys holding a ticket: work admitted, eligible, and waiting for a
+    /// permit.
+    pub(crate) fn ready_queued(&self) -> usize {
+        self.keys
+            .values()
+            .filter(|state| state.ready_ticket.is_some())
+            .count()
+    }
+
+    /// How long the longest-waiting queued key has been waiting, or `0`
+    /// when nothing is queued.
+    pub(crate) fn oldest_queued_ms(&self, now_ms: u64) -> u64 {
+        self.keys
+            .values()
+            .filter(|state| state.ready_ticket.is_some())
+            .filter_map(|state| state.ready_at_ms)
+            .min()
+            .map_or(0, |ready_at_ms| now_ms.saturating_sub(ready_at_ms))
+    }
+
     fn take_ticket(&mut self) -> u64 {
         let ticket = self.next_ticket;
         self.next_ticket = self.next_ticket.saturating_add(1);
@@ -205,10 +250,11 @@ impl Admission {
             return;
         }
         let ticket = self.take_ticket();
-        let state = self.keys.entry(key).or_default();
-        if state.ready_ticket.is_none() {
-            state.ready_ticket = Some(ticket);
-        }
+        // The only decision-free clock reading here: the queue timestamp a
+        // trace reports. Every scheduling decision still takes its `now_ms`
+        // as an argument.
+        let now_ms = self.clock.now_ms();
+        self.keys.entry(key).or_default().queue(ticket, now_ms);
     }
 
     /// Plants a timed obligation on the key: it becomes eligible on its own
@@ -238,15 +284,20 @@ impl Admission {
 
     /// Turns arrived obligations into ready keys, and re-arms a key whose
     /// latest planted deadline is still ahead of the one that just fired.
-    pub(crate) fn promote_due(&mut self, now_ms: u64) {
+    ///
+    /// Reports how many keys arrived, which is what tells a timer wake a
+    /// deadline caused it from one an ordinary notify did.
+    pub(crate) fn promote_due(&mut self, now_ms: u64) -> usize {
         if self.closed {
-            return;
+            return 0;
         }
         let mut ticket = self.next_ticket;
+        let mut promoted = 0usize;
         for state in self.keys.values_mut() {
             if state.not_before_ms.is_none_or(|at_ms| at_ms > now_ms) {
                 continue;
             }
+            promoted += 1;
             state.not_before_ms = state
                 .obligation_until_ms
                 .filter(|until_ms| *until_ms > now_ms);
@@ -254,11 +305,12 @@ impl Admission {
                 state.obligation_until_ms = None;
             }
             if state.ready_ticket.is_none() {
-                state.ready_ticket = Some(ticket);
+                state.queue(ticket, now_ms);
                 ticket = ticket.saturating_add(1);
             }
         }
         self.next_ticket = ticket;
+        promoted
     }
 
     /// Claims a permit for the fairest eligible key, if there is one and the
@@ -269,7 +321,7 @@ impl Admission {
             return None;
         }
         let key = self.pick_eligible(now_ms)?;
-        self.hold(&key);
+        self.hold(&key, now_ms);
         self.running = self.running.saturating_add(1);
         Some(key)
     }
@@ -303,12 +355,12 @@ impl Admission {
             return None;
         }
         if renudged && self.is_eligible(key, now_ms) {
-            self.hold(key);
+            self.hold(key, now_ms);
             return Some(key.clone());
         }
         match self.pick_eligible(now_ms) {
             Some(next) => {
-                self.hold(&next);
+                self.hold(&next, now_ms);
                 Some(next)
             }
             None => {
@@ -426,9 +478,7 @@ impl Admission {
                 // waiting, resuming from wherever this step stopped.
                 MaintenanceStepConclusion::Progressed | MaintenanceStepConclusion::Superseded => {
                     state.continuation = result.continuation;
-                    if state.ready_ticket.is_none() {
-                        state.ready_ticket = Some(ticket);
-                    }
+                    state.queue(ticket, now_ms);
                 }
                 // Work is left and this step's policy could not move it.
                 // Parks like `Idle` — requeueing zero-progress work would
@@ -468,9 +518,7 @@ impl Admission {
         };
         state.consecutive_failures = failures;
         state.retry_at_ms = Some(now_ms.saturating_add(delay_ms));
-        if state.ready_ticket.is_none() {
-            state.ready_ticket = Some(ticket);
-        }
+        state.queue(ticket, now_ms);
     }
 
     fn is_eligible(&self, key: &MaintenanceKey, now_ms: u64) -> bool {
@@ -499,9 +547,13 @@ impl Admission {
 
     /// Marks a key as the one this permit is running; the permit count is
     /// the caller's business, because a handoff keeps it.
-    fn hold(&mut self, key: &MaintenanceKey) {
+    fn hold(&mut self, key: &MaintenanceKey, now_ms: u64) {
         if let Some(state) = self.keys.get_mut(key) {
+            state.queue_wait_ms = state
+                .ready_at_ms
+                .map_or(0, |ready_at_ms| now_ms.saturating_sub(ready_at_ms));
             state.ready_ticket = None;
+            state.ready_at_ms = None;
             state.inflight = true;
         }
     }

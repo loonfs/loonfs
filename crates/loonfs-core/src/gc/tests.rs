@@ -651,6 +651,122 @@ async fn upload_gc_aborts_an_expired_session_then_reaps_it() {
     assert_eq!(report.deleted_upload_sessions, 0);
 }
 
+/// A pass knows when the things it retained stop being retained, because
+/// it compared every one of them against its own clock to decide. Saying so
+/// is what lets a scheduler come back exactly once, for exactly that
+/// namespace, with nothing else having to remember.
+#[tokio::test]
+async fn a_pass_reports_the_soonest_deadline_it_retained() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = context(1_000);
+    bootstrap_namespace(&store, &namespace_id, &setup, false)
+        .await
+        .expect("bootstrap");
+    let (upload_id, ..) = stage_upload(&store, &namespace_id, &setup).await;
+    let expires_at_ms = setup.now_ms + UPLOAD_SESSION_LEASE_MS;
+
+    // One un-expired open session and nothing else: the lease plus the
+    // pass's own grace window is the whole answer.
+    let inside = context(setup.now_ms + 1);
+    let report = gc_namespace(&store, &namespace_id, &config(), &inside)
+        .await
+        .expect("gc pass inside the lease");
+    assert_eq!(report.retained_candidates, 1);
+    assert_eq!(
+        report.next_reclamation_at_ms,
+        Some(expires_at_ms + GRACE_MS),
+        "an open session's reclamation waits for its lease and then the grace window"
+    );
+
+    // Completing it moves the deadline to the derived content grace, which
+    // is the one the next pass is too early for.
+    let completed_at = context(setup.now_ms + 2);
+    complete_staged_upload(&store, &namespace_id, &upload_id, &completed_at).await;
+    let report = gc_namespace(&store, &namespace_id, &config(), &completed_at)
+        .await
+        .expect("gc pass over the completed session");
+    assert_eq!(
+        report.next_reclamation_at_ms,
+        Some(completed_at.now_ms + CONTENT_RECLAMATION_GRACE_MS),
+        "a completed session's content is protected by the derived grace, not the configured one"
+    );
+}
+
+/// The abort gap, closed at the source: nothing plants a deadline when a
+/// session is aborted, so the pass that observes the abort reports the one
+/// the abort created. A restart loses every in-memory deadline the same
+/// way, and is covered by the same sentence.
+#[tokio::test]
+async fn an_aborted_session_is_reclaimed_from_the_deadline_the_pass_reported() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = context(1_000);
+    bootstrap_namespace(&store, &namespace_id, &setup, false)
+        .await
+        .expect("bootstrap");
+    let (upload_id, ..) = stage_upload(&store, &namespace_id, &setup).await;
+    let session_key =
+        loonfs_objectstore::keys::upload_session(namespace_id.as_str(), upload_id.as_str());
+
+    // The pass that aborts the session is the only thing that knows the
+    // record now ages out a grace window from this instant.
+    let expired = context(setup.now_ms + UPLOAD_SESSION_LEASE_MS + GRACE_MS + 1);
+    let report = gc_namespace(&store, &namespace_id, &config(), &expired)
+        .await
+        .expect("gc pass past the lease");
+    assert_eq!(report.deleted_upload_sessions, 0);
+    let reclaim_at_ms = report
+        .next_reclamation_at_ms
+        .expect("the abort this pass performed is a deadline it created");
+    assert_eq!(reclaim_at_ms, expired.now_ms + GRACE_MS);
+
+    // Nothing between the two passes says anything about this namespace:
+    // the time the first pass reported is the whole trigger.
+    let reclaiming = context(reclaim_at_ms + 1);
+    let report = gc_namespace(&store, &namespace_id, &config(), &reclaiming)
+        .await
+        .expect("gc pass at the reported deadline");
+    assert_eq!(report.deleted_upload_sessions, 1);
+    assert!(store.head(&session_key).await.expect("head").is_none());
+    assert_eq!(
+        report.next_reclamation_at_ms, None,
+        "a pass that reclaimed everything it found owes no later visit"
+    );
+}
+
+/// Completes a staged session against the content it staged.
+async fn complete_staged_upload<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    upload_id: &UploadId,
+    context: &MutationContext,
+) {
+    let content_store_id =
+        crate::namespace::catalog::load_namespace_content_store_id(store, namespace_id)
+            .await
+            .expect("content store id");
+    let session = read_upload_session(store, namespace_id, upload_id)
+        .await
+        .expect("open session");
+    let content_ref = session
+        .staged_content_ref
+        .clone()
+        .expect("a staged session carries the reference it wrote");
+    crate::protocol::complete_upload(
+        store,
+        namespace_id,
+        &content_store_id,
+        upload_id,
+        &loonfs_api::v0::CompleteUploadRequest::for_content_ref(content_ref),
+        context,
+    )
+    .await
+    .expect("complete upload");
+}
+
 /// A session record written straight into the store, never touched by an
 /// upload, still ages out on nothing but its own recorded lease.
 #[tokio::test]
