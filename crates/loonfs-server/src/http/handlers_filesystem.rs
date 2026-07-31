@@ -213,7 +213,7 @@ pub(super) async fn get_file_bytes(
         path = "/v0/namespaces/{namespace}/filesystem/trash",
         tag = "filesystem",
         summary = "List recoverable deletions",
-        description = "Returns the namespace's active deletions in ascending deleted-root inode order. Tombstone rows are retained forever, so entries never age out; each carries the inode id and deletion sequence undelete needs, plus the deleted name when the delete recorded one.",
+        description = "Returns the namespace's recoverable deletions, oldest deletion first. Entries never age out at the retention floor; each carries the inode id and deletion sequence undelete needs, plus the deleted name when the delete recorded one.",
         params(
             ("namespace" = String, Path, description = "Namespace id"),
             ("limit" = Option<String>, Query, description = "Maximum page size"),

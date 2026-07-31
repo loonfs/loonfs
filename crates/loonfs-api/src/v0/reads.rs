@@ -192,7 +192,7 @@ pub struct ListTrashResponse {
     pub namespace_id: NamespaceId,
     /// Head sequence this page was evaluated at.
     pub head_seq: ChangeSeq,
-    /// Active deletions in ascending root-inode order.
+    /// Recoverable deletions, oldest deletion first.
     pub entries: Vec<TrashEntry>,
     /// Present when another page follows.
     #[serde(default, skip_serializing_if = "Option::is_none")]

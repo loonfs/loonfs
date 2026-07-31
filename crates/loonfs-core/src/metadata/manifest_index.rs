@@ -2,16 +2,16 @@
 //! scans.
 
 use super::row_decode::{
-    commit_receipt_from_manifest_row, direntry_bind_from_manifest_row,
-    direntry_unbind_from_manifest_row, inode_from_manifest_row, revision_from_manifest_row,
-    tombstone_from_manifest_row,
+    active_deletion_from_manifest_row, commit_receipt_from_manifest_row,
+    direntry_bind_from_manifest_row, direntry_unbind_from_manifest_row, inode_from_manifest_row,
+    revision_from_manifest_row, tombstone_from_manifest_row,
 };
 use crate::checkpoint::{ManifestLoadError, Readahead, VerifiedMetadataTables};
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
 use crate::metadata::{
-    unbind_matches_binding, CommitReceiptRecord, DirentryBindRecord, DirentryUnbindRecord,
-    InodeRecord, RevisionRecord, SubtreeTombstoneRecord,
+    unbind_matches_binding, ActiveDeletionRecord, CommitReceiptRecord, DirentryBindRecord,
+    DirentryUnbindRecord, InodeRecord, RevisionRecord, SubtreeTombstoneRecord,
 };
 use loonfs_api::wire::manifest::lookup_keys;
 use loonfs_api::wire::manifest::MetadataTableFamily;
@@ -277,18 +277,27 @@ pub(super) async fn revisions_for_inode_page_desc<S: ObjectStore + ?Sized>(
         .collect()
 }
 
-/// Every tombstone event row in the namespace, across all roots. The trash
-/// listing's raw material: rows are immortal (never dropped by compaction),
-/// so this is complete for the namespace's whole history.
-pub(super) async fn all_subtree_tombstones<S: ObjectStore + ?Sized>(
+/// One key-ordered page of the derived active-deletion family, with each
+/// row's stored key. The trash listing's whole durable read: the family is
+/// keyed by deletion generation, so a page is a range scan whose cost follows
+/// the page, not the namespace's deletion history.
+pub(super) async fn active_deletions_page<S: ObjectStore + ?Sized>(
     tables: &VerifiedMetadataTables<'_, S>,
-) -> Result<Vec<SubtreeTombstoneRecord>> {
+    lower_bound: &str,
+    upper_bound: Option<&str>,
+    limit: usize,
+) -> Result<Vec<(String, ActiveDeletionRecord)>> {
     tables
-        .scan_prefix(MetadataTableFamily::Tombstones, "tombstone-")
+        .scan_range_page_with_keys(
+            MetadataTableFamily::ActiveDeletions,
+            lower_bound,
+            upper_bound,
+            limit,
+        )
         .await
         .map_err(manifest_error_to_core)?
         .into_iter()
-        .map(tombstone_from_manifest_row)
+        .map(|(row_key, row)| Ok((row_key, active_deletion_from_manifest_row(row)?)))
         .collect()
 }
 

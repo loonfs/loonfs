@@ -274,11 +274,15 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .await
     }
 
-    /// One page of the namespace's recoverable deletions: active subtree
-    /// tombstones in ascending root-inode order, reduced newest-event-wins
-    /// per root through the same shared helper every visibility read uses.
-    /// The scan is namespace-wide over the immortal tombstone family, so a
-    /// deletion stays listed however far the replay floor advances.
+    /// One page of the namespace's recoverable deletions, oldest deletion
+    /// first, as one bounded range scan over the derived active-deletion
+    /// family.
+    ///
+    /// The materializer keeps that family in step with the tombstone family —
+    /// a delete adds the row, an undelete removes it — so the page reads only
+    /// the deletions it returns, never the namespace's whole deletion
+    /// history. Rows are never dropped at the retention floor, so a deletion
+    /// stays listed and recoverable however far the floor advances.
     pub(crate) async fn list_trash_page(
         &self,
         request: PageRequest<TrashPageCursor>,
@@ -293,60 +297,42 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
                 .into());
             }
         }
-        let records = self
-            .metadata_view()
-            .session()
-            .all_tombstone_records()
-            .await?;
-        let mut per_root: std::collections::BTreeMap<InodeId, Vec<_>> =
-            std::collections::BTreeMap::new();
-        for record in records {
-            per_root
-                .entry(record.root_inode_id)
-                .or_default()
-                .push(record);
-        }
         let start_after = request
             .cursor
             .as_ref()
-            .map(|cursor| cursor.last_root_inode_id);
-        let mut entries = Vec::new();
-        for (root_inode_id, records) in per_root {
-            if start_after.is_some_and(|after| root_inode_id <= after) {
-                continue;
-            }
-            let Some(active) =
-                crate::metadata::active_tombstone_from_records(records, self.head.seq)
-            else {
-                continue;
-            };
-            entries.push(TrashEntry {
-                root_inode_id,
-                deleted_at_seq: active.tombstone_seq,
-                deleted_at_ms: active.deleted_at_ms,
-                parent_inode_id: active.parent_inode_id,
-                name_key: active.name_key,
-                display_name: active.display_name,
-            });
-            if entries.len() > request.limit.as_usize() {
-                break;
-            }
-        }
-        let has_more = entries.len() > request.limit.as_usize();
+            .map(|cursor| (cursor.last_deleted_at_seq, cursor.last_root_inode_id));
+        let mut deletions = self
+            .metadata_view()
+            .session()
+            .active_deletions_page(start_after, request.limit.limit_plus_one())
+            .await?;
+        let has_more = deletions.len() > request.limit.as_usize();
         if has_more {
-            entries.truncate(request.limit.as_usize());
+            deletions.truncate(request.limit.as_usize());
         }
         let next_cursor = if has_more {
+            let last = deletions
+                .last()
+                .expect("non-zero page limit with more entries must return an item");
             Some(TrashPageCursor {
                 head_seq: self.head.seq,
-                last_root_inode_id: entries
-                    .last()
-                    .expect("non-zero page limit with more entries must return an item")
-                    .root_inode_id,
+                last_deleted_at_seq: last.deleted_at_seq,
+                last_root_inode_id: last.root_inode_id,
             })
         } else {
             None
         };
+        let entries = deletions
+            .into_iter()
+            .map(|deletion| TrashEntry {
+                root_inode_id: deletion.root_inode_id,
+                deleted_at_seq: deletion.deleted_at_seq,
+                deleted_at_ms: deletion.deleted_at_ms,
+                parent_inode_id: deletion.parent_inode_id,
+                name_key: deletion.name_key,
+                display_name: deletion.display_name,
+            })
+            .collect();
         Ok(Page {
             items: entries,
             next_cursor,

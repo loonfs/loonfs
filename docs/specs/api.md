@@ -527,6 +527,7 @@ A representative v0 binding is shown below.
 | List file revisions by path | `GET /v0/namespaces/{ns}/filesystem/revisions?path=/docs/report.txt&limit=100&cursor=...` |
 | Read file content | `GET /v0/namespaces/{ns}/filesystem/content?path=/docs/report.txt` |
 | Read prior file content by path | `GET /v0/namespaces/{ns}/filesystem/content?path=/docs/report.txt&revision_no=3` |
+| List recoverable deletions | `GET /v0/namespaces/{ns}/filesystem/trash?limit=100&cursor=...` |
 | Apply a commit | `POST /v0/namespaces/{ns}/commits` |
 | Begin or prepare upload | `POST /v0/namespaces/{ns}/uploads` |
 | Upload full staged content | `PUT /v0/namespaces/{ns}/uploads/{upload_id}/content` |
@@ -1103,14 +1104,19 @@ stays `invalid_request`.)
 
 ### 6.6 `GET /filesystem/trash`
 
-Lists the namespace's recoverable deletions: every active subtree tombstone,
-ascending by deleted root inode, paged with the standard `limit`/`cursor`
-pattern (the cursor is an ordering resume like every other). Tombstone rows
-are retained forever, so entries never age out of this listing, however far
-the retention floor advances. Each entry carries the inode id and deletion
-sequence that `undelete` requires, the deletion's wall-clock stamp, and the
-deleted binding's name when the delete recorded one; entries written before
-names were recorded still carry a complete recovery handle.
+Lists the namespace's recoverable deletions, oldest deletion first — ascending
+by `(deleted_at_seq, root_inode_id)` — paged with the standard `limit`/`cursor`
+pattern (the cursor is an ordering resume like every other). The listing is a
+range scan over the derived active-deletions family (format spec, section
+2.5), so a page costs the page rather than the namespace's deletion history.
+Those rows are current state and are never dropped at the retention floor, so
+entries never age out of this listing however far the floor advances. Each
+entry carries the inode id and deletion sequence that `undelete` requires, the
+deletion's wall-clock stamp, and the deleted binding's name when the delete
+recorded one; entries written before names were recorded still carry a
+complete recovery handle. Deletions nest: a path deleted inside an
+already-deleted subtree keeps its own entry, and recovering the outer deletion
+leaves the inner one listed.
 
 ### 6.7 `GET /filesystem/content`
 

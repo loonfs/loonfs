@@ -44,10 +44,10 @@ use crate::namespace::basis::resolve_retention_floor_seq;
 use crate::namespace::control::{read_head_object, read_metadata_root_object_if_present};
 use crate::timing::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_api::wire::manifest::{
-    MetadataFileRef, MetadataRow, MetadataTableFamily, NamespaceManifestEnvelope,
-    NamespaceManifestPayload,
+    ActiveDeletionRowAction, MetadataFileRef, MetadataRow, MetadataTableFamily,
+    NamespaceManifestEnvelope, NamespaceManifestPayload,
 };
-use loonfs_api::{ChangeSeq, ManifestId, ManifestObjectId, NamespaceId};
+use loonfs_api::{ChangeSeq, InodeId, ManifestId, ManifestObjectId, NamespaceId};
 use loonfs_objectstore::keys::metadata_manifest_object;
 use loonfs_objectstore::ObjectStore;
 use std::collections::{BTreeMap, BTreeSet};
@@ -56,7 +56,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// each other's rows to decide what to drop (see
 /// `drop_rows_below_retention_floor`) must compact together, and a secondary
 /// index always travels with its canonical family.
-const REORGANIZE_FAMILY_GROUPS: [&[MetadataTableFamily]; 5] = [
+const REORGANIZE_FAMILY_GROUPS: [&[MetadataTableFamily]; 6] = [
     &[
         MetadataTableFamily::DirentryBinds,
         MetadataTableFamily::DirentryChildBinds,
@@ -68,6 +68,9 @@ const REORGANIZE_FAMILY_GROUPS: [&[MetadataTableFamily]; 5] = [
     ],
     &[MetadataTableFamily::Inodes],
     &[MetadataTableFamily::Tombstones],
+    // Active deletions fold alone: a removal marker is cancelled by the
+    // listed row it names, and both live in this family.
+    &[MetadataTableFamily::ActiveDeletions],
     &[MetadataTableFamily::CommitReceipts],
 ];
 
@@ -540,10 +543,11 @@ async fn write_reorganized_manifest<S: ObjectStore + ?Sized>(
 
 /// Drops rows that no retained sequence can observe (format spec,
 /// "Compaction"). Conservative subset: superseded or unbound bindings and
-/// spent unbind markers at or below the retention floor. Revision rows are
-/// never dropped — file history is durable data retained independently of
-/// the replay floor — and tombstone and inode rows are always retained
-/// until reachability-based dropping is designed.
+/// spent unbind markers at or below the retention floor, and cancelled
+/// active-deletion pairs. Revision rows are never dropped — file history is
+/// durable data retained independently of the replay floor — and tombstone
+/// and inode rows are always retained until reachability-based dropping is
+/// designed.
 pub(super) fn drop_rows_below_retention_floor(
     rows_by_family: &mut BTreeMap<MetadataTableFamily, Vec<MetadataRow>>,
     retention_floor_seq: ChangeSeq,
@@ -670,6 +674,42 @@ pub(super) fn drop_rows_below_retention_floor(
     if let Some(rows) = rows_by_family.get_mut(&MetadataTableFamily::DirentryUnbinds) {
         rows.retain(|row| match row {
             MetadataRow::DirentryUnbind { unbind_seq, .. } => *unbind_seq > retention_floor_seq,
+            _ => true,
+        });
+    }
+
+    // Active deletions are current state, not history, so the retention
+    // floor has NO say over them: a deletion stays listed and recoverable
+    // however far the floor advances — that is the product promise, and
+    // dropping a row at the floor would silently retire a recoverable
+    // deletion. The only rows that go are the pairs that cancelled each
+    // other. A removal marker's listed row is always in the same merged set:
+    // the deletion commits before the undelete, runs merge oldest-first, and
+    // the selected subset is a prefix of that order, so a marker can never
+    // outlive the row it names.
+    if let Some(rows) = rows_by_family.get_mut(&MetadataTableFamily::ActiveDeletions) {
+        let revoked: BTreeSet<(ChangeSeq, InodeId)> = rows
+            .iter()
+            .filter_map(|row| match row {
+                MetadataRow::ActiveDeletion {
+                    root_inode_id,
+                    deleted_at_seq,
+                    action: ActiveDeletionRowAction::Removed { .. },
+                } => Some((*deleted_at_seq, *root_inode_id)),
+                _ => None,
+            })
+            .collect();
+        rows.retain(|row| match row {
+            MetadataRow::ActiveDeletion {
+                root_inode_id,
+                deleted_at_seq,
+                action,
+            } => match action {
+                ActiveDeletionRowAction::Removed { .. } => false,
+                ActiveDeletionRowAction::Listed { .. } => {
+                    !revoked.contains(&(*deleted_at_seq, *root_inode_id))
+                }
+            },
             _ => true,
         });
     }

@@ -3,6 +3,7 @@
 //! its append-only rows.
 
 use super::indexes::MetadataIndexes;
+use loonfs_api::wire::manifest::lookup_keys;
 use loonfs_api::{
     ChangeSeq, CommitId, ContentRef, DisplayName, InodeId, InodeKind, NameKey, RevisionNo,
 };
@@ -178,6 +179,117 @@ pub(crate) fn active_tombstone_from_records(
         .filter(|tombstone| tombstone.tombstone_seq <= visible_seq)
         .max_by_key(|tombstone| (tombstone.tombstone_seq, tombstone.tombstone_delta_index))
         .filter(|tombstone| matches!(tombstone.action, SubtreeTombstoneAction::Set))
+}
+
+/// One row of the derived `ActiveDeletions` family: the current-state view of
+/// a single deletion generation.
+///
+/// Nothing appends these — [`active_deletion_from_tombstone`] derives one from
+/// every tombstone event, so the family is a projection of the tombstone
+/// family and never a second source of truth.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ActiveDeletionRecord {
+    pub(crate) root_inode_id: InodeId,
+    /// The deletion's committed sequence. Together with `root_inode_id` this
+    /// is the handle `undelete` addresses and the trash entry renders.
+    pub(crate) deleted_at_seq: ChangeSeq,
+    pub(crate) action: ActiveDeletionAction,
+}
+
+/// What one active-deletion row says about its generation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ActiveDeletionAction {
+    /// The deletion is recoverable, and the trash lists it with these
+    /// details.
+    Listed {
+        deleted_at_ms: u64,
+        parent_inode_id: Option<InodeId>,
+        name_key: Option<NameKey>,
+        display_name: Option<DisplayName>,
+    },
+    /// An undelete cancelled the deletion, so the listing skips the key.
+    Removed { revoked_at_seq: ChangeSeq },
+}
+
+/// The `ActiveDeletions` reducer, and the only mapping from a tombstone event
+/// to its derived row: a `set` adds the deletion to the listing, and a
+/// `revoke` removes the exact generation it names.
+///
+/// It reduces target-aware where the newest-event-wins rule in
+/// [`active_tombstone_from_records`] reduces target-blind. Commit validation
+/// only ever lands a revoke against the generation that was active, so the two
+/// agree on every history a writer can produce; the target is what lets a
+/// removal be derived one event at a time instead of by re-reading a root's
+/// whole history.
+pub(crate) fn active_deletion_from_tombstone(
+    tombstone: &SubtreeTombstoneRecord,
+) -> ActiveDeletionRecord {
+    match &tombstone.action {
+        SubtreeTombstoneAction::Set => ActiveDeletionRecord {
+            root_inode_id: tombstone.root_inode_id,
+            deleted_at_seq: tombstone.tombstone_seq,
+            action: ActiveDeletionAction::Listed {
+                deleted_at_ms: tombstone.deleted_at_ms,
+                parent_inode_id: tombstone.parent_inode_id,
+                name_key: tombstone.name_key.clone(),
+                display_name: tombstone.display_name.clone(),
+            },
+        },
+        SubtreeTombstoneAction::Revoke { target_seq, .. } => ActiveDeletionRecord {
+            root_inode_id: tombstone.root_inode_id,
+            deleted_at_seq: *target_seq,
+            action: ActiveDeletionAction::Removed {
+                revoked_at_seq: tombstone.tombstone_seq,
+            },
+        },
+    }
+}
+
+impl ActiveDeletionRecord {
+    /// This row's durable key, which is also its position in the trash
+    /// listing's order.
+    pub(crate) fn row_key(&self) -> String {
+        lookup_keys::active_deletion_row_key(
+            self.deleted_at_seq,
+            self.root_inode_id,
+            match &self.action {
+                ActiveDeletionAction::Listed { .. } => lookup_keys::ACTIVE_DELETION_RANK_LISTED,
+                ActiveDeletionAction::Removed { .. } => lookup_keys::ACTIVE_DELETION_RANK_REMOVED,
+            },
+        )
+    }
+
+    /// The deletion this row lists, or `None` when the row is an undelete's
+    /// removal marker.
+    pub(crate) fn into_recoverable(self) -> Option<RecoverableDeletion> {
+        match self.action {
+            ActiveDeletionAction::Listed {
+                deleted_at_ms,
+                parent_inode_id,
+                name_key,
+                display_name,
+            } => Some(RecoverableDeletion {
+                root_inode_id: self.root_inode_id,
+                deleted_at_seq: self.deleted_at_seq,
+                deleted_at_ms,
+                parent_inode_id,
+                name_key,
+                display_name,
+            }),
+            ActiveDeletionAction::Removed { .. } => None,
+        }
+    }
+}
+
+/// One recoverable deletion as the trash listing renders it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RecoverableDeletion {
+    pub(crate) root_inode_id: InodeId,
+    pub(crate) deleted_at_seq: ChangeSeq,
+    pub(crate) deleted_at_ms: u64,
+    pub(crate) parent_inode_id: Option<InodeId>,
+    pub(crate) name_key: Option<NameKey>,
+    pub(crate) display_name: Option<DisplayName>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

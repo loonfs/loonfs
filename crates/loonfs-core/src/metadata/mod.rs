@@ -41,8 +41,16 @@ pub use self::rows::{
 };
 
 pub(crate) use self::durable_cache::DurableVisibilityCache;
+/// The newest-event-wins tombstone rule. Every production reader reaches it
+/// through `metadata::visibility`; the trash listing's differential test
+/// reaches it directly, to model the walk the active-deletions family
+/// replaced.
+#[cfg(test)]
 pub(crate) use self::rows::active_tombstone_from_records;
 pub(crate) use self::rows::content_ref_evidence_bytes;
+pub(crate) use self::rows::{
+    active_deletion_from_tombstone, ActiveDeletionAction, ActiveDeletionRecord, RecoverableDeletion,
+};
 #[cfg(test)]
 pub(crate) use self::view::InMemoryMetadataView;
 pub(crate) use self::view::MetadataView;

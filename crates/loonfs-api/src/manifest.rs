@@ -54,6 +54,9 @@ pub enum MetadataTableFamily {
     RevisionsByInodeDesc,
     /// Stores set and revoke events used to determine active subtree tombstones.
     Tombstones,
+    /// Names the deletions that are recoverable right now, derived from the
+    /// tombstone family and ordered by deletion time.
+    ActiveDeletions,
     /// Preserves commit idempotency evidence independently of retained WAL history.
     CommitReceipts,
 }
@@ -194,6 +197,24 @@ pub enum MetadataRow {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         display_name: Option<DisplayName>,
     },
+    /// Names one deletion generation in the derived active-deletions family.
+    ///
+    /// The row is not a new event: the materializer derives it from the
+    /// tombstone family, adding a `listed` row for each `set` and a `removed`
+    /// row for each `revoke`, so the trash listing is a range scan instead of
+    /// a walk over every deletion the namespace ever recorded.
+    ActiveDeletion {
+        /// Subtree root the deletion covers. With `deleted_at_seq` this is
+        /// exactly the handle `undelete` addresses.
+        root_inode_id: InodeId,
+        /// Commit sequence of the deletion this row speaks for. A `removed`
+        /// row repeats its target's sequence, not the undelete's, so the two
+        /// rows sort together.
+        deleted_at_seq: ChangeSeq,
+        /// Whether the deletion is still recoverable, and the listing detail
+        /// it carries while it is.
+        action: ActiveDeletionRowAction,
+    },
     /// Preserves the evidence needed to answer a retried logical commit.
     CommitReceipt {
         /// Caller idempotency key whose later reuse is checked against this row.
@@ -229,6 +250,55 @@ pub enum TombstoneRowAction {
     },
 }
 
+/// Active-deletion row vocabulary (format spec, "Tombstones and deletion").
+///
+/// The family holds current state, not history: a `listed` row means the
+/// deletion is recoverable and the trash lists it, and a `removed` row is the
+/// undelete's compensating marker that hides it. The two rows for one
+/// deletion share a key prefix and `removed` sorts first, so an ascending
+/// scan always sees the removal before the row it removes; reorganization
+/// then drops the pair, because a cancelled deletion is not state anyone can
+/// still observe.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ActiveDeletionRowAction {
+    /// The deletion is recoverable; these are the fields the trash entry
+    /// renders, denormalized so a page needs no per-entry join.
+    Listed {
+        /// Wall-clock stamp of the deleting commit. Observational, like every
+        /// `committed_at_ms`.
+        deleted_at_ms: u64,
+        /// Directory that held the deleted binding, when the delete recorded
+        /// one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_inode_id: Option<InodeId>,
+        /// Canonical key of the deleted binding, when known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name_key: Option<NameKey>,
+        /// User-facing spelling of the deleted binding as of the deletion,
+        /// when known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display_name: Option<DisplayName>,
+    },
+    /// An undelete at `revoked_at_seq` cancelled the deletion this row's key
+    /// names, so the listing skips the key.
+    Removed {
+        /// Commit sequence of the undelete that cancelled the deletion.
+        revoked_at_seq: ChangeSeq,
+    },
+}
+
+impl ActiveDeletionRowAction {
+    /// The row-key component that orders a removal ahead of the row it
+    /// removes.
+    fn sort_rank(&self) -> u8 {
+        match self {
+            Self::Removed { .. } => lookup_keys::ACTIVE_DELETION_RANK_REMOVED,
+            Self::Listed { .. } => lookup_keys::ACTIVE_DELETION_RANK_LISTED,
+        }
+    }
+}
+
 impl MetadataRow {
     /// Builds this row's canonical durable key in its primary table family.
     ///
@@ -240,6 +310,7 @@ impl MetadataRow {
             Self::DirentryUnbind { .. } => MetadataTableFamily::DirentryUnbinds,
             Self::Revision { .. } => MetadataTableFamily::Revisions,
             Self::Tombstone { .. } => MetadataTableFamily::Tombstones,
+            Self::ActiveDeletion { .. } => MetadataTableFamily::ActiveDeletions,
             Self::CommitReceipt { .. } => MetadataTableFamily::CommitReceipts,
         })
     }
@@ -329,6 +400,15 @@ impl MetadataRow {
                     root_inode_id.0, tombstone_seq.0, tombstone_delta_index
                 )
             }
+            Self::ActiveDeletion {
+                root_inode_id,
+                deleted_at_seq,
+                action,
+            } => lookup_keys::active_deletion_row_key(
+                *deleted_at_seq,
+                *root_inode_id,
+                action.sort_rank(),
+            ),
             Self::CommitReceipt {
                 committed_seq,
                 commit_id,
@@ -380,6 +460,9 @@ impl MetadataRow {
             Self::Tombstone { root_inode_id, .. } => {
                 format!("tombstone-{:020}", root_inode_id.0)
             }
+            // The family is only ever range-scanned in key order, never
+            // probed for one deletion, so the filter key is the row key.
+            Self::ActiveDeletion { .. } => self.row_key_for_family(family),
             Self::CommitReceipt { commit_id, .. } => {
                 let commit_id = hex_encode_row_key_component(commit_id.as_str());
                 format!("commit-receipt-{commit_id}")
@@ -531,6 +614,51 @@ pub mod lookup_keys {
     /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
     pub fn tombstone_prefix(root_inode_id: InodeId) -> String {
         format!("{}-", tombstone_probe(root_inode_id))
+    }
+
+    /// The prefix every active-deletion row key starts with. Deletion
+    /// sequence and root inode are zero-padded to fixed widths after it, so a
+    /// range scan over this prefix walks the namespace's recoverable
+    /// deletions oldest deletion first — the trash listing's whole read.
+    ///
+    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
+    pub const ACTIVE_DELETION_ROW_PREFIX: &str = "active-deletion-";
+
+    /// Rank of an undelete's removal marker within one deletion generation.
+    /// It is the lowest rank on purpose: an ascending scan sees the removal
+    /// before the row it removes, so a page never lists a deletion whose
+    /// marker was going to arrive one page later.
+    pub const ACTIVE_DELETION_RANK_REMOVED: u8 = 0;
+
+    /// Rank of the listed row within one deletion generation, and the highest
+    /// rank the family defines.
+    pub const ACTIVE_DELETION_RANK_LISTED: u8 = 1;
+
+    /// Builds an active-deletion row key from its generation and rank.
+    ///
+    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
+    pub fn active_deletion_row_key(
+        deleted_at_seq: ChangeSeq,
+        root_inode_id: InodeId,
+        sort_rank: u8,
+    ) -> String {
+        format!(
+            "{ACTIVE_DELETION_ROW_PREFIX}{:020}-{:020}-{sort_rank}",
+            deleted_at_seq.0, root_inode_id.0
+        )
+    }
+
+    /// Builds the resume bound for a trash page that must continue strictly
+    /// after the deletion generation it last returned. The listed row is the
+    /// generation's highest-ranked row, so resuming past it skips the whole
+    /// generation and nothing else.
+    ///
+    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
+    pub fn active_deletion_key_after(deleted_at_seq: ChangeSeq, root_inode_id: InodeId) -> String {
+        format!(
+            "{}\0",
+            active_deletion_row_key(deleted_at_seq, root_inode_id, ACTIVE_DELETION_RANK_LISTED)
+        )
     }
 
     /// Builds the bloom-filter probe shared by receipts for one commit id.

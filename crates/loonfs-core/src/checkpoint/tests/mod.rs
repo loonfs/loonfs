@@ -3,6 +3,7 @@
 #![allow(clippy::panic)]
 // These tests use panic in impossible match arms to preserve precise failure messages.
 
+mod active_deletions;
 mod cache;
 mod cas_recovery;
 mod index_parity;

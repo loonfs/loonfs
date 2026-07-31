@@ -239,14 +239,18 @@ impl PageCursor for FileRevisionsPageCursor {
 
 /// Cursor for one trash listing position.
 ///
-/// Trash pagination advances in ascending deleted-root inode order. Like
-/// every cursor, it is an ordering resume tolerating forward head drift:
-/// the next page evaluates at whatever head is loaded and continues
-/// strictly after `last_root_inode_id`.
+/// Trash pagination advances oldest deletion first, in ascending
+/// `(deleted_at_seq, root_inode_id)` order — the order the derived
+/// active-deletion family is keyed in. Like every cursor, it is an ordering
+/// resume tolerating forward head drift: the next page evaluates at whatever
+/// head is loaded and continues strictly after the deletion generation named
+/// here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrashPageCursor {
     /// Head sequence the issuing page was evaluated at.
     pub head_seq: ChangeSeq,
+    /// Commit sequence of the deletion the previous page ended on.
+    pub last_deleted_at_seq: ChangeSeq,
     /// Deleted root inode the previous page ended on.
     pub last_root_inode_id: InodeId,
 }
