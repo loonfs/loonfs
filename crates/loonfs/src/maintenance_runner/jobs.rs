@@ -249,6 +249,10 @@ impl MaintenanceJob for GcJob {
                 MaintenanceStepConclusion::Idle,
             ));
         };
+        // The counts a pass produced survive here or nowhere: the runner
+        // reads a pass as one conclusion, and everything it reclaimed is
+        // dropped with the response a line below.
+        self.context.core.instruments().gc_pass(&gc);
         Ok(gc_step_result(gc, continuation))
     }
 

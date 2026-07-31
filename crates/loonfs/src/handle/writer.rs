@@ -3,7 +3,7 @@
 use super::{owning_runtime, FsReader, HandleBuilderCore};
 use crate::fs::{ReadCore, WriterBits, WriterIdentity};
 use crate::maintenance_runner::{register_core_jobs, MaintenanceRunner};
-use crate::metrics::ObjectStoreMetricsRecorder;
+use crate::metrics::{MetricsRecorder, ObjectStoreMetricsRecorder};
 use crate::publisher::{PublishObserver, PublisherRegistry};
 use crate::{
     CapabilityDocument, ChangeSeq, FsBackgroundWork, MaintenanceHandle, MaintenanceJob,
@@ -315,11 +315,26 @@ impl FsWriterBuilder {
         self
     }
 
-    /// Installs object-store metrics collection for this handle.
+    /// Installs raw object-store sample collection for this handle.
     ///
     /// The handle wraps its object store before opening; callers do not
-    /// need to construct an instrumented store manually.
-    pub fn metrics_recorder(mut self, recorder: Arc<dyn ObjectStoreMetricsRecorder>) -> Self {
+    /// need to construct an instrumented store manually. Combines with
+    /// [`Self::metrics_recorder`]: one wrapper feeds both.
+    pub fn object_store_metrics_recorder(
+        mut self,
+        recorder: Arc<dyn ObjectStoreMetricsRecorder>,
+    ) -> Self {
+        self.core.object_store_metrics_recorder = Some(recorder);
+        self
+    }
+
+    /// Installs the metrics recorder this handle reports its instruments to
+    /// (see [`crate::metrics`]).
+    ///
+    /// The handle registers its instrument set once, here, and reports into
+    /// it from then on: object-store calls, maintenance steps, publications,
+    /// and collection passes. A handle built without one registers nothing.
+    pub fn metrics_recorder(mut self, recorder: Arc<dyn MetricsRecorder>) -> Self {
         self.core.metrics_recorder = Some(recorder);
         self
     }
@@ -360,18 +375,23 @@ impl FsWriterBuilder {
                 )
             })?;
         let runtime = Some(owning_runtime()?);
+        let core = self.core.open_read_core()?;
+        let instruments = Arc::clone(core.instruments());
         let maintenance = match self.maintenance_clock {
             Some(clock) => MaintenanceRunner::with_clock(
                 self.background_work,
                 runtime,
                 max_concurrent_maintenance,
                 clock,
+                instruments,
             ),
-            None => {
-                MaintenanceRunner::new(self.background_work, runtime, max_concurrent_maintenance)
-            }
+            None => MaintenanceRunner::new(
+                self.background_work,
+                runtime,
+                max_concurrent_maintenance,
+                instruments,
+            ),
         };
-        let core = self.core.open_read_core()?;
         let bits = Arc::new(WriterBits {
             identity,
             maintenance,

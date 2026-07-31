@@ -1703,6 +1703,12 @@ async fn http_uploads_answer_server_busy_at_the_concurrency_cap() {
         "server_busy",
         Some("the server is at its concurrency limit for proxied uploads; retry shortly"),
     );
+    // The refusal is countable: an operator sizing `max_concurrent_uploads`
+    // needs to know it is happening, not only that some clients saw 503.
+    assert!(state
+        .metrics
+        .render(&state.writer.runtime_cache_stats(), 0, 0)
+        .contains("loonfs_server_busy_rejections_total{kind=\"upload\"} 1\n"));
 
     drop(held);
     let client = Client::new(client_config).expect("valid client config");
@@ -1814,6 +1820,10 @@ async fn http_content_reads_answer_server_busy_at_the_concurrency_cap() {
         "server_busy",
         Some("the server is at its concurrency limit for proxied content reads; retry shortly"),
     );
+    assert!(state
+        .metrics
+        .render(&state.writer.runtime_cache_stats(), 0, 0)
+        .contains("loonfs_server_busy_rejections_total{kind=\"download\"} 1\n"));
 
     drop(held);
     let client = Client::new(client_config).expect("valid client config");

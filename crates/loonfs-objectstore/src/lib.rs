@@ -12,6 +12,7 @@
 #![warn(missing_docs)]
 
 pub mod abs;
+mod attempts;
 mod configured;
 pub mod gcs;
 mod immutable_write;

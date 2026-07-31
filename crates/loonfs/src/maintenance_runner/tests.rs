@@ -285,6 +285,7 @@ fn runner_with(
         Some(tokio::runtime::Handle::current()),
         nonzero_usize(1),
         clock,
+        RuntimeInstruments::new(None),
     );
     runner.register(job).expect("register the test job");
     runner

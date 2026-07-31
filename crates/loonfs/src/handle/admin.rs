@@ -2,7 +2,7 @@
 
 use super::HandleBuilderCore;
 use crate::fs::{ReadCore, WriterIdentity};
-use crate::metrics::ObjectStoreMetricsRecorder;
+use crate::metrics::{MetricsRecorder, ObjectStoreMetricsRecorder};
 use crate::publisher::PublisherRegistry;
 use crate::{
     Result, RuntimeCacheConfig, RuntimeCacheStats, RuntimeError, SharedObjectStore, StoreConfig,
@@ -127,8 +127,22 @@ impl FsAdminBuilder {
         self
     }
 
-    /// Installs object-store metrics collection for this handle.
-    pub fn metrics_recorder(mut self, recorder: Arc<dyn ObjectStoreMetricsRecorder>) -> Self {
+    /// Installs raw object-store sample collection for this handle.
+    ///
+    /// Combines with [`Self::metrics_recorder`]: one wrapper feeds both.
+    pub fn object_store_metrics_recorder(
+        mut self,
+        recorder: Arc<dyn ObjectStoreMetricsRecorder>,
+    ) -> Self {
+        self.core.object_store_metrics_recorder = Some(recorder);
+        self
+    }
+
+    /// Installs the metrics recorder this handle reports its instruments to
+    /// (see [`crate::metrics`]). An admin registers the object-store and
+    /// collection instruments; the explicit maintenance it drives reports
+    /// through the writer that scheduled it.
+    pub fn metrics_recorder(mut self, recorder: Arc<dyn MetricsRecorder>) -> Self {
         self.core.metrics_recorder = Some(recorder);
         self
     }

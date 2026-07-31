@@ -1,8 +1,8 @@
 //! Embedded LoonFS runtime.
 //!
 //! `loonfs` is the ergonomic runtime layer. It wraps `loonfs-core` with caching,
-//! upload helpers, maintenance hooks, and optional object-store metrics. Use it
-//! when you want LoonFS in-process, or when building the reference server.
+//! upload helpers, maintenance hooks, and an optional [`metrics`] surface. Use
+//! it when you want LoonFS in-process, or when building the reference server.
 //!
 //! The runtime is opened through purpose-specific handles, each built
 //! asynchronously inside the Tokio runtime that will own it:
@@ -39,6 +39,7 @@ mod config;
 mod fs;
 mod handle;
 mod maintenance_runner;
+pub mod metrics;
 mod options;
 pub mod publisher;
 mod time;
@@ -131,7 +132,6 @@ pub mod control {
     };
 }
 
-pub use loonfs_objectstore::metrics;
 pub use loonfs_objectstore::{
     ByteStream, ObjectStore, ObjectStoreError, SharedObjectStore, StoreConfig,
 };

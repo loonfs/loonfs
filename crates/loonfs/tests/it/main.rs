@@ -17,6 +17,7 @@ mod handles;
 mod immutable_view_inputs;
 mod invalidation;
 mod maintenance;
+mod metrics_instruments;
 mod pagination;
 mod publication;
 mod publish_observer;

@@ -35,6 +35,38 @@
         ]
       }
     },
+    "/metrics": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "Scrape metrics",
+        "description": "Returns this process's metrics in Prometheus text exposition format 0.0.4. Unlike `/health` and `/readiness`, the route requires the deployment's bearer token.",
+        "operationId": "serve_metrics",
+        "responses": {
+          "200": {
+            "description": "Prometheus text exposition",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/readiness": {
       "get": {
         "tags": [

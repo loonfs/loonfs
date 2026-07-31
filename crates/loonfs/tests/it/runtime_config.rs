@@ -45,13 +45,13 @@ fn open_validates_runtime_config() {
 }
 
 #[test]
-fn builder_metrics_recorder_instruments_object_store() {
+fn builder_object_store_metrics_recorder_instruments_object_store() {
     let temp_dir = tempdir().expect("tempdir");
     let recorder = Arc::new(VecObjectStoreMetricsRecorder::default());
     let fs = open_runtime_with(store(temp_dir.path()), "metrics-test", |builder| {
         builder
             .trace_store_kind(TraceStoreKind::LocalFs)
-            .metrics_recorder(recorder.clone())
+            .object_store_metrics_recorder(recorder.clone())
     });
 
     fs.create_namespace_blocking(&namespace_id("demo"), CreateNamespaceOptions::default())

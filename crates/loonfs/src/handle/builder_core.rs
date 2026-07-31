@@ -3,7 +3,9 @@
 
 use crate::config::ReadConfig;
 use crate::fs::ReadCore;
-use crate::metrics::ObjectStoreMetricsRecorder;
+use crate::metrics::{
+    fan_out_object_store_recorder, MetricsRecorder, ObjectStoreMetricsRecorder, RuntimeInstruments,
+};
 use crate::{
     Result, RuntimeCacheConfig, RuntimeError, SharedObjectStore, StoreConfig, TraceMode,
     TraceStoreKind,
@@ -32,7 +34,8 @@ pub(super) struct HandleBuilderCore {
     pub(super) shared_metadata_table_cache: Option<Arc<MetadataTableCache>>,
     pub(super) trace_mode: TraceMode,
     pub(super) trace_store_kind: Option<TraceStoreKind>,
-    pub(super) metrics_recorder: Option<Arc<dyn ObjectStoreMetricsRecorder>>,
+    pub(super) object_store_metrics_recorder: Option<Arc<dyn ObjectStoreMetricsRecorder>>,
+    pub(super) metrics_recorder: Option<Arc<dyn MetricsRecorder>>,
 }
 
 impl HandleBuilderCore {
@@ -52,6 +55,7 @@ impl HandleBuilderCore {
             shared_metadata_table_cache: None,
             trace_mode: TraceMode::Embedded,
             trace_store_kind: None,
+            object_store_metrics_recorder: None,
             metrics_recorder: None,
         }
     }
@@ -59,6 +63,10 @@ impl HandleBuilderCore {
     /// Resolves the object-store client, wraps it for metrics when the
     /// builder was given a recorder, and opens the read core every handle
     /// is built on.
+    ///
+    /// A builder given no recorder of either kind wraps nothing: the store
+    /// the core holds is the store it was handed, and the instrument set it
+    /// carries reports nowhere.
     pub(super) fn open_read_core(self) -> Result<ReadCore> {
         let (store, derived_kind) = match self.source {
             StoreSource::Config(config) => {
@@ -71,7 +79,12 @@ impl HandleBuilderCore {
             StoreSource::Shared(store) => (store, TraceStoreKind::Unknown),
         };
         let trace_store_kind = self.trace_store_kind.unwrap_or(derived_kind);
-        let store = match self.metrics_recorder {
+        let instruments = RuntimeInstruments::new(self.metrics_recorder);
+        let recorder = fan_out_object_store_recorder(
+            self.object_store_metrics_recorder,
+            instruments.object_store_recorder(),
+        );
+        let store = match recorder {
             Some(recorder) => Arc::new(
                 InstrumentedObjectStore::new(store, recorder).store_kind(trace_store_kind.as_str()),
             ) as SharedObjectStore,
@@ -86,6 +99,7 @@ impl HandleBuilderCore {
                 trace_store_kind,
             },
             self.shared_metadata_table_cache,
+            instruments,
         ))
     }
 }

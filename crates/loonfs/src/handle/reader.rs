@@ -2,7 +2,7 @@
 
 use super::HandleBuilderCore;
 use crate::fs::ReadCore;
-use crate::metrics::ObjectStoreMetricsRecorder;
+use crate::metrics::{MetricsRecorder, ObjectStoreMetricsRecorder};
 use crate::{
     CapabilityDocument, Result, RuntimeCacheConfig, RuntimeCacheStats, SharedObjectStore,
     StoreConfig, TraceMode, TraceStoreKind,
@@ -100,8 +100,21 @@ impl FsReaderBuilder {
         self
     }
 
-    /// Installs object-store metrics collection for this handle.
-    pub fn metrics_recorder(mut self, recorder: Arc<dyn ObjectStoreMetricsRecorder>) -> Self {
+    /// Installs raw object-store sample collection for this handle.
+    ///
+    /// Combines with [`Self::metrics_recorder`]: one wrapper feeds both.
+    pub fn object_store_metrics_recorder(
+        mut self,
+        recorder: Arc<dyn ObjectStoreMetricsRecorder>,
+    ) -> Self {
+        self.core.object_store_metrics_recorder = Some(recorder);
+        self
+    }
+
+    /// Installs the metrics recorder this handle reports its instruments to
+    /// (see [`crate::metrics`]). A reader registers the object-store
+    /// instruments; it schedules nothing, so it reports nothing else.
+    pub fn metrics_recorder(mut self, recorder: Arc<dyn MetricsRecorder>) -> Self {
         self.core.metrics_recorder = Some(recorder);
         self
     }
