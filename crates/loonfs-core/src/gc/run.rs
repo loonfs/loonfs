@@ -1,6 +1,7 @@
 //! The GC entry point: orchestrates root collection, verification,
 //! and the bounded, resumable sweep.
 
+use super::budget::PassBudget;
 use super::config::GcConfig;
 use super::cursor::{CandidateFamily, GcCursor};
 use super::fork_checkpoints::{
@@ -64,12 +65,17 @@ pub(super) async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
     // The cursor can skip enumeration only; it never carries safety state.
     let mark = Arc::new(collect_live_set(store, namespace_id, context).await?);
     let mut sweep = SweepVerifier::seeded(Arc::clone(&mark), reverify_chunk);
-    // Content references are collected from this same root set, lazily. The
-    // derived reclamation grace is what lets one collection stand for the
-    // whole pass: past it, no receipt survives that could add a reference.
+    // Content references are collected from this same root set, lazily and
+    // at most once per invocation. The derived reclamation grace is what
+    // lets one collection stand for every candidate that follows it: past
+    // it, no receipt survives that could add a reference. The scan is
+    // charged against the budget below like everything else, and an
+    // invocation that cannot afford it skips content reclamation instead
+    // of overrunning — the sessions waiting on it are retained and the
+    // sweep continues.
     let mut references = ContentReferences::over(&mark);
     let mut report = GcResponse::empty(namespace_id.clone());
-    let mut examined = 0_u64;
+    let mut budget = PassBudget::of(config);
     let mut position = resume.clone();
 
     // Data precedes mutable records. A crash or bounded return can therefore
@@ -88,10 +94,7 @@ pub(super) async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
             {
                 continue;
             }
-            if config
-                .max_objects
-                .is_some_and(|max_objects| examined >= max_objects)
-            {
+            if budget.exhausted() {
                 // This one-key lookahead proves work remains. It performs no
                 // candidate reads or mutations; the key is reconsidered from
                 // the exclusive last-examined position on resume.
@@ -111,10 +114,18 @@ pub(super) async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
                 &mark,
                 &mut sweep,
                 &mut references,
+                &mut budget,
                 &mut report,
             )
             .await?;
-            examined = examined.saturating_add(1);
+            // Every candidate this loop hands to `process_candidate` comes
+            // back decided one way or the other, so the cursor always
+            // advances past it. The one thing a pass can run out of budget
+            // to answer — whether a completed session's content is still
+            // referenced — is answered by retaining the session, never by
+            // leaving it undecided and stopping: a budget below that scan's
+            // cost would otherwise pin the walk to one key forever.
+            budget.charge();
             position = GcCursor::after(namespace_id, family, key);
         }
     }
@@ -135,6 +146,7 @@ async fn process_candidate<S: ObjectStore + ?Sized>(
     mark: &LiveSet,
     sweep: &mut SweepVerifier,
     references: &mut ContentReferences<'_>,
+    budget: &mut PassBudget,
     report: &mut GcResponse,
 ) -> Result<()> {
     if family == CandidateFamily::UploadSessions {
@@ -146,6 +158,7 @@ async fn process_candidate<S: ObjectStore + ?Sized>(
             context,
             key,
             references,
+            budget,
             report,
         )
         .await;
@@ -277,6 +290,7 @@ async fn process_upload_session<S: ObjectStore + ?Sized>(
     context: &MutationContext,
     key: &str,
     references: &mut ContentReferences<'_>,
+    budget: &mut PassBudget,
     report: &mut GcResponse,
 ) -> Result<()> {
     let Some(upload_id) = upload_id_of(key) else {
@@ -290,18 +304,30 @@ async fn process_upload_session<S: ObjectStore + ?Sized>(
         &upload_id,
         config.grace_window_ms,
         references,
+        budget,
         context,
     )
     .await?
     {
-        UploadSessionSweep::Delete => {
+        UploadSessionSweep::Delete { reclaimed_content } => {
             store
                 .delete(key)
                 .await
                 .map_err(|error| CoreError::store(key, &error))?;
             report.deleted_upload_sessions += 1;
+            if reclaimed_content {
+                report.deleted_content_objects += 1;
+            }
         }
         UploadSessionSweep::Retain => report.retained_candidates += 1,
+        UploadSessionSweep::ContentReclamationDeferred => {
+            // Retained for the same reason any undecidable session is,
+            // plus a flag, so a caller can tell a pass that swept
+            // everything from one that skipped a question it could not
+            // afford to ask.
+            report.retained_candidates += 1;
+            report.content_reclamation_deferred = true;
+        }
     }
     Ok(())
 }

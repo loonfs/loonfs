@@ -110,9 +110,11 @@ fn accumulate_gc_response(total: &mut loonfs_api::GcResponse, pass: loonfs_api::
     total.deleted_checkpoint_records += pass.deleted_checkpoint_records;
     total.released_fork_checkpoints += pass.released_fork_checkpoints;
     total.deleted_upload_sessions += pass.deleted_upload_sessions;
+    total.deleted_content_objects += pass.deleted_content_objects;
     total.released_missing_basis_checkpoints += pass.released_missing_basis_checkpoints;
     total.retained_candidates += pass.retained_candidates;
     total.degraded_retention |= pass.degraded_retention;
+    total.content_reclamation_deferred |= pass.content_reclamation_deferred;
     total.next_cursor = pass.next_cursor;
 }
 

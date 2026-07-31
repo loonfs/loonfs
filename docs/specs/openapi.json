@@ -3861,7 +3861,7 @@
               "null"
             ],
             "format": "int64",
-            "description": "Maximum candidates examined by this invocation. Omit to retain the\nrun-to-completion behavior.",
+            "description": "Maximum objects this invocation may read or decide. Omit to retain\nthe run-to-completion behavior.\n\nA completed upload session past its reclamation grace makes the pass\nread every live manifest and retained WAL segment to find out\nwhether anything still references its content, and that read is\ncharged here like any other. A budget too small to finish it does\nnot stall the pass: the session is retained, the response sets\n`content_reclamation_deferred`, and the sweep carries on through\neverything else. What a chronically small budget costs is content\nleft unreclaimed, not progress. Give a pass at least as many objects\nas the namespace has live manifests and retained segments for that\ncontent to come back.",
             "minimum": 0
           }
         }
@@ -3880,6 +3880,10 @@
           "degraded_retention"
         ],
         "properties": {
+          "content_reclamation_deferred": {
+            "type": "boolean",
+            "description": "True when the pass skipped completed-content reclamation because\nthe reference collection it needs did not fit in `max_objects`.\nNothing was ever decided from a partial collection and the rest of\nthe sweep ran normally; a later pass with room for the whole scan\nreclaims what this one left behind."
+          },
           "degraded_retention": {
             "type": "boolean",
             "description": "True when ambiguous roots suppressed manifest/table deletion."
@@ -3888,6 +3892,12 @@
             "type": "integer",
             "format": "int64",
             "description": "Released checkpoint records deleted after their grace window.",
+            "minimum": 0
+          },
+          "deleted_content_objects": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Content objects reclaimed because their upload session completed,\naged past the derived reclamation grace, and nothing the namespace\ncan reach references them. The upload half's cleanup of abandoned\nsessions is not counted here: it deletes unconditionally, whether or\nnot the session ever wrote anything.",
             "minimum": 0
           },
           "deleted_manifests": {

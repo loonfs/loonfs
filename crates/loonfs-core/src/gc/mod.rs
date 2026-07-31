@@ -8,6 +8,7 @@
 //! re-verification, and retain-on-ambiguity defaults close those races. When
 //! in doubt, this module retains.
 
+mod budget;
 mod config;
 mod cursor;
 mod fork_checkpoints;

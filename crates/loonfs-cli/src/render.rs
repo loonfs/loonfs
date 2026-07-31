@@ -8,15 +8,13 @@ use serde::Serialize;
 use std::io::{self, Write};
 
 fn gc_summary(report: &GcResponse) -> String {
-    // Content blobs live in a shared content store and are never GC
-    // candidates in v0; say so rather than letting four zero-free counters
-    // imply everything reclaimable was swept.
     let mut summary = format!(
-        "gc deleted {} wal segments, {} tables, {} manifests, {} checkpoint records ({} retained); content objects are not swept in v0",
+        "gc deleted {} wal segments, {} tables, {} manifests, {} checkpoint records, {} content objects ({} retained)",
         report.deleted_wal_segments,
         report.deleted_metadata_tables,
         report.deleted_manifests,
         report.deleted_checkpoint_records,
+        report.deleted_content_objects,
         report.retained_candidates
     );
     if report.released_fork_checkpoints > 0 {
@@ -27,6 +25,11 @@ fn gc_summary(report: &GcResponse) -> String {
     }
     if report.degraded_retention {
         summary.push_str("; retention degraded: ambiguous roots suppressed deletion");
+    }
+    if report.content_reclamation_deferred {
+        summary.push_str(
+            "; content reclamation deferred: the reference scan did not fit in --max-objects",
+        );
     }
     if let Some(cursor) = &report.next_cursor {
         summary.push_str(&format!("; next_cursor: {cursor}"));

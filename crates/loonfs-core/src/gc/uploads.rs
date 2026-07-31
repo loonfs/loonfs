@@ -16,6 +16,7 @@
 //! receipt's life plus the publication it could admit. Past the grace, the
 //! set of references to a completed session's content can no longer grow.
 
+use super::budget::PassBudget;
 use super::live_set::LiveSet;
 use crate::checkpoint::load_verified_manifest_tables;
 use crate::context::MutationContext;
@@ -35,8 +36,9 @@ use loonfs_objectstore::ObjectStore;
 use std::collections::BTreeSet;
 
 /// Rows read from one metadata table per request while collecting content
-/// references. The scan runs at most once per pass, so this only bounds how
-/// much of a revision family is held in memory at a time.
+/// references. Each wave is one page of rows and costs one budget unit, so
+/// this sets both how much of a revision family is held in memory at a time
+/// and how finely the scan can be interrupted.
 const REVISION_SCAN_WAVE_ROWS: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,7 +46,17 @@ pub(super) enum UploadSessionSweep {
     /// The session key survives this pass. It may have advanced a state.
     Retain,
     /// The session has nothing left to say and its key may be deleted.
-    Delete,
+    Delete {
+        /// This sweep also removed the content object the session
+        /// completed and nothing ever published.
+        reclaimed_content: bool,
+    },
+    /// The pass could not afford the reference collection this session's
+    /// content needs. The session is retained exactly as an undecidable one
+    /// is, completed-content reclamation is off for the rest of the
+    /// invocation, and the sweep goes on to the next candidate: what the
+    /// budget could not pay for is the scan, not the sweep.
+    ContentReclamationDeferred,
 }
 
 /// Advances one upload session and reclaims whatever it stops owning.
@@ -55,6 +67,7 @@ pub(super) enum UploadSessionSweep {
 /// always follows the durable transition: a crash in between leaves an
 /// object the next pass deletes from the terminal record, never an object
 /// deleted out from under a session that is still open.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
@@ -62,6 +75,7 @@ pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
     upload_id: &UploadId,
     grace_window_ms: u64,
     references: &mut ContentReferences<'_>,
+    budget: &mut PassBudget,
     context: &MutationContext,
 ) -> Result<UploadSessionSweep> {
     // Reading first only selects the arm. Nothing here acts on this
@@ -95,7 +109,15 @@ pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
             AbandonedUpload::of(&state)
                 .release(store, content_store_id)
                 .await;
-            Ok(UploadSessionSweep::Delete)
+            // Not counted as a reclaimed content object: this delete is
+            // unconditional cleanup that runs whether or not the session
+            // ever wrote anything, and it repeats on every pass until the
+            // record ages out. Only the content half's Absent verdict
+            // reports a reclamation, because only it establishes that
+            // there was something to reclaim.
+            Ok(UploadSessionSweep::Delete {
+                reclaimed_content: false,
+            })
         }
         UploadSessionLifecycle::Completed {
             completed_at_ms,
@@ -105,13 +127,16 @@ pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
                 return Ok(UploadSessionSweep::Retain);
             }
             match references
-                .lookup(store, namespace_id, &content_ref.content_id)
+                .lookup(store, namespace_id, &content_ref.content_id, budget)
                 .await?
             {
                 ContentReference::Unknown => Ok(UploadSessionSweep::Retain),
+                ContentReference::Deferred => Ok(UploadSessionSweep::ContentReclamationDeferred),
                 // Published content answers to metadata now, not to the
                 // session that uploaded it, so the record is all that goes.
-                ContentReference::Referenced => Ok(UploadSessionSweep::Delete),
+                ContentReference::Referenced => Ok(UploadSessionSweep::Delete {
+                    reclaimed_content: false,
+                }),
                 ContentReference::Absent => {
                     delete_unpublished_content_object(
                         store,
@@ -119,7 +144,9 @@ pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
                         &content_ref.content_id,
                     )
                     .await;
-                    Ok(UploadSessionSweep::Delete)
+                    Ok(UploadSessionSweep::Delete {
+                        reclaimed_content: true,
+                    })
                 }
             }
         }
@@ -190,19 +217,51 @@ enum ContentReference {
     /// The reference set could not be established, so nothing is reclaimed
     /// (format spec, "Garbage collection", rule 5).
     Unknown,
+    /// The set did not fit in the budget the pass had left, so content
+    /// reclamation is skipped for the rest of this invocation. It is not an
+    /// answer of any kind — see [`ScanOutcome::BudgetExhausted`].
+    Deferred,
 }
 
 enum CollectedReferences {
     NotYet,
     Unavailable,
+    /// The scan ran out of budget once, which settles it for the whole
+    /// invocation: a later candidate must not pay to start the same scan
+    /// over, and being skipped is a property of the invocation rather than
+    /// of the session that happened to ask first.
+    Deferred,
     Referenced(BTreeSet<ContentId>),
 }
 
+/// What one attempt at the reference scan produced.
+enum ScanOutcome {
+    /// Every root was read. The set is complete and may decide deletions.
+    Complete(BTreeSet<ContentId>),
+    /// A root could not be read, so this pass has no reference set at all
+    /// (format spec, "Garbage collection", rule 5).
+    Unavailable,
+    /// The pass budget ran out before the last root was read. The ids
+    /// gathered so far are dropped: a partial set is not a smaller answer,
+    /// it is no answer. Every id it is missing looks unreferenced, so
+    /// deciding a deletion from one would delete live content.
+    BudgetExhausted,
+}
+
 /// Every content id the namespace's live metadata references, collected at
-/// most once per pass and only when a completed session has actually aged
-/// into reclamation — which in a healthy namespace is never, because
+/// most once per invocation and only when a completed session has actually
+/// aged into reclamation — which in a healthy namespace is never, because
 /// published sessions are swept before their content ever becomes a
 /// question.
+///
+/// The memo lives for one invocation, not one cursor-paged sweep. Carrying
+/// it further would mean putting "already scanned through here, found
+/// nothing" into the cursor, and the cursor is a client-supplied token that
+/// carries enumeration position only and never authorizes a deletion. So a
+/// resumed sweep collects again, and the budget above is what keeps that
+/// honest: the scan pays its own way every time it runs. A verdict of "not
+/// this time" is memoized like any other, which is what keeps one
+/// unaffordable scan from being re-attempted once per aged session.
 pub(super) struct ContentReferences<'a> {
     live: &'a LiveSet,
     collected: CollectedReferences,
@@ -221,21 +280,33 @@ impl<'a> ContentReferences<'a> {
         store: &S,
         namespace_id: &NamespaceId,
         content_id: &ContentId,
+        budget: &mut PassBudget,
     ) -> Result<ContentReference> {
         if matches!(self.collected, CollectedReferences::NotYet) {
-            self.collected = if self.live.degraded {
-                CollectedReferences::Unavailable
+            if self.live.degraded {
+                self.collected = CollectedReferences::Unavailable;
             } else {
-                match collect_referenced_content(store, namespace_id, self.live).await? {
-                    Some(referenced) => CollectedReferences::Referenced(referenced),
-                    None => CollectedReferences::Unavailable,
+                match collect_referenced_content(store, namespace_id, self.live, budget).await? {
+                    ScanOutcome::Complete(referenced) => {
+                        self.collected = CollectedReferences::Referenced(referenced);
+                    }
+                    ScanOutcome::Unavailable => {
+                        self.collected = CollectedReferences::Unavailable;
+                    }
+                    // The partial set is dropped, not remembered — but the
+                    // fact that it did not fit is, so the rest of the
+                    // invocation stops asking.
+                    ScanOutcome::BudgetExhausted => {
+                        self.collected = CollectedReferences::Deferred;
+                    }
                 }
-            };
+            }
         }
         Ok(match &self.collected {
             CollectedReferences::NotYet | CollectedReferences::Unavailable => {
                 ContentReference::Unknown
             }
+            CollectedReferences::Deferred => ContentReference::Deferred,
             CollectedReferences::Referenced(referenced) => {
                 if referenced.contains(content_id) {
                     ContentReference::Referenced
@@ -257,23 +328,39 @@ impl<'a> ContentReferences<'a> {
 /// namespace can only name content minted by that namespace's own sessions,
 /// so those two sources are the whole reachable set.
 ///
-/// `None` means the set could not be established and nothing may be
-/// reclaimed on this pass.
+/// Every root read costs a budget unit — one per manifest opened, one per
+/// page of revision rows, one per WAL segment fetched — so this scan is
+/// part of the pass's bound rather than an exception to it. Running out
+/// stops the scan where it stands and reports
+/// [`ScanOutcome::BudgetExhausted`]; the caller retains the session that
+/// triggered it, marks the pass as having deferred content reclamation,
+/// and carries on. A namespace whose scan never fits therefore keeps its
+/// completed content — `max_objects` has to be at least the scan's size
+/// for content reclamation to happen at all — but the sweep around it
+/// still advances, which is the difference between leaking content for a
+/// while and not collecting anything ever.
 async fn collect_referenced_content<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
     live: &LiveSet,
-) -> Result<Option<BTreeSet<ContentId>>> {
+    budget: &mut PassBudget,
+) -> Result<ScanOutcome> {
     let mut referenced = BTreeSet::new();
     for manifest_object_id in &live.manifests {
+        if !budget.try_charge() {
+            return Ok(ScanOutcome::BudgetExhausted);
+        }
         let Ok(tables) =
             load_verified_manifest_tables(store, namespace_id, manifest_object_id).await
         else {
-            return Ok(None);
+            return Ok(ScanOutcome::Unavailable);
         };
         let mut lower_bound = lookup_keys::REVISION_ROW_PREFIX.to_owned();
         let upper_bound = string_prefix_upper_bound(lookup_keys::REVISION_ROW_PREFIX);
         loop {
+            if !budget.try_charge() {
+                return Ok(ScanOutcome::BudgetExhausted);
+            }
             let Ok(rows) = tables
                 .scan_range_page_with_keys(
                     MetadataTableFamily::Revisions,
@@ -283,7 +370,7 @@ async fn collect_referenced_content<S: ObjectStore + ?Sized>(
                 )
                 .await
             else {
-                return Ok(None);
+                return Ok(ScanOutcome::Unavailable);
             };
             let exhausted = rows.len() < REVISION_SCAN_WAVE_ROWS;
             match rows.last() {
@@ -302,6 +389,9 @@ async fn collect_referenced_content<S: ObjectStore + ?Sized>(
     }
 
     for segment_key in &live.wal_segments {
+        if !budget.try_charge() {
+            return Ok(ScanOutcome::BudgetExhausted);
+        }
         let Some(bytes) = store
             .get(segment_key, None)
             .await
@@ -309,10 +399,10 @@ async fn collect_referenced_content<S: ObjectStore + ?Sized>(
         else {
             // A retained segment that vanished mid-pass is exactly the
             // ambiguity rule 5 is about.
-            return Ok(None);
+            return Ok(ScanOutcome::Unavailable);
         };
         let Ok(envelope) = decode_wal_segment_envelope_zstd(&bytes) else {
-            return Ok(None);
+            return Ok(ScanOutcome::Unavailable);
         };
         for record in &envelope.payload.records {
             for delta in &record.deltas {
@@ -323,5 +413,5 @@ async fn collect_referenced_content<S: ObjectStore + ?Sized>(
         }
     }
 
-    Ok(Some(referenced))
+    Ok(ScanOutcome::Complete(referenced))
 }
