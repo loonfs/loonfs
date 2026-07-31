@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
 use loonfs_objectstore::{
-    ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
+    ByteRange, ByteStream, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
     StoredObjectChecksum,
 };
 use std::fmt;
@@ -125,6 +125,16 @@ impl<S: ObjectStore> ObjectStore for MetadataMapStore<S> {
     ) -> Result<ObjectMetadata, ObjectStoreError> {
         let metadata = self.inner.put(key, bytes, mode).await?;
         Ok(self.map(key, metadata))
+    }
+
+    async fn put_streamed(
+        &self,
+        key: &str,
+        body: ByteStream,
+        mode: PutMode,
+    ) -> Result<u64, ObjectStoreError> {
+        // Nothing to remap: a streamed write reports a length, not identity.
+        self.inner.put_streamed(key, body, mode).await
     }
 
     async fn compare_and_swap(

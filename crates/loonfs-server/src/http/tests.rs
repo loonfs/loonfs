@@ -10,7 +10,7 @@ use crate::config::RuntimeCacheConfigOverrides;
 use crate::{ServerConfig, StoreConfig};
 use async_trait::async_trait;
 use axum::body::Bytes;
-use futures::stream::BoxStream;
+use futures::stream::{BoxStream, StreamExt};
 use loonfs::{
     CreateNamespaceOptions, DeleteOptions, FsAdmin, FsReader, FsWriter, PutFileOptions, TraceMode,
     TraceStoreKind,
@@ -97,7 +97,7 @@ fn error_status_mapping_matches_the_api_spec_table() {
 }
 use loonfs_test_support::http::raw_agent;
 use loonfs_test_support::ids::namespace_id;
-use loonfs_test_support::stores::{BlockingStore, KeyPredicate, OperationClass};
+use loonfs_test_support::stores::{BlockingStore, BufferWatchStore, KeyPredicate, OperationClass};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -1152,6 +1152,123 @@ async fn http_upload_body_over_the_limit_answers_content_too_large() {
         .expect("small upload fits under the limit");
 
     server.abort();
+}
+
+/// A payload with a distinct byte at every offset, so bytes landing in the
+/// wrong order or twice cannot go unnoticed.
+fn distinct_bytes(len: usize) -> Vec<u8> {
+    (0..len).map(|offset| (offset % 251) as u8).collect()
+}
+
+/// What the write path is allowed to hold at once, and what it is asked to
+/// carry: three internal parts' worth, so a path that materializes its
+/// payload is caught by more than a rounding error.
+const MEMORY_BOUND_PART_BYTES: u64 = loonfs_objectstore::PROVIDER_MULTIPART_PART_BYTES;
+const MEMORY_BOUND_PAYLOAD_BYTES: usize = 3 * MEMORY_BOUND_PART_BYTES as usize + 4_096;
+
+/// The proxied upload route must not materialize its request body.
+///
+/// This is measured, not asserted about the process: the store is wrapped in
+/// a watcher that records every payload buffer handed across the object-store
+/// boundary and, exactly, how many bytes of them are alive at any instant. A
+/// route that buffered its body would hand the store one buffer the size of
+/// the whole payload; a streaming one hands it a series of chunks and never
+/// holds more than a part's worth.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_proxied_upload_route_never_holds_the_whole_payload() {
+    let temp_dir = tempdir().expect("tempdir");
+    let watched = Arc::new(BufferWatchStore::watching_content(
+        LocalFsStore::new(temp_dir.path()).expect("store"),
+    ));
+    let store = Arc::clone(&watched) as SharedObjectStore;
+    bootstrap_namespace(&store, "runtime-writer", &namespace_id("demo")).await;
+    let harness = start_server(store, temp_dir.path(), "server-writer").await;
+
+    let payload = distinct_bytes(MEMORY_BOUND_PAYLOAD_BYTES);
+    let target = NamespacePath::parse("demo", "/streamed.bin").expect("target");
+    harness
+        .client
+        .put_file_bytes(&target, &payload, &replace_file_options())
+        .await
+        .expect("a multi-part payload uploads through the proxied route");
+
+    let peaks = watched.peaks();
+    assert_eq!(
+        peaks.total_bytes, MEMORY_BOUND_PAYLOAD_BYTES as u64,
+        "every payload byte crossed the store boundary exactly once"
+    );
+    assert!(
+        peaks.largest_buffer_bytes <= MEMORY_BOUND_PART_BYTES,
+        "no single buffer may exceed one part: largest was {}",
+        peaks.largest_buffer_bytes
+    );
+    assert!(
+        peaks.peak_live_bytes <= MEMORY_BOUND_PART_BYTES,
+        "the write path held {} bytes at once, past its one-part window",
+        peaks.peak_live_bytes
+    );
+
+    // And the bytes are the bytes.
+    let read_back = harness
+        .client
+        .get_file_bytes(&target)
+        .await
+        .expect("read the streamed object back");
+    assert_eq!(read_back, payload);
+
+    harness.server.abort();
+}
+
+/// The same bound one layer down, on the primitive the route depends on.
+/// Driving `put_streamed` directly separates "the route streams" from "the
+/// store writes incrementally", so a regression in either is attributable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn put_streamed_writes_a_multi_part_payload_one_part_at_a_time() {
+    let temp_dir = tempdir().expect("tempdir");
+    let watched =
+        BufferWatchStore::watching_content(LocalFsStore::new(temp_dir.path()).expect("store"));
+
+    let payload = distinct_bytes(MEMORY_BOUND_PAYLOAD_BYTES);
+    let key = loonfs_objectstore::keys::content_blob(
+        "cs_00000000000000000000000000000001",
+        &loonfs_api::ContentId::parse("con_0123456789abcdef0123456789abcdef").expect("content id"),
+    );
+    // Chunks the size of an HTTP body's, not the store's: the boundaries a
+    // caller hands over carry no meaning, and the store regroups them.
+    let chunks: Vec<Bytes> = payload
+        .chunks(64 * 1024)
+        .map(Bytes::copy_from_slice)
+        .collect();
+    let stored = watched
+        .put_streamed(
+            &key,
+            futures::stream::iter(chunks.into_iter().map(Ok)).boxed(),
+            PutMode::CreateIfAbsent,
+        )
+        .await
+        .expect("stream a multi-part payload into the store");
+
+    assert_eq!(stored, MEMORY_BOUND_PAYLOAD_BYTES as u64);
+    let peaks = watched.peaks();
+    assert_eq!(peaks.total_bytes, MEMORY_BOUND_PAYLOAD_BYTES as u64);
+    assert!(
+        peaks.largest_buffer_bytes <= MEMORY_BOUND_PART_BYTES,
+        "no single buffer may exceed one part: largest was {}",
+        peaks.largest_buffer_bytes
+    );
+    assert!(
+        peaks.peak_live_bytes <= MEMORY_BOUND_PART_BYTES,
+        "the store held {} bytes at once, past its one-part window",
+        peaks.peak_live_bytes
+    );
+    assert_eq!(
+        watched
+            .get(&key, None)
+            .await
+            .expect("read back")
+            .expect("object exists"),
+        Bytes::from(payload)
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

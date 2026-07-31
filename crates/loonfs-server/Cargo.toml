@@ -20,6 +20,7 @@ required-features = ["openapi"]
 axum.workspace = true
 bytes.workspace = true
 clap.workspace = true
+futures.workspace = true
 http.workspace = true
 loonfs-api = { path = "../loonfs-api" }
 loonfs = { path = "../loonfs" }
@@ -36,7 +37,6 @@ utoipa = { workspace = true, optional = true }
 
 [dev-dependencies]
 async-trait.workspace = true
-futures.workspace = true
 loonfs-client = { path = "../loonfs-client" }
 loonfs-test-support = { path = "../loonfs-test-support" }
 tempfile.workspace = true

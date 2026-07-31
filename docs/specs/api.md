@@ -555,10 +555,35 @@ cursor may re-examine work or defer a newly inserted key that sorts before its
 position until the next full pass; it can never make a newly live object
 deletable.
 
+#### Service-proxied upload
+
+`service_proxied` is the default and needs no capability from the provider:
+the client `PUT`s its bytes to `/uploads/{upload_id}/content` and the server
+writes them to object storage.
+
+The server does not hold the body. It hashes the payload as it forwards it,
+so a proxied upload costs one transfer part of server memory whatever the
+object's size, and `upload.max_content_bytes` is counted as the bytes arrive
+rather than measured after buffering — a body past the limit answers
+`content_too_large` without ever being held. The reference the upload
+produces carries `storage_checksum` = the SHA-256 the *server* computed over
+the complete payload, and `whole_file_sha256` set to the same value: the
+LoonFS write path is the trusted party that hashed these bytes (format spec,
+provenance rule).
+
+#### Direct single-PUT upload
+
 For `direct_put`, the client requests a presigned upload capability. It
 declares what it can know — how many bytes it holds and what they hash to —
 and nothing about where they go: the server owns content identity, so a
 client can never aim a signed write at an object it chose.
+
+The claim is required *here*, at begin, and cannot move: the SHA-256 is
+signed into the header the provider enforces on the write, so the presigned
+URL cannot exist before the digest does. That is the one place a LoonFS
+client must read its payload before uploading it, and it is why
+`direct_multipart` — whose whole-object claim is never signed into anything
+— claims at completion instead.
 
 ```json
 {
@@ -640,43 +665,52 @@ the network once, in parallel, straight into object storage; the server
 opens and closes the provider's multipart upload and signs each part, and
 never sees a byte.
 
-The client declares the assembled object's length and its **CRC-64/NVME**,
-not a SHA-256. That is deliberate: an S3-compatible provider computes a
-CRC-64/NVME over a multipart object and never computes a SHA-256 over it, so
-the CRC is the only full-object evidence that will ever exist for these
-bytes. The resulting `content_ref` therefore carries no `whole_file_sha256`
-(format spec, provenance rule).
+**A begin request declares nothing about the payload.** It settles only the
+part geometry, and every field is optional:
 
 ```json
 {
   "mode": "direct_multipart",
-  "multipart": {
-    "size_bytes": 17301504,
-    "crc64nvme": "<16 lowercase hex>"
-  }
+  "multipart": { "part_size_bytes": 8388608 }
 }
 ```
 
-The response names the object and the geometry to cut to, and nothing about
-the provider — no bucket, no key, no provider upload id:
+`part_size_bytes` must be between 5 MiB and 5 GiB — the range every
+supported provider accepts for a non-final part — and defaults to 8 MiB. It
+is also what bounds the object: a provider accepts at most 10,000 parts, so
+one session carries at most `part_size_bytes` × 10,000 bytes. A client
+uploading something very large asks for a larger part size; a client that
+does not know its length takes the default and keeps asking for part URLs
+until its stream ends.
+
+**The two direct modes claim their content at opposite ends, and the reason
+is signing.** A `direct_put` client must declare its SHA-256 at begin
+because that digest is signed into the request header the provider will
+enforce — there is no presigned URL to hand out until it exists. A
+`direct_multipart` client declares nothing at begin because nothing about
+the whole object is signed into anything: each part carries its own
+checksum, and the assembled object's claim is only ever *verified*, at
+completion. Waiting until then costs nothing and buys a great deal — one
+pass over the bytes instead of two, and uploads of streams whose length is
+not known when they start.
+
+The response is the geometry and nothing else — no content reference, no
+part count, and nothing about the provider:
 
 ```json
 {
   "namespace_id": "demo",
   "upload_id": "upl_...",
   "mode": "direct_multipart",
-  "direct_multipart": {
-    "content_ref": {
-      "kind": "blob_v1",
-      "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
-      "size_bytes": 17301504,
-      "storage_checksum": { "algorithm": "crc64nvme", "value": "<16 lowercase hex>" }
-    },
-    "part_size_bytes": 8388608,
-    "part_count": 3
-  }
+  "direct_multipart": { "part_size_bytes": 8388608 }
 }
 ```
+
+There is no content reference to return because there is nothing yet to
+describe: the server has minted the object's identity, but its length and
+checksum are what the client reports at completion. A client that knows its
+size derives its own part count from `part_size_bytes`; one that does not
+simply keeps going.
 
 **Parts.** `POST /uploads/{upload_id}/parts` takes a list of
 `{part_number, crc64nvme}` and returns one presigned capability per part,
@@ -691,13 +725,16 @@ The server keeps **no durable record of any part**. Part bookkeeping — part
 number, etag, checksum — belongs to the client all the way to completion,
 exactly as it does in the provider's own multipart API.
 
-**Completion.** `complete` carries the same `content_ref` plus
-`multipart_parts`: every part, once each, in ascending part order.
+**Completion.** `complete` carries the claim and the parts. The claim is the
+assembled object's length and its **CRC-64/NVME**, not a SHA-256: an
+S3-compatible provider computes a CRC-64/NVME over a multipart object and
+never computes a SHA-256 over it, so the CRC is the only full-object
+evidence that will ever exist for these bytes. The resulting `content_ref`
+therefore carries no `whole_file_sha256` (format spec, provenance rule).
 
 ```json
 {
-  "content_ref": { "kind": "blob_v1", "content_id": "con_...", "size_bytes": 17301504,
-                   "storage_checksum": { "algorithm": "crc64nvme", "value": "<16 hex>" } },
+  "multipart": { "size_bytes": 17301504, "crc64nvme": "<16 hex>" },
   "multipart_parts": [
     { "part_number": 1, "etag": "\"...\"", "crc64nvme": "<16 hex>" },
     { "part_number": 2, "etag": "\"...\"", "crc64nvme": "<16 hex>" },
@@ -705,6 +742,12 @@ exactly as it does in the provider's own multipart API.
   ]
 }
 ```
+
+Every part, once each, in ascending part order. A `direct_multipart`
+completion carries **no** `content_ref`: the client was never told the
+identity, and the completion response is where it learns it. Service-proxied
+and `direct_put` completions are the other way round — they name back the
+`content_ref` they were given and carry no `multipart` claim.
 
 The server asks the provider to assemble the object and then **reads the
 assembled object's stored checksum and size back and compares them against

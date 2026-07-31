@@ -319,6 +319,27 @@ Large immutable file data may use multipart upload or another
 provider-specific optimization. Small mutable control objects should not
 depend on those mechanisms.
 
+A payload whose length is not known before it starts arriving may be written
+incrementally, cutting it into provider parts as it goes so the writer's
+memory follows the part size rather than the object's size. Two rules apply
+to such a write:
+
+1. **A failed or abandoned incremental write leaves no provider state.** The
+   multipart upload it opened is aborted — on failure, and on cancellation
+   too, since a client that disconnects mid-upload is the ordinary case.
+   Aborting is safe whatever the upload's real state, so this needs no proof
+   of what it is cleaning up; an abort that itself fails leaves the bucket's
+   incomplete-upload lifecycle rule to collect the parts.
+2. **The payload is consumed before any precondition is evaluated.** A
+   writer folding a digest over the same bytes as it forwards them therefore
+   always ends up with a digest over the complete payload, even when the
+   write is refused — which is what lets it tell "these are the same bytes
+   again" from "these are different bytes". Beyond one part the write is an
+   unconditional overwrite regardless, because a provider assembles a
+   multipart object unconditionally; incremental writes are for immutable,
+   uniquely-named keys, where the condition is a corruption tripwire rather
+   than a concurrency control.
+
 ### 1.8 Provider conformance
 
 The format standardizes the required behaviors, not a brand name such as "S3
@@ -1538,11 +1559,31 @@ Nothing returns a session to `open`, and no state records consumption: a
 client that wants another attempt begins another session, which mints its own
 content identity, and publication never writes back to a session record.
 
+Every session records `namespace_id`, `upload_id`, `mode`, `content_id`, and
+`created_at_ms` alongside its lifecycle. The content identity is allocated
+when the session opens, before any byte is read, so the object's final key is
+known from birth and belongs to exactly one session.
+
+What a session records *about its payload* depends on when it can know
+anything. A `direct_put` session records `claimed_checksum` and
+`direct_put_content_ref` because its SHA-256 is signed into the write the
+server authorizes, so the claim has to exist before the session does. A
+service-proxied session records neither and learns both from the bytes it
+receives. A `direct_multipart` session records neither either: it is opened
+for a payload whose length may not be known yet, and its claim arrives with
+its completion. All three record `staged_content_ref` once content has
+passed validation, and the terminal `completed` state carries the verified
+reference.
+
 A session that uploads through a provider's multipart API also records
-`provider_multipart_upload_id`, the handle that upload is addressed by. It is
-the *only* provider handle a session keeps: parts are the uploader's
+`provider_multipart_upload_id`, the handle that upload is addressed by, and
+`multipart_part_size_bytes`, the geometry it was opened with. The upload id
+is the *only* provider handle a session keeps: parts are the uploader's
 bookkeeping, exactly as they are in the provider's own API, so there is no
-durable record per part and none is permitted. Cleanup reads this field to
+durable record per part and none is permitted. The geometry is recorded
+because it is settled at begin and the client may not be told it twice — a
+session resumed after a lost begin response reads it back rather than being
+handed a second, possibly different, one. Cleanup reads the upload id to
 abandon what a terminated session left open, under rule 2 above — after the
 durable transition, never before it. Aborting an upload that already
 assembled its object is safe on every supported provider: it succeeds and

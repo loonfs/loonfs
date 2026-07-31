@@ -2,8 +2,8 @@
 //! configuration.
 
 use super::{
-    ByteRange, MultipartCompletion, MultipartPart, ObjectBody, ObjectMetadata, ObjectStore,
-    PutMode, StoredObjectChecksum,
+    ByteRange, ByteStream, MultipartCompletion, MultipartPart, ObjectBody, ObjectMetadata,
+    ObjectStore, PutMode, StoredObjectChecksum,
 };
 use crate::abs::{AzureAbsStore, AzureAbsStoreConfig};
 use crate::gcs::{GcpGcsStore, GcpGcsStoreConfig};
@@ -266,6 +266,21 @@ impl ObjectStore for ConfiguredObjectStore {
             ConfiguredObjectStoreInner::CloudflareR2(store) => store.put(key, bytes, mode).await,
             ConfiguredObjectStoreInner::GcpGcs(store) => store.put(key, bytes, mode).await,
             ConfiguredObjectStoreInner::AzureAbs(store) => store.put(key, bytes, mode).await,
+        }
+    }
+
+    async fn put_streamed(&self, key: &str, body: ByteStream, mode: PutMode) -> Result<u64> {
+        macro_rules! put_streamed {
+            ($store:expr) => {
+                $store.put_streamed(key, body, mode).await
+            };
+        }
+        match &self.inner {
+            ConfiguredObjectStoreInner::LocalFs(store) => put_streamed!(store),
+            ConfiguredObjectStoreInner::AwsS3(store) => put_streamed!(store),
+            ConfiguredObjectStoreInner::CloudflareR2(store) => put_streamed!(store),
+            ConfiguredObjectStoreInner::GcpGcs(store) => put_streamed!(store),
+            ConfiguredObjectStoreInner::AzureAbs(store) => put_streamed!(store),
         }
     }
 

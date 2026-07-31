@@ -41,12 +41,17 @@ impl OperationClass {
                 kind,
                 OperationKind::Get { .. } | OperationKind::GetWithMetadata
             ),
-            Self::Put => matches!(kind, OperationKind::Put { .. }),
+            Self::Put => matches!(
+                kind,
+                OperationKind::Put { .. } | OperationKind::PutStreamed { .. }
+            ),
             Self::PutOverwrite => matches!(
                 kind,
                 OperationKind::Put {
                     mode: PutMode::Overwrite,
                     ..
+                } | OperationKind::PutStreamed {
+                    mode: PutMode::Overwrite,
                 }
             ),
             Self::PutCreateIfAbsent => matches!(
@@ -54,6 +59,8 @@ impl OperationClass {
                 OperationKind::Put {
                     mode: PutMode::CreateIfAbsent,
                     ..
+                } | OperationKind::PutStreamed {
+                    mode: PutMode::CreateIfAbsent,
                 }
             ),
             Self::CompareAndSwap => matches!(
@@ -62,6 +69,9 @@ impl OperationClass {
                     | OperationKind::Put {
                         mode: PutMode::CompareAndSwap { .. },
                         ..
+                    }
+                    | OperationKind::PutStreamed {
+                        mode: PutMode::CompareAndSwap { .. },
                     }
             ),
             Self::Delete => matches!(kind, OperationKind::Delete),
@@ -109,6 +119,12 @@ pub enum OperationKind<'a> {
     Put {
         /// Bytes supplied by the caller.
         bytes: &'a Bytes,
+        /// Write mode supplied by the caller.
+        mode: &'a PutMode,
+    },
+    /// A `put_streamed` call. There are no bytes to show: the payload has
+    /// not been read yet when a wrapper decides what to do about the call.
+    PutStreamed {
         /// Write mode supplied by the caller.
         mode: &'a PutMode,
     },

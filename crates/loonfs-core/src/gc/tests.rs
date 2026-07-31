@@ -294,6 +294,7 @@ async fn write_upload_session(store: &LocalFsStore, namespace_id: &NamespaceId) 
             expires_at_ms: 1_000 + UPLOAD_SESSION_LEASE_MS,
         },
         provider_multipart_upload_id: None,
+        multipart_part_size_bytes: None,
     };
     let envelope = loonfs_api::wire::control::UploadSessionEnvelope::from_state(
         loonfs_api::wire::control::ControlObjectKind::UploadSession,
@@ -696,10 +697,7 @@ async fn upload_completion_wins_before_gc_abort_and_the_session_is_retained() {
             &namespace_id,
             &content_store_id,
             &upload_id,
-            &loonfs_api::v0::CompleteUploadRequest {
-                content_ref: content_ref.clone(),
-                multipart_parts: None,
-            },
+            &loonfs_api::v0::CompleteUploadRequest::for_content_ref(content_ref.clone()),
             &aged,
         )
         .await;
@@ -738,10 +736,7 @@ async fn gc_abort_wins_before_completion_and_completion_reports_not_found() {
     let content_key =
         loonfs_objectstore::keys::content_blob(content_store_id.as_str(), &content_ref.content_id);
     let store = blocking_control_cas_store(store, BlockingControlCasTarget::UploadCompleted);
-    let request = loonfs_api::v0::CompleteUploadRequest {
-        content_ref: content_ref.clone(),
-        multipart_parts: None,
-    };
+    let request = loonfs_api::v0::CompleteUploadRequest::for_content_ref(content_ref.clone());
     let completion = crate::protocol::complete_upload(
         &store,
         &namespace_id,
@@ -807,10 +802,7 @@ async fn complete_upload_for_gc<S: ObjectStore + ?Sized>(
         namespace_id,
         &content_store_id,
         &begin.upload_id,
-        &loonfs_api::v0::CompleteUploadRequest {
-            content_ref: staged.content_ref.clone(),
-            multipart_parts: None,
-        },
+        &loonfs_api::v0::CompleteUploadRequest::for_content_ref(staged.content_ref.clone()),
         context,
     )
     .await

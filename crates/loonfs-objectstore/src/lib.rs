@@ -36,13 +36,13 @@ pub use configured::{ConfiguredObjectStore, ConfiguredObjectStoreKind};
 pub use immutable_write::ImmutableWriteError;
 pub use object_store::ObjectStoreError as Error;
 pub use object_store::{
-    ByteRange, MultipartCompletion, MultipartPart, ObjectBody, ObjectMetadata, ObjectStore,
-    ObjectStoreError, PutMode, Result, SharedObjectStore, StoredObjectChecksum,
+    ByteRange, ByteStream, MultipartCompletion, MultipartPart, ObjectBody, ObjectMetadata,
+    ObjectStore, ObjectStoreError, PutMode, Result, SharedObjectStore, StoredObjectChecksum,
 };
 pub use provider_object_store::{
     ProviderObjectStore, ProviderObjectStoreConfig, PROVIDER_ATTEMPT_TIMEOUT,
     PROVIDER_CONNECT_TIMEOUT, PROVIDER_MULTIPART_PART_BYTES, PROVIDER_MULTIPART_PART_WINDOW,
-    PROVIDER_MULTIPART_THRESHOLD_BYTES, PROVIDER_OPERATION_DEADLINE,
+    PROVIDER_MULTIPART_THRESHOLD_BYTES, PROVIDER_OPERATION_DEADLINE, PROVIDER_STREAMED_PART_WINDOW,
     PROVIDER_TRANSFER_ATTEMPT_TIMEOUT,
 };
 pub use secret::SecretString;

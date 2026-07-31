@@ -21,10 +21,10 @@ use loonfs_api::{
         BeginUploadRequest, BeginUploadResponse, ChangesResponse,
         CommitResponse as ApiCommitResponse, CommittedChange, CompleteUploadRequest,
         CompleteUploadResponse, CompletedUploadPart, DirectMultipartContentClaim,
-        DirectPutContentClaim, DisableGrepIndexResponse, EnableGrepIndexResponse, FilesystemChange,
-        GrepGcResponse, ObjectTransferAccess, SignUploadPartsRequest, SignUploadPartsResponse,
-        SignedUploadPart, UploadContentResponse, UploadMode, UploadPartChecksumClaim,
-        ValidatedContentToken,
+        DirectMultipartUploadOptions, DirectPutContentClaim, DisableGrepIndexResponse,
+        EnableGrepIndexResponse, FilesystemChange, GrepGcResponse, ObjectTransferAccess,
+        SignUploadPartsRequest, SignUploadPartsResponse, SignedUploadPart, UploadContentResponse,
+        UploadMode, UploadPartChecksumClaim, ValidatedContentToken,
     },
     AbsolutePath, AuthoritativePathEntry, CapabilityDocument, ChangeSeq, CheckpointId,
     ChecksumAlgorithm, CommitId, CommitRequest, ContentRef, CreateCheckpointRequest,
@@ -406,24 +406,25 @@ impl Client {
         .await
     }
 
-    /// Starts a direct multipart upload of an object the caller already
-    /// holds.
+    /// Opens a direct multipart upload session.
     ///
-    /// The claim names the assembled object's length and CRC-64/NVME. The
-    /// server answers with the content object it minted and the part
-    /// geometry to cut to, so the client needs no provider vocabulary at
-    /// all — not the bucket, not the key, not the provider's upload id.
+    /// Nothing about the payload is declared here — not its length, not its
+    /// digest — so one pass over the bytes is enough and a stream of unknown
+    /// length can start uploading immediately. The server answers with the
+    /// part geometry to cut to and nothing else: not the bucket, not the
+    /// key, not the provider's upload id, and not the content identity,
+    /// which it names back at completion.
     pub async fn begin_direct_multipart(
         &self,
         namespace_id: &NamespaceId,
-        claim: DirectMultipartContentClaim,
+        options: DirectMultipartUploadOptions,
     ) -> Result<BeginUploadResponse> {
         self.begin_upload(
             namespace_id,
             &BeginUploadRequest {
                 mode: Some(UploadMode::DirectMultipart),
                 content: None,
-                multipart: Some(claim),
+                multipart: Some(options),
             },
         )
         .await
@@ -722,7 +723,8 @@ impl Client {
     /// The whole-object checksum is folded part by part as the payload is
     /// cut, so the same pass that produces what the provider enforces on
     /// each part also produces what completion verifies the assembly
-    /// against.
+    /// against — and because the claim is only needed at completion, that
+    /// one pass is the only pass a caller ever has to make over its bytes.
     async fn stage_bytes_via_multipart(
         &self,
         namespace_id: &NamespaceId,
@@ -730,13 +732,7 @@ impl Client {
     ) -> Result<StagedContent> {
         let whole_object = StorageChecksum::crc64nvme(bytes);
         let begin = self
-            .begin_direct_multipart(
-                namespace_id,
-                DirectMultipartContentClaim {
-                    size_bytes: bytes.len() as u64,
-                    crc64nvme: whole_object.value.clone(),
-                },
-            )
+            .begin_direct_multipart(namespace_id, DirectMultipartUploadOptions::default())
             .await?;
         let upload_id = begin.upload_id.clone();
         let multipart = begin.direct_multipart.ok_or_else(|| {
@@ -771,10 +767,13 @@ impl Client {
             .complete_upload(
                 namespace_id,
                 &upload_id,
-                &CompleteUploadRequest {
-                    content_ref: multipart.content_ref,
-                    multipart_parts: Some(parts),
-                },
+                &CompleteUploadRequest::for_multipart(
+                    DirectMultipartContentClaim {
+                        size_bytes: bytes.len() as u64,
+                        crc64nvme: whole_object.value.clone(),
+                    },
+                    parts,
+                ),
             )
             .await?;
         Ok(Self::staged_from_completion(response))
@@ -837,10 +836,7 @@ impl Client {
             .complete_upload(
                 namespace_id,
                 &upload.upload_id,
-                &CompleteUploadRequest {
-                    content_ref: staged.content_ref,
-                    multipart_parts: None,
-                },
+                &CompleteUploadRequest::for_content_ref(staged.content_ref),
             )
             .await?;
         Ok(Self::staged_from_completion(response))
@@ -1535,10 +1531,7 @@ mod tests {
             .complete_upload(
                 &namespace_id,
                 &upload_id,
-                &CompleteUploadRequest {
-                    content_ref,
-                    multipart_parts: None,
-                },
+                &CompleteUploadRequest::for_content_ref(content_ref),
             )
             .await
             .expect("completed-session replay should retry");

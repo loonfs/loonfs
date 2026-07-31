@@ -245,10 +245,7 @@ async fn valid_content_admission_skips_durable_content_validation() {
     let completed = engine
         .complete_upload_prepared(
             &upload.upload_id,
-            &loonfs_api::v0::CompleteUploadRequest {
-                content_ref: staged.content_ref.clone(),
-                multipart_parts: None,
-            },
+            &loonfs_api::v0::CompleteUploadRequest::for_content_ref(staged.content_ref.clone()),
         )
         .await
         .expect("complete upload");
@@ -959,10 +956,7 @@ async fn a_re_minted_receipt_publishes_after_the_first_one_expired() {
     let completed = engine
         .complete_upload_prepared(
             &upload.upload_id,
-            &loonfs_api::v0::CompleteUploadRequest {
-                content_ref: staged.content_ref.clone(),
-                multipart_parts: None,
-            },
+            &loonfs_api::v0::CompleteUploadRequest::for_content_ref(staged.content_ref.clone()),
         )
         .await
         .expect("complete upload");

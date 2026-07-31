@@ -103,9 +103,17 @@ pub const GC_MIN_GRACE_WINDOW_MS: u64 = max_u64(
     + GC_SAFETY_MARGIN_MS;
 
 /// Most parts one direct multipart upload may cut into. This is the
-/// S3-compatible ceiling, so at the fixed part size it also fixes the
-/// largest object a direct multipart upload can carry.
+/// S3-compatible ceiling, so with the session's part size it fixes the
+/// largest object that session can carry: `part_size_bytes × 10_000`.
 pub const MAX_MULTIPART_PARTS: u32 = 10_000;
+
+/// Smallest part size a `direct_multipart` session may be opened with.
+/// Every supported provider refuses a non-final part below 5 MiB.
+pub const MIN_MULTIPART_PART_BYTES: u64 = 5 * 1024 * 1024;
+
+/// Largest part size a `direct_multipart` session may be opened with.
+/// Every supported provider refuses a part above 5 GiB.
+pub const MAX_MULTIPART_PART_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 
 /// Most part-upload capabilities one request may ask for. A client asks in
 /// waves as it works through a file, so this bounds one response rather than

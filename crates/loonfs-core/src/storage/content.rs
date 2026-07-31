@@ -5,13 +5,15 @@ use crate::error::CoreError;
 use crate::namespace::catalog::{load_namespace_content_store_id, VerifiedNamespaceCatalogEntry};
 use crate::storage::content_admission::{ContentAdmission, PreparedContent};
 use bytes::Bytes;
+use futures::StreamExt;
 use loonfs_api::{
     ChecksumAlgorithm, ContentId, ContentRef, ContentRefValidationError, ContentStoreId,
-    NamespaceId, StorageChecksum,
+    NamespaceId, Sha256, StorageChecksum,
 };
 use loonfs_objectstore::keys::content_blob;
-use loonfs_objectstore::ObjectStore;
+use loonfs_objectstore::{ByteStream, ObjectStore, ObjectStoreError, PutMode};
 use serde::{Deserialize, Serialize};
+use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -384,6 +386,145 @@ pub async fn store_bytes_as_content_with_store_id<S: ObjectStore + ?Sized>(
     bytes: &[u8],
 ) -> Result<StoredContent, CoreError> {
     stage_bytes_under_content_id(store, content_store_id, ContentId::generate(), bytes).await
+}
+
+/// Stages a streamed payload under a freshly minted identity.
+///
+/// The streaming twin of [`store_bytes_as_content_with_store_id`], for
+/// writers whose payload arrives in pieces or whose length is not known in
+/// advance. It produces the same acknowledged [`StoredContent`], so
+/// everything downstream — preparation, publication, verified reads — is
+/// unchanged.
+pub async fn store_stream_as_content_with_store_id<S: ObjectStore + ?Sized>(
+    store: &S,
+    content_store_id: ContentStoreId,
+    body: ByteStream,
+) -> Result<StoredContent, CoreError> {
+    let content_id = ContentId::generate();
+    let object_key = content_blob(content_store_id.as_str(), &content_id);
+    let staged =
+        stage_streamed_under_content_id(store, content_store_id.clone(), content_id, body).await?;
+    if staged.already_present {
+        // The identity is 128 fresh random bits, so an occupied key is not
+        // a race with anyone: it is corruption, and it fails loudly.
+        return Err(CoreError::Internal(format!(
+            "content object `{object_key}` already holds bytes under a freshly minted identity"
+        )));
+    }
+
+    Ok(StoredContent {
+        content_store_id,
+        object_key,
+        file_size_bytes: staged.content_ref.size_bytes,
+        content_ref: staged.content_ref,
+        _write_acknowledged: StoredContentWriteAcknowledgement,
+    })
+}
+
+/// What a streamed staging write established about the content object.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StagedStream {
+    /// Identity, length, and the digest folded over the payload on its way
+    /// through. The digest is always over the complete stream: the store
+    /// consumes the body before it evaluates any precondition.
+    pub content_ref: ContentRef,
+    /// Whether the key was already occupied when the write tried to create
+    /// it. Only this session can have written there — the identity is
+    /// random and belongs to one session — so the caller decides whether
+    /// this is its own earlier attempt replayed or a conflicting one, by
+    /// comparing `content_ref` against what the session recorded.
+    pub already_present: bool,
+}
+
+/// Stages a payload that arrives as a stream, hashing it on the way through.
+///
+/// The bytes are never held whole: the digest is folded chunk by chunk as
+/// they are forwarded to the store, and the reference is built from that
+/// digest and the length the store reports back. The result carries a
+/// trusted `whole_file_sha256` for the same reason the buffered path's does
+/// — the LoonFS write path hashed the complete payload itself — and it is
+/// the constructor, not a convention, that guarantees it.
+///
+/// The write is create-only, exactly like the buffered staging write, and
+/// degrades to an overwrite past the store's multipart threshold for the
+/// same reason that one does: a provider assembles a multipart object
+/// unconditionally. On a key named by 128 random bits the condition is a
+/// corruption tripwire rather than a concurrency control, so what it
+/// catches either way is a key occupied by something this session did not
+/// write.
+pub(crate) async fn stage_streamed_under_content_id<S: ObjectStore + ?Sized>(
+    store: &S,
+    content_store_id: ContentStoreId,
+    content_id: ContentId,
+    body: ByteStream,
+) -> Result<StagedStream, CoreError> {
+    let object_key = content_blob(content_store_id.as_str(), &content_id);
+    let observed = Arc::new(Mutex::new(StreamedPayload::default()));
+    let hashed = {
+        let observed = Arc::clone(&observed);
+        body.map(move |chunk| {
+            let chunk = chunk?;
+            let mut observed = observed.lock().unwrap_or_else(|err| err.into_inner());
+            observed.digest.update(&chunk);
+            observed.size_bytes += chunk.len() as u64;
+            Ok(chunk)
+        })
+        .boxed()
+    };
+
+    let stored = store
+        .put_streamed(&object_key, hashed, PutMode::CreateIfAbsent)
+        .await;
+    let observed = std::mem::take(&mut *observed.lock().unwrap_or_else(|err| err.into_inner()));
+    let already_present = match stored {
+        Ok(stored_bytes) if stored_bytes != observed.size_bytes => {
+            return Err(CoreError::Internal(format!(
+                "streamed write of `{object_key}` stored {stored_bytes} bytes, \
+                 but {} passed through this writer",
+                observed.size_bytes
+            )))
+        }
+        Ok(_) => false,
+        // The key is occupied. Only this session can name it, so the caller
+        // decides from the digest whether that was its own earlier attempt.
+        Err(ObjectStoreError::PreconditionFailed { .. }) => true,
+        Err(err) => return Err(CoreError::store(&object_key, &err)),
+    };
+
+    Ok(StagedStream {
+        content_ref: ContentRef::blob_v1_streamed(content_id, observed.size_bytes, observed.digest),
+        already_present,
+    })
+}
+
+/// Reads a payload without writing it anywhere, and reports what it was.
+///
+/// This is how a session that has already staged content answers a repeated
+/// upload: the only way to tell "the same bytes again" from "different
+/// bytes" is to hash them, and the object it already owns must not be
+/// touched while that is decided.
+pub(crate) async fn identify_streamed_payload(
+    content_id: ContentId,
+    mut body: ByteStream,
+) -> Result<ContentRef, CoreError> {
+    let mut observed = StreamedPayload::default();
+    while let Some(chunk) = body.next().await {
+        let chunk = chunk.map_err(|err| CoreError::store("upload body", &err))?;
+        observed.digest.update(&chunk);
+        observed.size_bytes += chunk.len() as u64;
+    }
+    Ok(ContentRef::blob_v1_streamed(
+        content_id,
+        observed.size_bytes,
+        observed.digest,
+    ))
+}
+
+/// What a streamed payload amounted to, folded as it passed through.
+#[derive(Debug, Default)]
+struct StreamedPayload {
+    digest: Sha256,
+    size_bytes: u64,
 }
 
 /// Stages bytes under an identity the caller already allocated, for writers

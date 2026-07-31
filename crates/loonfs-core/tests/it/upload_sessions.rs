@@ -272,10 +272,7 @@ async fn complete_upload_does_not_get_content_blob_after_staging() {
         &store,
         &namespace_id,
         &begin.upload_id,
-        &CompleteUploadRequest {
-            content_ref: uploaded.content_ref.clone(),
-            multipart_parts: None,
-        },
+        &CompleteUploadRequest::for_content_ref(uploaded.content_ref.clone()),
         &context,
     )
     .await
@@ -288,10 +285,7 @@ async fn complete_upload_does_not_get_content_blob_after_staging() {
         &store,
         &namespace_id,
         &begin.upload_id,
-        &CompleteUploadRequest {
-            content_ref: uploaded.content_ref,
-            multipart_parts: None,
-        },
+        &CompleteUploadRequest::for_content_ref(uploaded.content_ref),
         &context,
     )
     .await
@@ -319,10 +313,7 @@ async fn complete_upload_does_not_get_content_blob_after_staging() {
         &store,
         &namespace_id,
         &mismatch_begin.upload_id,
-        &CompleteUploadRequest {
-            content_ref: wrong_ref,
-            multipart_parts: None,
-        },
+        &CompleteUploadRequest::for_content_ref(wrong_ref),
         &context,
     )
     .await
@@ -359,6 +350,7 @@ async fn complete_upload_rejects_direct_put_session_without_bound_target() {
             expires_at_ms: context.now_ms + 60_000,
         },
         provider_multipart_upload_id: None,
+        multipart_part_size_bytes: None,
     };
     let envelope = UploadSessionEnvelope::from_state(ControlObjectKind::UploadSession, state)
         .expect("upload session envelope");
@@ -375,10 +367,7 @@ async fn complete_upload_rejects_direct_put_session_without_bound_target() {
         &store,
         &namespace_id,
         &upload_id,
-        &CompleteUploadRequest {
-            content_ref: stored.content_ref,
-            multipart_parts: None,
-        },
+        &CompleteUploadRequest::for_content_ref(stored.content_ref),
         &context,
     )
     .await
@@ -412,11 +401,149 @@ async fn upload_content_rejects_invalid_upload_id_before_key_construction() {
     );
 }
 
+/// The streamed proxied upload: same session, same reference, same
+/// idempotency, without the payload ever being held.
+mod streamed_content {
+    use super::*;
+    use futures::StreamExt;
+    use loonfs_objectstore::keys::content_blob;
+
+    /// A payload larger than one transfer part, cut into stream chunks whose
+    /// boundaries have nothing to do with the store's.
+    fn payload() -> Vec<u8> {
+        (0..3 * 1024 * 1024 + 17)
+            .map(|offset| (offset % 251) as u8)
+            .collect()
+    }
+
+    fn body(bytes: &[u8]) -> loonfs_objectstore::ByteStream {
+        let chunks: Vec<Bytes> = bytes.chunks(9_973).map(Bytes::copy_from_slice).collect();
+        futures::stream::iter(chunks.into_iter().map(Ok)).boxed()
+    }
+
+    async fn upload_streamed<S: ObjectStore + ?Sized>(
+        store: &S,
+        namespace_id: &NamespaceId,
+        upload_id: &UploadId,
+        bytes: &[u8],
+        context: &MutationContext,
+    ) -> Result<loonfs_api::v0::UploadContentResponse, CoreError> {
+        namespace_engine(store, namespace_id, context)
+            .upload_streamed_content(upload_id, body(bytes))
+            .await
+    }
+
+    /// A streamed upload produces exactly the reference the buffered one
+    /// would, because the same digest is computed over the same bytes — the
+    /// only difference is that they were never all in memory at once.
+    #[tokio::test]
+    async fn a_streamed_upload_produces_the_reference_the_buffered_one_would() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let context = mutation_context();
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        bootstrap_namespace(&store, &namespace_id, &context, false)
+            .await
+            .expect("bootstrap");
+        let bytes = payload();
+
+        let begin = begin_upload(&store, &namespace_id, &context)
+            .await
+            .expect("begin upload");
+        let staged = upload_streamed(&store, &namespace_id, &begin.upload_id, &bytes, &context)
+            .await
+            .expect("stream a multi-part payload into the session");
+
+        assert_eq!(staged.content_ref.size_bytes, bytes.len() as u64);
+        assert_eq!(
+            staged.content_ref.storage_checksum,
+            StorageChecksum::sha256(&bytes),
+            "the server hashed the whole stream itself"
+        );
+        assert_eq!(
+            staged.content_ref.whole_file_sha256.as_deref(),
+            Some(staged.content_ref.storage_checksum.value.as_str()),
+            "every proxied write carries a trusted whole-file digest"
+        );
+
+        // Completion is unchanged: it trusts what the server already checked.
+        let completed = complete_upload(
+            &store,
+            &namespace_id,
+            &begin.upload_id,
+            &CompleteUploadRequest::for_content_ref(staged.content_ref.clone()),
+            &context,
+        )
+        .await
+        .expect("complete a streamed upload");
+        assert_eq!(completed.content_ref, staged.content_ref);
+    }
+
+    /// Re-sending a body is the case that forces the shape: the digest only
+    /// exists once the payload has been read, so the decision comes after
+    /// the read — and the object the session already owns must survive it
+    /// either way.
+    #[tokio::test]
+    async fn a_repeated_body_replays_and_a_different_one_conflicts_without_rewriting() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = LocalFsStore::new(temp_dir.path()).expect("store");
+        let context = mutation_context();
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        bootstrap_namespace(&store, &namespace_id, &context, false)
+            .await
+            .expect("bootstrap");
+        let bytes = payload();
+
+        let begin = begin_upload(&store, &namespace_id, &context)
+            .await
+            .expect("begin upload");
+        let first = upload_streamed(&store, &namespace_id, &begin.upload_id, &bytes, &context)
+            .await
+            .expect("first streamed upload");
+        let repeated = upload_streamed(&store, &namespace_id, &begin.upload_id, &bytes, &context)
+            .await
+            .expect("the same bytes again is the same upload");
+        assert_eq!(first, repeated);
+
+        let mut different = bytes.clone();
+        different[0] ^= 0xff;
+        let error = upload_streamed(
+            &store,
+            &namespace_id,
+            &begin.upload_id,
+            &different,
+            &context,
+        )
+        .await
+        .expect_err("different bytes into one session conflict");
+        assert_eq!(error.code(), ErrorCode::UploadContentConflict);
+
+        let catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &namespace_id)
+            .await
+            .expect("catalog");
+        let object_key = content_blob(
+            catalog.content_store_id().as_str(),
+            &first.content_ref.content_id,
+        );
+        assert_eq!(
+            store
+                .get(&object_key, None)
+                .await
+                .expect("read staged object")
+                .expect("staged object exists"),
+            Bytes::from(bytes),
+            "a refused upload must not have rewritten what the session staged"
+        );
+    }
+}
+
 /// A multipart session's whole life, on a store that reproduces the
 /// providers' actual multipart behaviour.
 mod direct_multipart {
     use super::*;
-    use loonfs_api::v0::{CompletedUploadPart, DirectMultipartContentClaim};
+    use loonfs_api::v0::{
+        CompletedUploadPart, DirectMultipartContentClaim, DirectMultipartUploadOptions,
+    };
     use loonfs_api::wire::control::{decode_control_object, UploadSessionLifecycle};
     use loonfs_core::{gc_namespace, GcConfig};
     use loonfs_objectstore::keys::content_blob;
@@ -428,7 +555,10 @@ mod direct_multipart {
     struct Session {
         namespace_id: NamespaceId,
         upload_id: UploadId,
-        content_ref: ContentRef,
+        /// What the client will claim at completion, and therefore what the
+        /// server will build the reference from. The session itself knows
+        /// none of it yet.
+        claim: DirectMultipartContentClaim,
         object_key: String,
         provider_upload_id: String,
         payload: Vec<u8>,
@@ -444,28 +574,34 @@ mod direct_multipart {
             .expect("bootstrap");
         let payload = PART.repeat(3);
         let begin = namespace_engine(store, &namespace_id, context)
-            .begin_direct_multipart_upload_target(DirectMultipartContentClaim {
-                size_bytes: payload.len() as u64,
-                crc64nvme: StorageChecksum::crc64nvme(&payload).value,
-            })
+            .begin_direct_multipart_upload_target(DirectMultipartUploadOptions::default())
             .await
             .expect("begin direct multipart");
+        let state = session_state(store, &namespace_id, &begin.upload_id).await;
+        assert!(
+            state.claimed_checksum.is_none() && state.direct_put_content_ref.is_none(),
+            "a multipart session is opened knowing nothing about its payload"
+        );
+        assert_eq!(
+            state.multipart_part_size_bytes,
+            Some(begin.target.part_size_bytes),
+            "the geometry it handed out is the geometry it recorded"
+        );
         let catalog = loonfs_core::control::load_namespace_catalog_entry(store, &namespace_id)
             .await
             .expect("catalog");
-        let object_key = content_blob(
-            catalog.content_store_id().as_str(),
-            &begin.target.content_ref.content_id,
-        );
-        let provider_upload_id = session_state(store, &namespace_id, &begin.upload_id)
-            .await
+        let object_key = content_blob(catalog.content_store_id().as_str(), &state.content_id);
+        let provider_upload_id = state
             .provider_multipart_upload_id
             .expect("a multipart session records its provider upload");
 
         Session {
             namespace_id,
             upload_id: begin.upload_id,
-            content_ref: begin.target.content_ref,
+            claim: DirectMultipartContentClaim {
+                size_bytes: payload.len() as u64,
+                crc64nvme: StorageChecksum::crc64nvme(&payload).value,
+            },
             object_key,
             provider_upload_id,
             payload,
@@ -511,10 +647,7 @@ mod direct_multipart {
         session: &Session,
         parts: Vec<CompletedUploadPart>,
     ) -> CompleteUploadRequest {
-        CompleteUploadRequest {
-            content_ref: session.content_ref.clone(),
-            multipart_parts: Some(parts),
-        }
+        CompleteUploadRequest::for_multipart(session.claim.clone(), parts)
     }
 
     /// The whole point of the transport: parts go straight to the provider,
@@ -540,7 +673,18 @@ mod direct_multipart {
         .await
         .expect("complete a verified multipart upload");
 
-        assert_eq!(completed.content_ref, session.content_ref);
+        assert!(
+            completed
+                .content_ref
+                .content_id
+                .as_str()
+                .ends_with(session.object_key.rsplit('/').next().expect("key tail")),
+            "the completion names the identity the session held all along"
+        );
+        assert_eq!(
+            completed.content_ref.size_bytes,
+            session.payload.len() as u64
+        );
         assert_eq!(
             completed.content_ref.storage_checksum,
             StorageChecksum::crc64nvme(&session.payload),
@@ -805,5 +949,108 @@ mod direct_multipart {
             .await
             .expect("head")
             .is_none());
+    }
+
+    /// The geometry is the one thing a begin request may choose, and it is
+    /// bounded by what every supported provider accepts for a non-final
+    /// part. The size it settles on is what bounds the object, too.
+    #[tokio::test]
+    async fn a_multipart_session_takes_a_part_size_inside_the_providers_bounds() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = MultipartStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+        let context = mutation_context();
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        bootstrap_namespace(&store, &namespace_id, &context, false)
+            .await
+            .expect("bootstrap");
+
+        let chosen = namespace_engine(&store, &namespace_id, &context)
+            .begin_direct_multipart_upload_target(DirectMultipartUploadOptions {
+                part_size_bytes: Some(16 * 1024 * 1024),
+            })
+            .await
+            .expect("a part size inside the bounds is honoured");
+        assert_eq!(chosen.target.part_size_bytes, 16 * 1024 * 1024);
+
+        for out_of_bounds in [5 * 1024 * 1024 - 1, 5 * 1024 * 1024 * 1024 + 1] {
+            let error = namespace_engine(&store, &namespace_id, &context)
+                .begin_direct_multipart_upload_target(DirectMultipartUploadOptions {
+                    part_size_bytes: Some(out_of_bounds),
+                })
+                .await
+                .expect_err("a part size no provider accepts is refused");
+            assert_eq!(error.code(), ErrorCode::InvalidRequest);
+        }
+    }
+
+    /// The two completion shapes are not interchangeable. A multipart
+    /// session's client never learned an identity, so naming one is a
+    /// mistake worth reporting rather than a value worth checking; and a
+    /// session that was handed one has no claim to make.
+    #[tokio::test]
+    async fn each_mode_completes_with_the_shape_it_was_opened_for() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = MultipartStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+        let context = mutation_context();
+        let session = open_session(&store, &context).await;
+        let parts = upload_every_part(&store, &session);
+
+        let error = complete_upload(
+            &store,
+            &session.namespace_id,
+            &session.upload_id,
+            &CompleteUploadRequest {
+                content_ref: Some(ContentRef::blob_v1(ContentId::generate(), PART)),
+                multipart: Some(session.claim.clone()),
+                multipart_parts: Some(parts.clone()),
+            },
+            &context,
+        )
+        .await
+        .expect_err("a multipart completion cannot name the identity");
+        assert_eq!(error.code(), ErrorCode::InvalidRequest);
+
+        let error = complete_upload(
+            &store,
+            &session.namespace_id,
+            &session.upload_id,
+            &CompleteUploadRequest {
+                content_ref: None,
+                multipart: None,
+                multipart_parts: Some(parts),
+            },
+            &context,
+        )
+        .await
+        .expect_err("a multipart completion carries its claim");
+        assert_eq!(error.code(), ErrorCode::InvalidRequest);
+
+        // And the proxied direction: a staged session claims nothing.
+        let begin = begin_upload(&store, &session.namespace_id, &context)
+            .await
+            .expect("begin a proxied session");
+        let staged = upload_content(
+            &store,
+            &session.namespace_id,
+            &begin.upload_id,
+            PART,
+            &context,
+        )
+        .await
+        .expect("stage bytes");
+        let error = complete_upload(
+            &store,
+            &session.namespace_id,
+            &begin.upload_id,
+            &CompleteUploadRequest {
+                content_ref: Some(staged.content_ref),
+                multipart: Some(session.claim.clone()),
+                multipart_parts: None,
+            },
+            &context,
+        )
+        .await
+        .expect_err("a proxied completion carries no multipart claim");
+        assert_eq!(error.code(), ErrorCode::InvalidRequest);
     }
 }

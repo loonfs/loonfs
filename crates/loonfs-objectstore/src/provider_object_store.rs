@@ -11,7 +11,9 @@ use crate::retry::{
     transport_retry_backoff, transport_retry_pause, OperationDeadline, TransportRetryPolicy,
 };
 use crate::timing::{MonotonicTimer, StdMonotonicTimer};
-use crate::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode};
+use crate::{
+    ByteRange, ByteStream, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
+};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{self, BoxStream, FuturesUnordered, StreamExt};
@@ -78,6 +80,19 @@ pub const PROVIDER_MULTIPART_PART_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Concurrent in-flight parts per multipart upload.
 pub const PROVIDER_MULTIPART_PART_WINDOW: usize = 4;
+
+/// Buffered parts a streamed write holds at once.
+///
+/// One. The in-memory path can afford a window because it already holds the
+/// whole payload; a streamed write exists precisely so that it does not, so
+/// it fills a buffer, uploads it, drops it, and only then fills the next.
+/// Peak memory is therefore one part whatever the object's size.
+pub const PROVIDER_STREAMED_PART_WINDOW: usize = 1;
+
+/// Parts one provider multipart upload accepts. Every supported provider
+/// stops at 10,000, which with the part size sets the largest object a
+/// multipart write can produce.
+pub(crate) const MAX_PROVIDER_MULTIPART_PARTS: usize = 10_000;
 
 /// Bound for one payload-bearing HTTP attempt's request phase. A request
 /// body is opaque to progress observation while it uploads, so a flat
@@ -370,6 +385,114 @@ impl ProviderObjectStore {
     }
 }
 
+/// Cuts a byte stream into fixed-size parts, holding one at a time.
+///
+/// Chunk boundaries in the source stream carry no meaning, so a chunk that
+/// straddles a part boundary is split and its tail carried into the next
+/// part. A stream that ends exactly on a boundary produces no final part.
+struct PartReader {
+    body: ByteStream,
+    /// The tail of a chunk that overran the part being cut.
+    carry: Option<Bytes>,
+    part_bytes: usize,
+    exhausted: bool,
+}
+
+impl PartReader {
+    fn new(body: ByteStream, part_bytes: usize) -> Self {
+        Self {
+            body,
+            carry: None,
+            part_bytes,
+            exhausted: false,
+        }
+    }
+
+    /// Cuts the next part: exactly `part_bytes`, or whatever is left when
+    /// the stream ends. `None` once nothing is left.
+    ///
+    /// A full part is returned without polling the stream again, so a
+    /// caller cannot conclude from a full part that more is coming — only
+    /// a short part proves the stream ended.
+    async fn next_part(&mut self) -> Result<Option<Bytes>> {
+        let mut buffer = bytes::BytesMut::with_capacity(self.part_bytes);
+        while buffer.len() < self.part_bytes {
+            let mut chunk = match self.carry.take() {
+                Some(chunk) => chunk,
+                None if self.exhausted => break,
+                None => match self.body.next().await {
+                    Some(chunk) => chunk?,
+                    None => {
+                        self.exhausted = true;
+                        break;
+                    }
+                },
+            };
+            let take = (self.part_bytes - buffer.len()).min(chunk.len());
+            buffer.extend_from_slice(&chunk.split_to(take));
+            if !chunk.is_empty() {
+                self.carry = Some(chunk);
+            }
+        }
+        Ok((!buffer.is_empty()).then(|| buffer.freeze()))
+    }
+
+    /// Whether the stream has already reported its end.
+    fn exhausted(&self) -> bool {
+        self.exhausted && self.carry.is_none()
+    }
+}
+
+/// Abandons a provider multipart upload if the write that opened it is
+/// dropped before it finishes.
+///
+/// Every path that returns from a streamed write aborts explicitly and
+/// disarms this. What is left is cancellation — a client that disconnects
+/// mid-upload takes the handler's future with it — where there is no
+/// `await` point to run cleanup from, so the abort is spawned. Without a
+/// runtime to spawn on, the upload falls back to the bucket's own
+/// incomplete-upload lifecycle rule, which is what collects it today.
+struct AbortUploadOnDrop {
+    multipart: Option<Arc<dyn MultipartStore>>,
+    path: Path,
+    upload_id: provider_store::MultipartId,
+}
+
+impl AbortUploadOnDrop {
+    fn disarm(&mut self) {
+        self.multipart = None;
+    }
+}
+
+impl Drop for AbortUploadOnDrop {
+    fn drop(&mut self) {
+        let Some(multipart) = self.multipart.take() else {
+            return;
+        };
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            tracing::warn!(
+                object_key = %self.path,
+                operation = "abort_multipart",
+                "abandoned streamed write has no runtime to abort its multipart upload on; \
+                 parts remain until the bucket lifecycle rule collects them",
+            );
+            return;
+        };
+        let path = self.path.clone();
+        let upload_id = std::mem::take(&mut self.upload_id);
+        handle.spawn(async move {
+            if let Err(err) = multipart.abort_multipart(&path, &upload_id).await {
+                tracing::warn!(
+                    object_key = %path,
+                    operation = "abort_multipart",
+                    error = %err,
+                    "failed to abort the multipart upload of an abandoned streamed write",
+                );
+            }
+        });
+    }
+}
+
 /// One in-progress multipart write: the store, the provider multipart
 /// surface, and the object being written.
 struct MultipartWrite<'op> {
@@ -401,6 +524,52 @@ impl MultipartWrite<'_> {
                 return Err(map_provider_error(self.key, err));
             };
             transport_retry_pause(backoff).await;
+        }
+    }
+
+    /// Uploads a stream as parts, one buffered part at a time, and
+    /// assembles them.
+    ///
+    /// `head` is the first part, already cut by the caller so it could
+    /// decide that the payload does not fit in one request. Every later part
+    /// is cut into a fresh buffer *after* its predecessor has been uploaded
+    /// and dropped, so peak memory is one part regardless of how large the
+    /// object is. The final part may be short.
+    ///
+    /// Completion is not resolved by read-back the way the in-memory path's
+    /// is: there is no payload left in memory to prove a landed write
+    /// against. An ambiguous completion is a failure, and the caller abandons
+    /// the upload.
+    async fn upload_stream_and_complete(
+        &self,
+        upload_id: &provider_store::MultipartId,
+        head: Bytes,
+        mut parts_reader: PartReader,
+    ) -> Result<u64> {
+        let mut size_bytes = head.len() as u64;
+        let mut parts = vec![self.upload_part(upload_id, 0, head).await?];
+
+        while let Some(payload) = parts_reader.next_part().await? {
+            if parts.len() >= MAX_PROVIDER_MULTIPART_PARTS {
+                return Err(ObjectStoreError::transport(
+                    self.key,
+                    format!(
+                        "streamed payload needs more than the provider's \
+                         {MAX_PROVIDER_MULTIPART_PARTS}-part limit at this part size"
+                    ),
+                ));
+            }
+            size_bytes += payload.len() as u64;
+            parts.push(self.upload_part(upload_id, parts.len(), payload).await?);
+        }
+
+        match self
+            .multipart
+            .complete_multipart(self.path, upload_id, parts)
+            .await
+        {
+            Ok(_) => Ok(size_bytes),
+            Err(err) => Err(map_provider_error(self.key, err)),
         }
     }
 
@@ -718,6 +887,65 @@ impl ObjectStore for ProviderObjectStore {
                 })
             }
             Err(err) => Err(map_provider_error(key, err)),
+        }
+    }
+
+    /// Cuts the payload into parts as it arrives and uploads them one at a
+    /// time, so a large object costs one part of memory instead of its own
+    /// size.
+    ///
+    /// The first part is cut before anything is decided. A payload that
+    /// ends inside it is an ordinary [`ObjectStore::put`] with the caller's
+    /// mode intact — which is the same size line `put` itself draws, so a
+    /// small streamed write behaves exactly like a small buffered one.
+    /// Anything longer goes through the provider's multipart upload, whose
+    /// completion is an unconditional overwrite.
+    async fn put_streamed(&self, key: &str, body: ByteStream, mode: PutMode) -> Result<u64> {
+        let path = self.to_path(key)?;
+        let mut reader = PartReader::new(body, self.multipart_geometry.part_bytes as usize);
+        let head = reader.next_part().await?.unwrap_or_else(Bytes::new);
+        let Some(multipart) = self.multipart.clone() else {
+            // No provider multipart surface: fall back to the buffered
+            // contract rather than pretend, exactly as the default does.
+            let mut bytes = bytes::BytesMut::from(head.as_ref());
+            while let Some(part) = reader.next_part().await? {
+                bytes.extend_from_slice(&part);
+            }
+            let bytes = bytes.freeze();
+            let size_bytes = bytes.len() as u64;
+            self.put(key, bytes, mode).await?;
+            return Ok(size_bytes);
+        };
+        if reader.exhausted() {
+            let size_bytes = head.len() as u64;
+            self.put(key, head, mode).await?;
+            return Ok(size_bytes);
+        }
+
+        let upload = MultipartWrite {
+            store: self,
+            multipart: multipart.as_ref(),
+            key,
+            path: &path,
+        };
+        let upload_id = upload.create(0).await?;
+        let mut abort_on_drop = AbortUploadOnDrop {
+            multipart: Some(Arc::clone(&multipart)),
+            path: path.clone(),
+            upload_id: upload_id.clone(),
+        };
+        let result = upload
+            .upload_stream_and_complete(&upload_id, head, reader)
+            .await;
+        abort_on_drop.disarm();
+        match result {
+            Ok(size_bytes) => Ok(size_bytes),
+            Err(err) => {
+                // Best effort, and harmless when the failure raced a landed
+                // completion: the upload id no longer exists then.
+                upload.abort(&upload_id).await;
+                Err(err)
+            }
         }
     }
 
@@ -2032,6 +2260,146 @@ mod tests {
             0,
             "the conflict is decided by the provider precondition, not a pre-check"
         );
+    }
+
+    /// Cuts a payload into stream chunks that deliberately do not line up
+    /// with the part size, since a caller's chunk boundaries never do.
+    fn streamed(payload: &[u8], chunk_bytes: usize) -> ByteStream {
+        let chunks: Vec<Bytes> = payload
+            .chunks(chunk_bytes)
+            .map(Bytes::copy_from_slice)
+            .collect();
+        stream::iter(chunks.into_iter().map(Ok)).boxed()
+    }
+
+    /// The streamed write's whole job: regroup whatever arrives into fixed
+    /// parts, upload them one at a time, and assemble exactly the payload.
+    #[tokio::test]
+    async fn a_streamed_put_cuts_the_stream_into_parts_and_preserves_bytes() {
+        let flaky = Arc::new(FlakyStore::default());
+        let store = multipart_test_store(Arc::clone(&flaky));
+        // Parts of 512, 512, and 276 bytes, delivered in 100-byte chunks so
+        // every part boundary falls inside a chunk.
+        let payload = multipart_payload(1300);
+
+        let size_bytes = store
+            .put_streamed(
+                MULTIPART_KEY,
+                streamed(&payload, 100),
+                PutMode::CreateIfAbsent,
+            )
+            .await
+            .expect("streamed multipart put");
+
+        assert_eq!(size_bytes, 1300);
+        assert_eq!(flaky.multipart_creates.load(Ordering::SeqCst), 1);
+        assert_eq!(flaky.multipart_completes.load(Ordering::SeqCst), 1);
+        assert_eq!(flaky.multipart_aborts.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            flaky.puts.load(Ordering::SeqCst),
+            0,
+            "a payload past one part never becomes a whole-object PUT"
+        );
+        assert_eq!(part_attempts(&flaky, 0), 1);
+        assert_eq!(part_attempts(&flaky, 1), 1);
+        assert_eq!(part_attempts(&flaky, 2), 1);
+        assert_eq!(
+            store.get(MULTIPART_KEY, None).await.expect("get"),
+            Some(Bytes::from(payload))
+        );
+    }
+
+    /// A payload that ends inside the first buffered part is an ordinary
+    /// put, with the caller's mode intact — the same size line `put` itself
+    /// draws, so a small streamed write behaves like a small buffered one.
+    #[tokio::test]
+    async fn a_short_streamed_put_is_one_request_that_keeps_its_precondition() {
+        let flaky = Arc::new(FlakyStore::default());
+        let store = multipart_test_store(Arc::clone(&flaky));
+        let payload = multipart_payload(MULTIPART_TEST_PART as usize - 1);
+
+        store
+            .put_streamed(
+                MULTIPART_KEY,
+                streamed(&payload, 64),
+                PutMode::CreateIfAbsent,
+            )
+            .await
+            .expect("short streamed put");
+        assert_eq!(flaky.multipart_creates.load(Ordering::SeqCst), 0);
+        assert_eq!(flaky.puts.load(Ordering::SeqCst), 1);
+
+        let error = store
+            .put_streamed(
+                MULTIPART_KEY,
+                streamed(&payload, 64),
+                PutMode::CreateIfAbsent,
+            )
+            .await
+            .expect_err("the key is taken and create-only means it");
+        assert!(matches!(error, ObjectStoreError::PreconditionFailed { .. }));
+        assert_eq!(
+            store.get(MULTIPART_KEY, None).await.expect("get"),
+            Some(Bytes::from(payload))
+        );
+    }
+
+    /// An empty stream still writes an object, and still writes it the way
+    /// its mode asks for.
+    #[tokio::test]
+    async fn an_empty_streamed_put_writes_an_empty_object() {
+        let flaky = Arc::new(FlakyStore::default());
+        let store = multipart_test_store(Arc::clone(&flaky));
+
+        let size_bytes = store
+            .put_streamed(
+                MULTIPART_KEY,
+                stream::empty().boxed(),
+                PutMode::CreateIfAbsent,
+            )
+            .await
+            .expect("empty streamed put");
+
+        assert_eq!(size_bytes, 0);
+        assert_eq!(flaky.multipart_creates.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            store.get(MULTIPART_KEY, None).await.expect("get"),
+            Some(Bytes::new())
+        );
+    }
+
+    /// A payload that stops mid-transfer leaves nothing behind: the
+    /// provider upload is abandoned rather than left holding parts, and no
+    /// object appears at the key.
+    #[tokio::test]
+    async fn a_streamed_put_that_fails_mid_stream_abandons_its_upload() {
+        let flaky = Arc::new(FlakyStore::default());
+        let store = multipart_test_store(Arc::clone(&flaky));
+        let head = multipart_payload(MULTIPART_TEST_PART as usize);
+        let body = stream::iter([
+            Ok(Bytes::from(head)),
+            Ok(Bytes::from(multipart_payload(64))),
+            Err(ObjectStoreError::transport(
+                MULTIPART_KEY,
+                "the client stopped sending",
+            )),
+        ])
+        .boxed();
+
+        let error = store
+            .put_streamed(MULTIPART_KEY, body, PutMode::CreateIfAbsent)
+            .await
+            .expect_err("a payload that stops is not a write");
+
+        assert!(matches!(error, ObjectStoreError::Transport { .. }));
+        assert_eq!(flaky.multipart_creates.load(Ordering::SeqCst), 1);
+        assert_eq!(flaky.multipart_completes.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            flaky.multipart_aborts.load(Ordering::SeqCst),
+            1,
+            "the abandoned upload is aborted, not left holding parts"
+        );
+        assert_eq!(store.get(MULTIPART_KEY, None).await.expect("get"), None);
     }
 
     #[tokio::test]

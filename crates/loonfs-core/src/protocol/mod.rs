@@ -36,5 +36,5 @@ pub use self::uploads::CompletedUpload;
 pub(crate) use self::uploads::{
     abort_upload, begin_direct_multipart_upload_target, begin_direct_put_upload_target,
     begin_upload, complete_upload, direct_multipart_part_targets, read_upload_status,
-    upload_content, AbandonedUpload,
+    upload_content, upload_streamed_content, AbandonedUpload,
 };

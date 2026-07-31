@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
 use loonfs_objectstore::{
-    ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
+    ByteRange, ByteStream, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
     StoredObjectChecksum,
 };
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -243,6 +243,39 @@ impl<S: ObjectStore> ObjectStore for CountingStore<S> {
             }
         }
         self.inner.put(key, bytes, mode).await
+    }
+
+    async fn put_streamed(
+        &self,
+        key: &str,
+        body: ByteStream,
+        mode: PutMode,
+    ) -> Result<u64, ObjectStoreError> {
+        let result = self.inner.put_streamed(key, body, mode.clone()).await;
+        if self.matches(key) {
+            self.counters.puts.fetch_add(1, Ordering::SeqCst);
+            if let Ok(bytes) = &result {
+                self.counters
+                    .written_bytes
+                    .fetch_add(*bytes, Ordering::SeqCst);
+            }
+            match mode {
+                PutMode::Overwrite => {
+                    self.counters.overwrite_puts.fetch_add(1, Ordering::SeqCst);
+                }
+                PutMode::CreateIfAbsent => {
+                    self.counters
+                        .create_if_absent_puts
+                        .fetch_add(1, Ordering::SeqCst);
+                }
+                PutMode::CompareAndSwap { .. } => {
+                    self.counters
+                        .compare_and_swaps
+                        .fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }
+        result
     }
 
     async fn compare_and_swap(

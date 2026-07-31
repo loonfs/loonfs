@@ -5,6 +5,7 @@ use crate::uploads::{
     BeginDirectMultipartUploadTargetResponse, BeginDirectPutUploadTargetResponse,
     MultipartPartTargets,
 };
+use crate::ByteStream;
 use crate::FsWriter;
 use crate::Result;
 use crate::{
@@ -12,7 +13,8 @@ use crate::{
     DirectPutContentClaim, NamespaceId, UploadContentResponse,
 };
 use loonfs_api::v0::{
-    AbortUploadResponse, DirectMultipartContentClaim, UploadPartChecksumClaim, UploadStatusResponse,
+    AbortUploadResponse, DirectMultipartUploadOptions, UploadPartChecksumClaim,
+    UploadStatusResponse,
 };
 use loonfs_api::UploadId;
 
@@ -45,11 +47,11 @@ impl FsWriter {
     pub async fn begin_direct_multipart_upload_target(
         &self,
         namespace_id: &NamespaceId,
-        claim: DirectMultipartContentClaim,
+        options: DirectMultipartUploadOptions,
     ) -> Result<BeginDirectMultipartUploadTargetResponse> {
         Ok(self
             .engine(namespace_id)
-            .begin_direct_multipart_upload_target(claim)
+            .begin_direct_multipart_upload_target(options)
             .await?)
     }
 
@@ -76,6 +78,26 @@ impl FsWriter {
         Ok(self
             .engine(namespace_id)
             .upload_content(upload_id, bytes)
+            .await?)
+    }
+
+    /// Uploads content that arrives as a stream into an upload session.
+    ///
+    /// The payload is hashed as it is forwarded to object storage rather
+    /// than held, so memory follows the transfer's part size instead of the
+    /// object's length. Everything after this point — the reference it
+    /// produces, completion, publication — is identical to the buffered
+    /// path's; callers that already hold their bytes should stay on
+    /// [`Self::upload_content`].
+    pub async fn upload_streamed_content(
+        &self,
+        namespace_id: &NamespaceId,
+        upload_id: &UploadId,
+        body: ByteStream,
+    ) -> Result<UploadContentResponse> {
+        Ok(self
+            .engine(namespace_id)
+            .upload_streamed_content(upload_id, body)
             .await?)
     }
 

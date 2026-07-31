@@ -6,7 +6,8 @@
 pub use crate::protocol::CompletedUpload;
 pub use crate::storage::content::{
     prepare_existing_content_ref, prepare_stored_content, store_bytes_as_content,
-    store_bytes_as_content_with_store_id, DurableContentValidationError, StoredContent,
+    store_bytes_as_content_with_store_id, store_stream_as_content_with_store_id,
+    DurableContentValidationError, StoredContent,
 };
 pub use crate::storage::content_admission::{
     mint_content_token, verify_content_token, CompletedUploadReceipt, ContentTokenError,

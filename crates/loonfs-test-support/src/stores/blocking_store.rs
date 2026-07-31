@@ -6,7 +6,7 @@ use bytes::Bytes;
 use futures::stream::{self, BoxStream};
 use futures::StreamExt;
 use loonfs_objectstore::{
-    ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
+    ByteRange, ByteStream, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
     StoredObjectChecksum,
 };
 use std::fmt;
@@ -249,6 +249,23 @@ impl<S: ObjectStore> ObjectStore for BlockingStore<S> {
             ))
             .await;
         let result = self.inner.put(key, bytes, mode).await;
+        self.mark_completed(blocked);
+        result
+    }
+
+    async fn put_streamed(
+        &self,
+        key: &str,
+        body: ByteStream,
+        mode: PutMode,
+    ) -> Result<u64, ObjectStoreError> {
+        let blocked = self
+            .block_if_selected(&OperationContext::new(
+                key,
+                OperationKind::PutStreamed { mode: &mode },
+            ))
+            .await;
+        let result = self.inner.put_streamed(key, body, mode).await;
         self.mark_completed(blocked);
         result
     }

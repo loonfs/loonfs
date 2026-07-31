@@ -116,10 +116,10 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
         .complete_upload(
             &namespace,
             &mismatch_upload.upload_id,
-            &CompleteUploadRequest {
-                content_ref: ContentRef::blob_v1(ContentId::generate(), b"other bytes"),
-                multipart_parts: None,
-            },
+            &CompleteUploadRequest::for_content_ref(ContentRef::blob_v1(
+                ContentId::generate(),
+                b"other bytes",
+            )),
         )
         .await
     {
@@ -257,10 +257,10 @@ async fn http_upload_status_re_mints_and_abort_is_terminal() {
         .complete_upload(
             &namespace,
             &open.upload_id,
-            &CompleteUploadRequest {
-                content_ref: ContentRef::blob_v1(ContentId::generate(), b"never staged"),
-                multipart_parts: None,
-            },
+            &CompleteUploadRequest::for_content_ref(ContentRef::blob_v1(
+                ContentId::generate(),
+                b"never staged",
+            )),
         )
         .await
         .expect_err("an aborted session cannot complete");
@@ -341,10 +341,7 @@ async fn complete_upload_session(
         .complete_upload(
             namespace,
             &begin.upload_id,
-            &CompleteUploadRequest {
-                content_ref: staged.content_ref,
-                multipart_parts: None,
-            },
+            &CompleteUploadRequest::for_content_ref(staged.content_ref),
         )
         .await
         .expect("complete upload");
