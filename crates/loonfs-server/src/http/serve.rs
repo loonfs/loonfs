@@ -106,13 +106,38 @@ pub struct ServerLifecycle {
 }
 
 impl ServerLifecycle {
-    /// Settles the app's spawned work in dependency order: publisher
-    /// admission closes, admitted publications finish and send their last
-    /// maintenance nudges, then the writer's runner stops admitting and its
-    /// in-flight steps settle. Panicked tasks surface as the returned error.
+    /// Settles the app's spawned work in one order: maintenance admission
+    /// closes, publisher admission closes, admitted publications finish,
+    /// then the writer's runner drains its in-flight steps. Panicked tasks
+    /// surface as the returned error.
+    ///
+    /// Maintenance admission closes first because draining publications is
+    /// an await, and until it returns the runner is still live. Its timer
+    /// promotes keys whose deadlines have arrived, each publication that
+    /// lands fires the publish observer that nudges the grep index, and a
+    /// finishing step hands its permit straight to the next queued key.
+    /// Everything admitted in that window is work this shutdown already
+    /// decided to drop, and none of it is free: a metadata step advances
+    /// the metadata root, a collection pass deletes provider objects, an
+    /// index step writes segments. Then the drain below has to wait for
+    /// whatever it started. Closing first leaves the window empty.
+    ///
+    /// Neither order can wedge, and the reason is worth stating because it
+    /// is not the obvious one. A maintenance step never submits to the
+    /// publication service at all: every job does its work through
+    /// `FsAdmin`, which compare-and-swaps against the namespace head
+    /// itself. So the publication drain waits only on client work, its
+    /// pending set can only shrink, and no step of any kind can be left
+    /// waiting behind a publisher that is closing. A step already running
+    /// when this lands finishes normally, and its chain then ends rather
+    /// than passing its permit on, because a shut admission book releases
+    /// the permit instead of handing it to the next key.
     pub async fn shutdown(self) -> Result<(), loonfs::RuntimeError> {
+        self.writer.close_maintenance_admission();
         self.publisher.close_admission();
         self.publisher.drain().await?;
+        // Closes maintenance admission a second time — idempotent — and
+        // then drains the steps that were already running.
         self.writer.shutdown_background().await
     }
 
@@ -417,9 +442,9 @@ pub(super) async fn serve_on(
         .with_graceful_shutdown(shutdown)
         .await
         .map_err(ServeError::Serve)?;
-    // The listener has drained; close publisher admission, finish admitted
-    // publications and their final maintenance nudges, then settle
-    // writer-owned maintenance. Panicked tasks surface here rather than
+    // The listener has drained; close maintenance admission, then publisher
+    // admission, finish admitted publications, then settle the maintenance
+    // steps already running. Panicked tasks surface here rather than
     // disappearing with the process.
     lifecycle.shutdown().await.map_err(ServeError::Shutdown)
 }

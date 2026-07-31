@@ -12,8 +12,9 @@ use async_trait::async_trait;
 use axum::body::Bytes;
 use futures::stream::{BoxStream, StreamExt};
 use loonfs::{
-    CreateNamespaceOptions, DeleteOptions, FsAdmin, FsReader, FsWriter, PutFileOptions, TraceMode,
-    TraceStoreKind,
+    CreateNamespaceOptions, DeleteOptions, FsAdmin, FsReader, FsWriter, MaintenanceJob,
+    MaintenanceJobId, MaintenanceProbe, MaintenanceStepConclusion, MaintenanceStepResult,
+    PutFileOptions, TraceMode, TraceStoreKind,
 };
 use loonfs_api::ErrorCode;
 use loonfs_api::{
@@ -100,7 +101,7 @@ fn error_status_mapping_matches_the_api_spec_table() {
 use loonfs_test_support::http::raw_agent;
 use loonfs_test_support::ids::namespace_id;
 use loonfs_test_support::stores::{BlockingStore, BufferWatchStore, KeyPredicate, OperationClass};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tempfile::tempdir;
 
@@ -379,6 +380,159 @@ async fn embedded_shutdown_drains_an_active_grep_step() {
         .await
         .expect("join shutdown")
         .expect("drain grep step");
+}
+
+/// A job that does nothing but count the steps the runner admitted for it.
+///
+/// It is registered on the server's own writer, so it queues, waits for a
+/// permit, and is shut down through exactly the admission every other job
+/// goes through. Counting is the whole point: an ordinary step's work is
+/// object-store traffic, and the question this test asks is whether any of
+/// it is issued at all once a shutdown has begun.
+struct StepCountingJob {
+    id: MaintenanceJobId,
+    steps: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl MaintenanceJob for StepCountingJob {
+    fn id(&self) -> MaintenanceJobId {
+        self.id
+    }
+
+    async fn step(
+        &self,
+        _namespace_id: &NamespaceId,
+        _continuation: Option<&str>,
+    ) -> loonfs::Result<MaintenanceStepResult> {
+        self.steps.fetch_add(1, Ordering::SeqCst);
+        // Idle rather than progressed: a requeueing step would never let
+        // the control settle below.
+        Ok(MaintenanceStepResult::concluded(
+            MaintenanceStepConclusion::Idle,
+        ))
+    }
+
+    async fn probe(&self, _namespace_id: &NamespaceId) -> loonfs::Result<MaintenanceProbe> {
+        Ok(MaintenanceProbe::Idle)
+    }
+}
+
+/// The server closes maintenance admission before it starts draining
+/// publications, mirroring the rule `FsWriter::shutdown_background` holds
+/// internally.
+///
+/// The drain is a wait, and it is the whole window: while it runs, the
+/// runner's timer is still promoting deadlines and every publication that
+/// lands still fires the observer that nudges the grep index. A nudge that
+/// arrives in that window must find the door already shut, or the shutdown
+/// spends it starting work it is about to throw away — and then waits for
+/// that work to finish.
+///
+/// The observation is behavioral rather than a flag read, and it is pinned
+/// on the shutdown's first poll rather than on wall-clock timing: nudge
+/// after that poll, and no step may follow.
+#[tokio::test]
+async fn shutdown_closes_maintenance_admission_before_draining_publications() {
+    let temp_dir = tempdir().expect("tempdir");
+    let namespace_id = namespace_id("shutdown-order");
+    let blocking = Arc::new(BlockingStore::new(
+        LocalFsStore::new(temp_dir.path()).expect("construct local store"),
+        KeyPredicate::wal_head(namespace_id.as_str()),
+        OperationClass::CompareAndSwap,
+    ));
+    let config = test_config(temp_dir.path(), "shutdown-order-server");
+    let (_router, lifecycle, state) = super::app_with_store_and_transfer_issuer(
+        config,
+        blocking.clone() as SharedObjectStore,
+        None,
+    )
+    .await
+    .expect("build app");
+    state
+        .writer
+        .create_namespace(&namespace_id, CreateNamespaceOptions::default())
+        .await
+        .expect("create namespace");
+
+    let steps = Arc::new(AtomicUsize::new(0));
+    let job = MaintenanceJobId::new("shutdown-order-probe");
+    state
+        .writer
+        .register_maintenance_job(Arc::new(StepCountingJob {
+            id: job,
+            steps: Arc::clone(&steps),
+        }))
+        .expect("register the counting job");
+
+    // The control. Without it, a later count of zero would prove only that
+    // this job never ran under any conditions.
+    state.writer.maintenance().nudge(job, &namespace_id);
+    lifecycle
+        .wait_for_maintenance()
+        .await
+        .expect("settle the admitted step");
+    let admitted_while_serving = steps.load(Ordering::SeqCst);
+    assert_eq!(
+        admitted_while_serving, 1,
+        "a nudge on a serving deployment admits one step"
+    );
+
+    // Park a publication so the shutdown's publication drain is still
+    // pending when its first poll returns — the window the runner would
+    // otherwise keep admitting into.
+    blocking.block_next();
+    let put = tokio::spawn({
+        let writer = state.writer.clone();
+        let namespace_id = namespace_id.clone();
+        async move {
+            writer
+                .put_file_bytes(
+                    &namespace_id,
+                    "/parked.txt",
+                    b"body",
+                    PutFileOptions::default(),
+                )
+                .await
+        }
+    });
+    blocking.wait_until_blocked().await;
+
+    let mut shutdown = Box::pin(lifecycle.shutdown());
+    assert!(
+        futures::poll!(shutdown.as_mut()).is_pending(),
+        "the parked publication must keep the shutdown pending"
+    );
+    // Everything after this point is the drain window.
+    state.writer.maintenance().nudge(job, &namespace_id);
+
+    blocking.release();
+    put.await
+        .expect("join the parked put")
+        .expect("the released put succeeds");
+    // Releasing the put also lets it publish, which fires the publish
+    // observer's own nudge — the production path into this same window.
+    shutdown
+        .await
+        .expect("the shutdown settles with its queue discarded");
+
+    assert_eq!(
+        steps.load(Ordering::SeqCst),
+        admitted_while_serving,
+        "no maintenance step may be admitted once the shutdown has begun"
+    );
+    // And the runner stays shut rather than reopening behind the drain.
+    state.writer.maintenance().nudge(job, &namespace_id);
+    state
+        .writer
+        .wait_for_background_work()
+        .await
+        .expect("a shut runner has nothing left to settle");
+    assert_eq!(
+        steps.load(Ordering::SeqCst),
+        admitted_while_serving,
+        "a nudge after the shutdown must admit nothing either"
+    );
 }
 
 #[tokio::test]
