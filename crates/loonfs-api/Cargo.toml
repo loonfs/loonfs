@@ -12,6 +12,10 @@ ciborium.workspace = true
 # Durable-format checksums and filter hashing: both algorithm choices are
 # frozen format constants (docs/design/metadata-block-storage.md).
 crc32c.workspace = true
+# CRC-64/NVME is the checksum S3-compatible providers compute over a
+# multipart object, so a direct multipart upload has to produce exactly this
+# spelling of it. This is the implementation the AWS SDK uses.
+crc64fast-nvme.workspace = true
 # Content ids are 128 fully random bits, drawn straight from the system
 # generator so their shard prefixes stay uniform (see `ids::ContentId`).
 getrandom.workspace = true

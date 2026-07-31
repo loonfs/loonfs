@@ -79,6 +79,7 @@ profile nor its `query.*` keys — clients gate on the document either way.
     "core.namespaces.fork": true,
     "core.namespaces.delete": true,
     "core.uploads.direct_put": false,
+    "core.uploads.direct_multipart": false,
     "query.grep": true
   },
   "limits": {
@@ -140,6 +141,7 @@ hoc.
 | `core.namespaces.fork` | Forking namespaces (`POST /v0/namespaces/{ns}/forks`). | |
 | `core.namespaces.delete` | Deleting namespaces (`DELETE /v0/namespaces/{ns}`). | Terminal, and the id is permanently retired. Derived state becomes reclaimable through a `gc`-restricted maintenance step (section 6.3); content blobs are not reclaimed in v0. A deployment may still advertise `false` and answer `not_supported`. |
 | `core.uploads.direct_put` | Starting presigned `direct_put` upload sessions (`POST /v0/namespaces/{ns}/uploads`). | The server returns a short-lived presigned PUT capability for the exact content object. The key is present only when the selected provider profile proves the signed preconditions or the deployment explicitly opts into an unproven endpoint. Raw object keys and caller-managed object-store writes are not part of this feature. |
+| `core.uploads.direct_multipart` | Starting presigned `direct_multipart` upload sessions (`POST /v0/namespaces/{ns}/uploads`) and signing their parts (`POST /v0/namespaces/{ns}/uploads/{upload_id}/parts`). | The server opens the provider's multipart upload and returns one short-lived, checksum-bound capability per part. It rests on the same proven-endpoint condition as `core.uploads.direct_put`, plus the provider's multipart control operations, so the two keys are advertised together. |
 | `query.grep` | Content search (`POST /v0/namespaces/{ns}/query/grep`). | The serving half of a data-dependent capability: the request also requires a materialized steady-state grep root, and a namespace without one answers `not_supported` whatever this key advertises. |
 
 `admin/v0` currently has required ops only and no feature keys. `acl.*` keys
@@ -396,12 +398,42 @@ content object*, not what bytes it holds. So:
 
 - **Retrying a commit means resending the same `content_ref`.** That is a
   semantically identical commit and it replays.
-- **Re-uploading the bytes and then reusing the `commit_id` conflicts.** A
-  fresh upload mints a fresh content object, which is a different commit,
-  answered with `commit_id_reuse_conflict`.
+- **Re-uploading the bytes and then reusing the `commit_id` conflicts at the
+  server.** A fresh upload mints a fresh content object, which is a
+  different commit, answered with `commit_id_reuse_conflict`.
 
 Keep the `content_ref` a completed upload returned and reuse it across
-commit retries. Do not re-run the upload as part of a commit retry.
+commit retries; that is the cheapest retry and the one the server can
+answer on its own.
+
+**Client-side retry reconciliation.** Rerunning a whole upload-then-commit
+sequence under one `commit_id` — the shape of a command rerun, where no
+`content_ref` survived the first attempt — is nonetheless safe on identical
+bytes. A client that composes upload and commit must, on
+`commit_id_reuse_conflict`, resolve it as follows before surfacing it:
+
+1. Find what that `commit_id` committed. There is no read keyed by commit
+   id, so this reads the change feed and matches on `commit_id`.
+2. Compare the committed content against the bytes just uploaded: the
+   content's `whole_file_sha256` when it has one, and otherwise its
+   `storage_checksum`, after checking `size_bytes`.
+3. Equal content means the logical operation had already succeeded: report
+   the commit that landed, with its original `committed_seq`.
+4. Anything else surfaces a failure. Different content is the
+   `commit_id_reuse_conflict` unchanged. Content the client *cannot*
+   compare — a checksum algorithm it does not implement, or a commit it
+   could not locate — is reported as a failure naming why it could not
+   reconcile. **A comparison that cannot be made is never reported as
+   success.**
+
+The duplicate content object the rerun uploaded is then referenced by
+nothing. That is by design: it is a completed upload whose content no
+metadata names, and content garbage collection reclaims it once its grace
+passes (format spec, "Garbage collection", rule 11).
+
+This reconciliation is a client obligation, not a server behaviour: the
+server's answer to a reused id with different content is always
+`commit_id_reuse_conflict`.
 
 Identical resubmission is the reconciliation mechanism. There is no separate
 commit-status lookup: after `commit_outcome_unknown`, a transport failure, or
@@ -600,6 +632,115 @@ and a random object id says nothing about its bytes, so the comparison is the
 load-bearing check rather than a formality. A mismatch fails the completion and
 deletes the object — safe because the id was never published, so nothing
 references it. Nothing is read back through the server either way.
+
+#### Direct multipart upload
+
+`direct_multipart` is the one-pass path for a large object. The bytes cross
+the network once, in parallel, straight into object storage; the server
+opens and closes the provider's multipart upload and signs each part, and
+never sees a byte.
+
+The client declares the assembled object's length and its **CRC-64/NVME**,
+not a SHA-256. That is deliberate: an S3-compatible provider computes a
+CRC-64/NVME over a multipart object and never computes a SHA-256 over it, so
+the CRC is the only full-object evidence that will ever exist for these
+bytes. The resulting `content_ref` therefore carries no `whole_file_sha256`
+(format spec, provenance rule).
+
+```json
+{
+  "mode": "direct_multipart",
+  "multipart": {
+    "size_bytes": 17301504,
+    "crc64nvme": "<16 lowercase hex>"
+  }
+}
+```
+
+The response names the object and the geometry to cut to, and nothing about
+the provider — no bucket, no key, no provider upload id:
+
+```json
+{
+  "namespace_id": "demo",
+  "upload_id": "upl_...",
+  "mode": "direct_multipart",
+  "direct_multipart": {
+    "content_ref": {
+      "kind": "blob_v1",
+      "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
+      "size_bytes": 17301504,
+      "storage_checksum": { "algorithm": "crc64nvme", "value": "<16 lowercase hex>" }
+    },
+    "part_size_bytes": 8388608,
+    "part_count": 3
+  }
+}
+```
+
+**Parts.** `POST /uploads/{upload_id}/parts` takes a list of
+`{part_number, crc64nvme}` and returns one presigned capability per part,
+each with that part's checksum inside its signature. The client uploads
+parts directly and in parallel. A part is *not* create-only: asking for a
+part again and re-uploading it is how a client retries one, the provider
+takes the last write, and the object's checksum follows the bytes that
+stuck. Part sizes are the server's geometry, so a client never has to know a
+provider's minimum part size.
+
+The server keeps **no durable record of any part**. Part bookkeeping — part
+number, etag, checksum — belongs to the client all the way to completion,
+exactly as it does in the provider's own multipart API.
+
+**Completion.** `complete` carries the same `content_ref` plus
+`multipart_parts`: every part, once each, in ascending part order.
+
+```json
+{
+  "content_ref": { "kind": "blob_v1", "content_id": "con_...", "size_bytes": 17301504,
+                   "storage_checksum": { "algorithm": "crc64nvme", "value": "<16 hex>" } },
+  "multipart_parts": [
+    { "part_number": 1, "etag": "\"...\"", "crc64nvme": "<16 hex>" },
+    { "part_number": 2, "etag": "\"...\"", "crc64nvme": "<16 hex>" },
+    { "part_number": 3, "etag": "\"...\"", "crc64nvme": "<16 hex>" }
+  ]
+}
+```
+
+The server asks the provider to assemble the object and then **reads the
+assembled object's stored checksum and size back and compares them against
+the reference**. That read is load-bearing, not defence in depth: providers
+in this family do not agree about the whole-object checksum supplied at
+assembly time — one treats it as a precondition and refuses a mismatch, one
+accepts it, creates the object, and stores the true checksum instead — so
+LoonFS establishes the result for itself either way.
+
+**A completion that does not verify is terminal.** The provider's multipart
+upload is consumed by the completion attempt, so there are no parts left to
+retry against and the session can never produce the content it promised. The
+session goes to `aborted`, the object it assembled is deleted, and the
+failure is reported. The client starts a new session; there is no
+completion retry that could succeed.
+
+**A lost completion response is not a failure.** Replaying the provider's
+completion is useless — one provider replays a success carrying no checksum,
+another reports an upload it has never heard of while the object sits there
+correct — so the replayed call's answer is never the signal. Re-calling
+`complete` resolves it from durable state instead:
+
+- the session is already `completed` → the original result replays, with a
+  freshly minted receipt;
+- the session is still `open` and the provider has no such upload → the
+  object at the key is read back and verified; if it is the promised object,
+  the completion is recorded as if the first attempt's response had arrived;
+- neither an upload nor a matching object exists → the completion fails
+  terminally, as above.
+
+**Cleanup.** The session record carries the provider's upload id, so a
+session that is aborted — by the client, by a failed verification, or by
+upload garbage collection after its lease passes — abandons the provider's
+upload along with the object it was writing. Aborting an upload that already
+assembled its object is safe on every supported provider: it succeeds and
+leaves the object alone.
 
 A server may return a short-lived `validated_content_token` for the completed
 content ref; the token is opaque to clients, and reading the session mints

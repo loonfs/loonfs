@@ -247,6 +247,7 @@ async fn valid_content_admission_skips_durable_content_validation() {
             &upload.upload_id,
             &loonfs_api::v0::CompleteUploadRequest {
                 content_ref: staged.content_ref.clone(),
+                multipart_parts: None,
             },
         )
         .await
@@ -960,6 +961,7 @@ async fn a_re_minted_receipt_publishes_after_the_first_one_expired() {
             &upload.upload_id,
             &loonfs_api::v0::CompleteUploadRequest {
                 content_ref: staged.content_ref.clone(),
+                multipart_parts: None,
             },
         )
         .await

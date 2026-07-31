@@ -150,6 +150,7 @@ impl Client {
     ) -> Result<Vec<u8>> {
         self.send(request, body)
             .await
+            .map(|response| response.bytes)
             .map_err(|attempt| attempt.error)
     }
 
@@ -171,10 +172,25 @@ impl Client {
         request: &WireRequest,
         body: Option<&[u8]>,
     ) -> Result<Vec<u8>> {
+        self.call_with_transient_retry_headers(request, body)
+            .await
+            .map(|response| response.bytes)
+    }
+
+    /// [`Self::call_with_transient_retry`], keeping the response headers.
+    ///
+    /// A multipart part upload is the one call whose answer lives in a
+    /// header: the provider's etag for the accepted part, which the client
+    /// carries to completion.
+    pub(crate) async fn call_with_transient_retry_headers(
+        &self,
+        request: &WireRequest,
+        body: Option<&[u8]>,
+    ) -> Result<WireResponse> {
         let mut attempts = 0;
         loop {
             let attempt = match self.send(request, body).await {
-                Ok(bytes) => return Ok(bytes),
+                Ok(response) => return Ok(response),
                 Err(attempt) => attempt,
             };
             attempts += 1;
@@ -193,10 +209,10 @@ impl Client {
         &self,
         request: &WireRequest,
         body: Option<&[u8]>,
-    ) -> std::result::Result<Vec<u8>, FailedAttempt> {
+    ) -> std::result::Result<WireResponse, FailedAttempt> {
         #[cfg(test)]
         if let Some(outcome) = test_transport::next() {
-            return outcome;
+            return outcome.map(WireResponse::without_headers);
         }
         let mut builder = self.http.request(request.method.clone(), &request.url);
         if request.authenticate {
@@ -216,6 +232,7 @@ impl Client {
             error: ClientError::Http(describe_send_error(&request.url, &err)),
         })?;
         let status = response.status();
+        let headers = response.headers().clone();
         let bytes = response.bytes().await.map_err(|err| FailedAttempt {
             // The status arrived but the body did not: the connection failed
             // mid-response, which is a transport failure like any other.
@@ -223,12 +240,39 @@ impl Client {
             error: ClientError::Http(describe_send_error(&request.url, &err)),
         })?;
         if status.is_success() {
-            return Ok(bytes.to_vec());
+            return Ok(WireResponse {
+                headers,
+                bytes: bytes.to_vec(),
+            });
         }
         Err(FailedAttempt {
             transport: false,
             error: map_status_error(status.as_u16(), &bytes),
         })
+    }
+}
+
+/// One served response: the body, plus the headers for the call that needs
+/// them.
+pub(crate) struct WireResponse {
+    headers: reqwest::header::HeaderMap,
+    pub(crate) bytes: Vec<u8>,
+}
+
+impl WireResponse {
+    pub(crate) fn get(
+        &self,
+        name: reqwest::header::HeaderName,
+    ) -> Option<&reqwest::header::HeaderValue> {
+        self.headers.get(name)
+    }
+
+    #[cfg(test)]
+    fn without_headers(bytes: Vec<u8>) -> Self {
+        Self {
+            headers: reqwest::header::HeaderMap::new(),
+            bytes,
+        }
     }
 }
 

@@ -16,15 +16,26 @@ use loonfs_api::ErrorCode;
 use loonfs_api::{
     v0::{
         AbortUploadResponse, BeginUploadRequest, BeginUploadResponse, CompleteUploadRequest,
-        CompleteUploadResponse, DirectPutUpload, ObjectTransferAccess, UploadContentResponse,
+        CompleteUploadResponse, DirectMultipartUpload, DirectPutUpload, ObjectTransferAccess,
+        SignUploadPartsRequest, SignUploadPartsResponse, SignedUploadPart, UploadContentResponse,
         UploadMode, UploadSessionStatus, UploadStatusResponse, ValidatedContentToken,
     },
-    ContentRef, NamespaceId, UploadId, FEATURE_UPLOADS_DIRECT_PUT,
+    ContentRef, NamespaceId, UploadId, FEATURE_UPLOADS_DIRECT_MULTIPART,
+    FEATURE_UPLOADS_DIRECT_PUT,
 };
-use loonfs_objectstore::{presign::PresignedPutRequest, ObjectStoreError};
+use loonfs_objectstore::{
+    presign::{ObjectTransferIssuer, PresignedPartRequest, PresignedPutRequest},
+    ObjectStoreError,
+};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const DIRECT_PUT_URL_TTL: Duration = Duration::from_secs(15 * 60);
+
+/// Lifetime of one part-upload capability. Longer than a whole-object PUT's
+/// because a client works through a large file part by part and may not
+/// reach a late wave for a while, and short enough that an issued part URL
+/// is not a standing write capability.
+const MULTIPART_PART_URL_TTL: Duration = Duration::from_secs(60 * 60);
 
 pub(super) enum PutContentPreparation {
     Absent,
@@ -64,8 +75,14 @@ pub(super) async fn begin_upload(
 ) -> Result<Json<BeginUploadResponse>, ApiResponseError> {
     let namespace_id = namespace.into_id()?;
     let request = request.unwrap_or_default();
-    if request.mode.unwrap_or_default() == UploadMode::DirectPut {
-        return begin_direct_put_upload(state, namespace_id, request).await;
+    match request.mode.unwrap_or_default() {
+        UploadMode::DirectPut => {
+            return begin_direct_put_upload(state, namespace_id, request).await
+        }
+        UploadMode::DirectMultipart => {
+            return begin_direct_multipart_upload(state, namespace_id, request).await
+        }
+        UploadMode::ServiceProxied => {}
     }
 
     let response = state
@@ -126,7 +143,136 @@ async fn begin_direct_put_upload(
                 expires_at_ms: signed.expires_at_ms,
             },
         }),
+        direct_multipart: None,
     }))
+}
+
+async fn begin_direct_multipart_upload(
+    state: AppState,
+    namespace_id: NamespaceId,
+    request: BeginUploadRequest,
+) -> Result<Json<BeginUploadResponse>, ApiResponseError> {
+    if state.transfer_issuer.is_none() {
+        return Err(ApiResponseError::not_supported(
+            FEATURE_UPLOADS_DIRECT_MULTIPART,
+            "direct_multipart requires an object store that can presign checksum-bound \
+             part uploads and run the provider's multipart control operations; this \
+             deployment's endpoint cannot",
+        ));
+    }
+    let Some(claim) = request.multipart else {
+        return Err(ApiResponseError::new(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::InvalidRequest,
+            "invalid upload content: direct_multipart requires a multipart claim at begin_upload",
+        ));
+    };
+
+    let prepared = state
+        .writer
+        .begin_direct_multipart_upload_target(&namespace_id, claim)
+        .await
+        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+
+    Ok(Json(BeginUploadResponse {
+        namespace_id: prepared.namespace_id,
+        upload_id: prepared.upload_id,
+        mode: UploadMode::DirectMultipart,
+        direct_put: None,
+        direct_multipart: Some(DirectMultipartUpload {
+            content_ref: prepared.target.content_ref,
+            part_size_bytes: prepared.target.part_size_bytes,
+            part_count: prepared.target.part_count,
+        }),
+    }))
+}
+
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        post,
+        path = "/v0/namespaces/{namespace}/uploads/{upload_id}/parts",
+        tag = "uploads",
+        summary = "Sign multipart parts",
+        description = "Returns one short-lived, checksum-bound upload capability per requested part of an open direct_multipart session. Asking again for a part is how a client retries it.",
+        params(
+            ("namespace" = String, Path, description = "Namespace id"),
+            ("upload_id" = String, Path, description = "Upload session id")
+        ),
+        request_body = SignUploadPartsRequest,
+        responses(
+            (status = 200, description = "Part capabilities issued", body = SignUploadPartsResponse),
+            (status = 400, description = "Invalid part request", body = ApiError),
+            (status = 401, description = "Unauthorized", body = ApiError),
+            (status = 404, description = "Namespace or upload not found", body = ApiError),
+            (status = 409, description = "Upload already completed", body = ApiError),
+            (status = 410, description = "Namespace deleted", body = ApiError),
+            (status = 501, description = "Direct multipart upload is unsupported", body = ApiError)
+        )
+    )
+)]
+pub(super) async fn sign_upload_parts(
+    State(state): State<AppState>,
+    namespace: NamespaceIdPath,
+    path: AppPath<UploadPathParams>,
+    AppJson(request): AppJson<SignUploadPartsRequest>,
+) -> Result<Json<SignUploadPartsResponse>, ApiResponseError> {
+    let namespace_id = namespace.into_id()?;
+    let UploadPathParams { upload_id } = path.into_params()?;
+    let upload_id = parse_upload_id(&upload_id)?;
+    let Some(issuer) = state.transfer_issuer.as_ref() else {
+        return Err(ApiResponseError::not_supported(
+            FEATURE_UPLOADS_DIRECT_MULTIPART,
+            "this deployment cannot presign multipart part uploads",
+        ));
+    };
+
+    let targets = state
+        .writer
+        .direct_multipart_part_targets(&namespace_id, &upload_id, &request.parts)
+        .await
+        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+    let parts = sign_parts(issuer.as_ref(), &targets)?;
+
+    Ok(Json(SignUploadPartsResponse {
+        namespace_id,
+        upload_id,
+        parts,
+    }))
+}
+
+fn sign_parts(
+    issuer: &dyn ObjectTransferIssuer,
+    targets: &loonfs::uploads::MultipartPartTargets,
+) -> Result<Vec<SignedUploadPart>, ApiResponseError> {
+    let signing_time = direct_put_presign_time();
+    targets
+        .parts
+        .iter()
+        .map(|part| {
+            let signed = issuer
+                .presign_multipart_part(
+                    PresignedPartRequest {
+                        object_key: &targets.object_key,
+                        provider_upload_id: &targets.provider_upload_id,
+                        part_number: part.part_number,
+                        part_checksum: &part.checksum,
+                        expires_in: MULTIPART_PART_URL_TTL,
+                    },
+                    signing_time,
+                )
+                .map_err(direct_put_issuer_error)?;
+            Ok(SignedUploadPart {
+                part_number: part.part_number,
+                access: ObjectTransferAccess::PresignedUrl {
+                    method: signed.method,
+                    url: signed.url,
+                    headers: signed.headers,
+                    expires_at_ms: signed.expires_at_ms,
+                },
+            })
+        })
+        .collect()
 }
 
 fn direct_put_issuer_error(error: ObjectStoreError) -> ApiResponseError {

@@ -36,7 +36,8 @@ use self::handlers_query::{
     disable_grep_index, enable_grep_index, gc_grep_index, grep, grep_not_supported,
 };
 use self::handlers_uploads::{
-    abort_upload, begin_upload, complete_upload, read_upload_status, upload_content,
+    abort_upload, begin_upload, complete_upload, read_upload_status, sign_upload_parts,
+    upload_content,
 };
 use self::serve::AppState;
 #[cfg(test)]
@@ -149,6 +150,10 @@ fn router(state: AppState) -> Router {
         .route(
             "/v0/namespaces/:namespace/uploads/:upload_id/content",
             put(upload_content).layer(DefaultBodyLimit::max(max_upload_bytes)),
+        )
+        .route(
+            "/v0/namespaces/:namespace/uploads/:upload_id/parts",
+            post(sign_upload_parts),
         )
         .route(
             "/v0/namespaces/:namespace/uploads/:upload_id/complete",

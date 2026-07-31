@@ -518,6 +518,7 @@ async fn proxied_upload_completion_proof_publishes_without_additional_content_io
             &begin.upload_id,
             &CompleteUploadRequest {
                 content_ref: staged.content_ref,
+                multipart_parts: None,
             },
         )
         .await
@@ -574,6 +575,7 @@ async fn direct_put_completion_avoids_blob_get_and_prepared_publish_uses_no_cont
             &begin.upload_id,
             &CompleteUploadRequest {
                 content_ref: content_ref.clone(),
+                multipart_parts: None,
             },
         )
         .await

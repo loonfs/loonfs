@@ -274,6 +274,7 @@ async fn complete_upload_does_not_get_content_blob_after_staging() {
         &begin.upload_id,
         &CompleteUploadRequest {
             content_ref: uploaded.content_ref.clone(),
+            multipart_parts: None,
         },
         &context,
     )
@@ -289,6 +290,7 @@ async fn complete_upload_does_not_get_content_blob_after_staging() {
         &begin.upload_id,
         &CompleteUploadRequest {
             content_ref: uploaded.content_ref,
+            multipart_parts: None,
         },
         &context,
     )
@@ -319,6 +321,7 @@ async fn complete_upload_does_not_get_content_blob_after_staging() {
         &mismatch_begin.upload_id,
         &CompleteUploadRequest {
             content_ref: wrong_ref,
+            multipart_parts: None,
         },
         &context,
     )
@@ -355,6 +358,7 @@ async fn complete_upload_rejects_direct_put_session_without_bound_target() {
         state: loonfs_api::wire::control::UploadSessionLifecycle::Open {
             expires_at_ms: context.now_ms + 60_000,
         },
+        provider_multipart_upload_id: None,
     };
     let envelope = UploadSessionEnvelope::from_state(ControlObjectKind::UploadSession, state)
         .expect("upload session envelope");
@@ -373,6 +377,7 @@ async fn complete_upload_rejects_direct_put_session_without_bound_target() {
         &upload_id,
         &CompleteUploadRequest {
             content_ref: stored.content_ref,
+            multipart_parts: None,
         },
         &context,
     )
@@ -405,4 +410,400 @@ async fn upload_content_rejects_invalid_upload_id_before_key_construction() {
             .expect("list upload sessions"),
         Vec::<String>::new()
     );
+}
+
+/// A multipart session's whole life, on a store that reproduces the
+/// providers' actual multipart behaviour.
+mod direct_multipart {
+    use super::*;
+    use loonfs_api::v0::{CompletedUploadPart, DirectMultipartContentClaim};
+    use loonfs_api::wire::control::{decode_control_object, UploadSessionLifecycle};
+    use loonfs_core::{gc_namespace, GcConfig};
+    use loonfs_objectstore::keys::content_blob;
+    use loonfs_test_support::stores::{MultipartChecksumEnforcement, MultipartStore};
+
+    const PART: &[u8] = b"a part's worth of bytes, repeated enough to be a part\n";
+
+    /// One namespace with one open multipart session over three parts.
+    struct Session {
+        namespace_id: NamespaceId,
+        upload_id: UploadId,
+        content_ref: ContentRef,
+        object_key: String,
+        provider_upload_id: String,
+        payload: Vec<u8>,
+    }
+
+    async fn open_session(
+        store: &MultipartStore<LocalFsStore>,
+        context: &MutationContext,
+    ) -> Session {
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        bootstrap_namespace(store, &namespace_id, context, false)
+            .await
+            .expect("bootstrap");
+        let payload = PART.repeat(3);
+        let begin = namespace_engine(store, &namespace_id, context)
+            .begin_direct_multipart_upload_target(DirectMultipartContentClaim {
+                size_bytes: payload.len() as u64,
+                crc64nvme: StorageChecksum::crc64nvme(&payload).value,
+            })
+            .await
+            .expect("begin direct multipart");
+        let catalog = loonfs_core::control::load_namespace_catalog_entry(store, &namespace_id)
+            .await
+            .expect("catalog");
+        let object_key = content_blob(
+            catalog.content_store_id().as_str(),
+            &begin.target.content_ref.content_id,
+        );
+        let provider_upload_id = session_state(store, &namespace_id, &begin.upload_id)
+            .await
+            .provider_multipart_upload_id
+            .expect("a multipart session records its provider upload");
+
+        Session {
+            namespace_id,
+            upload_id: begin.upload_id,
+            content_ref: begin.target.content_ref,
+            object_key,
+            provider_upload_id,
+            payload,
+        }
+    }
+
+    async fn session_state<S: ObjectStore + ?Sized>(
+        store: &S,
+        namespace_id: &NamespaceId,
+        upload_id: &UploadId,
+    ) -> UploadSessionState {
+        let key = upload_session(namespace_id.as_str(), upload_id.as_str());
+        let bytes = store
+            .get(&key, None)
+            .await
+            .expect("read session")
+            .expect("session exists");
+        decode_control_object::<UploadSessionState>(&bytes, ControlObjectKind::UploadSession)
+            .expect("decode session")
+            .state
+    }
+
+    /// Uploads every part, the way a client would after asking for the
+    /// signed URLs, and returns the bookkeeping it carries to completion.
+    fn upload_every_part(
+        store: &MultipartStore<LocalFsStore>,
+        session: &Session,
+    ) -> Vec<CompletedUploadPart> {
+        let mut parts = Vec::new();
+        for (index, chunk) in session.payload.chunks(PART.len()).enumerate() {
+            let part_number = index as u32 + 1;
+            let etag = store.upload_part(&session.provider_upload_id, part_number, chunk);
+            parts.push(CompletedUploadPart {
+                part_number,
+                etag,
+                crc64nvme: StorageChecksum::crc64nvme(chunk).value,
+            });
+        }
+        parts
+    }
+
+    fn complete_request(
+        session: &Session,
+        parts: Vec<CompletedUploadPart>,
+    ) -> CompleteUploadRequest {
+        CompleteUploadRequest {
+            content_ref: session.content_ref.clone(),
+            multipart_parts: Some(parts),
+        }
+    }
+
+    /// The whole point of the transport: parts go straight to the provider,
+    /// the server assembles them, and it believes the assembly only after
+    /// reading the object's own checksum back.
+    #[tokio::test]
+    async fn a_multipart_upload_completes_against_the_assembled_object() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = MultipartStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+        let context = mutation_context();
+        let session = open_session(&store, &context).await;
+
+        let parts = upload_every_part(&store, &session);
+        assert_eq!(parts.len(), 3, "the payload cut into more than one part");
+
+        let completed = complete_upload(
+            &store,
+            &session.namespace_id,
+            &session.upload_id,
+            &complete_request(&session, parts),
+            &context,
+        )
+        .await
+        .expect("complete a verified multipart upload");
+
+        assert_eq!(completed.content_ref, session.content_ref);
+        assert_eq!(
+            completed.content_ref.storage_checksum,
+            StorageChecksum::crc64nvme(&session.payload),
+            "a provider-assembled object's evidence is the crc it computed"
+        );
+        assert!(
+            completed.content_ref.whole_file_sha256.is_none(),
+            "nobody trustworthy hashed these bytes, so no sha256 is claimed"
+        );
+        assert_eq!(
+            store
+                .get(&session.object_key, None)
+                .await
+                .expect("read object")
+                .expect("object exists"),
+            Bytes::from(session.payload.clone())
+        );
+        assert_eq!(store.open_uploads(), 0, "completion consumes the upload");
+    }
+
+    /// Re-uploading a part is how a client retries one. The last write wins
+    /// and the assembled object follows it.
+    #[tokio::test]
+    async fn a_re_uploaded_part_is_the_one_that_lands() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = MultipartStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+        let context = mutation_context();
+        let session = open_session(&store, &context).await;
+
+        // Part two arrives wrong first, then correct: same length both
+        // times, so only the checksum can tell them apart.
+        let wrong = vec![b'x'; PART.len()];
+        store.upload_part(&session.provider_upload_id, 2, &wrong);
+        let parts = upload_every_part(&store, &session);
+
+        complete_upload(
+            &store,
+            &session.namespace_id,
+            &session.upload_id,
+            &complete_request(&session, parts),
+            &context,
+        )
+        .await
+        .expect("the corrected part is the one completion assembles");
+
+        assert_eq!(
+            store
+                .get(&session.object_key, None)
+                .await
+                .expect("read object")
+                .expect("object exists"),
+            Bytes::from(session.payload.clone())
+        );
+    }
+
+    /// A completion whose response was lost. The provider has consumed the
+    /// upload, so replaying it reports an upload nobody has heard of — but
+    /// the durable session says what was promised and the object says what
+    /// landed, and those two settle it on every provider identically.
+    #[tokio::test]
+    async fn a_lost_completion_reconciles_from_the_session_and_the_object() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = MultipartStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+        let context = mutation_context();
+        let session = open_session(&store, &context).await;
+        let parts = upload_every_part(&store, &session);
+        let request = complete_request(&session, parts);
+
+        let first = complete_upload(
+            &store,
+            &session.namespace_id,
+            &session.upload_id,
+            &request,
+            &context,
+        )
+        .await
+        .expect("first completion");
+
+        // The client never saw that answer and asks again.
+        let replayed = complete_upload(
+            &store,
+            &session.namespace_id,
+            &session.upload_id,
+            &request,
+            &context,
+        )
+        .await
+        .expect("a lost completion is answered, not failed");
+
+        assert_eq!(replayed.content_ref, first.content_ref);
+        assert_eq!(
+            store
+                .get(&session.object_key, None)
+                .await
+                .expect("read object")
+                .expect("object survived the replay"),
+            Bytes::from(session.payload.clone())
+        );
+    }
+
+    /// An assembly that is not what was promised. There are no parts left to
+    /// retry against — completion consumed them — so the session ends rather
+    /// than waiting for a retry that could never work, and the wrong object
+    /// goes with it.
+    #[tokio::test]
+    async fn a_completion_that_does_not_verify_ends_the_session_and_deletes_the_object() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = MultipartStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+        let context = mutation_context();
+        let session = open_session(&store, &context).await;
+
+        // Every part is checksum-correct, but the last one is not the byte
+        // count the session was opened for, so the assembly cannot be the
+        // object that was promised. This is the shape a provider that only
+        // witnesses the whole-object checksum lets through.
+        let mut parts = upload_every_part(&store, &session);
+        let short = &PART[..PART.len() / 2];
+        let etag = store.upload_part(&session.provider_upload_id, 3, short);
+        parts[2] = CompletedUploadPart {
+            part_number: 3,
+            etag,
+            crc64nvme: StorageChecksum::crc64nvme(short).value,
+        };
+
+        let error = complete_upload(
+            &store,
+            &session.namespace_id,
+            &session.upload_id,
+            &complete_request(&session, parts),
+            &context,
+        )
+        .await
+        .expect_err("an unverified assembly cannot complete");
+        assert_eq!(error.code(), ErrorCode::InvalidRequest);
+
+        assert!(
+            matches!(
+                session_state(&store, &session.namespace_id, &session.upload_id)
+                    .await
+                    .state,
+                UploadSessionLifecycle::Aborted { .. }
+            ),
+            "a failed verification is terminal, not retryable"
+        );
+        assert!(
+            store
+                .head(&session.object_key)
+                .await
+                .expect("head")
+                .is_none(),
+            "the wrong object is deleted, not left publishable"
+        );
+
+        // And the terminal state holds: a second completion reports absence.
+        let parts = vec![CompletedUploadPart {
+            part_number: 1,
+            etag: "\"whatever\"".to_owned(),
+            crc64nvme: StorageChecksum::crc64nvme(PART).value,
+        }];
+        let error = complete_upload(
+            &store,
+            &session.namespace_id,
+            &session.upload_id,
+            &complete_request(&session, parts),
+            &context,
+        )
+        .await
+        .expect_err("an aborted session cannot complete");
+        assert_eq!(error.code(), ErrorCode::UploadNotFound);
+    }
+
+    /// A provider that treats the whole-object checksum as a precondition
+    /// refuses the assembly outright. The session still ends terminally:
+    /// the upload is spent either way.
+    #[tokio::test]
+    async fn a_refused_assembly_is_terminal_too() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = MultipartStore::with_enforcement(
+            LocalFsStore::new(temp_dir.path()).expect("store"),
+            MultipartChecksumEnforcement::Precondition,
+        );
+        let context = mutation_context();
+        let session = open_session(&store, &context).await;
+
+        let mut parts = upload_every_part(&store, &session);
+        let short = &PART[..PART.len() / 2];
+        let etag = store.upload_part(&session.provider_upload_id, 3, short);
+        parts[2] = CompletedUploadPart {
+            part_number: 3,
+            etag,
+            crc64nvme: StorageChecksum::crc64nvme(short).value,
+        };
+
+        let error = complete_upload(
+            &store,
+            &session.namespace_id,
+            &session.upload_id,
+            &complete_request(&session, parts),
+            &context,
+        )
+        .await
+        .expect_err("a refused assembly cannot complete");
+        assert_eq!(error.code(), ErrorCode::InvalidRequest);
+        assert!(matches!(
+            session_state(&store, &session.namespace_id, &session.upload_id)
+                .await
+                .state,
+            UploadSessionLifecycle::Aborted { .. }
+        ));
+        assert!(store
+            .head(&session.object_key)
+            .await
+            .expect("head")
+            .is_none());
+    }
+
+    /// A session abandoned mid-upload leaves parts sitting at the provider.
+    /// Upload collection abandons them along with the object, because the
+    /// session record is where the provider's upload id lives.
+    #[tokio::test]
+    async fn upload_collection_abandons_the_provider_upload_of_an_expired_session() {
+        let temp_dir = tempdir().expect("tempdir");
+        let store = MultipartStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+        let context = mutation_context();
+        let session = open_session(&store, &context).await;
+        upload_every_part(&store, &session);
+        assert_eq!(store.open_uploads(), 1);
+
+        // The session carries its own expiry, so collection is decided
+        // against that stamp and never against an object's provider
+        // timestamp.
+        let UploadSessionLifecycle::Open { expires_at_ms } =
+            session_state(&store, &session.namespace_id, &session.upload_id)
+                .await
+                .state
+        else {
+            panic!("a fresh session is open");
+        };
+        let config = GcConfig::default();
+        let expired = MutationContext {
+            writer_id: context.writer_id.clone(),
+            now_ms: expires_at_ms + config.grace_window_ms + 1,
+        };
+        gc_namespace(&store, &session.namespace_id, &config, &expired)
+            .await
+            .expect("garbage collection");
+
+        assert!(matches!(
+            session_state(&store, &session.namespace_id, &session.upload_id)
+                .await
+                .state,
+            UploadSessionLifecycle::Aborted { .. }
+        ));
+        assert_eq!(
+            store.open_uploads(),
+            0,
+            "the parts an abandoned session accumulated are released"
+        );
+        assert!(store.aborts() >= 1);
+        assert!(store
+            .head(&session.object_key)
+            .await
+            .expect("head")
+            .is_none());
+    }
 }

@@ -9,6 +9,7 @@ mod bulk_file_reads;
 mod cache_seeding;
 mod capability_conformance;
 mod cold_stat_requests;
+mod commit_retry;
 mod common;
 mod content_request_accounting;
 mod direct_put;

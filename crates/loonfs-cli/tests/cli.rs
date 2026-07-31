@@ -495,20 +495,14 @@ fn commit_messages_ride_the_feed_and_bind_identity() {
     );
 
     // A put's identity includes *which* content object it attaches, and
-    // `loon put` uploads its file every time it runs. So rerunning the same
-    // command under the same commit id is a different mutation, not a retry,
-    // and it conflicts rather than replaying. Reusing a commit id across
-    // `put` invocations is not a supported retry strategy.
+    // `loon put` uploads its file every time it runs, so a rerun under the
+    // same commit id is a different mutation as far as the server is
+    // concerned. What makes rerunning safe anyway is the client comparing
+    // the bytes it just sent against what that commit id actually
+    // committed: identical bytes mean the command had already succeeded, so
+    // it reports the same commit rather than a conflict.
     let local_payload = payload.to_str().expect("utf-8 path");
-    assert_success(&harness.run(&[
-        "--json",
-        "put",
-        local_payload,
-        "/pinned.txt",
-        "--commit-id",
-        "pinned-put",
-    ]));
-    let reuploaded = harness.run(&[
+    let first = harness.run(&[
         "--json",
         "put",
         local_payload,
@@ -516,12 +510,40 @@ fn commit_messages_ride_the_feed_and_bind_identity() {
         "--commit-id",
         "pinned-put",
     ]);
-    assert_failure(&reuploaded);
+    assert_success(&first);
+    let rerun = harness.run(&[
+        "--json",
+        "put",
+        local_payload,
+        "/pinned.txt",
+        "--commit-id",
+        "pinned-put",
+    ]);
+    assert_success(&rerun);
     assert_eq!(
-        json_error(&reuploaded)["code"],
+        json_data(&rerun)["committed_seq"],
+        json_data(&first)["committed_seq"],
+        "rerunning an identical put must report the commit that already landed"
+    );
+
+    // Different bytes under that commit id are a different operation, and
+    // the conflict stands.
+    let changed = harness.temp_dir.path().join("changed.txt");
+    fs::write(&changed, b"different pinned bytes\n").expect("write changed payload");
+    let conflicting = harness.run(&[
+        "--json",
+        "put",
+        changed.to_str().expect("utf-8 path"),
+        "/pinned.txt",
+        "--commit-id",
+        "pinned-put",
+    ]);
+    assert_failure(&conflicting);
+    assert_eq!(
+        json_error(&conflicting)["code"],
         "commit_id_reuse_conflict",
         "{}",
-        json_error(&reuploaded)
+        json_error(&conflicting)
     );
 }
 
@@ -2070,9 +2092,10 @@ fn every_advertised_capability_maps_to_a_cli_command_path() {
         ("core.namespaces.create", &["namespace", "create"]),
         ("core.namespaces.delete", &["namespace", "delete"]),
         ("core.namespaces.fork", &["namespace", "fork"]),
-        // Direct-put is a transfer mode negotiated inside the same upload
-        // staging flow `put` drives; it needs no separate verb.
+        // Both direct transports are modes negotiated inside the same upload
+        // staging flow `put` drives; neither needs a separate verb.
         ("core.uploads.direct_put", &["put"]),
+        ("core.uploads.direct_multipart", &["put"]),
         ("query.grep", &["grep"]),
     ];
 

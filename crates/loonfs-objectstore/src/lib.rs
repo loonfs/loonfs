@@ -36,8 +36,8 @@ pub use configured::{ConfiguredObjectStore, ConfiguredObjectStoreKind};
 pub use immutable_write::ImmutableWriteError;
 pub use object_store::ObjectStoreError as Error;
 pub use object_store::{
-    ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode, Result,
-    SharedObjectStore, StoredObjectChecksum,
+    ByteRange, MultipartCompletion, MultipartPart, ObjectBody, ObjectMetadata, ObjectStore,
+    ObjectStoreError, PutMode, Result, SharedObjectStore, StoredObjectChecksum,
 };
 pub use provider_object_store::{
     ProviderObjectStore, ProviderObjectStoreConfig, PROVIDER_ATTEMPT_TIMEOUT,

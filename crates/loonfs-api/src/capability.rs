@@ -24,6 +24,8 @@ pub const FEATURE_NAMESPACES_FORK: &str = "core.namespaces.fork";
 pub const FEATURE_NAMESPACES_DELETE: &str = "core.namespaces.delete";
 /// Gates direct upload sessions that are authorized with short-lived presigned URLs.
 pub const FEATURE_UPLOADS_DIRECT_PUT: &str = "core.uploads.direct_put";
+/// Starting presigned `direct_multipart` upload sessions.
+pub const FEATURE_UPLOADS_DIRECT_MULTIPART: &str = "core.uploads.direct_multipart";
 /// Gates grep-index content search: the serving half of the capability;
 /// the namespace's verified steady-state grep root is the data half.
 pub const FEATURE_QUERY_GREP: &str = "query.grep";

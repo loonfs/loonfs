@@ -200,6 +200,33 @@ pub(crate) async fn delete_unpublished_content_object<S: ObjectStore + ?Sized>(
     }
 }
 
+/// Abandons the provider multipart upload a terminated session opened.
+///
+/// Aborting is safe whatever the upload's real state: an upload that already
+/// assembled its object survives the abort untouched, and one the provider
+/// has never heard of succeeds anyway. So this runs strictly after the
+/// durable transition without first proving what it is cleaning up, and a
+/// failure is logged rather than propagated — the next garbage-collection
+/// pass repeats it from the terminal record.
+pub(crate) async fn abort_unpublished_multipart_upload<S: ObjectStore + ?Sized>(
+    store: &S,
+    content_store_id: &ContentStoreId,
+    content_id: &ContentId,
+    provider_upload_id: &str,
+) {
+    let object_key = content_blob(content_store_id.as_str(), content_id);
+    if let Err(error) = store
+        .abort_multipart_upload(&object_key, provider_upload_id)
+        .await
+    {
+        tracing::warn!(
+            content_id = %content_id,
+            error = %error,
+            "failed to abandon the multipart upload of a terminated upload session"
+        );
+    }
+}
+
 pub(crate) async fn read_durable_content_bytes<S: ObjectStore + ?Sized>(
     store: &S,
     content_store_id: &ContentStoreId,
@@ -227,10 +254,12 @@ fn content_object_key_for_ref(
 
 /// Checks fetched bytes against everything the reference claims about them.
 ///
-/// The whole-file SHA-256 is the check whenever it is present, which is
-/// every reference any current write path produces. A reference carrying
-/// only a CRC — which direct multipart will produce — is not silently
-/// accepted here; it is refused until this crate can recompute that CRC.
+/// The whole-file SHA-256 is the check whenever it is present; a reference
+/// that carries only a CRC — which direct multipart produces, because a
+/// provider-assembled object is never hashed by us — is verified by that
+/// CRC instead. A reference whose checksum this build cannot recompute is
+/// refused rather than waved through: an unverifiable read is not a
+/// verified one.
 fn validate_loaded_content_bytes(
     object_key: String,
     content_ref: &ContentRef,
@@ -245,16 +274,19 @@ fn validate_loaded_content_bytes(
         });
     }
 
-    match expected_sha256(content_ref) {
-        Some(expected) => {
-            let actual = StorageChecksum::sha256(bytes).value;
-            if actual != expected {
-                return Err(DurableContentValidationError::ContentChecksumMismatch {
-                    object_key,
-                    expected: format!("sha256:{expected}"),
-                    actual: format!("sha256:{actual}"),
-                });
-            }
+    let expected = verifiable_checksum(content_ref);
+    match expected.matches(bytes) {
+        Some(true) => {}
+        Some(false) => {
+            let actual = match expected.algorithm {
+                ChecksumAlgorithm::Sha256 => StorageChecksum::sha256(bytes),
+                _ => StorageChecksum::crc64nvme(bytes),
+            };
+            return Err(DurableContentValidationError::ContentChecksumMismatch {
+                object_key,
+                expected: describe_checksum(&expected),
+                actual: describe_checksum(&actual),
+            });
         }
         None => {
             return Err(DurableContentValidationError::ContentChecksumUnverifiable {
@@ -271,16 +303,17 @@ fn validate_loaded_content_bytes(
     })
 }
 
-/// The SHA-256 a read can recompute for this reference, from the trusted
-/// whole-file digest or from a storage checksum that is itself a SHA-256.
-fn expected_sha256(content_ref: &ContentRef) -> Option<&str> {
-    content_ref
-        .whole_file_sha256
-        .as_deref()
-        .or(match content_ref.storage_checksum.algorithm {
-            ChecksumAlgorithm::Sha256 => Some(content_ref.storage_checksum.value.as_str()),
-            ChecksumAlgorithm::Crc64nvme | ChecksumAlgorithm::Crc32c => None,
-        })
+/// The checksum a read holds these bytes to: the trusted whole-file digest
+/// when one exists, and otherwise the reference's own storage checksum,
+/// which for a provider-assembled object is the only evidence there is.
+fn verifiable_checksum(content_ref: &ContentRef) -> StorageChecksum {
+    match &content_ref.whole_file_sha256 {
+        Some(digest) => StorageChecksum {
+            algorithm: ChecksumAlgorithm::Sha256,
+            value: digest.clone(),
+        },
+        None => content_ref.storage_checksum.clone(),
+    }
 }
 
 fn describe_checksum(checksum: &StorageChecksum) -> String {
@@ -517,8 +550,8 @@ mod tests {
         let mut content_ref = content_ref(bytes);
         content_ref.whole_file_sha256 = None;
         content_ref.storage_checksum = StorageChecksum {
-            algorithm: ChecksumAlgorithm::Crc64nvme,
-            value: "bbb7305bdf118bcb".to_owned(),
+            algorithm: ChecksumAlgorithm::Crc32c,
+            value: "00000000".to_owned(),
         };
         put_content_object(&store, &content_store_id, &content_ref, bytes).await;
 
@@ -528,6 +561,43 @@ mod tests {
         assert!(matches!(
             err,
             DurableContentValidationError::ContentChecksumUnverifiable { .. }
+        ));
+    }
+
+    /// A direct multipart upload produces a reference whose only evidence is
+    /// the CRC-64/NVME the provider computed over the assembly. Reads must
+    /// verify it — the alternative is a whole write path whose bytes are
+    /// never checked on the way back out.
+    #[tokio::test]
+    async fn read_verifies_a_reference_whose_only_evidence_is_a_crc64nvme() {
+        let (_temp_dir, store, content_store_id) = test_store();
+        let bytes = b"provider-assembled bytes";
+        let content_ref = ContentRef {
+            kind: ContentRefKind::BlobV1,
+            content_id: ContentId::generate(),
+            size_bytes: bytes.len() as u64,
+            storage_checksum: StorageChecksum::crc64nvme(bytes),
+            whole_file_sha256: None,
+        };
+        put_content_object(&store, &content_store_id, &content_ref, bytes).await;
+
+        let read = read_durable_content_bytes(&store, &content_store_id, &content_ref)
+            .await
+            .expect("a crc-only reference verifies by its crc");
+        assert_eq!(read.bytes, bytes);
+
+        // Same length, different bytes: only the checksum can tell.
+        let (_temp_dir, store, content_store_id) = test_store();
+        let planted = ContentRef {
+            storage_checksum: StorageChecksum::crc64nvme(b"provider-assembled BYTES"),
+            ..content_ref.clone()
+        };
+        put_content_object(&store, &content_store_id, &planted, bytes).await;
+        assert!(matches!(
+            read_durable_content_bytes(&store, &content_store_id, &planted)
+                .await
+                .expect_err("crc mismatch"),
+            DurableContentValidationError::ContentChecksumMismatch { .. }
         ));
     }
 

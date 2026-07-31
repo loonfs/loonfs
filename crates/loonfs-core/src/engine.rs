@@ -17,8 +17,8 @@ use crate::protocol::CompletedUpload;
 use crate::storage::content_admission::CompletedUploadReceipt;
 use loonfs_api::v0::{
     AbortUploadResponse, BeginUploadRequest, BeginUploadResponse, ChangesResponse, CommitResponse,
-    CompleteUploadRequest, CompleteUploadResponse, DirectPutContentClaim, UploadContentResponse,
-    UploadStatusResponse,
+    CompleteUploadRequest, CompleteUploadResponse, DirectMultipartContentClaim,
+    DirectPutContentClaim, UploadContentResponse, UploadPartChecksumClaim, UploadStatusResponse,
 };
 use loonfs_api::wire::control::{CheckpointOwner, HeadState, NamespaceState};
 use loonfs_api::EffectiveLimit;
@@ -27,7 +27,7 @@ use loonfs_api::{
     CheckpointId, ContentRef, CreateCheckpointResponse, DeleteNamespaceResponse,
     DirectoryPageCursor, FileRevision, FileRevisionsPageCursor, FlushWalResponse, InodeId,
     NamespaceId, NamespaceSummary, Page, PageRequest, ReleaseCheckpointResponse, RevisionNo,
-    TrashEntry, TrashPageCursor, UploadId,
+    StorageChecksum, TrashEntry, TrashPageCursor, UploadId,
 };
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
@@ -79,6 +79,38 @@ pub struct BeginDirectPutUploadTargetResponse {
     pub namespace_id: NamespaceId,
     pub upload_id: UploadId,
     pub target: DirectPutUploadTarget,
+}
+
+/// Internal target used by server integrations before they mint part URLs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectMultipartUploadTarget {
+    pub content_ref: ContentRef,
+    pub object_key: String,
+    pub part_size_bytes: u64,
+    pub part_count: u32,
+}
+
+/// Internal response for preparing a direct_multipart session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BeginDirectMultipartUploadTargetResponse {
+    pub namespace_id: NamespaceId,
+    pub upload_id: UploadId,
+    pub target: DirectMultipartUploadTarget,
+}
+
+/// One part a server integration is about to sign.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MultipartPartTarget {
+    pub part_number: u32,
+    pub checksum: StorageChecksum,
+}
+
+/// Everything a server integration needs to sign one wave of part uploads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MultipartPartTargets {
+    pub object_key: String,
+    pub provider_upload_id: String,
+    pub parts: Vec<MultipartPartTarget>,
 }
 
 /// The actor identity a mutating engine publishes under.
@@ -424,6 +456,38 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             &self.namespace_id,
             claim,
             &self.mutation_context()?,
+        )
+        .await
+    }
+
+    /// Mints a direct_multipart upload target: a fresh content identity, the
+    /// reference that names it, the provider upload that assembles it, and
+    /// the part geometry the client cuts its payload to.
+    pub async fn begin_direct_multipart_upload_target(
+        &self,
+        claim: DirectMultipartContentClaim,
+    ) -> Result<BeginDirectMultipartUploadTargetResponse> {
+        crate::protocol::begin_direct_multipart_upload_target(
+            &self.store,
+            &self.namespace_id,
+            claim,
+            &self.mutation_context()?,
+        )
+        .await
+    }
+
+    /// Resolves one wave of parts for signing against the session that owns
+    /// them. Nothing durable is written: parts are the client's bookkeeping.
+    pub async fn direct_multipart_part_targets(
+        &self,
+        upload_id: &UploadId,
+        requested: &[UploadPartChecksumClaim],
+    ) -> Result<MultipartPartTargets> {
+        crate::protocol::direct_multipart_part_targets(
+            &self.store,
+            &self.namespace_id,
+            upload_id,
+            requested,
         )
         .await
     }

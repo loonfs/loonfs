@@ -19,19 +19,51 @@ mod transport;
 use loonfs_api::{
     v0::{
         BeginUploadRequest, BeginUploadResponse, ChangesResponse,
-        CommitResponse as ApiCommitResponse, CompleteUploadRequest, CompleteUploadResponse,
-        DirectPutContentClaim, DisableGrepIndexResponse, EnableGrepIndexResponse, GrepGcResponse,
-        ObjectTransferAccess, UploadContentResponse, UploadMode, ValidatedContentToken,
+        CommitResponse as ApiCommitResponse, CommittedChange, CompleteUploadRequest,
+        CompleteUploadResponse, CompletedUploadPart, DirectMultipartContentClaim,
+        DirectPutContentClaim, DisableGrepIndexResponse, EnableGrepIndexResponse, FilesystemChange,
+        GrepGcResponse, ObjectTransferAccess, SignUploadPartsRequest, SignUploadPartsResponse,
+        SignedUploadPart, UploadContentResponse, UploadMode, UploadPartChecksumClaim,
+        ValidatedContentToken,
     },
-    AbsolutePath, AuthoritativePathEntry, CapabilityDocument, ChangeSeq, CheckpointId, CommitId,
-    CommitRequest, ContentRef, CreateCheckpointRequest, CreateCheckpointResponse,
-    CreateNamespaceRequest, DeleteNamespaceResponse, DestinationBehavior, FilesystemOperation,
-    ForkNamespaceRequest, GrepRequest, GrepResponse, InodeId, ListFileRevisionsResponse,
-    ListPathEntriesResponse, ListTrashResponse, MaintenanceStepRequest, MaintenanceStepResponse,
-    NamespaceId, NamespaceStatusResponse, NamespaceSummary, ReleaseCheckpointResponse, RevisionNo,
-    UploadId,
+    AbsolutePath, AuthoritativePathEntry, CapabilityDocument, ChangeSeq, CheckpointId,
+    ChecksumAlgorithm, CommitId, CommitRequest, ContentRef, CreateCheckpointRequest,
+    CreateCheckpointResponse, CreateNamespaceRequest, DeleteNamespaceResponse, DestinationBehavior,
+    ErrorCode, FilesystemOperation, ForkNamespaceRequest, GrepRequest, GrepResponse, InodeId,
+    ListFileRevisionsResponse, ListPathEntriesResponse, ListTrashResponse, MaintenanceStepRequest,
+    MaintenanceStepResponse, NamespaceId, NamespaceStatusResponse, NamespaceSummary,
+    ReleaseCheckpointResponse, RevisionNo, StorageChecksum, UploadId,
+    FEATURE_UPLOADS_DIRECT_MULTIPART,
 };
 use std::sync::{Arc, OnceLock};
+
+/// Payload size from which the client prefers a direct multipart upload,
+/// when the deployment offers one. It mirrors the server's part size, so
+/// anything smaller would be a one-part multipart upload with extra round
+/// trips and nothing to gain.
+const DIRECT_MULTIPART_MIN_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Parts in flight at once. Each holds its bytes, so this is the memory the
+/// parallelism costs.
+const DIRECT_MULTIPART_PARTS_IN_FLIGHT: usize = 4;
+
+/// Change-feed sequences one lookup window covers when resolving a reused
+/// commit id.
+const COMMIT_LOOKUP_WINDOW: u64 = 128;
+
+/// Windows one lookup walks back from the feed's head before giving up. A
+/// commit being retried is a recent one; past this the answer is "not
+/// found", never a guess.
+const COMMIT_LOOKUP_MAX_WINDOWS: usize = 8;
+
+/// The content one committed change wrote, if it wrote any.
+fn committed_content_ref(change: &CommittedChange) -> Option<&ContentRef> {
+    change.events.iter().find_map(|event| match event {
+        FilesystemChange::Created { content_ref, .. } => content_ref.as_ref(),
+        FilesystemChange::ContentChanged { content_ref, .. } => Some(content_ref),
+        _ => None,
+    })
+}
 
 pub use config::ClientConfig;
 pub use error::ClientError;
@@ -368,9 +400,104 @@ impl Client {
             &BeginUploadRequest {
                 mode: Some(UploadMode::DirectPut),
                 content: Some(claim),
+                multipart: None,
             },
         )
         .await
+    }
+
+    /// Starts a direct multipart upload of an object the caller already
+    /// holds.
+    ///
+    /// The claim names the assembled object's length and CRC-64/NVME. The
+    /// server answers with the content object it minted and the part
+    /// geometry to cut to, so the client needs no provider vocabulary at
+    /// all — not the bucket, not the key, not the provider's upload id.
+    pub async fn begin_direct_multipart(
+        &self,
+        namespace_id: &NamespaceId,
+        claim: DirectMultipartContentClaim,
+    ) -> Result<BeginUploadResponse> {
+        self.begin_upload(
+            namespace_id,
+            &BeginUploadRequest {
+                mode: Some(UploadMode::DirectMultipart),
+                content: None,
+                multipart: Some(claim),
+            },
+        )
+        .await
+    }
+
+    /// Asks for one wave of checksum-bound part-upload capabilities.
+    ///
+    /// Asking again for a part already uploaded is how a client retries it:
+    /// a repeated part is last-write-wins at the provider, and the object's
+    /// checksum follows the bytes that stuck.
+    pub async fn sign_upload_parts(
+        &self,
+        namespace_id: &NamespaceId,
+        upload_id: &UploadId,
+        parts: Vec<UploadPartChecksumClaim>,
+    ) -> Result<SignUploadPartsResponse> {
+        let url = format!(
+            "{}/v0/namespaces/{namespace_id}/uploads/{upload_id}/parts",
+            self.base_url
+        );
+        // Signing writes nothing down, so asking twice costs two signatures
+        // and changes nothing.
+        self.request_json::<_, SignUploadPartsResponse>(
+            self.post(&url),
+            Some(&SignUploadPartsRequest { parts }),
+        )
+        .await
+    }
+
+    /// Uploads one part and reports what the provider recorded for it.
+    ///
+    /// The etag comes back to the caller rather than to the server: parts
+    /// are the uploader's bookkeeping all the way to completion, exactly as
+    /// they are in the provider's own multipart API.
+    pub async fn upload_part_via_presigned_url(
+        &self,
+        part_number: u32,
+        access: &ObjectTransferAccess,
+        crc64nvme: String,
+        bytes: &[u8],
+    ) -> Result<CompletedUploadPart> {
+        let ObjectTransferAccess::PresignedUrl {
+            method,
+            url,
+            headers,
+            ..
+        } = access;
+        if method != "PUT" {
+            return Err(ClientError::Http(format!(
+                "unsupported presigned part method `{method}`"
+            )));
+        }
+        let mut request = WireRequest::presigned(reqwest::Method::PUT, url);
+        for (name, value) in headers {
+            request = request.header(name, value);
+        }
+        // A part upload is safe to repeat: it is not create-only, the
+        // provider takes the last write, and the checksum rides the
+        // signature either way.
+        let response = self
+            .call_with_transient_retry_headers(&request, Some(bytes))
+            .await?;
+        let etag = response
+            .get(http::header::ETAG)
+            .and_then(|value| value.to_str().ok())
+            .ok_or_else(|| {
+                ClientError::Http(format!("part {part_number} upload returned no etag"))
+            })?
+            .to_owned();
+        Ok(CompletedUploadPart {
+            part_number,
+            etag,
+            crc64nvme,
+        })
     }
 
     pub async fn upload_via_presigned_url(
@@ -567,7 +694,135 @@ impl Client {
             .await
     }
 
+    /// Makes bytes durable, choosing the transport the payload and the
+    /// deployment allow.
+    ///
+    /// A large payload goes straight to object storage in parallel parts
+    /// where the server can authorize that; everything else goes through
+    /// the server. Either way the caller gets back one content reference
+    /// plus the receipt that admits it at commit.
     async fn stage_bytes_as_content_ref(
+        &self,
+        namespace_id: &NamespaceId,
+        bytes: &[u8],
+    ) -> Result<StagedContent> {
+        if bytes.len() as u64 >= DIRECT_MULTIPART_MIN_BYTES
+            && self
+                .capabilities()
+                .await
+                .is_ok_and(|capabilities| capabilities.supports(FEATURE_UPLOADS_DIRECT_MULTIPART))
+        {
+            return self.stage_bytes_via_multipart(namespace_id, bytes).await;
+        }
+        self.stage_bytes_via_server(namespace_id, bytes).await
+    }
+
+    /// Uploads one object straight to object storage in parallel parts.
+    ///
+    /// The whole-object checksum is folded part by part as the payload is
+    /// cut, so the same pass that produces what the provider enforces on
+    /// each part also produces what completion verifies the assembly
+    /// against.
+    async fn stage_bytes_via_multipart(
+        &self,
+        namespace_id: &NamespaceId,
+        bytes: &[u8],
+    ) -> Result<StagedContent> {
+        let whole_object = StorageChecksum::crc64nvme(bytes);
+        let begin = self
+            .begin_direct_multipart(
+                namespace_id,
+                DirectMultipartContentClaim {
+                    size_bytes: bytes.len() as u64,
+                    crc64nvme: whole_object.value.clone(),
+                },
+            )
+            .await?;
+        let upload_id = begin.upload_id.clone();
+        let multipart = begin.direct_multipart.ok_or_else(|| {
+            ClientError::Http("server accepted direct_multipart without part geometry".to_owned())
+        })?;
+
+        let part_size = usize::try_from(multipart.part_size_bytes)
+            .map_err(|_| ClientError::Http("part size does not fit this platform".to_owned()))?;
+        let chunks: Vec<&[u8]> = if bytes.is_empty() {
+            vec![&[]]
+        } else {
+            bytes.chunks(part_size.max(1)).collect()
+        };
+        let claims = chunks
+            .iter()
+            .enumerate()
+            .map(|(index, chunk)| UploadPartChecksumClaim {
+                part_number: index as u32 + 1,
+                crc64nvme: StorageChecksum::crc64nvme(chunk).value,
+            })
+            .collect::<Vec<_>>();
+        let signed = self
+            .sign_upload_parts(namespace_id, &upload_id, claims.clone())
+            .await?;
+
+        let mut parts = self
+            .upload_signed_parts(&signed.parts, &claims, &chunks)
+            .await?;
+        parts.sort_by_key(|part| part.part_number);
+
+        let response = self
+            .complete_upload(
+                namespace_id,
+                &upload_id,
+                &CompleteUploadRequest {
+                    content_ref: multipart.content_ref,
+                    multipart_parts: Some(parts),
+                },
+            )
+            .await?;
+        Ok(Self::staged_from_completion(response))
+    }
+
+    /// Uploads parts with a bounded number in flight.
+    ///
+    /// The window exists because each in-flight part holds its bytes: the
+    /// point of this path is that a large object crosses the network once
+    /// and in parallel, not that it is all in flight at once.
+    async fn upload_signed_parts(
+        &self,
+        signed: &[SignedUploadPart],
+        claims: &[UploadPartChecksumClaim],
+        chunks: &[&[u8]],
+    ) -> Result<Vec<CompletedUploadPart>> {
+        let mut uploaded = Vec::with_capacity(signed.len());
+        for wave in signed.chunks(DIRECT_MULTIPART_PARTS_IN_FLIGHT) {
+            let mut in_flight = tokio::task::JoinSet::new();
+            for part in wave {
+                let index = part.part_number as usize - 1;
+                let (Some(claim), Some(chunk)) = (claims.get(index), chunks.get(index)) else {
+                    return Err(ClientError::Http(format!(
+                        "server signed part {} which this upload does not have",
+                        part.part_number
+                    )));
+                };
+                let client = self.clone();
+                let access = part.access.clone();
+                let crc64nvme = claim.crc64nvme.clone();
+                let part_number = part.part_number;
+                let chunk = chunk.to_vec();
+                in_flight.spawn(async move {
+                    client
+                        .upload_part_via_presigned_url(part_number, &access, crc64nvme, &chunk)
+                        .await
+                });
+            }
+            while let Some(joined) = in_flight.join_next().await {
+                uploaded.push(joined.map_err(|err| {
+                    ClientError::Http(format!("part upload task failed: {err}"))
+                })??);
+            }
+        }
+        Ok(uploaded)
+    }
+
+    async fn stage_bytes_via_server(
         &self,
         namespace_id: &NamespaceId,
         bytes: &[u8],
@@ -584,9 +839,14 @@ impl Client {
                 &upload.upload_id,
                 &CompleteUploadRequest {
                     content_ref: staged.content_ref,
+                    multipart_parts: None,
                 },
             )
             .await?;
+        Ok(Self::staged_from_completion(response))
+    }
+
+    fn staged_from_completion(response: CompleteUploadResponse) -> StagedContent {
         let validated_content_token =
             response
                 .validated_content_token
@@ -594,12 +854,28 @@ impl Client {
                     content_ref: response.content_ref.clone(),
                     token,
                 });
-        Ok(StagedContent {
+        StagedContent {
             content_ref: response.content_ref,
             validated_content_token,
-        })
+        }
     }
 
+    /// Uploads bytes and commits them at a path.
+    ///
+    /// Re-running this with a `commit_id` that already committed is safe
+    /// when the bytes are the same. A commit's identity names *which*
+    /// content object it wrote, and a re-run necessarily uploads a fresh
+    /// one, so the server sees a different commit and reports
+    /// `commit_id_reuse_conflict`. This resolves that the only honest way
+    /// available: it reads back what the commit id actually committed and
+    /// compares its content against the bytes just sent. Equal means the
+    /// operation had already succeeded and the original answer is returned;
+    /// anything else — different bytes, or content this build cannot
+    /// compare — surfaces the conflict.
+    ///
+    /// The freshly uploaded duplicate object is then referenced by nothing.
+    /// That is by design, not a leak: content garbage collection reclaims an
+    /// unreferenced completed upload once its grace passes.
     pub async fn put_file_bytes(
         &self,
         spec: &NamespacePath,
@@ -614,7 +890,7 @@ impl Client {
             .commit(
                 spec.namespace(),
                 &CommitRequest {
-                    commit_id,
+                    commit_id: commit_id.clone(),
                     message: options.message.clone(),
                     content_tokens: staged.validated_content_token.into_iter().collect(),
                     operations: vec![FilesystemOperation::PutFile {
@@ -625,8 +901,106 @@ impl Client {
                     }],
                 },
             )
-            .await?;
-        Ok(response)
+            .await;
+        match response {
+            Ok(response) => Ok(response),
+            Err(error) if error.code() == Some(ErrorCode::CommitIdReuseConflict) => {
+                self.reconcile_commit_id_reuse(spec.namespace(), &commit_id, bytes, error)
+                    .await
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Decides whether a reused commit id already did this exact work.
+    ///
+    /// The evidence is the committed content itself, read back from the
+    /// change feed by commit id, and compared against the bytes that were
+    /// just uploaded. Nothing weaker counts: a comparison this build cannot
+    /// make is reported as a conflict that names why, never as agreement.
+    async fn reconcile_commit_id_reuse(
+        &self,
+        namespace_id: &NamespaceId,
+        commit_id: &CommitId,
+        bytes: &[u8],
+        conflict: ClientError,
+    ) -> Result<ApiCommitResponse> {
+        let Some(committed) = self.find_committed_change(namespace_id, commit_id).await? else {
+            return Err(conflict);
+        };
+        let Some(content_ref) = committed_content_ref(&committed) else {
+            return Err(conflict);
+        };
+        if content_ref.size_bytes != bytes.len() as u64 {
+            return Err(conflict);
+        }
+
+        // The trusted whole-file digest when the server has one, and
+        // otherwise the reference's own storage checksum — which for a
+        // provider-assembled multipart object is the only full-object
+        // evidence that exists.
+        let evidence = match &content_ref.whole_file_sha256 {
+            Some(digest) => StorageChecksum {
+                algorithm: ChecksumAlgorithm::Sha256,
+                value: digest.clone(),
+            },
+            None => content_ref.storage_checksum.clone(),
+        };
+        match evidence.matches(bytes) {
+            Some(true) => Ok(ApiCommitResponse {
+                namespace_id: namespace_id.clone(),
+                commit_id: committed.commit_id,
+                committed_seq: committed.seq,
+            }),
+            Some(false) => Err(conflict),
+            None => Err(ClientError::Http(format!(
+                "commit `{commit_id}` already committed content checksummed with \
+                 `{}`, which this client cannot recompute, so it cannot tell whether \
+                 this is the same upload retried",
+                evidence.algorithm
+            ))),
+        }
+    }
+
+    /// Finds one committed change by its commit id.
+    ///
+    /// There is no by-commit-id read on the wire, so this walks the change
+    /// feed backwards from its head in bounded windows. Backwards because a
+    /// commit being retried is a recent one, and bounded because a feed is
+    /// unbounded: past the budget this reports "not found", which the
+    /// caller turns into the conflict rather than into a guess.
+    async fn find_committed_change(
+        &self,
+        namespace_id: &NamespaceId,
+        commit_id: &CommitId,
+    ) -> Result<Option<CommittedChange>> {
+        let head = self
+            .list_changes(namespace_id, ChangeSeq(0), Some(1))
+            .await?
+            .through_seq;
+        let mut upper = head.0;
+        for _ in 0..COMMIT_LOOKUP_MAX_WINDOWS {
+            let lower = upper.saturating_sub(COMMIT_LOOKUP_WINDOW);
+            let page = self
+                .list_changes(
+                    namespace_id,
+                    ChangeSeq(lower),
+                    Some(COMMIT_LOOKUP_WINDOW as u32),
+                )
+                .await?;
+            if let Some(found) = page
+                .changes
+                .into_iter()
+                .find(|change| &change.commit_id == commit_id)
+            {
+                return Ok(Some(found));
+            }
+            if lower == 0 {
+                break;
+            }
+            upper = lower;
+        }
+        Ok(None)
     }
 
     pub async fn create_directory(
@@ -1161,7 +1535,10 @@ mod tests {
             .complete_upload(
                 &namespace_id,
                 &upload_id,
-                &CompleteUploadRequest { content_ref },
+                &CompleteUploadRequest {
+                    content_ref,
+                    multipart_parts: None,
+                },
             )
             .await
             .expect("completed-session replay should retry");

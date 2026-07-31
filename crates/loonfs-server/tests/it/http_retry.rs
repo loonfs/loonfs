@@ -136,8 +136,12 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
         .expect("repeat put");
     assert_eq!(repeated, first);
 
-    // Re-uploading the same bytes under the same commit id is not a retry:
-    // the upload minted a new content object, so it is a different commit.
+    // Re-running the put under the same commit id uploads a second content
+    // object, so the server sees a different commit and rejects it. The
+    // client resolves that by reading back what the commit id actually
+    // committed: same bytes, so the logical operation had already
+    // succeeded, and the original answer stands. The duplicate object is
+    // referenced by nothing and content collection reclaims it.
     let reuploaded = harness
         .client
         .put_file_bytes(
@@ -151,11 +155,8 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
             },
         )
         .await
-        .expect_err("re-uploading under a used commit id must conflict");
-    assert!(
-        matches!(&reuploaded, ClientError::Api { code, .. } if code == "commit_id_reuse_conflict"),
-        "unexpected error: {reuploaded:?}"
-    );
+        .expect("re-uploading identical bytes under a used commit id is idempotent");
+    assert_eq!(reuploaded, first);
 
     let entry = harness.client.stat_path(&target).await.expect("stat path");
     assert_eq!(entry.head_seq, first.committed_seq);
@@ -166,6 +167,8 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
         .expect("read file");
     assert_eq!(bytes, b"stable bytes\n");
 
+    // Different bytes under the same commit id is a different operation,
+    // not a retry, and stays a conflict.
     match harness
         .client
         .put_file_bytes(

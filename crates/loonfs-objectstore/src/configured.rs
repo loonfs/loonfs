@@ -1,7 +1,10 @@
 //! [`ConfiguredObjectStore`]: one enum over every provider, built from
 //! configuration.
 
-use super::{ByteRange, ObjectBody, ObjectMetadata, ObjectStore, PutMode, StoredObjectChecksum};
+use super::{
+    ByteRange, MultipartCompletion, MultipartPart, ObjectBody, ObjectMetadata, ObjectStore,
+    PutMode, StoredObjectChecksum,
+};
 use crate::abs::{AzureAbsStore, AzureAbsStoreConfig};
 use crate::gcs::{GcpGcsStore, GcpGcsStoreConfig};
 use crate::local_fs_store::LocalFsStore;
@@ -11,6 +14,7 @@ use crate::s3_compatible::{AwsS3StoreConfig, CloudflareR2StoreConfig, S3Compatib
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
+use loonfs_api::StorageChecksum;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -177,6 +181,61 @@ impl ObjectStore for ConfiguredObjectStore {
             }
             ConfiguredObjectStoreInner::GcpGcs(store) => store.head_stored_checksum(key).await,
             ConfiguredObjectStoreInner::AzureAbs(store) => store.head_stored_checksum(key).await,
+        }
+    }
+
+    async fn create_multipart_upload(&self, key: &str) -> Result<String> {
+        match &self.inner {
+            ConfiguredObjectStoreInner::LocalFs(store) => store.create_multipart_upload(key).await,
+            ConfiguredObjectStoreInner::AwsS3(store) => store.create_multipart_upload(key).await,
+            ConfiguredObjectStoreInner::CloudflareR2(store) => {
+                store.create_multipart_upload(key).await
+            }
+            ConfiguredObjectStoreInner::GcpGcs(store) => store.create_multipart_upload(key).await,
+            ConfiguredObjectStoreInner::AzureAbs(store) => store.create_multipart_upload(key).await,
+        }
+    }
+
+    async fn complete_multipart_upload(
+        &self,
+        key: &str,
+        provider_upload_id: &str,
+        parts: &[MultipartPart],
+        full_object_checksum: &StorageChecksum,
+    ) -> Result<MultipartCompletion> {
+        macro_rules! complete {
+            ($store:expr) => {
+                $store
+                    .complete_multipart_upload(key, provider_upload_id, parts, full_object_checksum)
+                    .await
+            };
+        }
+        match &self.inner {
+            ConfiguredObjectStoreInner::LocalFs(store) => complete!(store),
+            ConfiguredObjectStoreInner::AwsS3(store) => complete!(store),
+            ConfiguredObjectStoreInner::CloudflareR2(store) => complete!(store),
+            ConfiguredObjectStoreInner::GcpGcs(store) => complete!(store),
+            ConfiguredObjectStoreInner::AzureAbs(store) => complete!(store),
+        }
+    }
+
+    async fn abort_multipart_upload(&self, key: &str, provider_upload_id: &str) -> Result<()> {
+        match &self.inner {
+            ConfiguredObjectStoreInner::LocalFs(store) => {
+                store.abort_multipart_upload(key, provider_upload_id).await
+            }
+            ConfiguredObjectStoreInner::AwsS3(store) => {
+                store.abort_multipart_upload(key, provider_upload_id).await
+            }
+            ConfiguredObjectStoreInner::CloudflareR2(store) => {
+                store.abort_multipart_upload(key, provider_upload_id).await
+            }
+            ConfiguredObjectStoreInner::GcpGcs(store) => {
+                store.abort_multipart_upload(key, provider_upload_id).await
+            }
+            ConfiguredObjectStoreInner::AzureAbs(store) => {
+                store.abort_multipart_upload(key, provider_upload_id).await
+            }
         }
     }
 

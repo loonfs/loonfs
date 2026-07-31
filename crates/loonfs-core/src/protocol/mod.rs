@@ -34,6 +34,7 @@ pub use self::publish_view::PublishTailOptions;
 pub(crate) use self::publish_view::{load_publish_metadata_view, PublishTailProjection};
 pub use self::uploads::CompletedUpload;
 pub(crate) use self::uploads::{
-    abort_upload, begin_direct_put_upload_target, begin_upload, complete_upload,
-    read_upload_status, upload_content,
+    abort_upload, begin_direct_multipart_upload_target, begin_direct_put_upload_target,
+    begin_upload, complete_upload, direct_multipart_part_targets, read_upload_status,
+    upload_content, AbandonedUpload,
 };

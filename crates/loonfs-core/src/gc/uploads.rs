@@ -24,6 +24,7 @@ use crate::control_update::{
 };
 use crate::error::{CoreError, Result};
 use crate::limits::CONTENT_RECLAMATION_GRACE_MS;
+use crate::protocol::AbandonedUpload;
 use crate::storage::content::delete_unpublished_content_object;
 use loonfs_api::wire::control::{UploadSessionLifecycle, UploadSessionState};
 use loonfs_api::wire::manifest::{lookup_keys, MetadataRow, MetadataTableFamily};
@@ -90,8 +91,10 @@ pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
                 return Ok(UploadSessionSweep::Retain);
             }
             // Repeating the abort's own cleanup is what makes a crash
-            // between the abort swap and its delete cost nothing.
-            delete_unpublished_content_object(store, content_store_id, &state.content_id).await;
+            // between the abort swap and its provider work cost nothing.
+            AbandonedUpload::of(&state)
+                .release(store, content_store_id)
+                .await;
             Ok(UploadSessionSweep::Delete)
         }
         UploadSessionLifecycle::Completed {
@@ -149,20 +152,20 @@ async fn abort_expired_session<S: ObjectStore + ?Sized>(
             if !matches!(state.state, UploadSessionLifecycle::Open { .. }) {
                 return Ok(UploadSessionUpdate::Noop(None));
             }
-            let content_id = state.content_id.clone();
+            let abandoned = AbandonedUpload::of(&state);
             state.state = UploadSessionLifecycle::Aborted {
                 aborted_at_ms: context.now_ms,
             };
             Ok(UploadSessionUpdate::Replace {
                 next: Box::new(state),
-                outcome: Some(content_id),
+                outcome: Some(abandoned),
             })
         },
     )
     .await;
     match aborted {
-        Ok(UploadSessionCas::Applied(Some(content_id))) => {
-            delete_unpublished_content_object(store, content_store_id, &content_id).await;
+        Ok(UploadSessionCas::Applied(Some(abandoned))) => {
+            abandoned.release(store, content_store_id).await;
             Ok(UploadSessionSweep::Retain)
         }
         Ok(UploadSessionCas::Applied(None)) => Ok(UploadSessionSweep::Retain),

@@ -33,6 +33,7 @@ bytes = "1"
 ciborium = "0.2"
 clap = { version = "4.5", features = ["derive", "env"] }
 crc32c = "0.6"
+crc64fast-nvme = "1.2"
 http = "1"
 http-body = "1"
 futures = "0.3"

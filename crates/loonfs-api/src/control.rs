@@ -581,10 +581,20 @@ pub struct UploadSessionState {
     /// from the bytes it receives.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claimed_checksum: Option<StorageChecksum>,
-    /// For direct_put sessions, the content ref the presigned URL was minted for.
-    /// It becomes staged only after completion verifies the durable object.
+    /// For direct_put and direct_multipart sessions, the content ref the
+    /// signed writes were minted for. It becomes staged only after
+    /// completion verifies the durable object.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub direct_put_content_ref: Option<ContentRef>,
+    /// The provider-side multipart upload this session opened, for the one
+    /// mode that opens one.
+    ///
+    /// It is the only provider handle LoonFS keeps: parts are the client's
+    /// bookkeeping, exactly as they are in the provider's own API, so there
+    /// is no durable record per part. Cleanup reads this to abort what the
+    /// session left open; nothing else reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_multipart_upload_id: Option<String>,
     /// Content already verified and staged, or `None` before bytes have passed validation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub staged_content_ref: Option<ContentRef>,
@@ -607,6 +617,8 @@ struct StrictUploadSessionState {
     claimed_checksum: Option<StrictStorageChecksum>,
     #[serde(default)]
     direct_put_content_ref: Option<StrictContentRef>,
+    #[serde(default)]
+    provider_multipart_upload_id: Option<String>,
     #[serde(default)]
     staged_content_ref: Option<StrictContentRef>,
     created_at_ms: u64,
@@ -710,6 +722,7 @@ impl<'de> Deserialize<'de> for UploadSessionState {
             content_id: state.content_id,
             claimed_checksum: state.claimed_checksum.map(Into::into),
             direct_put_content_ref: state.direct_put_content_ref.map(Into::into),
+            provider_multipart_upload_id: state.provider_multipart_upload_id,
             staged_content_ref: state.staged_content_ref.map(Into::into),
             created_at_ms: state.created_at_ms,
             state: state.state.into(),
