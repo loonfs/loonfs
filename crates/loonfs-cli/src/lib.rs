@@ -10,6 +10,7 @@ mod backend_error;
 mod commands;
 mod config;
 mod error;
+mod payload;
 mod profiles;
 mod prompt;
 mod render;

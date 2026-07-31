@@ -1149,6 +1149,7 @@ dependencies = [
 name = "loonfs-cli"
 version = "0.1.1"
 dependencies = [
+ "bytes",
  "clap",
  "dialoguer",
  "futures",
@@ -1174,6 +1175,8 @@ dependencies = [
 name = "loonfs-client"
 version = "0.1.1"
 dependencies = [
+ "bytes",
+ "futures",
  "http",
  "loonfs-api",
  "reqwest",

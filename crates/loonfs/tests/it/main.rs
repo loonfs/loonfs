@@ -22,4 +22,5 @@ mod publication;
 mod publish_observer;
 mod request_accounting;
 mod runtime_config;
+mod streamed_put;
 mod undelete;

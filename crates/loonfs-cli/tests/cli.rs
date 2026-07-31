@@ -1,9 +1,10 @@
 use serde_json::Value;
 use std::env;
 use std::fs;
+use std::io::Write;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Output};
+use std::process::{Child, Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
@@ -545,6 +546,141 @@ fn commit_messages_ride_the_feed_and_bind_identity() {
         "{}",
         json_error(&conflicting)
     );
+}
+
+/// A payload past the size at which a put stops holding its bytes whole.
+/// It is the smallest payload that exercises the streaming path at all.
+fn streaming_payload() -> Vec<u8> {
+    let len = 8 * 1024 * 1024 + 1_024;
+    (0..len).map(|offset| (offset % 251) as u8).collect()
+}
+
+/// Reads a remote file back through the CLI and returns its bytes.
+fn download(harness: &Harness, remote_path: &str, name: &str) -> Vec<u8> {
+    let local = harness.temp_dir.path().join(name);
+    assert_success(&harness.run(&[
+        "get",
+        remote_path,
+        local.to_str().expect("utf-8 path"),
+        "--force",
+    ]));
+    fs::read(&local).expect("read downloaded file")
+}
+
+/// A large file and a pipe both round-trip through an embedded profile,
+/// and the retry contract holds for them exactly as it does for a payload
+/// small enough to hold.
+#[test]
+fn large_and_piped_puts_round_trip_through_an_embedded_profile() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+    let payload = streaming_payload();
+
+    let local = harness.temp_dir.path().join("big.bin");
+    fs::write(&local, &payload).expect("write payload");
+    let local_path = local.to_str().expect("utf-8 path");
+    let first = harness.run(&[
+        "--json",
+        "put",
+        local_path,
+        "/big.bin",
+        "--commit-id",
+        "pinned-big",
+    ]);
+    assert_success(&first);
+    assert_eq!(download(&harness, "/big.bin", "big-back.bin"), payload);
+
+    // The same reconciliation the buffered path has: the rerun uploads
+    // again, conflicts on identity, and resolves to the commit that landed.
+    let rerun = harness.run(&[
+        "--json",
+        "put",
+        local_path,
+        "/big.bin",
+        "--commit-id",
+        "pinned-big",
+        "--force",
+    ]);
+    assert_success(&rerun);
+    assert_eq!(
+        json_data(&rerun)["committed_seq"],
+        json_data(&first)["committed_seq"],
+        "rerunning an identical large put must report the commit that already landed"
+    );
+
+    let mut changed = payload.clone();
+    changed[0] ^= 0xff;
+    let changed_path = harness.temp_dir.path().join("changed.bin");
+    fs::write(&changed_path, &changed).expect("write changed payload");
+    let conflicting = harness.run(&[
+        "--json",
+        "put",
+        changed_path.to_str().expect("utf-8 path"),
+        "/big.bin",
+        "--commit-id",
+        "pinned-big",
+        "--force",
+    ]);
+    assert_failure(&conflicting);
+    assert_eq!(
+        json_error(&conflicting)["code"],
+        "commit_id_reuse_conflict",
+        "{}",
+        json_error(&conflicting)
+    );
+
+    // Standard input has no length to declare and no name to derive a
+    // destination from, so it needs one spelled out and takes the same
+    // read-once path.
+    assert_success(&harness.run_with_stdin(&["--json", "put", "-", "/piped.bin"], &payload));
+    assert_eq!(download(&harness, "/piped.bin", "piped-back.bin"), payload);
+
+    let no_destination = harness.run_with_stdin(&["--json", "put", "-"], b"anything");
+    assert_failure(&no_destination);
+    assert_eq!(json_error(&no_destination)["code"], "invalid_input");
+}
+
+/// The same two payloads over the remote transport. This deployment stores
+/// to a local filesystem, so it cannot authorize direct part uploads and
+/// the payload streams through the server instead — the fallback the client
+/// picks from the capability document rather than from a guess.
+#[test]
+fn large_and_piped_puts_round_trip_over_the_remote_transport() {
+    let harness = Harness::new();
+    let remote_server =
+        harness.start_external_server(harness.write_server_config("remote", "streaming-remote"));
+    assert_success(&harness.run(&[
+        "--json",
+        "profile",
+        "create",
+        "default",
+        "--mode",
+        "remote",
+        "--server-url",
+        &remote_server.server_url,
+        "--auth-token",
+        "test-token",
+    ]));
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+    let payload = streaming_payload();
+
+    let local = harness.temp_dir.path().join("big.bin");
+    fs::write(&local, &payload).expect("write payload");
+    assert_success(&harness.run(&[
+        "--json",
+        "put",
+        local.to_str().expect("utf-8 path"),
+        "/big.bin",
+    ]));
+    assert_eq!(download(&harness, "/big.bin", "big-back.bin"), payload);
+
+    // No `Content-Length` to send: this body is chunked, and the server's
+    // own incremental accounting is what bounds it.
+    assert_success(&harness.run_with_stdin(&["--json", "put", "-", "/piped.bin"], &payload));
+    assert_eq!(download(&harness, "/piped.bin", "piped-back.bin"), payload);
 }
 
 /// Every mutating command takes `-m`, and each one lands its annotation on
@@ -2387,6 +2523,26 @@ impl Harness {
             .args(args)
             .output()
             .expect("run loon")
+    }
+
+    /// Runs the CLI with a payload on standard input, which is the one
+    /// source whose length is not knowable before it is read.
+    fn run_with_stdin(&self, args: &[&str], stdin: &[u8]) -> Output {
+        let mut child = Command::new(loon_binary_path())
+            .env("HOME", &self.home_dir)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn loon");
+        child
+            .stdin
+            .take()
+            .expect("piped stdin")
+            .write_all(stdin)
+            .expect("write stdin");
+        child.wait_with_output().expect("run loon")
     }
 
     fn store_root(&self, name: &str) -> PathBuf {

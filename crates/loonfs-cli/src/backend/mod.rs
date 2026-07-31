@@ -17,6 +17,7 @@
 mod embedded;
 
 use crate::backend_error::BackendError;
+use crate::payload::LocalPayload;
 use crate::resolve::ResolvedTarget;
 use loonfs_api::{
     v0::{ChangesResponse, DisableGrepIndexResponse, EnableGrepIndexResponse},
@@ -241,6 +242,29 @@ impl ResolvedTarget {
         match self {
             Self::Embedded(target) => target.backend.put_file_bytes(spec, bytes, options).await,
             Self::Remote(target) => Ok(target.client.put_file_bytes(spec, bytes, options).await?),
+        }
+    }
+
+    /// Writes a file from a payload read once from its source, in bounded
+    /// memory whichever transport answers.
+    ///
+    /// The payload is opened per arm rather than shared: the two runtimes
+    /// spell a byte stream in their own terms, and only one arm ever runs.
+    pub(crate) async fn put_file_stream(
+        &self,
+        spec: &NamespacePath,
+        payload: &LocalPayload,
+        options: &PutFileOptions,
+    ) -> Result<CommitResponse, BackendError> {
+        match self {
+            Self::Embedded(target) => {
+                let body = payload.open_byte_stream().await?;
+                target.backend.put_file_stream(spec, body, options).await
+            }
+            Self::Remote(target) => {
+                let source = payload.open_source().await?;
+                Ok(target.client.put_file_stream(spec, source, options).await?)
+            }
         }
     }
 
