@@ -1243,9 +1243,12 @@ operation and a request carrying a one-element operation list are the same
 request, so they fingerprint identically by construction.
 
 The idempotency horizon is the retention floor. Commit receipts below the
-floor are dropped when metadata runs are rebuilt, so a commit retried from
-below the floor may be treated as new — the same re-bootstrap contract the change
-feed gives sub-floor cursors.
+floor are dropped when metadata runs are rebuilt, and a dropped id is
+indistinguishable from one never used: a commit retried from below the
+floor is admitted as a new mutation and commits again. Replay is guaranteed
+exactly while the receipt lives — the same window as retained history. This
+is deliberate: rejecting late reuse loudly would require an unbounded index
+of every id ever committed, and the durable format does not carry one.
 
 A reused `commit_id` with an equal fingerprint replays the originally
 committed response; an unequal fingerprint is rejected as

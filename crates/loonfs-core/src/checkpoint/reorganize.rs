@@ -674,9 +674,11 @@ pub(super) fn drop_rows_below_retention_floor(
         });
     }
 
-    // The idempotency horizon is the retention floor: a commit retried from
-    // below it re-bootstraps like any sub-floor cursor, so its receipt no
-    // longer needs to be carried forward.
+    // The idempotency horizon is the retention floor: a receipt dropped
+    // here makes its id indistinguishable from one never used, so a commit
+    // retried from below the floor commits AGAIN as a new mutation (format
+    // spec §3.3; pinned by `a_retry_past_the_receipt_horizon_commits_again`).
+    // Replay is guaranteed exactly as long as retained history.
     if let Some(rows) = rows_by_family.get_mut(&MetadataTableFamily::CommitReceipts) {
         rows.retain(|row| match row {
             MetadataRow::CommitReceipt { committed_seq, .. } => {

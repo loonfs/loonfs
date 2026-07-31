@@ -11,7 +11,8 @@ use crate::common::{open_runtime_async, store, TestRuntime};
 use bytes::Bytes;
 use futures::StreamExt;
 use loonfs::{
-    ByteStream, CommitId, CreateNamespaceOptions, DestinationBehavior, NamespaceId, PutFileOptions,
+    ByteStream, CommitId, CreateNamespaceOptions, DestinationBehavior, MaintenanceStepKind,
+    MaintenanceStepOptions, NamespaceId, PutFileOptions, ReorganizeStepOutcome,
 };
 use loonfs_api::ErrorCode;
 use tempfile::tempdir;
@@ -187,6 +188,124 @@ async fn a_retention_trimmed_commit_seq_leaves_the_conflict_standing() {
             .bytes,
         b"stable bytes\n",
         "the refused rerun changed nothing"
+    );
+}
+
+/// The idempotency horizon, pinned end to end: once the retention floor
+/// passes a commit AND reorganization drops its receipt, the id no longer
+/// replays — a late retry commits again as a new mutation. That is the
+/// documented contract (api spec, "safe retry"): replay is guaranteed only
+/// while the receipt lives, and receipts live exactly as long as retained
+/// history. This test exists so the behavior stays deliberate; if it ever
+/// starts failing because a late retry replays or errors instead, the spec
+/// and this pin must move together.
+#[tokio::test]
+async fn a_retry_past_the_receipt_horizon_commits_again() {
+    let temp_dir = tempdir().expect("tempdir");
+    let runtime = open_runtime_async(store(temp_dir.path()), "writer-a").await;
+    let namespace_id = namespace(&runtime).await;
+    let commit_id = CommitId::parse("pinned-put").expect("valid commit id");
+
+    let first = runtime
+        .put_file_bytes(&namespace_id, PATH, b"stable bytes\n", options(&commit_id))
+        .await
+        .expect("first put");
+
+    // Move the floor strictly past the pinned commit, and pile up enough
+    // flushed runs that reorganization has real folding to do — receipts
+    // are dropped when the runs holding them are rebuilt, and rebuilding
+    // waits for enough L0 runs to accumulate.
+    // Nine rounds: the first flush builds the base run, and the next eight
+    // accumulate the L0 runs that reach the fold trigger
+    // (`DEFAULT_MAX_CHECKPOINT_L0_RUNS`).
+    let mut last_seq = first.committed_seq;
+    for round in 0..9 {
+        let filler = runtime
+            .put_file_bytes(
+                &namespace_id,
+                &format!("/docs/filler-{round}.txt"),
+                b"filler\n",
+                options(&CommitId::parse(format!("filler-{round}")).expect("valid commit id")),
+            )
+            .await
+            .expect("filler put");
+        last_seq = filler.committed_seq;
+        runtime
+            .create_checkpoint(&namespace_id)
+            .await
+            .expect("create checkpoint");
+    }
+    let advanced = runtime
+        .admin
+        .advance_retention_floor(&namespace_id)
+        .await
+        .expect("advance retention floor");
+    assert!(
+        advanced.retention_floor_seq > first.committed_seq,
+        "the floor must pass the commit for this to test anything: floor {:?}, commit {:?}",
+        advanced.retention_floor_seq,
+        first.committed_seq
+    );
+
+    // The floor alone leaves the receipt answering (the conflict test above
+    // proves it). Drain reorganization until it reports nothing left, so
+    // the run families holding the receipt have been rebuilt above the
+    // floor.
+    let mut folded = false;
+    for _ in 0..32 {
+        let step = runtime
+            .admin
+            .maintenance_step_namespace(
+                &namespace_id,
+                MaintenanceStepOptions {
+                    only: Some(MaintenanceStepKind::Reorganize),
+                    ..MaintenanceStepOptions::default()
+                },
+            )
+            .await
+            .expect("reorganize step");
+        if matches!(step.reorganize, ReorganizeStepOutcome::NotNeeded) {
+            break;
+        }
+        folded = true;
+    }
+    assert!(
+        folded,
+        "reorganization must actually rebuild runs for this to test anything"
+    );
+
+    // The live session's caches still answer the receipt (a conservative,
+    // longer in-process window — a rerun in the same process still replays
+    // or conflicts). The horizon is a durable-state fact, and the late
+    // retry it governs is a cross-process event, so reopen on the same
+    // store to read what the reorganization actually kept.
+    drop(runtime);
+    let runtime = open_runtime_async(store(temp_dir.path()), "writer-b").await;
+
+    // Same id, same bytes — but the receipt is gone, so this is not a
+    // replay (which would return the original sequence without committing)
+    // and not a conflict: it commits again.
+    let retried = runtime
+        .put_file_bytes(&namespace_id, PATH, b"stable bytes\n", options(&commit_id))
+        .await
+        .expect("a retry past the horizon is admitted as a new commit");
+    assert!(
+        retried.committed_seq > last_seq,
+        "the late retry landed as a new commit: first {:?}, retry {:?}",
+        first.committed_seq,
+        retried.committed_seq
+    );
+
+    // The blast radius the spec documents: a duplicate revision of
+    // identical content. The file still reads back the same bytes.
+    assert_eq!(
+        runtime
+            .reader
+            .get_file_bytes(&namespace_id, PATH)
+            .await
+            .expect("read file")
+            .bytes,
+        b"stable bytes\n",
     );
 }
 
