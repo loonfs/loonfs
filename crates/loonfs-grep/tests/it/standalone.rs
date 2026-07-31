@@ -126,12 +126,6 @@ fn standalone_config_rejects_zero_work_limits() {
             "poll_interval_ms",
         ),
         (
-            "concurrency.toml",
-            "",
-            "max_concurrent_steps = 0\n",
-            "max_concurrent_steps",
-        ),
-        (
             "budget.toml",
             "",
             "max_files_per_step = 0\n",
@@ -149,6 +143,26 @@ fn standalone_config_rejects_zero_work_limits() {
         assert!(stderr.contains(rejected_field), "{stderr}");
         assert!(stderr.contains("greater than zero"), "{stderr}");
     }
+}
+
+/// Step concurrency is the maintenance runner's to bound, so the key that
+/// used to configure it here is now simply not a key.
+#[test]
+fn standalone_config_rejects_the_retired_step_concurrency_key() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store_root = temp_dir.path().join("store");
+    let namespace_id = NamespaceId::parse("retired-key").expect("namespace id");
+    let path = temp_dir.path().join("retired.toml");
+    write_config(&path, &store_root, "", "max_concurrent_steps = 2\n");
+
+    let output = run_once(&path, &[&namespace_id]);
+    assert!(
+        !output.status.success(),
+        "a config naming a deleted key must not start"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("max_concurrent_steps"), "{stderr}");
+    assert!(stderr.contains("unknown field"), "{stderr}");
 }
 
 #[tokio::test]

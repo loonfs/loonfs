@@ -61,7 +61,7 @@ cargo build -p loonfs-server
 ./target/debug/loonfs-server --config configs/loonfs-server.local-fs.example.toml
 ```
 
-Commented example configs for every supported store live in [configs/](configs) (`local-fs`, `aws-s3`, `gcp-gcs`, `cloudflare-r2`, `azure-abs`). The required fields are `bind`, `writer_id`, and a `[store]` block; everything else defaults. The optional `[grep]` table selects `mode = "disabled" | "embedded" | "serve_only"` (default `embedded`) and the bounded per-step build/fold policy shown in the local-fs example. Embedded grep maintenance is event-driven per namespace and has no recurring timer or store enumeration. Connect a client:
+Commented example configs for every supported store live in [configs/](configs) (`local-fs`, `aws-s3`, `gcp-gcs`, `cloudflare-r2`, `azure-abs`). The required fields are `bind`, `writer_id`, and a `[store]` block; everything else defaults. A server with no `[grep]` table composes no grep at all; the optional `[grep]` table selects `mode = "disabled" | "serve_only" | "maintain_only" | "serve_and_maintain"` (default `serve_and_maintain`) and the bounded per-step build/fold policy shown in the local-fs example. Grep index maintenance runs as one job under the writer's maintenance runner, driven by writes rather than by a timer or a store enumeration. Connect a client:
 
 ```bash
 export LOONFS_AUTH_TOKEN={auth_token}

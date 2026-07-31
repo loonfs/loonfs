@@ -39,8 +39,11 @@ pub struct ServerConfig {
     pub writer_id: String,
     #[serde(default)]
     pub runtime_cache: RuntimeCacheConfigOverrides,
-    /// Grep serving mode plus worker pacing and bounded-step budgets.
-    #[serde(default)]
+    /// What this server does about grep, plus the bounded-step budgets its
+    /// index maintenance runs under. A config with no `[grep]` table
+    /// composes no grep at all; a table that names no `mode` both serves
+    /// queries and maintains the index.
+    #[serde(default = "grep_absent")]
     pub grep: GrepConfig,
     /// Whether the server writer runs a maintenance runner: metadata steps
     /// after writes that cross the WAL-tail threshold, and collection
@@ -131,6 +134,16 @@ fn default_max_concurrent_maintenance() -> usize {
     loonfs::DEFAULT_MAX_CONCURRENT_MAINTENANCE
 }
 
+/// What a config with no `[grep]` table asks for: nothing composed, no
+/// query plane advertised, no index job registered. Saying `[grep]` at all
+/// is what opts a deployment in.
+fn grep_absent() -> GrepConfig {
+    GrepConfig {
+        mode: GrepMode::Disabled,
+        ..GrepConfig::default()
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeCacheConfigOverrides {
@@ -140,28 +153,38 @@ pub struct RuntimeCacheConfigOverrides {
     pub metadata_table_cache_max_decoded_bytes: Option<usize>,
 }
 
-/// Whether this server serves grep and owns grep background maintenance.
+/// What this server does about grep: answer queries, keep the index built,
+/// both, or neither.
+///
+/// The two jobs are independent. A read replica can serve searches over an
+/// index another process maintains; a write node can maintain the index for
+/// namespaces it never answers searches about; the reference deployment
+/// does both. Every combination is named here, so none has to be validated
+/// away.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GrepMode {
-    /// Neither serve grep nor run its worker.
+    /// Neither answer grep queries nor maintain the index.
     Disabled,
-    /// Serve grep and run the shared worker loop in this server process.
-    #[default]
-    Embedded,
-    /// Serve grep while an external process owns worker maintenance.
+    /// Answer queries over an index some other process maintains.
     ServeOnly,
+    /// Maintain the index without answering queries about it.
+    MaintainOnly,
+    /// Answer queries and maintain the index in this process.
+    #[default]
+    ServeAndMaintain,
 }
 
 impl GrepMode {
-    /// Whether grep query and index-administration endpoints are supported.
+    /// Whether the grep query endpoint is supported.
     pub fn serves_grep(self) -> bool {
-        self != Self::Disabled
+        matches!(self, Self::ServeOnly | Self::ServeAndMaintain)
     }
 
-    /// Whether this server process owns the grep worker loop.
-    pub fn runs_worker(self) -> bool {
-        self == Self::Embedded
+    /// Whether this server's writer registers the grep index job — which is
+    /// also what the index-administration endpoints act through.
+    pub fn maintains_index(self) -> bool {
+        matches!(self, Self::MaintainOnly | Self::ServeAndMaintain)
     }
 }
 
@@ -170,8 +193,6 @@ impl GrepMode {
 #[serde(default, deny_unknown_fields)]
 pub struct GrepConfig {
     pub mode: GrepMode,
-    /// Build or fold steps allowed to execute concurrently across namespaces.
-    pub max_concurrent_steps: usize,
     pub max_files_per_step: usize,
     pub max_content_bytes_per_step: u64,
     pub max_rows_per_segment: usize,
@@ -184,7 +205,6 @@ impl GrepConfig {
     /// Returns the shared bounded-step configuration represented by this table.
     pub fn worker_config(self) -> GrepWorkerConfig {
         GrepWorkerConfig {
-            max_concurrent_steps: self.max_concurrent_steps,
             max_files_per_step: self.max_files_per_step,
             max_content_bytes_per_step: self.max_content_bytes_per_step,
             max_rows_per_segment: self.max_rows_per_segment,
@@ -199,8 +219,7 @@ impl Default for GrepConfig {
     fn default() -> Self {
         let worker = GrepWorkerConfig::default();
         Self {
-            mode: GrepMode::Embedded,
-            max_concurrent_steps: worker.max_concurrent_steps,
+            mode: GrepMode::default(),
             max_files_per_step: worker.max_files_per_step,
             max_content_bytes_per_step: worker.max_content_bytes_per_step,
             max_rows_per_segment: worker.max_rows_per_segment,
@@ -803,7 +822,6 @@ auth_token = "dev-token"
 writer_id = "loonfs-server"
 
 [grep]
-max_concurrent_steps = 0
 max_decoded_input_rows_per_step = 0
 
 [store]
@@ -1073,7 +1091,7 @@ root = "/tmp/loonfs-server"
     }
 
     #[test]
-    fn load_uses_embedded_grep_defaults_when_table_is_omitted() {
+    fn an_omitted_grep_table_composes_no_grep() {
         let path = write_config(
             r#"
 bind = "127.0.0.1:9400"
@@ -1087,8 +1105,30 @@ root = "/tmp/loonfs-server"
         );
 
         let config = load_server_config(&path).expect("load config");
+        assert_eq!(config.grep.mode, super::GrepMode::Disabled);
+        assert!(!config.grep.mode.serves_grep());
+        assert!(!config.grep.mode.maintains_index());
+    }
+
+    #[test]
+    fn a_grep_table_without_a_mode_serves_and_maintains() {
+        let path = write_config(
+            r#"
+bind = "127.0.0.1:9400"
+auth_token = "dev-token"
+writer_id = "loonfs-server"
+
+[grep]
+
+[store]
+kind = "local-fs"
+root = "/tmp/loonfs-server"
+"#,
+        );
+
+        let config = load_server_config(&path).expect("load config");
         assert_eq!(config.grep, super::GrepConfig::default());
-        assert_eq!(config.grep.mode, super::GrepMode::Embedded);
+        assert_eq!(config.grep.mode, super::GrepMode::ServeAndMaintain);
         assert_eq!(
             config
                 .grep
@@ -1096,6 +1136,67 @@ root = "/tmp/loonfs-server"
                 .build_policy()
                 .expect("valid default grep policy"),
             loonfs_grep::GramIndexBuildPolicy::default(),
+        );
+    }
+
+    #[test]
+    fn every_grep_mode_names_the_two_jobs_it_does() {
+        for (spelling, mode, serves, maintains) in [
+            ("disabled", super::GrepMode::Disabled, false, false),
+            ("serve_only", super::GrepMode::ServeOnly, true, false),
+            ("maintain_only", super::GrepMode::MaintainOnly, false, true),
+            (
+                "serve_and_maintain",
+                super::GrepMode::ServeAndMaintain,
+                true,
+                true,
+            ),
+        ] {
+            let path = write_config(&format!(
+                r#"
+bind = "127.0.0.1:9400"
+auth_token = "dev-token"
+writer_id = "loonfs-server"
+
+[grep]
+mode = "{spelling}"
+
+[store]
+kind = "local-fs"
+root = "/tmp/loonfs-server"
+"#
+            ));
+
+            let config = load_server_config(&path).expect("load config");
+            assert_eq!(config.grep.mode, mode);
+            assert_eq!(config.grep.mode.serves_grep(), serves);
+            assert_eq!(config.grep.mode.maintains_index(), maintains);
+        }
+    }
+
+    #[test]
+    fn the_retired_step_concurrency_key_is_no_longer_a_key() {
+        // One permit pool bounds every maintenance family now, and it is
+        // configured by `max_concurrent_maintenance`.
+        let path = write_config(
+            r#"
+bind = "127.0.0.1:9400"
+auth_token = "dev-token"
+writer_id = "loonfs-server"
+
+[grep]
+max_concurrent_steps = 7
+
+[store]
+kind = "local-fs"
+root = "/tmp/loonfs-server"
+"#,
+        );
+
+        let error = load_server_config(&path).expect_err("retired key must not load");
+        assert!(
+            error.to_string().contains("max_concurrent_steps"),
+            "{error}"
         );
     }
 
@@ -1109,7 +1210,6 @@ writer_id = "loonfs-server"
 
 [grep]
 mode = "serve_only"
-max_concurrent_steps = 7
 max_files_per_step = 4096
 max_content_bytes_per_step = 536870912
 max_rows_per_segment = 131072
@@ -1125,7 +1225,6 @@ root = "/tmp/loonfs-server"
 
         let grep = load_server_config(&path).expect("load config").grep;
         assert_eq!(grep.mode, super::GrepMode::ServeOnly);
-        assert_eq!(grep.max_concurrent_steps, 7);
         let policy = grep
             .worker_config()
             .build_policy()

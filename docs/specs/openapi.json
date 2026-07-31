@@ -242,7 +242,7 @@
           "admin"
         ],
         "summary": "Disable the grep index",
-        "description": "Disables the namespace's grep root, clears its segment references, and stops its embedded driver. Explicit grep garbage collection later reclaims the segments. Idempotent.",
+        "description": "Disables the namespace's grep root and clears its segment references with one durable compare-and-swap; index maintenance stops on its own once a step reads the disabled root. Explicit grep garbage collection later reclaims the segments. Idempotent. Requires this deployment to maintain the grep index.",
         "operationId": "disable_grep_index",
         "parameters": [
           {
@@ -317,7 +317,7 @@
             }
           },
           "501": {
-            "description": "Grep serving is disabled for this deployment",
+            "description": "This deployment does not maintain the grep index",
             "content": {
               "application/json": {
                 "schema": {
@@ -335,7 +335,7 @@
           "admin"
         ],
         "summary": "Enable the grep index",
-        "description": "Enables the namespace's grep root. Embedded mode immediately starts that namespace's event-driven backfill driver; serve-only deployments rely on their explicitly assigned external driver. Idempotent.",
+        "description": "Enables the namespace's grep root and asks this deployment's maintenance runner for the backfill's first step. Idempotent. Requires this deployment to maintain the grep index.",
         "operationId": "enable_grep_index",
         "parameters": [
           {
@@ -410,7 +410,7 @@
             }
           },
           "501": {
-            "description": "Grep serving is disabled for this deployment",
+            "description": "This deployment does not maintain the grep index",
             "content": {
               "application/json": {
                 "schema": {
@@ -428,7 +428,7 @@
           "admin"
         ],
         "summary": "Collect grep-index garbage",
-        "description": "Runs one explicit garbage-collection pass over only this namespace's grep-owned extension keyspace. A tombstoned or absent namespace has aged extension state reaped; no grep garbage collection runs implicitly.",
+        "description": "Runs one explicit garbage-collection pass over only this namespace's grep-owned extension keyspace. A tombstoned or absent namespace has aged extension state reaped; no grep garbage collection runs implicitly. Requires this deployment to maintain the grep index.",
         "operationId": "gc_grep_index",
         "parameters": [
           {
@@ -483,7 +483,7 @@
             }
           },
           "501": {
-            "description": "Grep serving is disabled for this deployment",
+            "description": "This deployment does not maintain the grep index",
             "content": {
               "application/json": {
                 "schema": {
@@ -1717,7 +1717,7 @@
             }
           },
           "501": {
-            "description": "Grep serving is disabled, the grep index is not enabled, or its backfill has not completed on this namespace",
+            "description": "This deployment does not serve grep queries, the grep index is not enabled, or its backfill has not completed on this namespace",
             "content": {
               "application/json": {
                 "schema": {

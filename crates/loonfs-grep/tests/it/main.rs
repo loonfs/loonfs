@@ -3,10 +3,10 @@
 //! runs its tests as threads instead of as separate processes.
 
 mod common;
-mod driver;
 mod grams_index;
 mod grep_service_differential;
 mod grep_worker;
+mod maintenance;
 mod root_format;
 mod root_store;
 mod standalone;

@@ -3,7 +3,7 @@
 
 use super::error::status_for_core_error_code;
 use super::{
-    app_with_store, app_with_store_and_state, build_handles_with_metrics_jsonl_path,
+    app_with_store, app_with_store_and_state, build_handles_with_metrics_jsonl_path, AppState,
     SharedObjectStore,
 };
 use crate::config::RuntimeCacheConfigOverrides;
@@ -21,8 +21,10 @@ use loonfs_api::{
 };
 use loonfs_client::{Client, ClientConfig, ClientError, CommitOptions, NamespacePath};
 use loonfs_grep::keyspace::{manifest_key as grep_manifest_key, root_key as grep_root_key};
-use loonfs_grep::root::{encode_grep_root, GrepManifestId, GrepRootEnvelope, GrepRootPointer};
-use loonfs_grep::{GrepDriverParked, GrepIndexSnapshot, GrepWorker, NamespaceReads};
+use loonfs_grep::root::{
+    encode_grep_root, load_grep_root, GrepManifestId, GrepRootEnvelope, GrepRootPointer,
+};
+use loonfs_grep::{GrepIndexSnapshot, GrepWorker, NamespaceReads};
 use loonfs_objectstore::keys::wal_head;
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{
@@ -360,10 +362,10 @@ async fn embedded_shutdown_drains_an_active_grep_step() {
             .await
             .expect("build app");
     state
-        .grep_drivers
+        .grep_maintenance
         .as_ref()
-        .expect("embedded drivers")
-        .start(&namespace_id);
+        .expect("an index-maintaining app carries a maintenance handle")
+        .nudge(&namespace_id);
     blocking_store.wait_until_blocked().await;
 
     let shutdown = tokio::runtime::Handle::current().spawn(lifecycle.shutdown());
@@ -380,7 +382,7 @@ async fn embedded_shutdown_drains_an_active_grep_step() {
 }
 
 #[tokio::test]
-async fn embedded_publish_observer_nudges_only_the_enabled_namespace_driver() {
+async fn the_publish_observer_nudges_the_enabled_namespaces_index() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let config = test_config(temp_dir.path(), "grep-observer-server");
@@ -402,17 +404,21 @@ async fn embedded_publish_observer_nudges_only_the_enabled_namespace_driver() {
         .await
         .expect("enable grep");
     state
-        .grep_drivers
+        .grep_maintenance
         .as_ref()
-        .expect("embedded drivers")
-        .start(&namespace_id);
+        .expect("an index-maintaining app carries a maintenance handle")
+        .nudge(&namespace_id);
+    lifecycle
+        .wait_for_maintenance()
+        .await
+        .expect("settle the backfill");
     assert_eq!(
-        lifecycle.wait_for_grep_quiescence(&namespace_id).await,
-        Some(GrepDriverParked::CaughtUp {
-            built_through_seq: ChangeSeq(0)
-        })
+        built_through_seq(&state, &namespace_id).await,
+        ChangeSeq(0),
+        "an empty namespace's backfill completes at its own head"
     );
 
+    // The publish is the only trigger from here on: nothing below nudges.
     state
         .writer
         .put_file_bytes(
@@ -423,11 +429,14 @@ async fn embedded_publish_observer_nudges_only_the_enabled_namespace_driver() {
         )
         .await
         .expect("publish file");
+    lifecycle
+        .wait_for_maintenance()
+        .await
+        .expect("settle the observer-driven step");
     assert_eq!(
-        lifecycle.wait_for_grep_quiescence(&namespace_id).await,
-        Some(GrepDriverParked::CaughtUp {
-            built_through_seq: ChangeSeq(1)
-        })
+        built_through_seq(&state, &namespace_id).await,
+        ChangeSeq(1),
+        "the publish observer is what carried the index to the new head"
     );
     let request = GrepRequest {
         pattern: "observer-driven needle".to_owned(),
@@ -441,7 +450,7 @@ async fn embedded_publish_observer_nudges_only_the_enabled_namespace_driver() {
     let service = state
         .grep_service
         .as_ref()
-        .expect("an embedded-mode app carries a grep service");
+        .expect("a query-serving app carries a grep service");
     let store = state.writer.object_store();
     let reads = NamespaceReads::new(&state.reader, &namespace_id);
     let snapshot = GrepIndexSnapshot::from_grep_root(&*store, &namespace_id, service).await;
@@ -451,6 +460,17 @@ async fn embedded_publish_observer_nudges_only_the_enabled_namespace_driver() {
         .expect("grep caught-up index");
     assert_eq!(response.matches.len(), 1);
     lifecycle.shutdown().await.expect("drain lifecycle");
+}
+
+/// What the index's steps published, read where an operator reads it.
+async fn built_through_seq(state: &AppState, namespace_id: &NamespaceId) -> ChangeSeq {
+    load_grep_root(&*state.writer.object_store(), namespace_id)
+        .await
+        .expect("load grep root")
+        .expect("an enabled namespace has a grep root")
+        .state()
+        .index()
+        .built_through_seq
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -624,7 +644,7 @@ async fn grep_error_publication_conflict_is_stale_head_and_core_reads_survive() 
     let writer = seed_grep_error_namespace(&store, &namespace_id).await;
     writer.shutdown_background().await.expect("shutdown writer");
 
-    let harness = start_grep_error_server(store, temp_dir.path(), "conflict-server").await;
+    let harness = start_grep_admin_error_server(store, temp_dir.path(), "conflict-server").await;
     fault_store.conflict_next_root_publication();
     let client = &harness.client;
     let result = client.enable_grep_index(&namespace_id);
@@ -1817,6 +1837,9 @@ async fn write_grep_pointer(
         .expect("write grep pointer");
 }
 
+/// A deployment that answers searches over an index it does not maintain:
+/// exactly the query error surface these tests are about, with no
+/// maintenance step racing the fault they injected.
 async fn start_grep_error_server(
     store: SharedObjectStore,
     root: &Path,
@@ -1824,6 +1847,17 @@ async fn start_grep_error_server(
 ) -> TestHarness {
     let mut config = test_config(root, writer_id);
     config.grep.mode = crate::config::GrepMode::ServeOnly;
+    start_server_with_config(store, config).await
+}
+
+/// Administering a grep root belongs to a deployment that maintains one.
+async fn start_grep_admin_error_server(
+    store: SharedObjectStore,
+    root: &Path,
+    writer_id: &str,
+) -> TestHarness {
+    let mut config = test_config(root, writer_id);
+    config.grep.mode = crate::config::GrepMode::ServeAndMaintain;
     start_server_with_config(store, config).await
 }
 

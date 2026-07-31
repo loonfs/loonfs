@@ -13,14 +13,14 @@ loonfs-grep --config loonfs-grep.toml --namespace docs --once --gc
 ```
 
 `--once` drives each named namespace to a caught-up steady root and exits, making it suitable for
-cron. Without `--once`, each assigned namespace polls only its own durable head at the configured
-`poll_interval_ms`; a head advance nudges that namespace's parked driver. Each poll is one small
-read per assigned namespace per interval, and the process never scans namespaces. `--gc`
-explicitly collects each named namespace's grep-owned keyspace once before
-maintenance starts, including reaping aged extension state for an absent or tombstoned namespace.
+cron. Without `--once`, each assigned namespace is checked at the configured `poll_interval_ms`
+and stepped only when that check reports work. Each check is one or two small reads per assigned
+namespace per interval, and the process never scans namespaces. `--gc` explicitly collects each
+named namespace's grep-owned keyspace once before maintenance starts, including reaping aged
+extension state for an absent or tombstoned namespace.
 
 The strict config keeps the provider under `[store]`, puts the one detached-deployment timer at the
-top level, and uses `[grep]` for bounded step budgets and the deployment-wide step cap:
+top level, and uses `[grep]` for bounded step budgets:
 
 ```toml
 poll_interval_ms = 1000
@@ -30,7 +30,6 @@ kind = "local-fs"
 root = "./.loonfs-store"
 
 [grep]
-max_concurrent_steps = 2
 max_files_per_step = 256
 max_content_bytes_per_step = 67108864
 max_rows_per_segment = 65536
@@ -39,5 +38,7 @@ max_mid_runs = 8
 max_fold_rows_per_step = 131072
 ```
 
-`poll_interval_ms` defaults to 1000 and must be greater than zero. Every step budget and
-`max_concurrent_steps` must also be greater than zero.
+`poll_interval_ms` defaults to 1000 and must be greater than zero, and so must every step budget.
+How many steps may run at once is not configured here: this process runs one namespace at a time
+per assigned namespace, and a host that registers grep with a writer's maintenance runner bounds
+every maintenance family together with `max_concurrent_maintenance`.

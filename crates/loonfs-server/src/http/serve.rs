@@ -2,17 +2,17 @@
 
 use super::router;
 use crate::config::{ServerConfig, ServerConfigError};
-use crate::grep_drivers::GrepDrivers;
 use axum::Router;
 use loonfs::metrics::{
     InstrumentedObjectStore, JsonlObjectStoreMetricsRecorder, ObjectStoreMetricsRecorder,
 };
 use loonfs::publisher::PublisherRegistry;
 use loonfs::{
-    FsAdmin, FsBackgroundWork, FsReader, FsWriter, SharedObjectStore, TraceMode, TraceStoreKind,
+    FsAdmin, FsBackgroundWork, FsReader, FsWriter, MaintenanceHandle, MaintenanceJob,
+    MaintenanceProbe, SharedObjectStore, TraceMode, TraceStoreKind,
 };
 use loonfs_api::NamespaceId;
-use loonfs_grep::{GrepDriverParked, GrepService, GrepWorker};
+use loonfs_grep::{GrepMaintenanceJob, GrepService, GrepWorker, GREP_INDEX_JOB};
 use loonfs_objectstore::presign::ObjectTransferIssuer;
 use std::ffi::OsString;
 use std::net::SocketAddr;
@@ -41,7 +41,9 @@ pub(super) struct AppState {
     /// grep's own segments, held here because grep is a composed extension
     /// rather than part of the runtime the handles come from.
     pub(super) grep_service: Option<Arc<GrepService>>,
-    pub(super) grep_drivers: Option<GrepDrivers>,
+    /// Present when this deployment maintains the index: how a request tells
+    /// the writer's runner a namespace may have indexing to do.
+    pub(super) grep_maintenance: Option<GrepMaintenance>,
     /// Bounds concurrently buffered proxied-upload bodies; with the
     /// per-request body limit this makes worst-case upload memory
     /// `max_concurrent_uploads * max_upload_bytes`. Requests past the cap
@@ -53,8 +55,43 @@ pub(super) struct AppState {
     pub(super) download_permits: Arc<Semaphore>,
 }
 
-/// Everything the app spawns that must settle at shutdown: optional
-/// per-namespace grep drivers, publisher publications, and writer maintenance.
+/// Everything a request path tells the writer's maintenance runner about
+/// the grep index, and the one question it asks before telling it anything.
+///
+/// The runner owns admission, the permit pool, backoff, and shutdown: this
+/// is a nudge and a probe, both cheap and neither blocking.
+#[derive(Clone)]
+pub(super) struct GrepMaintenance {
+    handle: MaintenanceHandle,
+    job: Arc<GrepMaintenanceJob<SharedObjectStore>>,
+}
+
+impl GrepMaintenance {
+    /// Asks for one bounded indexing step as soon as a permit frees.
+    /// Repeated asks coalesce into one run.
+    pub(super) fn nudge(&self, namespace_id: &NamespaceId) {
+        self.handle.nudge(GREP_INDEX_JOB, namespace_id);
+    }
+
+    /// Nudges only a namespace whose index is actually behind.
+    ///
+    /// A read has no business admitting work that does not exist, and the
+    /// job already knows how to answer that question in at most two small
+    /// reads. An unreadable answer nudges nothing: the step would only
+    /// rediscover the same failure.
+    pub(super) async fn nudge_if_behind(&self, namespace_id: &NamespaceId) {
+        if matches!(
+            self.job.probe(namespace_id).await,
+            Ok(MaintenanceProbe::Due)
+        ) {
+            self.nudge(namespace_id);
+        }
+    }
+}
+
+/// Everything the app spawns that must settle at shutdown: publisher
+/// publications, and the writer's maintenance runner — which now admits the
+/// grep index's steps alongside the runtime's own.
 ///
 /// [`serve`] drives this itself. A host embedding the [`Router`] on its own
 /// HTTP server must call [`ServerLifecycle::shutdown`] after its listener
@@ -63,41 +100,34 @@ pub(super) struct AppState {
 pub struct ServerLifecycle {
     writer: FsWriter,
     publisher: PublisherRegistry,
-    grep_drivers: Option<GrepDrivers>,
+    maintains_grep_index: bool,
 }
 
 impl ServerLifecycle {
     /// Settles the app's spawned work in dependency order: publisher
     /// admission closes, admitted publications finish and send their last
-    /// nudges, grep drivers stop between bounded steps, then writer-scheduled
-    /// maintenance settles.
-    /// Panicked tasks surface as the returned error.
+    /// maintenance nudges, then the writer's runner stops admitting and its
+    /// in-flight steps settle. Panicked tasks surface as the returned error.
     pub async fn shutdown(self) -> Result<(), loonfs::RuntimeError> {
         self.publisher.close_admission();
         self.publisher.drain().await?;
-        if let Some(drivers) = self.grep_drivers {
-            drivers.shutdown().await?;
-        }
         self.writer.shutdown_background().await
     }
 
-    /// Waits without polling for an embedded namespace driver to catch up or
-    /// discover that grep is not enabled. Returns `None` when no driver runs.
-    pub async fn wait_for_grep_quiescence(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Option<GrepDriverParked> {
-        match &self.grep_drivers {
-            Some(drivers) => drivers.wait_for_quiescence(namespace_id).await,
-            None => None,
-        }
+    /// Waits for every maintenance step this server's writer has admitted —
+    /// metadata, collection, and grep indexing alike — to settle, without
+    /// closing the runner.
+    ///
+    /// This is a drain, not a per-namespace wait: the runner admits work per
+    /// `{job, namespace}` key and reports progress durably, so what a caller
+    /// waits for is quiet, and what it then reads is durable state.
+    pub async fn wait_for_maintenance(&self) -> Result<(), loonfs::RuntimeError> {
+        self.writer.wait_for_background_work().await
     }
 
-    /// Whether embedded mode currently owns a driver for `namespace_id`.
-    pub fn grep_driver_running(&self, namespace_id: &NamespaceId) -> bool {
-        self.grep_drivers
-            .as_ref()
-            .is_some_and(|drivers| drivers.is_running(namespace_id))
+    /// Whether this deployment registered the grep index job.
+    pub fn maintains_grep_index(&self) -> bool {
+        self.maintains_grep_index
     }
 }
 
@@ -161,47 +191,56 @@ pub(super) async fn app_with_store_and_transfer_issuer(
         std::env::var_os(OBJECT_STORE_METRICS_JSONL_ENV),
     )?;
     // Grep reads and checkpoints through the same handles the HTTP planes
-    // use, so it has to be composed after them. The drivers close the loop:
-    // the writer nudges them on every publish, and they own a worker built
-    // from that writer's own handles. The observer therefore resolves its
-    // target through a slot filled before the router is served — nothing
-    // publishes until then.
-    let driver_slot: Arc<OnceLock<GrepDrivers>> = Arc::new(OnceLock::new());
+    // use, so it has to be composed after them — but the publish observer
+    // that nudges its indexing is set on the writer's builder, before the
+    // runner it nudges exists. The observer therefore resolves its handle
+    // through a slot this function fills the moment the writer is built,
+    // before anything can publish through it.
+    let maintenance_slot: Arc<OnceLock<MaintenanceHandle>> = Arc::new(OnceLock::new());
     let (writer, reader, admin) = build_handles(
         &config,
         store.clone(),
-        config.grep.mode.runs_worker().then(|| driver_slot.clone()),
+        config
+            .grep
+            .mode
+            .maintains_index()
+            .then(|| maintenance_slot.clone()),
     )
     .await?;
-    let grep_worker = config
-        .grep
-        .mode
-        .serves_grep()
+    // A deployment that maintains the index needs a worker whether or not it
+    // answers queries with one.
+    let grep_worker = (config.grep.mode.serves_grep() || config.grep.mode.maintains_index())
         .then(|| GrepWorker::new(store.clone(), reader.clone(), admin.clone()));
     let grep_service = config
         .grep
         .mode
         .serves_grep()
         .then(|| Arc::new(GrepService::new()));
-    let grep_drivers = if config.grep.mode.runs_worker() {
-        let worker_config = config.grep.worker_config();
-        let grep_config_error =
-            |error: loonfs_grep::GrepWorkerConfigError| ServerConfigError::InvalidField {
+    let grep_maintenance = if config.grep.mode.maintains_index() {
+        let policy = config
+            .grep
+            .worker_config()
+            .build_policy()
+            .map_err(|error| ServerConfigError::InvalidField {
                 field: "grep",
                 reason: error.to_string(),
-            };
-        let drivers = GrepDrivers::new(
+            })?;
+        let job = Arc::new(GrepMaintenanceJob::new(
             grep_worker
                 .as_ref()
-                .expect("driver-running grep mode should serve grep")
+                .expect("an index-maintaining deployment composes a grep worker")
                 .clone(),
-            worker_config.build_policy().map_err(grep_config_error)?,
-            worker_config
-                .concurrent_step_limit()
-                .map_err(grep_config_error)?,
-        )?;
-        let _ = driver_slot.set(drivers.clone());
-        Some(drivers)
+            policy,
+        ));
+        writer
+            .register_maintenance_job(job.clone())
+            .map_err(|error| ServerConfigError::InvalidField {
+                field: "grep",
+                reason: error.to_string(),
+            })?;
+        let handle = writer.maintenance();
+        let _ = maintenance_slot.set(handle.clone());
+        Some(GrepMaintenance { handle, job })
     } else {
         None
     };
@@ -209,7 +248,7 @@ pub(super) async fn app_with_store_and_transfer_issuer(
     let lifecycle = ServerLifecycle {
         writer: writer.clone(),
         publisher: writer.publisher(),
-        grep_drivers: grep_drivers.clone(),
+        maintains_grep_index: grep_maintenance.is_some(),
     };
     let state = AppState {
         upload_permits: Arc::new(Semaphore::new(
@@ -225,7 +264,7 @@ pub(super) async fn app_with_store_and_transfer_issuer(
         transfer_issuer,
         grep_worker,
         grep_service,
-        grep_drivers,
+        grep_maintenance,
     };
     Ok((router(state.clone()), lifecycle, state))
 }
@@ -261,7 +300,7 @@ pub(super) async fn build_handles_with_metrics_jsonl_path(
 async fn build_handles(
     config: &ServerConfig,
     store: SharedObjectStore,
-    grep_drivers: Option<Arc<OnceLock<GrepDrivers>>>,
+    grep_maintenance: Option<Arc<OnceLock<MaintenanceHandle>>>,
 ) -> Result<(FsWriter, FsReader, FsAdmin), ServerConfigError> {
     let trace_store_kind = TraceStoreKind::from(config.store.kind());
     let runtime_error = |error: loonfs::RuntimeError| ServerConfigError::InvalidField {
@@ -284,10 +323,14 @@ async fn build_handles(
         .runtime_cache(config.runtime_cache_config())
         .trace_mode(TraceMode::Remote)
         .trace_store_kind(trace_store_kind);
-    if let Some(drivers) = grep_drivers {
+    if let Some(maintenance) = grep_maintenance {
+        // A publish is the index's one real trigger, and the cheapest
+        // possible hint: no blocking, no permit, nothing owed. The runner
+        // decides when the step runs, and the step re-reads what this
+        // publish committed rather than trusting it.
         writer_builder = writer_builder.publish_observer(move |namespace_id, _committed_seq| {
-            if let Some(drivers) = drivers.get() {
-                drivers.nudge_existing(namespace_id);
+            if let Some(maintenance) = maintenance.get() {
+                maintenance.nudge(GREP_INDEX_JOB, namespace_id);
             }
         });
     }
@@ -345,9 +388,9 @@ pub enum ServeError {
 }
 
 /// Serves until ctrl-c or SIGTERM, then shuts down gracefully: the listener
-/// stops accepting, in-flight requests drain, embedded grep drivers stop,
-/// publisher work finishes, and writer maintenance settles before this
-/// returns.
+/// stops accepting, in-flight requests drain, publisher work finishes, and
+/// writer maintenance — the runtime's steps and grep's alike — settles
+/// before this returns.
 pub async fn serve(config: ServerConfig) -> Result<(), ServeError> {
     serve_with_shutdown(config, shutdown_signal()).await
 }
@@ -376,9 +419,9 @@ pub(super) async fn serve_on(
         .await
         .map_err(ServeError::Serve)?;
     // The listener has drained; close publisher admission, finish admitted
-    // publications and their final grep nudges, stop grep drivers between
-    // bounded steps, then settle writer-owned maintenance. Panicked tasks
-    // surface here rather than disappearing with the process.
+    // publications and their final maintenance nudges, then settle
+    // writer-owned maintenance. Panicked tasks surface here rather than
+    // disappearing with the process.
     lifecycle.shutdown().await.map_err(ServeError::Shutdown)
 }
 

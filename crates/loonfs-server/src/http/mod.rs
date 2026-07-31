@@ -33,7 +33,8 @@ use self::handlers_namespace::{
     namespace_status, release_checkpoint,
 };
 use self::handlers_query::{
-    disable_grep_index, enable_grep_index, gc_grep_index, grep, grep_not_supported,
+    disable_grep_index, enable_grep_index, gc_grep_index, grep, grep_index_not_maintained,
+    grep_queries_not_served,
 };
 use self::handlers_uploads::{
     abort_upload, begin_upload, complete_upload, read_upload_status, sign_upload_parts,
@@ -81,25 +82,31 @@ async fn with_request_id(request: Request, next: Next) -> Response {
 }
 
 fn router(state: AppState) -> Router {
-    let grep_route = if state.config.grep.mode.serves_grep() {
+    // Searching an index and keeping one built are separate jobs, so they
+    // are separately deployable: the query route exists where this server
+    // serves grep, and the three routes that mutate a grep root exist where
+    // it maintains one.
+    let serves_grep = state.config.grep.mode.serves_grep();
+    let maintains_index = state.config.grep.mode.maintains_index();
+    let grep_route = if serves_grep {
         post(grep)
     } else {
-        post(grep_not_supported)
+        post(grep_queries_not_served)
     };
-    let enable_grep_route = if state.config.grep.mode.serves_grep() {
+    let enable_grep_route = if maintains_index {
         post(enable_grep_index)
     } else {
-        post(grep_not_supported)
+        post(grep_index_not_maintained)
     };
-    let disable_grep_route = if state.config.grep.mode.serves_grep() {
+    let disable_grep_route = if maintains_index {
         post(disable_grep_index)
     } else {
-        post(grep_not_supported)
+        post(grep_index_not_maintained)
     };
-    let grep_gc_route = if state.config.grep.mode.serves_grep() {
+    let grep_gc_route = if maintains_index {
         post(gc_grep_index)
     } else {
-        post(grep_not_supported)
+        post(grep_index_not_maintained)
     };
     Router::new()
         .route("/health", get(health))
