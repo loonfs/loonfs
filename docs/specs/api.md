@@ -388,6 +388,21 @@ The retry rule has three cases:
   `commit_id_reuse_conflict`.
 - Retrying with a new `commit_id` is a new logical commit.
 
+**The replay guarantee has a horizon.** A commit's receipt lives exactly as
+long as retained history: when the retention floor passes a commit and
+metadata runs are rebuilt, its receipt is dropped, and from then on the id
+is indistinguishable from one never used. A retry past that horizon does
+not replay and does not conflict — **it commits again as a new mutation.**
+The effects are bounded and mostly self-announcing: creates fail
+`destination_exists`, moves and deletes fail against the already-moved
+state, and a put lays down a duplicate revision of identical content
+(the read surface is unchanged; revision history gains one entry). Retries
+should therefore happen promptly — within the retention window, they are
+fully guaranteed — and a caller that must reuse ids beyond the window is
+responsible for its own reconciliation. LoonFS chooses this documented
+horizon over an unbounded receipt index deliberately: detecting a dropped
+id would require remembering every id forever.
+
 Caller-supplied race guards (`expected_inode_id` on delete,
 `expected_revision_no` on put) are part of the commit's semantic identity,
 so changing, adding, or removing a guard while reusing a `commit_id` fails
