@@ -436,8 +436,17 @@ pub struct GcRequest {
     /// deadlines); a smaller value is rejected as `invalid_request`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grace_window_ms: Option<u64>,
-    /// Maximum candidates examined by this invocation. Omit to retain the
-    /// run-to-completion behavior.
+    /// Maximum objects this invocation may read or decide. Omit to retain
+    /// the run-to-completion behavior.
+    ///
+    /// A completed upload session past its reclamation grace makes the pass
+    /// read every live manifest and retained WAL segment to find out
+    /// whether anything still references its content, and that read is
+    /// charged here like any other. A budget too small to finish it parks:
+    /// the pass decides nothing, returns the cursor it came in with, and a
+    /// caller looping on `next_cursor` alone would loop forever. Give a
+    /// pass at least as many objects as the namespace has live manifests
+    /// and retained segments.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_objects: Option<u64>,
     /// Opaque resume token returned as `next_cursor` by an earlier pass
@@ -470,6 +479,13 @@ pub struct GcResponse {
     /// Upload-session control objects deleted after the reap window.
     #[serde(default)]
     pub deleted_upload_sessions: u64,
+    /// Content objects reclaimed because their upload session completed,
+    /// aged past the derived reclamation grace, and nothing the namespace
+    /// can reach references them. The upload half's cleanup of abandoned
+    /// sessions is not counted here: it deletes unconditionally, whether or
+    /// not the session ever wrote anything.
+    #[serde(default)]
+    pub deleted_content_objects: u64,
     /// Active checkpoint records released because their basis manifest is
     /// verifiably gone.
     #[serde(default)]
@@ -479,9 +495,11 @@ pub struct GcResponse {
     pub retained_candidates: u64,
     /// True when ambiguous roots suppressed manifest/table deletion.
     pub degraded_retention: bool,
-    /// Opaque resume token when more candidates remain. Resuming rebuilds
-    /// every safety proof; the token carries enumeration position only and
-    /// is valid only against the same namespace.
+    /// Opaque resume token when the pass stopped with work left — either
+    /// more candidates to enumerate, or one candidate it ran out of budget
+    /// to decide. Resuming rebuilds every safety proof; the token carries
+    /// enumeration position only and is valid only against the same
+    /// namespace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
 }
@@ -498,6 +516,7 @@ impl GcResponse {
             released_fork_checkpoints: 0,
             released_expired_checkpoints: 0,
             deleted_upload_sessions: 0,
+            deleted_content_objects: 0,
             released_missing_basis_checkpoints: 0,
             retained_candidates: 0,
             degraded_retention: false,

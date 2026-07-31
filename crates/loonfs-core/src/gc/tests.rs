@@ -638,6 +638,10 @@ async fn upload_gc_aborts_an_expired_session_then_reaps_it() {
         .await
         .expect("gc pass past the abort grace");
     assert_eq!(report.deleted_upload_sessions, 1);
+    assert_eq!(
+        report.deleted_content_objects, 0,
+        "the abort half's unconditional cleanup is not a reclamation it can count"
+    );
     assert!(store.head(&session_key).await.expect("head").is_none());
 
     let again = context(reaped.now_ms + GRACE_MS);
@@ -872,6 +876,7 @@ async fn content_gc_retains_completed_content_inside_its_grace() {
         .expect("gc pass inside the content grace");
 
     assert_eq!(report.deleted_upload_sessions, 0);
+    assert_eq!(report.deleted_content_objects, 0);
     assert!(store.head(&content_key).await.expect("head").is_some());
     assert!(read_upload_session(&store, &namespace_id, &upload_id)
         .await
@@ -902,6 +907,7 @@ async fn content_gc_reclaims_completed_content_nothing_references() {
         .expect("gc pass past the content grace");
 
     assert_eq!(report.deleted_upload_sessions, 1);
+    assert_eq!(report.deleted_content_objects, 1);
     assert!(
         store.head(&content_key).await.expect("head").is_none(),
         "completed content nothing published is reclaimable"
@@ -960,6 +966,10 @@ async fn content_gc_never_reclaims_published_content() {
             report.deleted_upload_sessions, 1,
             "materialize={materialize}"
         );
+        assert_eq!(
+            report.deleted_content_objects, 0,
+            "materialize={materialize}"
+        );
         assert!(
             store.head(&content_key).await.expect("head").is_some(),
             "published content survives its session (materialize={materialize})"
@@ -969,6 +979,200 @@ async fn content_gc_never_reclaims_published_content() {
             .is_none());
         assert!(!report.degraded_retention);
     }
+}
+
+/// Builds a namespace whose content reference scan has real work to do: a
+/// materialized manifest to open and page through, and a WAL tail to fetch
+/// on top of it.
+async fn namespace_with_a_scan_worth_bounding(
+    store: &LocalFsStore,
+    namespace_id: &NamespaceId,
+    setup: &MutationContext,
+) {
+    bootstrap_namespace(store, namespace_id, setup, false)
+        .await
+        .expect("bootstrap");
+    for index in 0..3 {
+        write_test_file(
+            store,
+            namespace_id,
+            &format!("/docs/materialized-{index}.txt"),
+            &format!("scan-fixture-{index}"),
+            setup,
+        )
+        .await;
+    }
+    crate::checkpoint::flush_wal(store, namespace_id, setup)
+        .await
+        .expect("flush wal");
+    for index in 0..3 {
+        write_test_file(
+            store,
+            namespace_id,
+            &format!("/docs/tail-{index}.txt"),
+            &format!("scan-fixture-tail-{index}"),
+            setup,
+        )
+        .await;
+    }
+}
+
+/// The reference scan is the one place a bounded pass used to do unbounded
+/// work. A one-object budget cannot finish it, and the honest response to
+/// that is to decide nothing: the pass hands back the cursor it came in
+/// with, leaves the session and its content exactly where they were, and a
+/// resume from that cursor with room to finish the scan reaches the verdict
+/// an unbounded pass would have reached.
+#[tokio::test]
+async fn a_budget_that_dies_inside_the_reference_scan_parks_without_deciding() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = context(1_000);
+    namespace_with_a_scan_worth_bounding(&store, &namespace_id, &setup).await;
+    let (upload_id, content_ref, content_store_id, _prepared) =
+        complete_upload_for_gc(&store, &namespace_id, b"unpublished\n", &setup).await;
+    let content_key =
+        loonfs_objectstore::keys::content_blob(content_store_id.as_str(), &content_ref.content_id);
+    let live = collect_live_set(&store, &namespace_id, &setup)
+        .await
+        .expect("collect live set");
+    assert!(
+        !live.manifests.is_empty() && !live.wal_segments.is_empty(),
+        "the fixture must give the scan more than one object to read"
+    );
+
+    // One object per pass: the earlier families advance a key at a time
+    // until the sweep reaches the session, and there the cursor stops
+    // moving because the scan behind it never fits.
+    let past = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_MS + 1);
+    let mut tiny = config();
+    tiny.max_objects = Some(1);
+    let mut cursor: Option<String> = None;
+    let mut parked = None;
+    for _ in 0..64 {
+        tiny.cursor.clone_from(&cursor);
+        let pass = gc_namespace(&store, &namespace_id, &tiny, &past)
+            .await
+            .expect("one-object pass");
+        assert_eq!(pass.deleted_upload_sessions, 0);
+        assert_eq!(pass.deleted_content_objects, 0);
+        let next = pass.next_cursor.expect("work remains");
+        if cursor.as_deref() == Some(next.as_str()) {
+            parked = Some(next);
+            break;
+        }
+        cursor = Some(next);
+    }
+    let parked = parked.expect("a one-object budget parks inside the scan");
+    assert!(
+        store.head(&content_key).await.expect("head").is_some(),
+        "a parked pass reclaims nothing"
+    );
+    assert!(
+        read_upload_session(&store, &namespace_id, &upload_id)
+            .await
+            .is_some(),
+        "the session that triggered the scan is retained, not decided"
+    );
+
+    // Same cursor, a budget the scan fits inside: now it decides.
+    let mut enough = config();
+    enough.max_objects = Some(1_024);
+    enough.cursor = Some(parked);
+    let resumed = gc_namespace(&store, &namespace_id, &enough, &past)
+        .await
+        .expect("resumed pass");
+    assert_eq!(resumed.deleted_upload_sessions, 1);
+    assert_eq!(resumed.deleted_content_objects, 1);
+    assert!(store.head(&content_key).await.expect("head").is_none());
+    assert!(read_upload_session(&store, &namespace_id, &upload_id)
+        .await
+        .is_none());
+}
+
+/// The only reference keeping this content alive lives in the newest WAL
+/// segment, the very last root the scan reads. A pass that stopped short
+/// and answered from what it had collected would call the content
+/// unreferenced and delete it. Running every budget from one up past the
+/// whole scan's cost, each to a standstill, leaves no interleaving where a
+/// partial reference set decides anything — and the budgets that can afford
+/// the scan still reach the right verdict.
+#[tokio::test]
+async fn no_budget_lets_a_partial_reference_set_decide_a_deletion() {
+    let temp_dir = tempdir().expect("tempdir");
+    let seed_root = temp_dir.path().join("seed");
+    let seed = LocalFsStore::new(&seed_root).expect("seed store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = context(1_000);
+    namespace_with_a_scan_worth_bounding(&seed, &namespace_id, &setup).await;
+    let (upload_id, content_ref, content_store_id, prepared) =
+        complete_upload_for_gc(&seed, &namespace_id, b"published-last\n", &setup).await;
+    // The publish that saves this content lands in the newest WAL segment,
+    // so the reference sorts behind everything else the scan reads.
+    publish_completed_content(
+        &seed,
+        &namespace_id,
+        "/docs/published.txt",
+        content_ref.clone(),
+        prepared,
+        &setup,
+    )
+    .await;
+    let content_key =
+        loonfs_objectstore::keys::content_blob(content_store_id.as_str(), &content_ref.content_id);
+    let past = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_MS + 1);
+    let mut some_budget_reached_the_verdict = false;
+    let mut some_budget_parked_instead = false;
+
+    for max_objects in 1..=16 {
+        let trial_root = temp_dir.path().join(format!("trial-{max_objects}"));
+        copy_tree(&seed_root, &trial_root);
+        let store = LocalFsStore::new(&trial_root).expect("trial store");
+        let mut bounded = config();
+        bounded.max_objects = Some(max_objects);
+        let mut cursor: Option<String> = None;
+        for _ in 0..64 {
+            bounded.cursor.clone_from(&cursor);
+            let pass = gc_namespace(&store, &namespace_id, &bounded, &past)
+                .await
+                .expect("bounded pass");
+            assert_eq!(pass.deleted_content_objects, 0, "max_objects={max_objects}");
+            assert!(
+                store.head(&content_key).await.expect("head").is_some(),
+                "max_objects={max_objects}: referenced content survives every budget"
+            );
+            let Some(next) = pass.next_cursor else {
+                break;
+            };
+            if cursor.as_deref() == Some(next.as_str()) {
+                break;
+            }
+            cursor = Some(next);
+        }
+        assert!(
+            store.head(&content_key).await.expect("head").is_some(),
+            "max_objects={max_objects}"
+        );
+        // Reaching the referenced verdict is what deletes the record: the
+        // content is metadata's from here on. A surviving record means the
+        // budget parked instead — the case this test is really about.
+        let decided = read_upload_session(&store, &namespace_id, &upload_id)
+            .await
+            .is_none();
+        some_budget_reached_the_verdict |= decided;
+        some_budget_parked_instead |= !decided;
+    }
+
+    assert!(
+        some_budget_reached_the_verdict,
+        "a budget large enough to finish the scan must still decide the session"
+    );
+    assert!(
+        some_budget_parked_instead,
+        "the sweep must actually park mid-scan somewhere in this range, or the \
+         test proves nothing about partial reference sets"
+    );
 }
 
 #[tokio::test]
@@ -2324,6 +2528,7 @@ fn accumulate_report(total: &mut GcResponse, pass: &GcResponse) {
     total.deleted_checkpoint_records += pass.deleted_checkpoint_records;
     total.released_fork_checkpoints += pass.released_fork_checkpoints;
     total.deleted_upload_sessions += pass.deleted_upload_sessions;
+    total.deleted_content_objects += pass.deleted_content_objects;
     total.released_missing_basis_checkpoints += pass.released_missing_basis_checkpoints;
     total.retained_candidates += pass.retained_candidates;
     total.degraded_retention |= pass.degraded_retention;
@@ -2395,6 +2600,7 @@ async fn bounded_passes_delete_exactly_the_unbounded_pass_set() {
             bounded_report.deleted_manifests,
             bounded_report.deleted_checkpoint_records,
             bounded_report.deleted_upload_sessions,
+            bounded_report.deleted_content_objects,
         ),
         (
             unbounded_report.deleted_wal_segments,
@@ -2402,6 +2608,7 @@ async fn bounded_passes_delete_exactly_the_unbounded_pass_set() {
             unbounded_report.deleted_manifests,
             unbounded_report.deleted_checkpoint_records,
             unbounded_report.deleted_upload_sessions,
+            unbounded_report.deleted_content_objects,
         )
     );
 }

@@ -139,7 +139,7 @@ hoc.
 | --- | --- | --- |
 | `core.namespaces.create` | Creating namespaces (`POST /v0/namespaces`). | |
 | `core.namespaces.fork` | Forking namespaces (`POST /v0/namespaces/{ns}/forks`). | |
-| `core.namespaces.delete` | Deleting namespaces (`DELETE /v0/namespaces/{ns}`). | Terminal, and the id is permanently retired. Derived state becomes reclaimable through a `gc`-restricted maintenance step (section 6.3); content blobs are not reclaimed in v0. A deployment may still advertise `false` and answer `not_supported`. |
+| `core.namespaces.delete` | Deleting namespaces (`DELETE /v0/namespaces/{ns}`). | Terminal, and the id is permanently retired. Derived state becomes reclaimable through a `gc`-restricted maintenance step (section 6.3), which also reclaims the content of any upload session that completed, aged past the derived reclamation grace, and is referenced by nothing the namespace can reach. A deployment may still advertise `false` and answer `not_supported`. |
 | `core.uploads.direct_put` | Starting presigned `direct_put` upload sessions (`POST /v0/namespaces/{ns}/uploads`). | The server returns a short-lived presigned PUT capability for the exact content object. The key is present only when the selected provider profile proves the signed preconditions or the deployment explicitly opts into an unproven endpoint. Raw object keys and caller-managed object-store writes are not part of this feature. |
 | `core.uploads.direct_multipart` | Starting presigned `direct_multipart` upload sessions (`POST /v0/namespaces/{ns}/uploads`) and signing their parts (`POST /v0/namespaces/{ns}/uploads/{upload_id}/parts`). | The server opens the provider's multipart upload and returns one short-lived, checksum-bound capability per part. It rests on the same proven-endpoint condition as `core.uploads.direct_put`, plus the provider's multipart control operations, so the two keys are advertised together. |
 | `query.grep` | Content search (`POST /v0/namespaces/{ns}/query/grep`). | The serving half of a data-dependent capability: the request also requires a materialized steady-state grep root, and a namespace without one answers `not_supported` whatever this key advertises. |
@@ -559,7 +559,14 @@ unless it is present. `gc` opts into sweeping and overrides
 rejected as `invalid_request`. Upload sessions and the content they leave
 behind are not under `grace_window_ms` alone: a session carries its own
 lease, and how long a completed session's content is protected is derived
-rather than configured (format spec, "Garbage collection", rule 11). Step-driven GC defaults
+rather than configured (format spec, "Garbage collection", rule 11).
+`max_objects` bounds every object the pass reads, not only the candidates it
+enumerates: deciding whether a completed session's content is still
+referenced means reading each live manifest and each retained WAL segment,
+and each of those reads spends the same budget. A pass that runs out partway
+through decides nothing about that session and returns its cursor, so a
+budget smaller than the namespace's live manifests plus retained segments
+never finishes the question, however many times it is resumed. Step-driven GC defaults
 `max_objects` to 1024 and returns any `next_cursor` for a later step rather
 than looping internally. Nothing sweeps unless `gc` is present.
 
@@ -576,7 +583,9 @@ Routes under `/v0/admin/` belong to the `admin/v0` profile and routes under
 `/v0/namespaces/{ns}/query/` to `query/v0`; everything else shown belongs to
 `core/v0`.
 
-GC responses carry `next_cursor` only when more candidate enumeration remains.
+GC responses carry `next_cursor` when the pass stopped with work left —
+either more candidates to enumerate, or one candidate whose decision it ran
+out of budget to reach.
 The token is opaque, tolerant of additive fields when decoded, and valid only
 against the namespace that issued it. It encodes the last examined key and
 object family, not a live set or retention proof: every resumed invocation
@@ -933,8 +942,10 @@ WAL segments, metadata tables and manifests, and checkpoint records that
 protect nothing live — becomes garbage once the tombstone is in place. A
 maintenance step restricted to `gc` runs against the tombstone and ages
 that state out under the normal grace rules; the head survives as the
-tombstone so the id stays retired. Content blobs live in a shared
-content store outside the namespace prefix and are not reclaimed in v0.
+tombstone so the id stays retired. Content blobs live in a shared content
+store outside the namespace prefix, and the same pass reclaims each one
+still held by an upload-session record; a blob whose session record was
+already swept has nothing left pointing at it and is not reclaimed.
 
 The optional `expected_head_seq` query parameter deletes only if the head is
 still at that sequence, failing with `stale_head` otherwise — the same

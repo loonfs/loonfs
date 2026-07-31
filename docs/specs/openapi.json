@@ -3861,7 +3861,7 @@
               "null"
             ],
             "format": "int64",
-            "description": "Maximum candidates examined by this invocation. Omit to retain the\nrun-to-completion behavior.",
+            "description": "Maximum objects this invocation may read or decide. Omit to retain\nthe run-to-completion behavior.\n\nA completed upload session past its reclamation grace makes the pass\nread every live manifest and retained WAL segment to find out\nwhether anything still references its content, and that read is\ncharged here like any other. A budget too small to finish it parks:\nthe pass decides nothing, returns the cursor it came in with, and a\ncaller looping on `next_cursor` alone would loop forever. Give a\npass at least as many objects as the namespace has live manifests\nand retained segments.",
             "minimum": 0
           }
         }
@@ -3888,6 +3888,12 @@
             "type": "integer",
             "format": "int64",
             "description": "Released checkpoint records deleted after their grace window.",
+            "minimum": 0
+          },
+          "deleted_content_objects": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Content objects reclaimed because their upload session completed,\naged past the derived reclamation grace, and nothing the namespace\ncan reach references them. The upload half's cleanup of abandoned\nsessions is not counted here: it deletes unconditionally, whether or\nnot the session ever wrote anything.",
             "minimum": 0
           },
           "deleted_manifests": {
@@ -3923,7 +3929,7 @@
               "string",
               "null"
             ],
-            "description": "Opaque resume token when more candidates remain. Resuming rebuilds\nevery safety proof; the token carries enumeration position only and\nis valid only against the same namespace."
+            "description": "Opaque resume token when the pass stopped with work left — either\nmore candidates to enumerate, or one candidate it ran out of budget\nto decide. Resuming rebuilds every safety proof; the token carries\nenumeration position only and is valid only against the same\nnamespace."
           },
           "released_expired_checkpoints": {
             "type": "integer",
