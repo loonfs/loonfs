@@ -27,7 +27,7 @@ categories = ["filesystem", "command-line-utilities"]
 
 [workspace.dependencies]
 async-trait = "0.1"
-axum = "0.7"
+axum = "0.8"
 base64 = "0.22"
 bytes = "1"
 ciborium = "0.2"
