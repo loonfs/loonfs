@@ -83,8 +83,8 @@ Filesystem operations
   loon get [--profile <name>] [--namespace <name>] [--revision <n>] <remote-path> [local-destination]
     Download a remote file
 
-  loon put [--profile <name>] [--namespace <name>] <local-path> [remote-path] [--force] [-m <message>]
-    Upload a local file
+  loon put [--profile <name>] [--namespace <name>] <local-path|-> [remote-path] [--force] [-m <message>]
+    Upload a local file, or standard input when <local-path> is `-`
 
   loon revisions [--profile <name>] [--namespace <name>] [--limit <n>] [--cursor <cursor>] <path>
     List file revisions newest-first
@@ -178,6 +178,13 @@ Behavior notes
   `--json` is rejected for streaming output commands
 
   If `loon put` omits the remote path, the CLI uses `/<local-filename>`
+
+  `loon put -` reads standard input and needs an explicit remote path,
+  because a pipe has no local name to derive one from
+
+  `loon put` reads a large file or a pipe once, a piece at a time, so what
+  it costs in memory follows the transfer and not the payload's size; a
+  file small enough to hold is still uploaded in one request
 
   If `loon get` omits the local destination, the CLI writes to `./<remote-filename>`
 

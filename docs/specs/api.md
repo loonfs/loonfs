@@ -414,9 +414,18 @@ bytes. A client that composes upload and commit must, on
 
 1. Find what that `commit_id` committed. There is no read keyed by commit
    id, so this reads the change feed and matches on `commit_id`.
-2. Compare the committed content against the bytes just uploaded: the
+2. Compare the committed content against what was just uploaded: the
    content's `whole_file_sha256` when it has one, and otherwise its
    `storage_checksum`, after checking `size_bytes`.
+
+   A client that still holds its bytes recomputes whichever digest the
+   comparison calls for. A client that streamed its payload no longer has
+   the bytes, and compares the length it measured and the digest it folded
+   during that one pass instead — for a `direct_multipart` upload, the
+   `crc64nvme` it claimed at completion, which is also what the reference
+   the server minted carries. Both are evidence about the same bytes; they
+   differ only in which digests they can answer for, and a digest the
+   upload never computed falls to rule 4 rather than being guessed at.
 3. Equal content means the logical operation had already succeeded: report
    the commit that landed, with its original `committed_seq`.
 4. Anything else surfaces a failure. Different content is the
@@ -1269,6 +1278,43 @@ final (format spec, section 3.10). What that means at the API:
   it. This is also what a completion sees when server-side cleanup aborted
   the session first; if the completion lands first instead, the cleanup's
   conditional write fails and the completed session is retained.
+
+**The one-pass client obligation.** A client uploads a large payload by
+reading its source once, forward, and never holding it whole. Nothing in the
+transport requires more than that, and every part of the flow is arranged so
+it does not have to:
+
+1. Begin a `direct_multipart` session. It declares no length and no digest,
+   so a source that cannot state its length starts uploading immediately.
+   The response settles the part geometry and nothing else.
+2. Read the source part by part. For each part, compute its `crc64nvme` for
+   the URL the server signs, and fold the same bytes into a running
+   `crc64nvme` over the whole object. One pass produces both.
+3. Ask for part URLs in waves rather than all at once — a signing request
+   names at most 1,000 parts — upload the wave's parts, and record each
+   part's `{part_number, etag, crc64nvme}`. Part bookkeeping is the
+   client's, exactly as it is in the provider's own multipart API.
+4. Hold no more than a bounded window of parts at a time. The window is the
+   memory the upload costs, and it does not depend on the payload's length.
+   A part that fails is retried by re-asking for its URL: a repeated part is
+   last-write-wins at the provider.
+5. Complete with the part list plus the `{size_bytes, crc64nvme}` this pass
+   discovered. The claim arrives here because this is the first moment a
+   one-pass uploader can produce it.
+
+A session whose upload fails partway is aborted rather than abandoned; it
+owns an object nothing will finish writing.
+
+Two bounds are worth planning for. A provider assembles at most 10,000
+parts, so a session carries at most `part_size_bytes × 10_000` bytes and a
+longer payload is refused when it asks to authorize the part past that
+ceiling — a client that knows its payload is very large asks for a larger
+part size at begin. And a deployment that does not advertise
+`core.uploads.direct_multipart` cannot authorize part uploads at all; the
+same source then goes to `PUT /content` as a streaming request body, which
+the server hashes as it forwards it on. A body whose length is unknown is
+sent with chunked transfer encoding, and the server's incremental
+accounting against `upload.max_content_bytes` is what bounds it.
 
 **Receipt expiry and re-minting.** The `validated_content_token` is the
 upload's receipt: it is minted only from a session the store already says is

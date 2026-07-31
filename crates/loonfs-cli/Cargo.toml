@@ -13,6 +13,7 @@ name = "loon"
 path = "src/main.rs"
 
 [dependencies]
+bytes.workspace = true
 clap.workspace = true
 futures.workspace = true
 dialoguer = { version = "0.11", features = ["fuzzy-select"] }
@@ -27,7 +28,9 @@ serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+# `io-std` is what makes standard input an asynchronous source, which is
+# how `loon put -` reads a payload of unknown length.
+tokio = { workspace = true, features = ["io-std"] }
 toml.workspace = true
 walkdir.workspace = true
 

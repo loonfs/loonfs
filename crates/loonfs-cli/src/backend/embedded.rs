@@ -7,7 +7,7 @@ use crate::backend_error::{
 };
 use crate::render::write_stderr_warning;
 use loonfs::{
-    ChangesResponse, CopyOptions, CreateCheckpointOptions, CreateDirectoryOptions,
+    ByteStream, ChangesResponse, CopyOptions, CreateCheckpointOptions, CreateDirectoryOptions,
     CreateNamespaceOptions, DeleteNamespaceOptions, DeleteNamespaceResponse, DeleteOptions,
     FsAdmin, FsReader, FsWriter, ListChangesOptions, MaintenanceStepOptions, MoveOptions,
     PutFileOptions, RestoreRevisionOptions, RuntimeError, SharedObjectStore, UndeleteOptions,
@@ -341,6 +341,34 @@ impl EmbeddedBackend {
             )
         })
         .await
+    }
+
+    /// Writes a file from a payload read once, straight into the runtime's
+    /// streaming staging path.
+    ///
+    /// Unlike the buffered call this one makes a single attempt. The
+    /// `maintenance_required` recovery above works by resubmitting, and a
+    /// stream is consumed by the attempt that reads it: there is no second
+    /// attempt to make. A gated publish commits nothing, so rerunning the
+    /// command — with the same `--commit-id` if the caller wants the retry
+    /// to be idempotent — is the honest recovery.
+    pub(super) async fn put_file_stream(
+        &self,
+        spec: &NamespacePath,
+        body: ByteStream,
+        options: &PutFileOptions,
+    ) -> Result<CommitResponse, BackendError> {
+        let result = self
+            .writer
+            .put_file_stream(
+                spec.namespace(),
+                spec.absolute_path().as_str(),
+                body,
+                options.clone(),
+            )
+            .await
+            .map_err(|error| map_namespace_scoped_runtime_error(spec.namespace(), error));
+        self.settle_background_work_after(result).await
     }
 
     pub(super) async fn delete_path(

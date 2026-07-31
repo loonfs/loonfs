@@ -26,6 +26,50 @@ const COMMIT_LOOKUP_WINDOW: NonZeroU32 = NonZeroU32::new(128).expect("non-zero w
 /// found", never a guess.
 const COMMIT_LOOKUP_MAX_WINDOWS: usize = 8;
 
+/// What a retry can still say about the payload it just staged.
+///
+/// A buffered put can answer any question about its bytes by hashing them
+/// again. A streamed put cannot: the payload went by once and is gone, and
+/// what it kept instead is the reference the write path built while hashing
+/// it. Both describe the same bytes; they differ only in which questions
+/// they can answer, and a question neither can answer is reported as such
+/// rather than guessed at.
+#[derive(Debug, Clone, Copy)]
+enum StagedPayload<'a> {
+    /// The payload itself, which can produce any digest this build knows.
+    Bytes(&'a [u8]),
+    /// The reference built for a payload that was streamed past.
+    Streamed(&'a ContentRef),
+}
+
+impl StagedPayload<'_> {
+    /// Complete length of what was staged.
+    fn size_bytes(&self) -> u64 {
+        match self {
+            Self::Bytes(bytes) => bytes.len() as u64,
+            Self::Streamed(content_ref) => content_ref.size_bytes,
+        }
+    }
+
+    /// Whether the staged bytes produce this checksum. `None` is a refusal
+    /// to answer, never agreement.
+    fn matches(&self, expected: &StorageChecksum) -> Option<bool> {
+        match self {
+            Self::Bytes(bytes) => expected.matches(bytes),
+            Self::Streamed(content_ref) => {
+                let observed = if content_ref.storage_checksum.algorithm == expected.algorithm {
+                    Some(content_ref.storage_checksum.value.as_str())
+                } else if expected.algorithm == ChecksumAlgorithm::Sha256 {
+                    content_ref.whole_file_sha256.as_deref()
+                } else {
+                    None
+                };
+                Some(observed? == expected.value)
+            }
+        }
+    }
+}
+
 /// The content one committed change wrote, if it wrote any.
 fn committed_content_ref(change: &CommittedChange) -> Option<&ContentRef> {
     change.events.iter().find_map(|event| match event {
@@ -107,11 +151,81 @@ impl FsWriter {
         let published = self
             .put_file_prepared(namespace_id, absolute_path, prepared_content, options)
             .await;
+        self.settle_put(
+            namespace_id,
+            commit_id,
+            published,
+            StagedPayload::Bytes(bytes),
+        )
+        .await
+    }
+
+    /// Writes a file from a payload read once from its source.
+    ///
+    /// This is [`Self::put_file_bytes`] for a caller that should not hold
+    /// its payload: the stream is hashed as it is forwarded to object
+    /// storage and never held whole, so a large file costs one transfer
+    /// part of memory rather than its own size. Everything after the bytes
+    /// land is identical — same trusted whole-file SHA-256, same
+    /// publication, same retry reconciliation — so a caller that already
+    /// holds its bytes has no reason to come here.
+    ///
+    /// Retrying with a `commit_id` that already committed is safe in the
+    /// same way it is for the buffered call. The evidence is different only
+    /// because the payload is gone: what this pass measured and hashed on
+    /// the way past is what the reconciliation compares.
+    #[tracing::instrument(
+        level = "info",
+        name = "loonfs.put",
+        err,
+        skip_all,
+        fields(
+            operation = "put",
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+            payload_class = "streamed",
+        )
+    )]
+    pub async fn put_file_stream(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        body: ByteStream,
+        options: PutFileOptions,
+    ) -> Result<CommitResponse> {
+        self.core.record_trace_context(&tracing::Span::current());
+        let commit_id = options.commit_id.clone();
+        let prepared_content = self.prepare_file_stream(namespace_id, body).await?;
+        // The prepared reference describes the bytes that just went past,
+        // and with the payload gone it is the only description of them that
+        // still exists.
+        let staged = prepared_content.content_ref().clone();
+        let published = self
+            .put_file_prepared(namespace_id, absolute_path, prepared_content, options)
+            .await;
+        self.settle_put(
+            namespace_id,
+            commit_id,
+            published,
+            StagedPayload::Streamed(&staged),
+        )
+        .await
+    }
+
+    /// Turns a reused-commit-id rejection into the answer the retry
+    /// deserves, and passes everything else through.
+    async fn settle_put(
+        &self,
+        namespace_id: &NamespaceId,
+        commit_id: Option<CommitId>,
+        published: Result<CommitResponse>,
+        staged: StagedPayload<'_>,
+    ) -> Result<CommitResponse> {
         match (published, commit_id) {
             (Err(error), Some(commit_id))
                 if error.code() == loonfs_core::ErrorCode::CommitIdReuseConflict =>
             {
-                self.reconcile_commit_id_reuse(namespace_id, &commit_id, bytes, error)
+                self.reconcile_commit_id_reuse(namespace_id, &commit_id, staged, error)
                     .await
             }
             (published, _) => published,
@@ -128,7 +242,7 @@ impl FsWriter {
         &self,
         namespace_id: &NamespaceId,
         commit_id: &CommitId,
-        bytes: &[u8],
+        staged: StagedPayload<'_>,
         conflict: RuntimeError,
     ) -> Result<CommitResponse> {
         let Some(committed) = self.find_committed_change(namespace_id, commit_id).await? else {
@@ -137,7 +251,7 @@ impl FsWriter {
         let Some(content_ref) = committed_content_ref(&committed) else {
             return Err(conflict);
         };
-        if content_ref.size_bytes != bytes.len() as u64 {
+        if content_ref.size_bytes != staged.size_bytes() {
             return Err(conflict);
         }
 
@@ -151,7 +265,7 @@ impl FsWriter {
             },
             None => content_ref.storage_checksum.clone(),
         };
-        match evidence.matches(bytes) {
+        match staged.matches(&evidence) {
             Some(true) => Ok(CommitResponse {
                 namespace_id: namespace_id.clone(),
                 commit_id: committed.commit_id,
@@ -160,8 +274,8 @@ impl FsWriter {
             Some(false) => Err(conflict),
             None => Err(RuntimeError::Config(format!(
                 "commit `{commit_id}` already committed content checksummed with `{}`, \
-                 which this build cannot recompute, so it cannot tell whether this is \
-                 the same upload retried",
+                 which this build cannot compare against what it just staged, so it \
+                 cannot tell whether this is the same upload retried",
                 evidence.algorithm
             ))),
         }

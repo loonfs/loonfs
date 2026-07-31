@@ -473,6 +473,10 @@ pub(crate) struct FilesystemGetArgs {
 pub(crate) struct FilesystemPutArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
+    /// Local file to upload, or `-` to read standard input. A large file
+    /// and a pipe are both read once and never held whole, so what a put
+    /// costs in memory does not follow what it uploads. Reading `-` needs
+    /// an explicit remote path.
     pub local_path: String,
     pub remote_path: Option<String>,
     /// Upload the directory tree rooted at `local_path`. Every file lands

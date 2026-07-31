@@ -1,7 +1,8 @@
 //! The HTTP transport: request building, the bounded transient retry, and
 //! response-to-error mapping.
 
-use crate::{Client, ClientError, Result};
+use crate::{Client, ClientError, PayloadStream, Result};
+use bytes::Bytes;
 use loonfs_api::{ApiError, ErrorCode};
 use reqwest::Method;
 use std::time::Duration;
@@ -119,7 +120,9 @@ impl Client {
             Some(body) => {
                 // Serialized once: every retry attempt resends identical
                 // bytes when this call site permits a resend.
-                Some(serde_json::to_vec(body).map_err(|err| ClientError::Json(err.to_string()))?)
+                Some(Bytes::from(
+                    serde_json::to_vec(body).map_err(|err| ClientError::Json(err.to_string()))?,
+                ))
             }
             None => None,
         };
@@ -128,10 +131,10 @@ impl Client {
             None => request,
         };
         let bytes = if retry {
-            self.call_with_transient_retry(&request, body.as_deref())
+            self.call_with_transient_retry(&request, body.as_ref())
                 .await?
         } else {
-            self.call_once(&request, body.as_deref()).await?
+            self.call_once(&request, body.as_ref()).await?
         };
         serde_json::from_slice(&bytes).map_err(|err| ClientError::Json(err.to_string()))
     }
@@ -146,9 +149,29 @@ impl Client {
     pub(crate) async fn call_once(
         &self,
         request: &WireRequest,
-        body: Option<&[u8]>,
+        body: Option<&Bytes>,
     ) -> Result<Vec<u8>> {
         self.send(request, body)
+            .await
+            .map(|response| response.bytes)
+            .map_err(|attempt| attempt.error)
+    }
+
+    /// Sends one request whose body arrives in pieces, and never resends it.
+    ///
+    /// A stream is consumed by the attempt that reads it, so there is no
+    /// second attempt to make: this is the one call whose failure is always
+    /// the caller's to handle. `size_bytes` declares the length when the
+    /// source knows it, and its absence is what puts the request on chunked
+    /// transfer encoding — which is the honest framing for a payload whose
+    /// length nobody knows yet.
+    pub(crate) async fn call_streamed_once(
+        &self,
+        request: &WireRequest,
+        body: PayloadStream,
+        size_bytes: Option<u64>,
+    ) -> Result<Vec<u8>> {
+        self.send_streamed(request, body, size_bytes)
             .await
             .map(|response| response.bytes)
             .map_err(|attempt| attempt.error)
@@ -170,7 +193,7 @@ impl Client {
     pub(crate) async fn call_with_transient_retry(
         &self,
         request: &WireRequest,
-        body: Option<&[u8]>,
+        body: Option<&Bytes>,
     ) -> Result<Vec<u8>> {
         self.call_with_transient_retry_headers(request, body)
             .await
@@ -185,7 +208,7 @@ impl Client {
     pub(crate) async fn call_with_transient_retry_headers(
         &self,
         request: &WireRequest,
-        body: Option<&[u8]>,
+        body: Option<&Bytes>,
     ) -> Result<WireResponse> {
         let mut attempts = 0;
         loop {
@@ -208,12 +231,46 @@ impl Client {
     async fn send(
         &self,
         request: &WireRequest,
-        body: Option<&[u8]>,
+        body: Option<&Bytes>,
     ) -> std::result::Result<WireResponse, FailedAttempt> {
         #[cfg(test)]
         if let Some(outcome) = test_transport::next() {
-            return outcome.map(WireResponse::without_headers);
+            return outcome;
         }
+        let mut builder = self.build(request);
+        if let Some(bytes) = body {
+            // Cloning a `Bytes` shares the allocation rather than copying
+            // it. That is what keeps a part upload's memory equal to the
+            // part the caller is already holding, instead of twice it.
+            builder = builder.body(bytes.clone());
+        }
+        self.dispatch(request, builder).await
+    }
+
+    /// [`Self::send`] for a body that arrives in pieces.
+    async fn send_streamed(
+        &self,
+        request: &WireRequest,
+        body: PayloadStream,
+        size_bytes: Option<u64>,
+    ) -> std::result::Result<WireResponse, FailedAttempt> {
+        #[cfg(test)]
+        if let Some(outcome) = test_transport::next() {
+            // Drain the body so a scripted test still observes the source
+            // being read exactly once, as a real send would.
+            let mut body = body;
+            while futures::StreamExt::next(&mut body).await.is_some() {}
+            return outcome;
+        }
+        let mut builder = self.build(request).body(reqwest::Body::wrap_stream(body));
+        if let Some(size_bytes) = size_bytes {
+            builder = builder.header(http::header::CONTENT_LENGTH, size_bytes);
+        }
+        self.dispatch(request, builder).await
+    }
+
+    /// The parts of a request that do not depend on its body.
+    fn build(&self, request: &WireRequest) -> reqwest::RequestBuilder {
         let mut builder = self.http.request(request.method.clone(), &request.url);
         if request.authenticate {
             if let Some(token) = &self.auth_token {
@@ -223,10 +280,15 @@ impl Client {
         for (name, value) in &request.headers {
             builder = builder.header(name.as_str(), value.as_str());
         }
-        if let Some(bytes) = body {
-            builder = builder.body(bytes.to_vec());
-        }
+        builder
+    }
 
+    /// Sends a built request and reads its response.
+    async fn dispatch(
+        &self,
+        request: &WireRequest,
+        builder: reqwest::RequestBuilder,
+    ) -> std::result::Result<WireResponse, FailedAttempt> {
         let response = builder.send().await.map_err(|err| FailedAttempt {
             transport: true,
             error: ClientError::Http(describe_send_error(&request.url, &err)),
@@ -265,14 +327,6 @@ impl WireResponse {
         name: reqwest::header::HeaderName,
     ) -> Option<&reqwest::header::HeaderValue> {
         self.headers.get(name)
-    }
-
-    #[cfg(test)]
-    fn without_headers(bytes: Vec<u8>) -> Self {
-        Self {
-            headers: reqwest::header::HeaderMap::new(),
-            bytes,
-        }
     }
 }
 
@@ -379,14 +433,18 @@ async fn transient_retry_pause(backoff: Duration) {
 
 #[cfg(test)]
 pub(crate) mod test_transport {
-    use super::FailedAttempt;
+    use super::{FailedAttempt, WireResponse};
     use crate::ClientError;
     use std::cell::RefCell;
     use std::collections::VecDeque;
 
-    enum Outcome {
+    /// One response a scripted transport serves, in order.
+    pub(crate) enum Outcome {
         TransportFailure,
         Success(Vec<u8>),
+        /// A provider's answer to a part upload, whose result is its etag
+        /// header rather than its body.
+        PartAccepted(String),
     }
 
     struct State {
@@ -429,6 +487,12 @@ pub(crate) mod test_transport {
         install([Outcome::TransportFailure, Outcome::Success(body)])
     }
 
+    /// Serves a scripted conversation: one outcome per request the client
+    /// makes, in the order it makes them.
+    pub(crate) fn script(outcomes: impl IntoIterator<Item = Outcome>) -> Guard {
+        install(outcomes)
+    }
+
     fn install(outcomes: impl IntoIterator<Item = Outcome>) -> Guard {
         STATE.with(|state| {
             let replaced = state.borrow_mut().replace(State {
@@ -440,7 +504,7 @@ pub(crate) mod test_transport {
         Guard
     }
 
-    pub(super) fn next() -> Option<Result<Vec<u8>, FailedAttempt>> {
+    pub(super) fn next() -> Option<Result<WireResponse, FailedAttempt>> {
         STATE.with(|state| {
             let mut state = state.borrow_mut();
             let state = state.as_mut()?;
@@ -454,7 +518,21 @@ pub(crate) mod test_transport {
                     transport: true,
                     error: ClientError::Http("injected transport failure".to_owned()),
                 }),
-                Outcome::Success(body) => Ok(body),
+                Outcome::Success(bytes) => Ok(WireResponse {
+                    headers: reqwest::header::HeaderMap::new(),
+                    bytes,
+                }),
+                Outcome::PartAccepted(etag) => {
+                    let mut headers = reqwest::header::HeaderMap::new();
+                    headers.insert(
+                        reqwest::header::ETAG,
+                        etag.parse().expect("etag is a valid header value"),
+                    );
+                    Ok(WireResponse {
+                        headers,
+                        bytes: Vec::new(),
+                    })
+                }
             })
         })
     }

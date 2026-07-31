@@ -3,7 +3,7 @@
 
 use super::context::{
     default_remote_put_path, destination_path_for_get, destination_user_path, fail, namespace_path,
-    parse_user_path, render_target, resolve_command_context,
+    parse_user_path, render_target, resolve_command_context, CommandContext,
 };
 use super::output::{CommandData, CommandFailure, CommandOutput};
 use super::recursive;
@@ -14,6 +14,7 @@ use crate::args::{
     RuntimeBehavior, TrashArgs,
 };
 use crate::error::CliError;
+use crate::payload::{read_whole_file, LocalPayload, STDIN_PATH};
 use loonfs_api::{CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeKind, RevisionNo};
 use loonfs_client::{CreateDirectoryOptions, DeleteOptions, NamespacePath, PutFileOptions};
 use std::fs;
@@ -364,13 +365,8 @@ pub(crate) async fn run_filesystem_put(
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, &args.target).await?;
     let local_path = PathBuf::from(&args.local_path);
-    if local_path == Path::new("-") {
-        return Err(fail(
-            kind,
-            Some(context.profile_name),
-            Some(context.mode),
-            CliError::invalid_input("`-` is not supported for `put`"),
-        ));
+    if local_path == Path::new(STDIN_PATH) {
+        return run_filesystem_put_stdin(kind, args, context).await;
     }
 
     let metadata = fs::metadata(&local_path)
@@ -431,18 +427,89 @@ pub(crate) async fn run_filesystem_put(
                 )),
             )
         })?;
-    let remote_path = match args.remote_path {
+    let remote_path = match args.remote_path.as_deref() {
         // A trailing slash names the directory the file lands in — the
         // cp/rsync habit — while a plain path is the full destination.
-        Some(path) => destination_user_path(&path, &local_leaf, true),
+        Some(path) => destination_user_path(path, &local_leaf, true),
         None => default_remote_put_path(&local_path),
     }
     .map_err(|error| context.fail(kind, error))?;
     let spec = NamespacePath::new(context.namespace.clone(), remote_path);
-    let bytes = fs::read(&local_path)
-        .map_err(|error| context.fail(kind, CliError::io_for_path(&local_path, error)))?;
-    let commit_id = parse_commit_id_arg(args.commit_id.as_deref())
-        .map_err(|error| context.fail(kind, error))?;
+    let payload = LocalPayload::file(&local_path, metadata.len());
+    let options = put_file_options(&args).map_err(|error| context.fail(kind, error))?;
+    commit_put(kind, &context, &spec, &payload, &options).await
+}
+
+/// `loon put - <remote>`: standard input, whose length is not knowable, so
+/// it is always read once and never held.
+///
+/// The remote path has to be spelled out. Every other `put` derives a
+/// default from the local file's name, and a pipe has none to derive from.
+async fn run_filesystem_put_stdin(
+    kind: CommandKind,
+    args: FilesystemPutArgs,
+    context: CommandContext,
+) -> Result<CommandOutput, CommandFailure> {
+    if args.recursive {
+        return Err(context.fail(
+            kind,
+            CliError::invalid_input("`-` streams one file; a tree needs a directory"),
+        ));
+    }
+    let Some(remote_path) = args.remote_path.as_deref() else {
+        return Err(context.fail(
+            kind,
+            CliError::invalid_input(
+                "reading from `-` needs an explicit remote path; there is no local name to \
+                 derive one from",
+            ),
+        ));
+    };
+    let remote_path =
+        parse_user_path(remote_path, false).map_err(|error| context.fail(kind, error))?;
+    let spec = NamespacePath::new(context.namespace.clone(), remote_path);
+    let options = put_file_options(&args).map_err(|error| context.fail(kind, error))?;
+    commit_put(kind, &context, &spec, &LocalPayload::Stdin, &options).await
+}
+
+/// Writes one payload and renders what the commit did.
+///
+/// The payload decides how it travels: one that is small enough to hold
+/// goes as bytes, and one that is large — or that cannot say how large it
+/// is — is read once, in pieces, whichever transport the profile selects.
+async fn commit_put(
+    kind: CommandKind,
+    context: &CommandContext,
+    spec: &NamespacePath,
+    payload: &LocalPayload,
+    options: &PutFileOptions,
+) -> Result<CommandOutput, CommandFailure> {
+    let result = match payload.holdable_file() {
+        Some(path) => {
+            let bytes = read_whole_file(path)
+                .await
+                .map_err(|error| context.fail(kind, error))?;
+            context.target.put_file_bytes(spec, &bytes, options).await
+        }
+        None => context.target.put_file_stream(spec, payload, options).await,
+    }
+    .map_err(|error| context.fail(kind, error))?;
+
+    Ok(CommandOutput {
+        kind,
+        profile: Some(context.profile_name.clone()),
+        mode: Some(context.mode.clone()),
+        data: CommandData::FileMutation {
+            target: render_target(&context.namespace, spec.absolute_path()),
+            committed_seq: result.committed_seq,
+            commit_id: result.commit_id,
+            inode_id: None,
+        },
+    })
+}
+
+fn put_file_options(args: &FilesystemPutArgs) -> Result<PutFileOptions, CliError> {
+    let commit_id = parse_commit_id_arg(args.commit_id.as_deref())?;
     let expected_revision_no = args.expected_revision.map(RevisionNo);
     // The revision guard is a stronger replace statement, so it implies
     // --force rather than demanding both flags.
@@ -451,28 +518,11 @@ pub(crate) async fn run_filesystem_put(
     } else {
         DestinationBehavior::NoReplace
     };
-    let options = PutFileOptions {
+    Ok(PutFileOptions {
         behavior,
         commit_id,
         message: args.message.clone(),
         expected_revision_no,
-    };
-    let result = context
-        .target
-        .put_file_bytes(&spec, &bytes, &options)
-        .await
-        .map_err(|error| context.fail(kind, error))?;
-
-    Ok(CommandOutput {
-        kind,
-        profile: Some(context.profile_name),
-        mode: Some(context.mode),
-        data: CommandData::FileMutation {
-            target: render_target(&context.namespace, spec.absolute_path()),
-            committed_seq: result.committed_seq,
-            commit_id: result.commit_id,
-            inode_id: None,
-        },
     })
 }
 

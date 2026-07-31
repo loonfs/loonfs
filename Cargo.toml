@@ -41,7 +41,7 @@ fs4 = "0.13"
 getrandom = "0.3"
 object_store = { version = "=0.12.4", default-features = false, features = ["aws", "gcp", "azure"] }
 regex = { version = "1.11", default-features = false, features = ["std", "perf"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "stream"] }
 regex-syntax = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_bytes = "0.11"

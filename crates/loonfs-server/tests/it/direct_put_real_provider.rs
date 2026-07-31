@@ -1,6 +1,8 @@
 // Ignored real-provider tests exercise the full server/client/direct-object-store path.
 
 use crate::common::{start_server, test_config};
+use bytes::Bytes;
+use futures::StreamExt;
 use loonfs_api::{
     v0::{
         CompleteUploadRequest, DirectMultipartContentClaim, DirectMultipartUploadOptions,
@@ -10,7 +12,7 @@ use loonfs_api::{
     ChangeSeq, CommitId, CommitRequest, CommitResponse, DestinationBehavior, FilesystemOperation,
     NamespaceId, StorageChecksum,
 };
-use loonfs_client::{Client, ClientError, NamespacePath};
+use loonfs_client::{Client, ClientError, NamespacePath, PayloadSource};
 use loonfs_objectstore::ObjectStore;
 use loonfs_server::{ServerConfig, StoreConfig};
 use std::fmt;
@@ -527,10 +529,10 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
         let index = part.part_number as usize - 1;
         let client = harness.client.clone();
         let crc64nvme = claims[index].crc64nvme.clone();
-        let chunk = chunks[index].to_vec();
+        let chunk = Bytes::copy_from_slice(chunks[index]);
         in_flight.spawn(async move {
             client
-                .upload_part_via_presigned_url(part.part_number, &part.access, crc64nvme, &chunk)
+                .upload_part_via_presigned_url(part.part_number, &part.access, crc64nvme, chunk)
                 .await
         });
     }
@@ -545,7 +547,7 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
             repeated.part_number,
             &repeated.access,
             claims[1].crc64nvme.clone(),
-            chunks[1],
+            Bytes::copy_from_slice(chunks[1]),
         )
         .await
         .expect("re-uploading a part is allowed and last-write-wins");
@@ -652,8 +654,85 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
         .expect("rerunning identical bytes is idempotent without a sha256");
     assert_eq!(replayed_rerun, rerun);
 
+    one_pass_puts_against_the_provider(&harness, namespace).await;
+
     harness.server.abort();
     delete_everything_under_the_run_prefix(&store_config).await;
+}
+
+/// The one-pass path, against the provider that has to accept it.
+///
+/// Both puts here are what `loon put` runs: a payload that is never held
+/// whole, cut into parts as it is read, with the object's length and digest
+/// discovered on the way past and claimed at completion. The first reads a
+/// real file from disk — the size that matters is the file's, not this
+/// process's — and the second reads a source that cannot say how long it
+/// is, which is the case a pipe presents and the one no amount of buffering
+/// would rescue.
+async fn one_pass_puts_against_the_provider(harness: &crate::common::TestServer, namespace: &str) {
+    // Three parts and a bit at the deployment's geometry, so the pass
+    // crosses a wave boundary and ends on a short part.
+    let payload: Vec<u8> = (0..3 * MULTIPART_PART_SIZE + 4_096)
+        .map(|offset| (offset % 251) as u8)
+        .collect();
+
+    let file = tempfile::NamedTempFile::new().expect("temp file for the one-pass put");
+    std::fs::write(file.path(), &payload).expect("write the payload to disk");
+    let from_file = NamespacePath::parse(namespace, "/one-pass-file.bin").expect("file target");
+    harness
+        .client
+        .put_file_stream(
+            &from_file,
+            PayloadSource::open_file(file.path())
+                .await
+                .expect("open the payload file"),
+            &put_options("one-pass-file"),
+        )
+        .await
+        .expect("a file streams straight into object storage");
+    assert_eq!(
+        harness
+            .client
+            .get_file_bytes(&from_file)
+            .await
+            .expect("read the file back"),
+        payload,
+        "the object the provider assembled is the file that was read"
+    );
+
+    // The same flow with the length withheld. Nothing in the transport
+    // needed it: begin declares nothing, and the claim is produced by the
+    // pass itself.
+    let piped = NamespacePath::parse(namespace, "/one-pass-piped.bin").expect("piped target");
+    let chunks: Vec<Bytes> = payload
+        .chunks(64 * 1024)
+        .map(Bytes::copy_from_slice)
+        .collect();
+    let source = PayloadSource::stream(futures::stream::iter(chunks.into_iter().map(Ok)).boxed());
+    assert_eq!(source.size_bytes(), None, "this source declares no length");
+    harness
+        .client
+        .put_file_stream(&piped, source, &put_options("one-pass-piped"))
+        .await
+        .expect("a source of unknown length uploads the same way");
+    assert_eq!(
+        harness
+            .client
+            .get_file_bytes(&piped)
+            .await
+            .expect("read the piped payload back"),
+        payload,
+        "a payload nobody measured up front still lands byte for byte"
+    );
+}
+
+fn put_options(commit_id: &str) -> loonfs_client::PutFileOptions {
+    loonfs_client::PutFileOptions {
+        behavior: DestinationBehavior::NoReplace,
+        commit_id: Some(CommitId::parse(commit_id).expect("valid commit id")),
+        message: None,
+        expected_revision_no: None,
+    }
 }
 
 /// Removes every object this run wrote.

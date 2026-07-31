@@ -14,11 +14,13 @@
 
 mod config;
 mod error;
+mod payload;
 mod transport;
 
+use bytes::Bytes;
 use loonfs_api::{
     v0::{
-        BeginUploadRequest, BeginUploadResponse, ChangesResponse,
+        AbortUploadResponse, BeginUploadRequest, BeginUploadResponse, ChangesResponse,
         CommitResponse as ApiCommitResponse, CommittedChange, CompleteUploadRequest,
         CompleteUploadResponse, CompletedUploadPart, DirectMultipartContentClaim,
         DirectMultipartUploadOptions, DirectPutContentClaim, DisableGrepIndexResponse,
@@ -27,7 +29,7 @@ use loonfs_api::{
         UploadMode, UploadPartChecksumClaim, ValidatedContentToken,
     },
     AbsolutePath, AuthoritativePathEntry, CapabilityDocument, ChangeSeq, CheckpointId,
-    ChecksumAlgorithm, CommitId, CommitRequest, ContentRef, CreateCheckpointRequest,
+    ChecksumAlgorithm, CommitId, CommitRequest, ContentRef, Crc64Nvme, CreateCheckpointRequest,
     CreateCheckpointResponse, CreateNamespaceRequest, DeleteNamespaceResponse, DestinationBehavior,
     ErrorCode, FilesystemOperation, ForkNamespaceRequest, GrepRequest, GrepResponse, InodeId,
     ListFileRevisionsResponse, ListPathEntriesResponse, ListTrashResponse, MaintenanceStepRequest,
@@ -35,17 +37,27 @@ use loonfs_api::{
     ReleaseCheckpointResponse, RevisionNo, StorageChecksum, UploadId,
     FEATURE_UPLOADS_DIRECT_MULTIPART,
 };
+use payload::PartReader;
 use std::sync::{Arc, OnceLock};
 
-/// Payload size from which the client prefers a direct multipart upload,
-/// when the deployment offers one. It mirrors the server's part size, so
-/// anything smaller would be a one-part multipart upload with extra round
-/// trips and nothing to gain.
-const DIRECT_MULTIPART_MIN_BYTES: u64 = 8 * 1024 * 1024;
+/// Payload size from which a put stops holding its bytes whole.
+///
+/// It mirrors the server's multipart part size, and that one number answers
+/// two questions the same way: below it a direct multipart upload would be a
+/// one-part upload with extra round trips and nothing to gain, and a payload
+/// that fits in a single part is not worth streaming either. At or above it
+/// — and for any payload whose length is not known in advance — a put reads
+/// its source once, in bounded pieces.
+pub const STREAMING_PUT_MIN_BYTES: u64 = 8 * 1024 * 1024;
 
-/// Parts in flight at once. Each holds its bytes, so this is the memory the
-/// parallelism costs.
+/// Parts in flight at once. Each holds its bytes, so a one-pass upload's
+/// memory is this many parts and no more.
 const DIRECT_MULTIPART_PARTS_IN_FLIGHT: usize = 4;
+
+/// Attempts one part gets before its upload gives up. A retry re-asks for
+/// the part's URL, because the first thing that goes stale about a part is
+/// its signature.
+const DIRECT_MULTIPART_PART_ATTEMPTS: usize = 3;
 
 /// Change-feed sequences one lookup window covers when resolving a reused
 /// commit id.
@@ -55,6 +67,59 @@ const COMMIT_LOOKUP_WINDOW: u64 = 128;
 /// commit being retried is a recent one; past this the answer is "not
 /// found", never a guess.
 const COMMIT_LOOKUP_MAX_WINDOWS: usize = 8;
+
+/// What a retry can still say about the payload it just uploaded.
+///
+/// A buffered put can answer any question about its bytes by hashing them
+/// again. A one-pass put cannot: its payload went by once and is gone, and
+/// what it kept instead is the verified description the server gave back.
+/// Both are evidence about the same bytes; they differ only in which
+/// questions they can answer, and a question neither can answer is reported
+/// as such rather than guessed at.
+#[derive(Debug, Clone, Copy)]
+enum UploadedContent<'a> {
+    /// The payload itself, which can produce any digest this build knows.
+    Bytes(&'a [u8]),
+    /// The reference the server minted for a payload that was streamed
+    /// past: its length, and the digest whoever hashed it reported.
+    Streamed(&'a ContentRef),
+}
+
+impl UploadedContent<'_> {
+    /// Complete length of what was uploaded.
+    fn size_bytes(&self) -> u64 {
+        match self {
+            Self::Bytes(bytes) => bytes.len() as u64,
+            Self::Streamed(content_ref) => content_ref.size_bytes,
+        }
+    }
+
+    /// Whether the upload's bytes produce this checksum.
+    ///
+    /// `None` is a refusal to answer — the algorithm is one this build
+    /// cannot recompute, or one nobody computed over the streamed payload —
+    /// and a caller must never read it as agreement.
+    fn matches(&self, expected: &StorageChecksum) -> Option<bool> {
+        match self {
+            Self::Bytes(bytes) => expected.matches(bytes),
+            Self::Streamed(content_ref) => {
+                let observed = digest_of(content_ref, expected.algorithm)?;
+                Some(observed == expected.value)
+            }
+        }
+    }
+}
+
+/// The digest a reference carries under one algorithm, if it carries one.
+fn digest_of(content_ref: &ContentRef, algorithm: ChecksumAlgorithm) -> Option<&str> {
+    if content_ref.storage_checksum.algorithm == algorithm {
+        return Some(&content_ref.storage_checksum.value);
+    }
+    match algorithm {
+        ChecksumAlgorithm::Sha256 => content_ref.whole_file_sha256.as_deref(),
+        _ => None,
+    }
+}
 
 /// The content one committed change wrote, if it wrote any.
 fn committed_content_ref(change: &CommittedChange) -> Option<&ContentRef> {
@@ -67,6 +132,7 @@ fn committed_content_ref(change: &CommittedChange) -> Option<&ContentRef> {
 
 pub use config::ClientConfig;
 pub use error::ClientError;
+pub use payload::{PayloadSource, PayloadStream};
 use transport::{WireRequest, IO_INACTIVITY_TIMEOUT};
 pub use ClientError as Error;
 
@@ -97,6 +163,97 @@ pub struct Client {
 struct StagedContent {
     content_ref: ContentRef,
     validated_content_token: Option<ValidatedContentToken>,
+}
+
+/// What a multipart upload has to work with.
+///
+/// The two arms exist so that neither caller pays for the other's shape: a
+/// caller holding its payload should not have it copied whole to be
+/// uploaded, and a caller reading a stream cannot be asked for a length it
+/// does not have. Past this point the upload cannot tell them apart.
+enum MultipartPayload<'a> {
+    /// A payload the caller already holds.
+    Held(&'a [u8]),
+    /// A payload read once, in pieces, as it is uploaded.
+    Streamed(PayloadStream),
+}
+
+impl<'a> MultipartPayload<'a> {
+    /// Binds the payload to the geometry the server chose.
+    fn into_parts_of(self, part_bytes: usize) -> MultipartParts<'a> {
+        match self {
+            Self::Held(bytes) => MultipartParts::Held {
+                bytes,
+                offset: 0,
+                part_bytes: part_bytes.max(1),
+            },
+            Self::Streamed(stream) => MultipartParts::Streamed(PartReader::new(stream, part_bytes)),
+        }
+    }
+}
+
+/// A payload cut into the parts it will be uploaded as.
+enum MultipartParts<'a> {
+    Held {
+        bytes: &'a [u8],
+        offset: usize,
+        part_bytes: usize,
+    },
+    Streamed(PartReader),
+}
+
+impl MultipartParts<'_> {
+    /// The next part, or `None` once the payload is spent. Both arms hand
+    /// out one part's worth of bytes and no more.
+    async fn next_part(&mut self) -> Result<Option<Bytes>> {
+        match self {
+            Self::Held {
+                bytes,
+                offset,
+                part_bytes,
+            } => {
+                if *offset >= bytes.len() {
+                    return Ok(None);
+                }
+                let end = bytes.len().min(*offset + *part_bytes);
+                let part = Bytes::copy_from_slice(&bytes[*offset..end]);
+                *offset = end;
+                Ok(Some(part))
+            }
+            Self::Streamed(reader) => reader
+                .next_part()
+                .await
+                .map_err(|error| ClientError::Http(format!("reading the payload failed: {error}"))),
+        }
+    }
+}
+
+/// One part waiting to be uploaded, with the checksum its URL is signed
+/// against.
+struct PendingPart {
+    claim: UploadPartChecksumClaim,
+    bytes: Bytes,
+}
+
+/// What one pass over a payload produced: the assembled object's length and
+/// digest, and the parts it was written as.
+struct UploadedObject {
+    size_bytes: u64,
+    crc64nvme: StorageChecksum,
+    parts: Vec<CompletedUploadPart>,
+}
+
+/// Picks one part's authorization out of a signing response.
+fn signed_access(signed: &[SignedUploadPart], part_number: u32) -> Result<ObjectTransferAccess> {
+    signed
+        .iter()
+        .find(|part| part.part_number == part_number)
+        .map(|part| part.access.clone())
+        .ok_or_else(|| {
+            ClientError::Http(format!(
+                "server authorized no upload for part {part_number}"
+            ))
+        })
 }
 
 /// A path qualified by namespace.
@@ -464,7 +621,7 @@ impl Client {
         part_number: u32,
         access: &ObjectTransferAccess,
         crc64nvme: String,
-        bytes: &[u8],
+        bytes: Bytes,
     ) -> Result<CompletedUploadPart> {
         let ObjectTransferAccess::PresignedUrl {
             method,
@@ -485,7 +642,7 @@ impl Client {
         // provider takes the last write, and the checksum rides the
         // signature either way.
         let response = self
-            .call_with_transient_retry_headers(&request, Some(bytes))
+            .call_with_transient_retry_headers(&request, Some(&bytes))
             .await?;
         let etag = response
             .get(http::header::ETAG)
@@ -524,7 +681,9 @@ impl Client {
             request = request.header(name, value);
         }
         // A successful create-only PUT may replay as a provider precondition error, not success.
-        self.call_once(&request, Some(bytes)).await.map(|_| ())
+        self.call_once(&request, Some(&Bytes::copy_from_slice(bytes)))
+            .await
+            .map(|_| ())
     }
 
     pub async fn upload_content(
@@ -533,19 +692,71 @@ impl Client {
         upload_id: &UploadId,
         bytes: &[u8],
     ) -> Result<UploadContentResponse> {
+        let request = self.upload_content_request(namespace_id, upload_id);
+        // Proxied uploads are the request most likely to hit the server's
+        // concurrency cap; staging the same bytes again is idempotent.
+        let response = self
+            .call_with_transient_retry(&request, Some(&Bytes::copy_from_slice(bytes)))
+            .await?;
+        serde_json::from_slice(&response).map_err(|err| ClientError::Json(err.to_string()))
+    }
+
+    /// Stages a payload that arrives in pieces, forwarding it to the server
+    /// as it is read.
+    ///
+    /// This is [`Self::upload_content`] for a caller that does not hold its
+    /// bytes: the payload crosses the client in bounded chunks and the
+    /// server hashes it as it forwards it on, so neither side ever holds the
+    /// object. A source whose length is unknown is sent with chunked
+    /// transfer encoding, and the server's own limit is what bounds it.
+    ///
+    /// Unlike the buffered call this one never resends: a stream is consumed
+    /// by the attempt that reads it, so a failure here is the caller's to
+    /// handle with a fresh source.
+    pub async fn upload_streamed_content(
+        &self,
+        namespace_id: &NamespaceId,
+        upload_id: &UploadId,
+        source: PayloadSource,
+    ) -> Result<UploadContentResponse> {
+        let request = self.upload_content_request(namespace_id, upload_id);
+        let (stream, size_bytes) = source.into_stream();
+        let response = self
+            .call_streamed_once(&request, stream, size_bytes)
+            .await?;
+        serde_json::from_slice(&response).map_err(|err| ClientError::Json(err.to_string()))
+    }
+
+    fn upload_content_request(
+        &self,
+        namespace_id: &NamespaceId,
+        upload_id: &UploadId,
+    ) -> WireRequest {
         let url = format!(
             "{}/v0/namespaces/{namespace_id}/uploads/{upload_id}/content",
             self.base_url
         );
-        let request = self
-            .put(&url)
-            .header("content-type", "application/octet-stream");
-        // Proxied uploads are the request most likely to hit the server's
-        // concurrency cap; staging the same bytes again is idempotent.
-        let response = self
-            .call_with_transient_retry(&request, Some(bytes))
-            .await?;
-        serde_json::from_slice(&response).map_err(|err| ClientError::Json(err.to_string()))
+        self.put(&url)
+            .header("content-type", "application/octet-stream")
+    }
+
+    /// Ends an open upload session and deletes the object it was writing.
+    ///
+    /// Repeating it succeeds and reports the abort that stands. This is what
+    /// a one-pass upload does when its source fails partway: the session it
+    /// opened must not be left holding a half-written object.
+    pub async fn abort_upload(
+        &self,
+        namespace_id: &NamespaceId,
+        upload_id: &UploadId,
+    ) -> Result<AbortUploadResponse> {
+        let url = format!(
+            "{}/v0/namespaces/{namespace_id}/uploads/{upload_id}/abort",
+            self.base_url
+        );
+        // Aborting is idempotent: a repeat reports the abort that stands.
+        self.request_json::<(), AbortUploadResponse>(self.post(&url), None)
+            .await
     }
 
     pub async fn complete_upload(
@@ -707,61 +918,94 @@ impl Client {
         namespace_id: &NamespaceId,
         bytes: &[u8],
     ) -> Result<StagedContent> {
-        if bytes.len() as u64 >= DIRECT_MULTIPART_MIN_BYTES
-            && self
-                .capabilities()
-                .await
-                .is_ok_and(|capabilities| capabilities.supports(FEATURE_UPLOADS_DIRECT_MULTIPART))
-        {
-            return self.stage_bytes_via_multipart(namespace_id, bytes).await;
+        if bytes.len() as u64 >= STREAMING_PUT_MIN_BYTES && self.offers_direct_multipart().await {
+            return self
+                .stage_via_multipart(namespace_id, MultipartPayload::Held(bytes))
+                .await;
         }
         self.stage_bytes_via_server(namespace_id, bytes).await
     }
 
-    /// Uploads one object straight to object storage in parallel parts.
+    /// Makes a streamed payload durable, choosing the transport the source
+    /// and the deployment allow.
+    ///
+    /// Either way the source is read once, forward, and never held whole.
+    /// A deployment that can authorize direct part uploads gets them; one
+    /// that cannot receives the same source as a streaming request body.
+    async fn stage_source_as_content_ref(
+        &self,
+        namespace_id: &NamespaceId,
+        source: PayloadSource,
+    ) -> Result<StagedContent> {
+        // A source that knows it is small has nothing to gain from parts,
+        // exactly as a held payload of that size does not. A source that
+        // does not know its length cannot make that judgement, so it takes
+        // the transport that can carry any length.
+        let known_small = source
+            .size_bytes()
+            .is_some_and(|size_bytes| size_bytes < STREAMING_PUT_MIN_BYTES);
+        if !known_small && self.offers_direct_multipart().await {
+            let (stream, _) = source.into_stream();
+            return self
+                .stage_via_multipart(namespace_id, MultipartPayload::Streamed(stream))
+                .await;
+        }
+        self.stage_source_via_server(namespace_id, source).await
+    }
+
+    /// Whether this deployment authorizes direct part uploads.
+    async fn offers_direct_multipart(&self) -> bool {
+        self.capabilities()
+            .await
+            .is_ok_and(|capabilities| capabilities.supports(FEATURE_UPLOADS_DIRECT_MULTIPART))
+    }
+
+    /// Uploads one object straight to object storage in bounded waves of
+    /// parts.
     ///
     /// The whole-object checksum is folded part by part as the payload is
     /// cut, so the same pass that produces what the provider enforces on
     /// each part also produces what completion verifies the assembly
     /// against — and because the claim is only needed at completion, that
-    /// one pass is the only pass a caller ever has to make over its bytes.
-    async fn stage_bytes_via_multipart(
+    /// one pass is the only pass over the bytes anyone has to make. Nothing
+    /// here needs the payload's length in advance, which is what lets a
+    /// stream with no length take this path unchanged.
+    ///
+    /// A session that fails partway is aborted rather than left open.
+    async fn stage_via_multipart(
         &self,
         namespace_id: &NamespaceId,
-        bytes: &[u8],
+        payload: MultipartPayload<'_>,
     ) -> Result<StagedContent> {
-        let whole_object = StorageChecksum::crc64nvme(bytes);
         let begin = self
             .begin_direct_multipart(namespace_id, DirectMultipartUploadOptions::default())
             .await?;
         let upload_id = begin.upload_id.clone();
-        let multipart = begin.direct_multipart.ok_or_else(|| {
-            ClientError::Http("server accepted direct_multipart without part geometry".to_owned())
-        })?;
-
-        let part_size = usize::try_from(multipart.part_size_bytes)
-            .map_err(|_| ClientError::Http("part size does not fit this platform".to_owned()))?;
-        let chunks: Vec<&[u8]> = if bytes.is_empty() {
-            vec![&[]]
-        } else {
-            bytes.chunks(part_size.max(1)).collect()
+        let Some(multipart) = begin.direct_multipart else {
+            return Err(ClientError::Http(
+                "server accepted direct_multipart without part geometry".to_owned(),
+            ));
         };
-        let claims = chunks
-            .iter()
-            .enumerate()
-            .map(|(index, chunk)| UploadPartChecksumClaim {
-                part_number: index as u32 + 1,
-                crc64nvme: StorageChecksum::crc64nvme(chunk).value,
-            })
-            .collect::<Vec<_>>();
-        let signed = self
-            .sign_upload_parts(namespace_id, &upload_id, claims.clone())
-            .await?;
-
-        let mut parts = self
-            .upload_signed_parts(&signed.parts, &claims, &chunks)
-            .await?;
-        parts.sort_by_key(|part| part.part_number);
+        let uploaded = self
+            .upload_every_part(namespace_id, &upload_id, payload, multipart.part_size_bytes)
+            .await;
+        let uploaded = match uploaded {
+            Ok(uploaded) => uploaded,
+            Err(error) => {
+                // The session owns an object this upload will never finish
+                // writing. Ending it is best-effort: the original failure is
+                // what the caller needs to see, and abandoned sessions are
+                // collected either way.
+                let _ = self.abort_upload(namespace_id, &upload_id).await;
+                return Err(error);
+            }
+        };
+        if uploaded.parts.is_empty() {
+            // The source was empty, and a provider has no empty assembly to
+            // make. The payload is nothing, so staging it costs nothing.
+            let _ = self.abort_upload(namespace_id, &upload_id).await;
+            return self.stage_bytes_via_server(namespace_id, &[]).await;
+        }
 
         let response = self
             .complete_upload(
@@ -769,56 +1013,152 @@ impl Client {
                 &upload_id,
                 &CompleteUploadRequest::for_multipart(
                     DirectMultipartContentClaim {
-                        size_bytes: bytes.len() as u64,
-                        crc64nvme: whole_object.value.clone(),
+                        size_bytes: uploaded.size_bytes,
+                        crc64nvme: uploaded.crc64nvme.value,
                     },
-                    parts,
+                    uploaded.parts,
                 ),
             )
             .await?;
         Ok(Self::staged_from_completion(response))
     }
 
-    /// Uploads parts with a bounded number in flight.
+    /// Cuts the payload into parts and uploads them, holding at most
+    /// [`DIRECT_MULTIPART_PARTS_IN_FLIGHT`] of them at a time.
     ///
-    /// The window exists because each in-flight part holds its bytes: the
-    /// point of this path is that a large object crosses the network once
-    /// and in parallel, not that it is all in flight at once.
-    async fn upload_signed_parts(
+    /// The window is the memory bound: each in-flight part holds its bytes,
+    /// and nothing outside the window does. One wave asks for its part URLs
+    /// in a single request, uploads them together, and only then reads the
+    /// next wave — so the payload's length never enters into how much of it
+    /// is resident.
+    async fn upload_every_part(
         &self,
-        signed: &[SignedUploadPart],
-        claims: &[UploadPartChecksumClaim],
-        chunks: &[&[u8]],
-    ) -> Result<Vec<CompletedUploadPart>> {
-        let mut uploaded = Vec::with_capacity(signed.len());
-        for wave in signed.chunks(DIRECT_MULTIPART_PARTS_IN_FLIGHT) {
-            let mut in_flight = tokio::task::JoinSet::new();
-            for part in wave {
-                let index = part.part_number as usize - 1;
-                let (Some(claim), Some(chunk)) = (claims.get(index), chunks.get(index)) else {
-                    return Err(ClientError::Http(format!(
-                        "server signed part {} which this upload does not have",
-                        part.part_number
-                    )));
+        namespace_id: &NamespaceId,
+        upload_id: &UploadId,
+        payload: MultipartPayload<'_>,
+        part_size_bytes: u64,
+    ) -> Result<UploadedObject> {
+        let part_size = usize::try_from(part_size_bytes)
+            .map_err(|_| ClientError::Http("part size does not fit this platform".to_owned()))?;
+        let mut source = payload.into_parts_of(part_size);
+        let mut whole_object = Crc64Nvme::new();
+        let mut size_bytes = 0u64;
+        let mut parts = Vec::new();
+        let mut next_part_number = 1u32;
+
+        loop {
+            let mut wave = Vec::with_capacity(DIRECT_MULTIPART_PARTS_IN_FLIGHT);
+            while wave.len() < DIRECT_MULTIPART_PARTS_IN_FLIGHT {
+                let Some(bytes) = source.next_part().await? else {
+                    break;
                 };
-                let client = self.clone();
-                let access = part.access.clone();
-                let crc64nvme = claim.crc64nvme.clone();
-                let part_number = part.part_number;
-                let chunk = chunk.to_vec();
-                in_flight.spawn(async move {
-                    client
-                        .upload_part_via_presigned_url(part_number, &access, crc64nvme, &chunk)
-                        .await
+                whole_object.update(&bytes);
+                size_bytes += bytes.len() as u64;
+                wave.push(PendingPart {
+                    claim: UploadPartChecksumClaim {
+                        part_number: next_part_number,
+                        crc64nvme: StorageChecksum::crc64nvme(&bytes).value,
+                    },
+                    bytes,
                 });
+                next_part_number += 1;
             }
-            while let Some(joined) = in_flight.join_next().await {
-                uploaded.push(joined.map_err(|err| {
-                    ClientError::Http(format!("part upload task failed: {err}"))
-                })??);
+            if wave.is_empty() {
+                break;
+            }
+            let complete = wave.len() == DIRECT_MULTIPART_PARTS_IN_FLIGHT;
+            parts.extend(self.upload_wave(namespace_id, upload_id, wave).await?);
+            if !complete {
+                // A short wave is the only proof the source ended.
+                break;
             }
         }
-        Ok(uploaded)
+
+        parts.sort_by_key(|part| part.part_number);
+        Ok(UploadedObject {
+            size_bytes,
+            crc64nvme: whole_object.finish(),
+            parts,
+        })
+    }
+
+    /// Authorizes and uploads one wave of parts together.
+    async fn upload_wave(
+        &self,
+        namespace_id: &NamespaceId,
+        upload_id: &UploadId,
+        wave: Vec<PendingPart>,
+    ) -> Result<Vec<CompletedUploadPart>> {
+        let claims = wave.iter().map(|part| part.claim.clone()).collect();
+        let signed = self
+            .sign_upload_parts(namespace_id, upload_id, claims)
+            .await?;
+        let mut in_flight = tokio::task::JoinSet::new();
+        for part in wave {
+            let access = signed_access(&signed.parts, part.claim.part_number)?;
+            let client = self.clone();
+            let namespace_id = namespace_id.clone();
+            let upload_id = upload_id.clone();
+            in_flight.spawn(async move {
+                client
+                    .upload_one_part(&namespace_id, &upload_id, part, access)
+                    .await
+            });
+        }
+        let mut uploaded = Vec::new();
+        let mut failure = None;
+        while let Some(joined) = in_flight.join_next().await {
+            match joined.map_err(|err| ClientError::Http(format!("part upload task failed: {err}")))
+            {
+                // Every task is drained before the first failure surfaces,
+                // so no part upload outlives the wave that started it.
+                Ok(Ok(part)) => uploaded.push(part),
+                Ok(Err(error)) | Err(error) => failure = failure.or(Some(error)),
+            }
+        }
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(uploaded),
+        }
+    }
+
+    /// Uploads one part, re-asking for its URL if the upload fails.
+    ///
+    /// Re-asking is the retry: a part's signature is the first thing about
+    /// it that goes stale, and a repeated part is last-write-wins at the
+    /// provider, so nothing is lost by writing it again.
+    async fn upload_one_part(
+        &self,
+        namespace_id: &NamespaceId,
+        upload_id: &UploadId,
+        part: PendingPart,
+        mut access: ObjectTransferAccess,
+    ) -> Result<CompletedUploadPart> {
+        let part_number = part.claim.part_number;
+        for attempt in 1..=DIRECT_MULTIPART_PART_ATTEMPTS {
+            let result = self
+                .upload_part_via_presigned_url(
+                    part_number,
+                    &access,
+                    part.claim.crc64nvme.clone(),
+                    part.bytes.clone(),
+                )
+                .await;
+            match result {
+                Ok(uploaded) => return Ok(uploaded),
+                Err(error) if attempt == DIRECT_MULTIPART_PART_ATTEMPTS => return Err(error),
+                Err(_) => {
+                    let signed = self
+                        .sign_upload_parts(namespace_id, upload_id, vec![part.claim.clone()])
+                        .await?;
+                    access = signed_access(&signed.parts, part_number)?;
+                }
+            }
+        }
+        // The loop above returns on its last attempt.
+        Err(ClientError::Http(format!(
+            "part {part_number} upload made no attempt"
+        )))
     }
 
     async fn stage_bytes_via_server(
@@ -832,10 +1172,47 @@ impl Client {
         let staged = self
             .upload_content(namespace_id, &upload.upload_id, bytes)
             .await?;
+        self.complete_staged(namespace_id, &upload.upload_id, staged)
+            .await
+    }
+
+    /// Stages a streamed payload through the server, which hashes it as it
+    /// forwards it on.
+    ///
+    /// The session is aborted if the transfer fails, for the same reason a
+    /// multipart session is: it owns an object nothing will finish writing.
+    async fn stage_source_via_server(
+        &self,
+        namespace_id: &NamespaceId,
+        source: PayloadSource,
+    ) -> Result<StagedContent> {
+        let upload = self
+            .begin_upload(namespace_id, &BeginUploadRequest::default())
+            .await?;
+        let staged = self
+            .upload_streamed_content(namespace_id, &upload.upload_id, source)
+            .await;
+        let staged = match staged {
+            Ok(staged) => staged,
+            Err(error) => {
+                let _ = self.abort_upload(namespace_id, &upload.upload_id).await;
+                return Err(error);
+            }
+        };
+        self.complete_staged(namespace_id, &upload.upload_id, staged)
+            .await
+    }
+
+    async fn complete_staged(
+        &self,
+        namespace_id: &NamespaceId,
+        upload_id: &UploadId,
+        staged: UploadContentResponse,
+    ) -> Result<StagedContent> {
         let response = self
             .complete_upload(
                 namespace_id,
-                &upload.upload_id,
+                upload_id,
                 &CompleteUploadRequest::for_content_ref(staged.content_ref),
             )
             .await?;
@@ -878,10 +1255,63 @@ impl Client {
         bytes: &[u8],
         options: &PutFileOptions,
     ) -> Result<ApiCommitResponse> {
-        let commit_id = options.commit_id.clone().unwrap_or_else(CommitId::generate);
         let staged = self
             .stage_bytes_as_content_ref(spec.namespace(), bytes)
             .await?;
+        self.commit_staged_file(spec, staged, options, UploadedContent::Bytes(bytes))
+            .await
+    }
+
+    /// Uploads a payload read once from its source and commits it at a path.
+    ///
+    /// This is [`Self::put_file_bytes`] for a caller that should not hold
+    /// its payload: the source is read forward in bounded pieces, hashed as
+    /// it goes, and never assembled. What the memory costs is the transport's
+    /// window and nothing about the payload's size — so a file larger than
+    /// this process could hold, or a pipe whose length nobody knows, both
+    /// upload the same way.
+    ///
+    /// Where the deployment authorizes direct part uploads the payload goes
+    /// straight to object storage in parts, and otherwise it streams through
+    /// the server. One bound is worth knowing on the direct path: a provider
+    /// assembles at most 10,000 parts, so a session carries at most
+    /// `part_size_bytes × 10_000` and a longer payload is refused when it
+    /// asks to authorize the part past that ceiling. A caller that knows its
+    /// payload is enormous should not be taking the default geometry.
+    ///
+    /// Retrying with a `commit_id` that already committed is safe here in
+    /// the same way it is for [`Self::put_file_bytes`], and by the same
+    /// evidence: this pass measured the payload's length and folded its
+    /// digest, which is what the reconciliation compares. The digest is
+    /// CRC-64/NVME on the direct path, because that is what a provider
+    /// computes over an assembled object.
+    pub async fn put_file_stream(
+        &self,
+        spec: &NamespacePath,
+        source: PayloadSource,
+        options: &PutFileOptions,
+    ) -> Result<ApiCommitResponse> {
+        let staged = self
+            .stage_source_as_content_ref(spec.namespace(), source)
+            .await?;
+        // The staged reference is what the server verified about the bytes
+        // that just went past, and with the payload gone it is the only
+        // description of them that still exists.
+        let uploaded = staged.content_ref.clone();
+        self.commit_staged_file(spec, staged, options, UploadedContent::Streamed(&uploaded))
+            .await
+    }
+
+    /// Commits one staged payload at a path, reconciling a reused commit id
+    /// against what was just uploaded.
+    async fn commit_staged_file(
+        &self,
+        spec: &NamespacePath,
+        staged: StagedContent,
+        options: &PutFileOptions,
+        uploaded: UploadedContent<'_>,
+    ) -> Result<ApiCommitResponse> {
+        let commit_id = options.commit_id.clone().unwrap_or_else(CommitId::generate);
         let response = self
             .commit(
                 spec.namespace(),
@@ -901,7 +1331,7 @@ impl Client {
         match response {
             Ok(response) => Ok(response),
             Err(error) if error.code() == Some(ErrorCode::CommitIdReuseConflict) => {
-                self.reconcile_commit_id_reuse(spec.namespace(), &commit_id, bytes, error)
+                self.reconcile_commit_id_reuse(spec.namespace(), &commit_id, uploaded, error)
                     .await
             }
             Err(error) => Err(error),
@@ -918,7 +1348,7 @@ impl Client {
         &self,
         namespace_id: &NamespaceId,
         commit_id: &CommitId,
-        bytes: &[u8],
+        uploaded: UploadedContent<'_>,
         conflict: ClientError,
     ) -> Result<ApiCommitResponse> {
         let Some(committed) = self.find_committed_change(namespace_id, commit_id).await? else {
@@ -927,7 +1357,7 @@ impl Client {
         let Some(content_ref) = committed_content_ref(&committed) else {
             return Err(conflict);
         };
-        if content_ref.size_bytes != bytes.len() as u64 {
+        if content_ref.size_bytes != uploaded.size_bytes() {
             return Err(conflict);
         }
 
@@ -942,7 +1372,7 @@ impl Client {
             },
             None => content_ref.storage_checksum.clone(),
         };
-        match evidence.matches(bytes) {
+        match uploaded.matches(&evidence) {
             Some(true) => Ok(ApiCommitResponse {
                 namespace_id: namespace_id.clone(),
                 commit_id: committed.commit_id,
@@ -951,8 +1381,8 @@ impl Client {
             Some(false) => Err(conflict),
             None => Err(ClientError::Http(format!(
                 "commit `{commit_id}` already committed content checksummed with \
-                 `{}`, which this client cannot recompute, so it cannot tell whether \
-                 this is the same upload retried",
+                 `{}`, which this client cannot compare against what it just \
+                 uploaded, so it cannot tell whether this is the same upload retried",
                 evidence.algorithm
             ))),
         }
@@ -1214,6 +1644,9 @@ fn append_query_param(url: &mut String, has_query: &mut bool, name: &str, value:
     url.push('=');
     url.push_str(&urlencoding::encode(value));
 }
+
+#[cfg(test)]
+mod streaming_tests;
 
 #[cfg(test)]
 mod tests {
