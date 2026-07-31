@@ -75,6 +75,7 @@ fn upload_flow_is_available_from_runtime() {
 
     let request = CompleteUploadRequest {
         content_ref: staged.content_ref,
+        multipart_parts: None,
     };
     let completed = fs
         .complete_upload_blocking(&namespace_id, &begin.upload_id, &request)
@@ -106,6 +107,7 @@ fn direct_put_upload_flow_validates_durable_object_on_complete() {
 
     let complete_request = CompleteUploadRequest {
         content_ref: content_ref.clone(),
+        multipart_parts: None,
     };
     assert!(fs
         .complete_upload_blocking(&namespace_id, &begin.upload_id, &complete_request)
@@ -165,6 +167,7 @@ fn direct_put_completion_proves_upload_without_reading_content() {
             &begin.upload_id,
             &CompleteUploadRequest {
                 content_ref: content_ref.clone(),
+                multipart_parts: None,
             },
         )
         .expect("complete direct put");
@@ -201,7 +204,10 @@ fn direct_put_completion_rejects_a_mis_declared_size() {
         .complete_upload_blocking(
             &namespace_id,
             &begin.upload_id,
-            &CompleteUploadRequest { content_ref },
+            &CompleteUploadRequest {
+                content_ref,
+                multipart_parts: None,
+            },
         )
         .expect_err("mis-declared size must fail completion");
     assert!(
@@ -239,7 +245,10 @@ fn direct_put_completion_rejects_and_removes_bytes_that_do_not_match_the_claim()
         .complete_upload_blocking(
             &namespace_id,
             &begin.upload_id,
-            &CompleteUploadRequest { content_ref },
+            &CompleteUploadRequest {
+                content_ref,
+                multipart_parts: None,
+            },
         )
         .expect_err("mismatched bytes must fail completion");
     assert!(
@@ -387,11 +396,12 @@ fn path_mutations_return_the_commit_id_they_committed_under() {
         assert_eq!(replay.commit_id, first.commit_id);
         assert_eq!(replay.committed_seq, first.committed_seq);
 
-        // Re-uploading the same bytes under the same commit id does not
-        // replay: a fresh upload mints a fresh content object, so it is a
-        // different mutation and the reused id conflicts. This is the retry
-        // rule clients have to follow — keep the reference, do not re-upload.
-        let conflict = fs
+        // Re-uploading the same bytes under the same commit id stages a
+        // fresh content object, so the publisher sees a different mutation
+        // and refuses it. What makes the rerun safe is the comparison that
+        // follows: the commit id's committed content is read back, its
+        // bytes match, and the original commit is reported.
+        let reuploaded = fs
             .put_file_bytes(
                 &namespace_id,
                 "/docs/a.txt",
@@ -403,7 +413,23 @@ fn path_mutations_return_the_commit_id_they_committed_under() {
                 },
             )
             .await
-            .expect_err("re-uploading under a used commit id must conflict");
+            .expect("re-uploading identical bytes under a used commit id is idempotent");
+        assert_eq!(reuploaded.committed_seq, first.committed_seq);
+
+        // Different bytes are a different operation and still conflict.
+        let conflict = fs
+            .put_file_bytes(
+                &namespace_id,
+                "/docs/a.txt",
+                b"omega",
+                PutFileOptions {
+                    commit_id: Some(commit_id.clone()),
+                    message: None,
+                    ..PutFileOptions::default()
+                },
+            )
+            .await
+            .expect_err("different bytes under a used commit id must conflict");
         assert_eq!(conflict.code(), ErrorCode::CommitIdReuseConflict);
 
         // Without a caller-supplied id, the generated one is still returned,
@@ -460,6 +486,7 @@ fn concurrent_puts_coalesce_into_one_wal_segment() {
                     &begin.upload_id,
                     &CompleteUploadRequest {
                         content_ref: staged.content_ref,
+                        multipart_parts: None,
                     },
                 )
                 .await

@@ -69,6 +69,7 @@ async fn park_two_puts(temp_dir: &Path) -> ParkedPuts {
             BeginUploadRequest {
                 mode: None,
                 content: None,
+                multipart: None,
             },
         )
         .await

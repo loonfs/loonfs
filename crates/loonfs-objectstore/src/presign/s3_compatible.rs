@@ -1,6 +1,6 @@
 //! Presigner for S3-compatible providers (AWS S3, Cloudflare R2).
 
-use super::{ObjectTransferIssuer, PresignedPutRequest, PresignedUrl};
+use super::{ObjectTransferIssuer, PresignedPartRequest, PresignedPutRequest, PresignedUrl};
 use crate::keyspace::{parse_endpoint_url, scope_object_key};
 use crate::object_store::Result;
 use crate::presign::aws_sigv4::{
@@ -11,7 +11,7 @@ use crate::secret::SecretString;
 use crate::ObjectStoreError;
 use base64::Engine as _;
 use loonfs_api::wire::hex::hex_decode_bytes;
-use loonfs_api::{ChecksumAlgorithm, ContentRef, ContentRefKind};
+use loonfs_api::{ChecksumAlgorithm, ContentRef, ContentRefKind, StorageChecksum};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -19,6 +19,16 @@ use std::time::{Duration, SystemTime};
 
 const S3_CREATE_ONLY_HEADER: &str = "if-none-match";
 const S3_SHA256_CHECKSUM_HEADER: &str = "x-amz-checksum-sha256";
+const S3_CRC64NVME_CHECKSUM_HEADER: &str = "x-amz-checksum-crc64nvme";
+const S3_CHECKSUM_ALGORITHM_HEADER: &str = "x-amz-checksum-algorithm";
+/// Pins every multipart upload LoonFS opens to a whole-object checksum.
+///
+/// Full-object coverage is established here, at creation, rather than read
+/// back later: Cloudflare R2 never reports `x-amz-checksum-type`, so a
+/// reader could not tell a full-object checksum from a composite one.
+const S3_CHECKSUM_TYPE_HEADER: &str = "x-amz-checksum-type";
+const S3_FULL_OBJECT_CHECKSUM_TYPE: &str = "FULL_OBJECT";
+const S3_CRC64NVME_ALGORITHM: &str = "CRC64NVME";
 /// Asks S3-family `HeadObject` to report the object's stored checksum.
 pub(crate) const S3_CHECKSUM_MODE_HEADER: &str = "x-amz-checksum-mode";
 const MAX_PRESIGN_EXPIRY: u64 = 7 * 24 * 60 * 60;
@@ -100,10 +110,107 @@ impl S3CompatiblePresigner {
         )
     }
 
+    /// Signs `CreateMultipartUpload` for an object whose checksum will cover
+    /// the whole assembly.
+    pub(crate) fn presign_create_multipart(
+        &self,
+        object_key: &str,
+        expires_in: Duration,
+        now: SystemTime,
+    ) -> Result<PresignedUrl> {
+        self.presign_with_query(
+            "POST",
+            object_key,
+            BTreeMap::from([("uploads".to_owned(), String::new())]),
+            BTreeMap::from([
+                (
+                    S3_CHECKSUM_ALGORITHM_HEADER.to_owned(),
+                    S3_CRC64NVME_ALGORITHM.to_owned(),
+                ),
+                (
+                    S3_CHECKSUM_TYPE_HEADER.to_owned(),
+                    S3_FULL_OBJECT_CHECKSUM_TYPE.to_owned(),
+                ),
+            ]),
+            expires_in,
+            now,
+        )
+    }
+
+    /// Signs `AbortMultipartUpload`, the cleanup a terminated session runs.
+    pub(crate) fn presign_abort_multipart(
+        &self,
+        object_key: &str,
+        provider_upload_id: &str,
+        expires_in: Duration,
+        now: SystemTime,
+    ) -> Result<PresignedUrl> {
+        self.presign_with_query(
+            "DELETE",
+            object_key,
+            BTreeMap::from([("uploadId".to_owned(), provider_upload_id.to_owned())]),
+            BTreeMap::new(),
+            expires_in,
+            now,
+        )
+    }
+
+    /// Signs `CompleteMultipartUpload` carrying the whole-object checksum.
+    ///
+    /// AWS S3 treats that checksum as a precondition and refuses to assemble
+    /// an object that does not match it. Cloudflare R2 accepts the request
+    /// and stores the true checksum instead, which is why completion still
+    /// reads the object back rather than trusting this call's success.
+    pub(crate) fn presign_complete_multipart(
+        &self,
+        object_key: &str,
+        provider_upload_id: &str,
+        full_object_checksum: &StorageChecksum,
+        expires_in: Duration,
+        now: SystemTime,
+    ) -> Result<PresignedUrl> {
+        self.presign_with_query(
+            "POST",
+            object_key,
+            BTreeMap::from([("uploadId".to_owned(), provider_upload_id.to_owned())]),
+            BTreeMap::from([(
+                S3_CRC64NVME_CHECKSUM_HEADER.to_owned(),
+                base64_crc64nvme(full_object_checksum)?,
+            )]),
+            expires_in,
+            now,
+        )
+    }
+
     fn presign(
         &self,
         method: &str,
         object_key: &str,
+        required_headers: BTreeMap<String, String>,
+        expires_in: Duration,
+        now: SystemTime,
+    ) -> Result<PresignedUrl> {
+        self.presign_with_query(
+            method,
+            object_key,
+            BTreeMap::new(),
+            required_headers,
+            expires_in,
+            now,
+        )
+    }
+
+    /// Signs one request, with any operation-selecting query parameters
+    /// folded into the canonical query alongside the credential ones.
+    ///
+    /// The multipart operations are addressed by query parameter rather than
+    /// by path (`?uploads`, `?uploadId=`, `?partNumber=`), so they have to
+    /// participate in the signature or the provider computes a different one.
+    fn presign_with_query(
+        &self,
+        method: &str,
+        object_key: &str,
+        operation_query: BTreeMap<String, String>,
         required_headers: BTreeMap<String, String>,
         expires_in: Duration,
         now: SystemTime,
@@ -149,7 +256,8 @@ impl S3CompatiblePresigner {
                 .expect("writing to String cannot fail");
         }
 
-        let mut query = BTreeMap::from([
+        let mut query = operation_query;
+        query.extend([
             ("X-Amz-Algorithm".to_owned(), "AWS4-HMAC-SHA256".to_owned()),
             ("X-Amz-Credential".to_owned(), credential),
             ("X-Amz-Date".to_owned(), dates.amz_date.clone()),
@@ -268,6 +376,50 @@ impl ObjectTransferIssuer for S3CompatiblePresigner {
             now,
         )
     }
+
+    fn presign_multipart_part(
+        &self,
+        request: PresignedPartRequest<'_>,
+        now: SystemTime,
+    ) -> Result<PresignedUrl> {
+        if request.part_number == 0 {
+            return Err(invalid_direct_put_content("part numbers start at one"));
+        }
+        // No create-only header here, deliberately. A part is not the object:
+        // re-uploading one is how a client retries a failed transfer, and both
+        // providers take the last write and follow it with the checksum.
+        self.presign_with_query(
+            "PUT",
+            request.object_key,
+            BTreeMap::from([
+                ("partNumber".to_owned(), request.part_number.to_string()),
+                ("uploadId".to_owned(), request.provider_upload_id.to_owned()),
+            ]),
+            BTreeMap::from([(
+                S3_CRC64NVME_CHECKSUM_HEADER.to_owned(),
+                base64_crc64nvme(request.part_checksum)?,
+            )]),
+            request.expires_in,
+            now,
+        )
+    }
+}
+
+/// Converts a CRC-64/NVME into the base64 spelling the S3 family signs.
+fn base64_crc64nvme(checksum: &StorageChecksum) -> Result<String> {
+    if checksum.algorithm != ChecksumAlgorithm::Crc64nvme {
+        return Err(invalid_direct_put_content(
+            "multipart uploads are checksummed with crc64nvme",
+        ));
+    }
+    let raw = hex_decode_bytes(&checksum.value)
+        .map_err(|_| invalid_direct_put_content("crc64nvme must be lowercase hex"))?;
+    if raw.len() != ChecksumAlgorithm::Crc64nvme.value_bytes() {
+        return Err(invalid_direct_put_content(
+            "crc64nvme must be 16 hex characters",
+        ));
+    }
+    Ok(base64::engine::general_purpose::STANDARD.encode(raw))
 }
 
 fn s3_direct_put_required_headers(content_ref: &ContentRef) -> Result<BTreeMap<String, String>> {

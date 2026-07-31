@@ -102,6 +102,16 @@ pub const GC_MIN_GRACE_WINDOW_MS: u64 = max_u64(
     + PROVIDER_ATTEMPT_TIMEOUT_MS
     + GC_SAFETY_MARGIN_MS;
 
+/// Most parts one direct multipart upload may cut into. This is the
+/// S3-compatible ceiling, so at the fixed part size it also fixes the
+/// largest object a direct multipart upload can carry.
+pub const MAX_MULTIPART_PARTS: u32 = 10_000;
+
+/// Most part-upload capabilities one request may ask for. A client asks in
+/// waves as it works through a file, so this bounds one response rather than
+/// one upload.
+pub const MAX_SIGNED_PARTS_PER_REQUEST: usize = 1_000;
+
 /// Lease every fork attempt takes on the fork-owned source checkpoint it
 /// creates. An attempt that never installs its target head lets the lease
 /// pass, and garbage collection releases the record on that alone — no

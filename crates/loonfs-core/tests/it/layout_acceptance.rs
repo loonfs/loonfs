@@ -105,6 +105,7 @@ async fn reads_commits_and_change_feed_never_list() {
             &staged.upload_id,
             &loonfs_api::v0::CompleteUploadRequest {
                 content_ref: uploaded.content_ref,
+                multipart_parts: None,
             },
         )
         .await
@@ -206,6 +207,7 @@ async fn maintenance_never_touches_the_wal_head() {
             &staged.upload_id,
             &loonfs_api::v0::CompleteUploadRequest {
                 content_ref: uploaded.content_ref,
+                multipart_parts: None,
             },
         )
         .await

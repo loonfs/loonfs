@@ -4,12 +4,13 @@
 use crate::layout::{parse_object_key, DurableObjectFamily};
 use crate::object_store::Result;
 use crate::{
-    ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
-    StoredObjectChecksum,
+    ByteRange, MultipartCompletion, MultipartPart, ObjectBody, ObjectMetadata, ObjectStore,
+    ObjectStoreError, PutMode, StoredObjectChecksum,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{BoxStream, TryStreamExt};
+use loonfs_api::StorageChecksum;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::fs::{self, File};
@@ -60,6 +61,12 @@ pub enum ObjectStoreOperation {
     Put,
     /// Measures an idempotent object delete.
     Delete,
+    /// Measures opening a client-driven multipart upload.
+    CreateMultipartUpload,
+    /// Measures asking a provider to assemble a multipart upload.
+    CompleteMultipartUpload,
+    /// Measures abandoning a multipart upload and its parts.
+    AbortMultipartUpload,
     /// Measures a listing collected to completion.
     ListPrefix,
     /// Measures a listing stream until completion or early drop.
@@ -290,6 +297,57 @@ where
         result
     }
 
+    async fn create_multipart_upload(&self, key: &str) -> Result<String> {
+        let start = sample_clock();
+        let result = self.inner.create_multipart_upload(key).await;
+        // The multipart control calls move no payload of their own: the
+        // parts travel from the client straight to the provider. Timing them
+        // is the only thing there is to record.
+        self.record_unit(
+            ObjectStoreOperation::CreateMultipartUpload,
+            key,
+            start.elapsed(),
+            &result,
+        );
+        result
+    }
+
+    async fn complete_multipart_upload(
+        &self,
+        key: &str,
+        provider_upload_id: &str,
+        parts: &[MultipartPart],
+        full_object_checksum: &StorageChecksum,
+    ) -> Result<MultipartCompletion> {
+        let start = sample_clock();
+        let result = self
+            .inner
+            .complete_multipart_upload(key, provider_upload_id, parts, full_object_checksum)
+            .await;
+        self.record_unit(
+            ObjectStoreOperation::CompleteMultipartUpload,
+            key,
+            start.elapsed(),
+            &result,
+        );
+        result
+    }
+
+    async fn abort_multipart_upload(&self, key: &str, provider_upload_id: &str) -> Result<()> {
+        let start = sample_clock();
+        let result = self
+            .inner
+            .abort_multipart_upload(key, provider_upload_id)
+            .await;
+        self.record_unit(
+            ObjectStoreOperation::AbortMultipartUpload,
+            key,
+            start.elapsed(),
+            &result,
+        );
+        result
+    }
+
     async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Option<Bytes>> {
         let start = sample_clock();
         let result = self.inner.get(key, range.clone()).await;
@@ -442,12 +500,12 @@ impl<S> InstrumentedObjectStore<S> {
         });
     }
 
-    fn record_unit(
+    fn record_unit<T>(
         &self,
         operation: ObjectStoreOperation,
         key: &str,
         elapsed: Duration,
-        result: &Result<()>,
+        result: &Result<T>,
     ) {
         self.record(ObjectStoreMetricSample {
             operation,

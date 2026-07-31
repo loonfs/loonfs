@@ -238,10 +238,18 @@ field as a decision rather than a hint.
 `storage_checksum.algorithm` is one of `sha256`, `crc64nvme`, or `crc32c`, and
 `storage_checksum.value` is the lowercase hex of the raw checksum bytes (the
 algorithm is its own field, so the value carries no prefix; provider APIs that
-report base64 are converted at the adapter). Only `sha256` has producers
-today. The CRC algorithms exist because direct multipart upload mandates a
-provider-computed full-object CRC-64/NVME, and that producer must not require
-a format change.
+report base64 are converted at the adapter).
+
+`sha256` and `crc64nvme` both have producers. Every path that moves bytes
+through LoonFS hashes them and produces `sha256`. Direct multipart upload
+produces `crc64nvme`: an S3-compatible provider assembles a multipart object
+without any party hashing the whole stream, and the CRC-64/NVME it computes
+over the assembly is the only full-object evidence that will ever exist for
+those bytes. Such a reference therefore carries no `whole_file_sha256`, by
+the provenance rule above, and reads verify it by recomputing that CRC.
+`crc32c` decodes and round-trips with no producer; a reference carrying a
+checksum an implementation cannot recompute must fail its reads rather than
+pass them unverified.
 
 Metadata materialization tables include canonical metadata families and
 validated secondary indexes. The canonical families are `inodes`,
@@ -1529,6 +1537,17 @@ Two rules make this decidable under concurrency:
 Nothing returns a session to `open`, and no state records consumption: a
 client that wants another attempt begins another session, which mints its own
 content identity, and publication never writes back to a session record.
+
+A session that uploads through a provider's multipart API also records
+`provider_multipart_upload_id`, the handle that upload is addressed by. It is
+the *only* provider handle a session keeps: parts are the uploader's
+bookkeeping, exactly as they are in the provider's own API, so there is no
+durable record per part and none is permitted. Cleanup reads this field to
+abandon what a terminated session left open, under rule 2 above — after the
+durable transition, never before it. Aborting an upload that already
+assembled its object is safe on every supported provider: it succeeds and
+leaves the object untouched, so cleanup never has to prove what state it is
+cleaning up first.
 
 Three rules apply:
 

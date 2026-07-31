@@ -580,6 +580,7 @@ fn control_objects_match_golden_bytes() {
                 completed_at_ms: 2_000,
                 content_ref: sample_content_ref(),
             },
+            provider_multipart_upload_id: None,
         },
     );
     // The released lifecycle and the direct-put session shape are durable
@@ -624,6 +625,42 @@ fn control_objects_match_golden_bytes() {
             state: UploadSessionLifecycle::Open {
                 expires_at_ms: 87_400_000,
             },
+            provider_multipart_upload_id: None,
+        },
+    );
+    // The one session shape that carries a provider handle, and the only
+    // producer of a CRC-64/NVME reference: the object is assembled by the
+    // provider, so nothing trustworthy ever hashes it and the reference
+    // carries no whole-file SHA-256 at all.
+    check_control_golden(
+        "control_upload_session_direct_multipart.v1.json",
+        ControlObjectKind::UploadSession,
+        UploadSessionState {
+            namespace_id: namespace_id(),
+            upload_id: UploadId::parse("upl_22222222222222222222222222222222")
+                .expect("valid upload id"),
+            mode: UploadMode::DirectMultipart,
+            content_id: content_id("con_22222222222222222222222222222222"),
+            claimed_checksum: Some(StorageChecksum {
+                algorithm: ChecksumAlgorithm::Crc64nvme,
+                value: "bbb7305bdf118bcb".to_owned(),
+            }),
+            direct_put_content_ref: Some(ContentRef {
+                kind: ContentRefKind::BlobV1,
+                content_id: content_id("con_22222222222222222222222222222222"),
+                size_bytes: 11_534_336,
+                storage_checksum: StorageChecksum {
+                    algorithm: ChecksumAlgorithm::Crc64nvme,
+                    value: "bbb7305bdf118bcb".to_owned(),
+                },
+                whole_file_sha256: None,
+            }),
+            staged_content_ref: None,
+            created_at_ms: 1_000,
+            state: UploadSessionLifecycle::Open {
+                expires_at_ms: 87_400_000,
+            },
+            provider_multipart_upload_id: Some("provider-upload-id".to_owned()),
         },
     );
     check_control_golden(
@@ -642,6 +679,7 @@ fn control_objects_match_golden_bytes() {
             state: UploadSessionLifecycle::Aborted {
                 aborted_at_ms: 5_000,
             },
+            provider_multipart_upload_id: None,
         },
     );
 }
@@ -854,6 +892,7 @@ fn checkpoint_and_upload_decoders_reject_wrong_format_version_without_fallback()
                 state: UploadSessionLifecycle::Aborted {
                     aborted_at_ms: 5_000,
                 },
+                provider_multipart_upload_id: None,
             })
             .expect("upload state"),
         ),

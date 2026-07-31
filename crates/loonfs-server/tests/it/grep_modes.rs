@@ -9,8 +9,9 @@ use loonfs::{FsAdmin, FsReader};
 use loonfs_api::v0::GrepGcResponse;
 use loonfs_api::{
     ApiError, CapabilityDocument, GrepRequest, GrepResponse, NamespaceId, FEATURE_QUERY_GREP,
-    FEATURE_UPLOADS_DIRECT_PUT, LIMIT_QUERY_GREP_DEFAULT, LIMIT_QUERY_GREP_MAX,
-    LIMIT_QUERY_GREP_SCAN_BUDGET_FILES, LIMIT_QUERY_GREP_TAIL_BUDGET_FILES, PROFILE_QUERY_V0,
+    FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT, LIMIT_QUERY_GREP_DEFAULT,
+    LIMIT_QUERY_GREP_MAX, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES, LIMIT_QUERY_GREP_TAIL_BUDGET_FILES,
+    PROFILE_QUERY_V0,
 };
 use loonfs_grep::root::{load_grep_root, GrepLifecycle};
 use loonfs_grep::{GramIndexBuildPolicy, GrepBuildOutcome, GrepDriverParked, GrepWorker};
@@ -485,13 +486,15 @@ fn assert_served_document_covers_the_spec_example(served: &CapabilityDocument) {
         .expect("fenced block end");
     let mut expected: CapabilityDocument =
         serde_json::from_str(example).expect("spec capability example parses");
-    // Direct put is a property of the configured store, not of what this
-    // process composes: a store that cannot presign has the key removed
-    // rather than advertised `false`. This deployment's local-fs store
-    // cannot, so the key is out of scope for this comparison.
+    // The direct transports are properties of the configured store, not of
+    // what this process composes: a store that cannot presign has their keys
+    // removed rather than advertised `false`. This deployment's local-fs
+    // store cannot, so they are out of scope for this comparison.
     let mut served_features = served.features.clone();
-    expected.features.remove(FEATURE_UPLOADS_DIRECT_PUT);
-    served_features.remove(FEATURE_UPLOADS_DIRECT_PUT);
+    for feature in [FEATURE_UPLOADS_DIRECT_PUT, FEATURE_UPLOADS_DIRECT_MULTIPART] {
+        expected.features.remove(feature);
+        served_features.remove(feature);
+    }
 
     served.validate().expect("served document is well-formed");
     assert_eq!(served.protocol_version, expected.protocol_version);

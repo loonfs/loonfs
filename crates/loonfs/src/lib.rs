@@ -58,7 +58,8 @@ pub use loonfs_api::{
     NamespaceId, NamespaceStatusResponse, NamespaceSummary, Page, PageRequest, PaginationPolicy,
     ReleaseCheckpointResponse, ReorganizeStepOutcome, RevisionNo, UploadId, WalFlushStepOutcome,
     FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK,
-    FEATURE_UPLOADS_DIRECT_PUT, PROFILE_ADMIN_V0, PROFILE_CORE_V0, PROTOCOL_VERSION,
+    FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT, PROFILE_ADMIN_V0,
+    PROFILE_CORE_V0, PROTOCOL_VERSION,
 };
 pub use loonfs_core::cache::MetadataTableCacheConfig;
 pub use loonfs_core::limits::{DEFAULT_GC_MAX_OBJECTS, METADATA_PUBLICATION_BUDGET_MS};
@@ -98,11 +99,16 @@ pub mod content_tokens {
     };
 }
 
-/// Server-integration seam: the resolved direct-put upload target a serving
-/// session turns into a presigned URL for client-side object PUT. Most
-/// embedded users never need this module.
+/// Server-integration seam: the resolved direct upload targets a serving
+/// session turns into presigned URLs for client-side object writes — one
+/// whole-object PUT, or one PUT per multipart part. Most embedded users
+/// never need this module.
 pub mod uploads {
-    pub use loonfs_core::{BeginDirectPutUploadTargetResponse, DirectPutUploadTarget};
+    pub use loonfs_core::{
+        BeginDirectMultipartUploadTargetResponse, BeginDirectPutUploadTargetResponse,
+        DirectMultipartUploadTarget, DirectPutUploadTarget, MultipartPartTarget,
+        MultipartPartTargets,
+    };
 }
 
 /// White-box seam over the durable control plane: typed loaders for a

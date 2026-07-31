@@ -72,10 +72,11 @@ impl<'de> Deserialize<'de> for ContentRefKind {
 /// provider. (Cloudflare R2 never reports `x-amz-checksum-type` at all, so a
 /// type read back would be unavailable exactly where it would matter.)
 ///
-/// Only [`ChecksumAlgorithm::Sha256`] has producers today. `Crc64nvme` and
-/// `Crc32c` decode and round-trip so that direct multipart, which mandates
-/// provider-computed full-object CRC-64/NVME, needs no format change to
-/// start writing them.
+/// [`ChecksumAlgorithm::Sha256`] and [`ChecksumAlgorithm::Crc64nvme`] both
+/// have producers: every path that moves bytes through LoonFS hashes them,
+/// and direct multipart upload carries the CRC-64/NVME the S3-compatible
+/// providers compute over the assembled object. `Crc32c` decodes and
+/// round-trips without a producer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
@@ -135,6 +136,70 @@ impl StorageChecksum {
             algorithm: ChecksumAlgorithm::Sha256,
             value: hex_encode_bytes(&Sha256::digest(bytes)),
         }
+    }
+
+    /// Builds the CRC-64/NVME storage checksum for these complete bytes.
+    pub fn crc64nvme(bytes: &[u8]) -> Self {
+        let mut digest = Crc64Nvme::new();
+        digest.update(bytes);
+        digest.finish()
+    }
+
+    /// Reports whether these bytes produce this exact checksum.
+    ///
+    /// `None` means the algorithm has no implementation here, which is a
+    /// refusal to verify rather than a verification: a caller must never
+    /// read it as agreement.
+    pub fn matches(&self, bytes: &[u8]) -> Option<bool> {
+        let recomputed = match self.algorithm {
+            ChecksumAlgorithm::Sha256 => Self::sha256(bytes),
+            ChecksumAlgorithm::Crc64nvme => Self::crc64nvme(bytes),
+            ChecksumAlgorithm::Crc32c => return None,
+        };
+        Some(recomputed.value == self.value)
+    }
+}
+
+/// CRC-64/NVME over a payload delivered in pieces.
+///
+/// A direct multipart upload needs this digest twice over the same bytes:
+/// once per part, for the header the provider enforces on the way in, and
+/// once over the whole stream, for the reference completion verifies. Parts
+/// fed in order produce both without the object ever being held whole.
+#[derive(Default)]
+pub struct Crc64Nvme {
+    digest: crc64fast_nvme::Digest,
+}
+
+impl Crc64Nvme {
+    /// Starts an empty digest.
+    pub fn new() -> Self {
+        Self {
+            digest: crc64fast_nvme::Digest::new(),
+        }
+    }
+
+    /// Folds the next piece of the payload in, in order.
+    pub fn update(&mut self, bytes: &[u8]) {
+        self.digest.write(bytes);
+    }
+
+    /// Closes the digest over everything fed so far.
+    ///
+    /// The value is the big-endian spelling of the 64-bit result, which is
+    /// what the raw checksum bytes are on the wire and therefore what the
+    /// hex here has to be.
+    pub fn finish(self) -> StorageChecksum {
+        StorageChecksum {
+            algorithm: ChecksumAlgorithm::Crc64nvme,
+            value: hex_encode_bytes(&self.digest.sum64().to_be_bytes()),
+        }
+    }
+}
+
+impl fmt::Debug for Crc64Nvme {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Crc64Nvme").finish_non_exhaustive()
     }
 }
 
@@ -263,7 +328,8 @@ fn validate_checksum_value(
 #[cfg(test)]
 mod tests {
     use super::{
-        ChecksumAlgorithm, ContentRef, ContentRefKind, ContentRefValidationError, StorageChecksum,
+        ChecksumAlgorithm, ContentRef, ContentRefKind, ContentRefValidationError, Crc64Nvme,
+        StorageChecksum,
     };
     use crate::ids::ContentId;
 
@@ -360,6 +426,63 @@ mod tests {
             content_ref.validate(),
             Err(ContentRefValidationError::InvalidChecksum { .. })
         ));
+    }
+
+    /// The catalog check value for CRC-64/NVME. This is the one thing that
+    /// has to agree with the provider bit for bit: a completion compares our
+    /// value against the one S3 computed over the assembled object, so a
+    /// wrong polynomial or byte order would fail every multipart upload.
+    #[test]
+    fn crc64nvme_matches_its_catalog_check_value() {
+        assert_eq!(
+            StorageChecksum::crc64nvme(b"123456789").value,
+            "ae8b14860a799888"
+        );
+        assert_eq!(
+            StorageChecksum::crc64nvme(b"").value,
+            "0000000000000000",
+            "the empty payload is the identity"
+        );
+    }
+
+    /// The streaming form exists so parts can be hashed on the way past
+    /// without the whole object ever being held, so it must agree with the
+    /// one-shot form over the same bytes.
+    #[test]
+    fn a_streamed_crc64nvme_equals_the_whole_payload_at_once() {
+        let payload: Vec<u8> = (0..4096u32).map(|byte| byte as u8).collect();
+        let mut streamed = Crc64Nvme::new();
+        for chunk in payload.chunks(97) {
+            streamed.update(chunk);
+        }
+
+        assert_eq!(streamed.finish(), StorageChecksum::crc64nvme(&payload));
+    }
+
+    /// A checksum this build cannot recompute must answer "cannot tell",
+    /// never "matches".
+    #[test]
+    fn checksum_matching_refuses_rather_than_agrees_when_it_cannot_recompute() {
+        assert_eq!(
+            StorageChecksum::sha256(b"hello").matches(b"hello"),
+            Some(true)
+        );
+        assert_eq!(
+            StorageChecksum::sha256(b"hello").matches(b"other"),
+            Some(false)
+        );
+        assert_eq!(
+            StorageChecksum::crc64nvme(b"hello").matches(b"hello"),
+            Some(true)
+        );
+        assert_eq!(
+            StorageChecksum {
+                algorithm: ChecksumAlgorithm::Crc32c,
+                value: "00000000".to_owned(),
+            }
+            .matches(b"hello"),
+            None
+        );
     }
 
     #[test]

@@ -1,14 +1,19 @@
 //! Staged uploads and direct-put targets.
 
 use crate::content_tokens::{CompletedUpload, CompletedUploadReceipt};
-use crate::uploads::BeginDirectPutUploadTargetResponse;
+use crate::uploads::{
+    BeginDirectMultipartUploadTargetResponse, BeginDirectPutUploadTargetResponse,
+    MultipartPartTargets,
+};
 use crate::FsWriter;
 use crate::Result;
 use crate::{
     BeginUploadRequest, BeginUploadResponse, CompleteUploadRequest, CompleteUploadResponse,
     DirectPutContentClaim, NamespaceId, UploadContentResponse,
 };
-use loonfs_api::v0::{AbortUploadResponse, UploadStatusResponse};
+use loonfs_api::v0::{
+    AbortUploadResponse, DirectMultipartContentClaim, UploadPartChecksumClaim, UploadStatusResponse,
+};
 use loonfs_api::UploadId;
 
 impl FsWriter {
@@ -31,6 +36,33 @@ impl FsWriter {
         Ok(self
             .engine(namespace_id)
             .begin_direct_put_upload_target(claim)
+            .await?)
+    }
+
+    /// Mints the content object a direct multipart upload assembles into,
+    /// opens the provider upload behind it, and returns the internal target
+    /// for server-side signing.
+    pub async fn begin_direct_multipart_upload_target(
+        &self,
+        namespace_id: &NamespaceId,
+        claim: DirectMultipartContentClaim,
+    ) -> Result<BeginDirectMultipartUploadTargetResponse> {
+        Ok(self
+            .engine(namespace_id)
+            .begin_direct_multipart_upload_target(claim)
+            .await?)
+    }
+
+    /// Resolves one wave of multipart parts for server-side signing.
+    pub async fn direct_multipart_part_targets(
+        &self,
+        namespace_id: &NamespaceId,
+        upload_id: &UploadId,
+        requested: &[UploadPartChecksumClaim],
+    ) -> Result<MultipartPartTargets> {
+        Ok(self
+            .engine(namespace_id)
+            .direct_multipart_part_targets(upload_id, requested)
             .await?)
     }
 

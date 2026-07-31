@@ -46,6 +46,36 @@ pub struct StoredObjectChecksum {
     pub storage_checksum: StorageChecksum,
 }
 
+/// One part of a client-driven multipart upload, as the client observed the
+/// provider accept it.
+///
+/// LoonFS keeps no durable record of any part. Parts are the uploader's
+/// bookkeeping, exactly as they are in the provider's own multipart API, and
+/// this is the shape they come back in at completion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MultipartPart {
+    /// One-based part number.
+    pub part_number: u32,
+    /// Entity tag the provider returned for the accepted part.
+    pub etag: String,
+    /// Checksum the part was signed and accepted with.
+    pub checksum: StorageChecksum,
+}
+
+/// What a provider said about an attempt to assemble a multipart upload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MultipartCompletion {
+    /// The provider accepted the assembly on this call.
+    Assembled,
+    /// The provider has no such upload. It was already consumed — by an
+    /// earlier completion whose response was lost, or by an abort — so the
+    /// object at the key, if any, is the only remaining evidence of what
+    /// happened. Providers disagree about this case (AWS S3 replays a
+    /// success carrying no checksum, Cloudflare R2 answers `NoSuchUpload`),
+    /// which is exactly why the caller resolves it from the object instead.
+    UnknownUpload,
+}
+
 /// Full object bytes returned with metadata from the same read operation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObjectBody {
@@ -223,6 +253,54 @@ pub trait ObjectStore: Send + Sync + Debug {
         ))
     }
 
+    /// Opens a provider multipart upload targeting `key`, whose eventual
+    /// checksum covers the whole assembled object.
+    ///
+    /// This is the control half of a client-driven multipart upload: the
+    /// bytes travel from the client straight to the provider under signed
+    /// per-part capabilities, and the store only opens, closes, and abandons
+    /// the upload. Stores that cannot express it return
+    /// [`ObjectStoreError::Unsupported`].
+    async fn create_multipart_upload(&self, key: &str) -> Result<String> {
+        let _ = key;
+        Err(ObjectStoreError::Unsupported(
+            "client-driven multipart upload",
+        ))
+    }
+
+    /// Asks the provider to assemble `parts` into the object at `key`.
+    ///
+    /// `full_object_checksum` is supplied as a precondition where the
+    /// provider honours one. It is not sufficient evidence on its own:
+    /// Cloudflare R2 accepts a wrong claim, assembles the object, and
+    /// reports the true checksum, so a caller must read the object's stored
+    /// checksum back before believing anything about its bytes.
+    async fn complete_multipart_upload(
+        &self,
+        key: &str,
+        provider_upload_id: &str,
+        parts: &[MultipartPart],
+        full_object_checksum: &StorageChecksum,
+    ) -> Result<MultipartCompletion> {
+        let (_, _, _, _) = (key, provider_upload_id, parts, full_object_checksum);
+        Err(ObjectStoreError::Unsupported(
+            "client-driven multipart upload",
+        ))
+    }
+
+    /// Abandons a provider multipart upload and the parts it accumulated.
+    ///
+    /// Aborting an upload that already completed is safe on every provider
+    /// LoonFS supports: it succeeds and leaves the assembled object alone.
+    /// An upload the provider has never heard of also succeeds, so cleanup
+    /// can run without first proving what state it is cleaning up.
+    async fn abort_multipart_upload(&self, key: &str, provider_upload_id: &str) -> Result<()> {
+        let _ = (key, provider_upload_id);
+        Err(ObjectStoreError::Unsupported(
+            "client-driven multipart upload",
+        ))
+    }
+
     /// Reads complete bytes and identity metadata from one self-consistent observation.
     ///
     /// Returns `None` when the object is absent; invalid keys and provider
@@ -325,6 +403,28 @@ impl<T: ObjectStore + ?Sized> ObjectStore for Arc<T> {
         self.as_ref().head_stored_checksum(key).await
     }
 
+    async fn create_multipart_upload(&self, key: &str) -> Result<String> {
+        self.as_ref().create_multipart_upload(key).await
+    }
+
+    async fn complete_multipart_upload(
+        &self,
+        key: &str,
+        provider_upload_id: &str,
+        parts: &[MultipartPart],
+        full_object_checksum: &StorageChecksum,
+    ) -> Result<MultipartCompletion> {
+        self.as_ref()
+            .complete_multipart_upload(key, provider_upload_id, parts, full_object_checksum)
+            .await
+    }
+
+    async fn abort_multipart_upload(&self, key: &str, provider_upload_id: &str) -> Result<()> {
+        self.as_ref()
+            .abort_multipart_upload(key, provider_upload_id)
+            .await
+    }
+
     async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>> {
         self.as_ref().get_with_metadata(key).await
     }
@@ -385,6 +485,28 @@ impl<T: ObjectStore + ?Sized> ObjectStore for &T {
 
     async fn head_stored_checksum(&self, key: &str) -> Result<Option<StoredObjectChecksum>> {
         (*self).head_stored_checksum(key).await
+    }
+
+    async fn create_multipart_upload(&self, key: &str) -> Result<String> {
+        (*self).create_multipart_upload(key).await
+    }
+
+    async fn complete_multipart_upload(
+        &self,
+        key: &str,
+        provider_upload_id: &str,
+        parts: &[MultipartPart],
+        full_object_checksum: &StorageChecksum,
+    ) -> Result<MultipartCompletion> {
+        (*self)
+            .complete_multipart_upload(key, provider_upload_id, parts, full_object_checksum)
+            .await
+    }
+
+    async fn abort_multipart_upload(&self, key: &str, provider_upload_id: &str) -> Result<()> {
+        (*self)
+            .abort_multipart_upload(key, provider_upload_id)
+            .await
     }
 
     async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>> {

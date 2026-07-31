@@ -6,12 +6,14 @@
 
 use crate::keyspace::parse_endpoint_url;
 use crate::object_store::Result;
+use crate::presign::PresignedUrl;
 use crate::presign::{S3CompatiblePresigner, S3PresignerConfig};
 use crate::secret::SecretString;
 use crate::store_io_runtime::StoreIoRuntime;
 use crate::{
-    ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, ProviderObjectStore,
-    ProviderObjectStoreConfig, PutMode, StoredObjectChecksum,
+    ByteRange, MultipartCompletion, MultipartPart, ObjectBody, ObjectMetadata, ObjectStore,
+    ObjectStoreError, ProviderObjectStore, ProviderObjectStoreConfig, PutMode,
+    StoredObjectChecksum,
 };
 use async_trait::async_trait;
 use base64::Engine as _;
@@ -29,6 +31,10 @@ use std::time::{Duration, SystemTime};
 /// readback. The request is issued immediately and never handed out, so it
 /// only needs to outlive one round trip and its clock skew.
 const CHECKSUM_HEAD_TTL: Duration = Duration::from_secs(60);
+
+/// Lifetime of the internally signed multipart control requests. Like the
+/// checksum head, each is issued immediately and never handed out.
+const MULTIPART_CONTROL_TTL: Duration = Duration::from_secs(60);
 
 /// Provider checksum headers this adapter understands, in the order it
 /// prefers them, paired with the durable algorithm each one names.
@@ -99,11 +105,12 @@ struct S3CompatibleConfig {
 pub struct S3CompatibleStore {
     provider_name: &'static str,
     inner: ProviderObjectStore,
-    /// Signs the `HeadObject` that reads a stored checksum back. The
-    /// provider client cannot express that request, and the SigV4 signer
-    /// this crate already owns for direct-put URLs can.
-    checksum_head_signer: S3CompatiblePresigner,
-    /// Sends that one signed request over the store's own IO runtime and
+    /// Signs the requests the provider client cannot express: the
+    /// `HeadObject` that reads a stored checksum back, and the multipart
+    /// control calls that have to carry checksum headers. The SigV4 signer
+    /// this crate already owns for direct-put URLs can express all of them.
+    request_signer: S3CompatiblePresigner,
+    /// Sends those signed requests over the store's own IO runtime and
     /// timeout scheme, exactly like every provider-client request.
     http: HttpClient,
     /// Keeps the HTTP IO runtime alive for the provider client's lifetime;
@@ -180,7 +187,7 @@ impl S3CompatibleStore {
                 object_store_endpoint_url(&config.bucket, endpoint, config.force_path_style)
             })
             .transpose()?;
-        let checksum_head_signer = S3CompatiblePresigner::new(S3PresignerConfig {
+        let request_signer = S3CompatiblePresigner::new(S3PresignerConfig {
             bucket: config.bucket.clone(),
             region: config.region.clone(),
             endpoint_url: config.endpoint_url.clone(),
@@ -235,17 +242,90 @@ impl S3CompatibleStore {
         Ok(Self {
             provider_name: config.provider_name,
             inner,
-            checksum_head_signer,
+            request_signer,
             http,
             _io_runtime: io_runtime,
         })
     }
 
     #[allow(clippy::disallowed_methods)]
-    fn checksum_head_signing_time() -> SystemTime {
-        // A SigV4 signature is dated, so this one request enters wall time
-        // here. Nothing durable is derived from it.
+    fn signing_time() -> SystemTime {
+        // A SigV4 signature is dated, so these internally issued requests
+        // enter wall time here. Nothing durable is derived from it.
         SystemTime::now()
+    }
+
+    /// Issues one internally signed request and returns its status, headers,
+    /// and body.
+    ///
+    /// Every caller here signs a request the provider client cannot build,
+    /// so they all land on the same transport: the store's own HTTP client,
+    /// runtime, and timeouts.
+    async fn execute_signed(
+        &self,
+        key: &str,
+        signed: PresignedUrl,
+        body: HttpRequestBody,
+    ) -> Result<SignedResponse> {
+        let mut builder = http::Request::builder()
+            .method(signed.method.as_str())
+            .uri(&signed.url);
+        for (name, value) in &signed.headers {
+            builder = builder.header(name, value);
+        }
+        let request = builder
+            .body(body)
+            .map_err(|err| ObjectStoreError::transport(key, err.to_string()))?;
+        let response = self
+            .http
+            .execute(request)
+            .await
+            .map_err(|err| ObjectStoreError::transport(key, err.to_string()))?;
+
+        let status = response.status();
+        let headers = response.headers().clone();
+        let body = response
+            .into_body()
+            .bytes()
+            .await
+            .map_err(|err| ObjectStoreError::transport(key, err.to_string()))?;
+        Ok(SignedResponse {
+            status,
+            headers,
+            body,
+        })
+    }
+}
+
+/// One internally signed response, read whole.
+///
+/// The bodies here are small provider control documents — an upload id, or
+/// an error — so reading them fully is what makes the S3 family's habit of
+/// reporting failures inside a 200 response detectable at all.
+struct SignedResponse {
+    status: http::StatusCode,
+    headers: http::HeaderMap,
+    body: bytes::Bytes,
+}
+
+impl SignedResponse {
+    fn text(&self) -> std::borrow::Cow<'_, str> {
+        String::from_utf8_lossy(&self.body)
+    }
+
+    /// Reports the provider's own error code for this response, treating a
+    /// success status carrying an error document as the failure it is.
+    ///
+    /// `CompleteMultipartUpload` may answer 200 and then report a failure in
+    /// the body, because the provider holds the connection open while it
+    /// assembles the object. Reading only the status would take that for
+    /// success.
+    fn provider_error_code(&self) -> Option<String> {
+        let text = self.text();
+        if self.status.is_success() && !text.contains("<Error") {
+            return None;
+        }
+        Some(xml_element(&text, "Code").unwrap_or_else(|| self.status.to_string()))
     }
 }
 
@@ -256,25 +336,16 @@ impl ObjectStore for S3CompatibleStore {
     }
 
     async fn head_stored_checksum(&self, key: &str) -> Result<Option<StoredObjectChecksum>> {
-        let signed = self.checksum_head_signer.presign_head_stored_checksum(
+        let signed = self.request_signer.presign_head_stored_checksum(
             key,
             CHECKSUM_HEAD_TTL,
-            Self::checksum_head_signing_time(),
+            Self::signing_time(),
         )?;
-        let mut builder = http::Request::builder().method("HEAD").uri(&signed.url);
-        for (name, value) in &signed.headers {
-            builder = builder.header(name, value);
-        }
-        let request = builder
-            .body(HttpRequestBody::empty())
-            .map_err(|err| ObjectStoreError::transport(key, err.to_string()))?;
         let response = self
-            .http
-            .execute(request)
-            .await
-            .map_err(|err| ObjectStoreError::transport(key, err.to_string()))?;
+            .execute_signed(key, signed, HttpRequestBody::empty())
+            .await?;
 
-        let status = response.status();
+        let status = response.status;
         if status == http::StatusCode::NOT_FOUND {
             return Ok(None);
         }
@@ -293,7 +364,7 @@ impl ObjectStore for S3CompatibleStore {
             ));
         }
 
-        let headers = response.headers();
+        let headers = &response.headers;
         let Some(storage_checksum) = s3_stored_checksum(headers) else {
             return Err(ObjectStoreError::transport(
                 key,
@@ -312,6 +383,67 @@ impl ObjectStore for S3CompatibleStore {
             size_bytes,
             storage_checksum,
         }))
+    }
+
+    async fn create_multipart_upload(&self, key: &str) -> Result<String> {
+        let signed = self.request_signer.presign_create_multipart(
+            key,
+            MULTIPART_CONTROL_TTL,
+            Self::signing_time(),
+        )?;
+        let response = self
+            .execute_signed(key, signed, HttpRequestBody::empty())
+            .await?;
+        if let Some(code) = response.provider_error_code() {
+            return Err(multipart_error(key, "create", &code));
+        }
+        xml_element(&response.text(), "UploadId").ok_or_else(|| {
+            ObjectStoreError::transport(key, "multipart create returned no upload id")
+        })
+    }
+
+    async fn complete_multipart_upload(
+        &self,
+        key: &str,
+        provider_upload_id: &str,
+        parts: &[MultipartPart],
+        full_object_checksum: &StorageChecksum,
+    ) -> Result<MultipartCompletion> {
+        let signed = self.request_signer.presign_complete_multipart(
+            key,
+            provider_upload_id,
+            full_object_checksum,
+            MULTIPART_CONTROL_TTL,
+            Self::signing_time(),
+        )?;
+        let response = self
+            .execute_signed(key, signed, complete_multipart_body(parts)?.into())
+            .await?;
+        match response.provider_error_code().as_deref() {
+            None => Ok(MultipartCompletion::Assembled),
+            // The upload is gone, which says nothing about the object: an
+            // earlier completion may have consumed it and assembled exactly
+            // what was asked for. The caller decides from the object.
+            Some("NoSuchUpload") => Ok(MultipartCompletion::UnknownUpload),
+            Some(code) => Err(multipart_error(key, "complete", code)),
+        }
+    }
+
+    async fn abort_multipart_upload(&self, key: &str, provider_upload_id: &str) -> Result<()> {
+        let signed = self.request_signer.presign_abort_multipart(
+            key,
+            provider_upload_id,
+            MULTIPART_CONTROL_TTL,
+            Self::signing_time(),
+        )?;
+        let response = self
+            .execute_signed(key, signed, HttpRequestBody::empty())
+            .await?;
+        match response.provider_error_code().as_deref() {
+            // Nothing to abandon is the state an abort is trying to reach.
+            None | Some("NoSuchUpload") => Ok(()),
+            Some(code) => Err(multipart_error(key, "abort", code)),
+        }
     }
 
     async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>> {
@@ -357,6 +489,88 @@ fn s3_stored_checksum(headers: &http::HeaderMap) -> Option<StorageChecksum> {
         });
     }
     None
+}
+
+/// Reads the text of the first `<name>` element in a provider document.
+///
+/// The S3 control documents this crate reads are a handful of flat elements
+/// — an upload id, an error code — so a scan finds them without an XML
+/// parser, and anything it cannot find is reported as absent rather than
+/// guessed at.
+fn xml_element(document: &str, name: &str) -> Option<String> {
+    let opening = format!("<{name}>");
+    let closing = format!("</{name}>");
+    let start = document.find(&opening)? + opening.len();
+    let end = document[start..].find(&closing)? + start;
+    Some(document[start..end].trim().to_owned())
+}
+
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// Builds the part manifest `CompleteMultipartUpload` assembles from.
+///
+/// The parts are the client's bookkeeping: LoonFS never recorded them, so
+/// this document is the only place they exist on the server side, for
+/// exactly as long as one request.
+fn complete_multipart_body(parts: &[MultipartPart]) -> Result<String> {
+    if parts.is_empty() {
+        return Err(ObjectStoreError::InvalidContentRef(
+            "a multipart upload completes with at least one part".to_owned(),
+        ));
+    }
+    let mut body = String::from("<CompleteMultipartUpload>");
+    let mut previous = 0;
+    for part in parts {
+        if part.part_number <= previous {
+            return Err(ObjectStoreError::InvalidContentRef(
+                "multipart parts must be listed once each, in ascending part order".to_owned(),
+            ));
+        }
+        previous = part.part_number;
+        body.push_str("<Part><PartNumber>");
+        body.push_str(&part.part_number.to_string());
+        body.push_str("</PartNumber><ETag>");
+        body.push_str(&xml_escape(&part.etag));
+        body.push_str("</ETag><ChecksumCRC64NVME>");
+        body.push_str(&xml_escape(&base64_checksum(&part.checksum)?));
+        body.push_str("</ChecksumCRC64NVME></Part>");
+    }
+    body.push_str("</CompleteMultipartUpload>");
+    Ok(body)
+}
+
+fn base64_checksum(checksum: &StorageChecksum) -> Result<String> {
+    let raw = loonfs_api::wire::hex::hex_decode_bytes(&checksum.value).map_err(|_| {
+        ObjectStoreError::InvalidContentRef(format!(
+            "{} checksum must be lowercase hex",
+            checksum.algorithm
+        ))
+    })?;
+    if raw.len() != checksum.algorithm.value_bytes() {
+        return Err(ObjectStoreError::InvalidContentRef(format!(
+            "{} checksum must be {} hex characters",
+            checksum.algorithm,
+            checksum.algorithm.value_bytes() * 2
+        )));
+    }
+    Ok(base64::engine::general_purpose::STANDARD.encode(raw))
+}
+
+fn multipart_error(key: &str, operation: &str, code: &str) -> ObjectStoreError {
+    match code {
+        "AccessDenied" | "InvalidAccessKeyId" | "SignatureDoesNotMatch" => {
+            ObjectStoreError::PermissionDenied {
+                object_key: key.to_owned(),
+                message: format!("provider refused multipart {operation}: {code}"),
+            }
+        }
+        code => ObjectStoreError::transport(key, format!("multipart {operation} failed: {code}")),
+    }
 }
 
 fn validate_config(config: &S3CompatibleConfig) -> Result<()> {

@@ -40,7 +40,9 @@ pub use search::{
 };
 pub use uploads::{
     AbortUploadResponse, BeginUploadRequest, BeginUploadResponse, CompleteUploadRequest,
-    CompleteUploadResponse, DirectPutContentClaim, DirectPutUpload, ObjectTransferAccess,
-    UploadContentResponse, UploadMode, UploadSessionStatus, UploadStatusResponse,
+    CompleteUploadResponse, CompletedUploadPart, DirectMultipartContentClaim,
+    DirectMultipartUpload, DirectPutContentClaim, DirectPutUpload, ObjectTransferAccess,
+    SignUploadPartsRequest, SignUploadPartsResponse, SignedUploadPart, UploadContentResponse,
+    UploadMode, UploadPartChecksumClaim, UploadSessionStatus, UploadStatusResponse,
     ValidatedContentToken,
 };

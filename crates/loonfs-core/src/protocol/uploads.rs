@@ -12,17 +12,21 @@ use crate::context::MutationContext;
 use crate::control_update::{
     read_upload_session_state, update_upload_session, UploadSessionUpdate,
 };
-use crate::engine::{BeginDirectPutUploadTargetResponse, DirectPutUploadTarget};
+use crate::engine::{
+    BeginDirectMultipartUploadTargetResponse, BeginDirectPutUploadTargetResponse,
+    DirectMultipartUploadTarget, DirectPutUploadTarget, MultipartPartTarget, MultipartPartTargets,
+};
 use crate::error::MetadataProjectionLoadError;
 use crate::error::{CoreError, Result};
 use crate::limits::{
-    COMPLETED_UPLOAD_RECEIPT_WINDOW_MS, CONTENTION_RETRY_LIMIT, UPLOAD_SESSION_LEASE_MS,
+    COMPLETED_UPLOAD_RECEIPT_WINDOW_MS, CONTENTION_RETRY_LIMIT, MAX_MULTIPART_PARTS,
+    MAX_SIGNED_PARTS_PER_REQUEST, UPLOAD_SESSION_LEASE_MS,
 };
 use crate::namespace::catalog::load_namespace_content_store_id;
 use crate::namespace::control::load_namespace_head_control;
 use crate::storage::content::{
-    delete_unpublished_content_object, stage_bytes_under_content_id,
-    verify_durable_content_checksum,
+    abort_unpublished_multipart_upload, delete_unpublished_content_object,
+    stage_bytes_under_content_id, verify_durable_content_checksum,
 };
 use crate::storage::content_admission::{
     CompletedUploadReceipt, ContentAdmission, PreparedContent,
@@ -30,7 +34,8 @@ use crate::storage::content_admission::{
 use bytes::Bytes;
 use loonfs_api::v0::{
     AbortUploadResponse, BeginUploadRequest, BeginUploadResponse, CompleteUploadRequest,
-    CompleteUploadResponse, DirectPutContentClaim, UploadContentResponse, UploadMode,
+    CompleteUploadResponse, CompletedUploadPart, DirectMultipartContentClaim,
+    DirectPutContentClaim, UploadContentResponse, UploadMode, UploadPartChecksumClaim,
     UploadSessionStatus, UploadStatusResponse,
 };
 use loonfs_api::wire::control::{
@@ -42,7 +47,9 @@ use loonfs_api::{
     StorageChecksum, UploadId,
 };
 use loonfs_objectstore::keys::{content_blob, upload_session};
-use loonfs_objectstore::ObjectStore;
+use loonfs_objectstore::{
+    MultipartCompletion, MultipartPart, ObjectStore, PROVIDER_MULTIPART_PART_BYTES,
+};
 
 pub(crate) async fn begin_upload<S: ObjectStore + ?Sized>(
     store: &S,
@@ -52,10 +59,11 @@ pub(crate) async fn begin_upload<S: ObjectStore + ?Sized>(
 ) -> Result<BeginUploadResponse> {
     ensure_upload_namespace_available(store, namespace_id).await?;
     let mode = request.mode.unwrap_or_default();
-    if mode == UploadMode::DirectPut {
-        return Err(CoreError::InvalidUploadContent(
-            "direct_put requires a presigned URL issuer".to_owned(),
-        ));
+    if mode != UploadMode::ServiceProxied {
+        return Err(CoreError::InvalidUploadContent(format!(
+            "{} requires a presigned URL issuer",
+            upload_mode_name(mode)
+        )));
     }
     let upload_id = create_upload_session(
         store,
@@ -69,7 +77,16 @@ pub(crate) async fn begin_upload<S: ObjectStore + ?Sized>(
         upload_id,
         mode: UploadMode::ServiceProxied,
         direct_put: None,
+        direct_multipart: None,
     })
+}
+
+fn upload_mode_name(mode: UploadMode) -> &'static str {
+    match mode {
+        UploadMode::ServiceProxied => "service_proxied",
+        UploadMode::DirectPut => "direct_put",
+        UploadMode::DirectMultipart => "direct_multipart",
+    }
 }
 
 /// Mints the content identity a direct upload will write to, and the
@@ -107,6 +124,222 @@ pub(crate) async fn begin_direct_put_upload_target<S: ObjectStore + ?Sized>(
     })
 }
 
+/// Mints the content identity a direct multipart upload will assemble into,
+/// and opens the provider upload that will assemble it.
+///
+/// The provider upload is created before the session record, so the record
+/// is complete from birth and every later step — signing a part, completing,
+/// cleaning up — reads one durable object that already knows everything. A
+/// session record that fails to land takes the provider upload down with it,
+/// so the only thing a failure here can leave behind is nothing.
+pub(crate) async fn begin_direct_multipart_upload_target<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    claim: DirectMultipartContentClaim,
+    context: &MutationContext,
+) -> Result<BeginDirectMultipartUploadTargetResponse> {
+    ensure_upload_namespace_available(store, namespace_id).await?;
+    let content_store_id = load_namespace_content_store_id(store, namespace_id).await?;
+    let content_id = ContentId::generate();
+    let content_ref = direct_multipart_content_ref(content_id.clone(), &claim)?;
+    let part_count = multipart_part_count(claim.size_bytes)?;
+    let object_key = content_blob(content_store_id.as_str(), &content_id);
+
+    let provider_upload_id = store
+        .create_multipart_upload(&object_key)
+        .await
+        .map_err(|err| CoreError::store(&object_key, &err))?;
+    let session = NewUploadSession::direct_multipart(content_ref.clone(), &provider_upload_id);
+    let upload_id = match create_upload_session(store, namespace_id, session, context).await {
+        Ok(upload_id) => upload_id,
+        Err(error) => {
+            abort_unpublished_multipart_upload(
+                store,
+                &content_store_id,
+                &content_id,
+                &provider_upload_id,
+            )
+            .await;
+            return Err(error);
+        }
+    };
+
+    Ok(BeginDirectMultipartUploadTargetResponse {
+        namespace_id: namespace_id.clone(),
+        upload_id,
+        target: DirectMultipartUploadTarget {
+            content_ref,
+            object_key,
+            part_size_bytes: PROVIDER_MULTIPART_PART_BYTES,
+            part_count,
+        },
+    })
+}
+
+/// Resolves the parts a client asked to be authorized against the session
+/// that owns them.
+///
+/// The server signs a part, it does not remember one: nothing durable is
+/// written here and nothing is read back later. Part bookkeeping stays with
+/// the client all the way to completion, exactly as it does in the
+/// provider's own multipart API.
+pub(crate) async fn direct_multipart_part_targets<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    upload_id: &UploadId,
+    requested: &[UploadPartChecksumClaim],
+) -> Result<MultipartPartTargets> {
+    if requested.is_empty() {
+        return Err(CoreError::InvalidUploadContent(
+            "a part-signing request names at least one part".to_owned(),
+        ));
+    }
+    if requested.len() > MAX_SIGNED_PARTS_PER_REQUEST {
+        return Err(CoreError::InvalidUploadContent(format!(
+            "a part-signing request names at most {MAX_SIGNED_PARTS_PER_REQUEST} parts"
+        )));
+    }
+    let content_store_id = load_namespace_content_store_id(store, namespace_id).await?;
+    let session = read_upload_session_state(store, namespace_id, upload_id).await?;
+    if let Some(error) = terminal_session_error(&session.state, upload_id.clone()) {
+        return Err(error);
+    }
+    let (content_ref, provider_upload_id) = multipart_session_target(&session)?;
+    let part_count = multipart_part_count(content_ref.size_bytes)?;
+
+    let mut parts = Vec::with_capacity(requested.len());
+    for claim in requested {
+        if claim.part_number == 0 || claim.part_number > part_count {
+            return Err(CoreError::InvalidUploadContent(format!(
+                "part {} is outside this upload's {part_count} parts",
+                claim.part_number
+            )));
+        }
+        parts.push(MultipartPartTarget {
+            part_number: claim.part_number,
+            checksum: crc64nvme_claim(&claim.crc64nvme)?,
+        });
+    }
+
+    Ok(MultipartPartTargets {
+        object_key: content_blob(content_store_id.as_str(), &content_ref.content_id),
+        provider_upload_id: provider_upload_id.to_owned(),
+        parts,
+    })
+}
+
+/// The reference and provider upload a multipart session is bound to.
+fn multipart_session_target(session: &UploadSessionState) -> Result<(&ContentRef, &str)> {
+    if session.mode != UploadMode::DirectMultipart {
+        return Err(CoreError::InvalidUploadContent(
+            "this upload session is not a direct_multipart upload".to_owned(),
+        ));
+    }
+    let content_ref = session.direct_put_content_ref.as_ref().ok_or_else(|| {
+        CoreError::InvalidUploadContent(
+            "direct_multipart session is missing its target content ref".to_owned(),
+        )
+    })?;
+    let provider_upload_id = session
+        .provider_multipart_upload_id
+        .as_deref()
+        .ok_or_else(|| {
+            CoreError::InvalidUploadContent(
+                "direct_multipart session is missing its provider upload".to_owned(),
+            )
+        })?;
+    Ok((content_ref, provider_upload_id))
+}
+
+/// How many parts a declared size cuts into at the fixed part size.
+///
+/// The geometry is the server's, not the client's, so a client never has to
+/// know what a provider's part rules are — including the minimum size for a
+/// non-final part, which the fixed size satisfies by construction.
+fn multipart_part_count(size_bytes: u64) -> Result<u32> {
+    let parts = size_bytes.div_ceil(PROVIDER_MULTIPART_PART_BYTES).max(1);
+    u32::try_from(parts)
+        .ok()
+        .filter(|parts| *parts <= MAX_MULTIPART_PARTS)
+        .ok_or_else(|| {
+            CoreError::InvalidUploadContent(format!(
+                "direct_multipart carries at most {} bytes",
+                u64::from(MAX_MULTIPART_PARTS) * PROVIDER_MULTIPART_PART_BYTES
+            ))
+        })
+}
+
+/// Turns a client's multipart claim into the reference the assembled object
+/// is bound to.
+///
+/// There is no `whole_file_sha256`: nobody trustworthy hashes these bytes.
+/// The client's own digest is not evidence, and the provider assembles the
+/// object without ever computing a SHA-256 over it — so the CRC-64/NVME it
+/// does compute is the whole of the reference's evidence, and completion
+/// reads it back rather than believing the claim.
+fn direct_multipart_content_ref(
+    content_id: ContentId,
+    claim: &DirectMultipartContentClaim,
+) -> Result<ContentRef> {
+    let content_ref = ContentRef {
+        kind: ContentRefKind::BlobV1,
+        content_id,
+        size_bytes: claim.size_bytes,
+        storage_checksum: crc64nvme_claim(&claim.crc64nvme)?,
+        whole_file_sha256: None,
+    };
+    content_ref
+        .validate()
+        .map_err(|err| CoreError::InvalidUploadContent(err.to_string()))?;
+    Ok(content_ref)
+}
+
+fn crc64nvme_claim(value: &str) -> Result<StorageChecksum> {
+    let checksum = StorageChecksum {
+        algorithm: ChecksumAlgorithm::Crc64nvme,
+        value: value.to_owned(),
+    };
+    let width = ChecksumAlgorithm::Crc64nvme.value_bytes() * 2;
+    if checksum.value.len() != width
+        || !checksum
+            .value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(CoreError::InvalidUploadContent(format!(
+            "crc64nvme must be {width} lowercase hex characters"
+        )));
+    }
+    Ok(checksum)
+}
+
+/// Turns a client's part bookkeeping into what the provider assembles from.
+fn multipart_parts(parts: &[CompletedUploadPart]) -> Result<Vec<MultipartPart>> {
+    let mut previous = 0;
+    parts
+        .iter()
+        .map(|part| {
+            if part.part_number <= previous {
+                return Err(CoreError::InvalidUploadContent(
+                    "completion lists each part once, in ascending part order".to_owned(),
+                ));
+            }
+            previous = part.part_number;
+            if part.etag.trim().is_empty() {
+                return Err(CoreError::InvalidUploadContent(format!(
+                    "part {} carries no etag",
+                    part.part_number
+                )));
+            }
+            Ok(MultipartPart {
+                part_number: part.part_number,
+                etag: part.etag.clone(),
+                checksum: crc64nvme_claim(&part.crc64nvme)?,
+            })
+        })
+        .collect()
+}
+
 /// Turns a client's claim into the reference the write is bound to.
 ///
 /// The digest is the client's, but it stops being a client claim the moment
@@ -141,8 +374,10 @@ struct NewUploadSession {
     content_id: ContentId,
     /// What the client promised, for modes that promise anything.
     claimed_checksum: Option<StorageChecksum>,
-    /// The reference a `direct_put` write is signed against.
+    /// The reference a direct write is signed against.
     direct_put_content_ref: Option<ContentRef>,
+    /// The provider upload a direct multipart session assembles through.
+    provider_multipart_upload_id: Option<String>,
 }
 
 impl NewUploadSession {
@@ -152,6 +387,7 @@ impl NewUploadSession {
             content_id: ContentId::generate(),
             claimed_checksum: None,
             direct_put_content_ref: None,
+            provider_multipart_upload_id: None,
         }
     }
 
@@ -161,6 +397,17 @@ impl NewUploadSession {
             content_id: content_ref.content_id.clone(),
             claimed_checksum: Some(content_ref.storage_checksum.clone()),
             direct_put_content_ref: Some(content_ref),
+            provider_multipart_upload_id: None,
+        }
+    }
+
+    fn direct_multipart(content_ref: ContentRef, provider_upload_id: &str) -> Self {
+        Self {
+            mode: UploadMode::DirectMultipart,
+            content_id: content_ref.content_id.clone(),
+            claimed_checksum: Some(content_ref.storage_checksum.clone()),
+            direct_put_content_ref: Some(content_ref),
+            provider_multipart_upload_id: Some(provider_upload_id.to_owned()),
         }
     }
 }
@@ -179,6 +426,7 @@ async fn create_upload_session<S: ObjectStore + ?Sized>(
         content_id: session.content_id,
         claimed_checksum: session.claimed_checksum,
         direct_put_content_ref: session.direct_put_content_ref,
+        provider_multipart_upload_id: session.provider_multipart_upload_id,
         staged_content_ref: None,
         created_at_ms: context.now_ms,
         state: UploadSessionLifecycle::Open {
@@ -267,11 +515,11 @@ pub(crate) async fn upload_content<S: ObjectStore + ?Sized>(
                 if let Some(error) = terminal_session_error(&state.state, upload_id.clone()) {
                     return Err(error);
                 }
-                if state.mode == UploadMode::DirectPut {
-                    return Err(CoreError::InvalidUploadContent(
-                        "direct_put sessions must be completed after using the presigned URL"
-                            .to_owned(),
-                    ));
+                if state.mode != UploadMode::ServiceProxied {
+                    return Err(CoreError::InvalidUploadContent(format!(
+                        "{} sessions must be completed after using the presigned URLs",
+                        upload_mode_name(state.mode)
+                    )));
                 }
 
                 let content_ref = ContentRef::blob_v1(state.content_id.clone(), bytes);
@@ -337,9 +585,27 @@ pub(crate) async fn complete_upload<S: ObjectStore + ?Sized>(
         return Ok(completed);
     }
 
-    let verified =
-        verified_completion_content_ref(store, content_store_id, &loaded, &request.content_ref)
-            .await?;
+    let verified = match completion_content_ref(store, content_store_id, &loaded, request).await? {
+        CompletionOutcome::Verified(content_ref) => content_ref,
+        // The bytes that landed are not the bytes that were promised, and
+        // the provider upload that could have produced them is consumed.
+        // Nothing can rescue this session, so it stops here rather than
+        // waiting for its lease to pass: aborting is what deletes the wrong
+        // object and releases the provider state.
+        CompletionOutcome::Unusable(reason) => {
+            if let Err(error) =
+                abort_upload(store, namespace_id, content_store_id, upload_id, context).await
+            {
+                tracing::warn!(
+                    namespace_id = %namespace_id,
+                    upload_id = %upload_id,
+                    error = %error,
+                    "failed to abandon an upload session whose completion did not verify"
+                );
+            }
+            return Err(CoreError::InvalidUploadContent(reason));
+        }
+    };
 
     update_upload_session(
         store,
@@ -404,7 +670,7 @@ pub(crate) async fn abort_upload<S: ObjectStore + ?Sized>(
     context: &MutationContext,
 ) -> Result<AbortUploadResponse> {
     let now_ms = context.now_ms;
-    let (response, content_id) = update_upload_session(
+    let (response, abandoned) = update_upload_session(
         store,
         namespace_id,
         upload_id,
@@ -419,9 +685,13 @@ pub(crate) async fn abort_upload<S: ObjectStore + ?Sized>(
                     aborted_at_ms,
                 };
                 match state.state {
-                    UploadSessionLifecycle::Aborted { aborted_at_ms } => Ok(
-                        UploadSessionUpdate::Noop((aborted(aborted_at_ms), state.content_id)),
-                    ),
+                    UploadSessionLifecycle::Aborted { aborted_at_ms } => {
+                        let abandoned = AbandonedUpload::of(&state);
+                        Ok(UploadSessionUpdate::Noop((
+                            aborted(aborted_at_ms),
+                            abandoned,
+                        )))
+                    }
                     // Completion is final in the other direction: the
                     // content may already be published, so an abort cannot
                     // quietly succeed over it.
@@ -429,13 +699,13 @@ pub(crate) async fn abort_upload<S: ObjectStore + ?Sized>(
                         Err(CoreError::UploadAlreadyCompleted { upload_id })
                     }
                     UploadSessionLifecycle::Open { .. } => {
+                        let abandoned = AbandonedUpload::of(&state);
                         state.state = UploadSessionLifecycle::Aborted {
                             aborted_at_ms: now_ms,
                         };
-                        let content_id = state.content_id.clone();
                         Ok(UploadSessionUpdate::Replace {
                             next: Box::new(state),
-                            outcome: (aborted(now_ms), content_id),
+                            outcome: (aborted(now_ms), abandoned),
                         })
                     }
                 }
@@ -444,8 +714,47 @@ pub(crate) async fn abort_upload<S: ObjectStore + ?Sized>(
     )
     .await?;
 
-    delete_unpublished_content_object(store, content_store_id, &content_id).await;
+    abandoned.release(store, content_store_id).await;
     Ok(response)
+}
+
+/// The provider state one terminated session owned.
+///
+/// It travels out of the compare-and-swap that made the session terminal so
+/// cleanup runs strictly after the durable transition — the ordering that
+/// makes a crash in between cost a repeat rather than a lost object.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AbandonedUpload {
+    content_id: ContentId,
+    provider_multipart_upload_id: Option<String>,
+}
+
+impl AbandonedUpload {
+    pub(crate) fn of(state: &UploadSessionState) -> Self {
+        Self {
+            content_id: state.content_id.clone(),
+            provider_multipart_upload_id: state.provider_multipart_upload_id.clone(),
+        }
+    }
+
+    /// Releases everything the session left behind, provider upload first so
+    /// the object it might still assemble cannot outlive the deletion.
+    pub(crate) async fn release<S: ObjectStore + ?Sized>(
+        &self,
+        store: &S,
+        content_store_id: &ContentStoreId,
+    ) {
+        if let Some(provider_upload_id) = &self.provider_multipart_upload_id {
+            abort_unpublished_multipart_upload(
+                store,
+                content_store_id,
+                &self.content_id,
+                provider_upload_id,
+            )
+            .await;
+        }
+        delete_unpublished_content_object(store, content_store_id, &self.content_id).await;
+    }
 }
 
 /// Reads one session, minting a fresh receipt when it is completed.
@@ -598,54 +907,142 @@ fn completed_outcome(
     }
 }
 
+/// What a completion attempt established about the session's content.
+enum CompletionOutcome {
+    /// The object at the session's key is the object it promised.
+    Verified(ContentRef),
+    /// The session can never produce the content it promised. The caller
+    /// makes the session terminal and reports the reason.
+    Unusable(String),
+}
+
 /// Establishes the content reference a completion may freeze.
 ///
 /// A proxied session already wrote and checked its bytes, so the staged
-/// reference is the answer. A direct-put session's bytes bypassed the
-/// server, so this is where the server learns what actually landed: it
-/// verifies rather than trusts, because provider enforcement is not uniform
-/// across the family we support and a random object id says nothing about
-/// its contents. One checksum-bearing HEAD settles size and bytes together
+/// reference is the answer. A direct session's bytes bypassed the server,
+/// so this is where the server learns what actually landed: it verifies
+/// rather than trusts, because provider enforcement is not uniform across
+/// the family we support and a random object id says nothing about its
+/// contents. One checksum-bearing HEAD settles size and bytes together
 /// without a download.
-async fn verified_completion_content_ref<S: ObjectStore + ?Sized>(
+async fn completion_content_ref<S: ObjectStore + ?Sized>(
     store: &S,
     content_store_id: &ContentStoreId,
     session: &UploadSessionState,
-    requested: &ContentRef,
-) -> Result<ContentRef> {
+    request: &CompleteUploadRequest,
+) -> Result<CompletionOutcome> {
+    let requested = &request.content_ref;
     if let Some(staged) = &session.staged_content_ref {
         if staged != requested {
             return Err(CoreError::InvalidUploadContent(
                 "completed content ref does not match staged content".to_owned(),
             ));
         }
-        return Ok(staged.clone());
+        return Ok(CompletionOutcome::Verified(staged.clone()));
     }
 
-    if session.mode != UploadMode::DirectPut {
-        return Err(CoreError::InvalidUploadContent(
+    match session.mode {
+        UploadMode::ServiceProxied => Err(CoreError::InvalidUploadContent(
             "upload content has not been staged".to_owned(),
-        ));
+        )),
+        UploadMode::DirectPut => {
+            let expected = expected_direct_target(session, "direct_put", requested)?;
+            match verify_durable_content_checksum(store, content_store_id, expected).await {
+                Ok(()) => Ok(CompletionOutcome::Verified(expected.clone())),
+                Err(err) => {
+                    // The id is random and still open, so the object nothing
+                    // can name is safe to remove and would otherwise leak.
+                    delete_unpublished_content_object(
+                        store,
+                        content_store_id,
+                        &requested.content_id,
+                    )
+                    .await;
+                    Err(CoreError::InvalidUploadContent(err.to_string()))
+                }
+            }
+        }
+        UploadMode::DirectMultipart => {
+            assemble_multipart_upload(store, content_store_id, session, request).await
+        }
     }
-    let Some(expected) = &session.direct_put_content_ref else {
-        return Err(CoreError::InvalidUploadContent(
-            "direct_put session is missing its target content ref".to_owned(),
-        ));
-    };
+}
+
+fn expected_direct_target<'a>(
+    session: &'a UploadSessionState,
+    mode: &str,
+    requested: &ContentRef,
+) -> Result<&'a ContentRef> {
+    let expected = session.direct_put_content_ref.as_ref().ok_or_else(|| {
+        CoreError::InvalidUploadContent(format!("{mode} session is missing its target content ref"))
+    })?;
     if expected != requested {
-        return Err(CoreError::InvalidUploadContent(
-            "completed content ref does not match direct_put target".to_owned(),
-        ));
+        return Err(CoreError::InvalidUploadContent(format!(
+            "completed content ref does not match the {mode} target"
+        )));
+    }
+    Ok(expected)
+}
+
+/// Asks the provider to assemble the parts a client uploaded, then proves
+/// what it assembled.
+///
+/// The read-back is the load-bearing check, not a formality: AWS S3 treats
+/// the whole-object checksum as a precondition and refuses a wrong one, but
+/// Cloudflare R2 accepts it, assembles the object anyway, and reports the
+/// true checksum instead. One provider enforces, one only witnesses, so
+/// LoonFS witnesses for itself on both.
+///
+/// A completion whose response was lost reconciles here too. Replaying the
+/// provider's completion is useless — S3 answers success with no checksum,
+/// R2 answers `NoSuchUpload` while the object sits there correct — so a
+/// consumed upload is not read as failure. The object at the key is the
+/// evidence, and it answers the same way on both providers.
+async fn assemble_multipart_upload<S: ObjectStore + ?Sized>(
+    store: &S,
+    content_store_id: &ContentStoreId,
+    session: &UploadSessionState,
+    request: &CompleteUploadRequest,
+) -> Result<CompletionOutcome> {
+    let expected = expected_direct_target(session, "direct_multipart", &request.content_ref)?;
+    let (_, provider_upload_id) = multipart_session_target(session)?;
+    let parts = request.multipart_parts.as_deref().ok_or_else(|| {
+        CoreError::InvalidUploadContent(
+            "completing a direct_multipart upload requires the list of parts it uploaded"
+                .to_owned(),
+        )
+    })?;
+    let parts = multipart_parts(parts)?;
+    let object_key = content_blob(content_store_id.as_str(), &expected.content_id);
+
+    match store
+        .complete_multipart_upload(
+            &object_key,
+            provider_upload_id,
+            &parts,
+            &expected.storage_checksum,
+        )
+        .await
+    {
+        // Either the provider assembled the object on this call, or it had
+        // already consumed the upload. Both questions are answered by the
+        // same read of the object, so neither needs its own path.
+        Ok(MultipartCompletion::Assembled | MultipartCompletion::UnknownUpload) => {}
+        Err(err) => {
+            // The provider refused to assemble. On AWS S3 that includes a
+            // whole-object checksum that does not match the parts, which is
+            // a wrong upload and not a transient one, so this is where the
+            // session stops.
+            return Ok(CompletionOutcome::Unusable(format!(
+                "multipart completion failed: {}",
+                err.message()
+            )));
+        }
     }
 
-    match verify_durable_content_checksum(store, content_store_id, requested).await {
-        Ok(()) => Ok(requested.clone()),
-        Err(err) => {
-            // The id is random and still open, so the object nothing can
-            // name is safe to remove and would otherwise leak.
-            delete_unpublished_content_object(store, content_store_id, &requested.content_id).await;
-            Err(CoreError::InvalidUploadContent(err.to_string()))
-        }
+    match verify_durable_content_checksum(store, content_store_id, expected).await {
+        Ok(()) => Ok(CompletionOutcome::Verified(expected.clone())),
+        Err(err) => Ok(CompletionOutcome::Unusable(err.to_string())),
     }
 }
 
@@ -709,6 +1106,7 @@ mod tests {
             upload_id,
             &CompleteUploadRequest {
                 content_ref: content_ref.clone(),
+                multipart_parts: None,
             },
             context,
         )

@@ -164,7 +164,10 @@ pub use checkpoint::{
 };
 pub use context::MutationContext;
 pub use engine::RuntimeReadContext;
-pub use engine::{BeginDirectPutUploadTargetResponse, DirectPutUploadTarget};
+pub use engine::{
+    BeginDirectMultipartUploadTargetResponse, BeginDirectPutUploadTargetResponse,
+    DirectMultipartUploadTarget, DirectPutUploadTarget, MultipartPartTarget, MultipartPartTargets,
+};
 // The builder pair is reachable through `NamespaceEngine::builder()` and its
 // `build()`, so both stay public even though no caller names them directly.
 pub use engine::{NamespaceEngine, NamespaceEngineBuildError, NamespaceEngineBuilder};

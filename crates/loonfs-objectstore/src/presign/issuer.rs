@@ -1,7 +1,7 @@
 //! Issuer contract and values for presigned direct-put transfers.
 
 use crate::object_store::Result;
-use loonfs_api::ContentRef;
+use loonfs_api::{ContentRef, StorageChecksum};
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 
@@ -12,6 +12,21 @@ pub struct PresignedPutRequest<'a> {
     pub object_key: &'a str,
     /// Expected digest and byte length the provider must enforce for the request body.
     pub content_ref: &'a ContentRef,
+    /// Lifetime of the issued capability measured from the supplied signing time.
+    pub expires_in: Duration,
+}
+
+/// Describes one part of an open multipart upload to authorize for a client.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PresignedPartRequest<'a> {
+    /// Logical unscoped object key the finished upload assembles into.
+    pub object_key: &'a str,
+    /// Provider-side upload the part belongs to.
+    pub provider_upload_id: &'a str,
+    /// One-based part number.
+    pub part_number: u32,
+    /// Checksum the provider must enforce on this part's bytes.
+    pub part_checksum: &'a StorageChecksum,
     /// Lifetime of the issued capability measured from the supplied signing time.
     pub expires_in: Duration,
 }
@@ -56,6 +71,20 @@ pub trait ObjectTransferIssuer: Send + Sync + std::fmt::Debug {
     fn presign_put(
         &self,
         request: PresignedPutRequest<'_>,
+        now: SystemTime,
+    ) -> Result<PresignedUrl>;
+
+    /// Issues a write capability for one part of an open multipart upload.
+    ///
+    /// A part is not the object, so this one is not create-only: re-issuing
+    /// a part is how a client retries a transfer that failed halfway, and
+    /// the provider takes the last write. What still rides the signature is
+    /// the part's checksum, which both providers enforce on the way in — so
+    /// no part of the eventual object is ever bytes the client did not
+    /// declare.
+    fn presign_multipart_part(
+        &self,
+        request: PresignedPartRequest<'_>,
         now: SystemTime,
     ) -> Result<PresignedUrl>;
 }

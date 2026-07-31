@@ -9,9 +9,30 @@ use crate::{
     CreateDirectoryOptions, DeleteOptions, InodeId, MaintenanceStepOptions, MoveOptions,
     NamespaceId, PutFileOptions, RestoreRevisionOptions, RevisionNo, UndeleteOptions,
 };
+use crate::{ChecksumAlgorithm, CommittedChange, FilesystemChange};
 use crate::{Result, RuntimeError};
+use loonfs_api::{EffectiveLimit, StorageChecksum};
 use loonfs_core::NamespaceEngine;
+use std::num::NonZeroU32;
 use std::sync::Arc;
+
+/// Change-feed sequences one lookup window covers when resolving a reused
+/// commit id.
+const COMMIT_LOOKUP_WINDOW: NonZeroU32 = NonZeroU32::new(128).expect("non-zero window");
+
+/// Windows one lookup walks back from the feed's head before giving up. A
+/// commit being retried is a recent one; past this the answer is "not
+/// found", never a guess.
+const COMMIT_LOOKUP_MAX_WINDOWS: usize = 8;
+
+/// The content one committed change wrote, if it wrote any.
+fn committed_content_ref(change: &CommittedChange) -> Option<&ContentRef> {
+    change.events.iter().find_map(|event| match event {
+        FilesystemChange::Created { content_ref, .. } => content_ref.as_ref(),
+        FilesystemChange::ContentChanged { content_ref, .. } => Some(content_ref),
+        _ => None,
+    })
+}
 
 impl FsWriter {
     /// A mutating engine under this writer's identity.
@@ -57,6 +78,19 @@ impl FsWriter {
             payload_class = tracing::field::Empty,
         )
     )]
+    /// Re-running this with a `commit_id` that already committed is safe
+    /// when the bytes are the same. A commit's identity names *which*
+    /// content object it wrote, and a re-run necessarily stages a fresh
+    /// one, so the publisher sees a different commit and reports
+    /// `commit_id_reuse_conflict`. This resolves that by reading back what
+    /// the commit id actually committed and comparing its content against
+    /// the bytes just staged: equal means the operation had already
+    /// succeeded. Different bytes, or content this build cannot compare,
+    /// surface the conflict.
+    ///
+    /// The freshly staged duplicate object is then referenced by nothing.
+    /// That is by design, not a leak: content garbage collection reclaims an
+    /// unreferenced object once its grace passes.
     pub async fn put_file_bytes(
         &self,
         namespace_id: &NamespaceId,
@@ -67,9 +101,106 @@ impl FsWriter {
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
         span.record("payload_class", crate::trace::payload_class(bytes.len()));
+        let commit_id = options.commit_id.clone();
         let prepared_content = self.prepare_file_bytes(namespace_id, bytes).await?;
-        self.put_file_prepared(namespace_id, absolute_path, prepared_content, options)
-            .await
+        let published = self
+            .put_file_prepared(namespace_id, absolute_path, prepared_content, options)
+            .await;
+        match (published, commit_id) {
+            (Err(error), Some(commit_id))
+                if error.code() == loonfs_core::ErrorCode::CommitIdReuseConflict =>
+            {
+                self.reconcile_commit_id_reuse(namespace_id, &commit_id, bytes, error)
+                    .await
+            }
+            (published, _) => published,
+        }
+    }
+
+    /// Decides whether a reused commit id already did this exact work.
+    ///
+    /// The evidence is the committed content itself, found in the change
+    /// feed by commit id and compared against the bytes just staged.
+    /// Nothing weaker counts: a comparison this build cannot make is
+    /// reported as a conflict that names why, never as agreement.
+    async fn reconcile_commit_id_reuse(
+        &self,
+        namespace_id: &NamespaceId,
+        commit_id: &CommitId,
+        bytes: &[u8],
+        conflict: RuntimeError,
+    ) -> Result<CommitResponse> {
+        let Some(committed) = self.find_committed_change(namespace_id, commit_id).await? else {
+            return Err(conflict);
+        };
+        let Some(content_ref) = committed_content_ref(&committed) else {
+            return Err(conflict);
+        };
+        if content_ref.size_bytes != bytes.len() as u64 {
+            return Err(conflict);
+        }
+
+        // The trusted whole-file digest when one exists, and otherwise the
+        // reference's own storage checksum — which for a provider-assembled
+        // multipart object is the only full-object evidence there is.
+        let evidence = match &content_ref.whole_file_sha256 {
+            Some(digest) => StorageChecksum {
+                algorithm: ChecksumAlgorithm::Sha256,
+                value: digest.clone(),
+            },
+            None => content_ref.storage_checksum.clone(),
+        };
+        match evidence.matches(bytes) {
+            Some(true) => Ok(CommitResponse {
+                namespace_id: namespace_id.clone(),
+                commit_id: committed.commit_id,
+                committed_seq: committed.seq,
+            }),
+            Some(false) => Err(conflict),
+            None => Err(RuntimeError::Config(format!(
+                "commit `{commit_id}` already committed content checksummed with `{}`, \
+                 which this build cannot recompute, so it cannot tell whether this is \
+                 the same upload retried",
+                evidence.algorithm
+            ))),
+        }
+    }
+
+    /// Finds one committed change by its commit id.
+    ///
+    /// There is no by-commit-id read, so this walks the change feed
+    /// backwards from its head in bounded windows. Backwards because a
+    /// commit being retried is a recent one, and bounded because a feed is
+    /// unbounded: past the budget this reports "not found", which the
+    /// caller turns into the conflict rather than into a guess.
+    async fn find_committed_change(
+        &self,
+        namespace_id: &NamespaceId,
+        commit_id: &CommitId,
+    ) -> Result<Option<CommittedChange>> {
+        let engine = self.engine(namespace_id);
+        let window = EffectiveLimit::new(COMMIT_LOOKUP_WINDOW);
+        let head = engine
+            .list_changes_after(ChangeSeq(0), EffectiveLimit::new(NonZeroU32::MIN))
+            .await?
+            .through_seq;
+        let mut upper = head.0;
+        for _ in 0..COMMIT_LOOKUP_MAX_WINDOWS {
+            let lower = upper.saturating_sub(u64::from(COMMIT_LOOKUP_WINDOW.get()));
+            let page = engine.list_changes_after(ChangeSeq(lower), window).await?;
+            if let Some(found) = page
+                .changes
+                .into_iter()
+                .find(|change| &change.commit_id == commit_id)
+            {
+                return Ok(Some(found));
+            }
+            if lower == 0 {
+                break;
+            }
+            upper = lower;
+        }
+        Ok(None)
     }
 
     /// Stages file bytes as durable content for later publication.

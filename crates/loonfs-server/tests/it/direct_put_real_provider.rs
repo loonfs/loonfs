@@ -3,12 +3,14 @@
 use crate::common::{start_server, test_config};
 use loonfs_api::{
     v0::{
-        CompleteUploadRequest, DirectPutContentClaim, ObjectTransferAccess, ValidatedContentToken,
+        CompleteUploadRequest, DirectMultipartContentClaim, DirectPutContentClaim,
+        ObjectTransferAccess, UploadPartChecksumClaim, ValidatedContentToken,
     },
     ChangeSeq, CommitId, CommitRequest, CommitResponse, DestinationBehavior, FilesystemOperation,
     NamespaceId, StorageChecksum,
 };
 use loonfs_client::{Client, ClientError, NamespacePath};
+use loonfs_objectstore::ObjectStore;
 use loonfs_server::{ServerConfig, StoreConfig};
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -16,6 +18,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const AUTH_TOKEN: &str = "test-token";
 const CONTENT_TOKEN_SECRET: &str = "test-content-token-secret";
 const SIGNED_CHECKSUM_HEADER: &str = "x-amz-checksum-sha256";
+/// The part size the reference server hands out. A live payload is cut to
+/// this so it lands on a known part count; the assertions check the server
+/// still says so.
+const MULTIPART_PART_SIZE: usize = 8 * 1024 * 1024;
 
 /// What a direct-put client declares about bytes it is holding.
 fn direct_put_claim(bytes: &[u8]) -> DirectPutContentClaim {
@@ -122,6 +128,7 @@ async fn direct_put_round_trip(config: ServerConfig) {
             &begin.upload_id,
             &CompleteUploadRequest {
                 content_ref: content_ref.clone(),
+                multipart_parts: None,
             },
         )
         .await
@@ -182,7 +189,10 @@ async fn assert_wrong_direct_put_bytes_rejected(client: &Client, namespace_id: &
             .complete_upload(
                 namespace_id,
                 &begin.upload_id,
-                &CompleteUploadRequest { content_ref },
+                &CompleteUploadRequest {
+                    content_ref,
+                    multipart_parts: None,
+                },
             )
             .await,
         "complete wrong-bytes direct put",
@@ -216,7 +226,10 @@ async fn assert_direct_put_requires_signed_checksum_header(
             .complete_upload(
                 namespace_id,
                 &begin.upload_id,
-                &CompleteUploadRequest { content_ref },
+                &CompleteUploadRequest {
+                    content_ref,
+                    multipart_parts: None,
+                },
             )
             .await,
         "complete missing-checksum direct put",
@@ -247,7 +260,10 @@ async fn assert_direct_put_is_no_replace(client: &Client, namespace_id: &Namespa
         .complete_upload(
             namespace_id,
             &begin.upload_id,
-            &CompleteUploadRequest { content_ref },
+            &CompleteUploadRequest {
+                content_ref,
+                multipart_parts: None,
+            },
         )
         .await
         .expect("complete first direct put");
@@ -397,4 +413,279 @@ fn direct_put_prefix(provider: &str, base_prefix: Option<String>) -> String {
         std::process::id(),
         provider
     )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires real AWS S3 credentials"]
+async fn aws_s3_direct_multipart_real_provider_round_trip() {
+    let config = AwsS3DirectPutConfig::from_env().expect("load AWS S3 direct-put environment");
+    direct_multipart_round_trip(test_config(
+        StoreConfig::AwsS3 {
+            bucket: config.bucket,
+            region: config.region,
+            endpoint_url: config.endpoint,
+            access_key_id: config.access_key_id.into(),
+            secret_access_key: config.secret_access_key.into(),
+            session_token: config.session_token.map(Into::into),
+            key_prefix: Some(config.prefix),
+            force_path_style: false,
+        },
+        AUTH_TOKEN,
+        CONTENT_TOKEN_SECRET,
+        "direct-multipart-aws-s3",
+    ))
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires real Cloudflare R2 credentials"]
+async fn cloudflare_r2_direct_multipart_real_provider_round_trip() {
+    let config =
+        CloudflareR2DirectPutConfig::from_env().expect("load Cloudflare R2 direct-put environment");
+    direct_multipart_round_trip(test_config(
+        StoreConfig::CloudflareR2 {
+            bucket: config.bucket,
+            account_id: config.account_id,
+            endpoint_url: config.endpoint,
+            access_key_id: config.access_key_id.into(),
+            secret_access_key: config.secret_access_key.into(),
+            key_prefix: Some(config.prefix),
+        },
+        AUTH_TOKEN,
+        CONTENT_TOKEN_SECRET,
+        "direct-multipart-r2",
+    ))
+    .await;
+}
+
+/// A payload with a distinct byte at every offset, so a part landing in the
+/// wrong place or twice cannot go unnoticed.
+fn multipart_payload(part_size: usize, parts: usize) -> Vec<u8> {
+    (0..part_size * parts + 4_096)
+        .map(|offset| (offset % 251) as u8)
+        .collect()
+}
+
+/// The whole point of this PR, end to end against a real provider: a large
+/// object crosses the network once, in parallel, straight into object
+/// storage — and LoonFS believes the result only after reading the
+/// assembled object's own checksum back.
+async fn direct_multipart_round_trip(config: ServerConfig) {
+    let store_config = config.store.clone();
+    let harness = start_server(config).await;
+
+    let namespace = "direct-multipart-e2e";
+    let namespace_id = NamespaceId::parse(namespace).expect("valid namespace id");
+    let target =
+        NamespacePath::parse(namespace, "/large.bin").expect("parse direct-multipart target");
+
+    let capabilities = harness
+        .client
+        .capabilities()
+        .await
+        .expect("fetch capabilities");
+    assert!(capabilities.supports("core.uploads.direct_multipart"));
+
+    harness
+        .client
+        .create_namespace(&namespace_id)
+        .await
+        .expect("create namespace");
+
+    // Three parts, which is the smallest payload that exercises a middle
+    // part at all. The providers refuse a non-final part below their own
+    // minimum, so this also proves the geometry the server hands out
+    // satisfies that rule without the client knowing what it is.
+    let part_size = MULTIPART_PART_SIZE;
+    let payload = multipart_payload(part_size, 2);
+    let whole_object = StorageChecksum::crc64nvme(&payload);
+    let begin = harness
+        .client
+        .begin_direct_multipart(
+            &namespace_id,
+            DirectMultipartContentClaim {
+                size_bytes: payload.len() as u64,
+                crc64nvme: whole_object.value.clone(),
+            },
+        )
+        .await
+        .expect("begin direct multipart");
+    let upload_id = begin.upload_id.clone();
+    let multipart = begin.direct_multipart.expect("multipart geometry");
+    assert_eq!(
+        multipart.part_size_bytes as usize, part_size,
+        "the deployment's part geometry is the one this payload was cut to"
+    );
+    assert_eq!(multipart.part_count, 3, "three parts at this geometry");
+    assert_eq!(multipart.content_ref.size_bytes, payload.len() as u64);
+    assert_eq!(multipart.content_ref.storage_checksum, whole_object);
+    assert!(
+        multipart.content_ref.whole_file_sha256.is_none(),
+        "a provider-assembled object carries no whole-file sha256"
+    );
+    let content_ref = multipart.content_ref.clone();
+
+    let chunks: Vec<&[u8]> = payload.chunks(part_size).collect();
+    let claims: Vec<UploadPartChecksumClaim> = chunks
+        .iter()
+        .enumerate()
+        .map(|(index, chunk)| UploadPartChecksumClaim {
+            part_number: index as u32 + 1,
+            crc64nvme: StorageChecksum::crc64nvme(chunk).value,
+        })
+        .collect();
+    let signed = harness
+        .client
+        .sign_upload_parts(&namespace_id, &upload_id, claims.clone())
+        .await
+        .expect("sign every part");
+    assert_eq!(signed.parts.len(), chunks.len());
+
+    // Every part in parallel, and part two twice: re-uploading one part is
+    // how a client retries a transfer that failed halfway, and the provider
+    // takes the last write.
+    let mut in_flight = tokio::task::JoinSet::new();
+    for part in signed.parts.iter().cloned() {
+        let index = part.part_number as usize - 1;
+        let client = harness.client.clone();
+        let crc64nvme = claims[index].crc64nvme.clone();
+        let chunk = chunks[index].to_vec();
+        in_flight.spawn(async move {
+            client
+                .upload_part_via_presigned_url(part.part_number, &part.access, crc64nvme, &chunk)
+                .await
+        });
+    }
+    let mut parts = Vec::new();
+    while let Some(joined) = in_flight.join_next().await {
+        parts.push(joined.expect("part task").expect("part upload"));
+    }
+    let repeated = &signed.parts[1];
+    let replaced = harness
+        .client
+        .upload_part_via_presigned_url(
+            repeated.part_number,
+            &repeated.access,
+            claims[1].crc64nvme.clone(),
+            chunks[1],
+        )
+        .await
+        .expect("re-uploading a part is allowed and last-write-wins");
+    parts.retain(|part| part.part_number != repeated.part_number);
+    parts.push(replaced);
+    parts.sort_by_key(|part| part.part_number);
+
+    let request = CompleteUploadRequest {
+        content_ref: content_ref.clone(),
+        multipart_parts: Some(parts),
+    };
+    let complete = harness
+        .client
+        .complete_upload(&namespace_id, &upload_id, &request)
+        .await
+        .expect("complete the multipart upload");
+    assert_eq!(complete.content_ref, content_ref);
+
+    // The lost completion. The providers disagree completely about what a
+    // replayed completion means — AWS S3 replays a success with no checksum
+    // in it, Cloudflare R2 answers `NoSuchUpload` — so neither answer is
+    // used. Both reconcile from the durable session and the object.
+    let replayed = harness
+        .client
+        .complete_upload(&namespace_id, &upload_id, &request)
+        .await
+        .expect("a lost completion is answered, not failed");
+    assert_eq!(replayed.content_ref, content_ref);
+
+    let validated_content_token = replayed
+        .validated_content_token
+        .expect("completion returns content token");
+    let response = post_commit(
+        &harness.server_url,
+        namespace,
+        &CommitRequest {
+            commit_id: CommitId::parse("direct-multipart-e2e").expect("valid commit id"),
+            message: None,
+            content_tokens: vec![ValidatedContentToken {
+                content_ref: content_ref.clone(),
+                token: validated_content_token,
+            }],
+            operations: vec![FilesystemOperation::PutFile {
+                path: target.absolute_path().clone(),
+                content_ref,
+                behavior: DestinationBehavior::NoReplace,
+                expected_revision_no: None,
+            }],
+        },
+    );
+    assert_eq!(response.committed_seq, ChangeSeq(1));
+
+    // Reading it back is what proves the crc-only reference is a first-class
+    // one: the read verifies by that crc, because nothing else describes
+    // these bytes.
+    let loaded = harness
+        .client
+        .get_file_bytes(&target)
+        .await
+        .expect("read the assembled file");
+    assert_eq!(loaded, payload);
+
+    // And a rerun of the same put under the same commit id reconciles by
+    // content rather than conflicting, even with no whole-file sha256 to
+    // compare — the provider's crc is the evidence.
+    let rerun = harness
+        .client
+        .put_file_bytes(
+            &NamespacePath::parse(namespace, "/rerun.bin").expect("rerun target"),
+            &payload,
+            &loonfs_client::PutFileOptions {
+                behavior: DestinationBehavior::NoReplace,
+                commit_id: Some(CommitId::parse("multipart-rerun").expect("valid commit id")),
+                message: None,
+                expected_revision_no: None,
+            },
+        )
+        .await
+        .expect("a multipart put through the client");
+    let replayed_rerun = harness
+        .client
+        .put_file_bytes(
+            &NamespacePath::parse(namespace, "/rerun.bin").expect("rerun target"),
+            &payload,
+            &loonfs_client::PutFileOptions {
+                behavior: DestinationBehavior::NoReplace,
+                commit_id: Some(CommitId::parse("multipart-rerun").expect("valid commit id")),
+                message: None,
+                expected_revision_no: None,
+            },
+        )
+        .await
+        .expect("rerunning identical bytes is idempotent without a sha256");
+    assert_eq!(replayed_rerun, rerun);
+
+    harness.server.abort();
+    delete_everything_under_the_run_prefix(&store_config).await;
+}
+
+/// Removes every object this run wrote.
+///
+/// The run's key prefix is unique, and the store scopes every key beneath
+/// it, so listing the store root lists exactly this run's objects and
+/// nothing else in the bucket.
+async fn delete_everything_under_the_run_prefix(store_config: &StoreConfig) {
+    let store = store_config
+        .configured_object_store()
+        .expect("build a store for cleanup");
+    let keys = store.list_prefix("").await.expect("list the run prefix");
+    for key in keys {
+        store.delete(&key).await.expect("delete a run object");
+    }
+    assert!(
+        store
+            .list_prefix("")
+            .await
+            .expect("re-list the run prefix")
+            .is_empty(),
+        "the run left objects behind"
+    );
 }
