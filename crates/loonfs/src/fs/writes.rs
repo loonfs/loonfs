@@ -1,14 +1,13 @@
 //! [`FsWriter`]'s path mutations, commits, and the publication pipeline.
 
-use super::core::{BackgroundStepClaim, ReadCore, WriterBits};
+use super::core::{ReadCore, WriterBits};
 use crate::publish::{CommitCandidate, CommitRequest, FilesystemOperation, PreparedContent};
-use crate::publisher::PublisherRegistry;
 use crate::ByteStream;
 use crate::FsWriter;
 use crate::{
     ChangeSeq, CommitId, CommitResponse, ContentRef, CopyOptions, CoreError,
-    CreateDirectoryOptions, DeleteOptions, InodeId, MaintenanceStepOptions, MoveOptions,
-    NamespaceId, PutFileOptions, RestoreRevisionOptions, RevisionNo, UndeleteOptions,
+    CreateDirectoryOptions, DeleteOptions, InodeId, MaintenanceJobId, MaintenanceStepOptions,
+    MoveOptions, NamespaceId, PutFileOptions, RestoreRevisionOptions, RevisionNo, UndeleteOptions,
 };
 use crate::{ChecksumAlgorithm, CommittedChange, FilesystemChange};
 use crate::{Result, RuntimeError};
@@ -761,13 +760,10 @@ impl FsWriter {
 ///
 /// Only the publication service calls this: it owns the engine, and
 /// borrowing it here keeps engine construction and locking in that one
-/// place. `publisher` is the registry a scheduled maintenance step
-/// invalidates engines through; it is absent only for a publisher whose
-/// registry is already gone. Results match candidates in order.
+/// place. Results match candidates in order.
 pub(crate) async fn publish_batch_with_engine(
     core: &ReadCore,
     writer: &Arc<WriterBits>,
-    publisher: Option<&PublisherRegistry>,
     namespace_id: &NamespaceId,
     engine: &mut loonfs_core::publish::NamespaceCommitEngine,
     candidates: Vec<CommitCandidate>,
@@ -824,7 +820,7 @@ pub(crate) async fn publish_batch_with_engine(
         .map(|result| result.map_err(RuntimeError::Core))
         .collect::<Vec<_>>();
     notify_publish_observer(writer, namespace_id, &results);
-    maybe_auto_step_after_publish(core, writer, publisher, namespace_id, wal_tail_segments);
+    maybe_auto_step_after_publish(writer, namespace_id, wal_tail_segments);
     results
 }
 
@@ -846,105 +842,22 @@ fn notify_publish_observer(
     }
 }
 
-/// Schedules a maintenance step after a publish that observed the WAL
-/// tail at or past the checkpoint threshold. Steps are spawned on the
-/// writer's owning runtime — never on a hidden LoonFS runtime — so no
-/// writer (and no server batch pipeline) waits behind a checkpoint or
-/// base rebuild. The per-namespace singleflight claim dedupes concurrent
-/// publishers and is released on every outcome, including step panics
-/// and dropped tasks.
+/// Tells the maintenance runner a namespace crossed its WAL-tail threshold.
+///
+/// The nudge is a hint and nothing more: it never blocks the publish, never
+/// waits for a permit, and carries no claim on the step it suggests. The
+/// runner decides when — and whether — to run, and the step it eventually
+/// runs re-reads the tail rather than trusting what this publish saw.
 fn maybe_auto_step_after_publish(
-    core: &ReadCore,
     writer: &Arc<WriterBits>,
-    publisher: Option<&PublisherRegistry>,
     namespace_id: &NamespaceId,
     wal_tail_segments: u64,
 ) {
-    let options = MaintenanceStepOptions::default();
-    if wal_tail_segments < options.max_wal_tail_segments {
+    if wal_tail_segments < MaintenanceStepOptions::default().max_wal_tail_segments {
         return;
     }
-    // No registry means the publication service that would own the step is
-    // already gone; there is nothing left to schedule maintenance for.
-    let Some(publisher) = publisher else {
-        return;
-    };
-    if !writer.background.try_claim(namespace_id) {
-        return;
-    }
-    let claim = BackgroundStepClaim {
-        core: core.clone(),
-        bits: Arc::clone(writer),
-        publisher: publisher.clone(),
-        namespace_id: namespace_id.clone(),
-    };
-    spawn_claimed_auto_maintenance(claim, options);
-}
-
-fn spawn_claimed_auto_maintenance(claim: BackgroundStepClaim, options: MaintenanceStepOptions) {
-    // Type erasure lets a finishing task transfer its claim and spawn the
-    // next queued namespace without forming a recursive future type.
-    let background = Arc::clone(&claim.bits.background);
-    let future: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
-        Box::pin(async move {
-            let mut claim = claim;
-            loop {
-                if let Err(error) = run_auto_maintenance(&claim, options.clone()).await {
-                    tracing::info!(
-                        phase = "auto_maintenance_step",
-                        result = "error",
-                        error = %error,
-                        "post-publish maintenance step failed"
-                    );
-                }
-                let Some(next_namespace_id) =
-                    claim.bits.background.finish_or_rerun(&claim.namespace_id)
-                else {
-                    break;
-                };
-                if next_namespace_id == claim.namespace_id {
-                    // Preserve the existing own-namespace rerun in this
-                    // task before handing its slot to global queued work.
-                    continue;
-                }
-                claim.namespace_id = next_namespace_id;
-                spawn_claimed_auto_maintenance(claim, options);
-                return;
-            }
-        });
-    background.spawn(future);
-}
-
-async fn run_auto_maintenance(
-    claim: &BackgroundStepClaim,
-    options: MaintenanceStepOptions,
-) -> Result<()> {
-    // Background maintenance runs the same operations an operator runs,
-    // through the same handle, rather than a private copy of them — over
-    // the writer's own runtime, so its invalidations reach the writer's
-    // caches and publisher engines.
-    let admin = crate::FsAdmin::from_writer_parts(
-        claim.core.clone(),
-        claim.bits.identity.clone(),
-        claim.publisher.clone(),
-    );
-    let started = tokio::time::Instant::now();
-    let step = admin
-        .maintenance_step_namespace(&claim.namespace_id, options)
-        .await?;
-    admin
-        .drain_reorganization_backlog(&claim.namespace_id)
-        .await?;
-    // Quiet conclusions (`NotNeeded`) emit nothing at default levels;
-    // this is the only record that a background step ran at all.
-    tracing::debug!(
-        phase = "auto_maintenance_step",
-        namespace_id = %step.namespace_id,
-        wal_tail_segments_before = step.status_before.wal_tail_segments,
-        wal_flush = ?step.wal_flush,
-        reorganize = ?step.reorganize,
-        elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-        "background maintenance step concluded"
-    );
-    Ok(())
+    writer
+        .maintenance
+        .handle()
+        .nudge(MaintenanceJobId::METADATA, namespace_id);
 }

@@ -163,7 +163,13 @@ async fn a_retention_trimmed_commit_seq_leaves_the_conflict_standing() {
         .expect("create checkpoint");
     let advanced = runtime
         .admin
-        .advance_retention_floor(&namespace_id)
+        .maintenance_step_namespace(
+            &namespace_id,
+            MaintenanceStepOptions {
+                only: Some(MaintenanceStepKind::Retention),
+                ..MaintenanceStepOptions::default()
+            },
+        )
         .await
         .expect("advance retention floor");
     assert!(
@@ -237,7 +243,13 @@ async fn a_retry_past_the_receipt_horizon_commits_again() {
     }
     let advanced = runtime
         .admin
-        .advance_retention_floor(&namespace_id)
+        .maintenance_step_namespace(
+            &namespace_id,
+            MaintenanceStepOptions {
+                only: Some(MaintenanceStepKind::Retention),
+                ..MaintenanceStepOptions::default()
+            },
+        )
         .await
         .expect("advance retention floor");
     assert!(

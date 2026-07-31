@@ -443,20 +443,6 @@ impl NamespacePublisher {
         }
     }
 
-    /// A registry handle over the same shared state — what a clone of the
-    /// owning registry is — for the writer-side work a publication
-    /// schedules. `None` once that registry is gone.
-    fn registry(&self) -> Option<PublisherRegistry> {
-        Some(PublisherRegistry {
-            shared: self.shared.upgrade()?,
-            read_core: self.read_core.clone(),
-            writer: self.writer.clone(),
-            min_publish_interval: self.min_publish_interval,
-            trace_mode: self.trace_mode,
-            trace_store_kind: self.trace_store_kind,
-        })
-    }
-
     /// Recovers a poisoned lock rather than propagating, for the same reason
     /// as [`RegistryShared::lock_state`]: every critical section here is a
     /// plain field update, and one panicked publication must not leave the
@@ -779,13 +765,11 @@ impl NamespacePublisher {
         writer: &Arc<WriterBits>,
         candidates: Vec<CommitCandidate>,
     ) -> Vec<CommitResult> {
-        let registry = self.registry();
         let mut slot = self.engine.lock().await;
         let engine = self.engine_for(&mut slot);
         crate::fs::publish_batch_with_engine(
             &self.read_core,
             writer,
-            registry.as_ref(),
             &self.namespace_id,
             engine,
             candidates,

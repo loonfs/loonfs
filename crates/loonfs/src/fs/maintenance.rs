@@ -150,7 +150,7 @@ impl FsAdmin {
         let wal_flush = if runs(MaintenanceStepKind::WalFlush)
             && status_before.wal_tail_segments >= options.max_wal_tail_segments
         {
-            match self.flush_wal(namespace_id).await {
+            match self.run_step_wal_flush(namespace_id).await {
                 Ok(flush) => match flush.outcome {
                     FlushWalOutcome::Published => WalFlushStepOutcome::Flushed {
                         manifest_head_seq: flush.manifest_head_seq,
@@ -199,7 +199,7 @@ impl FsAdmin {
             None => options.retention,
         };
         let retention_floor_seq = if retention_runs {
-            self.advance_retention_floor(namespace_id)
+            self.run_step_retention(namespace_id)
                 .await?
                 .retention_floor_seq
         } else {
@@ -269,30 +269,6 @@ impl FsAdmin {
         Ok(report.outcome)
     }
 
-    /// Folds reorganization units until the trigger reports nothing left to
-    /// do. Only writer-scheduled background steps drain like this — an
-    /// explicit maintenance step keeps its one-unit-per-call cost bound —
-    /// so fold debt created by a burst of writes is settled by the burst's
-    /// own background step instead of waiting for future threshold
-    /// crossings that may never come.
-    pub(crate) async fn drain_reorganization_backlog(
-        &self,
-        namespace_id: &NamespaceId,
-    ) -> Result<()> {
-        // Four family groups exist today; the bound is a livelock guard,
-        // not a scheduling policy.
-        const MAX_UNITS_PER_DRAIN: usize = 16;
-        for _ in 0..MAX_UNITS_PER_DRAIN {
-            match self.run_step_reorganization(namespace_id).await? {
-                loonfs_core::MetadataReorganizeOutcome::UnitPublished { .. } => {}
-                loonfs_core::MetadataReorganizeOutcome::NotNeeded { .. }
-                | loonfs_core::MetadataReorganizeOutcome::BudgetExhausted { .. }
-                | loonfs_core::MetadataReorganizeOutcome::Superseded => break,
-            }
-        }
-        Ok(())
-    }
-
     async fn run_step_gc(
         &self,
         namespace_id: &NamespaceId,
@@ -307,8 +283,10 @@ impl FsAdmin {
     /// Runs the v1 mark-and-sweep garbage collector for one namespace.
     ///
     /// Bounded calls return an enumeration cursor; every resume rebuilds the
-    /// current live roots. Never runs implicitly: callers opt in here or
-    /// through [`MaintenanceStepOptions::gc`].
+    /// current live roots. A step sweeps only when asked — here, or through
+    /// [`MaintenanceStepOptions::gc`] — and the one thing that asks on its
+    /// own is a writer's collection job, which schedules a pass for each
+    /// upload deadline that writer created.
     pub async fn gc_namespace(
         &self,
         namespace_id: &NamespaceId,
@@ -377,6 +355,10 @@ impl FsAdmin {
 
     /// Flushes the WAL tail and advances the metadata root, creating no
     /// checkpoint record.
+    ///
+    /// Not a surface of its own: a caller asks for exactly this with
+    /// [`MaintenanceStepKind::WalFlush`], which is the same request with a
+    /// threshold attached.
     #[tracing::instrument(
         level = "info",
         name = "loonfs.compaction",
@@ -388,7 +370,7 @@ impl FsAdmin {
             store_kind = tracing::field::Empty,
         )
     )]
-    pub async fn flush_wal(&self, namespace_id: &NamespaceId) -> Result<FlushWalResponse> {
+    async fn run_step_wal_flush(&self, namespace_id: &NamespaceId) -> Result<FlushWalResponse> {
         let span = tracing::Span::current();
         self.core.record_trace_context(&span);
         let result = self
@@ -400,8 +382,10 @@ impl FsAdmin {
     }
 
     /// Advances the namespace retention floor when a verified checkpoint
-    /// makes it safe.
-    pub async fn advance_retention_floor(
+    /// makes it safe. Reached only through
+    /// [`MaintenanceStepKind::Retention`] or `options.retention`: nothing
+    /// surrenders replay history without being asked.
+    async fn run_step_retention(
         &self,
         namespace_id: &NamespaceId,
     ) -> Result<AdvanceRetentionResponse> {

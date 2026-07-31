@@ -7,12 +7,12 @@
 use loonfs::publish::CommitRequest;
 use loonfs::DirectPutContentClaim;
 use loonfs::{
-    AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, BeginUploadRequest,
-    BeginUploadResponse, ChangeSeq, ChangesResponse, CommitResponse, CompleteUploadRequest,
-    CompleteUploadResponse, ContentRef, CopyOptions, CreateCheckpointOptions,
-    CreateCheckpointResponse, CreateDirectoryOptions, CreateNamespaceOptions, DeleteOptions,
-    DirectoryPageCursor, ErrorCode, FsAdmin, FsReader, FsWriter, FsWriterBuilder,
-    ListChangesOptions, MaintenanceStepOptions, MaintenanceStepResponse, MoveOptions, NamespaceId,
+    AuthoritativeFileBytes, AuthoritativePathEntry, BeginUploadRequest, BeginUploadResponse,
+    ChangeSeq, ChangesResponse, CommitResponse, CompleteUploadRequest, CompleteUploadResponse,
+    ContentRef, CopyOptions, CreateCheckpointOptions, CreateCheckpointResponse,
+    CreateDirectoryOptions, CreateNamespaceOptions, DeleteOptions, DirectoryPageCursor, ErrorCode,
+    FsAdmin, FsReader, FsWriter, FsWriterBuilder, ListChangesOptions, MaintenanceStepKind,
+    MaintenanceStepOptions, MaintenanceStepResponse, MoveOptions, NamespaceId,
     NamespaceStatusResponse, PageRequest, PutFileOptions, RuntimeError, SharedObjectStore,
     UploadContentResponse, UploadId,
 };
@@ -311,7 +311,7 @@ pub(crate) trait RuntimeTestExt {
     fn advance_retention_floor_blocking(
         &self,
         namespace_id: &NamespaceId,
-    ) -> loonfs::Result<AdvanceRetentionResponse>;
+    ) -> loonfs::Result<MaintenanceStepResponse>;
 }
 
 impl RuntimeTestExt for TestRuntime {
@@ -523,8 +523,14 @@ impl RuntimeTestExt for TestRuntime {
     fn advance_retention_floor_blocking(
         &self,
         namespace_id: &NamespaceId,
-    ) -> loonfs::Result<AdvanceRetentionResponse> {
-        block_on(self.admin.advance_retention_floor(namespace_id))
+    ) -> loonfs::Result<MaintenanceStepResponse> {
+        block_on(self.admin.maintenance_step_namespace(
+            namespace_id,
+            MaintenanceStepOptions {
+                only: Some(MaintenanceStepKind::Retention),
+                ..MaintenanceStepOptions::default()
+            },
+        ))
     }
 }
 

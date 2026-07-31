@@ -8,8 +8,8 @@
 
 use loonfs::{
     CommitId, CreateCheckpointOptions, CreateNamespaceOptions, ErrorCode, FsAdmin,
-    FsBackgroundWork, FsReader, FsWriter, MaintenanceStepOptions, ManifestId, NamespaceId,
-    PutFileOptions, RuntimeCacheConfig, RuntimeError, SharedObjectStore, StoreConfig,
+    FsBackgroundWork, FsReader, FsWriter, MaintenanceStepKind, MaintenanceStepOptions, ManifestId,
+    NamespaceId, PutFileOptions, RuntimeCacheConfig, RuntimeError, SharedObjectStore, StoreConfig,
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
 use loonfs_core::control::load_namespace_metadata_root_control;
@@ -928,7 +928,13 @@ fn admin_checkpoint_and_retention_are_explicit_one_shot_calls() {
             .expect("create checkpoint");
         assert!(checkpoint.manifest_id > ManifestId(0));
         let retention = admin
-            .advance_retention_floor(&namespace_id)
+            .maintenance_step_namespace(
+                &namespace_id,
+                MaintenanceStepOptions {
+                    only: Some(MaintenanceStepKind::Retention),
+                    ..MaintenanceStepOptions::default()
+                },
+            )
             .await
             .expect("advance retention");
         assert_eq!(retention.namespace_id, namespace_id);

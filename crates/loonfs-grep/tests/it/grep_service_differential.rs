@@ -7,8 +7,8 @@ use crate::common::{control, grep_with, GrepHost};
 use loonfs::publish::{CommitCandidate, CommitRequest, FilesystemOperation};
 use loonfs::{
     CommitId, CoreError, CreateDirectoryOptions, CreateNamespaceOptions, DeleteOptions,
-    DestinationBehavior, FsAdmin, FsReader, FsWriter, MoveOptions, NamespaceId, PutFileOptions,
-    SharedObjectStore,
+    DestinationBehavior, FsAdmin, FsReader, FsWriter, MaintenanceStepKind, MaintenanceStepOptions,
+    MoveOptions, NamespaceId, PutFileOptions, SharedObjectStore,
 };
 use loonfs_api::{AbsolutePath, GrepRequest, GrepResponse};
 use loonfs_grep::root::load_grep_root;
@@ -240,7 +240,14 @@ async fn planless_scan_returns_exact_materialized_and_wal_boundary_revisions_onc
     let materialized_head = control::head(&fixture.store, &fixture.namespace_id).await;
     fixture
         .admin
-        .flush_wal(&fixture.namespace_id)
+        .maintenance_step_namespace(
+            &fixture.namespace_id,
+            MaintenanceStepOptions {
+                max_wal_tail_segments: 1,
+                only: Some(MaintenanceStepKind::WalFlush),
+                ..MaintenanceStepOptions::default()
+            },
+        )
         .await
         .expect("flush materialized commit");
     let materialized_root = control::metadata_root(&fixture.store, &fixture.namespace_id).await;
@@ -314,7 +321,14 @@ async fn planless_scan_deduplicates_an_inode_revised_across_materialization() {
         .expect("write materialized revision");
     fixture
         .admin
-        .flush_wal(&fixture.namespace_id)
+        .maintenance_step_namespace(
+            &fixture.namespace_id,
+            MaintenanceStepOptions {
+                max_wal_tail_segments: 1,
+                only: Some(MaintenanceStepKind::WalFlush),
+                ..MaintenanceStepOptions::default()
+            },
+        )
         .await
         .expect("flush materialized revision");
     fixture

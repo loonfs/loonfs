@@ -4,10 +4,10 @@
 // Publisher tests use panic in async result helpers for precise diagnostics.
 
 use super::*;
-use crate::background::{BackgroundWork, FsBackgroundWork};
 use crate::config::ReadConfig;
 use crate::content_tokens::ContentTokenError;
 use crate::fs::WriterIdentity;
+use crate::maintenance_runner::MaintenanceRunner;
 use crate::publish::{ContentPreparationError, FilesystemOperation};
 use crate::{
     BeginUploadRequest, CreateNamespaceOptions, ErrorCode, RuntimeCacheConfig,
@@ -205,11 +205,11 @@ fn test_read_core(store: SharedStore) -> ReadCore {
 fn test_writer_bits() -> Arc<WriterBits> {
     Arc::new(WriterBits {
         identity: WriterIdentity::new("writer-a".to_owned()).expect("valid writer identity"),
-        background: Arc::new(BackgroundWork::new(
-            FsBackgroundWork::ManualOnly,
+        maintenance: MaintenanceRunner::new(
+            crate::FsBackgroundWork::ManualOnly,
             None,
             std::num::NonZeroUsize::new(1).expect("nonzero"),
-        )),
+        ),
         publish_observer: None,
     })
 }

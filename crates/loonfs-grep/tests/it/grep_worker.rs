@@ -9,7 +9,8 @@ use bytes::Bytes;
 use futures::stream::BoxStream;
 use loonfs::{
     CreateNamespaceOptions, DeleteNamespaceOptions, ErrorCode, FsAdmin, FsReader, FsWriter,
-    GcConfig, NamespaceId, PutFileOptions, SharedObjectStore,
+    GcConfig, MaintenanceStepKind, MaintenanceStepOptions, NamespaceId, PutFileOptions,
+    SharedObjectStore,
 };
 use loonfs_api::wire::control::CheckpointRecordLifecycle;
 use loonfs_api::{sha256_digest, ChangeSeq, GrepRequest, GrepResponse, IndexSegmentId};
@@ -370,9 +371,25 @@ async fn retention_gap_and_vanished_checkpoint_restart_fresh_backfill() {
         )
         .await
         .expect("write after watermark");
-    admin.flush_wal(&namespace_id).await.expect("flush wal");
+    admin
+        .maintenance_step_namespace(
+            &namespace_id,
+            MaintenanceStepOptions {
+                max_wal_tail_segments: 1,
+                only: Some(MaintenanceStepKind::WalFlush),
+                ..MaintenanceStepOptions::default()
+            },
+        )
+        .await
+        .expect("flush wal");
     let floor = admin
-        .advance_retention_floor(&namespace_id)
+        .maintenance_step_namespace(
+            &namespace_id,
+            MaintenanceStepOptions {
+                only: Some(MaintenanceStepKind::Retention),
+                ..MaintenanceStepOptions::default()
+            },
+        )
         .await
         .expect("advance retention");
     assert!(floor.retention_floor_seq > ChangeSeq(0));
