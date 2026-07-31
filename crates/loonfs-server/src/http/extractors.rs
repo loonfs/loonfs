@@ -3,7 +3,6 @@
 use super::error::ApiResponseError;
 use super::serve::AppState;
 use crate::config::ServerConfig;
-use axum::async_trait;
 use axum::extract::rejection::PathRejection;
 use axum::extract::{FromRequest, FromRequestParts, Path as AxumPath, Query};
 use axum::http::request::Parts;
@@ -73,7 +72,7 @@ struct NamespaceSegment {
     namespace: String,
 }
 
-/// Extractor for the `:namespace` path segment of namespace-scoped routes.
+/// Extractor for the `{namespace}` path segment of namespace-scoped routes.
 ///
 /// The segment is parsed into a [`NamespaceId`] at extraction time, but the
 /// outcome is surfaced through [`NamespaceIdPath::into_id`] inside the
@@ -91,7 +90,6 @@ impl NamespaceIdPath {
     }
 }
 
-#[async_trait]
 impl<S> FromRequestParts<S> for NamespaceIdPath
 where
     S: Send + Sync,
@@ -126,7 +124,6 @@ impl<T> AppPath<T> {
     }
 }
 
-#[async_trait]
 impl<S, T> FromRequestParts<S> for AppPath<T>
 where
     S: Send + Sync,
@@ -154,7 +151,6 @@ impl<T> AppQuery<T> {
     }
 }
 
-#[async_trait]
 impl<S, T> FromRequestParts<S> for AppQuery<T>
 where
     S: Send + Sync,
@@ -203,7 +199,6 @@ where
     }
 }
 
-#[async_trait]
 impl<T> FromRequest<AppState> for AppJson<T>
 where
     T: serde::de::DeserializeOwned,
@@ -329,7 +324,6 @@ impl UploadStreamOutcome {
     }
 }
 
-#[async_trait]
 impl FromRequest<AppState> for UploadBodyStream {
     type Rejection = ApiResponseError;
 
@@ -395,7 +389,6 @@ pub(super) struct OptionalAppJson<T>(pub(super) Option<T>);
 
 const MAX_OPTIONAL_JSON_BODY_BYTES: usize = 1024 * 1024;
 
-#[async_trait]
 impl<T> FromRequest<AppState> for OptionalAppJson<T>
 where
     T: serde::de::DeserializeOwned,

@@ -122,48 +122,48 @@ fn router(state: AppState) -> Router {
         .route("/v0/capabilities", get(handlers_namespace::capabilities))
         .route("/v0/namespaces", post(create_namespace))
         .route(
-            "/v0/namespaces/:namespace",
+            "/v0/namespaces/{namespace}",
             get(namespace_status).delete(delete_namespace),
         )
-        .route("/v0/namespaces/:namespace/forks", post(fork_namespace))
+        .route("/v0/namespaces/{namespace}/forks", post(fork_namespace))
         .route(
-            "/v0/namespaces/:namespace/filesystem/list",
+            "/v0/namespaces/{namespace}/filesystem/list",
             get(list_path_entries),
         )
-        .route("/v0/namespaces/:namespace/filesystem/stat", get(stat_path))
+        .route("/v0/namespaces/{namespace}/filesystem/stat", get(stat_path))
         .route(
-            "/v0/namespaces/:namespace/filesystem/content",
+            "/v0/namespaces/{namespace}/filesystem/content",
             get(get_file_bytes),
         )
-        .route("/v0/namespaces/:namespace/query/grep", grep_route)
+        .route("/v0/namespaces/{namespace}/query/grep", grep_route)
         .route(
-            "/v0/admin/namespaces/:namespace/grep/index",
+            "/v0/admin/namespaces/{namespace}/grep/index",
             grep_status_route,
         )
         .route(
-            "/v0/admin/namespaces/:namespace/grep/index/enable",
+            "/v0/admin/namespaces/{namespace}/grep/index/enable",
             enable_grep_route,
         )
         .route(
-            "/v0/admin/namespaces/:namespace/grep/index/disable",
+            "/v0/admin/namespaces/{namespace}/grep/index/disable",
             disable_grep_route,
         )
         .route(
-            "/v0/admin/namespaces/:namespace/grep/index/gc",
+            "/v0/admin/namespaces/{namespace}/grep/index/gc",
             grep_gc_route,
         )
         .route(
-            "/v0/namespaces/:namespace/filesystem/revisions",
+            "/v0/namespaces/{namespace}/filesystem/revisions",
             get(list_file_revisions),
         )
         .route(
-            "/v0/namespaces/:namespace/filesystem/trash",
+            "/v0/namespaces/{namespace}/filesystem/trash",
             get(list_trash),
         )
-        .route("/v0/namespaces/:namespace/commits", post(apply_commit))
-        .route("/v0/namespaces/:namespace/uploads", post(begin_upload))
+        .route("/v0/namespaces/{namespace}/commits", post(apply_commit))
+        .route("/v0/namespaces/{namespace}/uploads", post(begin_upload))
         .route(
-            "/v0/namespaces/:namespace/uploads/:upload_id/content",
+            "/v0/namespaces/{namespace}/uploads/{upload_id}/content",
             // No body-limit layer: the upload route never buffers its
             // body, so a framework limit measured against a buffered read
             // would never fire. `UploadBodyStream` counts the bytes as it
@@ -171,32 +171,32 @@ fn router(state: AppState) -> Router {
             put(upload_content),
         )
         .route(
-            "/v0/namespaces/:namespace/uploads/:upload_id/parts",
+            "/v0/namespaces/{namespace}/uploads/{upload_id}/parts",
             post(sign_upload_parts),
         )
         .route(
-            "/v0/namespaces/:namespace/uploads/:upload_id/complete",
+            "/v0/namespaces/{namespace}/uploads/{upload_id}/complete",
             post(complete_upload),
         )
         .route(
-            "/v0/namespaces/:namespace/uploads/:upload_id/abort",
+            "/v0/namespaces/{namespace}/uploads/{upload_id}/abort",
             post(abort_upload),
         )
         .route(
-            "/v0/namespaces/:namespace/uploads/:upload_id",
+            "/v0/namespaces/{namespace}/uploads/{upload_id}",
             get(read_upload_status),
         )
-        .route("/v0/namespaces/:namespace/changes", get(list_changes))
+        .route("/v0/namespaces/{namespace}/changes", get(list_changes))
         .route(
-            "/v0/admin/namespaces/:namespace/checkpoints",
+            "/v0/admin/namespaces/{namespace}/checkpoints",
             post(create_checkpoint),
         )
         .route(
-            "/v0/admin/namespaces/:namespace/checkpoints/:checkpoint_id/release",
+            "/v0/admin/namespaces/{namespace}/checkpoints/{checkpoint_id}/release",
             post(release_checkpoint),
         )
         .route(
-            "/v0/admin/namespaces/:namespace/maintenance/step",
+            "/v0/admin/namespaces/{namespace}/maintenance/step",
             post(maintenance_step),
         )
         // Unmatched paths and wrong methods answer inside the error
