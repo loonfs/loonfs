@@ -5,7 +5,7 @@ use crate::cache::{MetadataTableCache, WalTailProjectionCache};
 use crate::checkpoint::{CheckpointFilesPage, CheckpointFilesPageCursor};
 use crate::commit_engine::CommitCandidate;
 use crate::context::MutationContext;
-use crate::error::Result;
+use crate::error::{CoreError, Result};
 use crate::namespace::basis::MetadataBasis;
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::namespace::{bootstrap, fork, BootstrapNamespaceError};
@@ -17,7 +17,7 @@ use crate::protocol::CompletedUpload;
 use crate::storage::content_admission::CompletedUploadReceipt;
 use loonfs_api::v0::{
     AbortUploadResponse, BeginUploadRequest, BeginUploadResponse, ChangesResponse, CommitResponse,
-    CompleteUploadRequest, CompleteUploadResponse, DirectMultipartContentClaim,
+    CompleteUploadRequest, CompleteUploadResponse, DirectMultipartUploadOptions,
     DirectPutContentClaim, UploadContentResponse, UploadPartChecksumClaim, UploadStatusResponse,
 };
 use loonfs_api::wire::control::{CheckpointOwner, HeadState, NamespaceState};
@@ -29,7 +29,7 @@ use loonfs_api::{
     NamespaceId, NamespaceSummary, Page, PageRequest, ReleaseCheckpointResponse, RevisionNo,
     StorageChecksum, TrashEntry, TrashPageCursor, UploadId,
 };
-use loonfs_objectstore::ObjectStore;
+use loonfs_objectstore::{ByteStream, ObjectStore};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
@@ -82,12 +82,14 @@ pub struct BeginDirectPutUploadTargetResponse {
 }
 
 /// Internal target used by server integrations before they mint part URLs.
+///
+/// There is no content ref: a multipart session is opened before anything
+/// is known about the payload, so identity exists but the reference that
+/// describes it does not yet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirectMultipartUploadTarget {
-    pub content_ref: ContentRef,
     pub object_key: String,
     pub part_size_bytes: u64,
-    pub part_count: u32,
 }
 
 /// Internal response for preparing a direct_multipart session.
@@ -461,16 +463,17 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     }
 
     /// Mints a direct_multipart upload target: a fresh content identity, the
-    /// reference that names it, the provider upload that assembles it, and
-    /// the part geometry the client cuts its payload to.
+    /// provider upload that assembles it, and the part geometry the client
+    /// cuts its payload to. What the payload turns out to be is claimed at
+    /// completion.
     pub async fn begin_direct_multipart_upload_target(
         &self,
-        claim: DirectMultipartContentClaim,
+        options: DirectMultipartUploadOptions,
     ) -> Result<BeginDirectMultipartUploadTargetResponse> {
         crate::protocol::begin_direct_multipart_upload_target(
             &self.store,
             &self.namespace_id,
-            claim,
+            options,
             &self.mutation_context()?,
         )
         .await
@@ -499,6 +502,17 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         bytes: &[u8],
     ) -> Result<UploadContentResponse> {
         crate::protocol::upload_content(&self.store, &self.namespace_id, upload_id, bytes).await
+    }
+
+    /// Uploads content that arrives as a stream into an upload session,
+    /// hashing it on the way through instead of holding it.
+    pub async fn upload_streamed_content(
+        &self,
+        upload_id: &UploadId,
+        body: ByteStream,
+    ) -> Result<UploadContentResponse> {
+        crate::protocol::upload_streamed_content(&self.store, &self.namespace_id, upload_id, body)
+            .await
     }
 
     /// Completes an upload session when the expected content ref matches.
@@ -539,13 +553,16 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         upload_id: &UploadId,
         request: &CompleteUploadRequest,
     ) -> Result<CompletedUpload> {
+        // The caller resolved a catalog for a different namespace, which is
+        // a wiring mistake rather than anything the request did. Naming the
+        // two namespaces says more than naming a content id would, and a
+        // multipart completion has no content id to name anyway.
         if catalog.namespace_id() != &self.namespace_id {
-            return Err(
-                crate::commit_engine::ContentPreparationError::ContentNotPrepared {
-                    content_id: request.content_ref.content_id.clone(),
-                }
-                .into(),
-            );
+            return Err(CoreError::Internal(format!(
+                "upload completion for namespace `{}` was given namespace `{}`'s catalog",
+                self.namespace_id,
+                catalog.namespace_id()
+            )));
         }
         crate::protocol::complete_upload(
             &self.store,

@@ -2549,8 +2549,8 @@
                 "type": "null"
               },
               {
-                "$ref": "#/components/schemas/DirectMultipartContentClaim",
-                "description": "Required for `direct_multipart`; the server opens the provider upload\nfor exactly this object and verifies it against this claim at\ncompletion."
+                "$ref": "#/components/schemas/DirectMultipartUploadOptions",
+                "description": "Optional for `direct_multipart`; selects the part geometry. Absent\ntakes the server's default. `direct_multipart` claims its content at\ncompletion, so nothing about the payload is declared here."
               }
             ]
           }
@@ -2573,7 +2573,7 @@
               },
               {
                 "$ref": "#/components/schemas/DirectMultipartUpload",
-                "description": "Object identity and part geometry for `DirectMultipart`, or `None` for\nevery other mode."
+                "description": "Part geometry for `DirectMultipart`, or `None` for every other mode."
               }
             ]
           },
@@ -2810,14 +2810,29 @@
       },
       "CompleteUploadRequest": {
         "type": "object",
-        "description": "Request to complete an upload with the expected content ref.",
-        "required": [
-          "content_ref"
-        ],
+        "description": "Request to complete an upload.\n\nThe two shapes correspond to who knew the content identity first. A\nservice-proxied or `direct_put` session was handed its reference before\nany byte moved, so its completion names that reference back. A\n`direct_multipart` session was never told one — there was nothing to\ntell — so its completion carries the claim instead and the server builds\nthe reference from the identity it has held all along.",
         "properties": {
           "content_ref": {
-            "$ref": "#/components/schemas/ContentRef",
-            "description": "Content identity the caller expects the session to have staged."
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ContentRef",
+                "description": "Content identity the caller expects the session to have staged.\nRequired for `service_proxied` and `direct_put`; absent for\n`direct_multipart`, whose identity the client never learns."
+              }
+            ]
+          },
+          "multipart": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/DirectMultipartContentClaim",
+                "description": "Required for `direct_multipart`: the assembled object's length and\nCRC-64/NVME, which completion verifies against the provider's own\nreading of the object."
+              }
+            ]
           },
           "multipart_parts": {
             "type": [
@@ -3053,7 +3068,7 @@
       },
       "DirectMultipartContentClaim": {
         "type": "object",
-        "description": "What a `direct_multipart` client promises about an object it will write\nin pieces.\n\nThe digest is CRC-64/NVME rather than SHA-256 because that is the\nchecksum an S3-compatible provider computes over a multipart object: it\nis the only full-object evidence the provider will ever be able to show\nback, so it is the only thing worth claiming up front.",
+        "description": "What a `direct_multipart` client says about the object it finished\nwriting, supplied at completion rather than at begin.\n\nThe claim arrives last because that is the only place a one-pass\nuploader can produce it: a client that had to declare the length and\ndigest up front would have to read its payload twice, and a client\nreading from a pipe could not start at all. Nothing is lost by waiting —\nthe claim was never trusted, only verified, and verification happens at\ncompletion either way.\n\nThe digest is CRC-64/NVME rather than SHA-256 because that is the\nchecksum an S3-compatible provider computes over a multipart object: it\nis the only full-object evidence the provider will ever be able to show\nback, so it is the only thing worth claiming at all.",
         "required": [
           "size_bytes",
           "crc64nvme"
@@ -3066,7 +3081,7 @@
           "size_bytes": {
             "type": "integer",
             "format": "int64",
-            "description": "Complete byte length the client will write across every part.",
+            "description": "Complete byte length the client wrote across every part.",
             "minimum": 0
           }
         },
@@ -3074,30 +3089,34 @@
       },
       "DirectMultipartUpload": {
         "type": "object",
-        "description": "Direct multipart upload details: the object identity, and the geometry a\nclient needs to cut its payload into parts.\n\nThe provider's upload id is deliberately absent. A client asks this\nserver for part URLs by part number; it never talks to the provider's\nmultipart API in its own words, so it needs no provider vocabulary.",
+        "description": "Direct multipart upload details: the geometry a client cuts its payload\ninto parts with, and nothing else.\n\nThere is no content reference here, and no part count. The session has\nnot been told what it is about to receive, so there is no identity to\necho and no arithmetic to do — the server mints the content object\nbehind the session and names it in the completion response. The\nprovider's upload id is absent for the same reason it always was: a\nclient asks this server for part URLs by part number and never talks to\nthe provider's multipart API in its own words.",
         "required": [
-          "content_ref",
-          "part_size_bytes",
-          "part_count"
+          "part_size_bytes"
         ],
         "properties": {
-          "content_ref": {
-            "$ref": "#/components/schemas/ContentRef",
-            "description": "Immutable object identity the server minted, with the CRC-64/NVME and\nbyte length completion will verify against. Completion and the later\ncommit both name exactly this reference."
-          },
-          "part_count": {
-            "type": "integer",
-            "format": "int32",
-            "description": "How many parts the declared size cuts into at `part_size_bytes`.",
-            "minimum": 0
-          },
           "part_size_bytes": {
             "type": "integer",
             "format": "int64",
-            "description": "Byte length of every part except the last.",
+            "description": "Byte length of every part except the last. At most 10,000 parts may\nbe uploaded, so this bounds the object at `part_size_bytes × 10_000`.",
             "minimum": 0
           }
         }
+      },
+      "DirectMultipartUploadOptions": {
+        "type": "object",
+        "description": "What a `direct_multipart` client asks for when it opens a session.\n\nA begin request declares no length and no digest: the session exists to\nreceive bytes whose length may not be known yet. All it settles is the\ngeometry the client cuts to.",
+        "properties": {
+          "part_size_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Byte length of every part except the last, or `None` for the\nserver's default.\n\nThe value bounds the object: a provider accepts at most 10,000\nparts, so this session can carry at most `part_size_bytes × 10_000`\nbytes. A client that knows its payload is very large asks for a\nlarger part size; one that does not know its length at all takes the\ndefault and keeps asking for part URLs until its stream ends.",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
       },
       "DirectPutContentClaim": {
         "type": "object",
@@ -4724,7 +4743,7 @@
           "part_number": {
             "type": "integer",
             "format": "int32",
-            "description": "One-based part number, at most the session's `part_count`.",
+            "description": "One-based part number, at most the provider's 10,000-part limit.",
             "minimum": 0
           }
         },

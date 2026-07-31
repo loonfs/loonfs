@@ -3,6 +3,7 @@
 use super::core::{BackgroundStepClaim, ReadCore, WriterBits};
 use crate::publish::{CommitCandidate, CommitRequest, FilesystemOperation, PreparedContent};
 use crate::publisher::PublisherRegistry;
+use crate::ByteStream;
 use crate::FsWriter;
 use crate::{
     ChangeSeq, CommitId, CommitResponse, ContentRef, CopyOptions, CoreError,
@@ -235,6 +236,47 @@ impl FsWriter {
             &self.core.inner.store,
             catalog.content_store_id().clone(),
             bytes,
+        )
+        .await?;
+        Ok(
+            loonfs_core::content::prepare_stored_content(&catalog, stored)
+                .map_err(CoreError::from)?,
+        )
+    }
+
+    /// Stages a streamed payload as durable content for later publication.
+    ///
+    /// The stream is hashed as it is forwarded to object storage and never
+    /// held whole, so a large file costs one transfer part of memory rather
+    /// than its own size. What comes back is the same [`PreparedContent`]
+    /// [`Self::prepare_file_bytes`] produces — same trusted whole-file
+    /// SHA-256, same publication path, same guarantees — so callers that
+    /// already hold their bytes have no reason to come here.
+    #[tracing::instrument(
+        level = "info",
+        name = "loonfs.prepare",
+        err,
+        skip_all,
+        fields(
+            operation = "prepare",
+            mode = tracing::field::Empty,
+            store_kind = tracing::field::Empty,
+            payload_class = "streamed",
+        )
+    )]
+    pub async fn prepare_file_stream(
+        &self,
+        namespace_id: &NamespaceId,
+        body: ByteStream,
+    ) -> Result<PreparedContent> {
+        self.core.record_trace_context(&tracing::Span::current());
+        let catalog = self
+            .load_namespace_catalog_for_content_preparation(namespace_id)
+            .await?;
+        let stored = loonfs_core::content::store_stream_as_content_with_store_id(
+            &self.core.inner.store,
+            catalog.content_store_id().clone(),
+            body,
         )
         .await?;
         Ok(

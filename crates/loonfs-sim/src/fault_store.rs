@@ -8,7 +8,7 @@ use bytes::Bytes;
 use futures::stream::BoxStream;
 use futures::Stream;
 use loonfs_objectstore::{
-    ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
+    ByteRange, ByteStream, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
     StoredObjectChecksum,
 };
 use std::collections::HashMap;
@@ -366,6 +366,25 @@ where
     ) -> Result<ObjectMetadata, ObjectStoreError> {
         let kind = put_mode_kind(&mode);
         self.put_with(key, kind, bytes, mode).await
+    }
+
+    /// Streamed writes are traced but not fault-injected: every scheduled
+    /// write fault is expressed against a payload the harness holds, and a
+    /// stream has none to hold. The simulator drives content through `put`,
+    /// so nothing it schedules is being skipped here.
+    async fn put_streamed(
+        &self,
+        key: &str,
+        body: ByteStream,
+        mode: PutMode,
+    ) -> Result<u64, ObjectStoreError> {
+        let op = self.next_object_op(put_mode_kind(&mode), key);
+        let result = self.inner.put_streamed(key, body, mode).await;
+        if result.is_ok() {
+            self.remember_successful_write(key);
+        }
+        self.push_trace(op, "put_streamed", None, result_class(&result));
+        result
     }
 
     async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {

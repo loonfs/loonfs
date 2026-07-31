@@ -19,8 +19,8 @@ use bytes::Bytes;
 use futures::stream::BoxStream;
 use loonfs_api::{Crc64Nvme, StorageChecksum};
 use loonfs_objectstore::{
-    ByteRange, MultipartCompletion, MultipartPart, ObjectBody, ObjectMetadata, ObjectStore,
-    ObjectStoreError, PutMode, Result, StoredObjectChecksum,
+    ByteRange, ByteStream, MultipartCompletion, MultipartPart, ObjectBody, ObjectMetadata,
+    ObjectStore, ObjectStoreError, PutMode, Result, StoredObjectChecksum,
 };
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -221,6 +221,10 @@ impl<S: ObjectStore> ObjectStore for MultipartStore<S> {
 
     async fn put(&self, key: &str, bytes: Bytes, mode: PutMode) -> Result<ObjectMetadata> {
         self.inner.put(key, bytes, mode).await
+    }
+
+    async fn put_streamed(&self, key: &str, body: ByteStream, mode: PutMode) -> Result<u64> {
+        self.inner.put_streamed(key, body, mode).await
     }
 
     async fn delete(&self, key: &str) -> Result<()> {

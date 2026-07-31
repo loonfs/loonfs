@@ -23,21 +23,49 @@ pub struct DirectPutContentClaim {
     pub sha256: String,
 }
 
-/// What a `direct_multipart` client promises about an object it will write
-/// in pieces.
+/// What a `direct_multipart` client says about the object it finished
+/// writing, supplied at completion rather than at begin.
+///
+/// The claim arrives last because that is the only place a one-pass
+/// uploader can produce it: a client that had to declare the length and
+/// digest up front would have to read its payload twice, and a client
+/// reading from a pipe could not start at all. Nothing is lost by waiting —
+/// the claim was never trusted, only verified, and verification happens at
+/// completion either way.
 ///
 /// The digest is CRC-64/NVME rather than SHA-256 because that is the
 /// checksum an S3-compatible provider computes over a multipart object: it
 /// is the only full-object evidence the provider will ever be able to show
-/// back, so it is the only thing worth claiming up front.
+/// back, so it is the only thing worth claiming at all.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct DirectMultipartContentClaim {
-    /// Complete byte length the client will write across every part.
+    /// Complete byte length the client wrote across every part.
     pub size_bytes: u64,
     /// CRC-64/NVME over the complete assembled payload, lowercase hex.
     pub crc64nvme: String,
+}
+
+/// What a `direct_multipart` client asks for when it opens a session.
+///
+/// A begin request declares no length and no digest: the session exists to
+/// receive bytes whose length may not be known yet. All it settles is the
+/// geometry the client cuts to.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
+pub struct DirectMultipartUploadOptions {
+    /// Byte length of every part except the last, or `None` for the
+    /// server's default.
+    ///
+    /// The value bounds the object: a provider accepts at most 10,000
+    /// parts, so this session can carry at most `part_size_bytes × 10_000`
+    /// bytes. A client that knows its payload is very large asks for a
+    /// larger part size; one that does not know its length at all takes the
+    /// default and keeps asking for part URLs until its stream ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part_size_bytes: Option<u64>,
 }
 
 /// Upload transport mode.
@@ -75,11 +103,11 @@ pub struct BeginUploadRequest {
     /// the write it authorizes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<DirectPutContentClaim>,
-    /// Required for `direct_multipart`; the server opens the provider upload
-    /// for exactly this object and verifies it against this claim at
-    /// completion.
+    /// Optional for `direct_multipart`; selects the part geometry. Absent
+    /// takes the server's default. `direct_multipart` claims its content at
+    /// completion, so nothing about the payload is declared here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub multipart: Option<DirectMultipartContentClaim>,
+    pub multipart: Option<DirectMultipartUploadOptions>,
 }
 
 /// Client-facing direct transfer capability.
@@ -117,23 +145,22 @@ pub struct DirectPutUpload {
     pub access: ObjectTransferAccess,
 }
 
-/// Direct multipart upload details: the object identity, and the geometry a
-/// client needs to cut its payload into parts.
+/// Direct multipart upload details: the geometry a client cuts its payload
+/// into parts with, and nothing else.
 ///
-/// The provider's upload id is deliberately absent. A client asks this
-/// server for part URLs by part number; it never talks to the provider's
-/// multipart API in its own words, so it needs no provider vocabulary.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// There is no content reference here, and no part count. The session has
+/// not been told what it is about to receive, so there is no identity to
+/// echo and no arithmetic to do — the server mints the content object
+/// behind the session and names it in the completion response. The
+/// provider's upload id is absent for the same reason it always was: a
+/// client asks this server for part URLs by part number and never talks to
+/// the provider's multipart API in its own words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct DirectMultipartUpload {
-    /// Immutable object identity the server minted, with the CRC-64/NVME and
-    /// byte length completion will verify against. Completion and the later
-    /// commit both name exactly this reference.
-    pub content_ref: ContentRef,
-    /// Byte length of every part except the last.
+    /// Byte length of every part except the last. At most 10,000 parts may
+    /// be uploaded, so this bounds the object at `part_size_bytes × 10_000`.
     pub part_size_bytes: u64,
-    /// How many parts the declared size cuts into at `part_size_bytes`.
-    pub part_count: u32,
 }
 
 /// One part's checksum, supplied by the client so the server can sign it
@@ -142,7 +169,7 @@ pub struct DirectMultipartUpload {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct UploadPartChecksumClaim {
-    /// One-based part number, at most the session's `part_count`.
+    /// One-based part number, at most the provider's 10,000-part limit.
     pub part_number: u32,
     /// CRC-64/NVME over this part's bytes, lowercase hex.
     pub crc64nvme: String,
@@ -221,8 +248,7 @@ pub struct BeginUploadResponse {
     /// Presigned write details for `DirectPut`, or `None` for `ServiceProxied`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub direct_put: Option<DirectPutUpload>,
-    /// Object identity and part geometry for `DirectMultipart`, or `None` for
-    /// every other mode.
+    /// Part geometry for `DirectMultipart`, or `None` for every other mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub direct_multipart: Option<DirectMultipartUpload>,
 }
@@ -239,18 +265,56 @@ pub struct UploadContentResponse {
     pub content_ref: ContentRef,
 }
 
-/// Request to complete an upload with the expected content ref.
+/// Request to complete an upload.
+///
+/// The two shapes correspond to who knew the content identity first. A
+/// service-proxied or `direct_put` session was handed its reference before
+/// any byte moved, so its completion names that reference back. A
+/// `direct_multipart` session was never told one — there was nothing to
+/// tell — so its completion carries the claim instead and the server builds
+/// the reference from the identity it has held all along.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 pub struct CompleteUploadRequest {
     /// Content identity the caller expects the session to have staged.
-    pub content_ref: ContentRef,
+    /// Required for `service_proxied` and `direct_put`; absent for
+    /// `direct_multipart`, whose identity the client never learns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_ref: Option<ContentRef>,
+    /// Required for `direct_multipart`: the assembled object's length and
+    /// CRC-64/NVME, which completion verifies against the provider's own
+    /// reading of the object.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multipart: Option<DirectMultipartContentClaim>,
     /// Required for `direct_multipart`: every part the client uploaded, in
     /// ascending part order. The server holds no part records of its own, so
     /// this list is what it assembles the object from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multipart_parts: Option<Vec<CompletedUploadPart>>,
+}
+
+impl CompleteUploadRequest {
+    /// Completes a session that already knows its content reference.
+    pub fn for_content_ref(content_ref: ContentRef) -> Self {
+        Self {
+            content_ref: Some(content_ref),
+            multipart: None,
+            multipart_parts: None,
+        }
+    }
+
+    /// Completes a `direct_multipart` session with what it assembled.
+    pub fn for_multipart(
+        claim: DirectMultipartContentClaim,
+        parts: Vec<CompletedUploadPart>,
+    ) -> Self {
+        Self {
+            content_ref: None,
+            multipart: Some(claim),
+            multipart_parts: Some(parts),
+        }
+    }
 }
 
 /// Response after an upload session is completed.

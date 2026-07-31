@@ -581,6 +581,7 @@ fn control_objects_match_golden_bytes() {
                 content_ref: sample_content_ref(),
             },
             provider_multipart_upload_id: None,
+            multipart_part_size_bytes: None,
         },
     );
     // The released lifecycle and the direct-put session shape are durable
@@ -626,12 +627,13 @@ fn control_objects_match_golden_bytes() {
                 expires_at_ms: 87_400_000,
             },
             provider_multipart_upload_id: None,
+            multipart_part_size_bytes: None,
         },
     );
-    // The one session shape that carries a provider handle, and the only
-    // producer of a CRC-64/NVME reference: the object is assembled by the
-    // provider, so nothing trustworthy ever hashes it and the reference
-    // carries no whole-file SHA-256 at all.
+    // The one session shape that carries a provider handle, and the one
+    // that claims nothing at all: a multipart session is opened before its
+    // payload is known, so it records identity, the provider upload, and
+    // the geometry — and learns what it assembled only at completion.
     check_control_golden(
         "control_upload_session_direct_multipart.v1.json",
         ControlObjectKind::UploadSession,
@@ -641,26 +643,15 @@ fn control_objects_match_golden_bytes() {
                 .expect("valid upload id"),
             mode: UploadMode::DirectMultipart,
             content_id: content_id("con_22222222222222222222222222222222"),
-            claimed_checksum: Some(StorageChecksum {
-                algorithm: ChecksumAlgorithm::Crc64nvme,
-                value: "bbb7305bdf118bcb".to_owned(),
-            }),
-            direct_put_content_ref: Some(ContentRef {
-                kind: ContentRefKind::BlobV1,
-                content_id: content_id("con_22222222222222222222222222222222"),
-                size_bytes: 11_534_336,
-                storage_checksum: StorageChecksum {
-                    algorithm: ChecksumAlgorithm::Crc64nvme,
-                    value: "bbb7305bdf118bcb".to_owned(),
-                },
-                whole_file_sha256: None,
-            }),
+            claimed_checksum: None,
+            direct_put_content_ref: None,
             staged_content_ref: None,
             created_at_ms: 1_000,
             state: UploadSessionLifecycle::Open {
                 expires_at_ms: 87_400_000,
             },
             provider_multipart_upload_id: Some("provider-upload-id".to_owned()),
+            multipart_part_size_bytes: Some(8 * 1024 * 1024),
         },
     );
     check_control_golden(
@@ -680,6 +671,7 @@ fn control_objects_match_golden_bytes() {
                 aborted_at_ms: 5_000,
             },
             provider_multipart_upload_id: None,
+            multipart_part_size_bytes: None,
         },
     );
 }
@@ -893,6 +885,7 @@ fn checkpoint_and_upload_decoders_reject_wrong_format_version_without_fallback()
                     aborted_at_ms: 5_000,
                 },
                 provider_multipart_upload_id: None,
+                multipart_part_size_bytes: None,
             })
             .expect("upload state"),
         ),

@@ -87,7 +87,7 @@ pub use capability::{
     PROFILE_QUERY_V0, PROTOCOL_VERSION,
 };
 pub use content::{
-    ChecksumAlgorithm, ContentRef, ContentRefKind, ContentRefValidationError, Crc64Nvme,
+    ChecksumAlgorithm, ContentRef, ContentRefKind, ContentRefValidationError, Crc64Nvme, Sha256,
     StorageChecksum,
 };
 pub use digest::sha256_digest;

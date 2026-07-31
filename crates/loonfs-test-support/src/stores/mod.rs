@@ -1,6 +1,7 @@
 //! Composable object-store wrappers for test fault injection and observation.
 
 mod blocking_store;
+mod buffer_watch_store;
 mod counting_store;
 mod fail_store;
 mod key_predicate;
@@ -10,6 +11,7 @@ mod operation;
 mod recording_store;
 
 pub use blocking_store::BlockingStore;
+pub use buffer_watch_store::{BufferPeaks, BufferWatchStore};
 pub use counting_store::{CountingStore, StoreCounts};
 pub use fail_store::{FailStore, FailureMode, InjectedError};
 pub use key_predicate::KeyPredicate;

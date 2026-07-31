@@ -127,7 +127,9 @@ pub mod control {
 }
 
 pub use loonfs_objectstore::metrics;
-pub use loonfs_objectstore::{ObjectStore, ObjectStoreError, SharedObjectStore, StoreConfig};
+pub use loonfs_objectstore::{
+    ByteStream, ObjectStore, ObjectStoreError, SharedObjectStore, StoreConfig,
+};
 
 pub use background::FsBackgroundWork;
 pub use cache::RuntimeCacheStats;

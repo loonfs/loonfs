@@ -4,15 +4,16 @@ use super::error::ApiResponseError;
 use super::serve::AppState;
 use crate::config::ServerConfig;
 use axum::async_trait;
-use axum::body::Bytes;
 use axum::extract::rejection::PathRejection;
 use axum::extract::{FromRequest, FromRequestParts, Path as AxumPath, Query};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
-use loonfs::ErrorCode;
+use futures::StreamExt;
+use loonfs::{ByteStream, ErrorCode};
 use loonfs_api::NamespaceId;
 use std::convert::Infallible;
+use std::sync::{Arc, Mutex};
 use tokio::sync::OwnedSemaphorePermit;
 
 /// One admission cap answered in-envelope: 503 `server_busy`, distinct from
@@ -220,24 +221,116 @@ where
     }
 }
 
-/// The proxied-upload body plus the admission permit that bounds how many
-/// such bodies the server buffers at once.
+/// The proxied-upload body as a stream, plus the admission permit that
+/// bounds how many such transfers run at once.
 ///
 /// Extraction runs the admission sequence in bounded-cost order:
 /// authorization first (an unauthenticated caller must not occupy a
-/// buffering slot), then a permit — or 503 `server_busy` — and only then is
-/// the body buffered, so the permit covers the buffering itself, not just
-/// the handler. The permit rides with the bytes and frees its slot when the
-/// handler drops them. Rejections stay inside the error contract: a body
-/// over the route's limit answers 413 `content_too_large`, other unreadable
-/// bodies 400.
-pub(super) struct UploadBodyBytes {
-    pub(super) bytes: Bytes,
+/// transfer slot), then a permit — or 503 `server_busy`. The body itself is
+/// not read here at all. It is handed on as a stream so the write path can
+/// hash it and forward it a piece at a time, which is what keeps a large
+/// upload's memory cost independent of its size. The permit rides with the
+/// stream and frees its slot when the handler drops it.
+///
+/// Two things end a transfer early, and neither can be reported through the
+/// stream itself — a store sees only "the payload stopped". So the reason
+/// is recorded beside it and read back by [`Self::into_rejection`] once the
+/// write has failed: a body past `upload.max_content_bytes` answers 413
+/// `content_too_large`, an unreadable one 400.
+pub(super) struct UploadBodyStream {
+    body: axum::body::Body,
+    max_bytes: u64,
+    abort: Arc<Mutex<Option<UploadStreamAbort>>>,
     _permit: OwnedSemaphorePermit,
 }
 
+/// Why the server stopped reading an upload body.
+enum UploadStreamAbort {
+    /// The payload ran past the deployment's upload limit.
+    TooLarge,
+    /// The connection failed or the client stopped sending.
+    Unreadable(String),
+}
+
+impl UploadBodyStream {
+    /// Consumes the body as a byte stream, counting as it goes and cutting
+    /// it off past the limit.
+    pub(super) fn into_stream(self) -> (ByteStream, UploadStreamOutcome) {
+        let Self {
+            body,
+            max_bytes,
+            abort,
+            _permit,
+        } = self;
+        let outcome = UploadStreamOutcome {
+            abort: Arc::clone(&abort),
+            _permit,
+        };
+        let mut read_bytes = 0u64;
+        let stream = body
+            .into_data_stream()
+            .map(move |chunk| match chunk {
+                Ok(chunk) => {
+                    read_bytes += chunk.len() as u64;
+                    if read_bytes > max_bytes {
+                        return Err(record_abort(&abort, UploadStreamAbort::TooLarge));
+                    }
+                    Ok(chunk)
+                }
+                Err(error) => Err(record_abort(
+                    &abort,
+                    UploadStreamAbort::Unreadable(error.to_string()),
+                )),
+            })
+            .boxed();
+        (stream, outcome)
+    }
+}
+
+/// Records why the body stopped and reports it to the store as a transport
+/// failure, which is all a store can act on.
+fn record_abort(
+    abort: &Arc<Mutex<Option<UploadStreamAbort>>>,
+    reason: UploadStreamAbort,
+) -> loonfs::ObjectStoreError {
+    let message = match &reason {
+        UploadStreamAbort::TooLarge => "upload body exceeded this deployment's limit".to_owned(),
+        UploadStreamAbort::Unreadable(error) => format!("upload body unreadable: {error}"),
+    };
+    *abort.lock().unwrap_or_else(|err| err.into_inner()) = Some(reason);
+    loonfs::ObjectStoreError::transport("upload body", message)
+}
+
+/// Holds the transfer permit for as long as the write runs, and remembers
+/// why the body stopped when it did.
+pub(super) struct UploadStreamOutcome {
+    abort: Arc<Mutex<Option<UploadStreamAbort>>>,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl UploadStreamOutcome {
+    /// The response a failed write owes the client, when the body — not the
+    /// store — is what failed.
+    pub(super) fn into_rejection(self) -> Option<ApiResponseError> {
+        match self
+            .abort
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .take()
+        {
+            Some(UploadStreamAbort::TooLarge) => Some(upload_body_too_large_error()),
+            Some(UploadStreamAbort::Unreadable(error)) => Some(ApiResponseError::new(
+                StatusCode::BAD_REQUEST,
+                ErrorCode::InvalidRequest,
+                &format!("request body unreadable: {error}"),
+            )),
+            None => None,
+        }
+    }
+}
+
 #[async_trait]
-impl FromRequest<AppState> for UploadBodyBytes {
+impl FromRequest<AppState> for UploadBodyStream {
     type Rejection = ApiResponseError;
 
     async fn from_request(
@@ -250,21 +343,29 @@ impl FromRequest<AppState> for UploadBodyBytes {
             .clone()
             .try_acquire_owned()
             .map_err(|_| server_busy_error("proxied uploads"))?;
-        match Bytes::from_request(req, state).await {
-            Ok(bytes) => Ok(UploadBodyBytes {
-                bytes,
-                _permit: permit,
-            }),
-            Err(rejection) if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE => {
-                Err(upload_body_too_large_error())
-            }
-            Err(rejection) => Err(ApiResponseError::new(
-                StatusCode::BAD_REQUEST,
-                ErrorCode::InvalidRequest,
-                &rejection.body_text(),
-            )),
+        let max_bytes = state.config.max_upload_bytes;
+        // A declared length past the limit is refused before a byte moves.
+        // The incremental count still runs: a chunked body declares nothing,
+        // and a declared length is a claim rather than a measurement.
+        if declared_content_length(req.headers()).is_some_and(|length| length > max_bytes) {
+            return Err(upload_body_too_large_error());
         }
+        Ok(UploadBodyStream {
+            body: req.into_body(),
+            max_bytes,
+            abort: Arc::new(Mutex::new(None)),
+            _permit: permit,
+        })
     }
+}
+
+fn declared_content_length(headers: &HeaderMap) -> Option<u64> {
+    headers
+        .get(axum::http::header::CONTENT_LENGTH)?
+        .to_str()
+        .ok()?
+        .parse()
+        .ok()
 }
 
 /// 413 for over-limit upload bodies: the guidance names the upload byte cap

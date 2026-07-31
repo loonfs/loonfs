@@ -73,10 +73,7 @@ fn upload_flow_is_available_from_runtime() {
         .expect("repeat upload content");
     assert_eq!(staged.content_ref, staged_again.content_ref);
 
-    let request = CompleteUploadRequest {
-        content_ref: staged.content_ref,
-        multipart_parts: None,
-    };
+    let request = CompleteUploadRequest::for_content_ref(staged.content_ref);
     let completed = fs
         .complete_upload_blocking(&namespace_id, &begin.upload_id, &request)
         .expect("complete upload");
@@ -105,10 +102,7 @@ fn direct_put_upload_flow_validates_durable_object_on_complete() {
         .object_key
         .ends_with(content_ref.content_id.as_str()));
 
-    let complete_request = CompleteUploadRequest {
-        content_ref: content_ref.clone(),
-        multipart_parts: None,
-    };
+    let complete_request = CompleteUploadRequest::for_content_ref(content_ref.clone());
     assert!(fs
         .complete_upload_blocking(&namespace_id, &begin.upload_id, &complete_request)
         .is_err());
@@ -165,10 +159,7 @@ fn direct_put_completion_proves_upload_without_reading_content() {
         .complete_upload_blocking(
             &namespace_id,
             &begin.upload_id,
-            &CompleteUploadRequest {
-                content_ref: content_ref.clone(),
-                multipart_parts: None,
-            },
+            &CompleteUploadRequest::for_content_ref(content_ref.clone()),
         )
         .expect("complete direct put");
     assert_eq!(completed.content_ref, content_ref);
@@ -204,10 +195,7 @@ fn direct_put_completion_rejects_a_mis_declared_size() {
         .complete_upload_blocking(
             &namespace_id,
             &begin.upload_id,
-            &CompleteUploadRequest {
-                content_ref,
-                multipart_parts: None,
-            },
+            &CompleteUploadRequest::for_content_ref(content_ref),
         )
         .expect_err("mis-declared size must fail completion");
     assert!(
@@ -245,10 +233,7 @@ fn direct_put_completion_rejects_and_removes_bytes_that_do_not_match_the_claim()
         .complete_upload_blocking(
             &namespace_id,
             &begin.upload_id,
-            &CompleteUploadRequest {
-                content_ref,
-                multipart_parts: None,
-            },
+            &CompleteUploadRequest::for_content_ref(content_ref),
         )
         .expect_err("mismatched bytes must fail completion");
     assert!(
@@ -484,10 +469,7 @@ fn concurrent_puts_coalesce_into_one_wal_segment() {
                 .complete_upload(
                     &namespace_id,
                     &begin.upload_id,
-                    &CompleteUploadRequest {
-                        content_ref: staged.content_ref,
-                        multipart_parts: None,
-                    },
+                    &CompleteUploadRequest::for_content_ref(staged.content_ref),
                 )
                 .await
                 .expect("complete upload");

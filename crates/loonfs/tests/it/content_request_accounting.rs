@@ -516,10 +516,7 @@ async fn proxied_upload_completion_proof_publishes_without_additional_content_io
         .complete_upload_prepared(
             &harness.namespace_id,
             &begin.upload_id,
-            &CompleteUploadRequest {
-                content_ref: staged.content_ref,
-                multipart_parts: None,
-            },
+            &CompleteUploadRequest::for_content_ref(staged.content_ref),
         )
         .await
         .expect("complete upload with proof");
@@ -573,10 +570,7 @@ async fn direct_put_completion_avoids_blob_get_and_prepared_publish_uses_no_cont
         .complete_upload_prepared(
             &harness.namespace_id,
             &begin.upload_id,
-            &CompleteUploadRequest {
-                content_ref: content_ref.clone(),
-                multipart_parts: None,
-            },
+            &CompleteUploadRequest::for_content_ref(content_ref.clone()),
         )
         .await
         .expect("complete direct put with proof");

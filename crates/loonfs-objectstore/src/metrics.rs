@@ -4,8 +4,8 @@
 use crate::layout::{parse_object_key, DurableObjectFamily};
 use crate::object_store::Result;
 use crate::{
-    ByteRange, MultipartCompletion, MultipartPart, ObjectBody, ObjectMetadata, ObjectStore,
-    ObjectStoreError, PutMode, StoredObjectChecksum,
+    ByteRange, ByteStream, MultipartCompletion, MultipartPart, ObjectBody, ObjectMetadata,
+    ObjectStore, ObjectStoreError, PutMode, StoredObjectChecksum,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -59,6 +59,8 @@ pub enum ObjectStoreOperation {
     Get,
     /// Measures an overwrite or conditional write.
     Put,
+    /// Measures a write whose payload arrived as a stream.
+    PutStreamed,
     /// Measures an idempotent object delete.
     Delete,
     /// Measures opening a client-driven multipart upload.
@@ -367,6 +369,28 @@ where
         let bytes_in = bytes.len() as u64;
         let result = self.inner.put(key, bytes, mode.clone()).await;
         self.record_put(key, bytes_in, &mode, start.elapsed(), &result);
+        result
+    }
+
+    /// Streamed writes get their own operation rather than being folded
+    /// into `put`: their request bytes are only known once the stream ends,
+    /// and a deployment reading these samples needs to see which write path
+    /// its content is taking.
+    async fn put_streamed(&self, key: &str, body: ByteStream, mode: PutMode) -> Result<u64> {
+        let start = sample_clock();
+        let result = self.inner.put_streamed(key, body, mode.clone()).await;
+        self.record(ObjectStoreMetricSample {
+            operation: ObjectStoreOperation::PutStreamed,
+            elapsed_micros: start.elapsed().as_micros(),
+            result: classify_result(&result),
+            bytes_in: result.as_ref().ok().copied(),
+            bytes_out: None,
+            item_count: None,
+            key_class: classify_key(key),
+            range_class: None,
+            put_mode: Some(classify_put_mode(&mode)),
+            store_kind: self.store_kind.clone(),
+        });
         result
     }
 

@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{self, BoxStream};
 use loonfs_objectstore::{
-    ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
+    ByteRange, ByteStream, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
     StoredObjectChecksum,
 };
 use std::fmt;
@@ -244,6 +244,28 @@ impl<S: ObjectStore> ObjectStore for FailStore<S> {
             return Err(self.error.for_key(key));
         }
         let result = self.inner.put(key, bytes, mode).await;
+        if fail {
+            result?;
+            Err(self.error.for_key(key))
+        } else {
+            result
+        }
+    }
+
+    async fn put_streamed(
+        &self,
+        key: &str,
+        body: ByteStream,
+        mode: PutMode,
+    ) -> Result<u64, ObjectStoreError> {
+        let fail = self.should_fail(&OperationContext::new(
+            key,
+            OperationKind::PutStreamed { mode: &mode },
+        ));
+        if fail && self.mode == FailureMode::BeforeApply {
+            return Err(self.error.for_key(key));
+        }
+        let result = self.inner.put_streamed(key, body, mode).await;
         if fail {
             result?;
             Err(self.error.for_key(key))

@@ -4,7 +4,7 @@
 use crate::hex::hex_encode_bytes;
 use crate::ids::ContentId;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha256 as Sha2Sha256};
 use std::fmt;
 use thiserror::Error;
 
@@ -134,7 +134,7 @@ impl StorageChecksum {
     pub fn sha256(bytes: &[u8]) -> Self {
         Self {
             algorithm: ChecksumAlgorithm::Sha256,
-            value: hex_encode_bytes(&Sha256::digest(bytes)),
+            value: hex_encode_bytes(&Sha2Sha256::digest(bytes)),
         }
     }
 
@@ -203,6 +203,44 @@ impl fmt::Debug for Crc64Nvme {
     }
 }
 
+/// SHA-256 over a payload delivered in pieces.
+///
+/// The proxied write path folds this over the request body as it forwards
+/// it to object storage, so a reference's trusted whole-file digest exists
+/// without the payload ever being held whole. Pieces must be fed in order.
+#[derive(Default)]
+pub struct Sha256 {
+    digest: Sha2Sha256,
+}
+
+impl Sha256 {
+    /// Starts an empty digest.
+    pub fn new() -> Self {
+        Self {
+            digest: Sha2Sha256::new(),
+        }
+    }
+
+    /// Folds the next piece of the payload in, in order.
+    pub fn update(&mut self, bytes: &[u8]) {
+        self.digest.update(bytes);
+    }
+
+    /// Closes the digest over everything fed so far.
+    pub fn finish(self) -> StorageChecksum {
+        StorageChecksum {
+            algorithm: ChecksumAlgorithm::Sha256,
+            value: hex_encode_bytes(&self.digest.finalize()),
+        }
+    }
+}
+
+impl fmt::Debug for Sha256 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Sha256").finish_non_exhaustive()
+    }
+}
+
 /// Describes why a content reference cannot be part of a durable commit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
 pub enum ContentRefValidationError {
@@ -268,6 +306,24 @@ impl ContentRef {
             kind: ContentRefKind::BlobV1,
             content_id,
             size_bytes: bytes.len() as u64,
+            whole_file_sha256: Some(storage_checksum.value.clone()),
+            storage_checksum,
+        }
+    }
+
+    /// Builds a reference from a digest folded over the payload as it was
+    /// written, for a write that never held the whole payload at once.
+    ///
+    /// Taking the digest itself rather than a checksum value is what keeps
+    /// the provenance rule structural: the only way to reach this
+    /// constructor is to have hashed the bytes here, on the LoonFS write
+    /// path, which is exactly what `whole_file_sha256` claims.
+    pub fn blob_v1_streamed(content_id: ContentId, size_bytes: u64, digest: Sha256) -> Self {
+        let storage_checksum = digest.finish();
+        Self {
+            kind: ContentRefKind::BlobV1,
+            content_id,
+            size_bytes,
             whole_file_sha256: Some(storage_checksum.value.clone()),
             storage_checksum,
         }

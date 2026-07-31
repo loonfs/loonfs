@@ -103,10 +103,7 @@ async fn reads_commits_and_change_feed_never_list() {
     engine
         .complete_upload(
             &staged.upload_id,
-            &loonfs_api::v0::CompleteUploadRequest {
-                content_ref: uploaded.content_ref,
-                multipart_parts: None,
-            },
+            &loonfs_api::v0::CompleteUploadRequest::for_content_ref(uploaded.content_ref),
         )
         .await
         .expect("complete upload");
@@ -205,10 +202,7 @@ async fn maintenance_never_touches_the_wal_head() {
     engine
         .complete_upload(
             &staged.upload_id,
-            &loonfs_api::v0::CompleteUploadRequest {
-                content_ref: uploaded.content_ref,
-                multipart_parts: None,
-            },
+            &loonfs_api::v0::CompleteUploadRequest::for_content_ref(uploaded.content_ref),
         )
         .await
         .expect("second upload complete");

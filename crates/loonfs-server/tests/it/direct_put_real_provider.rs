@@ -3,8 +3,9 @@
 use crate::common::{start_server, test_config};
 use loonfs_api::{
     v0::{
-        CompleteUploadRequest, DirectMultipartContentClaim, DirectPutContentClaim,
-        ObjectTransferAccess, UploadPartChecksumClaim, ValidatedContentToken,
+        CompleteUploadRequest, DirectMultipartContentClaim, DirectMultipartUploadOptions,
+        DirectPutContentClaim, ObjectTransferAccess, UploadPartChecksumClaim,
+        ValidatedContentToken,
     },
     ChangeSeq, CommitId, CommitRequest, CommitResponse, DestinationBehavior, FilesystemOperation,
     NamespaceId, StorageChecksum,
@@ -126,10 +127,7 @@ async fn direct_put_round_trip(config: ServerConfig) {
         .complete_upload(
             &namespace_id,
             &begin.upload_id,
-            &CompleteUploadRequest {
-                content_ref: content_ref.clone(),
-                multipart_parts: None,
-            },
+            &CompleteUploadRequest::for_content_ref(content_ref.clone()),
         )
         .await
         .expect("complete direct-put upload");
@@ -189,10 +187,7 @@ async fn assert_wrong_direct_put_bytes_rejected(client: &Client, namespace_id: &
             .complete_upload(
                 namespace_id,
                 &begin.upload_id,
-                &CompleteUploadRequest {
-                    content_ref,
-                    multipart_parts: None,
-                },
+                &CompleteUploadRequest::for_content_ref(content_ref),
             )
             .await,
         "complete wrong-bytes direct put",
@@ -226,10 +221,7 @@ async fn assert_direct_put_requires_signed_checksum_header(
             .complete_upload(
                 namespace_id,
                 &begin.upload_id,
-                &CompleteUploadRequest {
-                    content_ref,
-                    multipart_parts: None,
-                },
+                &CompleteUploadRequest::for_content_ref(content_ref),
             )
             .await,
         "complete missing-checksum direct put",
@@ -260,10 +252,7 @@ async fn assert_direct_put_is_no_replace(client: &Client, namespace_id: &Namespa
         .complete_upload(
             namespace_id,
             &begin.upload_id,
-            &CompleteUploadRequest {
-                content_ref,
-                multipart_parts: None,
-            },
+            &CompleteUploadRequest::for_content_ref(content_ref),
         )
         .await
         .expect("complete first direct put");
@@ -499,15 +488,12 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
     let part_size = MULTIPART_PART_SIZE;
     let payload = multipart_payload(part_size, 2);
     let whole_object = StorageChecksum::crc64nvme(&payload);
+    // Begin declares nothing about the payload. A one-pass uploader could
+    // not fill in a length or a digest here, and this session proves it does
+    // not have to: the claim arrives with the completion below.
     let begin = harness
         .client
-        .begin_direct_multipart(
-            &namespace_id,
-            DirectMultipartContentClaim {
-                size_bytes: payload.len() as u64,
-                crc64nvme: whole_object.value.clone(),
-            },
-        )
+        .begin_direct_multipart(&namespace_id, DirectMultipartUploadOptions::default())
         .await
         .expect("begin direct multipart");
     let upload_id = begin.upload_id.clone();
@@ -516,14 +502,6 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
         multipart.part_size_bytes as usize, part_size,
         "the deployment's part geometry is the one this payload was cut to"
     );
-    assert_eq!(multipart.part_count, 3, "three parts at this geometry");
-    assert_eq!(multipart.content_ref.size_bytes, payload.len() as u64);
-    assert_eq!(multipart.content_ref.storage_checksum, whole_object);
-    assert!(
-        multipart.content_ref.whole_file_sha256.is_none(),
-        "a provider-assembled object carries no whole-file sha256"
-    );
-    let content_ref = multipart.content_ref.clone();
 
     let chunks: Vec<&[u8]> = payload.chunks(part_size).collect();
     let claims: Vec<UploadPartChecksumClaim> = chunks
@@ -575,16 +553,27 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
     parts.push(replaced);
     parts.sort_by_key(|part| part.part_number);
 
-    let request = CompleteUploadRequest {
-        content_ref: content_ref.clone(),
-        multipart_parts: Some(parts),
-    };
+    // The claim rides with the completion, and the identity comes back with
+    // the answer: the client never named the object it wrote.
+    let request = CompleteUploadRequest::for_multipart(
+        DirectMultipartContentClaim {
+            size_bytes: payload.len() as u64,
+            crc64nvme: whole_object.value.clone(),
+        },
+        parts,
+    );
     let complete = harness
         .client
         .complete_upload(&namespace_id, &upload_id, &request)
         .await
         .expect("complete the multipart upload");
-    assert_eq!(complete.content_ref, content_ref);
+    let content_ref = complete.content_ref.clone();
+    assert_eq!(content_ref.size_bytes, payload.len() as u64);
+    assert_eq!(content_ref.storage_checksum, whole_object);
+    assert!(
+        content_ref.whole_file_sha256.is_none(),
+        "a provider-assembled object carries no whole-file sha256"
+    );
 
     // The lost completion. The providers disagree completely about what a
     // replayed completion means — AWS S3 replays a success with no checksum

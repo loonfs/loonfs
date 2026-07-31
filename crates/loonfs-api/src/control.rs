@@ -575,15 +575,19 @@ pub struct UploadSessionState {
     /// The identity exists before any byte is read, so the final object key
     /// is known up front and belongs to exactly this session.
     pub content_id: ContentId,
-    /// What the client promised about the bytes, for sessions that make a
-    /// promise up front. `direct_put` claims a size and a whole-file
-    /// SHA-256; a service-proxied session claims nothing and learns both
-    /// from the bytes it receives.
+    /// What the client promised about the bytes, for the one mode that
+    /// promises anything up front.
+    ///
+    /// Only `direct_put` does: its SHA-256 is signed into the presigned
+    /// request, so it has to exist before the write is authorized. A
+    /// service-proxied session learns size and digest from the bytes it
+    /// receives, and a `direct_multipart` session is told at completion —
+    /// neither records a claim here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claimed_checksum: Option<StorageChecksum>,
-    /// For direct_put and direct_multipart sessions, the content ref the
-    /// signed writes were minted for. It becomes staged only after
-    /// completion verifies the durable object.
+    /// For `direct_put` sessions, the content ref the signed write was
+    /// minted for. It becomes staged only after completion verifies the
+    /// durable object.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub direct_put_content_ref: Option<ContentRef>,
     /// The provider-side multipart upload this session opened, for the one
@@ -595,6 +599,14 @@ pub struct UploadSessionState {
     /// session left open; nothing else reads it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_multipart_upload_id: Option<String>,
+    /// Part geometry a `direct_multipart` session was opened with.
+    ///
+    /// It is recorded because the geometry is settled at begin and the
+    /// client may not learn it again: a session resumed after a lost begin
+    /// response reads its part size from here rather than being told a
+    /// second, possibly different, one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multipart_part_size_bytes: Option<u64>,
     /// Content already verified and staged, or `None` before bytes have passed validation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub staged_content_ref: Option<ContentRef>,
@@ -619,6 +631,8 @@ struct StrictUploadSessionState {
     direct_put_content_ref: Option<StrictContentRef>,
     #[serde(default)]
     provider_multipart_upload_id: Option<String>,
+    #[serde(default)]
+    multipart_part_size_bytes: Option<u64>,
     #[serde(default)]
     staged_content_ref: Option<StrictContentRef>,
     created_at_ms: u64,
@@ -723,6 +737,7 @@ impl<'de> Deserialize<'de> for UploadSessionState {
             claimed_checksum: state.claimed_checksum.map(Into::into),
             direct_put_content_ref: state.direct_put_content_ref.map(Into::into),
             provider_multipart_upload_id: state.provider_multipart_upload_id,
+            multipart_part_size_bytes: state.multipart_part_size_bytes,
             staged_content_ref: state.staged_content_ref.map(Into::into),
             created_at_ms: state.created_at_ms,
             state: state.state.into(),

@@ -13,6 +13,13 @@ use thiserror::Error;
 /// Shares one provider client across handles without changing its storage semantics.
 pub type SharedObjectStore = Arc<dyn ObjectStore>;
 
+/// A payload delivered in pieces, for writes that must not hold it whole.
+///
+/// Chunk boundaries carry no meaning: an implementation regroups them into
+/// whatever units the provider wants. A chunk error ends the write, and the
+/// implementation cleans up whatever it had started.
+pub type ByteStream = BoxStream<'static, Result<Bytes>>;
+
 /// Metadata returned by a successful `head`, full-object `get`, or `put` call.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObjectMetadata {
@@ -220,6 +227,18 @@ impl ObjectStoreError {
 /// Facade alias: signatures inside this crate use `Result<T>`.
 pub type Result<T> = std::result::Result<T, ObjectStoreError>;
 
+/// Drains a byte stream into one buffer, for implementations that cannot
+/// write incrementally.
+pub(crate) async fn collect_stream(mut body: ByteStream) -> Result<Bytes> {
+    use futures::StreamExt as _;
+
+    let mut buffered = bytes::BytesMut::new();
+    while let Some(chunk) = body.next().await {
+        buffered.extend_from_slice(&chunk?);
+    }
+    Ok(buffered.freeze())
+}
+
 /// Defines the provider-independent durability and consistency boundary LoonFS relies on.
 ///
 /// Implementations must satisfy the
@@ -318,6 +337,45 @@ pub trait ObjectStore: Send + Sync + Debug {
     /// Successful completion is immediately authoritative. Invalid keys,
     /// failed conditions, permission failures, and ambiguous transport failures are returned.
     async fn put(&self, key: &str, bytes: Bytes, mode: PutMode) -> Result<ObjectMetadata>;
+
+    /// Writes a payload of unknown length without holding it whole, and
+    /// reports how many bytes were stored.
+    ///
+    /// This is for immutable objects at uniquely-named keys — content
+    /// blobs. Two properties define it:
+    ///
+    /// - **Bounded memory.** A store that can write incrementally holds at
+    ///   most one internal buffer at a time, whatever the payload's length.
+    ///   The default implementation cannot, and says so below.
+    /// - **The body is consumed before any precondition is evaluated.** A
+    ///   caller folding a digest over the stream as it forwards it therefore
+    ///   always ends up with a digest over the complete payload, even when
+    ///   the write is refused — which is what lets it tell "these are the
+    ///   same bytes again" from "these are different bytes".
+    ///
+    /// `mode` is honoured exactly while the payload fits inside one
+    /// internal part. Beyond that, the write goes through the provider's
+    /// multipart upload, whose completion is an unconditional overwrite, so
+    /// a create-only or compare-and-swap request degrades to one there.
+    /// That is the same trade [`Self::put_immutable_verified`] already makes
+    /// at its multipart threshold, and the reason both are for immutable
+    /// keys only: on a key whose bytes are fixed by its name, the condition
+    /// is a corruption tripwire rather than a concurrency control.
+    ///
+    /// A failed or abandoned write leaves no provider state behind: an
+    /// implementation that opened a multipart upload aborts it.
+    ///
+    /// The default implementation **buffers the whole stream** and delegates
+    /// to [`Self::put`]. It exists so a provider without an incremental
+    /// write is honest rather than absent: its memory cost is exactly what
+    /// buffering the payload and calling `put` costs today, and it is
+    /// bounded only by whatever bounds the caller puts on the stream.
+    async fn put_streamed(&self, key: &str, body: ByteStream, mode: PutMode) -> Result<u64> {
+        let bytes = collect_stream(body).await?;
+        let size_bytes = bytes.len() as u64;
+        self.put(key, bytes, mode).await?;
+        Ok(size_bytes)
+    }
 
     /// Deletes a key idempotently and makes its absence immediately authoritative.
     ///
@@ -437,6 +495,10 @@ impl<T: ObjectStore + ?Sized> ObjectStore for Arc<T> {
         self.as_ref().put(key, bytes, mode).await
     }
 
+    async fn put_streamed(&self, key: &str, body: ByteStream, mode: PutMode) -> Result<u64> {
+        self.as_ref().put_streamed(key, body, mode).await
+    }
+
     async fn delete(&self, key: &str) -> Result<()> {
         self.as_ref().delete(key).await
     }
@@ -519,6 +581,10 @@ impl<T: ObjectStore + ?Sized> ObjectStore for &T {
 
     async fn put(&self, key: &str, bytes: Bytes, mode: PutMode) -> Result<ObjectMetadata> {
         (*self).put(key, bytes, mode).await
+    }
+
+    async fn put_streamed(&self, key: &str, body: ByteStream, mode: PutMode) -> Result<u64> {
+        (*self).put_streamed(key, body, mode).await
     }
 
     async fn delete(&self, key: &str) -> Result<()> {

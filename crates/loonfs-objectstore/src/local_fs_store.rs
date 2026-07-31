@@ -13,7 +13,7 @@ use crate::keyspace::{
 };
 use crate::object_store::Result;
 use crate::{
-    ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
+    ByteRange, ByteStream, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
     StoredObjectChecksum,
 };
 use async_trait::async_trait;
@@ -190,6 +190,100 @@ impl LocalFsStore {
             sync_dir_chain(key, path, root).await?;
         }
         sync_parent_dir(key, path).await
+    }
+
+    /// Writes a streamed payload to a sibling staging file, then links or
+    /// renames it into place exactly as the buffered writes do.
+    ///
+    /// Nothing but the current chunk is ever held: the staging file is the
+    /// buffer. The payload is fully written and fsynced before the mode's
+    /// precondition is evaluated, which is the contract a caller folding a
+    /// digest over the same stream depends on.
+    async fn put_streamed_object(
+        &self,
+        key: &str,
+        mut body: ByteStream,
+        mode: PutMode,
+    ) -> Result<u64> {
+        let path = self.resolve_key(key)?;
+        let created_dirs = ensure_parent_dir(key, &path).await?;
+        let temp_path = temp_path(&path);
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+            .await
+            .map_err(|err| io_error(key, err))?;
+
+        let staged: Result<u64> = async {
+            let mut size_bytes = 0u64;
+            while let Some(chunk) = body.next().await {
+                let chunk = chunk?;
+                file.write_all(&chunk)
+                    .await
+                    .map_err(|err| io_error(key, err))?;
+                size_bytes += chunk.len() as u64;
+            }
+            file.sync_all().await.map_err(|err| io_error(key, err))?;
+            Ok(size_bytes)
+        }
+        .await;
+        let size_bytes = match staged {
+            Ok(size_bytes) => size_bytes,
+            Err(err) => {
+                let _ = fs::remove_file(&temp_path).await;
+                return Err(err);
+            }
+        };
+
+        let published = self
+            .publish_staged_object(key, &path, &temp_path, mode)
+            .await;
+        let _ = fs::remove_file(&temp_path).await;
+        published?;
+
+        if created_dirs {
+            sync_dir_chain(key, &path, &self.root).await?;
+        }
+        sync_parent_dir(key, &path).await?;
+        Ok(size_bytes)
+    }
+
+    /// Moves a fully written staging file to its key under `mode`'s
+    /// precondition, holding both write locks while it checks and acts.
+    async fn publish_staged_object(
+        &self,
+        key: &str,
+        path: &Path,
+        temp_path: &Path,
+        mode: PutMode,
+    ) -> Result<()> {
+        let _guard = self.write_lock.lock().await;
+        let _cross_process_guard = self.acquire_cross_process_write_lock(key).await?;
+        let precondition_failed = || ObjectStoreError::PreconditionFailed {
+            object_key: key.to_owned(),
+        };
+        match mode {
+            PutMode::Overwrite => fs::rename(temp_path, path)
+                .await
+                .map_err(|err| io_error(key, err)),
+            // `hard_link` fails if the key exists, which is exactly the
+            // create-if-absent precondition.
+            PutMode::CreateIfAbsent => fs::hard_link(temp_path, path)
+                .await
+                .map_err(|err| map_create_error(key, err)),
+            PutMode::CompareAndSwap { expected_etag } => {
+                let current = Self::metadata_for_path(key, path)
+                    .await?
+                    .ok_or_else(precondition_failed)?;
+                if current.etag.as_deref() != Some(expected_etag.as_str()) {
+                    return Err(precondition_failed());
+                }
+                fs::rename(temp_path, path)
+                    .await
+                    .map_err(|err| io_error(key, err))
+            }
+        }
     }
 
     async fn replace_object(key: &str, root: &Path, path: &Path, bytes: &[u8]) -> Result<()> {
@@ -375,6 +469,11 @@ impl ObjectStore for LocalFsStore {
 
     async fn put(&self, key: &str, bytes: Bytes, mode: PutMode) -> Result<ObjectMetadata> {
         self.put_object(&self.scoped(key)?, &bytes, mode).await
+    }
+
+    async fn put_streamed(&self, key: &str, body: ByteStream, mode: PutMode) -> Result<u64> {
+        self.put_streamed_object(&self.scoped(key)?, body, mode)
+            .await
     }
 
     async fn delete(&self, key: &str) -> Result<()> {

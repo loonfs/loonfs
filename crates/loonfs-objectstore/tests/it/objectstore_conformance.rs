@@ -132,6 +132,13 @@ async fn local_fs_compare_and_swap_missing_object_rejects_writer() {
 }
 
 #[tokio::test]
+async fn local_fs_streamed_write_round_trips() {
+    let temp_dir = TestDir::new("streamed-write");
+    let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
+    assert_streamed_write_round_trips(&store).await;
+}
+
+#[tokio::test]
 #[ignore = "requires real AWS S3 credentials"]
 async fn aws_s3_real_provider_conformance() {
     let config = AwsS3ConformanceConfig::from_env()
@@ -148,6 +155,48 @@ async fn aws_s3_real_provider_conformance() {
     })
     .expect("create AWS S3 object store");
     assert_provider_conformance(&store).await;
+}
+
+/// The streamed write against live AWS S3. Separate from the conformance
+/// sweep because it moves 24 MiB: it is the one exercise where the
+/// provider's real multipart rules — non-final part sizes, completion,
+/// assembly — meet a payload the server never held.
+#[tokio::test]
+#[ignore = "requires real AWS S3 credentials"]
+async fn aws_s3_streamed_write_round_trips() {
+    let config = AwsS3ConformanceConfig::from_env()
+        .expect("load AWS S3 real-provider conformance environment");
+    let store = S3CompatibleStore::aws_s3(AwsS3StoreConfig {
+        bucket: config.bucket,
+        region: config.region,
+        endpoint_url: config.endpoint,
+        access_key_id: config.access_key_id.into(),
+        secret_access_key: config.secret_access_key.into(),
+        session_token: config.session_token.map(Into::into),
+        key_prefix: Some(config.prefix),
+        force_path_style: false,
+    })
+    .expect("create AWS S3 object store");
+    assert_streamed_write_round_trips(&store).await;
+}
+
+/// The same streamed write against live Cloudflare R2, whose fixed
+/// non-final part size rule is the one this geometry has to satisfy.
+#[tokio::test]
+#[ignore = "requires real Cloudflare R2 credentials"]
+async fn cloudflare_r2_streamed_write_round_trips() {
+    let config = CloudflareR2ConformanceConfig::from_env()
+        .expect("load Cloudflare R2 real-provider conformance environment");
+    let store = S3CompatibleStore::cloudflare_r2(CloudflareR2StoreConfig {
+        bucket: config.bucket,
+        account_id: config.account_id,
+        endpoint_url: config.endpoint,
+        access_key_id: config.access_key_id.into(),
+        secret_access_key: config.secret_access_key.into(),
+        key_prefix: Some(config.prefix),
+    })
+    .expect("create Cloudflare R2 object store");
+    assert_streamed_write_round_trips(&store).await;
 }
 
 #[test]
@@ -560,6 +609,72 @@ async fn assert_lists_immediately_after_write_and_delete<S: ObjectStore>(store: 
         .await
         .expect("list after delete")
         .is_empty());
+}
+
+/// The content key a streamed-write exercise writes to and cleans up.
+fn streamed_write_key() -> String {
+    content_blob(
+        "cs_00000000000000000000000000000001",
+        &ContentId::parse("con_5723ea9d1c4b48f0a1d2e3f4a5b6c7d8").expect("valid content id"),
+    )
+}
+
+/// Cuts a payload into stream chunks whose boundaries have nothing to do
+/// with the store's part size, exactly as an HTTP body's do not.
+fn streamed_chunks(payload: &[u8], chunk_bytes: usize) -> loonfs_objectstore::ByteStream {
+    let chunks: Vec<Bytes> = payload
+        .chunks(chunk_bytes)
+        .map(Bytes::copy_from_slice)
+        .collect();
+    futures::stream::iter(chunks.into_iter().map(Ok)).boxed()
+}
+
+/// A proxied write's shape against a real provider: a payload larger than
+/// the store's part size, delivered as a stream, must land byte-identical
+/// and leave the prefix it borrowed empty afterwards.
+///
+/// Three internal parts is the smallest payload with a middle part, which
+/// is where a provider's own rules about non-final part sizes bite.
+async fn assert_streamed_write_round_trips<S: ObjectStore>(store: &S) {
+    let key = streamed_write_key();
+    let _ = store.delete(&key).await;
+
+    let payload_len = 3 * loonfs_objectstore::PROVIDER_MULTIPART_PART_BYTES as usize;
+    let payload: Vec<u8> = (0..payload_len).map(|index| (index % 251) as u8).collect();
+    let expected = StorageChecksum::sha256(&payload);
+
+    let size_bytes = store
+        .put_streamed(
+            &key,
+            streamed_chunks(&payload, 64 * 1024),
+            loonfs_objectstore::PutMode::CreateIfAbsent,
+        )
+        .await
+        .expect("streamed write of a multi-part payload");
+    assert_eq!(size_bytes, payload_len as u64);
+
+    let read_back = store
+        .get(&key, None)
+        .await
+        .expect("read the streamed object back")
+        .expect("streamed object exists");
+    assert_eq!(read_back.len(), payload_len);
+    assert_eq!(
+        StorageChecksum::sha256(&read_back),
+        expected,
+        "the assembled object must hash to what was streamed into it"
+    );
+
+    store.delete(&key).await.expect("delete streamed object");
+    let prefix = key.rsplit_once('/').expect("content key has a shard").0;
+    assert!(
+        store
+            .list_prefix(&format!("{prefix}/"))
+            .await
+            .expect("list the streamed object's shard")
+            .is_empty(),
+        "a streamed-write exercise leaves nothing behind"
+    );
 }
 
 async fn assert_sorted_list_prefix<S: ObjectStore>(store: &S) {

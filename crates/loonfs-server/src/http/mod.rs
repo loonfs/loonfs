@@ -22,7 +22,7 @@ pub use self::serve::{app, serve, serve_with_shutdown, ServeError, ServerLifecyc
 use self::error::ApiResponseError;
 use self::extractors::{
     authorize, server_busy_error, AppJson, AppPath, AppQuery, NamespaceIdPath, OptionalAppJson,
-    UploadBodyBytes,
+    UploadBodyStream,
 };
 use self::handlers_filesystem::{
     apply_commit, get_file_bytes, list_changes, list_file_revisions, list_path_entries, list_trash,
@@ -45,7 +45,7 @@ use self::serve::{
     app_with_store, app_with_store_and_state, app_with_store_and_transfer_issuer,
     build_handles_with_metrics_jsonl_path, serve_on,
 };
-use axum::extract::{DefaultBodyLimit, Request, State};
+use axum::extract::{Request, State};
 use axum::http::{HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::Response;
@@ -81,10 +81,6 @@ async fn with_request_id(request: Request, next: Next) -> Response {
 }
 
 fn router(state: AppState) -> Router {
-    // Upload content carries legitimately large bodies and gets a
-    // configured budget. Every other route keeps axum's conservative
-    // default limit.
-    let max_upload_bytes = usize::try_from(state.config.max_upload_bytes).unwrap_or(usize::MAX);
     let grep_route = if state.config.grep.mode.serves_grep() {
         post(grep)
     } else {
@@ -149,7 +145,11 @@ fn router(state: AppState) -> Router {
         .route("/v0/namespaces/:namespace/uploads", post(begin_upload))
         .route(
             "/v0/namespaces/:namespace/uploads/:upload_id/content",
-            put(upload_content).layer(DefaultBodyLimit::max(max_upload_bytes)),
+            // No body-limit layer: the upload route never buffers its
+            // body, so a framework limit measured against a buffered read
+            // would never fire. `UploadBodyStream` counts the bytes as it
+            // forwards them and enforces `upload.max_content_bytes` itself.
+            put(upload_content),
         )
         .route(
             "/v0/namespaces/:namespace/uploads/:upload_id/parts",

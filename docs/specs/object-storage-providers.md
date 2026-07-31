@@ -68,17 +68,39 @@ not offered.
 | Azure Blob Storage | No | n/a |
 | Local filesystem | No | n/a |
 
-## 4. Local Filesystem Provider
+## 4. Incremental writes and where they are real
+
+A proxied upload never holds its body: the server hashes the payload as it
+forwards it into the store. Whether the *store* then holds it depends on the
+provider, and the difference is observable only as memory, so it is stated
+here rather than advertised as a capability.
+
+| Provider | Incremental write | What a large proxied upload costs the server |
+| --- | --- | --- |
+| AWS S3 | Yes, provider multipart | One part (8 MiB by default), whatever the object's size |
+| Cloudflare R2 | Yes, provider multipart | One part, whatever the object's size |
+| Other S3-compatible endpoints | Yes, provider multipart | One part, whatever the object's size |
+| Google Cloud Storage | No | The whole payload, bounded by `upload.max_content_bytes` |
+| Azure Blob Storage | No | The whole payload, bounded by `upload.max_content_bytes` |
+| Local filesystem | Yes, staging file | One chunk as it arrives |
+
+The two providers without an incremental write are not broken by this and
+are not silently degraded either: they buffer and write in one request,
+which is exactly what every provider did before, and the byte cap that
+bounded that buffering still bounds it. Adding an incremental write for them
+is a provider-adapter change, not a contract change.
+
+## 5. Local Filesystem Provider
 
 The local provider is a development and test provider supported on Unix-family platforms. It stages each replacement in the destination directory, makes the staged bytes durable, and atomically renames the staged file over the destination. A concurrent reader therefore observes either the complete prior object or the complete replacement, never a missing or partial object. Construction fails on other platforms rather than claiming a weaker replacement contract.
 
-## 5. LoonFS Design Implications
+## 6. LoonFS Design Implications
 
 1. **WAL/head flush cadence:** one update per second is the same-key CAS ceiling for GCS and R2. For more throughput, write immutable segment objects and update multiple sharded heads or a batched manifest.
 2. **Immutable content path:** content-addressed or monotonic keys can scale through multipart upload and distributed prefixes. 
 3. **Checksums:** LoonFS should own end-to-end integrity. Provider checksums help validate transport/storage, but ETag/checksum semantics diverge sharply across providers and multipart modes.
 
-## 6. Sources
+## 7. Sources
 
 [^1]: Google Cloud Storage, "Quotas & limits": [https://cloud.google.com/storage/quotas](https://cloud.google.com/storage/quotas)
 

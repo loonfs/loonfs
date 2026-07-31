@@ -155,10 +155,7 @@ pub(crate) mod http_split_support {
             .upload_content(namespace_id, &begin.upload_id, file_bytes)
             .await
             .expect("upload content");
-        let complete_request = CompleteUploadRequest {
-            content_ref: staged.content_ref,
-            multipart_parts: None,
-        };
+        let complete_request = CompleteUploadRequest::for_content_ref(staged.content_ref);
         let complete = client
             .complete_upload(namespace_id, &begin.upload_id, &complete_request)
             .await

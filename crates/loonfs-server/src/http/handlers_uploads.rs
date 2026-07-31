@@ -2,7 +2,7 @@
 //! backing them.
 
 use super::error::ApiResponseError;
-use super::{AppJson, AppPath, AppState, NamespaceIdPath, OptionalAppJson, UploadBodyBytes};
+use super::{AppJson, AppPath, AppState, NamespaceIdPath, OptionalAppJson, UploadBodyStream};
 use crate::config::ServerConfig;
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -160,17 +160,13 @@ async fn begin_direct_multipart_upload(
              deployment's endpoint cannot",
         ));
     }
-    let Some(claim) = request.multipart else {
-        return Err(ApiResponseError::new(
-            StatusCode::BAD_REQUEST,
-            ErrorCode::InvalidRequest,
-            "invalid upload content: direct_multipart requires a multipart claim at begin_upload",
-        ));
-    };
+    // A multipart begin declares nothing about the payload, so an absent
+    // `multipart` object simply takes the server's default geometry.
+    let options = request.multipart.unwrap_or_default();
 
     let prepared = state
         .writer
-        .begin_direct_multipart_upload_target(&namespace_id, claim)
+        .begin_direct_multipart_upload_target(&namespace_id, options)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
 
@@ -180,9 +176,7 @@ async fn begin_direct_multipart_upload(
         mode: UploadMode::DirectMultipart,
         direct_put: None,
         direct_multipart: Some(DirectMultipartUpload {
-            content_ref: prepared.target.content_ref,
             part_size_bytes: prepared.target.part_size_bytes,
-            part_count: prepared.target.part_count,
         }),
     }))
 }
@@ -396,21 +390,40 @@ pub(super) fn current_unix_ms() -> Result<u64, ApiResponseError> {
         )
     )
 )]
+/// Forwards a proxied upload's body straight into object storage.
+///
+/// The body is never held: it is hashed and written a piece at a time, so
+/// the server's memory cost tracks the transfer's part size rather than the
+/// object's length. The reference this produces is the same one the
+/// buffered path produced — `storage_checksum` is the SHA-256 this server
+/// computed over the complete payload, and `whole_file_sha256` carries it —
+/// because this server is the trusted party that hashed the bytes.
+///
+/// A failure has two possible authors. The store may have refused the
+/// write, or the body may have ended early — past the byte cap, or with a
+/// broken connection — and only the second is the client's. The stream
+/// records which, so the client is told the truth rather than a blanket
+/// storage error.
 pub(super) async fn upload_content(
     State(state): State<AppState>,
     namespace: NamespaceIdPath,
     path: AppPath<UploadPathParams>,
-    body: UploadBodyBytes,
+    body: UploadBodyStream,
 ) -> Result<Json<UploadContentResponse>, ApiResponseError> {
     let namespace_id = namespace.into_id()?;
     let UploadPathParams { upload_id } = path.into_params()?;
     let upload_id = parse_upload_id(&upload_id)?;
-    let response = state
+    let (stream, outcome) = body.into_stream();
+    match state
         .writer
-        .upload_content(&namespace_id, &upload_id, &body.bytes)
+        .upload_streamed_content(&namespace_id, &upload_id, stream)
         .await
-        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
-    Ok(Json(response))
+    {
+        Ok(response) => Ok(Json(response)),
+        Err(error) => Err(outcome
+            .into_rejection()
+            .unwrap_or_else(|| ApiResponseError::runtime_for_namespace(&namespace_id, error))),
+    }
 }
 
 #[cfg_attr(

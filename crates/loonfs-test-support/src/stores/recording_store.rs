@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
 use loonfs_objectstore::{
-    ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
+    ByteRange, ByteStream, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
     StoredObjectChecksum,
 };
 use std::sync::Mutex;
@@ -31,6 +31,13 @@ pub enum RecordedOperation {
         mode: PutMode,
         bytes: usize,
     },
+    /// A streamed put, recorded once its payload has been written and its
+    /// length is known.
+    PutStreamed {
+        key: String,
+        mode: PutMode,
+        bytes: u64,
+    },
     /// A compare-and-swap call.
     CompareAndSwap { key: String, bytes: usize },
     /// A delete.
@@ -47,6 +54,7 @@ impl RecordedOperation {
             | Self::Get { key, .. }
             | Self::GetWithMetadata { key }
             | Self::Put { key, .. }
+            | Self::PutStreamed { key, .. }
             | Self::CompareAndSwap { key, .. }
             | Self::Delete { key } => key,
             Self::List { prefix } => prefix,
@@ -180,6 +188,23 @@ impl<S: ObjectStore> ObjectStore for RecordingStore<S> {
             bytes: bytes.len(),
         });
         self.inner.put(key, bytes, mode).await
+    }
+
+    async fn put_streamed(
+        &self,
+        key: &str,
+        body: ByteStream,
+        mode: PutMode,
+    ) -> Result<u64, ObjectStoreError> {
+        let result = self.inner.put_streamed(key, body, mode.clone()).await;
+        if let Ok(bytes) = &result {
+            self.record(RecordedOperation::PutStreamed {
+                key: key.to_owned(),
+                mode,
+                bytes: *bytes,
+            });
+        }
+        result
     }
 
     async fn compare_and_swap(
