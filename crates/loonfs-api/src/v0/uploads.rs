@@ -150,11 +150,73 @@ pub struct CompleteUploadResponse {
     pub validated_content_token: Option<String>,
 }
 
+/// Observed state of an upload session.
+///
+/// A session is `open`, then `completed` or `aborted`, and both of those are
+/// final. Reading a completed session mints a fresh receipt for content that
+/// is already durable, which is why losing a commit response never costs a
+/// retransfer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum UploadSessionStatus {
+    /// Accepting content until its lease passes.
+    #[cfg_attr(feature = "openapi", schema(title = "UploadSessionStatusOpen"))]
+    Open {
+        /// Unix-millisecond instant after which the session is abandoned and
+        /// may be aborted by server-side cleanup.
+        expires_at_ms: u64,
+    },
+    /// Final: the content is durable and verified.
+    #[cfg_attr(feature = "openapi", schema(title = "UploadSessionStatusCompleted"))]
+    Completed {
+        /// Unix-millisecond stamp of the completion.
+        completed_at_ms: u64,
+        /// Verified immutable content this session settled on.
+        content_ref: ContentRef,
+        /// Freshly minted proof for a following commit, or `None` once the
+        /// session has stopped minting them.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        validated_content_token: Option<String>,
+    },
+    /// Final: the session selected no content and its object is gone.
+    #[cfg_attr(feature = "openapi", schema(title = "UploadSessionStatusAborted"))]
+    Aborted {
+        /// Unix-millisecond stamp of the abort.
+        aborted_at_ms: u64,
+    },
+}
+
+/// Response for reading one upload session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct UploadStatusResponse {
+    /// Namespace that owns the session.
+    pub namespace_id: NamespaceId,
+    /// Session that was read.
+    pub upload_id: UploadId,
+    /// The session's state, with a fresh receipt when it is completed.
+    pub status: UploadSessionStatus,
+}
+
+/// Response after aborting an upload session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct AbortUploadResponse {
+    /// Namespace that owns the session.
+    pub namespace_id: NamespaceId,
+    /// Session that is now final.
+    pub upload_id: UploadId,
+    /// Unix-millisecond stamp of the abort that stands, which for a repeated
+    /// abort is the first one's.
+    pub aborted_at_ms: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         BeginUploadRequest, BeginUploadResponse, DirectPutContentClaim, DirectPutUpload,
-        ObjectTransferAccess, UploadMode,
+        ObjectTransferAccess, UploadMode, UploadSessionStatus,
     };
     use crate::{ContentId, ContentRef, NamespaceId, UploadId};
     use std::collections::BTreeMap;
@@ -220,6 +282,33 @@ mod tests {
             )
             .is_err(),
             "a client must not be able to name the content object"
+        );
+    }
+
+    #[test]
+    fn upload_status_names_its_state_on_the_wire() {
+        let open = serde_json::to_value(UploadSessionStatus::Open {
+            expires_at_ms: 1_000,
+        })
+        .expect("serialize open status");
+        assert_eq!(open["state"], "open");
+
+        let aborted = serde_json::to_value(UploadSessionStatus::Aborted {
+            aborted_at_ms: 2_000,
+        })
+        .expect("serialize aborted status");
+        assert_eq!(aborted["state"], "aborted");
+
+        let completed = serde_json::to_value(UploadSessionStatus::Completed {
+            completed_at_ms: 3_000,
+            content_ref: ContentRef::blob_v1(ContentId::generate(), b"hello"),
+            validated_content_token: None,
+        })
+        .expect("serialize completed status");
+        assert_eq!(completed["state"], "completed");
+        assert!(
+            completed.get("validated_content_token").is_none(),
+            "a session past its receipt window reports no token at all"
         );
     }
 }

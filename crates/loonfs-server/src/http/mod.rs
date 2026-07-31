@@ -35,7 +35,9 @@ use self::handlers_namespace::{
 use self::handlers_query::{
     disable_grep_index, enable_grep_index, gc_grep_index, grep, grep_not_supported,
 };
-use self::handlers_uploads::{begin_upload, complete_upload, upload_content};
+use self::handlers_uploads::{
+    abort_upload, begin_upload, complete_upload, read_upload_status, upload_content,
+};
 use self::serve::AppState;
 #[cfg(test)]
 use self::serve::{
@@ -151,6 +153,14 @@ fn router(state: AppState) -> Router {
         .route(
             "/v0/namespaces/:namespace/uploads/:upload_id/complete",
             post(complete_upload),
+        )
+        .route(
+            "/v0/namespaces/:namespace/uploads/:upload_id/abort",
+            post(abort_upload),
+        )
+        .route(
+            "/v0/namespaces/:namespace/uploads/:upload_id",
+            get(read_upload_status),
         )
         .route("/v0/namespaces/:namespace/changes", get(list_changes))
         .route(

@@ -78,7 +78,6 @@ pub fn gc_config_from_request(request: GcRequest) -> GcConfig {
     let defaults = GcConfig::default();
     GcConfig {
         grace_window_ms: request.grace_window_ms.unwrap_or(defaults.grace_window_ms),
-        reap_window_ms: request.reap_window_ms.unwrap_or(defaults.reap_window_ms),
         max_objects: request.max_objects,
         cursor: request.cursor,
     }

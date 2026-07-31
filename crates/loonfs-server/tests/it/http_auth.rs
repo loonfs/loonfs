@@ -2,7 +2,6 @@
 
 use crate::common::http_split_support::*;
 use crate::common::start_server;
-use loonfs::content_tokens::mint_content_token;
 use loonfs_api::ContentId;
 use loonfs_api::{
     v0::ValidatedContentToken, AbsolutePath, ApiError, ChangeSeq, CommitId, CommitRequest,
@@ -189,7 +188,7 @@ async fn path_put_with_valid_content_token_succeeds() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn landed_path_put_replays_after_content_token_is_absent_expired_or_garbage() {
+async fn landed_path_put_replays_after_content_token_is_absent_rejected_or_garbage() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_server(test_config(
         temp_dir.path().join("store"),
@@ -236,10 +235,16 @@ async fn landed_path_put_replays_after_content_token_is_absent_expired_or_garbag
     request.content_tokens.clear();
     assert_eq!(send(&request), original);
 
+    // A real receipt, but for other bytes: well formed, correctly signed,
+    // and rejected. Only a completed session mints one, so this is the
+    // closest a test can get to a token the publisher will turn down for a
+    // reason other than syntax.
+    let other = stage_uploaded_content(&harness.client, &namespace, b"other bytes").await;
     request.content_tokens = vec![ValidatedContentToken {
         content_ref: content_ref.clone(),
-        token: mint_content_token(TEST_CONTENT_TOKEN_SECRET, &namespace, &content_ref, 0)
-            .expect("mint expired content token"),
+        token: other
+            .validated_content_token
+            .expect("completed upload carries token"),
     }];
     assert_eq!(send(&request), original);
 

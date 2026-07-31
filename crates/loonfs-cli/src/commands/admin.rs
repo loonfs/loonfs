@@ -63,7 +63,6 @@ async fn run_admin_gc(
     let single_pass = args.max_objects.is_some();
     let mut request = GcRequest {
         grace_window_ms: args.grace_window_ms,
-        reap_window_ms: args.reap_window_ms,
         max_objects: Some(args.max_objects.unwrap_or(loonfs::DEFAULT_GC_MAX_OBJECTS)),
         cursor: None,
     };

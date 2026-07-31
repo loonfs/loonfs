@@ -206,6 +206,23 @@ fn required_etag_core<'a>(
     })
 }
 
+/// Reads one upload session's durable state without holding an etag.
+///
+/// Callers that only need to know what a session says — status reads, and
+/// the terminal-state check a completion makes before it touches any
+/// provider object — take this instead of opening a compare-and-swap they
+/// may not use.
+pub(crate) async fn read_upload_session_state<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    upload_id: &UploadId,
+) -> crate::error::Result<UploadSessionState> {
+    Ok(read_upload_session_object(store, namespace_id, upload_id)
+        .await?
+        .envelope
+        .state)
+}
+
 #[derive(Debug, Clone)]
 struct LoadedUploadSessionObject {
     object_key: String,

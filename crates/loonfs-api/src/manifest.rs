@@ -412,6 +412,13 @@ pub mod lookup_keys {
     /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
     pub const INODE_ROW_PREFIX: &str = "inode-";
 
+    /// The prefix every canonical revision row key starts with. A range scan
+    /// over it walks every revision the manifest records, superseded ones
+    /// included, which is what a reachability question about content needs.
+    ///
+    /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).
+    pub const REVISION_ROW_PREFIX: &str = "revision-";
+
     /// Builds the exact point-lookup key for an inode row.
     ///
     /// See [metadata segments](../../../../docs/specs/format.md#421-metadata-segments).

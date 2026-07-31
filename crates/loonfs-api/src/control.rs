@@ -505,27 +505,57 @@ impl HeadState {
     }
 }
 
-/// Records the immutable content selected when an upload session completed.
+/// Lifecycle of a durable upload session: one live state and two terminal
+/// ones, with no way back.
+///
+/// A session opens with a lease and either completes or is aborted. The
+/// compare-and-swap that makes one of those two land is the serialization
+/// point for the whole upload — provider state follows the durable
+/// transition, never the other way around — so whichever transition wins is
+/// simply what happened, and the loser reports a terminal error rather than
+/// undoing anything. Nothing returns a session to `open`: a client that
+/// wants another try begins another session, which mints its own content
+/// identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CompletedUpload {
-    /// Verified content reference returned by every idempotent completion retry.
-    pub content_ref: ContentRef,
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum UploadSessionLifecycle {
+    /// The one state that may stage bytes and complete. Live until its lease
+    /// passes, after which garbage collection aborts it.
+    Open {
+        /// Unix-millisecond instant after which the session is abandoned.
+        /// The record carries it so no session transition depends on an
+        /// object's provider timestamp.
+        expires_at_ms: u64,
+    },
+    /// Terminal: the content is durable and verified. This is the only state
+    /// a receipt may be minted from, and the content reference it carries is
+    /// what every re-mint and idempotent completion retry answers with.
+    Completed {
+        /// Unix-millisecond stamp written by the completing compare-and-swap,
+        /// and the only input to when the content may be reclaimed.
+        completed_at_ms: u64,
+        /// Verified immutable content this session settled on.
+        content_ref: ContentRef,
+    },
+    /// Terminal: the session will never select content. Its content
+    /// identity was never published — a receipt exists only for a completed
+    /// session — so the object it named belongs to nobody and is deleted.
+    Aborted {
+        /// Unix-millisecond stamp written by the aborting compare-and-swap,
+        /// and the only input to when the record may be deleted.
+        aborted_at_ms: u64,
+    },
 }
 
-/// Lifecycle of a durable upload session.
-///
-/// `active` sessions may stage or complete content. Garbage collection
-/// compare-and-swaps an abandoned session to absorbing `condemned` before
-/// physical deletion; upload operations treat that state as not found.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum UploadSessionLifecycle {
-    /// Allows staging and idempotent completion of content.
-    #[default]
-    Active,
-    /// Irreversibly transfers an abandoned session to garbage-collection cleanup.
-    Condemned,
+impl std::fmt::Display for UploadSessionLifecycle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let state = match self {
+            Self::Open { .. } => "open",
+            Self::Completed { .. } => "completed",
+            Self::Aborted { .. } => "aborted",
+        };
+        formatter.write_str(state)
+    }
 }
 
 /// Tracks one durable content-upload workflow independently of commit publication.
@@ -558,12 +588,10 @@ pub struct UploadSessionState {
     /// Content already verified and staged, or `None` before bytes have passed validation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub staged_content_ref: Option<ContentRef>,
-    /// Frozen completion result, or `None` while the session can still select content.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub completed: Option<CompletedUpload>,
-    /// Unix-millisecond creation stamp used for abandoned-session cleanup policy.
+    /// Unix-millisecond creation stamp.
     pub created_at_ms: u64,
-    /// Guarded lifecycle that prevents upload operations racing with cleanup.
+    /// The session's lifecycle, and the field every upload operation
+    /// compare-and-swaps against.
     pub state: UploadSessionLifecycle,
 }
 
@@ -581,16 +609,44 @@ struct StrictUploadSessionState {
     direct_put_content_ref: Option<StrictContentRef>,
     #[serde(default)]
     staged_content_ref: Option<StrictContentRef>,
-    #[serde(default)]
-    completed: Option<StrictCompletedUpload>,
     created_at_ms: u64,
-    state: UploadSessionLifecycle,
+    state: StrictUploadSessionLifecycle,
 }
 
+/// The lifecycle read back through the same strict content-ref decoder the
+/// rest of the record uses, so a completed session's reference is held to
+/// the durable schema rather than the wire one.
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StrictCompletedUpload {
-    content_ref: StrictContentRef,
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum StrictUploadSessionLifecycle {
+    Open {
+        expires_at_ms: u64,
+    },
+    Completed {
+        completed_at_ms: u64,
+        content_ref: StrictContentRef,
+    },
+    Aborted {
+        aborted_at_ms: u64,
+    },
+}
+
+impl From<StrictUploadSessionLifecycle> for UploadSessionLifecycle {
+    fn from(state: StrictUploadSessionLifecycle) -> Self {
+        match state {
+            StrictUploadSessionLifecycle::Open { expires_at_ms } => Self::Open { expires_at_ms },
+            StrictUploadSessionLifecycle::Completed {
+                completed_at_ms,
+                content_ref,
+            } => Self::Completed {
+                completed_at_ms,
+                content_ref: content_ref.into(),
+            },
+            StrictUploadSessionLifecycle::Aborted { aborted_at_ms } => {
+                Self::Aborted { aborted_at_ms }
+            }
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -655,11 +711,8 @@ impl<'de> Deserialize<'de> for UploadSessionState {
             claimed_checksum: state.claimed_checksum.map(Into::into),
             direct_put_content_ref: state.direct_put_content_ref.map(Into::into),
             staged_content_ref: state.staged_content_ref.map(Into::into),
-            completed: state.completed.map(|completed| CompletedUpload {
-                content_ref: completed.content_ref.into(),
-            }),
             created_at_ms: state.created_at_ms,
-            state: state.state,
+            state: state.state.into(),
         })
     }
 }

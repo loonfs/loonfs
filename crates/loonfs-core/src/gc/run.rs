@@ -10,13 +10,13 @@ use super::live_set::{collect_live_set, LiveSet, SweepVerifier};
 use super::reap::{
     delete_if_aged, manifest_object_id_of, sweep_checkpoint_record, CheckpointSweep,
 };
+use super::uploads::{sweep_upload_session, ContentReferences, UploadSessionSweep};
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
 use crate::namespace::control::{read_head_object, ControlObjectLoadError};
-use crate::protocol::{condemn_upload_session_if_aged, UploadSessionSweep};
 use futures::StreamExt;
 use loonfs_api::v0::GcResponse;
-use loonfs_api::{NamespaceId, UploadId};
+use loonfs_api::{ContentStoreId, NamespaceId, UploadId};
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
 
@@ -45,14 +45,15 @@ pub(super) async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
     config.validate()?;
     // The head is the namespace: without one there is nothing to collect,
     // and nothing could have been written under the prefix either, because
-    // the head is every installation's first and only write.
-    match read_head_object(store, namespace_id).await {
-        Ok(_) => {}
+    // the head is every installation's first and only write. It also names
+    // the content store a session's object lives in.
+    let content_store_id = match read_head_object(store, namespace_id).await {
+        Ok(head) => head.envelope.state.content_store_id,
         Err(ControlObjectLoadError::MissingObject { .. }) => {
             return Ok(GcResponse::empty(namespace_id.clone()))
         }
         Err(error) => return Err(CoreError::load_head(error)),
-    }
+    };
 
     let resume = match config.cursor.as_deref() {
         Some(token) => GcCursor::decode(token, namespace_id)?,
@@ -63,6 +64,10 @@ pub(super) async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
     // The cursor can skip enumeration only; it never carries safety state.
     let mark = Arc::new(collect_live_set(store, namespace_id, context).await?);
     let mut sweep = SweepVerifier::seeded(Arc::clone(&mark), reverify_chunk);
+    // Content references are collected from this same root set, lazily. The
+    // derived reclamation grace is what lets one collection stand for the
+    // whole pass: past it, no receipt survives that could add a reference.
+    let mut references = ContentReferences::over(&mark);
     let mut report = GcResponse::empty(namespace_id.clone());
     let mut examined = 0_u64;
     let mut position = resume.clone();
@@ -98,12 +103,14 @@ pub(super) async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
             process_candidate(
                 store,
                 namespace_id,
+                &content_store_id,
                 config,
                 context,
                 family,
                 &key,
                 &mark,
                 &mut sweep,
+                &mut references,
                 &mut report,
             )
             .await?;
@@ -120,16 +127,28 @@ pub(super) async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
 async fn process_candidate<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
+    content_store_id: &ContentStoreId,
     config: &GcConfig,
     context: &MutationContext,
     family: CandidateFamily,
     key: &str,
     mark: &LiveSet,
     sweep: &mut SweepVerifier,
+    references: &mut ContentReferences<'_>,
     report: &mut GcResponse,
 ) -> Result<()> {
     if family == CandidateFamily::UploadSessions {
-        return process_upload_session(store, namespace_id, config, context, key, report).await;
+        return process_upload_session(
+            store,
+            namespace_id,
+            content_store_id,
+            config,
+            context,
+            key,
+            references,
+            report,
+        )
+        .await;
     }
 
     if family == CandidateFamily::Checkpoints && mark.missing_basis_records.contains(key) {
@@ -249,23 +268,28 @@ async fn process_checkpoint<S: ObjectStore + ?Sized>(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn process_upload_session<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,
+    content_store_id: &ContentStoreId,
     config: &GcConfig,
     context: &MutationContext,
     key: &str,
+    references: &mut ContentReferences<'_>,
     report: &mut GcResponse,
 ) -> Result<()> {
     let Some(upload_id) = upload_id_of(key) else {
         report.retained_candidates += 1;
         return Ok(());
     };
-    match condemn_upload_session_if_aged(
+    match sweep_upload_session(
         store,
         namespace_id,
+        content_store_id,
         &upload_id,
-        config.reap_window_ms,
+        config.grace_window_ms,
+        references,
         context,
     )
     .await?

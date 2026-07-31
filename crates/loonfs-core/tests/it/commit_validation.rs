@@ -6,15 +6,19 @@
 // These integration tests use panic in unexpected match arms for precise diagnostics.
 
 use crate::common::commit_split_support::*;
+use crate::common::namespace_engine;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
 use loonfs_api::{
-    v0::{FilesystemChange, ValidatedContentToken},
+    v0::{FilesystemChange, UploadSessionStatus, ValidatedContentToken},
     AbsolutePath, ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior, DisplayName,
     NamespaceId, RevisionNo,
 };
-use loonfs_core::content::{mint_content_token, store_bytes_as_content, verify_content_token};
+use loonfs_core::content::{
+    mint_content_token, store_bytes_as_content, verify_content_token, ContentTokenError,
+};
+use loonfs_core::limits::CONTENT_RECEIPT_TTL_MS;
 use loonfs_core::publish::{
     CommitCandidate, CommitRequest, ContentPreparationError, FilesystemOperation,
 };
@@ -227,15 +231,35 @@ async fn valid_content_admission_skips_durable_content_validation() {
     bootstrap_namespace(&store, &namespace_id, &context, false)
         .await
         .expect("bootstrap");
-    let content = store_bytes_as_content(&store, &namespace_id, b"admitted")
+    // A receipt exists only for a session the store already says completed,
+    // so the token this test admits has to come from a real upload.
+    let engine = namespace_engine(&store, &namespace_id, &context);
+    let upload = engine
+        .begin_upload(loonfs_api::v0::BeginUploadRequest::default())
+        .await
+        .expect("begin upload");
+    let staged = engine
+        .upload_content(&upload.upload_id, b"admitted")
         .await
         .expect("stage content");
+    let completed = engine
+        .complete_upload_prepared(
+            &upload.upload_id,
+            &loonfs_api::v0::CompleteUploadRequest {
+                content_ref: staged.content_ref.clone(),
+            },
+        )
+        .await
+        .expect("complete upload");
+    let content_ref = completed.response.content_ref.clone();
     let token = ValidatedContentToken {
-        content_ref: content.content_ref.clone(),
+        content_ref: content_ref.clone(),
         token: mint_content_token(
             "test-content-token-secret",
-            &namespace_id,
-            &content.content_ref,
+            completed
+                .receipt
+                .as_ref()
+                .expect("a completed session mints a receipt"),
             context.now_ms,
         )
         .expect("mint token"),
@@ -259,7 +283,7 @@ async fn valid_content_admission_skips_durable_content_validation() {
             CommitRequest::single(
                 commit_id("put-admitted-content"),
                 None,
-                put_file("/docs/admitted.txt", content.content_ref),
+                put_file("/docs/admitted.txt", content_ref),
             ),
             vec![prepared],
         )],
@@ -906,4 +930,108 @@ async fn a_revision_guard_observes_an_earlier_operation_of_the_same_request() {
             .operation_index,
         Some(1)
     );
+}
+
+/// The end-to-end promise: a client that lost its commit response reads the
+/// session again, gets a fresh receipt for bytes that never moved, and
+/// publishes with it. The receipt it was holding is refused at admission
+/// first, so the re-mint is doing real work rather than papering over a
+/// token that would have been accepted anyway.
+#[tokio::test]
+async fn a_re_minted_receipt_publishes_after_the_first_one_expired() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = namespace_id("demo");
+    let context = mutation_context();
+    bootstrap_namespace(&store, &namespace_id, &context, false)
+        .await
+        .expect("bootstrap");
+    let engine = namespace_engine(&store, &namespace_id, &context);
+    let upload = engine
+        .begin_upload(loonfs_api::v0::BeginUploadRequest::default())
+        .await
+        .expect("begin upload");
+    let staged = engine
+        .upload_content(&upload.upload_id, b"re-minted")
+        .await
+        .expect("stage content");
+    let completed = engine
+        .complete_upload_prepared(
+            &upload.upload_id,
+            &loonfs_api::v0::CompleteUploadRequest {
+                content_ref: staged.content_ref.clone(),
+            },
+        )
+        .await
+        .expect("complete upload");
+    let catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &namespace_id)
+        .await
+        .expect("load namespace catalog");
+
+    // The receipt the completion handed back, past its life.
+    let first = ValidatedContentToken {
+        content_ref: staged.content_ref.clone(),
+        token: mint_content_token(
+            "test-content-token-secret",
+            completed.receipt.as_ref().expect("completion mints"),
+            0,
+        )
+        .expect("mint"),
+    };
+    let refused = verify_content_token(
+        "test-content-token-secret",
+        &catalog,
+        &first,
+        CONTENT_RECEIPT_TTL_MS + 1,
+    )
+    .expect_err("an expired receipt is refused at admission");
+    assert_eq!(refused, ContentTokenError::Expired);
+
+    // Reading the session mints another one for the same durable bytes.
+    let (status, receipt) = engine
+        .read_upload_status(&upload.upload_id)
+        .await
+        .expect("read upload status");
+    match status.status {
+        UploadSessionStatus::Completed { content_ref, .. } => {
+            assert_eq!(content_ref, staged.content_ref);
+        }
+        other => panic!("expected a completed session, got {other:?}"),
+    }
+    let re_minted = ValidatedContentToken {
+        content_ref: staged.content_ref.clone(),
+        token: mint_content_token(
+            "test-content-token-secret",
+            receipt.as_ref().expect("the status read re-mints"),
+            CONTENT_RECEIPT_TTL_MS + 1,
+        )
+        .expect("re-mint"),
+    };
+    let prepared = verify_content_token(
+        "test-content-token-secret",
+        &catalog,
+        &re_minted,
+        CONTENT_RECEIPT_TTL_MS + 2,
+    )
+    .expect("a re-minted receipt is admitted");
+
+    let responses = publish_namespace_commits_batch(
+        &store,
+        &namespace_id,
+        vec![CommitCandidate::prepared(
+            CommitRequest::single(
+                commit_id("put-re-minted-content"),
+                None,
+                put_file("/docs/re-minted.txt", staged.content_ref),
+            ),
+            vec![prepared],
+        )],
+        &context,
+    )
+    .await;
+    responses
+        .into_iter()
+        .next()
+        .expect("one response")
+        .expect("publishing with a re-minted receipt succeeds");
 }

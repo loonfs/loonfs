@@ -117,6 +117,61 @@ pub const GC_MIN_GRACE_WINDOW_MS: u64 = max_u64(
 /// publication plus provider bounds plus skew, so each is one floor.
 pub const FORK_CHECKPOINT_LEASE_MS: u64 = 2 * GC_MIN_GRACE_WINDOW_MS;
 
+/// Lease an upload session takes when it opens. A session is the only place
+/// retry idempotency lives, so the lease has to outlast any single transfer a
+/// client may reasonably be in the middle of — a proxied body, or a presigned
+/// direct write and the completion call after it. Once it passes, the session
+/// is abandoned by definition and upload garbage collection aborts it: unlike
+/// a namespace, a session is a lease, so reclaiming one on age alone is the
+/// correct reading and not a guess about the client.
+pub const UPLOAD_SESSION_LEASE_MS: u64 = 24 * 60 * 60 * 1000;
+
+/// How long one minted content receipt admits the content it names at commit.
+///
+/// Short on purpose: durability lives in the completed upload session, which
+/// is durable and re-mints, so the receipt only has to cover the gap between
+/// finishing an upload and committing the metadata that references it.
+pub const CONTENT_RECEIPT_TTL_MS: u64 = 60 * 60 * 1000;
+
+/// How long a completed session goes on minting receipts for its content.
+///
+/// This is the "a lost publish response never costs a retransfer" promise
+/// expressed as a number: for this long after completion, reading the
+/// session's status hands back a fresh receipt for bytes that are already
+/// durable. After it, the content is either referenced by metadata — which
+/// protects it on its own — or reclaimable.
+pub const COMPLETED_UPLOAD_RECEIPT_WINDOW_MS: u64 = 7 * 24 * 60 * 60 * 1000;
+
+/// Grace a completed upload's content object gets before content garbage
+/// collection may reclaim it as unreferenced. Derived, not tuned.
+///
+/// Three spans have to be over before "no metadata references this" can be
+/// trusted to stay true. The session may mint a receipt at any point in its
+/// receipt window; the last such receipt admits a commit for one more receipt
+/// TTL; and a commit admitted at that last instant still has a publication
+/// budget plus provider bounds and clock skew to land its root — which is
+/// exactly what `GC_MIN_GRACE_WINDOW_MS` bounds. Past their sum no new
+/// reference can appear, so a reference set collected earlier in the pass is
+/// still sound at delete time.
+pub const CONTENT_RECLAMATION_GRACE_MS: u64 =
+    COMPLETED_UPLOAD_RECEIPT_WINDOW_MS + CONTENT_RECEIPT_TTL_MS + GC_MIN_GRACE_WINDOW_MS;
+
+/// The grace floor's inequality, shared by the compile-time assertion below
+/// and the test that proves the assertion has teeth.
+const fn outlasts_every_receipt(grace_ms: u64) -> bool {
+    grace_ms >= COMPLETED_UPLOAD_RECEIPT_WINDOW_MS + CONTENT_RECEIPT_TTL_MS + GC_MIN_GRACE_WINDOW_MS
+}
+
+// Content reclamation is the one sweep that deletes bytes a user handed us,
+// and its safety is an inequality over the constants above rather than a
+// judgement call, so it is checked where a broken derivation is a compile
+// error instead of a test failure.
+const _: () = assert!(
+    outlasts_every_receipt(CONTENT_RECLAMATION_GRACE_MS),
+    "content reclamation must outlast the last receipt a completed session can mint, \
+     the commit that receipt admits, and that commit's publication"
+);
+
 /// Margin the post-publish fork guard requires between now and the source
 /// record's lease expiry before it lets a target stand.
 ///
@@ -145,6 +200,21 @@ const _: () = assert!(
 mod tests {
     use super::*;
     use crate::gc::GcConfig;
+
+    /// The compile-time assertion above is only worth having if its
+    /// predicate can fail, so the predicate is exercised from both sides
+    /// here: one millisecond below the derivation is rejected.
+    #[test]
+    fn the_content_grace_floor_rejects_a_window_one_receipt_short() {
+        assert!(outlasts_every_receipt(CONTENT_RECLAMATION_GRACE_MS));
+        assert!(!outlasts_every_receipt(CONTENT_RECLAMATION_GRACE_MS - 1));
+        assert!(!outlasts_every_receipt(
+            COMPLETED_UPLOAD_RECEIPT_WINDOW_MS + CONTENT_RECEIPT_TTL_MS
+        ));
+        // 7 days of re-minting + 1 hour of receipt life + 20.5 minutes of
+        // publication.
+        assert_eq!(CONTENT_RECLAMATION_GRACE_MS, 608_400_000 + 1_230_000);
+    }
 
     #[test]
     fn derived_minimum_grace_window_sits_below_the_default() {

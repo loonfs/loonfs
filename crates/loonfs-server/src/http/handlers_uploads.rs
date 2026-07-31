@@ -7,7 +7,7 @@ use crate::config::ServerConfig;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
-use loonfs::content_tokens::{mint_content_token, ContentTokenError};
+use loonfs::content_tokens::{mint_content_token, CompletedUploadReceipt, ContentTokenError};
 use loonfs::publish::PreparedContent;
 use loonfs::FsWriter;
 #[cfg(feature = "openapi")]
@@ -15,9 +15,9 @@ use loonfs_api::ApiError;
 use loonfs_api::ErrorCode;
 use loonfs_api::{
     v0::{
-        BeginUploadRequest, BeginUploadResponse, CompleteUploadRequest, CompleteUploadResponse,
-        DirectPutUpload, ObjectTransferAccess, UploadContentResponse, UploadMode,
-        ValidatedContentToken,
+        AbortUploadResponse, BeginUploadRequest, BeginUploadResponse, CompleteUploadRequest,
+        CompleteUploadResponse, DirectPutUpload, ObjectTransferAccess, UploadContentResponse,
+        UploadMode, UploadSessionStatus, UploadStatusResponse, ValidatedContentToken,
     },
     ContentRef, NamespaceId, UploadId, FEATURE_UPLOADS_DIRECT_PUT,
 };
@@ -299,21 +299,113 @@ pub(super) async fn complete_upload(
     let namespace_id = namespace.into_id()?;
     let UploadPathParams { upload_id } = path.into_params()?;
     let upload_id = parse_upload_id(&upload_id)?;
-    let mut response = state
+    let completed = state
         .writer
-        .complete_upload(&namespace_id, &upload_id, &request)
+        .complete_upload_prepared(&namespace_id, &upload_id, &request)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
-    response.validated_content_token = Some(
-        mint_content_token(
-            state.config.content_token_secret(),
-            &namespace_id,
-            &response.content_ref,
-            current_unix_ms()?,
-        )
-        .map_err(content_token_error)?,
-    );
+    let mut response = completed.response;
+    response.validated_content_token = mint_receipt(&state.config, completed.receipt.as_ref())?;
     Ok(Json(response))
+}
+
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        get,
+        path = "/v0/namespaces/{namespace}/uploads/{upload_id}",
+        tag = "uploads",
+        summary = "Read upload session",
+        description = "Reads one upload session. A completed session answers with a freshly minted validation token for its content, so a client that lost a commit response can commit again without re-uploading anything.",
+        params(
+            ("namespace" = String, Path, description = "Namespace id"),
+            ("upload_id" = String, Path, description = "Upload session id")
+        ),
+        responses(
+            (status = 200, description = "Upload session state", body = UploadStatusResponse),
+            (status = 400, description = "Invalid upload id", body = ApiError),
+            (status = 401, description = "Unauthorized", body = ApiError),
+            (status = 404, description = "Namespace or upload not found", body = ApiError),
+            (status = 410, description = "Namespace deleted", body = ApiError)
+        )
+    )
+)]
+pub(super) async fn read_upload_status(
+    State(state): State<AppState>,
+    namespace: NamespaceIdPath,
+    path: AppPath<UploadPathParams>,
+) -> Result<Json<UploadStatusResponse>, ApiResponseError> {
+    let namespace_id = namespace.into_id()?;
+    let UploadPathParams { upload_id } = path.into_params()?;
+    let upload_id = parse_upload_id(&upload_id)?;
+    let (mut response, receipt) = state
+        .writer
+        .read_upload_status(&namespace_id, &upload_id)
+        .await
+        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+    if let UploadSessionStatus::Completed {
+        validated_content_token,
+        ..
+    } = &mut response.status
+    {
+        *validated_content_token = mint_receipt(&state.config, receipt.as_ref())?;
+    }
+    Ok(Json(response))
+}
+
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        post,
+        path = "/v0/namespaces/{namespace}/uploads/{upload_id}/abort",
+        tag = "uploads",
+        summary = "Abort upload",
+        description = "Ends an upload session without selecting content and deletes the object it was writing. Repeating it succeeds; a session that already completed cannot be aborted.",
+        params(
+            ("namespace" = String, Path, description = "Namespace id"),
+            ("upload_id" = String, Path, description = "Upload session id")
+        ),
+        responses(
+            (status = 200, description = "Upload aborted", body = AbortUploadResponse),
+            (status = 400, description = "Invalid upload id", body = ApiError),
+            (status = 401, description = "Unauthorized", body = ApiError),
+            (status = 404, description = "Namespace or upload not found", body = ApiError),
+            (status = 409, description = "Upload already completed", body = ApiError),
+            (status = 410, description = "Namespace deleted", body = ApiError)
+        )
+    )
+)]
+pub(super) async fn abort_upload(
+    State(state): State<AppState>,
+    namespace: NamespaceIdPath,
+    path: AppPath<UploadPathParams>,
+) -> Result<Json<AbortUploadResponse>, ApiResponseError> {
+    let namespace_id = namespace.into_id()?;
+    let UploadPathParams { upload_id } = path.into_params()?;
+    let upload_id = parse_upload_id(&upload_id)?;
+    let response = state
+        .writer
+        .abort_upload(&namespace_id, &upload_id)
+        .await
+        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+    Ok(Json(response))
+}
+
+/// Signs a receipt the core layer already proved is mintable.
+///
+/// Core decides *whether* a receipt exists — only a durable completed
+/// session inside its receipt window yields one — and the server owns the
+/// secret that signs it, so neither side can mint on its own.
+fn mint_receipt(
+    config: &ServerConfig,
+    receipt: Option<&CompletedUploadReceipt>,
+) -> Result<Option<String>, ApiResponseError> {
+    let Some(receipt) = receipt else {
+        return Ok(None);
+    };
+    let token = mint_content_token(config.content_token_secret(), receipt, current_unix_ms()?)
+        .map_err(content_token_error)?;
+    Ok(Some(token))
 }
 
 fn parse_upload_id(value: &str) -> Result<UploadId, ApiResponseError> {

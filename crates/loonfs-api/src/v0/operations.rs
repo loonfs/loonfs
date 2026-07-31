@@ -430,10 +430,6 @@ pub struct GcRequest {
     /// deadlines); a smaller value is rejected as `invalid_request`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grace_window_ms: Option<u64>,
-    /// Upload sessions older than this may be reaped. Must be at least the
-    /// grace window.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reap_window_ms: Option<u64>,
     /// Maximum candidates examined by this invocation. Omit to retain the
     /// run-to-completion behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
