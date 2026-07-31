@@ -545,6 +545,7 @@ A representative v0 binding is shown below.
 | Enable the grep index | `POST /v0/admin/namespaces/{ns}/grep/index/enable` (CAS-publishes the independent grep root into checkpointed backfill and nudges the deployment's maintenance runner; requires a deployment that maintains the index; idempotent) |
 | Disable the grep index | `POST /v0/admin/namespaces/{ns}/grep/index/disable` (CAS-publishes the grep root as disabled; grep-owned garbage collection later reclaims unreferenced segments; idempotent) |
 | Collect grep-index garbage | `POST /v0/admin/namespaces/{ns}/grep/index/gc` (one explicit pass over only that namespace's grep extension; `max_objects` bounds the reads it spends and returns a `next_cursor` when keys remain; also reaps aged state for an absent or tombstoned namespace) |
+| Probe the store contract | `POST /v0/admin/store/probe` (the one admin route whose subject is the store rather than a namespace; body carries no options today and `{}` is the request; see below) |
 
 The status route and the enable response both report the index's lifecycle
 as a tagged `state`, and the phases never share a field:
@@ -606,6 +607,42 @@ runs the two opted-in sub-steps after flush and reorganization.
 The retention floor bounds incremental replay only. File revision history
 is never pruned: a revisions listing is always complete, however far the
 floor has advanced.
+
+#### Store contract probe
+
+The store probe proves the configured object store honours the provider
+contract this format depends on — create-if-absent, compare-and-swap,
+read-after-write visibility, prefix listing, ranged reads — and reports what
+it found check by check. It runs only when an operator asks: a probe writes
+and deletes objects, so nothing runs one at startup or on a schedule.
+
+Every object a run writes lives under `probe-runs/{run_id}/`, which is not a
+durable object family, so garbage collection never enumerates it and no
+namespace state can be reached from it. The run's last check deletes those
+objects and proves the prefix empty, so a probe that completes leaves
+nothing behind; one that dies partway leaves orphans under a prefix nothing
+consults.
+
+The response carries the `run_id` the server minted and one entry per check,
+in the order the checks ran. Each entry names the check and its `outcome`:
+
+| `outcome` | Means |
+| --- | --- |
+| `passed` | The store behaved as the contract requires. |
+| `unsupported` | The store declares it cannot do this at all. Only the optional capabilities answer this way, and a deployment that needs neither is unaffected. |
+| `failed` | The store did something the contract forbids, or the operation failed outright. The entry's `message` says what was expected and what happened instead. |
+
+A failed check is reported in the body, not as an error: a probe that ran to
+completion answers 200 whatever it found, because the operator asked a
+question and the answer is that the store is wrong. Only an unauthorized
+request or a malformed body answers in the error envelope. One check ending
+does not end the run, so one probe answers the whole question rather than
+the first thing that went wrong.
+
+A probe never decides whether a deployment may serve presigned direct
+uploads. That trust comes from the endpoint allowlist behind the
+`uploads.direct_put` capability, because a probe exercises the server's own
+request path and never a presigned capability handed to a client.
 
 Routes under `/v0/admin/` belong to the `admin/v0` profile and routes under
 `/v0/namespaces/{ns}/query/` to `query/v0`; everything else shown belongs to

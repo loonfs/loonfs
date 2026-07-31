@@ -64,7 +64,8 @@ pub fn openapi_json_pretty() -> Result<String, serde_json::Error> {
         crate::http::handlers_query::grep_index_status,
         crate::http::handlers_query::enable_grep_index,
         crate::http::handlers_query::disable_grep_index,
-        crate::http::handlers_query::gc_grep_index
+        crate::http::handlers_query::gc_grep_index,
+        crate::http::handlers_store::probe_store
     ),
     components(schemas(
         loonfs_api::CapabilityDocument,
@@ -137,7 +138,11 @@ pub fn openapi_json_pretty() -> Result<String, serde_json::Error> {
         loonfs_api::v0::EnableGrepIndexResponse,
         loonfs_api::v0::DisableGrepIndexResponse,
         loonfs_api::v0::GrepGcRequest,
-        loonfs_api::v0::GrepGcResponse
+        loonfs_api::v0::GrepGcResponse,
+        loonfs_api::v0::StoreProbeRequest,
+        loonfs_api::v0::StoreProbeCheckOutcome,
+        loonfs_api::v0::StoreProbeCheckResult,
+        loonfs_api::v0::StoreProbeResponse
     )),
     tags(
         (name = "health", description = "Server health"),

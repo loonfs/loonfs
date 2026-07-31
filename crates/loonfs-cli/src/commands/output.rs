@@ -6,7 +6,7 @@ use crate::error::CliError;
 use crate::profiles::ProfileSummary;
 use loonfs_api::v0::{
     ChangesResponse, DisableGrepIndexResponse, GrepGcResponse, GrepIndexLifecycle,
-    GrepIndexStatusResponse,
+    GrepIndexStatusResponse, StoreProbeCheckOutcome, StoreProbeResponse,
 };
 use loonfs_api::{
     AuthoritativePathEntry, ChangeSeq, CommitId, CreateCheckpointResponse, DeleteNamespaceResponse,
@@ -115,6 +115,9 @@ pub(crate) enum CommandData {
         /// True when a budget stopped the drain before every key settled.
         budget_exhausted: bool,
     },
+    /// What one store contract probe found. Failed checks are data, not an
+    /// error: the probe ran and the store is what it is.
+    StoreProbed(StoreProbeResponse),
     GrepIndexDisabled(DisableGrepIndexResponse),
     GrepIndexStatus(GrepIndexStatusResponse),
     GrepIndexCollected(GrepGcResponse),
@@ -212,6 +215,13 @@ impl CommandData {
             | CommandData::MaintenanceHosted {
                 budget_exhausted, ..
             } => *budget_exhausted,
+            // A probe that found a broken store prints every check's verdict
+            // and still exits nonzero, because the store it was asked about
+            // cannot be trusted.
+            CommandData::StoreProbed(response) => response
+                .checks
+                .iter()
+                .any(|check| check.outcome == StoreProbeCheckOutcome::Failed),
             _ => false,
         }
     }

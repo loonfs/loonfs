@@ -26,8 +26,8 @@ use loonfs_api::{
         DirectMultipartUploadOptions, DirectPutContentClaim, DisableGrepIndexResponse,
         EnableGrepIndexResponse, FilesystemChange, GrepGcRequest, GrepGcResponse,
         GrepIndexStatusResponse, ObjectTransferAccess, SignUploadPartsRequest,
-        SignUploadPartsResponse, SignedUploadPart, UploadContentResponse, UploadMode,
-        UploadPartChecksumClaim, ValidatedContentToken,
+        SignUploadPartsResponse, SignedUploadPart, StoreProbeRequest, StoreProbeResponse,
+        UploadContentResponse, UploadMode, UploadPartChecksumClaim, ValidatedContentToken,
     },
     AbsolutePath, AuthoritativePathEntry, CapabilityDocument, ChangeSeq, CheckpointId,
     ChecksumAlgorithm, CommitId, CommitRequest, ContentRef, Crc64Nvme, CreateCheckpointRequest,
@@ -839,6 +839,18 @@ impl Client {
             "{}/v0/admin/namespaces/{namespace_id}/maintenance/step",
             self.base_url
         );
+        self.request_json(self.post(&url), Some(request)).await
+    }
+
+    /// Proves the server's backing store honours the object-store contract
+    /// LoonFS depends on (admin plane).
+    ///
+    /// The probe writes and deletes objects under a scratch prefix, so it
+    /// runs only when asked. A store that fails a check answers with that
+    /// check reported failed rather than with an error: the probe ran, and
+    /// the answer is that the store is wrong.
+    pub async fn probe_store(&self, request: &StoreProbeRequest) -> Result<StoreProbeResponse> {
+        let url = format!("{}/v0/admin/store/probe", self.base_url);
         self.request_json(self.post(&url), Some(request)).await
     }
 

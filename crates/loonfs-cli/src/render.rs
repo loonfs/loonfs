@@ -3,10 +3,23 @@
 use crate::args::CommandKind;
 use crate::commands::{CommandData, CommandFailure, CommandOutput, MaintenanceKeyReport};
 use crate::error::CliError;
-use loonfs_api::v0::GrepIndexLifecycle;
+use loonfs_api::v0::{GrepIndexLifecycle, StoreProbeCheckOutcome, StoreProbeCheckResult};
 use loonfs_api::{GcResponse, NamespaceId, ReorganizeStepOutcome, WalFlushStepOutcome};
 use serde::Serialize;
 use std::io::{self, Write};
+
+/// One line per contract check: its verdict, and what went wrong when the
+/// verdict is that something did.
+fn store_probe_check_line(check: &StoreProbeCheckResult) -> String {
+    match check.outcome {
+        StoreProbeCheckOutcome::Passed => format!("{}: passed", check.name),
+        StoreProbeCheckOutcome::Unsupported => format!("{}: unsupported", check.name),
+        StoreProbeCheckOutcome::Failed => match &check.message {
+            Some(message) => format!("{}: failed: {message}", check.name),
+            None => format!("{}: failed", check.name),
+        },
+    }
+}
 
 /// One phrase for where the index is, in the terms that phase actually has.
 fn grep_index_state_summary(state: &GrepIndexLifecycle) -> String {
@@ -517,6 +530,29 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
                 });
                 lines.join("\n")
             }
+        }
+        CommandData::StoreProbed(response) => {
+            let failed = response
+                .checks
+                .iter()
+                .filter(|check| check.outcome == StoreProbeCheckOutcome::Failed)
+                .count();
+            let mut lines: Vec<String> =
+                response.checks.iter().map(store_probe_check_line).collect();
+            lines.push(if failed == 0 {
+                format!(
+                    "store probe {}: {} checks passed",
+                    response.run_id,
+                    response.checks.len()
+                )
+            } else {
+                format!(
+                    "store probe {}: {failed} of {} checks failed",
+                    response.run_id,
+                    response.checks.len()
+                )
+            });
+            lines.join("\n")
         }
         CommandData::GrepIndexDisabled(response) => {
             if response.was_enabled {

@@ -194,6 +194,13 @@ Maintenance
     returns after one pass, and --grace-window-ms protects objects younger
     than the window
 
+  loonfs admin probe-store
+    Prove the profile's object store honours the contract LoonFS depends on
+    (create-if-absent, compare-and-swap, visibility, listing, ranged reads)
+    and print one line per check; the run writes and deletes objects under a
+    scratch prefix it empties afterwards, and exits nonzero when any check
+    failed
+
   loonfs admin checkpoint --name <label> [--ttl-ms <ms>]
     Pin the namespace's current state under a named checkpoint; --ttl-ms
     expires the pin, and an omitted TTL holds it until release

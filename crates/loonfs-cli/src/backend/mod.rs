@@ -22,7 +22,8 @@ use crate::resolve::ResolvedTarget;
 use loonfs_api::{
     v0::{
         ChangesResponse, DisableGrepIndexResponse, EnableGrepIndexResponse, GrepGcRequest,
-        GrepGcResponse, GrepIndexLifecycle, GrepIndexStatusResponse,
+        GrepGcResponse, GrepIndexLifecycle, GrepIndexStatusResponse, StoreProbeRequest,
+        StoreProbeResponse,
     },
     AuthoritativePathEntry, ChangeSeq, CheckpointId, CommitResponse, CreateCheckpointRequest,
     CreateCheckpointResponse, DeleteNamespaceResponse, DestinationBehavior, GrepRequest,
@@ -616,6 +617,20 @@ impl ResolvedTarget {
                 .client
                 .maintenance_step(namespace_id, &request)
                 .await?),
+        }
+    }
+
+    /// Proves the profile's object store honours the object-store contract
+    /// LoonFS depends on, and reports what it found check by check.
+    ///
+    /// Store-scoped: it names no namespace. An embedded profile probes the
+    /// store it is configured with; a remote profile asks its server to
+    /// probe the store that server is configured with, which is the store
+    /// the answer is about either way.
+    pub(crate) async fn probe_store(&self) -> Result<StoreProbeResponse, BackendError> {
+        match self {
+            Self::Embedded(target) => Ok(target.backend.probe_store().await),
+            Self::Remote(target) => Ok(target.client.probe_store(&StoreProbeRequest {}).await?),
         }
     }
 

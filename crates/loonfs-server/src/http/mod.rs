@@ -8,6 +8,7 @@ mod extractors;
 mod handlers_filesystem;
 mod handlers_namespace;
 mod handlers_query;
+mod handlers_store;
 mod handlers_uploads;
 #[cfg(feature = "openapi")]
 mod openapi;
@@ -36,6 +37,7 @@ use self::handlers_query::{
     disable_grep_index, enable_grep_index, gc_grep_index, grep, grep_index_not_maintained,
     grep_index_status, grep_queries_not_served,
 };
+use self::handlers_store::probe_store;
 use self::handlers_uploads::{
     abort_upload, begin_upload, complete_upload, read_upload_status, sign_upload_parts,
     upload_content,
@@ -199,6 +201,9 @@ fn router(state: AppState) -> Router {
             "/v0/admin/namespaces/:namespace/maintenance/step",
             post(maintenance_step),
         )
+        // The one admin route whose subject is the store rather than a
+        // namespace, so it sits beside them rather than under one.
+        .route("/v0/admin/store/probe", post(probe_store))
         // Unmatched paths and wrong methods answer inside the error
         // contract instead of axum's empty default bodies.
         .fallback(route_not_found)

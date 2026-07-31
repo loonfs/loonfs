@@ -453,3 +453,96 @@ async fn http_checkpoint_manifest_consumption_is_strict_when_manifest_is_corrupt
     harness.server.abort();
     cold.server.abort();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_admin_store_probe_reports_every_check_against_the_configured_store() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loonfs-server-probe",
+        "http-admin-probe",
+    ))
+    .await;
+
+    let probe: loonfs_api::v0::StoreProbeResponse = post_admin_json_body(
+        &format!("{}/v0/admin/store/probe", harness.server_url),
+        "test-token",
+        serde_json::json!({}),
+    )
+    .expect("probe the configured store");
+
+    assert!(probe.run_id.starts_with("probe_"));
+    let names: Vec<&str> = probe
+        .checks
+        .iter()
+        .map(|check| check.name.as_str())
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            "create_if_absent_enforced",
+            "compare_and_swap_rejects_stale",
+            "compare_and_swap_missing_object_rejected",
+            "overwrite_updates_head_and_body",
+            "get_with_metadata_round_trip",
+            "visibility_after_write",
+            "visibility_after_delete",
+            "delete_missing_idempotent",
+            "sorted_listing",
+            "range_reads",
+            "multipart_round_trip",
+            "stored_checksum_readback",
+            "cleanup_leaves_prefix_empty",
+        ]
+    );
+    for check in &probe.checks {
+        assert_ne!(
+            check.outcome,
+            loonfs_api::v0::StoreProbeCheckOutcome::Failed,
+            "the local filesystem store should honour every contract check: {check:?}"
+        );
+        assert_eq!(check.message, None);
+    }
+
+    // A probe leaves the store as it found it: emptying the run's scratch
+    // prefix is its own last check, and nothing else here wrote there.
+    let store = ConfiguredObjectStore::local_fs(
+        harness.store_root.as_ref().expect("local-fs test store"),
+        harness.store_key_prefix.as_deref(),
+    )
+    .expect("open the test store");
+    assert!(store
+        .list_prefix("probe-runs/")
+        .await
+        .expect("list the probe prefix")
+        .is_empty());
+
+    harness.server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_admin_store_probe_requires_a_token_and_accepts_a_bodyless_request() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loonfs-server-probe-auth",
+        "http-admin-probe-auth",
+    ))
+    .await;
+    let url = format!("{}/v0/admin/store/probe", harness.server_url);
+
+    let unauthorized: Result<loonfs_api::v0::StoreProbeResponse, ApiError> =
+        post_admin_json_body(&url, "wrong-token", serde_json::json!({}));
+    assert_eq!(
+        unauthorized.expect_err("a wrong token is refused").code,
+        "unauthorized"
+    );
+
+    // Body handling matches the maintenance-step route: an absent body is
+    // the same request as `{}`.
+    let bodyless: loonfs_api::v0::StoreProbeResponse =
+        post_admin_json(&url, "test-token").expect("probe with no body");
+    assert_eq!(bodyless.checks.len(), 13);
+
+    harness.server.abort();
+}

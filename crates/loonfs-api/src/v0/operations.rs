@@ -675,6 +675,55 @@ pub struct MaintenanceStepResponse {
     pub gc: Option<GcResponse>,
 }
 
+/// Options for one store contract probe. Empty today; a body is still sent
+/// so later options do not change the shape of the request.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct StoreProbeRequest {}
+
+/// What one store contract probe observed, check by check.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct StoreProbeResponse {
+    /// Label the server minted for this run. It scopes the objects the run
+    /// wrote, so it identifies the run in provider logs too.
+    pub run_id: String,
+    /// Every check the run performed, in the order it performed them. A
+    /// failed check lives here rather than in an error: the probe answered
+    /// the question, and the answer is that the store is wrong.
+    pub checks: Vec<StoreProbeCheckResult>,
+}
+
+/// One named contract check and what the store did with it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct StoreProbeCheckResult {
+    /// Stable check name.
+    pub name: String,
+    /// What the store did.
+    pub outcome: StoreProbeCheckOutcome,
+    /// What was expected and what happened instead. Present only on
+    /// `failed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// What one contract check concluded about the store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum StoreProbeCheckOutcome {
+    /// The store behaved as the contract requires.
+    Passed,
+    /// The store declares it cannot do this at all. Only the optional
+    /// capabilities answer this way, and it is an answer rather than a
+    /// fault.
+    Unsupported,
+    /// The store did something the contract forbids, or the operation
+    /// failed outright.
+    Failed,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -35,6 +35,11 @@ pub(super) struct AppState {
     pub(super) writer: FsWriter,
     pub(super) reader: FsReader,
     pub(super) admin: FsAdmin,
+    /// The store itself, for the one endpoint whose subject is the store
+    /// rather than a namespace: the contract probe. It is the same
+    /// instrumented client the handles were built on, so a probe measures
+    /// what production traffic measures.
+    pub(super) probe_store: SharedObjectStore,
     pub(super) transfer_issuer: Option<Arc<dyn ObjectTransferIssuer>>,
     pub(super) grep_worker: Option<GrepWorker<SharedObjectStore>>,
     /// The grep query service: one process-wide decoded-block cache for
@@ -229,6 +234,7 @@ pub(super) async fn app_with_store_and_transfer_issuer(
     // the trait that publications concern it, and registering it is what
     // subscribes it.
     let (writer, reader, admin) = build_handles(&config, store.clone()).await?;
+    let probe_store = store.clone();
     // A deployment that maintains the index needs a worker whether or not it
     // answers queries with one.
     let grep_worker = (config.grep.mode.serves_grep() || config.grep.mode.maintains_index())
@@ -284,6 +290,7 @@ pub(super) async fn app_with_store_and_transfer_issuer(
         writer,
         reader,
         admin,
+        probe_store,
         transfer_issuer,
         grep_worker,
         grep_service,

@@ -7,18 +7,19 @@ use crate::provider_env::{
 };
 use bytes::Bytes;
 use futures::StreamExt;
-use loonfs_api::{ChecksumAlgorithm, ContentId, ManifestObjectId, StorageChecksum};
+use loonfs_api::{ContentId, ManifestObjectId, StorageChecksum};
 use loonfs_objectstore::abs::{AzureAbsStore, AzureAbsStoreConfig};
 use loonfs_objectstore::gcs::{GcpGcsStore, GcpGcsStoreConfig};
 use loonfs_objectstore::keys::{
-    content_blob, metadata_manifest_object, metadata_table, upload_session, wal_head, wal_segment,
+    content_blob, metadata_manifest_object, metadata_table, wal_head, wal_segment,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
+use loonfs_objectstore::probe::{run_store_contract_probe, StoreProbeOutcome, StoreProbeReport};
 use loonfs_objectstore::s3_compatible::{
     AwsS3StoreConfig, CloudflareR2StoreConfig, S3CompatibleStore,
 };
+use loonfs_objectstore::ObjectStore;
 use loonfs_objectstore::ObjectStoreError;
-use loonfs_objectstore::{ByteRange, ObjectStore};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -80,41 +81,10 @@ fn provider_env_example_covers_real_provider_contract() {
 }
 
 #[tokio::test]
-async fn local_fs_create_if_absent_is_enforced() {
-    let temp_dir = TestDir::new("create-if-absent");
+async fn local_fs_passes_the_store_contract_probe() {
+    let temp_dir = TestDir::new("contract-probe");
     let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
-    assert_create_if_absent_is_enforced(&store).await;
-}
-
-#[tokio::test]
-async fn local_fs_compare_and_swap_rejects_stale_writer() {
-    let temp_dir = TestDir::new("cas");
-    let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
-    assert_compare_and_swap_rejects_stale_writer(&store).await;
-}
-
-#[tokio::test]
-async fn local_fs_overwrite_visibility_and_delete_idempotence() {
-    let temp_dir = TestDir::new("overwrite-delete");
-    let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
-    assert_overwrite_updates_head_and_body(&store).await;
-    assert_get_with_metadata_returns_body_and_identity(&store).await;
-    assert_delete_missing_is_idempotent(&store).await;
-}
-
-#[tokio::test]
-async fn local_fs_lists_immediately_after_write_and_delete() {
-    let temp_dir = TestDir::new("listing");
-    let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
-    assert_lists_immediately_after_write_and_delete(&store).await;
-    assert_sorted_list_prefix(&store).await;
-}
-
-#[tokio::test]
-async fn local_fs_supports_range_reads() {
-    let temp_dir = TestDir::new("ranges");
-    let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
-    assert_supports_range_reads(&store).await;
+    assert_store_contract_probe_passes(&store).await;
 }
 
 #[tokio::test]
@@ -122,13 +92,6 @@ async fn local_fs_rejects_path_traversal_keys() {
     let temp_dir = TestDir::new("invalid-key");
     let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
     assert_rejects_invalid_keys_consistently(&store).await;
-}
-
-#[tokio::test]
-async fn local_fs_compare_and_swap_missing_object_rejects_writer() {
-    let temp_dir = TestDir::new("cas-missing");
-    let store = LocalFsStore::new(temp_dir.path()).expect("create local object store");
-    assert_compare_and_swap_missing_object_rejects_writer(&store).await;
 }
 
 #[tokio::test]
@@ -307,308 +270,56 @@ async fn azure_abs_real_provider_conformance() {
     assert_provider_conformance(&store).await;
 }
 
-async fn assert_provider_conformance<S: ObjectStore>(store: &S) {
-    assert_create_if_absent_is_enforced(store).await;
-    assert_compare_and_swap_rejects_stale_writer(store).await;
-    assert_compare_and_swap_missing_object_rejects_writer(store).await;
-    assert_overwrite_updates_head_and_body(store).await;
-    assert_get_with_metadata_returns_body_and_identity(store).await;
-    assert_delete_missing_is_idempotent(store).await;
-    assert_lists_immediately_after_write_and_delete(store).await;
-    assert_sorted_list_prefix(store).await;
-    assert_supports_range_reads(store).await;
-    assert_multipart_overwrite_round_trips(store).await;
-    assert_stored_checksum_readback_is_honest(store).await;
+/// The live provider sweep: the store contract probe, plus the key
+/// rejection the probe deliberately leaves to tests.
+///
+/// The probe is the production surface an operator runs, and running it
+/// here is what stops the two from drifting: a contract check changes for
+/// production and for this sweep in one edit, or not at all.
+async fn assert_provider_conformance(store: &dyn ObjectStore) {
+    assert_store_contract_probe_passes(store).await;
     assert_rejects_invalid_keys_consistently(store).await;
 }
 
-/// Direct-put completion decides whether to publish an object from one
-/// checksum-bearing metadata request, so a wrong header name, a mis-decoded
-/// base64 value, or a mis-scoped key would silently break publication.
+/// Requires every probe check to pass, and prints the whole report when one
+/// does not.
 ///
-/// Which algorithm comes back is the provider's business, and the providers
-/// disagree: AWS S3 reports the SHA-256 this adapter attaches to uploads,
-/// while Cloudflare R2 reports a CRC-64/NVME of its own even though this
-/// adapter attaches nothing to proxied writes. So the check pins what must
-/// be true everywhere — the size, the algorithm's own encoding rules, and a
-/// SHA-256 that actually matches when SHA-256 is what is reported — rather
-/// than a single expected algorithm.
+/// The report is the point of a live run. Cloudflare R2's 501 answer to
+/// `GetObjectAttributes` was read off exactly this output, so a failure
+/// shows every check's verdict rather than the first one that broke.
 ///
-/// Presigned direct-put writes carry a signed SHA-256 on both providers,
-/// which is the path completion actually verifies; the end-to-end proof of
-/// that lives in `loonfs-server`'s real-provider direct-put tests.
-async fn assert_stored_checksum_readback_is_honest<S: ObjectStore>(store: &S) {
-    let key = wal_segment("ns-1", "seg_00000000000000000000000000000778");
-    let _ = store.delete(&key).await;
-    let payload = Bytes::from_static(b"stored checksum readback payload");
-
-    let absent = match store.head_stored_checksum(&key).await {
-        // A store that cannot ask the question at all says so plainly, and
-        // there is nothing further to check: those are exactly the providers
-        // that do not offer direct_put, so no completion path depends on
-        // them. GCS and Azure Blob Storage are both this case.
-        Err(ObjectStoreError::Unsupported(_)) => return,
-        answer => answer.expect("absent object answers without a checksum"),
-    };
+/// `stored_checksum_readback` may answer `unsupported`: that is the
+/// capability line for presigned direct uploads, and GCS and Azure Blob
+/// Storage both sit on the far side of it. Every other check must pass
+/// outright on every provider this suite covers, multipart included.
+async fn assert_store_contract_probe_passes(store: &dyn ObjectStore) {
+    let run_id = loonfs_api::generated_id("probe");
+    let report = run_store_contract_probe(store, &run_id).await;
+    let acceptable = report.checks.iter().all(|check| match check.outcome {
+        StoreProbeOutcome::Passed => true,
+        StoreProbeOutcome::Unsupported => check.name == "stored_checksum_readback",
+        StoreProbeOutcome::Failed { .. } => false,
+    });
     assert!(
-        absent.is_none(),
-        "an absent object must not report a checksum"
+        acceptable,
+        "store contract probe {run_id} did not pass:\n{}",
+        probe_report_lines(&report)
     );
+}
 
-    store
-        .put_if_absent(&key, payload.clone())
-        .await
-        .expect("write checksum probe object");
-    match store.head_stored_checksum(&key).await {
-        Ok(stored) => {
-            let stored = stored.expect("a present object must not read back as absent");
-            assert_eq!(stored.size_bytes, payload.len() as u64);
-            let checksum = stored.storage_checksum;
-            assert_eq!(
-                checksum.value.len(),
-                checksum.algorithm.value_bytes() * 2,
-                "a checksum value must be its algorithm's width in hex: {checksum:?}"
-            );
-            assert!(
-                checksum
-                    .value
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
-                "a checksum value must be lowercase hex: {checksum:?}"
-            );
-            if checksum.algorithm == ChecksumAlgorithm::Sha256 {
-                assert_eq!(
-                    checksum,
-                    StorageChecksum::sha256(&payload),
-                    "a reported sha256 must describe the bytes actually stored"
-                );
+fn probe_report_lines(report: &StoreProbeReport) -> String {
+    report
+        .checks
+        .iter()
+        .map(|check| match &check.outcome {
+            StoreProbeOutcome::Passed => format!("  {}: passed", check.name),
+            StoreProbeOutcome::Unsupported => format!("  {}: unsupported", check.name),
+            StoreProbeOutcome::Failed { message } => {
+                format!("  {}: failed: {message}", check.name)
             }
-        }
-        // A provider that stores no checksum for this object must say so
-        // rather than invent an answer.
-        Err(error) => {
-            let message = error.to_string();
-            assert!(
-                message.contains("no full-object checksum"),
-                "a provider that stores no checksum must say so: {message}"
-            );
-        }
-    }
-
-    store.delete(&key).await.expect("delete checksum probe");
-}
-
-/// The one live exercise of the native multipart path: an overwrite past
-/// the threshold uploads in parts (at least two) and must read back
-/// byte-identical. R2's fixed-part-size rule and each provider's completion
-/// semantics only show up against the real service.
-async fn assert_multipart_overwrite_round_trips<S: ObjectStore>(store: &S) {
-    let key = wal_segment("ns-1", "seg_00000000000000000000000000000777");
-    let _ = store.delete(&key).await;
-
-    let payload_len = loonfs_objectstore::PROVIDER_MULTIPART_THRESHOLD_BYTES as usize
-        + loonfs_objectstore::PROVIDER_MULTIPART_PART_BYTES as usize
-        + 4096;
-    let payload: Vec<u8> = (0..payload_len).map(|index| (index % 251) as u8).collect();
-
-    let metadata = store
-        .put_overwrite(&key, Bytes::from(payload.clone()))
-        .await
-        .expect("multipart overwrite");
-    assert_eq!(metadata.size_bytes, payload_len as u64);
-
-    let read_back = store
-        .get(&key, None)
-        .await
-        .expect("read back")
-        .expect("object exists");
-    assert_eq!(read_back.len(), payload_len);
-    assert_eq!(read_back.as_ref(), payload.as_slice());
-
-    store.delete(&key).await.expect("cleanup multipart object");
-}
-
-async fn assert_get_with_metadata_returns_body_and_identity<S: ObjectStore>(store: &S) {
-    let key = wal_head("ns-1");
-    let _ = store.delete(&key).await;
-
-    let written = store
-        .put_overwrite(
-            &key,
-            Bytes::from_static(br#"{"seq":41,"source":"get-with-metadata"}"#),
-        )
-        .await
-        .expect("write object for get_with_metadata");
-    let loaded = store
-        .get_with_metadata(&key)
-        .await
-        .expect("get_with_metadata")
-        .expect("object should exist");
-
-    assert_eq!(loaded.bytes, br#"{"seq":41,"source":"get-with-metadata"}"#);
-    assert_eq!(loaded.metadata.size_bytes, loaded.bytes.len() as u64);
-    assert_eq!(loaded.metadata.etag, written.etag);
-
-    store
-        .delete(&key)
-        .await
-        .expect("cleanup get_with_metadata object");
-}
-
-async fn assert_create_if_absent_is_enforced<S: ObjectStore>(store: &S) {
-    let key = wal_head("ns-1");
-    let _ = store.delete(&key).await;
-
-    store
-        .put_if_absent(&key, Bytes::from_static(br#"{"seq":41}"#))
-        .await
-        .expect("initial create should succeed");
-
-    let second = store
-        .put_if_absent(&key, Bytes::from_static(br#"{"seq":42}"#))
-        .await;
-    assert_precondition_failed(second);
-
-    assert_eq!(
-        store
-            .get(&key, None)
-            .await
-            .expect("read body")
-            .expect("body exists"),
-        Bytes::from_static(br#"{"seq":41}"#)
-    );
-
-    store
-        .delete(&key)
-        .await
-        .expect("cleanup create-if-absent object");
-}
-
-async fn assert_compare_and_swap_rejects_stale_writer<S: ObjectStore>(store: &S) {
-    let key = wal_head("ns-1");
-    let _ = store.delete(&key).await;
-
-    store
-        .put_if_absent(&key, Bytes::from_static(br#"{"seq":41,"writer_epoch":8}"#))
-        .await
-        .expect("seed initial head");
-    let first_read = store
-        .head(&key)
-        .await
-        .expect("head read")
-        .expect("head should exist")
-        .etag
-        .expect("etag should exist");
-
-    store
-        .compare_and_swap(
-            &key,
-            &first_read,
-            Bytes::from_static(br#"{"seq":42,"writer_epoch":8}"#),
-        )
-        .await
-        .expect("first CAS should succeed");
-
-    let stale = store
-        .compare_and_swap(
-            &key,
-            &first_read,
-            Bytes::from_static(br#"{"seq":42,"writer_epoch":9}"#),
-        )
-        .await;
-    assert_precondition_failed(stale);
-
-    assert_eq!(
-        store
-            .get(&key, None)
-            .await
-            .expect("read body")
-            .expect("body exists"),
-        Bytes::from_static(br#"{"seq":42,"writer_epoch":8}"#)
-    );
-
-    store.delete(&key).await.expect("cleanup CAS object");
-}
-
-async fn assert_compare_and_swap_missing_object_rejects_writer<S: ObjectStore>(store: &S) {
-    let key = wal_head("ns-cas-missing");
-    let _ = store.delete(&key).await;
-    assert_precondition_failed(
-        store
-            .compare_and_swap(&key, "missing-etag", Bytes::from_static(br#"{"seq":1}"#))
-            .await,
-    );
-}
-
-async fn assert_overwrite_updates_head_and_body<S: ObjectStore>(store: &S) {
-    let key = wal_head("ns-overwrite");
-    let _ = store.delete(&key).await;
-
-    let first = store
-        .put_overwrite(&key, Bytes::from_static(br#"{"seq":41}"#))
-        .await
-        .expect("initial overwrite should succeed");
-    let second = store
-        .put_overwrite(&key, Bytes::from_static(br#"{"seq":42}"#))
-        .await
-        .expect("second overwrite should succeed");
-
-    assert_eq!(
-        store
-            .get(&key, None)
-            .await
-            .expect("read overwritten body")
-            .expect("overwritten body exists"),
-        Bytes::from_static(br#"{"seq":42}"#)
-    );
-    let head = store
-        .head(&key)
-        .await
-        .expect("head after overwrite")
-        .expect("overwritten object exists");
-    assert_eq!(head.etag, second.etag);
-    assert_eq!(head.size_bytes, second.size_bytes);
-    assert_ne!(first, second, "overwrite should refresh visible metadata");
-
-    store
-        .delete(&key)
-        .await
-        .expect("cleanup overwritten object");
-    assert_eq!(store.head(&key).await.expect("head after delete"), None);
-}
-
-async fn assert_delete_missing_is_idempotent<S: ObjectStore>(store: &S) {
-    let key = wal_head("ns-delete-missing");
-    let _ = store.delete(&key).await;
-    store
-        .delete(&key)
-        .await
-        .expect("delete missing object should succeed");
-    assert_eq!(store.head(&key).await.expect("head missing object"), None);
-}
-
-async fn assert_lists_immediately_after_write_and_delete<S: ObjectStore>(store: &S) {
-    let key = upload_session("ns-1", "upl_00000000000000000000000000000001");
-    let _ = store.delete(&key).await;
-
-    store
-        .put_if_absent(&key, Bytes::from_static(br#"{"created":true}"#))
-        .await
-        .expect("create upload object");
-    assert_eq!(
-        store
-            .list_prefix("namespaces/ns-1/uploads/")
-            .await
-            .expect("list after write"),
-        vec![key.clone()]
-    );
-
-    store.delete(&key).await.expect("delete upload object");
-    assert!(store
-        .list_prefix("namespaces/ns-1/uploads/")
-        .await
-        .expect("list after delete")
-        .is_empty());
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// The content key a streamed-write exercise writes to and cleans up.
@@ -677,112 +388,7 @@ async fn assert_streamed_write_round_trips<S: ObjectStore>(store: &S) {
     );
 }
 
-async fn assert_sorted_list_prefix<S: ObjectStore>(store: &S) {
-    let manifest_object_id = ManifestObjectId::parse("00000000000000000001-0123456789abcdef")
-        .expect("valid manifest object id");
-    let keys = vec![
-        wal_head("ns-sort"),
-        metadata_manifest_object("ns-sort", &manifest_object_id),
-        upload_session("ns-sort", "upl_00000000000000000000000000000001"),
-    ];
-    for key in &keys {
-        let _ = store.delete(key).await;
-    }
-
-    store
-        .put_if_absent(&keys[1], Bytes::from_static(br#"{"seq":1}"#))
-        .await
-        .expect("seed second sort key");
-    store
-        .put_if_absent(&keys[2], Bytes::from_static(br#"{"lease":1}"#))
-        .await
-        .expect("seed third sort key");
-    store
-        .put_if_absent(&keys[0], Bytes::from_static(br#"{"through_seq":1}"#))
-        .await
-        .expect("seed first sort key");
-
-    // Assert on the raw provider stream, not `list_prefix` — the trait
-    // default sorts client-side, so asserting on it can never fail. No
-    // protocol depends on listing order; this pins the documented
-    // convenience that `list_prefix` answers sorted regardless.
-    let mut streamed = Vec::new();
-    let mut stream = store.list_prefix_stream("namespaces/ns-sort/");
-    while let Some(key) = stream.next().await {
-        streamed.push(key.expect("stream sorted keys"));
-    }
-    streamed.sort();
-    let listed = store
-        .list_prefix("namespaces/ns-sort/")
-        .await
-        .expect("list sorted keys");
-    let mut expected = keys.clone();
-    expected.sort();
-    assert_eq!(streamed, expected);
-    assert_eq!(listed, expected);
-
-    for key in &keys {
-        store.delete(key).await.expect("cleanup sort key");
-    }
-}
-
-async fn assert_supports_range_reads<S: ObjectStore>(store: &S) {
-    let key = wal_segment("ns-1", "seg_00000000000000000000000000000001");
-    let _ = store.delete(&key).await;
-
-    store
-        .put_if_absent(&key, Bytes::from_static(b"abcdef"))
-        .await
-        .expect("create wal object");
-
-    let bounded = |start_inclusive, end_exclusive| {
-        Some(ByteRange {
-            start_inclusive,
-            end_exclusive,
-        })
-    };
-
-    let range = store
-        .get(&key, bounded(1, 4))
-        .await
-        .expect("range read")
-        .expect("range body should exist");
-    assert_eq!(range, Bytes::from_static(b"bcd"));
-
-    // The bounded-read contract, uniform across providers: an end past the
-    // object clamps, reading at the exact end is empty, a start past the
-    // end is an invalid range, and a missing object answers `None` however
-    // the request was shaped.
-    assert_eq!(
-        store
-            .get(&key, bounded(4, 99))
-            .await
-            .expect("clamped range read"),
-        Some(Bytes::from_static(b"ef"))
-    );
-    assert_eq!(
-        store
-            .get(&key, bounded(6, 8))
-            .await
-            .expect("range at the exact end"),
-        Some(Bytes::new())
-    );
-    assert!(matches!(
-        store.get(&key, bounded(7, 8)).await,
-        Err(ObjectStoreError::InvalidRange { .. })
-    ));
-
-    store.delete(&key).await.expect("cleanup range object");
-    assert_eq!(
-        store
-            .get(&key, bounded(0, 4))
-            .await
-            .expect("ranged read of a missing object"),
-        None
-    );
-}
-
-async fn assert_rejects_invalid_keys_consistently<S: ObjectStore>(store: &S) {
+async fn assert_rejects_invalid_keys_consistently(store: &dyn ObjectStore) {
     fn assert_invalid_key<T: std::fmt::Debug>(key: &str, result: Result<T, ObjectStoreError>) {
         let carries_rejected_key = matches!(
             &result,
@@ -814,13 +420,6 @@ async fn assert_rejects_invalid_keys_consistently<S: ObjectStore>(store: &S) {
         assert_invalid_key(key, store.delete(key).await);
         assert_invalid_key(key, store.list_prefix(key).await);
     }
-}
-
-fn assert_precondition_failed<T>(result: Result<T, ObjectStoreError>) {
-    assert!(matches!(
-        result,
-        Err(ObjectStoreError::PreconditionFailed { .. })
-    ));
 }
 
 #[derive(Debug)]
