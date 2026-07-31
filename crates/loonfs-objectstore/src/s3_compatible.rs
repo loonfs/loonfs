@@ -169,11 +169,17 @@ impl S3CompatibleStore {
             // style makes the client append the bucket. Virtual hosting would
             // use the endpoint verbatim and address keys as buckets.
             force_path_style: true,
-            // Left off pending a live verification: R2 historically rejected
-            // aws-chunked checksummed uploads, yet its presigner requires
-            // `x-amz-checksum-sha256` on direct puts -- so R2 provably accepts
-            // the checksum and this is likely stale caution. Verify
-            // single-part and multipart against live R2 before enabling.
+            // Measured live 2026-07-31: must stay off. With a checksum
+            // algorithm configured, the provider client signs multipart part
+            // uploads with the aws-chunked streaming-trailer encoding, and R2
+            // answers 501 Not Implemented to every part PUT. Plain PUTs with
+            // the header succeed (the first nine conformance assertions pass;
+            // the multipart-overwrite and streamed-write assertions fail), but
+            // one upstream knob configures both shapes, so it stays off
+            // wholesale. Nothing is lost: R2 stores its self-computed
+            // CRC-64/NVME, which `head_stored_checksum` reads back, and the
+            // presigned direct paths carry their own enforced checksum
+            // headers independent of this flag.
             sha256_upload_checksum: false,
         })
     }
