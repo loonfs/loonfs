@@ -52,15 +52,16 @@ writer_id = "loonfs-server-local"
 # Decoded-byte budget for the metadata table cache; unlimited by default.
 #metadata_table_cache_max_decoded_bytes = 268435456
 
-# Grep defaults to embedded: this server serves queries and owns background
-# indexing. `disabled` serves uniform `not_supported` responses and advertises
-# no `query.grep` feature or limits; `serve_only` serves an index maintained by
-# an external `loonfs-grep` process.
+# Omit the `[grep]` table and this server composes no grep at all: uniform
+# `not_supported` responses, and no `query.grep` feature or limits advertised.
+# A `[grep]` table with no `mode` both serves searches and maintains the index.
+# `serve_only` answers searches over an index another process maintains;
+# `maintain_only` maintains the index without answering searches; `disabled`
+# turns both off again.
 #[grep]
-#mode = "embedded"
-# Shared expensive-step cap and bounded build/fold budgets; every value must
-# be greater than zero.
-#max_concurrent_steps = 2
+#mode = "serve_and_maintain"
+# Bounded build/fold budgets; every value must be greater than zero. How many
+# maintenance steps run at once — grep's included — is `max_concurrent_maintenance`.
 #max_files_per_step = 256
 #max_content_bytes_per_step = 67108864
 #max_rows_per_segment = 65536

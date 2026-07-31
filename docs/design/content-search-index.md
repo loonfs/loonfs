@@ -146,27 +146,34 @@ segments, and publish the cursor (the last inode consumed) and segment set
 in one root CAS. The completing step changes the lifecycle to `steady` and
 releases the checkpoint.
 
-One per-namespace driver owns those steps. Starting a driver immediately
-runs backfill and incremental catch-up continuously, yielding between bounded
-steps. Drivers share one FIFO semaphore, configured by
-`max_concurrent_steps` (default 2), and acquire it only while a build or reorganize
-step executes; parked drivers hold no permit. Once the root is steady and its
-watermark reaches the namespace head, the driver parks without a timer. A
-nudge received while active coalesces into one more catch-up run; a nudge
-received while parked wakes it. Step failures back off exponentially inside
-only that namespace's driver, capped at one second, so a poisoned root cannot
-delay a sibling namespace.
+The grep index is background maintenance like any other, so it runs under
+the runtime's maintenance runner rather than a scheduler of its own. A host
+registers one `MaintenanceJob` — build one bounded unit, and fold one when
+there is nothing left to build — and the runner owns everything about when
+that job runs: one pending key per `{job, namespace}`, coalescing, the one
+permit pool `max_concurrent_maintenance` sizes across every maintenance
+family, per-key exponential backoff capped at one second, and a periodic
+reconciliation sweep that asks the job's probe whether a key it admitted
+still has work. A poisoned root therefore backs off alone and cannot delay
+a sibling namespace, and no permit is held by a namespace with nothing to do.
 
-In server `embedded` mode, enable and re-enable start the namespace driver,
-disable stops it, and successful runtime publications send a non-blocking
-nudge only to an already-running driver. A grep query also starts or nudges a
-driver when the root it inspects is backfilling or its watermark trails the
-head. That first-touch path resumes durable work after a restart without a
-scan. `serve_only` serves the same queries and administration operations but
-starts no drivers.
+The job's probe is the cheap question the sweep and the query path both ask:
+read the grep root, and — only for a steady root sitting at a commit
+boundary — ask the change feed for one commit after its watermark. Two small
+reads answer whether the index trails its namespace.
 
-A library-embedded host (the CLI's embedded mode) has no driver runtime, so
-enabling the index is the driver: the host calls
+A server that maintains the index registers that job on its writer. Enable
+nudges the namespace so the backfill starts at once; every successful
+runtime publication nudges it through the writer's publish observer; and a
+grep query nudges a namespace whose probe says it is behind, which is what
+resumes durable work after a restart without a scan. Disable is one durable
+compare-and-swap and nothing else: a step already running loses its own root
+publication to it, retries, reads a disabled root, and the runner forgets the
+namespace. A server that only serves queries registers no job and refuses
+the routes that would mutate a grep root.
+
+A library-embedded host (the CLI's embedded mode) schedules nothing, so
+enabling the index is the schedule: the host calls
 `GrepWorker::run_to_quiescence`, the same build-and-fold pair loop run
 synchronously until the index is caught up, and re-running enable on an
 already-enabled namespace drives catch-up the same way. Between enables, small write tails are served by the query-time
@@ -174,10 +181,11 @@ exhaustive tail scan within its budget.
 
 Detached maintenance is explicitly assigned with repeatable
 `loonfs-grep --namespace <id>` flags. `--once` catches up only those namespaces
-and exits. The long-running form asks each assigned namespace's change feed
-for anything after that driver's watermark at `poll_interval_ms` (default
-1000, zero rejected), the manifest-poll analog for this derived index. It
-never lists a namespace prefix.
+and exits. The long-running form runs the same job's probe for each assigned
+namespace at `poll_interval_ms` (default 1000, zero rejected) — the
+manifest-poll analog for this derived index — and steps the ones it reports
+work for. It hosts no writer and therefore no runner, and it never lists a
+namespace prefix.
 
 Steady-state build steps read the change feed after `built_through_seq` as
 semantic events, collect the file revisions those events published, read
@@ -192,8 +200,9 @@ advance shares one root CAS with the segment set that implements it.
 Two rules keep the cycle honest:
 
 - **Index building never rides core maintenance.** Metadata steps flush and
-  reorganize core state only. Grep build and reorganize steps are scheduled by the
-  grep worker, and freshness between worker steps is the query path's job.
+  reorganize core state only. Grep build and reorganize steps are their own
+  job under the same runner, sharing its admission and its permits but never
+  its steps, and freshness between them is the query path's job.
 - **Retention may outrun the index.** The independent worker does not hold
   the core WAL floor behind `built_through_seq`. If the change feed reports
   that retention removed required history, the worker starts a fresh

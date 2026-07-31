@@ -1,13 +1,15 @@
 //! The explicitly assigned `loonfs-grep` per-namespace maintenance binary.
+//!
+//! This process serves nothing and hosts no runtime writer, so it runs the
+//! grep job's bounded steps directly on a per-namespace timer instead of
+//! through the maintenance runner a server's writer owns. It performs the
+//! identical durable protocol either way — the job is the same executor —
+//! and the loop here is only the poll a detached deployment needs.
 
 use clap::Parser;
-use loonfs::{FsAdmin, FsReader, ListChangesOptions};
-use loonfs_api::{ChangeSeq, EffectiveLimit, ErrorCode, NamespaceId};
-use loonfs_grep::root::{load_grep_root, GrepLifecycle};
-use loonfs_grep::{
-    GrepDriver, GrepDriverParked, GrepDriverState, GrepDriverTask, GrepStepLimiter, GrepWorker,
-    GrepWorkerConfig,
-};
+use loonfs::{FsAdmin, FsReader, MaintenanceJob, MaintenanceProbe, MaintenanceStepConclusion};
+use loonfs_api::NamespaceId;
+use loonfs_grep::{GrepMaintenanceJob, GrepWorker, GrepWorkerConfig};
 use loonfs_objectstore::{SharedObjectStore, StoreConfig};
 use serde::Deserialize;
 use std::collections::BTreeSet;
@@ -22,10 +24,8 @@ use tracing_subscriber::EnvFilter;
 
 const DEFAULT_POLL_INTERVAL_MS: u64 = 1_000;
 
-/// One commit is all the poller needs to see to know there is work.
-fn one_change() -> EffectiveLimit {
-    EffectiveLimit::new(std::num::NonZeroU32::MIN)
-}
+/// The executor this binary runs, over the shared provider client.
+type NamespaceJob = GrepMaintenanceJob<SharedObjectStore>;
 
 #[derive(Debug, Parser)]
 #[command(about = "Drive grep maintenance for explicitly assigned LoonFS namespaces")]
@@ -82,14 +82,13 @@ enum StandaloneError {
     Clock(String),
     #[error("grep operation failed: {0}")]
     Grep(#[from] loonfs_grep::GrepError),
-    #[error("grep driver for namespace `{namespace_id}` stopped before parking")]
-    DriverStopped { namespace_id: NamespaceId },
-    #[error("grep driver task failed: {0}")]
-    DriverTask(#[from] tokio::task::JoinError),
+    #[error("namespace maintenance task failed: {0}")]
+    MaintenanceTask(#[from] tokio::task::JoinError),
     #[error("failed to initialize tracing: {0}")]
     Tracing(String),
 }
 
+/// Cooperative stop for the per-namespace loops.
 #[derive(Debug)]
 struct PollShutdown {
     requested: AtomicBool,
@@ -109,11 +108,23 @@ impl PollShutdown {
         self.notify.notify_waiters();
     }
 
-    async fn wait(&self) {
-        if self.requested.load(Ordering::Acquire) {
-            return;
+    fn requested(&self) -> bool {
+        self.requested.load(Ordering::Acquire)
+    }
+
+    /// Waits one poll interval. Answers `false` once a stop is requested,
+    /// which is the loops' only exit.
+    #[allow(clippy::disallowed_methods)]
+    async fn rest(&self, poll_interval: Duration) -> bool {
+        // The one timer a detached deployment needs, at this process
+        // scheduling boundary, so durable replay stays deterministic.
+        if self.requested() {
+            return false;
         }
-        self.notify.notified().await;
+        tokio::select! {
+            () = tokio::time::sleep(poll_interval) => !self.requested(),
+            () = self.notify.notified() => false,
+        }
     }
 }
 
@@ -132,7 +143,6 @@ async fn run() -> Result<(), StandaloneError> {
     init_tracing()?;
     let args = Args::parse();
     let config = load_config(&args.config)?;
-    let step_limit = config.grep.concurrent_step_limit()?;
     let build_policy = config.grep.build_policy()?;
     let store = Arc::new(config.store.configured_object_store()?) as SharedObjectStore;
     // One process, one provider client: the runtime handles grep reads and
@@ -142,70 +152,127 @@ async fn run() -> Result<(), StandaloneError> {
         .actor_id("loonfs-grep")
         .build()
         .await?;
-    let worker = GrepWorker::new(store.clone(), reader.clone(), admin);
+    let worker = GrepWorker::new(store, reader, admin);
     let namespace_ids: BTreeSet<_> = args.namespace.into_iter().collect();
 
     if args.gc {
         collect_assigned(&worker, &namespace_ids).await?;
     }
 
-    let runtime = tokio::runtime::Handle::current();
-    let step_limiter = GrepStepLimiter::new(step_limit);
-    let mut drivers = Vec::with_capacity(namespace_ids.len());
-    for namespace_id in &namespace_ids {
-        let task = GrepDriver::new(
-            worker.clone(),
-            namespace_id.clone(),
-            build_policy,
-            step_limiter.clone(),
-        )
-        .spawn_on(&runtime);
-        drivers.push((namespace_id.clone(), task));
-    }
-
+    let job = GrepMaintenanceJob::new(worker, build_policy);
     if args.once {
-        wait_for_assigned(&drivers).await?;
-        shutdown_drivers(drivers).await?;
-        return Ok(());
+        return catch_up_assigned(&job, &namespace_ids).await;
     }
 
+    let runtime = tokio::runtime::Handle::current();
     let shutdown = Arc::new(PollShutdown::new());
-    let mut poll_tasks = Vec::with_capacity(drivers.len());
-    for (namespace_id, driver) in &drivers {
-        poll_tasks.push(runtime.spawn(poll_namespace(
-            store.clone(),
-            reader.clone(),
-            namespace_id.clone(),
-            driver.handle(),
-            Duration::from_millis(config.poll_interval_ms),
+    let poll_interval = Duration::from_millis(config.poll_interval_ms);
+    let mut tasks = Vec::with_capacity(namespace_ids.len());
+    for namespace_id in namespace_ids {
+        tasks.push(runtime.spawn(maintain_namespace(
+            job.clone(),
+            namespace_id,
+            poll_interval,
             shutdown.clone(),
         )));
     }
 
     shutdown_signal().await;
     shutdown.request();
-    for task in poll_tasks {
+    for task in tasks {
         task.await?;
     }
-    shutdown_drivers(drivers).await
+    Ok(())
 }
 
-async fn wait_for_assigned(
-    drivers: &[(NamespaceId, GrepDriverTask)],
+/// Runs every assigned namespace to caught-up once, surfacing the first
+/// failure instead of retrying it.
+async fn catch_up_assigned(
+    job: &NamespaceJob,
+    namespace_ids: &BTreeSet<NamespaceId>,
 ) -> Result<(), StandaloneError> {
-    for (namespace_id, driver) in drivers {
-        let parked = driver.handle().wait_for_quiescence().await.ok_or_else(|| {
-            StandaloneError::DriverStopped {
-                namespace_id: namespace_id.clone(),
-            }
-        })?;
-        tracing::info!(
-            namespace_id = %namespace_id,
-            state = ?parked,
-            "grep namespace caught up"
-        );
+    // A one-shot run answers to no stop signal, so every namespace here
+    // reaches a conclusion.
+    let never_stops = PollShutdown::new();
+    for namespace_id in namespace_ids {
+        if let Some(conclusion) = catch_up(job, namespace_id, &never_stops).await? {
+            tracing::info!(
+                namespace_id = %namespace_id,
+                conclusion = ?conclusion,
+                "grep namespace caught up"
+            );
+        }
     }
     Ok(())
+}
+
+/// Keeps one assigned namespace's index caught up until the process stops.
+///
+/// A namespace with nothing to do costs one probe per interval: the grep
+/// root, and one page of one change when the root is steady. Work only
+/// starts once that probe says there is some.
+async fn maintain_namespace(
+    job: NamespaceJob,
+    namespace_id: NamespaceId,
+    poll_interval: Duration,
+    shutdown: Arc<PollShutdown>,
+) {
+    loop {
+        match catch_up(&job, &namespace_id, &shutdown).await {
+            Ok(None) => return,
+            Ok(Some(conclusion)) => tracing::debug!(
+                namespace_id = %namespace_id,
+                conclusion = ?conclusion,
+                "grep namespace settled"
+            ),
+            // The next interval retries: the step re-reads durable state, so
+            // nothing carries over from the attempt that failed.
+            Err(error) => tracing::warn!(
+                namespace_id = %namespace_id,
+                phase = "grep_step",
+                result = "error",
+                error = %error,
+                "grep namespace step failed"
+            ),
+        }
+        loop {
+            if !shutdown.rest(poll_interval).await {
+                return;
+            }
+            match job.probe(&namespace_id).await {
+                Ok(MaintenanceProbe::Due) => break,
+                Ok(MaintenanceProbe::Idle) => {}
+                Err(error) => tracing::warn!(
+                    namespace_id = %namespace_id,
+                    phase = "grep_probe",
+                    result = "error",
+                    error = %error,
+                    "grep namespace probe failed"
+                ),
+            }
+        }
+    }
+}
+
+/// Runs bounded steps until one reports the index has nothing left to do.
+///
+/// Answers `None` when a stop landed between steps: every step is bounded
+/// and every conclusion is durable, so stopping between two of them costs
+/// nothing but the work not yet started.
+async fn catch_up(
+    job: &NamespaceJob,
+    namespace_id: &NamespaceId,
+    shutdown: &PollShutdown,
+) -> Result<Option<MaintenanceStepConclusion>, StandaloneError> {
+    while !shutdown.requested() {
+        match job.step(namespace_id, None).await?.conclusion {
+            // Both mean the same thing here: durable state moved, by this
+            // step or by whoever won the race it lost.
+            MaintenanceStepConclusion::Progressed | MaintenanceStepConclusion::Superseded => {}
+            settled => return Ok(Some(settled)),
+        }
+    }
+    Ok(None)
 }
 
 async fn collect_assigned(
@@ -226,114 +293,6 @@ async fn collect_assigned(
         );
     }
     Ok(())
-}
-
-async fn shutdown_drivers(
-    drivers: Vec<(NamespaceId, GrepDriverTask)>,
-) -> Result<(), StandaloneError> {
-    for (_, driver) in &drivers {
-        driver.handle().request_stop();
-    }
-    for (_, driver) in drivers {
-        driver.shutdown().await?;
-    }
-    Ok(())
-}
-
-async fn poll_namespace(
-    store: SharedObjectStore,
-    reader: FsReader,
-    namespace_id: NamespaceId,
-    driver: loonfs_grep::GrepDriverHandle,
-    poll_interval: Duration,
-    shutdown: Arc<PollShutdown>,
-) {
-    let mut interval = namespace_poll_interval(poll_interval);
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    loop {
-        tokio::select! {
-            _ = interval.tick() => {
-                let should_nudge = match driver.state() {
-                    GrepDriverState::Parked(GrepDriverParked::CaughtUp { built_through_seq }) => {
-                        has_changes_after(&reader, &namespace_id, built_through_seq).await
-                    }
-                    GrepDriverState::Parked(GrepDriverParked::NotEnabled) => {
-                        // Assigned namespaces are an explicit, small operator-chosen set,
-                        // so one small conditional read per existing poll interval is
-                        // cheaper than introducing a second cadence concept.
-                        match load_grep_root(&*store, &namespace_id).await {
-                            Ok(Some(root)) => matches!(
-                                root.state().lifecycle(),
-                                GrepLifecycle::Backfilling { .. } | GrepLifecycle::Steady
-                            ),
-                            Ok(None) => false,
-                            Err(error) => {
-                                tracing::warn!(
-                                    namespace_id = %namespace_id,
-                                    phase = "grep_root_poll",
-                                    result = "error",
-                                    error = %error,
-                                    "grep namespace root poll failed"
-                                );
-                                false
-                            }
-                        }
-                    }
-                    GrepDriverState::Active
-                    | GrepDriverState::BackingOff { .. }
-                    | GrepDriverState::Stopped => false,
-                };
-                if should_nudge {
-                    driver.nudge();
-                }
-            }
-            () = shutdown.wait() => return,
-        }
-    }
-}
-
-/// Whether the namespace has committed anything the driver has not indexed.
-///
-/// The change feed answers the poller's question directly — one page of one
-/// commit is enough to know there is work — so the poller reads what it acts
-/// on instead of comparing sequence numbers off a control object.
-async fn has_changes_after(
-    reader: &FsReader,
-    namespace_id: &NamespaceId,
-    built_through_seq: ChangeSeq,
-) -> bool {
-    match reader
-        .list_changes(
-            namespace_id,
-            built_through_seq,
-            ListChangesOptions {
-                limit: Some(one_change()),
-            },
-        )
-        .await
-    {
-        Ok(changes) => !changes.changes.is_empty(),
-        // The watermark fell behind retention: the worker rebuilds from a
-        // fresh checkpoint, which is work, so wake it.
-        Err(error) if error.code() == ErrorCode::RebootstrapRequired => true,
-        Err(error) => {
-            tracing::warn!(
-                namespace_id = %namespace_id,
-                phase = "grep_namespace_poll",
-                result = "error",
-                error = %error,
-                "grep namespace change poll failed"
-            );
-            false
-        }
-    }
-}
-
-#[allow(clippy::disallowed_methods)]
-fn namespace_poll_interval(period: Duration) -> tokio::time::Interval {
-    // Standalone namespace polling enters a recurring timer at this process
-    // scheduling boundary so durable replay stays deterministic.
-    tokio::time::interval(period)
 }
 
 fn load_config(path: &Path) -> Result<StandaloneConfig, StandaloneError> {

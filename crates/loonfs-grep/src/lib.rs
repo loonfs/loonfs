@@ -40,12 +40,13 @@
 //! per-call reads suffice where a pinned snapshot once seemed necessary.
 //!
 //! **Three hosting modes, one protocol.** The reference server composes
-//! grep in-process and runs a [`GrepDriver`] per namespace, event-driven off
-//! the writer's publish observer; a serve-only deployment answers queries
-//! while an external `loonfs-grep` process drives the same bounded steps;
-//! a one-shot host (the CLI) calls [`GrepWorker::run_to_quiescence`] where
-//! the driver would be. All three run the identical durable protocol, so
-//! which one is running is a deployment choice, not a format.
+//! grep in-process and registers [`GrepMaintenanceJob`] with the writer's
+//! maintenance runner, nudged by the publish observer; a query-serving
+//! deployment answers searches while an external `loonfs-grep` process runs
+//! the same bounded steps; a one-shot host (the CLI) calls
+//! [`GrepWorker::run_to_quiescence`] where a scheduler would be. All three
+//! run the identical durable protocol, so which one is running is a
+//! deployment choice, not a format.
 //!
 //! **An extension owns its keyspace and its garbage.** Grep's durable state
 //! lives under each namespace's `extensions/grep/` prefix and is
@@ -64,23 +65,20 @@
 mod cache;
 pub mod codec;
 mod config;
-mod driver;
 mod error;
 mod index_read;
 pub mod keyspace;
+mod maintenance;
 mod query;
 mod reads;
 pub mod root;
 mod service;
 mod worker;
 
-pub use config::{GrepWorkerConfig, GrepWorkerConfigError, DEFAULT_MAX_CONCURRENT_STEPS};
-pub use driver::{
-    GrepDriver, GrepDriverHandle, GrepDriverParked, GrepDriverState, GrepDriverTask,
-    GrepStepLimiter,
-};
+pub use config::{GrepWorkerConfig, GrepWorkerConfigError};
 pub use error::GrepError as Error;
 pub use error::{GrepError, Result};
+pub use maintenance::{GrepMaintenanceJob, GREP_INDEX_JOB};
 pub use reads::NamespaceReads;
 pub use service::{
     GrepIndexSnapshot, GrepService, DEFAULT_GREP_PAGE_LIMIT, MAX_GREP_PAGE_LIMIT,

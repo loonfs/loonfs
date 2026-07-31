@@ -12,7 +12,6 @@ use loonfs_api::v0::{
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
 use loonfs_api::FEATURE_QUERY_GREP;
-use loonfs_grep::root::{load_grep_root, GrepLifecycle};
 use loonfs_grep::{
     GrepDisableOutcome, GrepEnableOutcome, GrepError, GrepIndexSnapshot, NamespaceReads,
 };
@@ -36,7 +35,7 @@ const GREP_INDEX_FEATURE: &str = "grep.index";
             (status = 403, description = "The backing store rejected its configured credentials", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
             (status = 410, description = "Namespace deleted", body = ApiError),
-            (status = 501, description = "Grep serving is disabled, the grep index is not enabled, or its backfill has not completed on this namespace", body = ApiError),
+            (status = 501, description = "This deployment does not serve grep queries, the grep index is not enabled, or its backfill has not completed on this namespace", body = ApiError),
             (status = 503, description = "The index trails the head past the scan budget", body = ApiError),
             (status = 500, description = "The grep index is corrupt or its backing store is unavailable", body = ApiError)
         )
@@ -48,7 +47,12 @@ pub(super) async fn grep(
     AppJson(request): AppJson<GrepRequest>,
 ) -> Result<Json<GrepResponse>, ApiResponseError> {
     let namespace_id = namespace.into_id()?;
-    start_driver_for_query_if_needed(&state, &namespace_id).await;
+    // First touch: on a deployment that maintains this index, a search is
+    // also the hint that someone cares about this namespace again — after a
+    // restart, nothing else has said so.
+    if let Some(maintenance) = &state.grep_maintenance {
+        maintenance.nudge_if_behind(&namespace_id).await;
+    }
     let service = state
         .grep_service
         .as_ref()
@@ -66,15 +70,30 @@ pub(super) async fn grep(
     Ok(Json(response))
 }
 
-/// Uniform absent-capability response for every grep-owned HTTP operation.
-pub(super) async fn grep_not_supported(
+/// Absent-capability response where this deployment answers no searches.
+pub(super) async fn grep_queries_not_served(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     Err(ApiResponseError::not_supported(
         FEATURE_QUERY_GREP,
-        "grep is disabled for this deployment; set `[grep].mode` to `embedded` or `serve_only`",
+        "this deployment does not serve grep queries; set `[grep].mode` to `serve_only` \
+         or `serve_and_maintain`",
+    ))
+}
+
+/// Absent-capability response where this deployment maintains no index, so
+/// nothing here may enable, disable, or collect one.
+pub(super) async fn grep_index_not_maintained(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiResponseError> {
+    authorize(&state.config, &headers)?;
+    Err(ApiResponseError::not_supported(
+        FEATURE_QUERY_GREP,
+        "this deployment does not maintain the grep index; set `[grep].mode` to \
+         `maintain_only` or `serve_and_maintain`, or administer the index where it is maintained",
     ))
 }
 
@@ -85,7 +104,7 @@ pub(super) async fn grep_not_supported(
         path = "/v0/admin/namespaces/{namespace}/grep/index/enable",
         tag = "admin",
         summary = "Enable the grep index",
-        description = "Enables the namespace's grep root. Embedded mode immediately starts that namespace's event-driven backfill driver; serve-only deployments rely on their explicitly assigned external driver. Idempotent.",
+        description = "Enables the namespace's grep root and asks this deployment's maintenance runner for the backfill's first step. Idempotent. Requires this deployment to maintain the grep index.",
         params(("namespace" = String, Path, description = "Namespace id")),
         responses(
             (status = 200, description = "Grep root enabled or already enabled", body = EnableGrepIndexResponse),
@@ -93,7 +112,7 @@ pub(super) async fn grep_not_supported(
             (status = 403, description = "The backing store rejected its configured credentials", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
             (status = 409, description = "Lost a grep root-pointer publication race; retry", body = ApiError),
-            (status = 501, description = "Grep serving is disabled for this deployment", body = ApiError),
+            (status = 501, description = "This deployment does not maintain the grep index", body = ApiError),
             (status = 500, description = "The grep index is corrupt or its backing store is unavailable", body = ApiError)
         )
     )
@@ -132,8 +151,9 @@ pub(super) async fn enable_grep_index(
             ));
         }
     };
-    if let Some(drivers) = &state.grep_drivers {
-        drivers.start(&namespace_id);
+    // The root is durable now; the backfill is one nudge away from starting.
+    if let Some(maintenance) = &state.grep_maintenance {
+        maintenance.nudge(&namespace_id);
     }
     Ok(Json(response))
 }
@@ -145,7 +165,7 @@ pub(super) async fn enable_grep_index(
         path = "/v0/admin/namespaces/{namespace}/grep/index/disable",
         tag = "admin",
         summary = "Disable the grep index",
-        description = "Disables the namespace's grep root, clears its segment references, and stops its embedded driver. Explicit grep garbage collection later reclaims the segments. Idempotent.",
+        description = "Disables the namespace's grep root and clears its segment references with one durable compare-and-swap; index maintenance stops on its own once a step reads the disabled root. Explicit grep garbage collection later reclaims the segments. Idempotent. Requires this deployment to maintain the grep index.",
         params(("namespace" = String, Path, description = "Namespace id")),
         responses(
             (status = 200, description = "Grep root disabled or already disabled", body = DisableGrepIndexResponse),
@@ -153,7 +173,7 @@ pub(super) async fn enable_grep_index(
             (status = 403, description = "The backing store rejected its configured credentials", body = ApiError),
             (status = 404, description = "Namespace not found", body = ApiError),
             (status = 409, description = "Lost a grep root-pointer publication race; retry", body = ApiError),
-            (status = 501, description = "Grep serving is disabled for this deployment", body = ApiError),
+            (status = 501, description = "This deployment does not maintain the grep index", body = ApiError),
             (status = 500, description = "The grep index is corrupt or its backing store is unavailable", body = ApiError)
         )
     )
@@ -165,12 +185,11 @@ pub(super) async fn disable_grep_index(
 ) -> Result<Json<DisableGrepIndexResponse>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let namespace_id = namespace.into_id()?;
-    if let Some(drivers) = &state.grep_drivers {
-        drivers
-            .stop(&namespace_id)
-            .await
-            .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
-    }
+    // Disabling is one durable compare-and-swap and nothing else. A step
+    // already running loses its own publication race to this one and
+    // retries; the retry reads a disabled root, concludes there is nothing
+    // to maintain, and the runner forgets the namespace. Nothing here waits
+    // on a background task to notice.
     let outcome = state
         .grep_worker
         .as_ref()
@@ -206,13 +225,13 @@ pub(super) async fn disable_grep_index(
         path = "/v0/admin/namespaces/{namespace}/grep/index/gc",
         tag = "admin",
         summary = "Collect grep-index garbage",
-        description = "Runs one explicit garbage-collection pass over only this namespace's grep-owned extension keyspace. A tombstoned or absent namespace has aged extension state reaped; no grep garbage collection runs implicitly.",
+        description = "Runs one explicit garbage-collection pass over only this namespace's grep-owned extension keyspace. A tombstoned or absent namespace has aged extension state reaped; no grep garbage collection runs implicitly. Requires this deployment to maintain the grep index.",
         params(("namespace" = String, Path, description = "Namespace id")),
         responses(
             (status = 200, description = "Namespace grep garbage collection completed", body = GrepGcResponse),
             (status = 401, description = "Unauthorized", body = ApiError),
             (status = 403, description = "The backing store rejected its configured credentials", body = ApiError),
-            (status = 501, description = "Grep serving is disabled for this deployment", body = ApiError),
+            (status = 501, description = "This deployment does not maintain the grep index", body = ApiError),
             (status = 500, description = "The grep index is corrupt or its backing store is unavailable", body = ApiError)
         )
     )
@@ -249,34 +268,5 @@ fn map_grep_error(namespace_id: &loonfs_api::NamespaceId, error: GrepError) -> A
         }
         GrepError::Runtime(error) => ApiResponseError::runtime_for_namespace(namespace_id, error),
         error => ApiResponseError::new(status_for_core_error_code(code), code, &error.to_string()),
-    }
-}
-
-async fn start_driver_for_query_if_needed(
-    state: &AppState,
-    namespace_id: &loonfs_api::NamespaceId,
-) {
-    let Some(drivers) = &state.grep_drivers else {
-        return;
-    };
-    let Ok(Some(root)) = load_grep_root(&*state.writer.object_store(), namespace_id).await else {
-        return;
-    };
-    let needs_catch_up = match root.state().lifecycle() {
-        GrepLifecycle::Backfilling { .. } => true,
-        GrepLifecycle::Steady => {
-            state
-                .admin
-                .namespace_status(namespace_id)
-                .await
-                .is_ok_and(|status| {
-                    root.state().index().next_event_index != 0
-                        || root.state().index().built_through_seq < status.head_seq
-                })
-        }
-        GrepLifecycle::Disabled => false,
-    };
-    if needs_catch_up {
-        drivers.start(namespace_id);
     }
 }

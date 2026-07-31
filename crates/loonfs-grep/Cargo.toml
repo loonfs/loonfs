@@ -13,6 +13,7 @@ name = "loonfs-grep"
 path = "src/main.rs"
 
 [dependencies]
+async-trait.workspace = true
 bytes.workspace = true
 clap.workspace = true
 futures.workspace = true
@@ -31,7 +32,6 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
-async-trait.workspace = true
 ciborium.workspace = true
 loonfs-test-support = { path = "../loonfs-test-support" }
 tempfile.workspace = true

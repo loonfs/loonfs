@@ -1,26 +1,22 @@
-//! Grep worker step budgets and the driver-fleet concurrency cap.
+//! Grep worker step budgets.
+//!
+//! How many steps run at once is not here and never will be: every host
+//! that schedules grep does it through the runtime's maintenance runner,
+//! whose one permit pool (`max_concurrent_maintenance`) bounds every
+//! maintenance family together.
 
 use crate::GramIndexBuildPolicy;
 use serde::Deserialize;
 use std::num::{NonZeroU64, NonZeroUsize};
 use thiserror::Error;
 
-/// Default cap on concurrently executing grep build or reorganize steps.
-///
-/// Mirrors `loonfs::DEFAULT_MAX_CONCURRENT_MAINTENANCE`; both background
-/// maintenance families default to two expensive namespace steps at once.
-pub const DEFAULT_MAX_CONCURRENT_STEPS: usize = 2;
-
-/// Bounded-work policy shared by embedded and standalone drivers.
+/// Bounded-work policy shared by every host that runs grep steps.
 ///
 /// Project-wide, zero may disable an explicitly documented cache. Work
-/// budgets and concurrency limits instead reject zero at their construction
-/// boundaries.
+/// budgets instead reject zero at their construction boundaries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GrepWorkerConfig {
-    /// Build or reorganize steps allowed to execute concurrently across namespaces.
-    pub max_concurrent_steps: usize,
     /// Revisions examined per build step.
     pub max_files_per_step: usize,
     /// Content bytes read per build step.
@@ -54,14 +50,8 @@ impl GrepWorkerConfig {
         })
     }
 
-    /// Returns the validated deployment-wide concurrency limit.
-    pub fn concurrent_step_limit(self) -> Result<NonZeroUsize, GrepWorkerConfigError> {
-        nonzero_usize("max_concurrent_steps", self.max_concurrent_steps)
-    }
-
     /// Rejects zero step budgets.
     pub fn validate(self) -> Result<(), GrepWorkerConfigError> {
-        self.concurrent_step_limit()?;
         self.build_policy()?;
         Ok(())
     }
@@ -71,7 +61,6 @@ impl Default for GrepWorkerConfig {
     fn default() -> Self {
         let policy = GramIndexBuildPolicy::default();
         Self {
-            max_concurrent_steps: DEFAULT_MAX_CONCURRENT_STEPS,
             max_files_per_step: policy.max_files_per_step.get(),
             max_content_bytes_per_step: policy.max_content_bytes_per_step.get(),
             max_rows_per_segment: policy.max_rows_per_segment.get(),
@@ -125,13 +114,6 @@ mod tests {
     #[test]
     fn zero_policy_fields_are_rejected() {
         for (field, config) in [
-            (
-                "max_concurrent_steps",
-                GrepWorkerConfig {
-                    max_concurrent_steps: 0,
-                    ..GrepWorkerConfig::default()
-                },
-            ),
             (
                 "max_files_per_step",
                 GrepWorkerConfig {

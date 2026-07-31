@@ -179,8 +179,8 @@ pub struct GrepGcReport {
 
 /// Namespace-independent writer for the grep-owned durable keyspace.
 ///
-/// Calls are explicit and bounded. Per-namespace drivers decide when to call
-/// them without changing the durable protocol.
+/// Calls are explicit and bounded. Whatever schedules them decides when to
+/// call them without changing the durable protocol.
 ///
 /// The worker writes only grep's own keyspace, through `store`. Everything
 /// it needs from the filesystem it takes from the two runtime handles it
@@ -220,8 +220,13 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     }
 
     /// This worker's filesystem reads for one namespace.
-    fn reads<'a>(&'a self, namespace_id: &'a NamespaceId) -> NamespaceReads<'a> {
+    pub(crate) fn reads<'a>(&'a self, namespace_id: &'a NamespaceId) -> NamespaceReads<'a> {
         NamespaceReads::new(&self.reader, namespace_id)
+    }
+
+    /// The grep-owned keyspace this worker publishes through.
+    pub(crate) fn store(&self) -> &S {
+        &self.store
     }
 
     /// Enables grep by pinning a checkpoint and CAS-publishing a fresh
@@ -400,14 +405,13 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     /// caught up with nothing left to fold, and answers the watermark it
     /// reached.
     ///
-    /// This is what a host without a driver runtime — a one-shot command,
-    /// a test — calls where the reference server runs a [`GrepDriver`]: the
-    /// same pair loop, minus the driver's channel and backoff machinery, so
-    /// a synchronous caller surfaces the first error instead of retrying.
-    /// Every non-final outcome makes progress (a batch built or a unit
-    /// folded), so the loop terminates without an iteration cap.
-    ///
-    /// [`GrepDriver`]: crate::GrepDriver
+    /// This is what a host with no scheduler — a one-shot command, a test —
+    /// calls where a long-lived host registers
+    /// [`GrepMaintenanceJob`](crate::GrepMaintenanceJob): the same pair
+    /// loop, minus admission and backoff, so a synchronous caller surfaces
+    /// the first error instead of retrying. Every non-final outcome makes
+    /// progress (a batch built or a unit folded), so the loop terminates
+    /// without an iteration cap.
     pub async fn run_to_quiescence(
         &self,
         namespace_id: &NamespaceId,

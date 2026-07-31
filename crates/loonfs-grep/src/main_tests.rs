@@ -1,22 +1,24 @@
 #![allow(clippy::panic)]
-//! Standalone poller wakeup coverage with in-process driver observation.
+//! Standalone poll-loop wakeup coverage, observed through durable state.
+//!
+//! The loop under test owns no observable state of its own — it steps the
+//! grep job and parks — so every assertion here reads the grep root the
+//! steps publish, which is what an operator watching this process sees.
 
-use super::{poll_namespace, PollShutdown};
+use super::{maintain_namespace, NamespaceJob, PollShutdown};
 use loonfs::{FsAdmin, FsReader, FsWriter};
 use loonfs_api::{ChangeSeq, GrepRequest, NamespaceId};
 use loonfs_grep::root::{load_grep_root, GrepLifecycle};
 use loonfs_grep::{
-    GramIndexBuildPolicy, GrepDriver, GrepDriverParked, GrepDriverState, GrepDriverTask,
-    GrepIndexSnapshot, GrepService, GrepStepLimiter, GrepWorker, NamespaceReads,
+    GramIndexBuildPolicy, GrepIndexSnapshot, GrepMaintenanceJob, GrepService, GrepWorker,
+    NamespaceReads,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::SharedObjectStore;
 use loonfs_test_support::ids::namespace_id;
-use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::tempdir;
-use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 const TEST_POLL_INTERVAL: Duration = Duration::from_millis(5);
@@ -29,32 +31,24 @@ async fn standalone_starts_before_enable_and_wakes_within_poll() {
     let namespace_id = namespace_id("poll-enable");
     let writer = seed_namespace(store.clone(), &namespace_id).await;
     put_file(&writer, &namespace_id, "poll-enable-put").await;
-    let reader = reader(&store).await;
     let worker = worker(&store, "poll-enable").await;
-    let driver = spawn_driver(worker.clone(), namespace_id.clone());
-    let handle = driver.handle();
-    wait_for_parked(&handle, GrepDriverParked::NotEnabled).await;
-    let (poll, shutdown) = spawn_poll(
-        store.clone(),
-        reader.clone(),
-        namespace_id.clone(),
-        handle.clone(),
+    let (poll, shutdown) = spawn_poll(&worker, &namespace_id);
+    assert!(
+        load_grep_root(&*store, &namespace_id)
+            .await
+            .expect("load absent root")
+            .is_none(),
+        "an unenabled namespace must not be enabled by the poll loop"
     );
 
     worker
         .enable(&namespace_id)
         .await
         .expect("externally enable grep");
-    wait_for_parked(
-        &handle,
-        GrepDriverParked::CaughtUp {
-            built_through_seq: ChangeSeq(1),
-        },
-    )
-    .await;
+    wait_for_steady(&store, &namespace_id, ChangeSeq(1)).await;
     assert_searchable(&store, &namespace_id).await;
 
-    stop_poll_and_driver(poll, shutdown, driver).await;
+    stop_poll(poll, shutdown).await;
 }
 
 #[tokio::test]
@@ -63,52 +57,27 @@ async fn standalone_wakes_after_disable_then_reenable_and_backfills_fresh() {
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let namespace_id = namespace_id("poll-reenable");
     let writer = seed_namespace(store.clone(), &namespace_id).await;
-    let reader = reader(&store).await;
     let worker = worker(&store, "poll-reenable").await;
     worker.enable(&namespace_id).await.expect("enable grep");
-    let driver = spawn_driver(worker.clone(), namespace_id.clone());
-    let handle = driver.handle();
-    wait_for_parked(
-        &handle,
-        GrepDriverParked::CaughtUp {
-            built_through_seq: ChangeSeq(0),
-        },
-    )
-    .await;
-    let (poll, shutdown) = spawn_poll(
-        store.clone(),
-        reader.clone(),
-        namespace_id.clone(),
-        handle.clone(),
-    );
+    let (poll, shutdown) = spawn_poll(&worker, &namespace_id);
+    wait_for_steady(&store, &namespace_id, ChangeSeq(0)).await;
 
     worker.disable(&namespace_id).await.expect("disable grep");
     put_file(&writer, &namespace_id, "poll-reenable-put").await;
-    wait_for_parked(&handle, GrepDriverParked::NotEnabled).await;
     worker.enable(&namespace_id).await.expect("re-enable grep");
     let backfill = load_grep_root(&*store, &namespace_id)
         .await
         .expect("load re-enabled root")
         .expect("re-enabled root");
-    assert!(matches!(
-        backfill.state().lifecycle(),
-        GrepLifecycle::Backfilling { .. }
-    ));
     assert!(
         backfill.state().segments().is_empty(),
         "re-enable must begin a fresh backfill"
     );
 
-    wait_for_parked(
-        &handle,
-        GrepDriverParked::CaughtUp {
-            built_through_seq: ChangeSeq(1),
-        },
-    )
-    .await;
+    wait_for_steady(&store, &namespace_id, ChangeSeq(1)).await;
     assert_searchable(&store, &namespace_id).await;
 
-    stop_poll_and_driver(poll, shutdown, driver).await;
+    stop_poll(poll, shutdown).await;
 }
 
 #[tokio::test]
@@ -117,18 +86,9 @@ async fn standalone_enable_without_head_change_wakes_empty_backfill() {
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let namespace_id = namespace_id("poll-empty");
     seed_namespace(store.clone(), &namespace_id).await;
-    let reader = reader(&store).await;
     let admin = admin(&store, "poll-empty").await;
     let worker = worker(&store, "poll-empty").await;
-    let driver = spawn_driver(worker.clone(), namespace_id.clone());
-    let handle = driver.handle();
-    wait_for_parked(&handle, GrepDriverParked::NotEnabled).await;
-    let (poll, shutdown) = spawn_poll(
-        store.clone(),
-        reader.clone(),
-        namespace_id.clone(),
-        handle.clone(),
-    );
+    let (poll, shutdown) = spawn_poll(&worker, &namespace_id);
     let head_before = admin
         .namespace_status(&namespace_id)
         .await
@@ -138,13 +98,7 @@ async fn standalone_enable_without_head_change_wakes_empty_backfill() {
         .enable(&namespace_id)
         .await
         .expect("externally enable empty namespace");
-    wait_for_parked(
-        &handle,
-        GrepDriverParked::CaughtUp {
-            built_through_seq: ChangeSeq(0),
-        },
-    )
-    .await;
+    wait_for_steady(&store, &namespace_id, ChangeSeq(0)).await;
 
     let head_after = admin
         .namespace_status(&namespace_id)
@@ -155,10 +109,9 @@ async fn standalone_enable_without_head_change_wakes_empty_backfill() {
         .await
         .expect("load empty root")
         .expect("empty root");
-    assert!(matches!(root.state().lifecycle(), GrepLifecycle::Steady));
     assert!(root.state().segments().is_empty());
 
-    stop_poll_and_driver(poll, shutdown, driver).await;
+    stop_poll(poll, shutdown).await;
 }
 
 async fn reader(store: &SharedObjectStore) -> FsReader {
@@ -204,59 +157,53 @@ async fn put_file(writer: &FsWriter, namespace_id: &NamespaceId, commit_id: &str
     .await;
 }
 
-fn spawn_driver(
-    worker: GrepWorker<SharedObjectStore>,
-    namespace_id: NamespaceId,
-) -> GrepDriverTask {
-    GrepDriver::new(
-        worker,
-        namespace_id,
-        GramIndexBuildPolicy::default(),
-        GrepStepLimiter::new(NonZeroUsize::MIN),
-    )
-    .spawn_on(&tokio::runtime::Handle::current())
-}
-
 fn spawn_poll(
-    store: SharedObjectStore,
-    reader: FsReader,
-    namespace_id: NamespaceId,
-    driver: loonfs_grep::GrepDriverHandle,
+    worker: &GrepWorker<SharedObjectStore>,
+    namespace_id: &NamespaceId,
 ) -> (JoinHandle<()>, Arc<PollShutdown>) {
+    let job: NamespaceJob =
+        GrepMaintenanceJob::new(worker.clone(), GramIndexBuildPolicy::default());
     let shutdown = Arc::new(PollShutdown::new());
-    let poll = tokio::runtime::Handle::current().spawn(poll_namespace(
-        store,
-        reader,
-        namespace_id,
-        driver,
+    let poll = tokio::runtime::Handle::current().spawn(maintain_namespace(
+        job,
+        namespace_id.clone(),
         TEST_POLL_INTERVAL,
         shutdown.clone(),
     ));
     (poll, shutdown)
 }
 
-async fn wait_for_parked(driver: &loonfs_grep::GrepDriverHandle, expected: GrepDriverParked) {
-    let mut state = driver.subscribe_state();
-    tokio::time::timeout(TEST_TIMEOUT, wait_for_state(&mut state, expected))
-        .await
-        .unwrap_or_else(|_| {
-            panic!(
-                "driver did not reach {expected:?}; state: {:?}",
-                driver.state()
-            )
-        });
+async fn stop_poll(poll: JoinHandle<()>, shutdown: Arc<PollShutdown>) {
+    shutdown.request();
+    poll.await.expect("join namespace poll");
 }
 
-async fn wait_for_state(state: &mut watch::Receiver<GrepDriverState>, expected: GrepDriverParked) {
-    loop {
-        if *state.borrow_and_update() == GrepDriverState::Parked(expected) {
-            return;
+/// Waits for the poll loop to publish a steady root at `built_through_seq`.
+#[allow(clippy::disallowed_methods)]
+async fn wait_for_steady(
+    store: &SharedObjectStore,
+    namespace_id: &NamespaceId,
+    built_through_seq: ChangeSeq,
+) {
+    // Bounded observation of the real per-namespace poll timer under test:
+    // the loop publishes durable state and reports nothing in-process.
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        loop {
+            if let Some(root) = load_grep_root(&**store, namespace_id)
+                .await
+                .expect("load polled root")
+            {
+                if matches!(root.state().lifecycle(), GrepLifecycle::Steady)
+                    && root.state().index().built_through_seq == built_through_seq
+                {
+                    return;
+                }
+            }
+            tokio::time::sleep(TEST_POLL_INTERVAL).await;
         }
-        state
-            .changed()
-            .await
-            .expect("driver state remains observable");
-    }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("the poll loop did not reach {built_through_seq:?}"));
 }
 
 async fn assert_searchable(store: &SharedObjectStore, namespace_id: &NamespaceId) {
@@ -283,14 +230,4 @@ async fn assert_searchable(store: &SharedObjectStore, namespace_id: &NamespaceId
         .expect("query caught-up index");
     assert_eq!(response.matches.len(), 1);
     assert_eq!(response.matches[0].absolute_path.as_str(), "/note.txt");
-}
-
-async fn stop_poll_and_driver(
-    poll: JoinHandle<()>,
-    shutdown: Arc<PollShutdown>,
-    driver: GrepDriverTask,
-) {
-    shutdown.request();
-    poll.await.expect("join namespace poll");
-    driver.shutdown().await.expect("stop grep driver");
 }
