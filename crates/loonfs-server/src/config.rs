@@ -56,11 +56,12 @@ pub struct ServerConfig {
     #[serde(default = "default_min_publish_interval_ms")]
     pub min_publish_interval_ms: u64,
     /// Largest request body accepted for service-proxied upload content
-    /// requests (`PUT .../uploads/{upload_id}/content`). The server buffers
-    /// each upload body in memory, so this bounds per-request memory;
-    /// clients may use `direct_put` for larger transfers when the capability
-    /// is advertised. Advertised as the `upload.max_content_bytes`
-    /// capability limit.
+    /// requests (`PUT .../uploads/{upload_id}/content`). Enforced
+    /// incrementally while the body streams to the store, so it bounds the
+    /// accepted transfer size, not per-request memory (streamed writes hold
+    /// at most one internal part). Clients may use `direct_put` or direct
+    /// multipart for larger transfers when the capability is advertised.
+    /// Advertised as the `upload.max_content_bytes` capability limit.
     #[serde(default = "default_max_upload_bytes")]
     pub max_upload_bytes: u64,
     /// Largest file content a service-proxied read (`GET .../filesystem/
@@ -70,9 +71,10 @@ pub struct ServerConfig {
     /// `download.max_content_bytes` capability limit.
     #[serde(default = "default_max_download_bytes")]
     pub max_download_bytes: u64,
-    /// How many proxied upload bodies the server will buffer at once;
-    /// requests past the cap answer `server_busy` before any buffering.
-    /// Worst-case upload memory is this times `max_upload_bytes`.
+    /// How many proxied upload bodies the server will stream at once;
+    /// requests past the cap answer `server_busy` before any transfer.
+    /// Worst-case upload memory is this times one streamed part, since
+    /// bodies forward to the store incrementally instead of buffering.
     #[serde(default = "default_max_concurrent_uploads")]
     pub max_concurrent_uploads: usize,
     /// How many proxied content reads the server will materialize at once;
