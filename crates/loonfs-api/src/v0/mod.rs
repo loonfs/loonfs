@@ -28,7 +28,8 @@ pub use operations::{
     FlushWalOutcome, FlushWalResponse, ForkNamespaceRequest, GcRequest, GcResponse,
     ListFileRevisionsResponse, MaintenanceStepKind, MaintenanceStepRequest,
     MaintenanceStepResponse, NamespaceStatusResponse, NamespaceSummary, ReleaseCheckpointResponse,
-    ReorganizeStepOutcome, WalFlushStepOutcome,
+    ReorganizeStepOutcome, StoreProbeCheckOutcome, StoreProbeCheckResult, StoreProbeRequest,
+    StoreProbeResponse, WalFlushStepOutcome,
 };
 pub use reads::{
     AuthoritativeFileBytes, AuthoritativePathEntry, ListPathEntriesResponse, ListTrashResponse,

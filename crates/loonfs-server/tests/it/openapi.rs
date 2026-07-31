@@ -60,6 +60,7 @@ fn openapi_documents_current_server_paths() {
             "post",
         ),
         ("/v0/admin/namespaces/{namespace}/grep/index/gc", "post"),
+        ("/v0/admin/store/probe", "post"),
     ] {
         assert_path_method(paths, path, method);
     }

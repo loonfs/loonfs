@@ -5,8 +5,8 @@ use super::context::{fail, fail_for, resolve_command_context};
 use super::output::{CommandData, CommandFailure, CommandOutput, MaintenanceKeyReport};
 use crate::args::{
     AdminCheckpointArgs, AdminCheckpointReleaseArgs, AdminCommand, AdminGcArgs,
-    AdminIndexEnableArgs, AdminIndexGcArgs, AdminNamespaceArgs, AdminRunArgs, AdminStepArgs,
-    ChangesArgs, CommandKind, MaintenanceJobArg,
+    AdminIndexEnableArgs, AdminIndexGcArgs, AdminNamespaceArgs, AdminProbeStoreArgs, AdminRunArgs,
+    AdminStepArgs, ChangesArgs, CommandKind, MaintenanceJobArg,
 };
 use crate::backend::{MaintenanceKeyProgress, StepBudget};
 use crate::resolve::{parse_namespace_id, resolve_target_profile};
@@ -34,6 +34,7 @@ pub(crate) async fn run_admin_command(
         AdminCommand::Run(args) => run_admin_run(kind, args).await,
         AdminCommand::Step(args) => run_admin_step(kind, args).await,
         AdminCommand::Gc(args) => run_admin_gc(kind, args).await,
+        AdminCommand::ProbeStore(args) => run_admin_probe_store(kind, args).await,
         AdminCommand::IndexEnable(args) => run_admin_index_enable(kind, args).await,
         AdminCommand::IndexDisable(args) => run_admin_index_disable(kind, args).await,
         AdminCommand::IndexStatus(args) => run_admin_index_status(kind, args).await,
@@ -300,6 +301,32 @@ async fn run_admin_run(
             steps,
             budget_exhausted,
         },
+    })
+}
+
+/// Proves the profile's object store honours the contract LoonFS depends
+/// on. Store-scoped like `admin run`: it names no namespace, because the
+/// store is the subject.
+async fn run_admin_probe_store(
+    kind: CommandKind,
+    args: AdminProbeStoreArgs,
+) -> Result<CommandOutput, CommandFailure> {
+    let explicit_profile = args.profile.profile.as_deref();
+    let resolved = resolve_target_profile(explicit_profile, args.profile.no_retry)
+        .await
+        .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
+    let mode = resolved.target.mode_str().to_owned();
+    let response = resolved
+        .target
+        .probe_store()
+        .await
+        .map_err(|error| fail_for(kind, &resolved.profile_name, &mode, error))?;
+
+    Ok(CommandOutput {
+        kind,
+        profile: Some(resolved.profile_name),
+        mode: Some(mode),
+        data: CommandData::StoreProbed(response),
     })
 }
 

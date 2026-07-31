@@ -2581,6 +2581,52 @@ fn admin_run_takes_a_poll_interval_with_a_floor_that_a_drain_ignores() {
     );
 }
 
+/// The store probe is store-scoped: it needs no namespace, prints one line
+/// per check, and exits zero only because every check passed.
+#[test]
+fn admin_probe_store_reports_every_check_against_the_profile_store() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+
+    let probe = harness.run(&["admin", "probe-store"]);
+    assert_success(&probe);
+    let text = stdout_string(&probe);
+    for check in [
+        "create_if_absent_enforced",
+        "compare_and_swap_rejects_stale",
+        "compare_and_swap_missing_object_rejected",
+        "overwrite_updates_head_and_body",
+        "get_with_metadata_round_trip",
+        "visibility_after_write",
+        "visibility_after_delete",
+        "delete_missing_idempotent",
+        "sorted_listing",
+        "range_reads",
+        "multipart_round_trip",
+        "stored_checksum_readback",
+        "cleanup_leaves_prefix_empty",
+    ] {
+        assert!(text.contains(check), "missing `{check}` in: {text}");
+    }
+    assert!(text.contains("13 checks passed"), "{text}");
+
+    let json = harness.run(&["--json", "admin", "probe-store"]);
+    assert_success(&json);
+    let data = json_data(&json);
+    assert_eq!(data["kind"], "store_probed");
+    assert_eq!(data["checks"].as_array().expect("checks array").len(), 13);
+    assert_eq!(data["checks"][0]["name"], "create_if_absent_enforced");
+    assert_eq!(data["checks"][0]["outcome"], "passed");
+
+    // The probe cleans up after itself, so the store carries no probe keys.
+    let probe_runs = harness.store_root("default").join("probe-runs");
+    assert!(
+        !probe_runs.exists() || fs::read_dir(&probe_runs).is_ok_and(|mut dir| dir.next().is_none()),
+        "the probe left objects behind at {}",
+        probe_runs.display()
+    );
+}
+
 /// A remote profile's server hosts its own runner. Stepping one from here
 /// would be a second scheduler over the same namespaces, so the command
 /// refuses instead of pretending it can.
@@ -2672,6 +2718,7 @@ fn every_advertised_capability_maps_to_a_cli_command_path() {
                 &["admin", "run"],
                 &["admin", "step"],
                 &["admin", "gc"],
+                &["admin", "probe-store"],
                 &["admin", "index-enable"],
                 &["admin", "index-disable"],
                 &["admin", "index-status"],
@@ -2942,12 +2989,25 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
             "namespace `missing` does not exist"
         );
 
+        // The store probe is store-scoped, so it is the one admin command
+        // that names no namespace in either mode; both modes still answer
+        // with the same report shape.
+        let probe = harness.run(&["--json", "admin", "probe-store", "--profile", profile]);
+        assert_success(&probe);
+        let probe_data = json_data(&probe);
+        assert_eq!(probe_data["kind"], "store_probed");
+        assert_eq!(
+            probe_data["checks"].as_array().expect("checks array").len(),
+            13
+        );
+
         shapes_by_mode.push((
             sorted_object_keys(&changes_data),
             sorted_object_keys(&checkpoint_data),
             sorted_object_keys(&retention_data),
             sorted_object_keys(&step_data),
             sorted_object_keys(&gc_data),
+            sorted_object_keys(&probe_data),
         ));
     }
 

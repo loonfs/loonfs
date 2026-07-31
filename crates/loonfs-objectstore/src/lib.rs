@@ -5,8 +5,9 @@
 //! listing — and this crate owns that boundary: the [`ObjectStore`] trait,
 //! provider adapters for S3, Cloudflare R2, Google Cloud Storage, Azure Blob
 //! Storage, and the local filesystem, the durable key layout in [`keys`] and
-//! [`layout`], and the conformance suite that keeps provider assumptions
-//! honest.
+//! [`layout`], and the contract probe in [`probe`] that proves a configured
+//! store honours that contract — the same checks the conformance suite runs
+//! against real providers.
 
 #![warn(missing_docs)]
 
@@ -21,6 +22,7 @@ pub mod local_fs_store;
 pub mod metrics;
 pub mod object_store;
 pub mod presign;
+pub mod probe;
 mod provider_object_store;
 mod retry;
 pub mod s3_compatible;
@@ -39,6 +41,7 @@ pub use object_store::{
     ByteRange, ByteStream, MultipartCompletion, MultipartPart, ObjectBody, ObjectMetadata,
     ObjectStore, ObjectStoreError, PutMode, Result, SharedObjectStore, StoredObjectChecksum,
 };
+pub use probe::{run_store_contract_probe, StoreProbeCheck, StoreProbeOutcome, StoreProbeReport};
 pub use provider_object_store::{
     ProviderObjectStore, ProviderObjectStoreConfig, PROVIDER_ATTEMPT_TIMEOUT,
     PROVIDER_CONNECT_TIMEOUT, PROVIDER_MULTIPART_PART_BYTES, PROVIDER_MULTIPART_PART_WINDOW,

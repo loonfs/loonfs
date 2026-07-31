@@ -16,7 +16,8 @@ use loonfs::{
 use loonfs_api::{
     v0::{
         DisableGrepIndexResponse, EnableGrepIndexResponse, GrepGcRequest, GrepGcResponse,
-        GrepIndexLifecycle, GrepIndexStatusResponse,
+        GrepIndexLifecycle, GrepIndexStatusResponse, StoreProbeCheckOutcome, StoreProbeCheckResult,
+        StoreProbeResponse,
     },
     AuthoritativePathEntry, ChangeSeq, CheckpointId, CommitResponse, CreateCheckpointRequest,
     CreateCheckpointResponse, DestinationBehavior, EffectiveLimit, ErrorCode, GrepRequest,
@@ -29,6 +30,7 @@ use loonfs_grep::{
     GramIndexBuildPolicy, GrepDisableOutcome, GrepEnableOutcome, GrepError, GrepIndexSnapshot,
     GrepMaintenanceJob, GrepService, GrepWorker, NamespaceReads, GREP_INDEX_JOB,
 };
+use loonfs_objectstore::probe::{run_store_contract_probe, StoreProbeOutcome, StoreProbeReport};
 use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
 use std::sync::Arc;
 
@@ -758,6 +760,15 @@ impl EmbeddedBackend {
             .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
     }
 
+    /// Proves this profile's object store honours the contract LoonFS
+    /// depends on. Store-scoped: it names no namespace and reads none, so
+    /// no namespace error scoping applies.
+    pub(super) async fn probe_store(&self) -> StoreProbeResponse {
+        let run_id = loonfs_api::generated_id("probe");
+        let report = run_store_contract_probe(self.writer.object_store().as_ref(), &run_id).await;
+        store_probe_response(report)
+    }
+
     pub(super) async fn list_changes(
         &self,
         namespace_id: &NamespaceId,
@@ -831,6 +842,32 @@ fn resolve_cli_page_limit(limit: Option<u32>) -> Result<EffectiveLimit, BackendE
     PaginationPolicy::default()
         .resolve_limit(limit)
         .map_err(|error| BackendError::new(ErrorCode::InvalidRequest.as_str(), error.to_string()))
+}
+
+/// Renders a probe report as the wire shape both backends answer with, so
+/// an embedded run and a remote one print the same thing.
+fn store_probe_response(report: StoreProbeReport) -> StoreProbeResponse {
+    StoreProbeResponse {
+        run_id: report.run_id,
+        checks: report
+            .checks
+            .into_iter()
+            .map(|check| {
+                let (outcome, message) = match check.outcome {
+                    StoreProbeOutcome::Passed => (StoreProbeCheckOutcome::Passed, None),
+                    StoreProbeOutcome::Unsupported => (StoreProbeCheckOutcome::Unsupported, None),
+                    StoreProbeOutcome::Failed { message } => {
+                        (StoreProbeCheckOutcome::Failed, Some(message))
+                    }
+                };
+                StoreProbeCheckResult {
+                    name: check.name.to_owned(),
+                    outcome,
+                    message,
+                }
+            })
+            .collect(),
+    }
 }
 
 #[cfg(test)]

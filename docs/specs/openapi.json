@@ -672,6 +672,59 @@
         }
       }
     },
+    "/v0/admin/store/probe": {
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Probe the store contract",
+        "description": "Proves the configured object store honours the create-if-absent, compare-and-swap, visibility, listing, and ranged-read semantics LoonFS depends on, and reports what it found check by check. Nothing runs this implicitly: a probe writes and deletes objects, all of them under a scratch prefix that is not a durable object family, and its last check deletes them and proves the prefix empty. A store that fails a check answers 200 with that check reported `failed` — the probe ran, and the answer is that the store is wrong. Optional capabilities a store declares it lacks answer `unsupported`, which is an answer rather than a fault. This route does not decide whether the deployment may serve presigned direct uploads: that trust comes from the endpoint allowlist, because a probe exercises the server's own request path and never a presigned capability handed to a client.",
+        "operationId": "probe_store",
+        "requestBody": {
+          "description": "Probe options; send `{}` for defaults",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StoreProbeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Probe completed; per-check outcomes are in the body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StoreProbeResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed request body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v0/capabilities": {
       "get": {
         "tags": [
@@ -4897,6 +4950,65 @@
           }
         },
         "additionalProperties": false
+      },
+      "StoreProbeCheckOutcome": {
+        "type": "string",
+        "description": "What one contract check concluded about the store.",
+        "enum": [
+          "passed",
+          "unsupported",
+          "failed"
+        ]
+      },
+      "StoreProbeCheckResult": {
+        "type": "object",
+        "description": "One named contract check and what the store did with it.",
+        "required": [
+          "name",
+          "outcome"
+        ],
+        "properties": {
+          "message": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What was expected and what happened instead. Present only on\n`failed`."
+          },
+          "name": {
+            "type": "string",
+            "description": "Stable check name."
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/StoreProbeCheckOutcome",
+            "description": "What the store did."
+          }
+        }
+      },
+      "StoreProbeRequest": {
+        "type": "object",
+        "description": "Options for one store contract probe. Empty today; a body is still sent\nso later options do not change the shape of the request."
+      },
+      "StoreProbeResponse": {
+        "type": "object",
+        "description": "What one store contract probe observed, check by check.",
+        "required": [
+          "run_id",
+          "checks"
+        ],
+        "properties": {
+          "checks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StoreProbeCheckResult"
+            },
+            "description": "Every check the run performed, in the order it performed them. A\nfailed check lives here rather than in an error: the probe answered\nthe question, and the answer is that the store is wrong."
+          },
+          "run_id": {
+            "type": "string",
+            "description": "Label the server minted for this run. It scopes the objects the run\nwrote, so it identifies the run in provider logs too."
+          }
+        }
       },
       "TrashEntry": {
         "type": "object",

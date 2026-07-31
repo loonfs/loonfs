@@ -613,6 +613,9 @@ pub(crate) enum AdminCommand {
     Step(AdminStepArgs),
     /// Run a mark-and-sweep garbage-collection pass.
     Gc(AdminGcArgs),
+    /// Prove the profile's object store honours the contract LoonFS
+    /// depends on, and report what it found check by check.
+    ProbeStore(AdminProbeStoreArgs),
     /// Enable the gram content index and wait for its backfill to reach the
     /// sequence the namespace was at when this command started.
     IndexEnable(AdminIndexEnableArgs),
@@ -762,6 +765,12 @@ pub(crate) struct AdminGcArgs {
     pub max_objects: Option<u64>,
 }
 
+#[derive(Debug, Args)]
+pub(crate) struct AdminProbeStoreArgs {
+    #[command(flatten)]
+    pub profile: ProfileSelectorArgs,
+}
+
 #[derive(Debug, Subcommand)]
 pub(crate) enum ConfigCommand {
     /// Print the config file path.
@@ -827,6 +836,7 @@ pub(crate) enum CommandKind {
     AdminRun,
     AdminStep,
     AdminGc,
+    AdminProbeStore,
     AdminIndexEnable,
     AdminIndexDisable,
     AdminIndexStatus,
@@ -873,6 +883,7 @@ impl CommandKind {
             CommandKind::AdminRun => "admin_run",
             CommandKind::AdminStep => "admin_step",
             CommandKind::AdminGc => "admin_gc",
+            CommandKind::AdminProbeStore => "admin_probe_store",
             CommandKind::AdminIndexEnable => "admin_index_enable",
             CommandKind::AdminIndexDisable => "admin_index_disable",
             CommandKind::AdminIndexStatus => "admin_index_status",
@@ -930,6 +941,7 @@ impl Cli {
                 AdminCommand::Run(_) => CommandKind::AdminRun,
                 AdminCommand::Step(_) => CommandKind::AdminStep,
                 AdminCommand::Gc(_) => CommandKind::AdminGc,
+                AdminCommand::ProbeStore(_) => CommandKind::AdminProbeStore,
                 AdminCommand::IndexEnable(_) => CommandKind::AdminIndexEnable,
                 AdminCommand::IndexDisable(_) => CommandKind::AdminIndexDisable,
                 AdminCommand::IndexStatus(_) => CommandKind::AdminIndexStatus,
