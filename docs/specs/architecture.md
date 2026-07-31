@@ -51,3 +51,54 @@ Most core operations fall into one of two classes.
 Implementations may additionally expose coordinator-specific helpers for recursive workflows or admin work, but those helpers are outside the interoperable core model.
 
 Control objects and implementation-specific helpers never create a second history model.
+
+## 5. Background maintenance
+
+Maintenance is split in two, and the split is the whole design. A **runner** owns scheduling: which work is eligible, how much runs at once, what happens when a step fails, and when everything stops. A **job** owns one kind of work and knows nothing about scheduling: asked for a step, it re-reads durable state, does one bounded unit, publishes the result through the same compare-and-swap protocol any writer uses, and says what it accomplished. There is one runner per write-capable handle and one implementation of retry, coalescing, concurrency, and shutdown in it. A job that wants a scheduler of its own is a design error.
+
+The runner keys work by `{job, namespace}`. One key runs at a time, duplicate hints for a key coalesce into one, and every key shares a single permit pool sized by `max_concurrent_maintenance`, so a burst across many namespaces cannot fan out into unbounded concurrent maintenance. Hints are level-triggered and never authoritative: a step's own read of durable state decides whether there was anything to do. User writes never wait on maintenance admission or execution.
+
+### Conclusions
+
+A step's return value is its entire scheduling vocabulary.
+
+| Conclusion | What it says | What the runner does |
+| --- | --- | --- |
+| `progressed` | Durable state advanced. | Eligible again at once, behind whatever else is waiting. |
+| `idle` | Nothing to do. | Parks until a nudge or a reconciliation sweep finds work. |
+| `blocked` | There is work this step's policy cannot advance — an input that does not fit the per-step budget, for one. | Parks like `idle`; requeueing zero-progress work would only spin. |
+| `superseded` | Another writer won this step's race. | Eligible again at once, to take the race against what landed. Not a failure. |
+| `not_enabled` | This job has nothing to maintain here at all. | Forgets the key. |
+
+A step may also hand back an opaque continuation — where it stopped, for the next step to resume from — and the earliest time it saw work becoming eligible, such as a lease expiry. The runner holds both; jobs keep no scheduler state beside it. A continuation never crosses a process boundary, so a job that cannot safely restart its pass from the beginning must not use one. Transient errors get per-key exponential backoff with a fleet-safe ceiling, because one provider outage must not turn into every namespace retrying in lockstep.
+
+### Jobs and admission policy
+
+| Job | Step | Admission |
+| --- | --- | --- |
+| `metadata` | Flush the WAL tail past its threshold, then fold one bounded reorganization unit. | Automatic. Nudged by publication. |
+| `gc` | One bounded mark-and-sweep pass. | Automatic, and clock-driven: work becomes eligible when a lease expires or a grace window passes, so the deadlines that create reclaimable state are what plant the wakeup. |
+| `grep-index` | One bounded gram-index build or fold unit. | Automatic where a host maintains the index. Nudged by enable, publication, and queries that find the index behind. |
+| retention (*not a job*) | Advance the retention floor. | **Never automatic.** There is no job id to register; an operator asks for it. |
+
+Retention is the one deliberate exception, and it is a moral distinction rather than a safety budget. Collection reclaims state that is provably dead; advancing the retention floor surrenders replay history that is still there. So collection runs on its own and retention is asked for explicitly, through the maintenance step's `retention` opt-in or the typed admin operation. Grep collection is likewise explicit and per namespace.
+
+### Coverage: touched and assigned
+
+LoonFS has no global namespace enumeration, so no local runner can promise to reach every namespace in a deployment. Coverage is stated exactly:
+
+> Automatic maintenance covers namespaces touched by the running process and namespaces explicitly assigned to a maintenance host.
+
+A **touched** namespace — written, queried, or nudged by this process — stays covered for the rest of the process lifetime, and the runner may forget it once a probe finds it idle. An **assigned** namespace is named by an operator and stays covered across quiet periods and restarts, because its host asserts the assignment again on an interval. Nothing claims that reconciliation eventually finds every namespace; a deployment that wants a cold namespace maintained assigns it somewhere.
+
+### Hosts
+
+The same runner and the same jobs run in every host; which one is running is a deployment choice.
+
+| Host | Registers | Covers |
+| --- | --- | --- |
+| **Server** | The runtime's jobs, plus the grep index job when its grep mode maintains. | Namespaces it touches, while its maintenance mode is automatic. Set it manual when a dedicated process owns upkeep instead. |
+| **Embedded process** | Whatever the library host registers on its writer. | Namespaces it touches. |
+| **`loonfs admin run`** | The runtime's jobs and the grep index job, narrowed by `--job`. | The namespaces named by `--namespace`, and nothing else — this command never discovers namespaces. It serves nothing, hosts until a signal, or catches its assignment up and exits with `--drain`. |
+
+Shutdown order is the runner's requirement on whoever hosts it, and it is one order: close maintenance admission, drain admitted publications, let in-flight maintenance publications settle, then drain runner tasks, then stop the extension and query services. The reason is the failure it prevents — a maintenance publication left waiting behind a publisher that is already gone. Closing admission first is also what makes the drain honest: nothing may register work after the registry has been drained, and a finishing step may not hand its slot to queued work once admission is shut.

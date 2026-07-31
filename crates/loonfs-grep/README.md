@@ -1,44 +1,40 @@
 # loonfs-grep
 
 `loonfs-grep` owns LoonFS's optional, namespace-scoped gram index under
-`namespaces/{namespace_id}/extensions/grep/`. Maintenance is assigned explicitly; the binary never
-enumerates the store.
+`namespaces/{namespace_id}/extensions/grep/`. It is an extension, not a service: the crate
+implements `loonfs`'s public `MaintenanceJob` trait and a host registers that job on a writer's
+maintenance runner. Maintenance is assigned explicitly and grep never enumerates the store.
 
-Name each namespace with a repeatable `--namespace` flag:
+Two hosts run it. A server whose `[grep]` mode maintains registers the job on its own writer, and
+the runner schedules it beside metadata upkeep and collection. A detached host names its
+namespaces on the command line:
 
 ```console
-loonfs-grep --config loonfs-grep.toml --namespace docs --namespace source --once
-loonfs-grep --config loonfs-grep.toml --namespace docs
-loonfs-grep --config loonfs-grep.toml --namespace docs --once --gc
+loonfs admin run --namespace docs --namespace source --job grep-index
+loonfs admin run --namespace docs --job grep-index --drain
+loonfs admin index-gc docs
 ```
 
-`--once` drives each named namespace to a caught-up steady root and exits, making it suitable for
-cron. Without `--once`, each assigned namespace is checked at the configured `poll_interval_ms`
-and stepped only when that check reports work. Each check is one or two small reads per assigned
-namespace per interval, and the process never scans namespaces. `--gc` explicitly collects each
-named namespace's grep-owned keyspace once before maintenance starts, including reaping aged
-extension state for an absent or tombstoned namespace.
+Without `--drain` the command hosts the runner until a signal, asserting its assignment on an
+interval so a quiet namespace stays covered. With `--drain` it catches every assigned namespace up
+and exits, which suits cron; `--max-steps` and `--deadline-ms` bound it and it reports where each
+namespace stopped. Omitting `--job` hosts metadata and collection too, so one process can own
+everything a namespace nobody is writing to needs. `loonfs admin index-gc` collects one namespace's
+grep-owned keyspace, including reaping aged extension state for an absent or tombstoned namespace.
 
-The strict config keeps the provider under `[store]`, puts the one detached-deployment timer at the
-top level, and uses `[grep]` for bounded step budgets:
+Bounded-step budgets are `GrepWorkerConfig`, which a server reads from its `[grep]` table:
 
 ```toml
-poll_interval_ms = 1000
-
-[store]
-kind = "local-fs"
-root = "./.loonfs-store"
-
 [grep]
+mode = "serve_and_maintain"
 max_files_per_step = 256
 max_content_bytes_per_step = 67108864
 max_rows_per_segment = 65536
 max_l0_runs = 8
 max_mid_runs = 8
-max_fold_rows_per_step = 131072
+max_decoded_input_rows_per_step = 131072
 ```
 
-`poll_interval_ms` defaults to 1000 and must be greater than zero, and so must every step budget.
-How many steps may run at once is not configured here: this process runs one namespace at a time
-per assigned namespace, and a host that registers grep with a writer's maintenance runner bounds
-every maintenance family together with `max_concurrent_maintenance`.
+Every step budget must be greater than zero. How many steps may run at once is not configured
+here: every host schedules grep through the runtime's maintenance runner, whose one permit pool
+`max_concurrent_maintenance` bounds every maintenance family together.

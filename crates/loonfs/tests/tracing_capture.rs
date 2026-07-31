@@ -23,6 +23,7 @@ use loonfs_test_support::ids::namespace_id;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
+use tracing_subscriber::fmt::format::FmtSpan;
 
 fn store_config(root: &Path) -> StoreConfig {
     StoreConfig::LocalFs {
@@ -81,6 +82,9 @@ fn background_step_conclusions_emit_debug_events() {
     let subscriber = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
         .with_ansi(false)
+        // Closing spans are recorded so the maintenance spans name
+        // themselves in the capture whether or not they emitted an event.
+        .with_span_events(FmtSpan::CLOSE)
         .with_writer(move || CaptureWriter(Arc::clone(&sink)))
         .finish();
     // Thread-local so the capture cannot leak into other tests; the
@@ -103,23 +107,32 @@ fn background_step_conclusions_emit_debug_events() {
     let log = String::from_utf8(captured.lock().expect("capture lock").clone())
         .expect("captured log is utf8");
     // Two records, one per layer: what the executor did, and what the runner
-    // made of it.
+    // made of it. Fields are matched with their `=` so a span carrying the
+    // same word cannot satisfy the assertion.
     let step = find_event(&log, "metadata maintenance step concluded");
     for field in [
-        "wal_flush",
-        "reorganize",
-        "wal_tail_segments_before",
-        "conclusion",
+        "wal_flush=",
+        "reorganize=",
+        "wal_tail_segments_before=",
+        "conclusion=",
     ] {
         assert!(step.contains(field), "missing `{field}` in: {step}");
     }
     let admission = find_event(&log, "maintenance step settled");
-    for field in ["job", "namespace_id", "conclusion", "elapsed_ms"] {
+    for field in ["job=", "namespace_id=", "conclusion=", "elapsed_ms="] {
         assert!(
             admission.contains(field),
             "missing `{field}` in: {admission}"
         );
     }
+    // The spans this work runs under say maintenance, which is what it is.
+    for span in ["loonfs.maintenance.step", "loonfs.maintenance.wal_flush"] {
+        assert!(log.contains(span), "missing span `{span}` in:\n{log}");
+    }
+    assert!(
+        !log.contains("compaction"),
+        "maintenance still traces as compaction:\n{log}"
+    );
 }
 
 fn find_event<'log>(log: &'log str, message: &str) -> &'log str {

@@ -20,12 +20,11 @@ use std::sync::Arc;
 const ERROR_BACKOFF_BASE_MS: u64 = 10;
 /// Ceiling the per-key error backoff window doubles up to.
 ///
-/// A minute, not the one second the grep driver used. That cap was written
-/// for a single namespace's indexer, where retrying every second costs
-/// nothing. This backoff is fleet-wide: it governs every key this process
-/// has admitted, so a provider outage under a one-second cap turns into
-/// every namespace retrying every second for as long as the outage lasts —
-/// a second outage stacked on the first. A minute is small enough that
+/// A minute, because this backoff is fleet-wide: it governs every key this
+/// process has admitted. A cap sized for one namespace's indexer, where
+/// retrying every second costs nothing, turns a provider outage into every
+/// namespace retrying every second for as long as the outage lasts — a
+/// second outage stacked on the first. A minute is small enough that
 /// recovery is picked up within one reconciliation interval and large
 /// enough that a long outage costs a trickle.
 const ERROR_BACKOFF_CAP_MS: u64 = 60_000;

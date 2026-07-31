@@ -76,11 +76,11 @@ impl FsAdmin {
     /// superseded by another publisher is an outcome, not an error.
     #[tracing::instrument(
         level = "info",
-        name = "loonfs.compaction",
+        name = "loonfs.maintenance.step",
         err,
         skip_all,
         fields(
-            operation = "compaction",
+            operation = "maintenance.step",
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
@@ -315,11 +315,11 @@ impl FsAdmin {
     /// is not a request to compact metadata.
     #[tracing::instrument(
         level = "info",
-        name = "loonfs.compaction",
+        name = "loonfs.maintenance.checkpoint_create",
         err,
         skip_all,
         fields(
-            operation = "compaction",
+            operation = "maintenance.checkpoint_create",
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )
@@ -413,11 +413,11 @@ impl FsAdmin {
     /// invalidated.
     #[tracing::instrument(
         level = "info",
-        name = "loonfs.compaction",
+        name = "loonfs.maintenance.wal_flush",
         err,
         skip_all,
         fields(
-            operation = "compaction",
+            operation = "maintenance.wal_flush",
             mode = tracing::field::Empty,
             store_kind = tracing::field::Empty,
         )

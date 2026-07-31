@@ -338,7 +338,7 @@ fn parse_checkpoint_id(value: &str) -> Result<CheckpointId, ApiResponseError> {
         path = "/v0/admin/namespaces/{namespace}/maintenance/step",
         tag = "admin",
         summary = "Run maintenance step",
-        description = "Runs one bounded maintenance step: flushes the WAL tail once it reaches the threshold, and optionally runs a garbage-collection pass afterwards. Step-driven GC defaults to 1024 candidates and returns its cursor for a later step rather than looping internally. Losing the root race is an outcome, not an error.",
+        description = "Runs one bounded maintenance step, which does four things in order: flushes the WAL tail once it reaches the threshold, merges one bounded metadata reorganization unit, and — each strictly opt-in — advances the retention floor (`retention: true`) and runs one bounded garbage-collection pass (`gc`). Nothing surrenders replay history or sweeps objects unless the body asked for it. `only` restricts the step to a single sub-step: `wal_flush`, `reorganize`, `retention`, or `gc`; naming `retention` or `gc` that way is itself the opt-in. Step-driven GC defaults to 1024 candidates and returns its cursor for a later step rather than looping internally. Losing the root race is an outcome, not an error.",
         params(("namespace" = String, Path, description = "Namespace id")),
         request_body(content = MaintenanceStepRequest, description = "Optional threshold and GC overrides"),
         responses(
