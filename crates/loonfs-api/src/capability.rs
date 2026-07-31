@@ -42,6 +42,16 @@ pub const LIMIT_UPLOAD_MAX_CONCURRENT: &str = "upload.max_concurrent";
 /// Advisory limit: how many service-proxied content reads the deployment
 /// materializes at once; requests past the cap answer `server_busy`.
 pub const LIMIT_DOWNLOAD_MAX_CONCURRENT: &str = "download.max_concurrent";
+/// Advisory limit: the most path operations one commit may carry; a longer
+/// list answers `invalid_request` before planning.
+pub const LIMIT_COMMIT_MAX_OPERATIONS: &str = "commit.max_operations";
+/// Advisory limit: the most content tokens one commit may carry.
+pub const LIMIT_COMMIT_MAX_CONTENT_TOKENS: &str = "commit.max_content_tokens";
+/// Advisory limit: the most distinct external content refs one commit's
+/// operations may name.
+pub const LIMIT_COMMIT_MAX_EXTERNAL_CONTENT_REFS: &str = "commit.max_external_content_refs";
+/// Advisory limit: the largest accepted commit `message`, in bytes.
+pub const LIMIT_COMMIT_MAX_MESSAGE_BYTES: &str = "commit.max_message_bytes";
 /// Advisory capability key for the default page size applied when callers omit `limit`.
 pub const LIMIT_PAGINATION_DEFAULT: &str = "pagination.default_limit";
 /// Advisory capability key for the largest page size accepted by a deployment.

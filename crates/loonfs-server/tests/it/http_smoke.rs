@@ -2,9 +2,16 @@
 
 use crate::common::http_split_support::*;
 use crate::common::start_server;
+use loonfs::publish::{
+    MAX_COMMIT_CONTENT_TOKENS, MAX_COMMIT_EXTERNAL_CONTENT_REFS, MAX_COMMIT_MESSAGE_BYTES,
+    MAX_COMMIT_OPERATIONS,
+};
 use loonfs_api::{
     ChangeSeq, CommitId, DestinationBehavior, InodeKind, DEFAULT_MAX_PAGE_LIMIT,
-    DEFAULT_PAGE_LIMIT, LIMIT_PAGINATION_DEFAULT, LIMIT_PAGINATION_MAX,
+    DEFAULT_PAGE_LIMIT, LIMIT_COMMIT_MAX_CONTENT_TOKENS, LIMIT_COMMIT_MAX_EXTERNAL_CONTENT_REFS,
+    LIMIT_COMMIT_MAX_MESSAGE_BYTES, LIMIT_COMMIT_MAX_OPERATIONS, LIMIT_DOWNLOAD_MAX_CONCURRENT,
+    LIMIT_DOWNLOAD_MAX_CONTENT_BYTES, LIMIT_PAGINATION_DEFAULT, LIMIT_PAGINATION_MAX,
+    LIMIT_UPLOAD_MAX_CONCURRENT, LIMIT_UPLOAD_MAX_CONTENT_BYTES,
 };
 use loonfs_client::{ClientError, CreateDirectoryOptions, NamespacePath, PutFileOptions};
 use loonfs_test_support::http::raw_agent;
@@ -141,6 +148,46 @@ async fn capabilities_endpoint_advertises_capabilities() {
         capabilities.limits.get(LIMIT_PAGINATION_MAX),
         Some(&u64::from(DEFAULT_MAX_PAGE_LIMIT))
     );
+    // The two halves a client pre-validates a write against: what this
+    // deployment will carry over the wire, and what the runtime will accept
+    // as one commit. Both are advertised, so neither has to be discovered by
+    // being rejected.
+    let config = test_config(
+        temp_dir.path().join("store"),
+        "loonfs-server-test",
+        "http-smoke",
+    );
+    for (limit, expected) in [
+        (LIMIT_UPLOAD_MAX_CONTENT_BYTES, config.max_upload_bytes),
+        (LIMIT_DOWNLOAD_MAX_CONTENT_BYTES, config.max_download_bytes),
+        (
+            LIMIT_UPLOAD_MAX_CONCURRENT,
+            config.max_concurrent_uploads as u64,
+        ),
+        (
+            LIMIT_DOWNLOAD_MAX_CONCURRENT,
+            config.max_concurrent_downloads as u64,
+        ),
+        (LIMIT_COMMIT_MAX_OPERATIONS, MAX_COMMIT_OPERATIONS as u64),
+        (
+            LIMIT_COMMIT_MAX_CONTENT_TOKENS,
+            MAX_COMMIT_CONTENT_TOKENS as u64,
+        ),
+        (
+            LIMIT_COMMIT_MAX_EXTERNAL_CONTENT_REFS,
+            MAX_COMMIT_EXTERNAL_CONTENT_REFS as u64,
+        ),
+        (
+            LIMIT_COMMIT_MAX_MESSAGE_BYTES,
+            MAX_COMMIT_MESSAGE_BYTES as u64,
+        ),
+    ] {
+        assert_eq!(
+            capabilities.limits.get(limit),
+            Some(&expected),
+            "`{limit}` is not advertised with the value this deployment enforces"
+        );
+    }
 
     let cached = harness
         .client

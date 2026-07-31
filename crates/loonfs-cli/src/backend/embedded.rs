@@ -393,25 +393,30 @@ impl EmbeddedBackend {
     /// Hosts `jobs` for `namespaces` until `shutdown` resolves.
     ///
     /// The runner does the work; this command's job is the assignment. It
-    /// nudges every key once at start-up and again on an interval, and the
-    /// runner decides when each step runs, how many run at once, and what
-    /// happens when one fails. The shutdown is the writer's own: maintenance
-    /// admission closes before publications drain, so nothing admitted is
-    /// left running behind a publisher that is already gone.
+    /// nudges every key once at start-up and again on `poll_interval_ms`
+    /// (the default cadence when `None`), and the runner decides when each
+    /// step runs, how many run at once, and what happens when one fails. The
+    /// shutdown is the writer's own: maintenance admission closes before
+    /// publications drain, so nothing admitted is left running behind a
+    /// publisher that is already gone.
     pub(super) async fn host_maintenance(
         &self,
         namespaces: &[NamespaceId],
         jobs: &[MaintenanceJobId],
+        poll_interval_ms: Option<u64>,
         shutdown: impl std::future::Future<Output = ()>,
     ) -> Result<(), BackendError> {
         let hosted = self.hosted_jobs(jobs)?;
+        let interval_ms = poll_interval_ms.unwrap_or(ASSIGNMENT_INTERVAL_MS);
         let maintenance = self.writer.maintenance();
         assign(&maintenance, &hosted, namespaces);
         let mut shutdown = std::pin::pin!(shutdown);
         loop {
             tokio::select! {
                 () = &mut shutdown => break,
-                () = rest_between_assignments() => assign(&maintenance, &hosted, namespaces),
+                () = rest_between_assignments(interval_ms) => {
+                    assign(&maintenance, &hosted, namespaces);
+                }
             }
         }
         self.writer
@@ -771,7 +776,8 @@ impl EmbeddedBackend {
     }
 }
 
-/// How long an assignment rests before it is asserted again.
+/// How long an assignment rests before it is asserted again, unless
+/// `--poll-interval-ms` says otherwise.
 ///
 /// The runner forgets a key whose probe found it idle, which is right for a
 /// namespace this process merely touched and not enough for one an operator
@@ -799,10 +805,10 @@ fn assign(maintenance: &MaintenanceHandle, jobs: &[HostedJob], namespaces: &[Nam
 
 /// The one timer a maintenance host owns: how long an assignment rests
 /// before it is asserted again. Nothing durable depends on it — it decides
-/// when to look, never what is true.
+/// when to look, never what is true, which is why an operator may set it.
 #[allow(clippy::disallowed_methods)]
-async fn rest_between_assignments() {
-    tokio::time::sleep(std::time::Duration::from_millis(ASSIGNMENT_INTERVAL_MS)).await;
+async fn rest_between_assignments(interval_ms: u64) {
+    tokio::time::sleep(std::time::Duration::from_millis(interval_ms)).await;
 }
 
 /// Grace windows are wall-clock policy, and this is where an embedded
@@ -1073,7 +1079,7 @@ mod tests {
         };
         target
             .backend
-            .host_maintenance(std::slice::from_ref(&namespace), &every_job(), stop)
+            .host_maintenance(std::slice::from_ref(&namespace), &every_job(), None, stop)
             .await
             .expect("the host shuts down cleanly on its signal");
 
