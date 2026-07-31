@@ -51,11 +51,12 @@ pub(super) enum UploadSessionSweep {
         /// completed and nothing ever published.
         reclaimed_content: bool,
     },
-    /// The pass ran out of budget before it could establish whether this
-    /// session's content is referenced. Nothing was decided and nothing was
-    /// deleted; the pass stops here and its cursor still points before this
-    /// session's key, so a resume reconsiders it from the start.
-    BudgetExhausted,
+    /// The pass could not afford the reference collection this session's
+    /// content needs. The session is retained exactly as an undecidable one
+    /// is, completed-content reclamation is off for the rest of the
+    /// invocation, and the sweep goes on to the next candidate: what the
+    /// budget could not pay for is the scan, not the sweep.
+    ContentReclamationDeferred,
 }
 
 /// Advances one upload session and reclaims whatever it stops owning.
@@ -130,7 +131,7 @@ pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
                 .await?
             {
                 ContentReference::Unknown => Ok(UploadSessionSweep::Retain),
-                ContentReference::BudgetExhausted => Ok(UploadSessionSweep::BudgetExhausted),
+                ContentReference::Deferred => Ok(UploadSessionSweep::ContentReclamationDeferred),
                 // Published content answers to metadata now, not to the
                 // session that uploaded it, so the record is all that goes.
                 ContentReference::Referenced => Ok(UploadSessionSweep::Delete {
@@ -216,14 +217,20 @@ enum ContentReference {
     /// The reference set could not be established, so nothing is reclaimed
     /// (format spec, "Garbage collection", rule 5).
     Unknown,
-    /// The pass ran out of budget partway through establishing the set. It
-    /// is not an answer of any kind — see [`ScanOutcome::BudgetExhausted`].
-    BudgetExhausted,
+    /// The set did not fit in the budget the pass had left, so content
+    /// reclamation is skipped for the rest of this invocation. It is not an
+    /// answer of any kind — see [`ScanOutcome::BudgetExhausted`].
+    Deferred,
 }
 
 enum CollectedReferences {
     NotYet,
     Unavailable,
+    /// The scan ran out of budget once, which settles it for the whole
+    /// invocation: a later candidate must not pay to start the same scan
+    /// over, and being skipped is a property of the invocation rather than
+    /// of the session that happened to ask first.
+    Deferred,
     Referenced(BTreeSet<ContentId>),
 }
 
@@ -252,7 +259,9 @@ enum ScanOutcome {
 /// nothing" into the cursor, and the cursor is a client-supplied token that
 /// carries enumeration position only and never authorizes a deletion. So a
 /// resumed sweep collects again, and the budget above is what keeps that
-/// honest: the scan pays its own way every time it runs.
+/// honest: the scan pays its own way every time it runs. A verdict of "not
+/// this time" is memoized like any other, which is what keeps one
+/// unaffordable scan from being re-attempted once per aged session.
 pub(super) struct ContentReferences<'a> {
     live: &'a LiveSet,
     collected: CollectedReferences,
@@ -284,11 +293,11 @@ impl<'a> ContentReferences<'a> {
                     ScanOutcome::Unavailable => {
                         self.collected = CollectedReferences::Unavailable;
                     }
-                    // Deliberately leaves the memo unset: nothing partial
-                    // is ever remembered, and the pass is about to stop
-                    // and hand its caller a cursor anyway.
+                    // The partial set is dropped, not remembered — but the
+                    // fact that it did not fit is, so the rest of the
+                    // invocation stops asking.
                     ScanOutcome::BudgetExhausted => {
-                        return Ok(ContentReference::BudgetExhausted);
+                        self.collected = CollectedReferences::Deferred;
                     }
                 }
             }
@@ -297,6 +306,7 @@ impl<'a> ContentReferences<'a> {
             CollectedReferences::NotYet | CollectedReferences::Unavailable => {
                 ContentReference::Unknown
             }
+            CollectedReferences::Deferred => ContentReference::Deferred,
             CollectedReferences::Referenced(referenced) => {
                 if referenced.contains(content_id) {
                     ContentReference::Referenced
@@ -323,10 +333,12 @@ impl<'a> ContentReferences<'a> {
 /// part of the pass's bound rather than an exception to it. Running out
 /// stops the scan where it stands and reports
 /// [`ScanOutcome::BudgetExhausted`]; the caller retains the session that
-/// triggered it and returns its cursor. A namespace whose scan costs more
-/// than one whole budget therefore never finishes it, which is why
-/// `max_objects` has to be at least the scan's size for content
-/// reclamation to make progress at all.
+/// triggered it, marks the pass as having deferred content reclamation,
+/// and carries on. A namespace whose scan never fits therefore keeps its
+/// completed content — `max_objects` has to be at least the scan's size
+/// for content reclamation to happen at all — but the sweep around it
+/// still advances, which is the difference between leaking content for a
+/// while and not collecting anything ever.
 async fn collect_referenced_content<S: ObjectStore + ?Sized>(
     store: &S,
     namespace_id: &NamespaceId,

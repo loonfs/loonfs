@@ -20,7 +20,9 @@ pub struct GcConfig {
     /// run-to-completion behavior. What one unit buys is spelled out on
     /// `gc::budget::PassBudget`; the short version is that the content
     /// reference scan pays out of the same purse as candidate enumeration,
-    /// so a budget smaller than that scan can never finish one.
+    /// so a budget smaller than that scan defers content reclamation
+    /// instead of finishing it, pass after pass, while the rest of the
+    /// sweep proceeds normally.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_objects: Option<u64>,
     /// Opaque enumeration cursor returned by an earlier invocation.

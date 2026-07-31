@@ -1019,12 +1019,13 @@ async fn namespace_with_a_scan_worth_bounding(
 
 /// The reference scan is the one place a bounded pass used to do unbounded
 /// work. A one-object budget cannot finish it, and the honest response to
-/// that is to decide nothing: the pass hands back the cursor it came in
-/// with, leaves the session and its content exactly where they were, and a
-/// resume from that cursor with room to finish the scan reaches the verdict
-/// an unbounded pass would have reached.
+/// that is to reclaim nothing and say so: the session and its content stay
+/// exactly where they were, `content_reclamation_deferred` reports the
+/// skip, and the walk keeps moving past the session rather than pinning
+/// itself to it. A later pass with room for the scan reaches the verdict an
+/// unbounded pass would have reached.
 #[tokio::test]
-async fn a_budget_that_dies_inside_the_reference_scan_parks_without_deciding() {
+async fn a_budget_that_dies_inside_the_reference_scan_defers_and_walks_on() {
     let temp_dir = tempdir().expect("tempdir");
     let store = LocalFsStore::new(temp_dir.path()).expect("store");
     let namespace_id = NamespaceId::parse("demo").expect("namespace id");
@@ -1042,47 +1043,63 @@ async fn a_budget_that_dies_inside_the_reference_scan_parks_without_deciding() {
         "the fixture must give the scan more than one object to read"
     );
 
-    // One object per pass: the earlier families advance a key at a time
-    // until the sweep reaches the session, and there the cursor stops
-    // moving because the scan behind it never fits.
+    // One object per pass: the sweep advances a key at a time until it
+    // reaches the session, and the scan behind that session never fits in
+    // one object. The walk has to get past it anyway.
     let past = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_MS + 1);
     let mut tiny = config();
     tiny.max_objects = Some(1);
     let mut cursor: Option<String> = None;
-    let mut parked = None;
-    for _ in 0..64 {
+    let mut deferred = false;
+    let mut passes = 0;
+    loop {
+        passes += 1;
+        assert!(
+            passes <= 64,
+            "a one-object budget must still walk the namespace to the end"
+        );
         tiny.cursor.clone_from(&cursor);
         let pass = gc_namespace(&store, &namespace_id, &tiny, &past)
             .await
             .expect("one-object pass");
         assert_eq!(pass.deleted_upload_sessions, 0);
         assert_eq!(pass.deleted_content_objects, 0);
-        let next = pass.next_cursor.expect("work remains");
-        if cursor.as_deref() == Some(next.as_str()) {
-            parked = Some(next);
+        deferred |= pass.content_reclamation_deferred;
+        let Some(next) = pass.next_cursor else {
             break;
-        }
+        };
+        // The whole point of deferring rather than parking: a pass either
+        // finishes or hands back a cursor strictly past the one it came in
+        // with. It never asks to be run again from where it started.
+        assert_ne!(
+            Some(next.as_str()),
+            cursor.as_deref(),
+            "pass {passes} handed back the cursor it came in with"
+        );
         cursor = Some(next);
     }
-    let parked = parked.expect("a one-object budget parks inside the scan");
+    assert!(
+        deferred,
+        "a one-object budget cannot afford the scan, and the pass must say so"
+    );
     assert!(
         store.head(&content_key).await.expect("head").is_some(),
-        "a parked pass reclaims nothing"
+        "a deferred pass reclaims nothing"
     );
     assert!(
         read_upload_session(&store, &namespace_id, &upload_id)
             .await
             .is_some(),
-        "the session that triggered the scan is retained, not decided"
+        "the session that triggered the scan is retained, not reclaimed"
     );
 
-    // Same cursor, a budget the scan fits inside: now it decides.
+    // Try again with a budget the scan fits inside: now it decides.
     let mut enough = config();
     enough.max_objects = Some(1_024);
-    enough.cursor = Some(parked);
     let resumed = gc_namespace(&store, &namespace_id, &enough, &past)
         .await
-        .expect("resumed pass");
+        .expect("pass with room for the scan");
+    assert!(!resumed.content_reclamation_deferred);
     assert_eq!(resumed.deleted_upload_sessions, 1);
     assert_eq!(resumed.deleted_content_objects, 1);
     assert!(store.head(&content_key).await.expect("head").is_none());
@@ -1095,9 +1112,9 @@ async fn a_budget_that_dies_inside_the_reference_scan_parks_without_deciding() {
 /// segment, the very last root the scan reads. A pass that stopped short
 /// and answered from what it had collected would call the content
 /// unreferenced and delete it. Running every budget from one up past the
-/// whole scan's cost, each to a standstill, leaves no interleaving where a
-/// partial reference set decides anything — and the budgets that can afford
-/// the scan still reach the right verdict.
+/// whole scan's cost, each to the end of its walk, leaves no interleaving
+/// where a partial reference set decides anything — and the budgets that
+/// can afford the scan still reach the right verdict.
 #[tokio::test]
 async fn no_budget_lets_a_partial_reference_set_decide_a_deletion() {
     let temp_dir = tempdir().expect("tempdir");
@@ -1123,7 +1140,7 @@ async fn no_budget_lets_a_partial_reference_set_decide_a_deletion() {
         loonfs_objectstore::keys::content_blob(content_store_id.as_str(), &content_ref.content_id);
     let past = context(setup.now_ms + CONTENT_RECLAMATION_GRACE_MS + 1);
     let mut some_budget_reached_the_verdict = false;
-    let mut some_budget_parked_instead = false;
+    let mut some_budget_deferred_instead = false;
 
     for max_objects in 1..=16 {
         let trial_root = temp_dir.path().join(format!("trial-{max_objects}"));
@@ -1132,7 +1149,14 @@ async fn no_budget_lets_a_partial_reference_set_decide_a_deletion() {
         let mut bounded = config();
         bounded.max_objects = Some(max_objects);
         let mut cursor: Option<String> = None;
-        for _ in 0..64 {
+        let mut deferred = false;
+        let mut passes = 0;
+        loop {
+            passes += 1;
+            assert!(
+                passes <= 256,
+                "max_objects={max_objects}: the walk must reach its end"
+            );
             bounded.cursor.clone_from(&cursor);
             let pass = gc_namespace(&store, &namespace_id, &bounded, &past)
                 .await
@@ -1142,12 +1166,15 @@ async fn no_budget_lets_a_partial_reference_set_decide_a_deletion() {
                 store.head(&content_key).await.expect("head").is_some(),
                 "max_objects={max_objects}: referenced content survives every budget"
             );
+            deferred |= pass.content_reclamation_deferred;
             let Some(next) = pass.next_cursor else {
                 break;
             };
-            if cursor.as_deref() == Some(next.as_str()) {
-                break;
-            }
+            assert_ne!(
+                Some(next.as_str()),
+                cursor.as_deref(),
+                "max_objects={max_objects}: pass {passes} handed back its own cursor"
+            );
             cursor = Some(next);
         }
         assert!(
@@ -1156,12 +1183,18 @@ async fn no_budget_lets_a_partial_reference_set_decide_a_deletion() {
         );
         // Reaching the referenced verdict is what deletes the record: the
         // content is metadata's from here on. A surviving record means the
-        // budget parked instead — the case this test is really about.
+        // budget deferred instead — the case this test is really about —
+        // and the two must line up exactly, because a session this walk
+        // passed over is a session the reference scan could not afford.
         let decided = read_upload_session(&store, &namespace_id, &upload_id)
             .await
             .is_none();
+        assert_eq!(
+            deferred, !decided,
+            "max_objects={max_objects}: the session survives exactly when the scan was deferred"
+        );
         some_budget_reached_the_verdict |= decided;
-        some_budget_parked_instead |= !decided;
+        some_budget_deferred_instead |= deferred;
     }
 
     assert!(
@@ -1169,9 +1202,9 @@ async fn no_budget_lets_a_partial_reference_set_decide_a_deletion() {
         "a budget large enough to finish the scan must still decide the session"
     );
     assert!(
-        some_budget_parked_instead,
-        "the sweep must actually park mid-scan somewhere in this range, or the \
-         test proves nothing about partial reference sets"
+        some_budget_deferred_instead,
+        "the sweep must actually run out mid-scan somewhere in this range, or \
+         the test proves nothing about partial reference sets"
     );
 }
 
@@ -2532,6 +2565,7 @@ fn accumulate_report(total: &mut GcResponse, pass: &GcResponse) {
     total.released_missing_basis_checkpoints += pass.released_missing_basis_checkpoints;
     total.retained_candidates += pass.retained_candidates;
     total.degraded_retention |= pass.degraded_retention;
+    total.content_reclamation_deferred |= pass.content_reclamation_deferred;
 }
 
 #[tokio::test]

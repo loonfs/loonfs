@@ -26,6 +26,11 @@ fn gc_summary(report: &GcResponse) -> String {
     if report.degraded_retention {
         summary.push_str("; retention degraded: ambiguous roots suppressed deletion");
     }
+    if report.content_reclamation_deferred {
+        summary.push_str(
+            "; content reclamation deferred: the reference scan did not fit in --max-objects",
+        );
+    }
     if let Some(cursor) = &report.next_cursor {
         summary.push_str(&format!("; next_cursor: {cursor}"));
     }

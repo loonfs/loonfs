@@ -442,11 +442,13 @@ pub struct GcRequest {
     /// A completed upload session past its reclamation grace makes the pass
     /// read every live manifest and retained WAL segment to find out
     /// whether anything still references its content, and that read is
-    /// charged here like any other. A budget too small to finish it parks:
-    /// the pass decides nothing, returns the cursor it came in with, and a
-    /// caller looping on `next_cursor` alone would loop forever. Give a
-    /// pass at least as many objects as the namespace has live manifests
-    /// and retained segments.
+    /// charged here like any other. A budget too small to finish it does
+    /// not stall the pass: the session is retained, the response sets
+    /// `content_reclamation_deferred`, and the sweep carries on through
+    /// everything else. What a chronically small budget costs is content
+    /// left unreclaimed, not progress. Give a pass at least as many objects
+    /// as the namespace has live manifests and retained segments for that
+    /// content to come back.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_objects: Option<u64>,
     /// Opaque resume token returned as `next_cursor` by an earlier pass
@@ -495,11 +497,16 @@ pub struct GcResponse {
     pub retained_candidates: u64,
     /// True when ambiguous roots suppressed manifest/table deletion.
     pub degraded_retention: bool,
-    /// Opaque resume token when the pass stopped with work left — either
-    /// more candidates to enumerate, or one candidate it ran out of budget
-    /// to decide. Resuming rebuilds every safety proof; the token carries
-    /// enumeration position only and is valid only against the same
-    /// namespace.
+    /// True when the pass skipped completed-content reclamation because
+    /// the reference collection it needs did not fit in `max_objects`.
+    /// Nothing was ever decided from a partial collection and the rest of
+    /// the sweep ran normally; a later pass with room for the whole scan
+    /// reclaims what this one left behind.
+    #[serde(default)]
+    pub content_reclamation_deferred: bool,
+    /// Opaque resume token when more candidates remain. Resuming rebuilds
+    /// every safety proof; the token carries enumeration position only and
+    /// is valid only against the same namespace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
 }
@@ -520,6 +527,7 @@ impl GcResponse {
             released_missing_basis_checkpoints: 0,
             retained_candidates: 0,
             degraded_retention: false,
+            content_reclamation_deferred: false,
             next_cursor: None,
         }
     }

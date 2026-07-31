@@ -69,8 +69,10 @@ pub(super) async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
     // at most once per invocation. The derived reclamation grace is what
     // lets one collection stand for every candidate that follows it: past
     // it, no receipt survives that could add a reference. The scan is
-    // charged against the budget below like everything else, so an
-    // invocation that cannot afford it stops rather than overrunning.
+    // charged against the budget below like everything else, and an
+    // invocation that cannot afford it skips content reclamation instead
+    // of overrunning — the sessions waiting on it are retained and the
+    // sweep continues.
     let mut references = ContentReferences::over(&mark);
     let mut report = GcResponse::empty(namespace_id.clone());
     let mut budget = PassBudget::of(config);
@@ -101,7 +103,7 @@ pub(super) async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
                 return Ok(report);
             }
 
-            let outcome = process_candidate(
+            process_candidate(
                 store,
                 namespace_id,
                 &content_store_id,
@@ -116,17 +118,13 @@ pub(super) async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
                 &mut report,
             )
             .await?;
-            if outcome == CandidateOutcome::Parked {
-                // The budget died inside the work this candidate needed, so
-                // it was decided neither way and the cursor stays where it
-                // was: the resume re-enumerates this key and starts its
-                // reasoning over from a complete root set. Charging nothing
-                // for it keeps the resumed pass's whole budget available
-                // for the retry.
-                report.next_cursor = Some(position.encode()?);
-                report.degraded_retention = sweep.degraded;
-                return Ok(report);
-            }
+            // Every candidate this loop hands to `process_candidate` comes
+            // back decided one way or the other, so the cursor always
+            // advances past it. The one thing a pass can run out of budget
+            // to answer — whether a completed session's content is still
+            // referenced — is answered by retaining the session, never by
+            // leaving it undecided and stopping: a budget below that scan's
+            // cost would otherwise pin the walk to one key forever.
             budget.charge();
             position = GcCursor::after(namespace_id, family, key);
         }
@@ -134,16 +132,6 @@ pub(super) async fn gc_namespace_with_reverify_chunk<S: ObjectStore + ?Sized>(
 
     report.degraded_retention = sweep.degraded;
     Ok(report)
-}
-
-/// Whether the pass decided a candidate, or stopped short of deciding it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CandidateOutcome {
-    /// The candidate was decided; the cursor may advance past it.
-    Decided,
-    /// The budget ran out before the candidate could be decided. Nothing
-    /// was deleted for it and the cursor does not advance.
-    Parked,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -160,7 +148,7 @@ async fn process_candidate<S: ObjectStore + ?Sized>(
     references: &mut ContentReferences<'_>,
     budget: &mut PassBudget,
     report: &mut GcResponse,
-) -> Result<CandidateOutcome> {
+) -> Result<()> {
     if family == CandidateFamily::UploadSessions {
         return process_upload_session(
             store,
@@ -190,7 +178,7 @@ async fn process_candidate<S: ObjectStore + ?Sized>(
         } else {
             report.retained_candidates += 1;
         }
-        return Ok(CandidateOutcome::Decided);
+        return Ok(());
     }
 
     // Preserve the existing mark selection exactly: objects reachable from
@@ -207,7 +195,7 @@ async fn process_candidate<S: ObjectStore + ?Sized>(
         CandidateFamily::UploadSessions => false,
     };
     if !selected {
-        return Ok(CandidateOutcome::Decided);
+        return Ok(());
     }
 
     sweep.refresh_if_due(store, namespace_id, context).await?;
@@ -243,7 +231,7 @@ async fn process_candidate<S: ObjectStore + ?Sized>(
         }
         CandidateFamily::UploadSessions => {}
     }
-    Ok(CandidateOutcome::Decided)
+    Ok(())
 }
 
 async fn process_checkpoint<S: ObjectStore + ?Sized>(
@@ -304,10 +292,10 @@ async fn process_upload_session<S: ObjectStore + ?Sized>(
     references: &mut ContentReferences<'_>,
     budget: &mut PassBudget,
     report: &mut GcResponse,
-) -> Result<CandidateOutcome> {
+) -> Result<()> {
     let Some(upload_id) = upload_id_of(key) else {
         report.retained_candidates += 1;
-        return Ok(CandidateOutcome::Decided);
+        return Ok(());
     };
     match sweep_upload_session(
         store,
@@ -332,9 +320,16 @@ async fn process_upload_session<S: ObjectStore + ?Sized>(
             }
         }
         UploadSessionSweep::Retain => report.retained_candidates += 1,
-        UploadSessionSweep::BudgetExhausted => return Ok(CandidateOutcome::Parked),
+        UploadSessionSweep::ContentReclamationDeferred => {
+            // Retained for the same reason any undecidable session is,
+            // plus a flag, so a caller can tell a pass that swept
+            // everything from one that skipped a question it could not
+            // afford to ask.
+            report.retained_candidates += 1;
+            report.content_reclamation_deferred = true;
+        }
     }
-    Ok(CandidateOutcome::Decided)
+    Ok(())
 }
 
 fn upload_id_of(key: &str) -> Option<UploadId> {

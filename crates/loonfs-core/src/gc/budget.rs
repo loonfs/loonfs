@@ -38,7 +38,8 @@ impl PassBudget {
     }
 
     /// True once nothing further may be charged: the caller stops where it
-    /// stands and returns its cursor.
+    /// stands. The sweep returns its cursor; the content reference scan
+    /// gives up on collecting and the pass defers that reclamation.
     pub(super) fn exhausted(&self) -> bool {
         self.max_objects
             .is_some_and(|max_objects| self.spent >= max_objects)

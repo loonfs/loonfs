@@ -564,9 +564,13 @@ rather than configured (format spec, "Garbage collection", rule 11).
 enumerates: deciding whether a completed session's content is still
 referenced means reading each live manifest and each retained WAL segment,
 and each of those reads spends the same budget. A pass that runs out partway
-through decides nothing about that session and returns its cursor, so a
-budget smaller than the namespace's live manifests plus retained segments
-never finishes the question, however many times it is resumed. Step-driven GC defaults
+through that reading skips completed-content reclamation for the rest of the
+invocation: the session is retained, `content_reclamation_deferred` is set,
+and the sweep goes on through every other candidate under the usual budget.
+Deletion only ever follows a complete collection, so a partial one decides
+nothing. A budget smaller than the namespace's live manifests plus retained
+segments therefore keeps that content rather than reclaiming it — a pass with
+room for the whole scan collects it later. Step-driven GC defaults
 `max_objects` to 1024 and returns any `next_cursor` for a later step rather
 than looping internally. Nothing sweeps unless `gc` is present.
 
@@ -583,9 +587,7 @@ Routes under `/v0/admin/` belong to the `admin/v0` profile and routes under
 `/v0/namespaces/{ns}/query/` to `query/v0`; everything else shown belongs to
 `core/v0`.
 
-GC responses carry `next_cursor` when the pass stopped with work left —
-either more candidates to enumerate, or one candidate whose decision it ran
-out of budget to reach.
+GC responses carry `next_cursor` only when more candidate enumeration remains.
 The token is opaque, tolerant of additive fields when decoded, and valid only
 against the namespace that issued it. It encodes the last examined key and
 object family, not a live set or retention proof: every resumed invocation
