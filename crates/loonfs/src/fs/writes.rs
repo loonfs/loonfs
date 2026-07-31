@@ -12,19 +12,10 @@ use crate::{
 };
 use crate::{ChecksumAlgorithm, CommittedChange, FilesystemChange};
 use crate::{Result, RuntimeError};
-use loonfs_api::{EffectiveLimit, StorageChecksum};
+use loonfs_api::{EffectiveLimit, ErrorCode, StorageChecksum};
 use loonfs_core::NamespaceEngine;
 use std::num::NonZeroU32;
 use std::sync::Arc;
-
-/// Change-feed sequences one lookup window covers when resolving a reused
-/// commit id.
-const COMMIT_LOOKUP_WINDOW: NonZeroU32 = NonZeroU32::new(128).expect("non-zero window");
-
-/// Windows one lookup walks back from the feed's head before giving up. A
-/// commit being retried is a recent one; past this the answer is "not
-/// found", never a guess.
-const COMMIT_LOOKUP_MAX_WINDOWS: usize = 8;
 
 /// What a retry can still say about the payload it just staged.
 ///
@@ -67,6 +58,21 @@ impl StagedPayload<'_> {
                 Some(observed? == expected.value)
             }
         }
+    }
+}
+
+/// Where a reuse conflict says the commit id already landed.
+///
+/// The publisher decides the conflict against a durable receipt, and the
+/// receipt holds the sequence, so the error carries it. It is absent only
+/// when nothing has committed under the id yet — two conflicting requests
+/// claiming it at once — and then there is nothing to read back.
+fn reported_committed_seq(error: &RuntimeError) -> Option<ChangeSeq> {
+    match error {
+        RuntimeError::Core(CoreError::CommitIdReuseConflict { committed_seq, .. }) => {
+            *committed_seq
+        }
+        _ => None,
     }
 }
 
@@ -222,9 +228,7 @@ impl FsWriter {
         staged: StagedPayload<'_>,
     ) -> Result<CommitResponse> {
         match (published, commit_id) {
-            (Err(error), Some(commit_id))
-                if error.code() == loonfs_core::ErrorCode::CommitIdReuseConflict =>
-            {
+            (Err(error), Some(commit_id)) if error.code() == ErrorCode::CommitIdReuseConflict => {
                 self.reconcile_commit_id_reuse(namespace_id, &commit_id, staged, error)
                     .await
             }
@@ -234,10 +238,11 @@ impl FsWriter {
 
     /// Decides whether a reused commit id already did this exact work.
     ///
-    /// The evidence is the committed content itself, found in the change
-    /// feed by commit id and compared against the bytes just staged.
-    /// Nothing weaker counts: a comparison this build cannot make is
-    /// reported as a conflict that names why, never as agreement.
+    /// The evidence is the committed content itself, read from the change
+    /// feed at the sequence the conflict reported and compared against the
+    /// bytes just staged. Nothing weaker counts: a comparison this build
+    /// cannot make is reported as a conflict that names why, never as
+    /// agreement.
     async fn reconcile_commit_id_reuse(
         &self,
         namespace_id: &NamespaceId,
@@ -245,7 +250,13 @@ impl FsWriter {
         staged: StagedPayload<'_>,
         conflict: RuntimeError,
     ) -> Result<CommitResponse> {
-        let Some(committed) = self.find_committed_change(namespace_id, commit_id).await? else {
+        let Some(committed_seq) = reported_committed_seq(&conflict) else {
+            return Err(conflict);
+        };
+        let Some(committed) = self
+            .read_committed_change(namespace_id, commit_id, committed_seq)
+            .await?
+        else {
             return Err(conflict);
         };
         let Some(content_ref) = committed_content_ref(&committed) else {
@@ -281,41 +292,36 @@ impl FsWriter {
         }
     }
 
-    /// Finds one committed change by its commit id.
+    /// Reads the one change a reuse conflict said the commit id landed at.
     ///
-    /// There is no by-commit-id read, so this walks the change feed
-    /// backwards from its head in bounded windows. Backwards because a
-    /// commit being retried is a recent one, and bounded because a feed is
-    /// unbounded: past the budget this reports "not found", which the
-    /// caller turns into the conflict rather than into a guess.
-    async fn find_committed_change(
+    /// There is no by-commit-id read, but the conflict already named the
+    /// sequence, so this is one feed page positioned on it rather than a
+    /// search. `None` means the evidence is not there to compare — the
+    /// sequence has fallen below the retention floor, or the row at it
+    /// belongs to some other commit — and the caller turns that into the
+    /// conflict rather than into a guess.
+    async fn read_committed_change(
         &self,
         namespace_id: &NamespaceId,
         commit_id: &CommitId,
+        committed_seq: ChangeSeq,
     ) -> Result<Option<CommittedChange>> {
-        let engine = self.engine(namespace_id);
-        let window = EffectiveLimit::new(COMMIT_LOOKUP_WINDOW);
-        let head = engine
-            .list_changes_after(ChangeSeq(0), EffectiveLimit::new(NonZeroU32::MIN))
-            .await?
-            .through_seq;
-        let mut upper = head.0;
-        for _ in 0..COMMIT_LOOKUP_MAX_WINDOWS {
-            let lower = upper.saturating_sub(u64::from(COMMIT_LOOKUP_WINDOW.get()));
-            let page = engine.list_changes_after(ChangeSeq(lower), window).await?;
-            if let Some(found) = page
-                .changes
-                .into_iter()
-                .find(|change| &change.commit_id == commit_id)
-            {
-                return Ok(Some(found));
-            }
-            if lower == 0 {
-                break;
-            }
-            upper = lower;
-        }
-        Ok(None)
+        let after_seq = ChangeSeq(committed_seq.0.saturating_sub(1));
+        let page = match self
+            .engine(namespace_id)
+            .list_changes_after(after_seq, EffectiveLimit::new(NonZeroU32::MIN))
+            .await
+        {
+            Ok(page) => page,
+            // Retention gave up the replay promise below the floor: the
+            // commit landed, but what it wrote can no longer be read back.
+            Err(error) if error.code() == ErrorCode::RebootstrapRequired => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        Ok(page
+            .changes
+            .into_iter()
+            .find(|change| change.seq == committed_seq && &change.commit_id == commit_id))
     }
 
     /// Stages file bytes as durable content for later publication.

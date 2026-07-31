@@ -546,9 +546,11 @@ async fn publisher_duplicate_active_request_joins_while_conflict_fails() {
         &namespace_id,
         create_directory_request("active", "different-active"),
     );
+    // Both claims are still in flight, so there is no landed sequence.
     assert!(matches!(
         conflict,
-        Err(CoreError::CommitIdReuseConflict(commit_id)) if commit_id == "active"
+        Err(CoreError::CommitIdReuseConflict { commit_id, committed_seq: None })
+            if commit_id == "active"
     ));
 
     store.release();
@@ -598,7 +600,8 @@ async fn publisher_pending_batch_full_rejects_distinct_but_allows_duplicate() {
     );
     assert!(matches!(
         conflict,
-        Err(CoreError::CommitIdReuseConflict(commit_id)) if commit_id == "pending-0"
+        Err(CoreError::CommitIdReuseConflict { commit_id, committed_seq: None })
+            if commit_id == "pending-0"
     ));
 
     let overflow = try_admit_commit(

@@ -59,15 +59,6 @@ const DIRECT_MULTIPART_PARTS_IN_FLIGHT: usize = 4;
 /// its signature.
 const DIRECT_MULTIPART_PART_ATTEMPTS: usize = 3;
 
-/// Change-feed sequences one lookup window covers when resolving a reused
-/// commit id.
-const COMMIT_LOOKUP_WINDOW: u64 = 128;
-
-/// Windows one lookup walks back from the feed's head before giving up. A
-/// commit being retried is a recent one; past this the answer is "not
-/// found", never a guess.
-const COMMIT_LOOKUP_MAX_WINDOWS: usize = 8;
-
 /// What a retry can still say about the payload it just uploaded.
 ///
 /// A buffered put can answer any question about its bytes by hashing them
@@ -117,6 +108,19 @@ fn digest_of(content_ref: &ContentRef, algorithm: ChecksumAlgorithm) -> Option<&
     }
     match algorithm {
         ChecksumAlgorithm::Sha256 => content_ref.whole_file_sha256.as_deref(),
+        _ => None,
+    }
+}
+
+/// Where a reuse conflict says the commit id already landed.
+///
+/// The server decides the conflict against a durable receipt, and the
+/// receipt holds the sequence, so the error body carries it. It is absent
+/// only when nothing has committed under the id yet — two conflicting
+/// requests claiming it at once — and then there is nothing to read back.
+fn reported_committed_seq(error: &ClientError) -> Option<ChangeSeq> {
+    match error {
+        ClientError::Api { details, .. } => details.as_ref()?.committed_seq,
         _ => None,
     }
 }
@@ -1341,9 +1345,10 @@ impl Client {
     /// Decides whether a reused commit id already did this exact work.
     ///
     /// The evidence is the committed content itself, read back from the
-    /// change feed by commit id, and compared against the bytes that were
-    /// just uploaded. Nothing weaker counts: a comparison this build cannot
-    /// make is reported as a conflict that names why, never as agreement.
+    /// change feed at the sequence the conflict reported, and compared
+    /// against the bytes that were just uploaded. Nothing weaker counts: a
+    /// comparison this build cannot make is reported as a conflict that
+    /// names why, never as agreement.
     async fn reconcile_commit_id_reuse(
         &self,
         namespace_id: &NamespaceId,
@@ -1351,7 +1356,13 @@ impl Client {
         uploaded: UploadedContent<'_>,
         conflict: ClientError,
     ) -> Result<ApiCommitResponse> {
-        let Some(committed) = self.find_committed_change(namespace_id, commit_id).await? else {
+        let Some(committed_seq) = reported_committed_seq(&conflict) else {
+            return Err(conflict);
+        };
+        let Some(committed) = self
+            .read_committed_change(namespace_id, commit_id, committed_seq)
+            .await?
+        else {
             return Err(conflict);
         };
         let Some(content_ref) = committed_content_ref(&committed) else {
@@ -1388,45 +1399,34 @@ impl Client {
         }
     }
 
-    /// Finds one committed change by its commit id.
+    /// Reads the one change a reuse conflict said the commit id landed at.
     ///
-    /// There is no by-commit-id read on the wire, so this walks the change
-    /// feed backwards from its head in bounded windows. Backwards because a
-    /// commit being retried is a recent one, and bounded because a feed is
-    /// unbounded: past the budget this reports "not found", which the
-    /// caller turns into the conflict rather than into a guess.
-    async fn find_committed_change(
+    /// There is no by-commit-id read on the wire, but the conflict already
+    /// named the sequence, so this is one feed page positioned on it rather
+    /// than a search. `None` means the evidence is not there to compare —
+    /// the sequence has fallen below the retention floor, or the row at it
+    /// belongs to some other commit — and the caller turns that into the
+    /// conflict rather than into a guess.
+    async fn read_committed_change(
         &self,
         namespace_id: &NamespaceId,
         commit_id: &CommitId,
+        committed_seq: ChangeSeq,
     ) -> Result<Option<CommittedChange>> {
-        let head = self
-            .list_changes(namespace_id, ChangeSeq(0), Some(1))
-            .await?
-            .through_seq;
-        let mut upper = head.0;
-        for _ in 0..COMMIT_LOOKUP_MAX_WINDOWS {
-            let lower = upper.saturating_sub(COMMIT_LOOKUP_WINDOW);
-            let page = self
-                .list_changes(
-                    namespace_id,
-                    ChangeSeq(lower),
-                    Some(COMMIT_LOOKUP_WINDOW as u32),
-                )
-                .await?;
-            if let Some(found) = page
-                .changes
-                .into_iter()
-                .find(|change| &change.commit_id == commit_id)
-            {
-                return Ok(Some(found));
+        let after_seq = ChangeSeq(committed_seq.0.saturating_sub(1));
+        let page = match self.list_changes(namespace_id, after_seq, Some(1)).await {
+            Ok(page) => page,
+            // Retention gave up the replay promise below the floor: the
+            // commit landed, but what it wrote can no longer be read back.
+            Err(error) if error.code() == Some(ErrorCode::RebootstrapRequired) => {
+                return Ok(None);
             }
-            if lower == 0 {
-                break;
-            }
-            upper = lower;
-        }
-        Ok(None)
+            Err(error) => return Err(error),
+        };
+        Ok(page
+            .changes
+            .into_iter()
+            .find(|change| change.seq == committed_seq && &change.commit_id == commit_id))
     }
 
     pub async fn create_directory(

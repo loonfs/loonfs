@@ -205,7 +205,7 @@ The codes that populate it:
 | --- | --- |
 | `writer_fenced` | `fenced_epoch`, `active_writer_epoch`, plus `active_writer` and `active_acquired_at_ms` when the head recorded a writer block. Writer ids are process labels, so two runs on one machine can share one; the acquisition stamp is what tells them apart |
 | `stale_revision` | `inode_id`, `expected_revision`, `actual_revision` (absent when the inode has no current revision) |
-| `commit_id_reuse_conflict` | `commit_id` |
+| `commit_id_reuse_conflict` | `commit_id`, plus `committed_seq` when the conflict was decided against a durable commit receipt — the sequence that `commit_id` already landed at. Absent when nothing has committed under the id yet and two live requests are claiming it at once |
 | `rebootstrap_required` | `after_seq`, `retention_floor_seq` |
 | `not_deleted` | `inode_id`, plus `requested_deletion_seq` and `active_deletion_seq` when a live deletion exists at a different generation |
 | any failed commit | `commit_id` — the idempotency key the request committed under, echoed so failed and uncertain outcomes carry the caller's reconciliation handle (section 5.2) |
@@ -413,7 +413,12 @@ bytes. A client that composes upload and commit must, on
 `commit_id_reuse_conflict`, resolve it as follows before surfacing it:
 
 1. Find what that `commit_id` committed. There is no read keyed by commit
-   id, so this reads the change feed and matches on `commit_id`.
+   id, but the error names where it landed: read the change feed once at
+   `details.committed_seq` — cursor `after_seq = committed_seq - 1`, limit 1
+   — and take the row whose `commit_id` matches. If `details.committed_seq`
+   is absent, or the feed answers `rebootstrap_required` because retention
+   has moved past that sequence, or the row there names some other commit,
+   there is nothing to compare: go straight to rule 4.
 2. Compare the committed content against what was just uploaded: the
    content's `whole_file_sha256` when it has one, and otherwise its
    `storage_checksum`, after checking `size_bytes`.
@@ -429,11 +434,12 @@ bytes. A client that composes upload and commit must, on
 3. Equal content means the logical operation had already succeeded: report
    the commit that landed, with its original `committed_seq`.
 4. Anything else surfaces a failure. Different content is the
-   `commit_id_reuse_conflict` unchanged. Content the client *cannot*
-   compare — a checksum algorithm it does not implement, or a commit it
-   could not locate — is reported as a failure naming why it could not
-   reconcile. **A comparison that cannot be made is never reported as
-   success.**
+   `commit_id_reuse_conflict` unchanged, and so is a commit the client
+   could not locate — an absent `committed_seq`, or a sequence retention no
+   longer answers for. Content the client *cannot* compare — a checksum
+   algorithm it does not implement — is reported as a failure naming why it
+   could not reconcile. **A comparison that cannot be made is never
+   reported as success.**
 
 The duplicate content object the rerun uploaded is then referenced by
 nothing. That is by design: it is a completed upload whose content no
@@ -455,10 +461,11 @@ attempt for namespace create, fork, and delete, upload-session begin, and
 presigned direct PUT.
 
 Commits record a durable receipt binding the `commit_id` to its
-`committed_seq`; replay reads that receipt. Receipts are currently retained
-for the life of the namespace. When receipt retention becomes bounded, this
-contract will state the replay window explicitly, and resubmission after the
-window must fail loudly rather than silently committing again.
+`committed_seq`; replay reads that receipt, and a reuse conflict reports the
+`committed_seq` it read. The replay window is the namespace's retention
+floor: metadata reorganization drops receipts whose `committed_seq` has
+fallen below the floor, so resubmitting from below the window is a new
+logical commit rather than a replay of the original.
 
 ### 5.3 Writer topology and fencing
 

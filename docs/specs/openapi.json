@@ -3277,6 +3277,17 @@
               }
             ]
           },
+          "committed_seq": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ChangeSeq",
+                "description": "Sequence at which that commit id already landed. Present when the\nfailure was decided against a durable commit receipt, which is what\nholds the sequence; absent when nothing has committed under the id\nyet and two live requests are simply claiming it at once."
+              }
+            ]
+          },
           "expected_revision": {
             "oneOf": [
               {

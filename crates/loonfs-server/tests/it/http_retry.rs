@@ -2,7 +2,9 @@
 
 use crate::common::http_split_support::*;
 use crate::common::start_server;
-use loonfs_api::v0::ValidatedContentToken;
+use loonfs_api::v0::{
+    CreateCheckpointRequest, MaintenanceStepKind, MaintenanceStepRequest, ValidatedContentToken,
+};
 use loonfs_api::{AbsolutePath, CommitId, CommitRequest, DestinationBehavior, FilesystemOperation};
 use loonfs_client::{ClientError, CommitOptions, DeleteOptions, NamespacePath, PutFileOptions};
 use loonfs_test_support::ids::namespace_id;
@@ -26,7 +28,7 @@ async fn http_operation_rejects_same_commit_id_with_different_payload() {
         .expect("create namespace");
 
     let commit_id = CommitId::parse("req-phase-2a-conflict").expect("valid commit id");
-    harness
+    let first = harness
         .client
         .put_file_bytes(
             &NamespacePath::parse("demo", "/first.txt").expect("first target"),
@@ -62,9 +64,12 @@ async fn http_operation_rejects_same_commit_id_with_different_payload() {
             assert_eq!(code, "commit_id_reuse_conflict");
             // The error carries the caller's reconciliation identity as
             // structured fields, not prose (API spec, "Standard error
-            // contract").
+            // contract"). The server decided this against the durable
+            // receipt, so it reports where the id landed too — the one read
+            // a retry needs, instead of a search of the feed.
             let details = details.expect("structured details");
             assert_eq!(details.commit_id, Some(commit_id));
+            assert_eq!(details.committed_seq, Some(first.committed_seq));
             let request_id = request_id.expect("request id");
             assert!(request_id.starts_with("req_"), "got `{request_id}`");
         }
@@ -188,6 +193,100 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
         }
         other => unreachable!("expected commit_id_reuse_conflict, got {other:?}"),
     }
+
+    harness.server.abort();
+}
+
+/// The client reconciles by reading the feed at the sequence the conflict
+/// reported. Once retention has surrendered incremental replay below that
+/// sequence, the feed cannot answer for it, so there is nothing to compare
+/// and the conflict stands — identical bytes included. A comparison that
+/// cannot be made is never reported as success.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_put_conflict_stands_when_retention_trimmed_the_committed_seq() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loonfs-server-trimmed",
+        "http-trimmed",
+    ))
+    .await;
+
+    let namespace = namespace_id("demo");
+    harness
+        .client
+        .create_namespace(&namespace)
+        .await
+        .expect("create namespace");
+    let target = NamespacePath::parse("demo", "/docs/trimmed.txt").expect("target");
+    let commit_id = CommitId::parse("req-trimmed-put").expect("valid commit id");
+    let options = || PutFileOptions {
+        behavior: DestinationBehavior::Replace,
+        commit_id: Some(commit_id.clone()),
+        message: None,
+        expected_revision_no: None,
+    };
+
+    let first = harness
+        .client
+        .put_file_bytes(&target, b"stable bytes\n", &options())
+        .await
+        .expect("first put");
+
+    // Pin the head, then give up incremental replay below it.
+    harness
+        .client
+        .create_checkpoint(
+            &namespace,
+            &CreateCheckpointRequest {
+                name: "trimmed".to_owned(),
+                ttl_ms: None,
+            },
+        )
+        .await
+        .expect("create checkpoint");
+    let advanced = harness
+        .client
+        .maintenance_step(
+            &namespace,
+            &MaintenanceStepRequest {
+                only: Some(MaintenanceStepKind::Retention),
+                ..MaintenanceStepRequest::default()
+            },
+        )
+        .await
+        .expect("advance retention floor");
+    assert!(
+        advanced.retention_floor_seq >= first.committed_seq,
+        "the floor must cover the commit for this to test anything: floor {:?}, commit {:?}",
+        advanced.retention_floor_seq,
+        first.committed_seq
+    );
+
+    match harness
+        .client
+        .put_file_bytes(&target, b"stable bytes\n", &options())
+        .await
+    {
+        Err(ClientError::Api { code, details, .. }) => {
+            assert_eq!(code, "commit_id_reuse_conflict");
+            // The server still knows where the id landed; the feed just
+            // cannot answer for that sequence any more.
+            let details = details.expect("structured details");
+            assert_eq!(details.committed_seq, Some(first.committed_seq));
+        }
+        other => unreachable!("expected commit_id_reuse_conflict, got {other:?}"),
+    }
+
+    let bytes = harness
+        .client
+        .get_file_bytes(&target)
+        .await
+        .expect("read file");
+    assert_eq!(
+        bytes, b"stable bytes\n",
+        "the refused rerun changed nothing"
+    );
 
     harness.server.abort();
 }
