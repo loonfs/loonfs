@@ -46,11 +46,18 @@ fn open_partial_file(destination: &Path) -> std::io::Result<tempfile::NamedTempF
     let mut prefix = std::ffi::OsString::from(".");
     prefix.push(file_name);
     prefix.push(".loonfs-partial-");
-    let parent = destination
+    tempfile::Builder::new()
+        .prefix(&prefix)
+        .tempfile_in(partial_file_parent(destination))
+}
+
+/// The directory a destination's partial file is created in — its own, and
+/// the working directory for a bare file name.
+fn partial_file_parent(destination: &Path) -> &Path {
+    destination
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    tempfile::Builder::new().prefix(&prefix).tempfile_in(parent)
+        .unwrap_or_else(|| Path::new("."))
 }
 
 /// Installs a completed download at its destination with one rename.
@@ -395,7 +402,7 @@ pub(super) async fn stream_download_to_file(
     derived_name: bool,
 ) -> Result<u64, CliError> {
     let mut temp = open_partial_file(destination)
-        .map_err(|error| local_destination_error(destination, error, force, derived_name))?;
+        .map_err(|error| local_open_error(destination, error, force, derived_name))?;
     let mut bytes_written = 0u64;
     while let Some(chunk) = download.next_chunk().await? {
         temp.write_all(&chunk)
@@ -427,6 +434,31 @@ async fn stream_download_to_stdout(download: &mut FileDownload) -> Result<(), Cl
             .map_err(CliError::io)?;
     }
     io::stdout().lock().flush().map_err(CliError::io)
+}
+
+/// Shapes the failure to open a download's partial file.
+///
+/// A missing directory is the one failure whose underlying error is about the
+/// wrong thing: it names the temporary file this CLI picked, whose random
+/// suffix the caller never asked for and cannot act on. The parent they have
+/// to create is what the message says instead.
+fn local_open_error(
+    destination: &Path,
+    error: std::io::Error,
+    force: bool,
+    derived_name: bool,
+) -> CliError {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        return CliError::new(
+            "io_error",
+            format!(
+                "i/o error for `{}`: parent directory `{}` does not exist",
+                destination.display(),
+                partial_file_parent(destination).display()
+            ),
+        );
+    }
+    local_destination_error(destination, error, force, derived_name)
 }
 
 /// Shapes a local write failure the way `get` has always reported one.

@@ -1634,7 +1634,17 @@ fn single_file_get_refuses_a_missing_parent_directory() {
         missing.join("a.txt").to_str().expect("utf-8 path"),
     ]);
     assert_failure(&get);
-    assert_eq!(json_error(&get)["code"], "io_error");
+    let error = json_error(&get);
+    assert_eq!(error["code"], "io_error");
+    let message = error["message"].as_str().expect("error message");
+    assert!(
+        message.contains(missing.to_str().expect("utf-8 path")),
+        "the message names the directory to create, got: {message}"
+    );
+    assert!(
+        !message.contains(".loonfs-partial"),
+        "the message keeps the CLI's own temporary file out of it, got: {message}"
+    );
     assert!(!missing.exists(), "a failed get created no directory");
 }
 
