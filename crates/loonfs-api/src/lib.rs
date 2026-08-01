@@ -96,7 +96,7 @@ pub use capability::{
 };
 pub use content::{
     ChecksumAlgorithm, ContentRef, ContentRefKind, ContentRefValidationError, Crc64Nvme, Sha256,
-    StorageChecksum,
+    StorageChecksum, StreamingChecksum,
 };
 pub use digest::sha256_digest;
 pub use error::{ErrorCode, ErrorKind};

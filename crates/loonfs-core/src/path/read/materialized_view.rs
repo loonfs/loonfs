@@ -21,9 +21,9 @@ use crate::storage::content::read_durable_content_bytes;
 use crate::wal::{load_validated_wal_chain, project_validated_wal_tail, WalChainLoadRequest};
 use loonfs_api::wire::control::{HeadState, NamespaceState};
 use loonfs_api::{
-    AbsolutePath, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq, ContentStoreId,
-    DirectoryPageCursor, DisplayName, FileRevision, FileRevisionsPageCursor, InodeId, InodeKind,
-    NamespaceId, Page, PageRequest, RevisionNo, TrashEntry, TrashPageCursor,
+    AbsolutePath, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq, ContentRef,
+    ContentStoreId, DirectoryPageCursor, DisplayName, FileRevision, FileRevisionsPageCursor,
+    InodeId, InodeKind, NamespaceId, Page, PageRequest, RevisionNo, TrashEntry, TrashPageCursor,
 };
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
@@ -239,6 +239,23 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
         absolute_path: &str,
         max_content_bytes: Option<u64>,
     ) -> Result<AuthoritativeFileBytes> {
+        let (entry, content_ref) = self.resolve_file_content(absolute_path).await?;
+        ensure_within_read_limit(content_ref.size_bytes, max_content_bytes)?;
+        let read = read_durable_content_bytes(store, &self.content_store_id, &content_ref).await?;
+        Ok(AuthoritativeFileBytes {
+            entry,
+            bytes: read.bytes,
+        })
+    }
+
+    /// Resolves a path to the file it names and the content reference its
+    /// current revision points at: the metadata half both the buffered read
+    /// and the streaming one run, so neither can resolve a path the other
+    /// would refuse.
+    pub(crate) async fn resolve_file_content(
+        &self,
+        absolute_path: &str,
+    ) -> Result<(AuthoritativePathEntry, ContentRef)> {
         let entry = self.resolve_path(absolute_path).await?;
         if entry.inode_kind != InodeKind::File {
             return Err(CoreError::ExpectedFile {
@@ -250,12 +267,12 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
             .content_ref
             .clone()
             .ok_or_else(|| CoreError::PathNotFound(absolute_path.to_owned()))?;
-        ensure_within_read_limit(content_ref.size_bytes, max_content_bytes)?;
-        let read = read_durable_content_bytes(store, &self.content_store_id, &content_ref).await?;
-        Ok(AuthoritativeFileBytes {
-            entry,
-            bytes: read.bytes,
-        })
+        Ok((entry, content_ref))
+    }
+
+    /// The content store this view's namespace is bound to.
+    pub(crate) fn content_store_id(&self) -> &ContentStoreId {
+        &self.content_store_id
     }
 
     pub(crate) async fn list_file_revisions_page(

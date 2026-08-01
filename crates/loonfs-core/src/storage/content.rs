@@ -7,12 +7,13 @@ use crate::storage::content_admission::{ContentAdmission, PreparedContent};
 use bytes::Bytes;
 use futures::StreamExt;
 use loonfs_api::{
-    ChecksumAlgorithm, ContentId, ContentRef, ContentRefValidationError, ContentStoreId,
-    NamespaceId, Sha256, StorageChecksum,
+    AuthoritativePathEntry, ChecksumAlgorithm, ContentId, ContentRef, ContentRefValidationError,
+    ContentStoreId, NamespaceId, Sha256, StorageChecksum, StreamingChecksum,
 };
 use loonfs_objectstore::keys::content_blob;
-use loonfs_objectstore::{ByteStream, ObjectStore, ObjectStoreError, PutMode};
+use loonfs_objectstore::{ByteRange, ByteStream, ObjectStore, ObjectStoreError, PutMode};
 use serde::{Deserialize, Serialize};
+use std::num::NonZeroU64;
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
@@ -226,6 +227,212 @@ pub(crate) async fn abort_unpublished_multipart_upload<S: ObjectStore + ?Sized>(
             error = %error,
             "failed to abandon the multipart upload of a terminated upload session"
         );
+    }
+}
+
+/// Bytes one ranged read of a content object fetches, and therefore the most
+/// of that object a streaming read holds at once.
+///
+/// The same 8 MiB the write path moves a large payload in
+/// ([`loonfs_objectstore::PROVIDER_MULTIPART_PART_BYTES`]): one transfer unit
+/// for both directions, large enough that per-request overhead disappears
+/// against the payload on a large object, small enough that a read's memory
+/// is a fixed few megabytes whatever the object's size.
+pub const CONTENT_READ_CHUNK_BYTES: u64 = 8 * 1024 * 1024;
+
+/// One file's current content, read as fixed-size ranged chunks.
+///
+/// This is the streaming twin of the buffered content read, for a reader that
+/// must not hold what it reads: chunks are fetched one range at a time and
+/// the verifying digest is folded as they go, so a 50 GiB object costs one
+/// chunk of memory rather than 50 GiB. It verifies exactly what the buffered
+/// read verifies — the declared size, and the reference's trusted whole-file
+/// SHA-256 when it has one, otherwise its own storage checksum, which for a
+/// provider-assembled object is the only full-object evidence there is. A
+/// reference whose checksum this build cannot recompute is refused when the
+/// stream is opened, before any byte is fetched, rather than after.
+///
+/// The object is immutable and named by a random content id, so nothing can
+/// rewrite it under a reader: chunk *n* and chunk *n+1* are always from the
+/// same object, and no revalidation between them is needed or done.
+///
+/// Verification lands on the final [`Self::next_chunk`] call — the one that
+/// reports the end of the content. A caller that stops early stops with
+/// unverified bytes, which is what streaming means and why the buffered read
+/// stays for callers that want the whole answer or none of it.
+pub struct FileContentStream<S> {
+    store: S,
+    entry: AuthoritativePathEntry,
+    object_key: String,
+    content_ref: ContentRef,
+    chunk_bytes: NonZeroU64,
+    /// Offset the next ranged read starts at; also how much has been read.
+    next_offset: u64,
+    /// The checksum the complete object must produce, folded so far.
+    digest: StreamingChecksum,
+    /// The value `digest` is closed against.
+    expected: StorageChecksum,
+    /// The verdict on the complete object, once there is one. Kept because a
+    /// digest can only be closed once: without it, asking again after the end
+    /// would fold a second, empty digest and report a mismatch that is not
+    /// one.
+    completion: Option<Result<(), DurableContentValidationError>>,
+}
+
+impl<S: ObjectStore> FileContentStream<S> {
+    /// Opens a streaming read of the object `content_ref` names.
+    ///
+    /// One `HeadObject` proves the object exists and is exactly as long as
+    /// the reference claims before any payload moves, which is what lets a
+    /// wrong-sized object fail without a partial answer having been handed
+    /// out. The reference's checksum algorithm is resolved here for the same
+    /// reason.
+    pub(crate) async fn open(
+        store: S,
+        content_store_id: &ContentStoreId,
+        entry: AuthoritativePathEntry,
+        content_ref: ContentRef,
+        chunk_bytes: NonZeroU64,
+    ) -> Result<Self, DurableContentValidationError> {
+        let object_key = content_object_key_for_ref(content_store_id, &content_ref)?;
+        validate_content_size(&store, &object_key, &content_ref).await?;
+        let expected = verifiable_checksum(&content_ref);
+        let digest = StreamingChecksum::for_algorithm(expected.algorithm).ok_or({
+            DurableContentValidationError::ContentChecksumUnverifiable {
+                object_key: object_key.clone(),
+                algorithm: content_ref.storage_checksum.algorithm,
+            }
+        })?;
+        Ok(Self {
+            store,
+            entry,
+            object_key,
+            content_ref,
+            chunk_bytes,
+            next_offset: 0,
+            digest,
+            expected,
+            completion: None,
+        })
+    }
+
+    /// The authoritative metadata entry the path resolved to.
+    pub fn entry(&self) -> &AuthoritativePathEntry {
+        &self.entry
+    }
+
+    /// Complete length of the content this stream reads.
+    pub fn size_bytes(&self) -> u64 {
+        self.content_ref.size_bytes
+    }
+
+    /// Fetches the next chunk, or reports the end of a verified read.
+    ///
+    /// `Ok(None)` is returned only after the folded digest and the byte count
+    /// agree with the reference; a mismatch fails this call instead. Chunks
+    /// arrive in order, and every one but the last is exactly the chunk size
+    /// this stream was opened with.
+    ///
+    /// This is the method callers outside this crate hold, so it speaks the
+    /// crate's error type: a content object that disagrees with its reference
+    /// is namespace corruption, and it is classified as such here rather than
+    /// at every call site.
+    pub async fn next_chunk(&mut self) -> Result<Option<Bytes>, CoreError> {
+        Ok(self.next_verified_chunk().await?)
+    }
+
+    async fn next_verified_chunk(
+        &mut self,
+    ) -> Result<Option<Bytes>, DurableContentValidationError> {
+        if self.next_offset == self.content_ref.size_bytes {
+            return self.completion().map(|()| None);
+        }
+        let end_exclusive = self
+            .next_offset
+            .saturating_add(self.chunk_bytes.get())
+            .min(self.content_ref.size_bytes);
+        let bytes = match self
+            .store
+            .get(
+                &self.object_key,
+                Some(ByteRange {
+                    start_inclusive: self.next_offset,
+                    end_exclusive,
+                }),
+            )
+            .await
+        {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => {
+                return Err(DurableContentValidationError::MissingContentObject {
+                    object_key: self.object_key.clone(),
+                })
+            }
+            Err(err) => {
+                return Err(DurableContentValidationError::Store {
+                    object_key: self.object_key.clone(),
+                    message: err.message(),
+                })
+            }
+        };
+        // A range ending past the object is truncated, so a short answer is
+        // an object that ended earlier than its reference says it does.
+        if bytes.len() as u64 != end_exclusive - self.next_offset {
+            return Err(DurableContentValidationError::ContentLengthMismatch {
+                object_key: self.object_key.clone(),
+                expected: self.content_ref.size_bytes,
+                actual: self.next_offset + bytes.len() as u64,
+            });
+        }
+        self.digest.update(&bytes);
+        self.next_offset += bytes.len() as u64;
+        Ok(Some(bytes))
+    }
+
+    /// The verdict on the complete object: computed the first time the end is
+    /// reached, and repeated on every later ask.
+    ///
+    /// The byte count needs no check of its own here. Every chunk is required
+    /// to arrive exactly as long as it was asked for, and no chunk is asked
+    /// for past the declared size, so reaching this point *is* having read
+    /// exactly `size_bytes` — checked against the object's own length by the
+    /// head request [`Self::open`] made.
+    fn completion(&mut self) -> Result<(), DurableContentValidationError> {
+        let verdict = match self.completion.take() {
+            Some(verdict) => verdict,
+            None => self.verify_complete(),
+        };
+        self.completion = Some(verdict.clone());
+        verdict
+    }
+
+    /// Closes the digest over everything read and holds it to the reference.
+    fn verify_complete(&mut self) -> Result<(), DurableContentValidationError> {
+        // Closing consumes the digest, which is why this runs exactly once.
+        let digest = std::mem::replace(
+            &mut self.digest,
+            StreamingChecksum::for_algorithm(self.expected.algorithm)
+                .expect("an algorithm this stream already folded stays recomputable"),
+        );
+        let actual = digest.finish();
+        if actual != self.expected {
+            return Err(DurableContentValidationError::ContentChecksumMismatch {
+                object_key: self.object_key.clone(),
+                expected: describe_checksum(&self.expected),
+                actual: describe_checksum(&actual),
+            });
+        }
+        Ok(())
+    }
+}
+
+impl<S> std::fmt::Debug for FileContentStream<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FileContentStream")
+            .field("object_key", &self.object_key)
+            .field("size_bytes", &self.content_ref.size_bytes)
+            .field("next_offset", &self.next_offset)
+            .finish_non_exhaustive()
     }
 }
 
@@ -574,12 +781,13 @@ async fn load_required_object<S: ObjectStore + ?Sized>(
 mod tests {
     use super::{
         read_durable_content_bytes, store_bytes_as_content_with_store_id,
-        validate_durable_content_reference, verify_durable_content_checksum,
-        DurableContentValidationError,
+        validate_durable_content_reference, verify_durable_content_checksum, CoreError,
+        DurableContentValidationError, FileContentStream, NonZeroU64,
     };
     use bytes::Bytes;
     use loonfs_api::{
-        ChecksumAlgorithm, ContentId, ContentRef, ContentRefKind, ContentStoreId, StorageChecksum,
+        AuthoritativePathEntry, ChecksumAlgorithm, ContentId, ContentRef, ContentRefKind,
+        ContentStoreId, StorageChecksum,
     };
     use loonfs_objectstore::keys::content_blob;
     use loonfs_objectstore::local_fs_store::LocalFsStore;
@@ -849,6 +1057,239 @@ mod tests {
                 Bytes::from_static(b"identical payload")
             );
         }
+    }
+
+    /// Chunk size the streaming tests read in, small enough that a
+    /// many-chunk object is a few kilobytes rather than tens of megabytes.
+    const TEST_CHUNK_BYTES: u64 = 1024;
+
+    fn test_chunk_bytes() -> NonZeroU64 {
+        NonZeroU64::new(TEST_CHUNK_BYTES).expect("non-zero test chunk size")
+    }
+
+    fn payload(len: usize) -> Vec<u8> {
+        (0..len).map(|offset| (offset % 251) as u8).collect()
+    }
+
+    fn test_entry() -> AuthoritativePathEntry {
+        AuthoritativePathEntry {
+            namespace_id: loonfs_api::NamespaceId::parse("demo").expect("namespace id"),
+            absolute_path: loonfs_api::AbsolutePath::parse("/file.bin").expect("absolute path"),
+            inode_id: loonfs_api::InodeId(1),
+            inode_kind: loonfs_api::InodeKind::File,
+            head_seq: loonfs_api::ChangeSeq(1),
+            parent_inode_id: None,
+            display_name: None,
+            revision_no: None,
+            size_bytes: None,
+            content_ref: None,
+            committed_at_ms: None,
+        }
+    }
+
+    async fn open_stream<S: ObjectStore>(
+        store: S,
+        content_store_id: &ContentStoreId,
+        content_ref: &ContentRef,
+    ) -> Result<FileContentStream<S>, DurableContentValidationError> {
+        FileContentStream::open(
+            store,
+            content_store_id,
+            test_entry(),
+            content_ref.clone(),
+            test_chunk_bytes(),
+        )
+        .await
+    }
+
+    /// A streamed read hands back the object in chunks of the size it was
+    /// opened with, in order, and ends only after verifying the whole thing.
+    #[tokio::test]
+    async fn a_streamed_read_returns_the_object_one_chunk_at_a_time() {
+        let (_temp_dir, store, content_store_id) = test_store();
+        let bytes = payload(3 * TEST_CHUNK_BYTES as usize + 7);
+        let content_ref = content_ref(&bytes);
+        put_content_object(&store, &content_store_id, &content_ref, &bytes).await;
+
+        let mut stream = open_stream(&store, &content_store_id, &content_ref)
+            .await
+            .expect("open stream");
+        let mut chunks = Vec::new();
+        while let Some(chunk) = stream.next_chunk().await.expect("chunk") {
+            chunks.push(chunk);
+        }
+
+        assert_eq!(chunks.len(), 4, "three full chunks and the remainder");
+        for chunk in &chunks[..3] {
+            assert_eq!(chunk.len() as u64, TEST_CHUNK_BYTES);
+        }
+        assert_eq!(chunks[3].len(), 7);
+        assert_eq!(chunks.concat(), bytes, "the object arrives byte-identical");
+    }
+
+    /// The end is an answer, not an event: a caller that asks again after it
+    /// gets the same verdict rather than a digest closed a second time over
+    /// nothing.
+    #[tokio::test]
+    async fn a_finished_stream_repeats_its_verdict() {
+        let (_temp_dir, store, content_store_id) = test_store();
+        let bytes = payload(TEST_CHUNK_BYTES as usize + 3);
+        let content_ref = content_ref(&bytes);
+        put_content_object(&store, &content_store_id, &content_ref, &bytes).await;
+
+        let mut stream = open_stream(&store, &content_store_id, &content_ref)
+            .await
+            .expect("open stream");
+        while stream.next_chunk().await.expect("chunk").is_some() {}
+        assert!(stream.next_chunk().await.expect("verified end").is_none());
+        assert!(stream.next_chunk().await.expect("verified end").is_none());
+    }
+
+    /// An empty file has nothing to fetch and still verifies: the digest of
+    /// no bytes is the digest its reference carries.
+    #[tokio::test]
+    async fn a_streamed_read_of_an_empty_object_verifies_without_fetching() {
+        let (_temp_dir, inner, content_store_id) = test_store();
+        let store = CountingStore::new(inner, KeyPredicate::content_blob());
+        let content_ref = content_ref(b"");
+        put_content_object(&store, &content_store_id, &content_ref, b"").await;
+
+        store.reset();
+        let mut stream = open_stream(&store, &content_store_id, &content_ref)
+            .await
+            .expect("open stream");
+        assert!(stream.next_chunk().await.expect("verified end").is_none());
+        assert_eq!(
+            store.count(OperationClass::Read),
+            0,
+            "an empty object needs no ranged read"
+        );
+    }
+
+    /// A reference whose only evidence is a checksum this build cannot
+    /// recompute is refused before any byte moves, not after — a streamed
+    /// read that discovered this at the end would already have handed
+    /// unverifiable bytes to its caller.
+    #[tokio::test]
+    async fn a_streamed_read_refuses_a_reference_it_cannot_verify_before_reading() {
+        let (_temp_dir, inner, content_store_id) = test_store();
+        let store = CountingStore::new(inner, KeyPredicate::content_blob());
+        let bytes = b"crc only";
+        let mut content_ref = content_ref(bytes);
+        content_ref.whole_file_sha256 = None;
+        content_ref.storage_checksum = StorageChecksum {
+            algorithm: ChecksumAlgorithm::Crc32c,
+            value: "00000000".to_owned(),
+        };
+        put_content_object(&store, &content_store_id, &content_ref, bytes).await;
+
+        store.reset();
+        let err = open_stream(&store, &content_store_id, &content_ref)
+            .await
+            .expect_err("unverifiable checksum");
+        assert!(matches!(
+            err,
+            DurableContentValidationError::ContentChecksumUnverifiable { .. }
+        ));
+        assert_eq!(store.count(OperationClass::Read), 0);
+    }
+
+    /// The same evidence the buffered read holds bytes to, folded chunk by
+    /// chunk: a provider-assembled object carries only a CRC, and a streamed
+    /// read verifies it rather than waving it through.
+    #[tokio::test]
+    async fn a_streamed_read_verifies_a_reference_whose_only_evidence_is_a_crc64nvme() {
+        let (_temp_dir, store, content_store_id) = test_store();
+        let bytes = payload(2 * TEST_CHUNK_BYTES as usize);
+        let content_ref = ContentRef {
+            kind: ContentRefKind::BlobV1,
+            content_id: ContentId::generate(),
+            size_bytes: bytes.len() as u64,
+            storage_checksum: StorageChecksum::crc64nvme(&bytes),
+            whole_file_sha256: None,
+        };
+        put_content_object(&store, &content_store_id, &content_ref, &bytes).await;
+
+        let mut stream = open_stream(&store, &content_store_id, &content_ref)
+            .await
+            .expect("open stream");
+        let mut read = Vec::new();
+        while let Some(chunk) = stream.next_chunk().await.expect("chunk") {
+            read.extend_from_slice(&chunk);
+        }
+        assert_eq!(read, bytes);
+    }
+
+    /// Bytes that disagree with the reference fail the read at the call that
+    /// reports the end, after the chunks have been handed out. That is what
+    /// streaming costs, and why a caller that installs a file installs it
+    /// only once this call has returned.
+    #[tokio::test]
+    async fn a_streamed_read_rejects_an_object_that_does_not_match_its_reference() {
+        let (_temp_dir, store, content_store_id) = test_store();
+        let bytes = payload(2 * TEST_CHUNK_BYTES as usize);
+        let expected = content_ref(&bytes);
+        // Same id and same length, different bytes: only the digest can tell.
+        let mut planted = bytes.clone();
+        planted[0] ^= 0xff;
+        let planted_ref = ContentRef::blob_v1(expected.content_id.clone(), &planted);
+        put_content_object(&store, &content_store_id, &planted_ref, &planted).await;
+
+        let mut stream = open_stream(&store, &content_store_id, &expected)
+            .await
+            .expect("open stream");
+        let mut chunks = 0;
+        let err = loop {
+            match stream.next_chunk().await {
+                Ok(Some(_)) => chunks += 1,
+                Ok(None) => break None,
+                Err(err) => break Some(err),
+            }
+        }
+        .expect("a mismatched object must not report a verified end");
+        assert_eq!(chunks, 2, "the mismatch is reported after the last chunk");
+        assert!(matches!(
+            err,
+            CoreError::DurableContent(
+                DurableContentValidationError::ContentChecksumMismatch { .. }
+            )
+        ));
+    }
+
+    /// An object that is not there fails when the stream is opened, so a
+    /// caller learns it before it has written anything anywhere.
+    #[tokio::test]
+    async fn a_streamed_read_reports_a_missing_object_when_it_opens() {
+        let (_temp_dir, store, content_store_id) = test_store();
+        let content_ref = content_ref(b"never stored");
+
+        let err = open_stream(&store, &content_store_id, &content_ref)
+            .await
+            .expect_err("missing object");
+        assert!(matches!(
+            err,
+            DurableContentValidationError::MissingContentObject { .. }
+        ));
+    }
+
+    /// An object longer or shorter than its reference claims is caught
+    /// before any of it is handed out, by the same size check the buffered
+    /// read makes over the bytes it downloaded.
+    #[tokio::test]
+    async fn a_streamed_read_rejects_an_object_of_the_wrong_length() {
+        let (_temp_dir, store, content_store_id) = test_store();
+        let bytes = payload(TEST_CHUNK_BYTES as usize + 1);
+        let mut content_ref = content_ref(&bytes);
+        put_content_object(&store, &content_store_id, &content_ref, &bytes).await;
+        content_ref.size_bytes += 1;
+
+        let err = open_stream(&store, &content_store_id, &content_ref)
+            .await
+            .expect_err("length mismatch");
+        assert!(matches!(
+            err,
+            DurableContentValidationError::ContentLengthMismatch { .. }
+        ));
     }
 
     fn test_store() -> (tempfile::TempDir, LocalFsStore, ContentStoreId) {

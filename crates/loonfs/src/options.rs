@@ -16,6 +16,7 @@ use loonfs_api::v0::{
     CreateCheckpointRequest, GcRequest, MaintenanceStepKind, MaintenanceStepRequest,
 };
 use loonfs_core::publish::WalTailPolicy;
+use std::num::NonZeroU64;
 
 pub use loonfs_api::options::{
     CopyOptions, CreateDirectoryOptions, DeleteOptions, MoveOptions, PutFileOptions,
@@ -121,6 +122,28 @@ pub struct CreateNamespaceOptions {
 pub struct ListChangesOptions {
     /// Page limit; `None` resolves the default pagination policy.
     pub limit: Option<EffectiveLimit>,
+}
+
+/// Options for a streaming file read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReadFileStreamOptions {
+    /// Bytes one ranged read fetches, which is the most of the file the read
+    /// holds at once. Defaults to
+    /// [`CONTENT_READ_CHUNK_BYTES`](loonfs_core::CONTENT_READ_CHUNK_BYTES);
+    /// a caller with a tighter memory budget than that says so here, the way
+    /// a caller of [`FsReader::read_content_ref`](crate::FsReader::read_content_ref)
+    /// declares its own. Non-zero by type, so there is no chunk size that
+    /// makes no progress.
+    pub chunk_bytes: NonZeroU64,
+}
+
+impl Default for ReadFileStreamOptions {
+    fn default() -> Self {
+        Self {
+            chunk_bytes: NonZeroU64::new(loonfs_core::CONTENT_READ_CHUNK_BYTES)
+                .expect("the default read chunk size is non-zero"),
+        }
+    }
 }
 
 #[cfg(test)]

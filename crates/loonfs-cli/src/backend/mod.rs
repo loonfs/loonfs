@@ -16,9 +16,10 @@
 
 mod embedded;
 
-use crate::backend_error::BackendError;
+use crate::backend_error::{map_namespace_scoped_runtime_error, BackendError};
 use crate::payload::LocalPayload;
 use crate::resolve::ResolvedTarget;
+use bytes::Bytes;
 use loonfs_api::{
     v0::{
         ChangesResponse, DisableGrepIndexResponse, EnableGrepIndexResponse, GrepGcRequest,
@@ -37,7 +38,9 @@ use loonfs_client::{
 use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
 
 pub(crate) use embedded::EmbeddedBackend;
-use loonfs::{MaintenanceJobId, MaintenanceStepConclusion};
+use loonfs::{
+    FileContentStream, MaintenanceJobId, MaintenanceStepConclusion, RuntimeError, SharedObjectStore,
+};
 
 /// How long a remote wait rests between status checks.
 ///
@@ -65,6 +68,45 @@ impl StepBudget {
             || self
                 .deadline_ms
                 .is_some_and(|deadline_ms| elapsed_ms >= deadline_ms)
+    }
+}
+
+/// One file's content, in the pieces the transport that opened it delivers.
+///
+/// The two arms exist because the transports genuinely differ, not because
+/// the commands above want to know which they got: both are consumed by the
+/// same [`FileDownload::next_chunk`] loop, so a download is written to disk
+/// or to standard output the same way whichever profile served it.
+pub(crate) enum FileDownload {
+    /// The embedded runtime's bounded stream. Boxed because a stream carries
+    /// its object key, reference, and running digest, and the whole arm is a
+    /// pointer beside it.
+    Streamed {
+        namespace_id: NamespaceId,
+        stream: Box<FileContentStream<SharedObjectStore>>,
+    },
+    /// Bytes the transport already holds whole.
+    Whole(Vec<u8>),
+}
+
+impl FileDownload {
+    /// The next piece of the file, or `None` at a verified end.
+    ///
+    /// A streamed download verifies size and digest on the call that reports
+    /// the end, so a caller that drives this to `None` has verified content
+    /// and a caller that stops early does not. Held bytes were verified
+    /// before they were handed over and answer in one piece.
+    pub(crate) async fn next_chunk(&mut self) -> Result<Option<Bytes>, BackendError> {
+        match self {
+            Self::Streamed {
+                namespace_id,
+                stream,
+            } => stream.next_chunk().await.map_err(|error| {
+                map_namespace_scoped_runtime_error(namespace_id, RuntimeError::Core(error))
+            }),
+            Self::Whole(bytes) if bytes.is_empty() => Ok(None),
+            Self::Whole(bytes) => Ok(Some(Bytes::from(std::mem::take(bytes)))),
+        }
     }
 }
 
@@ -255,6 +297,36 @@ impl ResolvedTarget {
         match self {
             Self::Embedded(target) => target.backend.get_file_bytes(spec).await,
             Self::Remote(target) => Ok(target.client.get_file_bytes(spec).await?),
+        }
+    }
+
+    /// Opens a download of one file, in the largest pieces the transport
+    /// hands out and no larger.
+    ///
+    /// An embedded profile reads its own store, so it streams: chunks arrive
+    /// one at a time and the file's size never becomes the command's memory.
+    /// A remote profile's proxied read answers with one response body, so it
+    /// arrives whole — the same bytes through the same loop, held rather than
+    /// streamed. A revision read is whole on both, because there is no
+    /// streaming revision read to call.
+    pub(crate) async fn open_file_download(
+        &self,
+        spec: &NamespacePath,
+        revision_no: Option<RevisionNo>,
+    ) -> Result<FileDownload, BackendError> {
+        if let Some(revision_no) = revision_no {
+            return Ok(FileDownload::Whole(
+                self.get_file_revision_bytes(spec, revision_no).await?,
+            ));
+        }
+        match self {
+            Self::Embedded(target) => Ok(FileDownload::Streamed {
+                namespace_id: spec.namespace().clone(),
+                stream: Box::new(target.backend.read_file_stream(spec).await?),
+            }),
+            Self::Remote(target) => Ok(FileDownload::Whole(
+                target.client.get_file_bytes(spec).await?,
+            )),
         }
     }
 

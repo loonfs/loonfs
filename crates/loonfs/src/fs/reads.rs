@@ -8,8 +8,9 @@ use crate::Result;
 use crate::{
     AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq, ChangesResponse,
     CheckpointFilesPage, CheckpointFilesPageCursor, CheckpointId, ContentRef, CoreError,
-    CurrentFileState, InodeId, ListChangesOptions, ListFileRevisionsResponse,
-    ListPathEntriesResponse, NamespaceId, RevisionNo, RuntimeError,
+    CurrentFileState, FileContentStream, InodeId, ListChangesOptions, ListFileRevisionsResponse,
+    ListPathEntriesResponse, NamespaceId, ReadFileStreamOptions, RevisionNo, RuntimeError,
+    SharedObjectStore,
 };
 use loonfs_api::{
     encode_cursor, AbsolutePath, DirectoryPageCursor, FileRevisionsPageCursor, PageRequest,
@@ -161,6 +162,38 @@ impl FsReader {
             .cache_stats
             .record_latest_metadata_view_read();
         Ok(read)
+    }
+
+    /// Reads a file's current content as bounded chunks instead of one buffer.
+    ///
+    /// This is [`Self::get_file_bytes`] for a caller that should not hold what
+    /// it reads: the content arrives one ranged read at a time with the
+    /// verifying digest folded over it, so a 50 GiB file costs one chunk of
+    /// memory rather than 50 GiB. The verification is the buffered read's,
+    /// unweakened — declared size, plus the reference's trusted whole-file
+    /// SHA-256 when it has one and its storage checksum when that is the only
+    /// full-object evidence there is — and it lands on the final
+    /// [`FileContentStream::next_chunk`] call. A caller that stops early
+    /// stops with unverified bytes; a caller that wants the whole answer or
+    /// none of it uses [`Self::get_file_bytes`].
+    ///
+    /// The deployment's buffered-read cap does not apply here. That cap
+    /// bounds what one call materializes, and this call materializes a chunk.
+    pub async fn read_file_stream(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        options: ReadFileStreamOptions,
+    ) -> Result<FileContentStream<SharedObjectStore>> {
+        let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
+        let stream = engine
+            .read_file_stream(absolute_path, &read_context, options.chunk_bytes)
+            .await?;
+        self.core
+            .inner
+            .cache_stats
+            .record_latest_metadata_view_read();
+        Ok(stream)
     }
 
     /// Reads one page of the files visible in the state a checkpoint pins,

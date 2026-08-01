@@ -73,8 +73,8 @@ pub use loonfs_core::time::current_time_ms;
 pub use loonfs_core::{
     delete_if_aged, BootstrapNamespaceError, CheckpointFile, CheckpointFilesPage,
     CheckpointFilesPageCursor, CurrentFileState, DeleteNamespaceOptions, Error as CoreError,
-    ErrorCode, ErrorKind, GcConfig, MetadataViewError, PassBudget, StoreFailureClass, WriterFence,
-    MAX_RESOLVE_CURRENT_FILES,
+    ErrorCode, ErrorKind, FileContentStream, GcConfig, MetadataViewError, PassBudget,
+    StoreFailureClass, WriterFence, CONTENT_READ_CHUNK_BYTES, MAX_RESOLVE_CURRENT_FILES,
 };
 pub use publisher::PublishObserver;
 
@@ -149,7 +149,7 @@ pub use maintenance_runner::{
 pub use options::{
     gc_config_from_request, CopyOptions, CreateCheckpointOptions, CreateDirectoryOptions,
     CreateNamespaceOptions, DeleteOptions, ListChangesOptions, MaintenanceStepOptions, MoveOptions,
-    PutFileOptions, RestoreRevisionOptions, UndeleteOptions,
+    PutFileOptions, ReadFileStreamOptions, RestoreRevisionOptions, UndeleteOptions,
 };
 pub use trace::{payload_class, TraceMode, TraceStoreKind};
 

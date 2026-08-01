@@ -14,6 +14,7 @@ use crate::path::read::{
     load_metadata_view, CurrentFileState, LoadedMetadataView, ReadLoadContext,
 };
 use crate::protocol::CompletedUpload;
+use crate::storage::content::FileContentStream;
 use crate::storage::content_admission::CompletedUploadReceipt;
 use crate::time::current_time_ms;
 use loonfs_api::v0::{
@@ -31,6 +32,7 @@ use loonfs_api::{
     StorageChecksum, TrashEntry, TrashPageCursor, UploadId,
 };
 use loonfs_objectstore::{ByteStream, ObjectStore};
+use std::num::NonZeroU64;
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -237,6 +239,41 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         let view = self.load_read_view(context).await?;
         view.read_file_bytes(&self.store, path.as_ref(), max_content_bytes)
             .await
+    }
+
+    /// Opens a bounded streaming read of a file's current content against the
+    /// pinned runtime read context.
+    ///
+    /// The path resolves exactly as it does for [`Self::read_file`]; what
+    /// differs is everything after. The content arrives as `chunk_bytes`
+    /// ranged reads with the verifying digest folded over them, so what the
+    /// read costs in memory is one chunk rather than the file's size, and the
+    /// deployment's buffered-read cap deliberately does not apply — that cap
+    /// bounds what a caller materializes, and this caller materializes a
+    /// chunk.
+    ///
+    /// The pinned context resolves the path; it does not have to survive the
+    /// read. The reference names one immutable object at a random id, so no
+    /// commit landing mid-read can change the bytes under a reader.
+    pub async fn read_file_stream(
+        &self,
+        path: impl AsRef<str>,
+        context: &RuntimeReadContext,
+        chunk_bytes: NonZeroU64,
+    ) -> Result<FileContentStream<S>>
+    where
+        S: Clone,
+    {
+        let view = self.load_read_view(context).await?;
+        let (entry, content_ref) = view.resolve_file_content(path.as_ref()).await?;
+        Ok(FileContentStream::open(
+            self.store.clone(),
+            view.content_store_id(),
+            entry,
+            content_ref,
+            chunk_bytes,
+        )
+        .await?)
     }
 
     /// Lists one revision page for a path against the pinned runtime read context.

@@ -20,10 +20,11 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::{self, BoxStream, StreamExt};
 use loonfs_api::{sha256_digest, StorageChecksum};
+use std::io::SeekFrom;
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::fs::{self, File, OpenOptions};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 
 /// Lock file serializing mutations across processes sharing one store root.
@@ -345,6 +346,13 @@ impl LocalFsStore {
         Ok(Some(ObjectBody { metadata, bytes }))
     }
 
+    /// Reads the whole object, or exactly one range of it.
+    ///
+    /// A ranged read seeks to its start and reads only its length, so it
+    /// holds the range and never the object. That is what a caller reading a
+    /// large object in bounded chunks is promised, and a store that
+    /// materialized the whole object to answer each chunk would break the
+    /// promise on this provider alone.
     async fn get_object(&self, key: &str, range: Option<ByteRange>) -> Result<Option<Vec<u8>>> {
         let path = self.resolve_key(key)?;
         let mut file = match File::open(&path).await {
@@ -353,28 +361,36 @@ impl LocalFsStore {
             Err(err) => return Err(io_error(key, err)),
         };
 
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)
+        let Some(range) = range else {
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes)
+                .await
+                .map_err(|err| io_error(key, err))?;
+            return Ok(Some(bytes));
+        };
+
+        let invalid_range = || ObjectStoreError::InvalidRange {
+            object_key: key.to_owned(),
+        };
+        let size_bytes = file
+            .metadata()
+            .await
+            .map_err(|err| io_error(key, err))?
+            .len();
+        if range.end_exclusive < range.start_inclusive || range.start_inclusive > size_bytes {
+            return Err(invalid_range());
+        }
+        // A range ending past the object is truncated, never refused.
+        let end_exclusive = range.end_exclusive.min(size_bytes);
+        file.seek(SeekFrom::Start(range.start_inclusive))
             .await
             .map_err(|err| io_error(key, err))?;
-
-        match range {
-            None => Ok(Some(bytes)),
-            Some(range) => {
-                let invalid_range = || ObjectStoreError::InvalidRange {
-                    object_key: key.to_owned(),
-                };
-                let start = usize::try_from(range.start_inclusive).map_err(|_| invalid_range())?;
-                let mut end = usize::try_from(range.end_exclusive).map_err(|_| invalid_range())?;
-
-                if end < start || start > bytes.len() {
-                    return Err(invalid_range());
-                }
-
-                end = end.min(bytes.len());
-                Ok(Some(bytes[start..end].to_vec()))
-            }
-        }
+        let mut bytes = Vec::new();
+        file.take(end_exclusive - range.start_inclusive)
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(|err| io_error(key, err))?;
+        Ok(Some(bytes))
     }
 
     async fn put_object(&self, key: &str, bytes: &[u8], mode: PutMode) -> Result<ObjectMetadata> {
@@ -756,7 +772,7 @@ mod tests {
     // Tests panic in unexpected match arms for precise diagnostics.
 
     use super::LocalFsStore;
-    use super::{ObjectStore, ObjectStoreError, PutMode};
+    use super::{ByteRange, ObjectStore, ObjectStoreError, PutMode};
     use crate::keys::{upload_session, wal_head};
     use bytes::Bytes;
     use std::fs;
@@ -846,6 +862,63 @@ mod tests {
         assert_eq!(head.etag, second.etag);
         assert_eq!(head.size_bytes, second.size_bytes);
         assert_ne!(first, second);
+    }
+
+    /// The range contract a chunked reader depends on: ranges answer their
+    /// own bytes, an end past the object is truncated rather than refused,
+    /// and a start past the object or a descending range is refused.
+    #[tokio::test]
+    async fn ranged_reads_answer_their_range_and_refuse_impossible_ones() {
+        let temp_dir = TestDir::new("ranged-reads");
+        let store = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
+        let key = wal_head("ns-1");
+        let payload = Bytes::from_static(b"0123456789");
+        store
+            .put(&key, payload.clone(), PutMode::Overwrite)
+            .await
+            .expect("seed object");
+
+        let range = |start_inclusive, end_exclusive| {
+            Some(ByteRange {
+                start_inclusive,
+                end_exclusive,
+            })
+        };
+        assert_eq!(
+            store.get(&key, range(0, 4)).await.expect("leading range"),
+            Some(Bytes::from_static(b"0123"))
+        );
+        assert_eq!(
+            store.get(&key, range(4, 7)).await.expect("middle range"),
+            Some(Bytes::from_static(b"456"))
+        );
+        assert_eq!(
+            store
+                .get(&key, range(7, 99))
+                .await
+                .expect("range past the end is truncated"),
+            Some(Bytes::from_static(b"789"))
+        );
+        assert_eq!(
+            store
+                .get(&key, range(10, 10))
+                .await
+                .expect("a range at the end is empty, not missing"),
+            Some(Bytes::new())
+        );
+        assert!(matches!(
+            store.get(&key, range(11, 12)).await,
+            Err(ObjectStoreError::InvalidRange { .. })
+        ));
+        assert!(matches!(
+            store.get(&key, range(6, 2)).await,
+            Err(ObjectStoreError::InvalidRange { .. })
+        ));
+        assert!(store
+            .get(&wal_head("ns-missing"), range(0, 4))
+            .await
+            .expect("a ranged read of a missing object is absent, not an error")
+            .is_none());
     }
 
     /// Readers race each overwrite rename to exercise replacement visibility across runtime workers.

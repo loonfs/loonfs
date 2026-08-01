@@ -187,3 +187,6 @@ pub use gc::{delete_if_aged, gc_namespace, GcConfig, PassBudget};
 pub use namespace::BootstrapNamespaceError;
 pub use options::{BootstrapOptions, DeleteNamespaceOptions};
 pub use path::read::{CurrentFileState, MAX_RESOLVE_CURRENT_FILES};
+// The streaming read `loonfs`'s reader handle returns, and the chunk size it
+// reads in.
+pub use storage::content::{FileContentStream, CONTENT_READ_CHUNK_BYTES};
