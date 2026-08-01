@@ -5,22 +5,26 @@ use super::output::{CommandData, CommandFailure, CommandOutput};
 use super::profile_config::{build_profile_from_create_spec, create_profile_spec_from_init};
 use crate::args::{CommandKind, ConfigCommand, InitArgs, RuntimeBehavior};
 use crate::config::{
-    default_config_path, load_config_for_repair, load_or_default_config, redacted_config_table,
-    save_config, ConfigLoad, ProfileConfig,
+    load_config_for_repair, load_or_default_config, redacted_config_table, save_config, ConfigLoad,
+    ConfigLocation, ProfileConfig,
 };
 use crate::error::CliError;
 use crate::profiles::add_profile;
 use crate::prompt;
+use std::path::Path;
 
 // --- init ---
 
+/// Writes the resolved config file, whichever way it was named, creating
+/// the directories it needs. Naming a path that holds no file yet is the
+/// way back from a default config this build refuses to read: init only
+/// ever touches the file resolution named.
 pub(crate) fn run_config_init(
     kind: CommandKind,
+    config_path: &Path,
     args: InitArgs,
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
-    let config_path = default_config_path().map_err(|error| fail(kind, None, None, error))?;
-
     let result = (|| -> Result<(String, ProfileConfig), CliError> {
         if config_path.exists() {
             return Err(CliError::config_already_exists(
@@ -35,10 +39,10 @@ pub(crate) fn run_config_init(
         };
         let profile = build_profile_from_create_spec(create_profile_spec_from_init(args), runtime)?;
 
-        let mut config = load_or_default_config(&config_path)?;
+        let mut config = load_or_default_config(config_path)?;
         let (profile_name, redacted) = add_profile(&mut config, &name, profile)?;
         config.default_profile = Some(profile_name.clone());
-        save_config(&config_path, &config)?;
+        save_config(config_path, &config)?;
         Ok((profile_name, redacted))
     })()
     .map_err(|error| fail(kind, None, None, error))?;
@@ -55,20 +59,29 @@ pub(crate) fn run_config_init(
 
 pub(crate) fn run_config_command(
     kind: CommandKind,
+    location: &ConfigLocation,
     command: ConfigCommand,
 ) -> Result<CommandOutput, CommandFailure> {
-    let config_path = default_config_path().map_err(|error| fail(kind, None, None, error))?;
+    let config_path = location.path.as_path();
     match command {
+        // Path never reads the file: the one command that answers "which
+        // config is this build even looking at" has to work while that file
+        // is one the build refuses to read.
         ConfigCommand::Path => Ok(CommandOutput {
             kind,
             profile: None,
             mode: None,
             data: CommandData::ConfigPath {
                 path: config_path.display().to_string(),
+                source: location.source,
+                preferred_path: location
+                    .preferred_path
+                    .as_ref()
+                    .map(|path| path.display().to_string()),
             },
         }),
         ConfigCommand::Show => {
-            let loaded = load_config_for_repair(&config_path)
+            let loaded = load_config_for_repair(config_path)
                 .map_err(|error| fail(kind, None, None, error))?;
             let data = match loaded {
                 ConfigLoad::Valid(config) => CommandData::ConfigShow {

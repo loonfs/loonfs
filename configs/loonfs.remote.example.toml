@@ -1,5 +1,5 @@
 # Example LoonFS CLI configuration for a remote profile that talks to a
-# LoonFS server. The CLI reads this file from ~/.loonfs/config.toml.
+# LoonFS server. `loonfs config path` prints where the CLI reads it from.
 
 config_version = 1
 default_profile = "remote"

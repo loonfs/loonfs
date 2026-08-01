@@ -1,7 +1,7 @@
 //! The typed command results the renderer turns into text or JSON.
 
 use crate::args::CommandKind;
-use crate::config::{CliConfig, ProfileConfig};
+use crate::config::{CliConfig, ConfigSource, ProfileConfig};
 use crate::error::CliError;
 use crate::profiles::ProfileSummary;
 use loonfs_api::v0::{
@@ -176,6 +176,12 @@ pub(crate) enum CommandData {
     },
     ConfigPath {
         path: String,
+        /// Which rule chose the path.
+        source: ConfigSource,
+        /// Where the file belongs now, while a legacy file is in use only
+        /// because the preferred location holds none yet.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        preferred_path: Option<String>,
     },
     ConfigShow {
         config: CliConfig,

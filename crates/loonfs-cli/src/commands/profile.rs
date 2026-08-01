@@ -10,8 +10,8 @@ use crate::args::{
     CommandKind, ProfileCommand, ProfileCreateArgs, ProfileUpdateArgs, RuntimeBehavior,
 };
 use crate::config::{
-    default_config_path, load_config, load_config_for_repair, load_config_if_exists,
-    load_or_default_config, save_config, save_config_table, ConfigLoad, ProfileConfig,
+    load_config, load_config_for_repair, load_config_if_exists, load_or_default_config,
+    save_config, save_config_table, ConfigLoad, ProfileConfig,
 };
 use crate::error::CliError;
 use crate::profiles::{
@@ -25,14 +25,14 @@ use std::path::Path;
 
 pub(crate) fn run_profile_command(
     kind: CommandKind,
+    config_path: &Path,
     command: ProfileCommand,
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
-    let config_path = default_config_path().map_err(|error| fail(kind, None, None, error))?;
     match command {
-        ProfileCommand::Create(args) => run_profile_create(kind, &config_path, args, runtime),
+        ProfileCommand::Create(args) => run_profile_create(kind, config_path, args, runtime),
         ProfileCommand::List => {
-            let config = load_config_if_exists(&config_path)
+            let config = load_config_if_exists(config_path)
                 .map_err(|error| fail(kind, None, None, error))?;
             Ok(CommandOutput {
                 kind,
@@ -46,7 +46,7 @@ pub(crate) fn run_profile_command(
         }
         ProfileCommand::Show { name } => {
             let config =
-                load_config(&config_path).map_err(|error| fail(kind, name.clone(), None, error))?;
+                load_config(config_path).map_err(|error| fail(kind, name.clone(), None, error))?;
             let (profile_name, redacted) = show_profile(&config, name.as_deref())
                 .map_err(|error| fail(kind, name.clone(), None, error))?;
             Ok(CommandOutput {
@@ -56,9 +56,9 @@ pub(crate) fn run_profile_command(
                 data: CommandData::Profile(redacted),
             })
         }
-        ProfileCommand::Update(args) => run_profile_update(kind, &config_path, args, runtime),
-        ProfileCommand::Delete { name } => run_profile_delete(kind, &config_path, &name, runtime),
-        ProfileCommand::Use { name } => run_profile_use(kind, &config_path, &name),
+        ProfileCommand::Update(args) => run_profile_update(kind, config_path, args, runtime),
+        ProfileCommand::Delete { name } => run_profile_delete(kind, config_path, &name, runtime),
+        ProfileCommand::Use { name } => run_profile_use(kind, config_path, &name),
     }
 }
 

@@ -2,6 +2,7 @@
 
 use crate::args::CommandKind;
 use crate::commands::{CommandData, CommandFailure, CommandOutput, MaintenanceKeyReport};
+use crate::config::ConfigSource;
 use crate::error::CliError;
 use loonfs_api::v0::{GrepIndexLifecycle, StoreProbeCheckOutcome, StoreProbeCheckResult};
 use loonfs_api::{GcResponse, NamespaceId, ReorganizeStepOutcome, WalFlushStepOutcome};
@@ -733,7 +734,24 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             }
             _ => format!("{from} -> {to} @ seq {committed_seq} (commit {commit_id})"),
         },
-        CommandData::ConfigPath { path } => path.clone(),
+        CommandData::ConfigPath {
+            path,
+            source,
+            preferred_path,
+        } => {
+            let chosen = match (source, preferred_path) {
+                (ConfigSource::Flag, _) => "from --config".to_owned(),
+                (ConfigSource::Env, _) => "from LOONFS_CONFIG".to_owned(),
+                (ConfigSource::Xdg, _) => "from XDG_CONFIG_HOME".to_owned(),
+                // The migration case: say where the file belongs, since
+                // moving it there is what makes this note go away.
+                (ConfigSource::Legacy, Some(preferred)) => {
+                    format!("legacy location; move it to {preferred} once convenient")
+                }
+                (ConfigSource::Legacy, None) => "default location".to_owned(),
+            };
+            format!("{path} ({chosen})")
+        }
         CommandData::ConfigShow { config } => {
             toml::to_string_pretty(config).unwrap_or_else(|_| "failed to render config".to_owned())
         }

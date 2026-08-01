@@ -11,6 +11,9 @@ Loon CLI Command Reference
 `loonfs` works with profiles, namespaces, and path-based filesystem operations.
 
 Global flags
+  --config <path>
+    Config file to use, ahead of LOONFS_CONFIG and the default location
+
   --json
     Emit JSON instead of human output
 
@@ -52,13 +55,35 @@ Setup and configuration
     fails when the config file already exists
 
   loonfs config path
-    Print the path to the CLI config file
+    Print the config file this invocation uses and which rule chose it
 
   loonfs config show
     Print the config file with secrets redacted
 
   loonfs version
     Print the version, commit, and build date
+
+Config file location
+  One config file per invocation, chosen by the first rule that applies:
+    1. --config <path>
+    2. LOONFS_CONFIG=<path>
+    3. $XDG_CONFIG_HOME/loonfs/config.toml, when XDG_CONFIG_HOME names an
+       absolute directory
+    4. ~/.loonfs/config.toml
+
+  A path given to --config or LOONFS_CONFIG is the file this invocation
+  uses whether or not it is there yet, and `loonfs init` creates the
+  directories it needs. That is the way past a config file this build will
+  not read: an unknown key is an error, so every command that reads the
+  file fails until it is fixed or stepped around, and each of those errors
+  names the file, what in it went wrong, and both ways past it.
+
+  `loonfs config path` reads nothing, so it keeps answering while the file
+  it names is unreadable.
+
+  While XDG_CONFIG_HOME is set but holds no config of its own, an existing
+  ~/.loonfs/config.toml stays in use and `loonfs config path` names the
+  preferred path to move it to.
 
 Profile management
   loonfs profile create <name> [profile-options]

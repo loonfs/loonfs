@@ -9,6 +9,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
+/// A config file with no profiles: enough to load, for the tests that care
+/// about which file was loaded rather than what was in it.
+const MINIMAL_CONFIG: &str = "config_version = 1\n";
+
 #[test]
 fn profile_create_list_show_delete_work() {
     let harness = Harness::new();
@@ -155,6 +159,222 @@ root = "{}"
         !future_message.contains("future_setting"),
         "{future_message}"
     );
+}
+
+/// The resolution chain, first match wins: `--config`, then
+/// `LOONFS_CONFIG`, then `$XDG_CONFIG_HOME/loonfs/config.toml`, then
+/// `~/.loonfs/config.toml`.
+#[test]
+fn config_resolution_prefers_the_flag_then_the_environment_then_xdg_then_legacy() {
+    let harness = Harness::new();
+    harness.write_cli_config(MINIMAL_CONFIG);
+    let legacy_path = harness.config_path.display().to_string();
+
+    let xdg_home = harness.temp_dir.path().join("xdg");
+    let xdg_path = xdg_home.join("loonfs").join("config.toml");
+    let named_path = harness.temp_dir.path().join("named.toml");
+    let flagged_path = harness.temp_dir.path().join("flagged.toml");
+
+    // Without XDG the legacy path is simply the default, with nothing to
+    // migrate to.
+    let default = json_data(&harness.run(&["--json", "config", "path"]));
+    assert_eq!(default["path"], legacy_path);
+    assert_eq!(default["source"], "legacy");
+    assert!(default["preferred_path"].is_null(), "{default}");
+
+    // XDG set but holding no config: the existing legacy file keeps
+    // working, and the answer names where it belongs.
+    let migrating = json_data(&harness.run_with_env(
+        &[("XDG_CONFIG_HOME", &xdg_home)],
+        &["--json", "config", "path"],
+    ));
+    assert_eq!(migrating["path"], legacy_path);
+    assert_eq!(migrating["source"], "legacy");
+    assert_eq!(migrating["preferred_path"], xdg_path.display().to_string());
+
+    // A config at the preferred path wins as soon as one exists there.
+    fs::create_dir_all(xdg_path.parent().expect("xdg config dir")).expect("create xdg config dir");
+    fs::write(&xdg_path, MINIMAL_CONFIG).expect("write xdg config");
+    let xdg = json_data(&harness.run_with_env(
+        &[("XDG_CONFIG_HOME", &xdg_home)],
+        &["--json", "config", "path"],
+    ));
+    assert_eq!(xdg["path"], xdg_path.display().to_string());
+    assert_eq!(xdg["source"], "xdg");
+    assert!(xdg["preferred_path"].is_null(), "{xdg}");
+
+    // The environment beats both defaults, by being spelled rather than by
+    // the file it names existing.
+    let from_env = json_data(&harness.run_with_env(
+        &[
+            ("XDG_CONFIG_HOME", &xdg_home),
+            ("LOONFS_CONFIG", &named_path),
+        ],
+        &["--json", "config", "path"],
+    ));
+    assert_eq!(from_env["path"], named_path.display().to_string());
+    assert_eq!(from_env["source"], "env");
+    assert!(!named_path.exists(), "the named file need not exist yet");
+
+    // The flag beats everything, and being global it may follow the
+    // subcommand as readily as precede it.
+    for args in [
+        vec![
+            "--json",
+            "--config",
+            flagged_path.to_str().expect("utf-8 path"),
+            "config",
+            "path",
+        ],
+        vec![
+            "--json",
+            "config",
+            "path",
+            "--config",
+            flagged_path.to_str().expect("utf-8 path"),
+        ],
+    ] {
+        let from_flag = json_data(&harness.run_with_env(
+            &[
+                ("XDG_CONFIG_HOME", &xdg_home),
+                ("LOONFS_CONFIG", &named_path),
+            ],
+            &args,
+        ));
+        assert_eq!(from_flag["path"], flagged_path.display().to_string());
+        assert_eq!(from_flag["source"], "flag");
+    }
+}
+
+/// `config path` is the command that answers "which file is this build even
+/// looking at", so it never reads that file.
+#[test]
+fn config_path_answers_while_the_config_file_is_unreadable() {
+    let harness = Harness::new();
+    harness.write_cli_config("config_version = 1\nunknown_knob = true\n");
+
+    assert_failure(&harness.run(&["profile", "list"]));
+
+    let path = harness.run(&["--json", "config", "path"]);
+    assert_success(&path);
+    assert_eq!(
+        json_data(&path)["path"],
+        harness.config_path.display().to_string()
+    );
+    assert_eq!(json_data(&path)["source"], "legacy");
+
+    // The human line carries both answers: the file, and why that file.
+    let human = harness.run(&["config", "path"]);
+    assert_success(&human);
+    let shown = stdout_string(&human);
+    assert!(
+        shown.contains(&harness.config_path.display().to_string()),
+        "{shown}"
+    );
+    assert!(shown.contains("default location"), "{shown}");
+}
+
+/// The recovery path: an override reaches a config file of its own while
+/// the default file is one this build refuses to read.
+#[test]
+fn init_runs_through_an_override_while_the_default_config_is_unreadable() {
+    let harness = Harness::new();
+    harness.write_cli_config("config_version = 1\nunknown_knob = true\n");
+    let broken = fs::read_to_string(&harness.config_path).expect("read broken config");
+
+    let flagged_path = harness.temp_dir.path().join("recovery").join("config.toml");
+    let flagged = flagged_path.to_str().expect("utf-8 path");
+    let init = harness.run(&[
+        "--json",
+        "--config",
+        flagged,
+        "init",
+        "rescue",
+        "--mode",
+        "embedded",
+        "--store-kind",
+        "local-fs",
+        "--root",
+        harness.store_root("rescue").to_str().expect("utf-8 path"),
+    ]);
+    assert_success(&init);
+    assert_eq!(json_data(&init)["mode"], "embedded");
+    assert!(
+        flagged_path.exists(),
+        "init creates the directories it needs"
+    );
+
+    let list = harness.run(&["--json", "--config", flagged, "profile", "list"]);
+    assert_success(&list);
+    assert_eq!(json_data(&list)["profiles"][0]["name"], "rescue");
+
+    // The environment is the same way out.
+    let env_path = harness.temp_dir.path().join("by-env").join("config.toml");
+    let env_init = harness.run_with_env(
+        &[("LOONFS_CONFIG", &env_path)],
+        &[
+            "--json",
+            "init",
+            "byenv",
+            "--mode",
+            "embedded",
+            "--store-kind",
+            "local-fs",
+            "--root",
+            harness.store_root("byenv").to_str().expect("utf-8 path"),
+        ],
+    );
+    assert_success(&env_init);
+    let env_list = harness.run_with_env(
+        &[("LOONFS_CONFIG", &env_path)],
+        &["--json", "profile", "list"],
+    );
+    assert_success(&env_list);
+    assert_eq!(json_data(&env_list)["profiles"][0]["name"], "byenv");
+
+    // Neither route read or rewrote the file that started this.
+    assert_eq!(
+        fs::read_to_string(&harness.config_path).expect("read unchanged config"),
+        broken
+    );
+}
+
+/// A file this build will not read names itself, what in it went wrong, and
+/// the two ways past it.
+#[test]
+fn unreadable_config_errors_name_the_file_the_field_and_the_way_out() {
+    let harness = Harness::new();
+    harness.write_cli_config("config_version = 1\ndefault_profil = \"typo\"\n");
+
+    let list = harness.run(&["--json", "profile", "list"]);
+    assert_failure(&list);
+    let error = json_error(&list);
+    assert_eq!(error["code"], "invalid_config");
+    let message = error["message"].as_str().expect("json string");
+    assert!(
+        message.contains(&harness.config_path.display().to_string()),
+        "{message}"
+    );
+    assert!(message.contains("default_profil"), "{message}");
+    assert!(message.contains("line 2"), "{message}");
+    assert!(message.contains("--config"), "{message}");
+    assert!(message.contains("LOONFS_CONFIG"), "{message}");
+
+    // A semantic failure is just as much a wall, so it carries the same way
+    // past it.
+    harness.write_cli_config("config_version = 1\ndefault_profile = \"missing\"\n");
+    let unresolvable = harness.run(&["--json", "profile", "list"]);
+    assert_failure(&unresolvable);
+    let message = json_error(&unresolvable)["message"]
+        .as_str()
+        .expect("json string")
+        .to_owned();
+    assert!(
+        message.contains(&harness.config_path.display().to_string()),
+        "{message}"
+    );
+    assert!(message.contains("--config"), "{message}");
+    assert!(message.contains("LOONFS_CONFIG"), "{message}");
 }
 
 #[test]
@@ -3261,18 +3481,36 @@ impl Harness {
     }
 
     fn run(&self, args: &[&str]) -> Output {
-        Command::new(loon_binary_path())
+        self.command().args(args).output().expect("run loonfs")
+    }
+
+    /// Runs the CLI with `variables` in its environment, for the config
+    /// resolution the environment takes part in.
+    fn run_with_env(&self, variables: &[(&str, &Path)], args: &[&str]) -> Output {
+        let mut command = self.command();
+        for (name, value) in variables {
+            command.env(name, value);
+        }
+        command.args(args).output().expect("run loonfs")
+    }
+
+    /// Every invocation starts from the temp home with the config
+    /// environment cleared, so a developer's own `XDG_CONFIG_HOME` or
+    /// `LOONFS_CONFIG` can never decide which file a test reads.
+    fn command(&self) -> Command {
+        let mut command = Command::new(loon_binary_path());
+        command
             .env("HOME", &self.home_dir)
-            .args(args)
-            .output()
-            .expect("run loonfs")
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("LOONFS_CONFIG");
+        command
     }
 
     /// Runs the CLI with a payload on standard input, which is the one
     /// source whose length is not knowable before it is read.
     fn run_with_stdin(&self, args: &[&str], stdin: &[u8]) -> Output {
-        let mut child = Command::new(loon_binary_path())
-            .env("HOME", &self.home_dir)
+        let mut child = self
+            .command()
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

@@ -14,6 +14,25 @@ pub(crate) use loonfs_objectstore::StoreConfig;
 
 pub(crate) const CONFIG_VERSION: u32 = 1;
 
+/// Environment override for the config file, and the escape hatch a shell
+/// session reaches for when the default file is one the CLI will not read.
+pub(crate) const CONFIG_PATH_ENV: &str = "LOONFS_CONFIG";
+
+const CONFIG_FILE_NAME: &str = "config.toml";
+/// Directory under `$XDG_CONFIG_HOME`.
+const XDG_CONFIG_SUBDIR: &str = "loonfs";
+/// Directory under `$HOME`, where installs predating XDG support live.
+const LEGACY_CONFIG_SUBDIR: &str = ".loonfs";
+
+/// The way past a config file this build will not accept. Every failure to
+/// load the resolved file ends with it, because strict decoding is only
+/// safe while a rejected file can always be stepped around — otherwise one
+/// unknown key bricks every command, `loonfs init` included. The
+/// environment variable named here is [`CONFIG_PATH_ENV`].
+const CONFIG_REMEDY: &str = "fix that file, or run against a different one with `--config <path>` \
+     or `LOONFS_CONFIG=<path>`; `loonfs config path` prints the file in use, and \
+     `loonfs init --config <path>` writes a fresh one";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CliConfig {
@@ -195,11 +214,103 @@ fn profile_store_error(profile_name: &str, error: &StoreConfigError) -> CliError
     }
 }
 
-pub(crate) fn default_config_path() -> Result<PathBuf, CliError> {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or_else(|| CliError::invalid_config("unable to determine the home directory"))?;
-    Ok(home.join(".loonfs").join("config.toml"))
+/// How [`resolve_config_location`] chose the file, so `config path` answers
+/// both "which file" and "why that one". The serialized spellings are the
+/// `--json` surface: `flag`, `env`, `xdg`, `legacy`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum ConfigSource {
+    /// The `--config` flag.
+    Flag,
+    /// The `LOONFS_CONFIG` environment variable.
+    Env,
+    /// `$XDG_CONFIG_HOME/loonfs/config.toml`.
+    Xdg,
+    /// `~/.loonfs/config.toml`.
+    Legacy,
+}
+
+/// The one config file this invocation reads and writes.
+pub(crate) struct ConfigLocation {
+    pub path: PathBuf,
+    pub source: ConfigSource,
+    /// Where the file belongs now. Set only while a legacy file is in use
+    /// because `XDG_CONFIG_HOME` is set and holds no config yet.
+    pub preferred_path: Option<PathBuf>,
+}
+
+impl ConfigLocation {
+    fn at(path: PathBuf, source: ConfigSource) -> Self {
+        Self {
+            path,
+            source,
+            preferred_path: None,
+        }
+    }
+}
+
+/// Resolves the config file for this invocation: `--config` beats
+/// `LOONFS_CONFIG` beats the default location.
+///
+/// The explicit forms win by being spelled, never by the named file
+/// existing — a path that is not there yet is still the path this
+/// invocation uses, which is what makes `loonfs init --config <path>` a way
+/// out of an unreadable default file.
+pub(crate) fn resolve_config_location(flag: Option<&Path>) -> Result<ConfigLocation, CliError> {
+    if let Some(path) = flag {
+        return Ok(ConfigLocation::at(path.to_path_buf(), ConfigSource::Flag));
+    }
+    if let Some(path) = non_empty_env_path(CONFIG_PATH_ENV) {
+        return Ok(ConfigLocation::at(path, ConfigSource::Env));
+    }
+    default_config_location()
+}
+
+/// The default location: `$XDG_CONFIG_HOME/loonfs/config.toml` when that
+/// variable names an absolute directory, and `~/.loonfs/config.toml`
+/// otherwise.
+///
+/// Existence decides exactly one thing here, and only for the migration:
+/// an install that predates XDG support keeps reading its `~/.loonfs` file
+/// until a config exists at the preferred path.
+fn default_config_location() -> Result<ConfigLocation, CliError> {
+    let legacy = legacy_config_path();
+    let Some(xdg_dir) = xdg_config_home() else {
+        let path = legacy.ok_or_else(|| {
+            CliError::invalid_config(format!(
+                "unable to determine the home directory; name the config file with \
+                 `--config <path>` or `{CONFIG_PATH_ENV}=<path>`"
+            ))
+        })?;
+        return Ok(ConfigLocation::at(path, ConfigSource::Legacy));
+    };
+    let xdg_path = xdg_dir.join(XDG_CONFIG_SUBDIR).join(CONFIG_FILE_NAME);
+    match legacy.filter(|path| !xdg_path.exists() && path.exists()) {
+        Some(legacy_path) => Ok(ConfigLocation {
+            path: legacy_path,
+            source: ConfigSource::Legacy,
+            preferred_path: Some(xdg_path),
+        }),
+        None => Ok(ConfigLocation::at(xdg_path, ConfigSource::Xdg)),
+    }
+}
+
+/// `XDG_CONFIG_HOME` when it names an absolute directory. The XDG spec
+/// calls an empty or relative value invalid, and ignoring it keeps a stray
+/// relative value from making the config file follow the working directory.
+fn xdg_config_home() -> Option<PathBuf> {
+    let path = PathBuf::from(std::env::var_os("XDG_CONFIG_HOME")?);
+    path.is_absolute().then_some(path)
+}
+
+fn legacy_config_path() -> Option<PathBuf> {
+    let home = non_empty_env_path("HOME")?;
+    Some(home.join(LEGACY_CONFIG_SUBDIR).join(CONFIG_FILE_NAME))
+}
+
+fn non_empty_env_path(name: &str) -> Option<PathBuf> {
+    let value = std::env::var_os(name)?;
+    (!value.is_empty()).then(|| PathBuf::from(value))
 }
 
 pub(crate) fn validate_profile_name(name: &str) -> Result<(), CliError> {
@@ -211,8 +322,8 @@ fn profile_field(name: &str, field: &str) -> String {
 }
 
 pub(crate) fn load_config(path: &Path) -> Result<CliConfig, CliError> {
-    let table = load_config_table(path)?;
-    decode_config_table(path, table)
+    let source = load_config_source(path)?;
+    decode_config_source(path, &source.text)
 }
 
 /// A config load for the repair commands. When the strict decode rejects the
@@ -228,38 +339,52 @@ pub(crate) enum ConfigLoad {
 }
 
 pub(crate) fn load_config_for_repair(path: &Path) -> Result<ConfigLoad, CliError> {
-    let table = load_config_table(path)?;
-    match decode_config_table(path, table.clone()) {
+    let source = load_config_source(path)?;
+    match decode_config_source(path, &source.text) {
         Ok(config) => Ok(ConfigLoad::Valid(config)),
         Err(error) => Ok(ConfigLoad::Degraded {
-            table,
+            table: source.table,
             error: Box::new(error),
         }),
     }
 }
 
-/// Stage one of loading: bytes to a loose TOML table, plus the version
-/// probe. Unknown fields and per-profile shape problems survive this stage;
-/// unreadable files, TOML syntax errors, and other config versions do not.
-fn load_config_table(path: &Path) -> Result<toml::Table, CliError> {
+/// A config file that got as far as being TOML of this version.
+struct ConfigDocument {
+    /// The file's own text, which the strict decode reads so its errors can
+    /// point at a line and column in it.
+    text: String,
+    /// The same file as a loose table, for the version probe and for the
+    /// repair commands.
+    table: toml::Table,
+}
+
+/// Stage one of loading: bytes to text and a loose TOML table, plus the
+/// version probe. Unknown fields and per-profile shape problems survive
+/// this stage; unreadable files, TOML syntax errors, and other config
+/// versions do not.
+fn load_config_source(path: &Path) -> Result<ConfigDocument, CliError> {
     let bytes = fs::read(path).map_err(|err| {
         if err.kind() == std::io::ErrorKind::NotFound {
-            CliError::invalid_config(format!("config file does not exist: {}", path.display()))
+            CliError::invalid_config(format!(
+                "config file does not exist: {}; run `loonfs init` to create it",
+                path.display()
+            ))
         } else {
-            CliError::invalid_config(format!("failed to read config {}: {err}", path.display()))
+            unusable_config(format!("failed to read config {}: {err}", path.display()))
         }
     })?;
-    let contents = std::str::from_utf8(&bytes).map_err(|err| {
-        CliError::invalid_config(format!("failed to decode config {}: {err}", path.display()))
+    let text = String::from_utf8(bytes).map_err(|err| {
+        unusable_config(format!("failed to decode config {}: {err}", path.display()))
     })?;
-    let table: toml::Table = toml::from_str(contents).map_err(|err| {
-        CliError::invalid_config(format!("failed to decode config {}: {err}", path.display()))
+    let table: toml::Table = toml::from_str(&text).map_err(|err| {
+        unusable_config(format!("failed to decode config {}: {err}", path.display()))
     })?;
     // Version before shape: a config written for another version should say
     // so directly, not surface as unknown-field noise from the strict decode.
     match table.get("config_version") {
         None => {
-            return Err(CliError::invalid_config(format!(
+            return Err(unusable_config(format!(
                 "config {} is missing `config_version`",
                 path.display()
             )));
@@ -267,31 +392,50 @@ fn load_config_table(path: &Path) -> Result<toml::Table, CliError> {
         Some(value) => match value.as_integer() {
             Some(version) if version == i64::from(CONFIG_VERSION) => {}
             Some(version) => {
-                return Err(CliError::invalid_config(format!(
+                return Err(unusable_config(format!(
                     "config {} declares `config_version = {version}`; this build supports \
                      `{CONFIG_VERSION}`",
                     path.display()
                 )));
             }
             None => {
-                return Err(CliError::invalid_config(format!(
+                return Err(unusable_config(format!(
                     "config {}: `config_version` must be an integer",
                     path.display()
                 )));
             }
         },
     }
-    Ok(table)
+    Ok(ConfigDocument { text, table })
 }
 
 /// Stage two of loading: the strict typed decode (`deny_unknown_fields`)
 /// plus semantic validation.
-fn decode_config_table(path: &Path, table: toml::Table) -> Result<CliConfig, CliError> {
-    let config: CliConfig = toml::Value::Table(table).try_into().map_err(|err| {
-        CliError::invalid_config(format!("failed to decode config {}: {err}", path.display()))
+///
+/// The decode reads the file's own text rather than the table stage one
+/// already built. That costs a second parse of a small file and buys the
+/// line, column, and quoted source line a TOML error carries only when it
+/// knows where in the text it is.
+fn decode_config_source(path: &Path, text: &str) -> Result<CliConfig, CliError> {
+    let config: CliConfig = toml::from_str(text).map_err(|err| {
+        unusable_config(format!("failed to decode config {}: {err}", path.display()))
     })?;
-    config.validate()?;
+    // Validation messages are field-rooted (`<profile>.store.<field>`), so
+    // the file they belong to is named here rather than in every check.
+    config.validate().map_err(|error| {
+        unusable_config(format!(
+            "invalid config {}: {}",
+            path.display(),
+            error.message
+        ))
+    })?;
     Ok(config)
+}
+
+/// Marks a config file this build will not read, so the failure carries the
+/// way past it. Every load failure but "no file yet" goes through here.
+fn unusable_config(problem: String) -> CliError {
+    CliError::invalid_config(format!("{problem}\n{CONFIG_REMEDY}"))
 }
 
 pub(crate) fn load_config_if_exists(path: &Path) -> Result<Option<CliConfig>, CliError> {
@@ -662,6 +806,33 @@ secret_access_key = "secret"
             "{}",
             unknown.message
         );
+    }
+
+    /// Strict decoding is only safe while a rejected file can be stepped
+    /// around, so every way of failing to load one offers both hatches.
+    #[test]
+    fn every_unreadable_config_offers_both_escape_hatches() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let write = |contents: &str| std::fs::write(&path, contents).expect("write config");
+
+        for contents in [
+            "config_version = ",
+            "config_version = 2\n",
+            "default_profile = \"x\"\n",
+            "config_version = 1\ndefault_profil = \"typo\"\n",
+            // Semantic failures are as much a wall as shape failures.
+            "config_version = 1\ndefault_profile = \"missing\"\n",
+        ] {
+            write(contents);
+            let error = super::load_config(&path).expect_err("unreadable config");
+            assert!(error.message.contains("--config"), "{}", error.message);
+            assert!(
+                error.message.contains(super::CONFIG_PATH_ENV),
+                "{}",
+                error.message
+            );
+        }
     }
 
     #[test]
