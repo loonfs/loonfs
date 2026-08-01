@@ -589,8 +589,12 @@ pub(crate) struct FilesystemRestoreArgs {
 pub(crate) struct FilesystemUndeleteArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
-    /// Destination path for the recovered file or directory.
-    pub path: String,
+    /// Destination path for the recovered file or directory. Omit to
+    /// restore in place: the entry re-binds under the parent and name its
+    /// deletion recorded, which lands correctly even when the enclosing
+    /// directories were renamed since. A deletion that recorded no binding
+    /// needs the explicit path.
+    pub path: Option<String>,
     /// Inode id of the deleted item, as reported by `rm` and the change
     /// feed.
     #[arg(long)]

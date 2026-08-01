@@ -1481,10 +1481,10 @@ and path revision restore:
 ```
 
 and undelete, which recovers a deleted file or subtree by re-binding the
-deletion's root inode at a destination path — the inode's identity and
-retained revision history come back with it. The request names both halves
-of the recovery handle the delete reported (and the change feed carries):
-the inode id and the deletion's committed sequence.
+deletion's root inode — the inode's identity and retained revision history
+come back with it. The request names both halves of the recovery handle the
+delete reported (and the change feed carries): the inode id and the
+deletion's committed sequence.
 
 ```json
 {
@@ -1500,11 +1500,21 @@ the inode id and the deletion's committed sequence.
 }
 ```
 
+`path` is optional. When present, it is the destination: its parent must
+exist and be visible, and its name must be free. When absent, the entry
+restores in place — it re-binds under the parent inode and name its
+deletion recorded, anchored on the parent's identity rather than a
+remembered spelling, so recovery lands correctly even when the enclosing
+directories were renamed after the delete. A deletion that recorded no
+binding (early tombstones carry none) answers `invalid_request` and needs
+the explicit path. The in-place parent and name obey the same rules a path
+would: the parent must not be deleted, and the name must be free, each
+answering its usual code otherwise.
+
 Only the root of a deletion can be undeleted, and only the exact deletion
 generation named by `deleted_at_seq` — anything else answers `not_deleted`
 with the requested and active generations in the details, so a stale
-recovery request can never cancel a later deletion. The destination parent
-must exist and be visible, and the destination name must be free.
+recovery request can never cancel a later deletion.
 
 ### 6.9 Upload transport
 

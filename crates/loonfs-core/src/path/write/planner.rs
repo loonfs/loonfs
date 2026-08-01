@@ -91,7 +91,11 @@ enum OperationFingerprintInput<'a> {
     Undelete {
         inode_id: InodeId,
         deleted_at_seq: ChangeSeq,
-        absolute_path: &'a str,
+        // Preimage-additive: `Some` serializes as the bare string it always
+        // was, so every stored undelete fingerprint is unchanged; `None`
+        // serializes as `null`, a new distinct preimage for the in-place
+        // form. Both shapes are pinned below.
+        absolute_path: Option<&'a str>,
     },
 }
 
@@ -188,7 +192,7 @@ fn operation_fingerprint_input(operation: &FilesystemOperation) -> OperationFing
         } => OperationFingerprintInput::Undelete {
             inode_id: *inode_id,
             deleted_at_seq: *deleted_at_seq,
-            absolute_path: path.as_str(),
+            absolute_path: path.as_ref().map(|path| path.as_str()),
         },
     }
 }
@@ -343,7 +347,7 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
             inode_id,
             deleted_at_seq,
             path,
-        } => plan_publish_undelete(*inode_id, *deleted_at_seq, path, view).await,
+        } => plan_publish_undelete(*inode_id, *deleted_at_seq, path.as_ref(), view).await,
     }
 }
 
@@ -481,6 +485,58 @@ mod tests {
         assert_eq!(
             fingerprint.as_str(),
             "v0:sha256:edc8e06bd0a651e9470198875ec44c8fcd7d9b95f162fe1d7ca46011c27e2818"
+        );
+    }
+
+    /// Pins the exact stored fingerprint for an undelete with a destination
+    /// path.
+    ///
+    /// This literal is what proves the in-place form was preimage-additive:
+    /// the path became optional and this value did not move, because a
+    /// present path serializes as the bare string it always was.
+    #[test]
+    fn undelete_fingerprint_value_is_pinned() {
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let mut fixed = request(FilesystemOperation::Undelete {
+            inode_id: InodeId(42),
+            deleted_at_seq: ChangeSeq(17),
+            path: Some(AbsolutePath::parse("/docs/report.txt").expect("path")),
+        });
+        fixed.commit_id = CommitId::parse("c_00000000000000000000000000000044").expect("commit id");
+
+        let fingerprint = commit_fingerprint(&namespace_id, &fixed).expect("fingerprint");
+
+        // The mechanism behind "did not move": a present option serializes
+        // as the bare value, so wrapping the preimage field changed no
+        // stored byte.
+        assert_eq!(
+            serde_json::to_value(Some("/docs/report.txt")).expect("serialize"),
+            serde_json::to_value("/docs/report.txt").expect("serialize"),
+        );
+        assert_eq!(
+            fingerprint.as_str(),
+            "v0:sha256:1f4fa76d65aa64903a7d44cead91600a97c0bac9ec3a01ac51f0cd1130eff3d6"
+        );
+    }
+
+    /// Pins the exact stored fingerprint for an in-place undelete, whose
+    /// absent path serializes as `null` — a distinct preimage from every
+    /// pathed form.
+    #[test]
+    fn in_place_undelete_fingerprint_value_is_pinned() {
+        let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
+        let mut fixed = request(FilesystemOperation::Undelete {
+            inode_id: InodeId(42),
+            deleted_at_seq: ChangeSeq(17),
+            path: None,
+        });
+        fixed.commit_id = CommitId::parse("c_00000000000000000000000000000044").expect("commit id");
+
+        let fingerprint = commit_fingerprint(&namespace_id, &fixed).expect("fingerprint");
+
+        assert_eq!(
+            fingerprint.as_str(),
+            "v0:sha256:4d7737cdc3888e3613dad0ec7d752e8daac089c8b528301cf0eba9307fa1cc4c"
         );
     }
 

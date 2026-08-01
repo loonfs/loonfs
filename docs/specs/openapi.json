@@ -4268,11 +4268,10 @@
           {
             "type": "object",
             "title": "FsOpUndelete",
-            "description": "Recover a deleted file or subtree: revoke the deletion of\n`inode_id` recorded at `deleted_at_seq` (both reported by the\ndelete and by the change feed) and re-bind it at `path`. Answers\n`not_deleted` when that generation is not the live one, so a stale\nrequest never cancels a later delete.",
+            "description": "Recover a deleted file or subtree: revoke the deletion of\n`inode_id` recorded at `deleted_at_seq` (both reported by the\ndelete and by the change feed) and re-bind it. Answers\n`not_deleted` when that generation is not the live one, so a stale\nrequest never cancels a later delete.",
             "required": [
               "inode_id",
               "deleted_at_seq",
-              "path",
               "kind"
             ],
             "properties": {
@@ -4291,8 +4290,15 @@
                 ]
               },
               "path": {
-                "$ref": "#/components/schemas/AbsolutePath",
-                "description": "Absolute destination path whose parent must be visible and whose name must be absent."
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/AbsolutePath",
+                    "description": "Absolute destination path whose parent must be visible and whose\nname must be absent. Absent means restore in place: re-bind\nunder the parent and name the deletion recorded, anchored on\nthe parent's identity rather than any remembered spelling, so\nthe entry lands correctly even when ancestors were renamed\nsince. A deletion that recorded no binding needs the explicit\npath."
+                  }
+                ]
               }
             }
           },

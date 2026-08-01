@@ -706,9 +706,14 @@ impl FsWriter {
         namespace_id: &NamespaceId,
         inode_id: InodeId,
         deleted_at_seq: ChangeSeq,
-        absolute_path: &str,
+        absolute_path: Option<&str>,
         options: UndeleteOptions,
     ) -> Result<CommitResponse> {
+        // An absent destination restores in place: the entry re-binds under
+        // the parent and name its deletion recorded.
+        let path = absolute_path
+            .map(loonfs_core::path::parse_mutation_path)
+            .transpose()?;
         self.commit(
             namespace_id,
             CommitRequest::single(
@@ -717,7 +722,7 @@ impl FsWriter {
                 FilesystemOperation::Undelete {
                     inode_id,
                     deleted_at_seq,
-                    path: loonfs_core::path::parse_mutation_path(absolute_path)?,
+                    path,
                 },
             ),
         )

@@ -199,7 +199,7 @@ async fn build_mixed_namespace(fs: &TestRuntime, namespace_id: &NamespaceId) {
             namespace_id,
             recovered_inode_id,
             deleted_at_seq,
-            "/notes/restored.txt",
+            Some("/notes/restored.txt"),
             UndeleteOptions::default(),
         )
         .await
@@ -655,7 +655,7 @@ async fn resolve_current_files_answers_the_whole_matrix_in_input_order() {
             &namespace_id,
             recovered,
             recovered_deleted_at_seq,
-            "/m/recovered-again.txt",
+            Some("/m/recovered-again.txt"),
             UndeleteOptions::default(),
         )
         .await

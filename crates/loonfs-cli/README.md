@@ -198,10 +198,14 @@ History and recovery
     List recoverable deletions: what was deleted, when, and the exact
     `loonfs undelete` command that recovers each one
 
-  loonfs undelete <path> --inode <id> --deleted-at <seq>
-    Recover a deleted file or directory at <path>; --inode and --deleted-at
-    come from `loonfs trash` or the `rm` output and name one exact deletion,
-    so a stale command cannot cancel a later delete
+  loonfs undelete [<path>] --inode <id> --deleted-at <seq>
+    Recover a deleted file or directory; --inode and --deleted-at come from
+    `loonfs trash` or the `rm` output and name one exact deletion, so a
+    stale command cannot cancel a later delete. Omit <path> to restore in
+    place — the entry re-binds under the parent and name its deletion
+    recorded, which lands correctly even if the enclosing directories were
+    renamed since. Pass <path> to recover somewhere else, or when the
+    deletion recorded no binding
 
   loonfs changes [--after <seq>] [--limit <n>]
     List committed changes after a sequence number, from the start of

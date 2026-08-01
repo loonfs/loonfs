@@ -238,24 +238,28 @@ impl UndeleteHint {
         Self { context_flags }
     }
 
-    /// The complete `loonfs undelete` invocation that recovers one deletion:
-    /// where it should land, and the inode plus deletion sequence that
-    /// identify the exact deletion being recovered.
+    /// The complete `loonfs undelete` invocation that recovers one deletion.
     ///
-    /// `destination` is absent for a deletion that recorded no name, which
-    /// has none to offer.
+    /// A deletion that recorded its binding restores in place — the entry
+    /// re-binds under the parent and name the delete recorded — so the
+    /// pasted command names no destination at all. One that recorded no
+    /// binding needs the caller to supply where it should land.
     pub(crate) fn command(
         &self,
-        destination: Option<&str>,
+        recorded_binding: bool,
         inode_id: InodeId,
         deleted_at: ChangeSeq,
     ) -> String {
         // The placeholder is deliberately left unquoted: pasted unedited, a
         // shell rejects it instead of recovering the entry to a file
         // literally named `<path>`.
-        let destination = destination.map_or_else(|| PATH_PLACEHOLDER.to_owned(), shell_quote);
+        let destination = if recorded_binding {
+            String::new()
+        } else {
+            format!("{PATH_PLACEHOLDER} ")
+        };
         format!(
-            "loonfs undelete {destination} --inode {inode_id} --deleted-at {}{}",
+            "loonfs undelete {destination}--inode {inode_id} --deleted-at {}{}",
             deleted_at.0, self.context_flags
         )
     }

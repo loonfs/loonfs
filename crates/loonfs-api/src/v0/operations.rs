@@ -260,7 +260,7 @@ pub enum FilesystemOperation {
     },
     /// Recover a deleted file or subtree: revoke the deletion of
     /// `inode_id` recorded at `deleted_at_seq` (both reported by the
-    /// delete and by the change feed) and re-bind it at `path`. Answers
+    /// delete and by the change feed) and re-bind it. Answers
     /// `not_deleted` when that generation is not the live one, so a stale
     /// request never cancels a later delete.
     #[cfg_attr(feature = "openapi", schema(title = "FsOpUndelete"))]
@@ -269,8 +269,15 @@ pub enum FilesystemOperation {
         inode_id: InodeId,
         /// Observed deletion sequence, which prevents cancelling a newer tombstone generation.
         deleted_at_seq: ChangeSeq,
-        /// Absolute destination path whose parent must be visible and whose name must be absent.
-        path: AbsolutePath,
+        /// Absolute destination path whose parent must be visible and whose
+        /// name must be absent. Absent means restore in place: re-bind
+        /// under the parent and name the deletion recorded, anchored on
+        /// the parent's identity rather than any remembered spelling, so
+        /// the entry lands correctly even when ancestors were renamed
+        /// since. A deletion that recorded no binding needs the explicit
+        /// path.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<AbsolutePath>,
     },
     /// Restore an older revision as the current revision for a path.
     #[cfg_attr(feature = "openapi", schema(title = "FsOpRestoreRevision"))]
@@ -1154,7 +1161,7 @@ mod tests {
                 FilesystemOperation::Undelete {
                     inode_id: InodeId(7),
                     deleted_at_seq: ChangeSeq(8),
-                    path: path("/docs/restored"),
+                    path: Some(path("/docs/restored")),
                 },
                 serde_json::json!({
                     "kind": "undelete",

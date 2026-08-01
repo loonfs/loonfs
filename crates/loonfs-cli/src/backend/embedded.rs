@@ -20,11 +20,12 @@ use loonfs_api::{
         GrepIndexLifecycle, GrepIndexStatusResponse, StoreProbeCheckOutcome, StoreProbeCheckResult,
         StoreProbeResponse,
     },
-    AuthoritativePathEntry, ChangeSeq, CheckpointId, CommitResponse, CreateCheckpointRequest,
-    CreateCheckpointResponse, EffectiveLimit, ErrorCode, GrepRequest, GrepResponse, InodeId,
-    ListCheckpointsResponse, ListFileRevisionsResponse, ListPathEntriesResponse, ListTrashResponse,
-    MaintenanceStepRequest, MaintenanceStepResponse, NamespaceId, NamespaceStatusResponse,
-    NamespaceSummary, PaginationPolicy, ReleaseCheckpointResponse, RevisionNo,
+    AbsolutePath, AuthoritativePathEntry, ChangeSeq, CheckpointId, CommitResponse,
+    CreateCheckpointRequest, CreateCheckpointResponse, EffectiveLimit, ErrorCode, GrepRequest,
+    GrepResponse, InodeId, ListCheckpointsResponse, ListFileRevisionsResponse,
+    ListPathEntriesResponse, ListTrashResponse, MaintenanceStepRequest, MaintenanceStepResponse,
+    NamespaceId, NamespaceStatusResponse, NamespaceSummary, PaginationPolicy,
+    ReleaseCheckpointResponse, RevisionNo,
 };
 use loonfs_client::NamespacePath;
 use loonfs_grep::{
@@ -740,17 +741,18 @@ impl EmbeddedBackend {
 
     pub(super) async fn undelete(
         &self,
-        spec: &NamespacePath,
+        namespace: &NamespaceId,
+        path: Option<&AbsolutePath>,
         inode_id: InodeId,
         deleted_at_seq: ChangeSeq,
         options: &UndeleteOptions,
     ) -> Result<CommitResponse, BackendError> {
-        self.publish_with_maintenance_recovery(spec.namespace(), || {
+        self.publish_with_maintenance_recovery(namespace, || {
             self.writer.undelete(
-                spec.namespace(),
+                namespace,
                 inode_id,
                 deleted_at_seq,
-                spec.absolute_path().as_str(),
+                path.map(|path| path.as_str()),
                 options.clone(),
             )
         })
