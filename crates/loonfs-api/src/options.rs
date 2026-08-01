@@ -6,6 +6,10 @@
 //! Keeping one definition is what stops the two surfaces from drifting a
 //! field apart.
 //!
+//! There is one type per operation, even where two of them currently hold the
+//! same fields: options follow the operation they parameterize, so a guard
+//! added to one is not silently offered on the others.
+//!
 //! These are plain in-process argument structs, not wire shapes: nothing here
 //! serializes. The request bodies that do cross the wire live in
 //! [`crate::v0`], and each surface resolves these options into one.
@@ -77,4 +81,44 @@ impl Default for DeleteOptions {
             expected_inode_id: None,
         }
     }
+}
+
+/// Options for moving a path.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MoveOptions {
+    /// Create-only or replace-existing behavior for the destination.
+    pub behavior: DestinationBehavior,
+    /// Optional idempotency key.
+    pub commit_id: Option<CommitId>,
+    /// Annotation recorded on the commit; part of the commit's identity.
+    pub message: Option<String>,
+}
+
+/// Options for copying a file path.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CopyOptions {
+    /// Create-only or replace-existing behavior for the destination.
+    pub behavior: DestinationBehavior,
+    /// Optional idempotency key.
+    pub commit_id: Option<CommitId>,
+    /// Annotation recorded on the commit; part of the commit's identity.
+    pub message: Option<String>,
+}
+
+/// Options for restoring a file revision by path.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RestoreRevisionOptions {
+    /// Optional idempotency key.
+    pub commit_id: Option<CommitId>,
+    /// Annotation recorded on the commit; part of the commit's identity.
+    pub message: Option<String>,
+}
+
+/// Options for recovering a deleted file or subtree.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct UndeleteOptions {
+    /// Optional idempotency key.
+    pub commit_id: Option<CommitId>,
+    /// Annotation recorded on the commit; part of the commit's identity.
+    pub message: Option<String>,
 }

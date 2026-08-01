@@ -339,8 +339,8 @@ fn create_directory_request(
     CommitRequest::single(
         CommitId::parse(commit_id.into()).expect("valid commit id"),
         None,
-        FilesystemOperation::CreateDir {
-            absolute_path: AbsolutePath::parse(format!("/{}", directory_name.as_ref()))
+        FilesystemOperation::CreateDirectory {
+            path: AbsolutePath::parse(format!("/{}", directory_name.as_ref()))
                 .expect("valid absolute path"),
             parents: false,
         },
@@ -1130,7 +1130,7 @@ async fn publisher_batches_plain_and_prepared_mutations_together() {
         CommitId::parse("prepared-put").expect("valid commit id"),
         None,
         FilesystemOperation::PutFile {
-            absolute_path: AbsolutePath::parse("/file.txt").expect("path"),
+            path: AbsolutePath::parse("/file.txt").expect("path"),
             content_ref: prepared_content.content_ref().clone(),
             behavior: DestinationBehavior::NoReplace,
             expected_revision_no: None,

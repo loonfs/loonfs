@@ -130,7 +130,7 @@ mod tests {
                 CommitId::parse(commit_id).expect("valid commit id"),
                 None,
                 FilesystemOperation::PutFile {
-                    absolute_path: AbsolutePath::parse(absolute_path).expect("path"),
+                    path: AbsolutePath::parse(absolute_path).expect("path"),
                     content_ref: content_ref.clone(),
                     behavior: DestinationBehavior::NoReplace,
                     expected_revision_no: None,
@@ -181,7 +181,7 @@ mod tests {
             CommitId::parse("plan-a").expect("valid commit id"),
             None,
             FilesystemOperation::PutFile {
-                absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
+                path: AbsolutePath::parse("/docs/a.txt").expect("path"),
                 content_ref: staged.content_ref.clone(),
                 behavior: DestinationBehavior::NoReplace,
                 expected_revision_no: None,
@@ -197,7 +197,7 @@ mod tests {
             CommitId::parse("plan-b").expect("valid commit id"),
             None,
             FilesystemOperation::PutFile {
-                absolute_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
+                path: AbsolutePath::parse("/docs/b.txt").expect("path"),
                 content_ref: staged.content_ref.clone(),
                 behavior: DestinationBehavior::NoReplace,
                 expected_revision_no: None,
@@ -221,7 +221,7 @@ mod tests {
 
     /// The first candidate implicitly creates `/wide`; the second must plan
     /// against the session state that already contains it, or its own
-    /// duplicate `CreateDir` would fail child-name-absent validation.
+    /// duplicate `CreateDirectory` would fail child-name-absent validation.
     #[tokio::test]
     async fn batch_creates_under_one_new_parent_share_session_state() {
         let (_temp_dir, store, namespace_id, context) = setup_namespace().await;
@@ -323,7 +323,7 @@ mod tests {
                     CommitId::parse("delete-doomed").expect("valid commit id"),
                     None,
                     FilesystemOperation::DeletePath {
-                        absolute_path: AbsolutePath::parse("/docs/doomed.txt").expect("path"),
+                        path: AbsolutePath::parse("/docs/doomed.txt").expect("path"),
                         behavior: DeleteDirectoryBehavior::NonRecursive,
                         expected_inode_id: None,
                     },

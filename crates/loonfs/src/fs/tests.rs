@@ -12,8 +12,7 @@ fn mutation_facade_exports_constructor_types() {
         message: None,
         operations: vec![
             FilesystemOperation::RestoreRevision {
-                absolute_path: parse_mutation_path("/docs/Report.txt")
-                    .expect("valid mutation path"),
+                path: parse_mutation_path("/docs/Report.txt").expect("valid mutation path"),
                 source_revision_no: RevisionNo(1),
             },
             FilesystemOperation::MovePath {
@@ -29,8 +28,8 @@ fn mutation_facade_exports_constructor_types() {
 
 #[test]
 fn single_operation_request_carries_exactly_one_operation() {
-    let operation = FilesystemOperation::CreateDir {
-        absolute_path: parse_mutation_path("/docs").expect("valid mutation path"),
+    let operation = FilesystemOperation::CreateDirectory {
+        path: parse_mutation_path("/docs").expect("valid mutation path"),
         parents: false,
     };
     let request = CommitRequest::single(

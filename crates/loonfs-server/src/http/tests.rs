@@ -20,7 +20,7 @@ use loonfs_api::ErrorCode;
 use loonfs_api::{
     ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior, GrepRequest, NamespaceId,
 };
-use loonfs_client::{Client, ClientConfig, ClientError, CommitOptions, NamespacePath};
+use loonfs_client::{Client, ClientConfig, ClientError, MoveOptions, NamespacePath};
 use loonfs_grep::keyspace::{manifest_key as grep_manifest_key, root_key as grep_root_key};
 use loonfs_grep::root::{
     encode_grep_root, load_grep_root, GrepManifestId, GrepRootEnvelope, GrepRootPointer,
@@ -919,8 +919,11 @@ async fn http_missing_namespace_mutations_return_namespace_not_found() {
             .move_path(
                 &target,
                 &destination,
-                DestinationBehavior::NoReplace,
-                &CommitOptions::default(),
+                &MoveOptions {
+                    behavior: DestinationBehavior::NoReplace,
+                    commit_id: None,
+                    message: None,
+                },
             )
             .await,
         404,
@@ -1019,8 +1022,11 @@ async fn http_put_over_directory_and_move_into_existing_target_return_path_confl
             .move_path(
                 &from,
                 &to,
-                DestinationBehavior::NoReplace,
-                &CommitOptions::default(),
+                &MoveOptions {
+                    behavior: DestinationBehavior::NoReplace,
+                    commit_id: None,
+                    message: None,
+                },
             )
             .await,
         409,
@@ -1078,8 +1084,11 @@ async fn http_put_and_move_under_deleted_ancestor_create_fresh_subtrees() {
         .move_path(
             &from,
             &to,
-            DestinationBehavior::NoReplace,
-            &CommitOptions::default(),
+            &MoveOptions {
+                behavior: DestinationBehavior::NoReplace,
+                commit_id: None,
+                message: None,
+            },
         )
         .await
         .expect("move lands in the recreated subtree");

@@ -1,9 +1,17 @@
 //! [`CommitRequest`]: the one filesystem commit language, before planning.
 
-use loonfs_api::{
-    AbsolutePath, ChangeSeq, CommitId, ContentRef, DeleteDirectoryBehavior, DestinationBehavior,
-    InodeId, RevisionNo,
-};
+use loonfs_api::CommitId;
+
+/// The operation language a commit is written in, owned by `loonfs-api` and
+/// used here unchanged.
+///
+/// There is one spelling of a pre-planning operation across the workspace:
+/// what a client sends is what the planner matches on, so no surface
+/// translates between two versions of the same language. The durable
+/// fingerprint preimage is a separate, frozen spelling, and the planner's
+/// `operation_fingerprint_input` is the only place this one is renamed
+/// into it.
+pub use loonfs_api::FilesystemOperation;
 
 /// One logical filesystem commit: an idempotency key, an optional caller
 /// annotation, and an ordered, non-empty list of operations.
@@ -12,6 +20,10 @@ use loonfs_api::{
 /// the effects of the ones before it, and either all of them commit or none
 /// of them do. A convenience one-operation request is this same type with a
 /// single-element list, so it plans, fingerprints, and replays identically.
+///
+/// This is the wire [`CommitRequest`](loonfs_api::CommitRequest) minus the
+/// content tokens: proofs are checked at the surface that accepts them, and
+/// what reaches the planner is the commit itself.
 ///
 /// Paths are parsed once at the surface that accepts the raw string
 /// ([`parse_mutation_path`]); a request always carries validated, normalized
@@ -42,57 +54,4 @@ impl CommitRequest {
             operations: vec![operation],
         }
     }
-}
-
-/// One path-oriented operation inside a [`CommitRequest`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FilesystemOperation {
-    /// Create one directory.
-    CreateDir {
-        absolute_path: AbsolutePath,
-        /// Also create missing ancestor directories, like `PutFile` does.
-        parents: bool,
-    },
-    /// Put one file at a path.
-    PutFile {
-        absolute_path: AbsolutePath,
-        content_ref: ContentRef,
-        behavior: DestinationBehavior,
-        /// When set, replacing applies only while the file's current
-        /// revision is still this one; a raced write fails the plan
-        /// instead of stacking a revision on state the caller never saw.
-        expected_revision_no: Option<RevisionNo>,
-    },
-    /// Delete one path.
-    DeletePath {
-        absolute_path: AbsolutePath,
-        behavior: DeleteDirectoryBehavior,
-        /// When set, the delete applies only while the path still resolves
-        /// to this inode; a raced rebinding fails the plan instead of
-        /// deleting the wrong inode.
-        expected_inode_id: Option<InodeId>,
-    },
-    /// Move one path to another path.
-    MovePath {
-        from_path: AbsolutePath,
-        to_path: AbsolutePath,
-        behavior: DestinationBehavior,
-    },
-    /// Copy one file path to another path.
-    CopyFilePath {
-        from_path: AbsolutePath,
-        to_path: AbsolutePath,
-        behavior: DestinationBehavior,
-    },
-    /// Restore a file revision at a path.
-    RestoreRevision {
-        absolute_path: AbsolutePath,
-        source_revision_no: RevisionNo,
-    },
-    /// Recover a deleted subtree to a destination path.
-    Undelete {
-        inode_id: InodeId,
-        deleted_at_seq: ChangeSeq,
-        absolute_path: AbsolutePath,
-    },
 }

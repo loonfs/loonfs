@@ -26,13 +26,13 @@ use loonfs_api::{
         StoreProbeResponse,
     },
     AuthoritativePathEntry, ChangeSeq, CheckpointId, CommitResponse, CreateCheckpointRequest,
-    CreateCheckpointResponse, DeleteNamespaceResponse, DestinationBehavior, GrepRequest,
-    GrepResponse, InodeId, ListFileRevisionsResponse, ListTrashResponse, MaintenanceStepRequest,
-    MaintenanceStepResponse, NamespaceId, NamespaceStatusResponse, NamespaceSummary,
-    ReleaseCheckpointResponse, RevisionNo,
+    CreateCheckpointResponse, DeleteNamespaceResponse, GrepRequest, GrepResponse, InodeId,
+    ListFileRevisionsResponse, ListTrashResponse, MaintenanceStepRequest, MaintenanceStepResponse,
+    NamespaceId, NamespaceStatusResponse, NamespaceSummary, ReleaseCheckpointResponse, RevisionNo,
 };
 use loonfs_client::{
-    CommitOptions, CreateDirectoryOptions, DeleteOptions, NamespacePath, PutFileOptions,
+    CopyOptions, CreateDirectoryOptions, DeleteOptions, MoveOptions, NamespacePath, PutFileOptions,
+    RestoreRevisionOptions, UndeleteOptions,
 };
 use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
 
@@ -480,37 +480,29 @@ impl ResolvedTarget {
         }
     }
 
-    /// Moves a path within a namespace; `behavior` selects create-only or
-    /// replace semantics for the destination.
+    /// Moves a path within a namespace.
     pub(crate) async fn move_path(
         &self,
         from: &NamespacePath,
         to: &NamespacePath,
-        behavior: DestinationBehavior,
-        options: &CommitOptions,
+        options: &MoveOptions,
     ) -> Result<CommitResponse, BackendError> {
         match self {
-            Self::Embedded(target) => target.backend.move_path(from, to, behavior, options).await,
-            Self::Remote(target) => {
-                Ok(target.client.move_path(from, to, behavior, options).await?)
-            }
+            Self::Embedded(target) => target.backend.move_path(from, to, options).await,
+            Self::Remote(target) => Ok(target.client.move_path(from, to, options).await?),
         }
     }
 
-    /// Copies a file within a namespace; `behavior` selects create-only or
-    /// replace semantics for the destination.
+    /// Copies a file within a namespace.
     pub(crate) async fn copy_path(
         &self,
         from: &NamespacePath,
         to: &NamespacePath,
-        behavior: DestinationBehavior,
-        options: &CommitOptions,
+        options: &CopyOptions,
     ) -> Result<CommitResponse, BackendError> {
         match self {
-            Self::Embedded(target) => target.backend.copy_path(from, to, behavior, options).await,
-            Self::Remote(target) => {
-                Ok(target.client.copy_path(from, to, behavior, options).await?)
-            }
+            Self::Embedded(target) => target.backend.copy_path(from, to, options).await,
+            Self::Remote(target) => Ok(target.client.copy_path(from, to, options).await?),
         }
     }
 
@@ -519,7 +511,7 @@ impl ResolvedTarget {
         &self,
         spec: &NamespacePath,
         source_revision_no: RevisionNo,
-        options: &CommitOptions,
+        options: &RestoreRevisionOptions,
     ) -> Result<CommitResponse, BackendError> {
         match self {
             Self::Embedded(target) => {
@@ -543,7 +535,7 @@ impl ResolvedTarget {
         spec: &NamespacePath,
         inode_id: InodeId,
         deleted_at_seq: ChangeSeq,
-        options: &CommitOptions,
+        options: &UndeleteOptions,
     ) -> Result<CommitResponse, BackendError> {
         match self {
             Self::Embedded(target) => {

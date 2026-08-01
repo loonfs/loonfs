@@ -46,7 +46,7 @@ async fn delete_path_non_recursive_expecting<S: ObjectStore + ?Sized>(
         namespace_id,
         CommitId::parse(commit_id).expect("valid test commit id"),
         FilesystemOperation::DeletePath {
-            absolute_path: AbsolutePath::parse(absolute_path).expect("path"),
+            path: AbsolutePath::parse(absolute_path).expect("path"),
             behavior: DeleteDirectoryBehavior::NonRecursive,
             expected_inode_id,
         },
@@ -377,7 +377,7 @@ async fn batch_delete_then_recreate_of_a_durable_file_layers_over_cached_state()
             CommitCandidate::new(commit_request(
                 "delete-cycled",
                 FilesystemOperation::DeletePath {
-                    absolute_path: AbsolutePath::parse("/docs/cycled.txt").expect("path"),
+                    path: AbsolutePath::parse("/docs/cycled.txt").expect("path"),
                     behavior: DeleteDirectoryBehavior::NonRecursive,
                     expected_inode_id: None,
                 },
@@ -388,7 +388,7 @@ async fn batch_delete_then_recreate_of_a_durable_file_layers_over_cached_state()
                 commit_request(
                     "recreate-cycled",
                     FilesystemOperation::PutFile {
-                        absolute_path: AbsolutePath::parse("/docs/cycled.txt").expect("path"),
+                        path: AbsolutePath::parse("/docs/cycled.txt").expect("path"),
                         content_ref: staged.content_ref,
                         behavior: DestinationBehavior::NoReplace,
                         expected_revision_no: None,
@@ -427,15 +427,15 @@ async fn batch_commit_writes_one_segment_and_expands_change_feed() {
         vec![
             commit_request(
                 "req-batch-a",
-                FilesystemOperation::CreateDir {
-                    absolute_path: AbsolutePath::parse("/alpha").expect("path"),
+                FilesystemOperation::CreateDirectory {
+                    path: AbsolutePath::parse("/alpha").expect("path"),
                     parents: false,
                 },
             ),
             commit_request(
                 "req-batch-b",
-                FilesystemOperation::CreateDir {
-                    absolute_path: AbsolutePath::parse("/beta").expect("path"),
+                FilesystemOperation::CreateDirectory {
+                    path: AbsolutePath::parse("/beta").expect("path"),
                     parents: false,
                 },
             ),
@@ -561,7 +561,7 @@ async fn ack_lost_head_cas_reports_unknown_outcome_and_replays_idempotently() {
         commit_request(
             "ack-lost-put",
             FilesystemOperation::PutFile {
-                absolute_path: AbsolutePath::parse("/ack.txt").expect("path"),
+                path: AbsolutePath::parse("/ack.txt").expect("path"),
                 content_ref: content.content_ref.clone(),
                 behavior: DestinationBehavior::NoReplace,
                 expected_revision_no: None,
@@ -605,7 +605,7 @@ async fn retry_succeeds_after_wal_orphaned_by_stale_head_cas() {
     let put = commit_request(
         "retry-after-orphan",
         FilesystemOperation::PutFile {
-            absolute_path: AbsolutePath::parse("/retry.txt").expect("path"),
+            path: AbsolutePath::parse("/retry.txt").expect("path"),
             content_ref: content.content_ref,
             behavior: DestinationBehavior::NoReplace,
             expected_revision_no: None,
@@ -703,7 +703,7 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
             CommitCandidate::new(commit_request(
                 "reject-materialization",
                 FilesystemOperation::DeletePath {
-                    absolute_path: AbsolutePath::parse("/missing.txt").expect("path"),
+                    path: AbsolutePath::parse("/missing.txt").expect("path"),
                     behavior: DeleteDirectoryBehavior::NonRecursive,
                     expected_inode_id: None,
                 },
@@ -715,7 +715,7 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
                 commit_request(
                     "accept-a",
                     FilesystemOperation::PutFile {
-                        absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
+                        path: AbsolutePath::parse("/docs/a.txt").expect("path"),
                         content_ref: content.content_ref.clone(),
                         behavior: DestinationBehavior::NoReplace,
                         expected_revision_no: None,
@@ -731,7 +731,7 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
                 commit_request(
                     "reject-speculative",
                     FilesystemOperation::PutFile {
-                        absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
+                        path: AbsolutePath::parse("/docs/a.txt").expect("path"),
                         content_ref: content.content_ref.clone(),
                         behavior: DestinationBehavior::NoReplace,
                         expected_revision_no: None,
@@ -743,7 +743,7 @@ async fn failed_wal_write_fails_rejections_decided_against_in_batch_state() {
             CommitCandidate::new(commit_request(
                 "reject-materialization",
                 FilesystemOperation::DeletePath {
-                    absolute_path: AbsolutePath::parse("/missing.txt").expect("path"),
+                    path: AbsolutePath::parse("/missing.txt").expect("path"),
                     behavior: DeleteDirectoryBehavior::NonRecursive,
                     expected_inode_id: None,
                 },
@@ -819,7 +819,7 @@ async fn stale_head_cas_fails_rejections_decided_against_in_batch_state() {
             CommitCandidate::new(commit_request(
                 "reject-materialization",
                 FilesystemOperation::DeletePath {
-                    absolute_path: AbsolutePath::parse("/missing.txt").expect("path"),
+                    path: AbsolutePath::parse("/missing.txt").expect("path"),
                     behavior: DeleteDirectoryBehavior::NonRecursive,
                     expected_inode_id: None,
                 },
@@ -830,7 +830,7 @@ async fn stale_head_cas_fails_rejections_decided_against_in_batch_state() {
                 commit_request(
                     "accept-a",
                     FilesystemOperation::PutFile {
-                        absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
+                        path: AbsolutePath::parse("/docs/a.txt").expect("path"),
                         content_ref: content.content_ref.clone(),
                         behavior: DestinationBehavior::NoReplace,
                         expected_revision_no: None,
@@ -844,7 +844,7 @@ async fn stale_head_cas_fails_rejections_decided_against_in_batch_state() {
                 commit_request(
                     "reject-speculative",
                     FilesystemOperation::PutFile {
-                        absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
+                        path: AbsolutePath::parse("/docs/a.txt").expect("path"),
                         content_ref: content.content_ref.clone(),
                         behavior: DestinationBehavior::NoReplace,
                         expected_revision_no: None,
@@ -960,8 +960,8 @@ async fn retry_succeeds_after_stale_head_get_during_publish_view_load() {
     let publish = async |engine: &mut NamespaceCommitEngine, path: &str, commit_id: &str| {
         let mkdir = commit_request(
             commit_id,
-            FilesystemOperation::CreateDir {
-                absolute_path: AbsolutePath::parse(path).expect("path"),
+            FilesystemOperation::CreateDirectory {
+                path: AbsolutePath::parse(path).expect("path"),
                 parents: false,
             },
         );
@@ -1023,8 +1023,8 @@ async fn batch_commit_aliases_duplicate_commit_id_with_same_fingerprint() {
 
     let duplicated = commit_request(
         "req-duplicate",
-        FilesystemOperation::CreateDir {
-            absolute_path: AbsolutePath::parse("/alpha").expect("path"),
+        FilesystemOperation::CreateDirectory {
+            path: AbsolutePath::parse("/alpha").expect("path"),
             parents: false,
         },
     );
@@ -1084,7 +1084,7 @@ async fn oversized_prepared_proof_candidate_replays_receipt_but_new_request_is_r
     let put = commit_request(
         "over-proof-replay",
         FilesystemOperation::PutFile {
-            absolute_path: AbsolutePath::parse("/proof-replay.txt").expect("path"),
+            path: AbsolutePath::parse("/proof-replay.txt").expect("path"),
             content_ref: stored.content_ref,
             behavior: DestinationBehavior::NoReplace,
             expected_revision_no: None,
@@ -1154,7 +1154,7 @@ async fn same_batch_over_limit_proof_duplicate_joins_its_primary() {
     let put = commit_request(
         "over-proof-duplicate",
         FilesystemOperation::PutFile {
-            absolute_path: AbsolutePath::parse("/batch-proof.txt").expect("path"),
+            path: AbsolutePath::parse("/batch-proof.txt").expect("path"),
             content_ref: stored.content_ref,
             behavior: DestinationBehavior::NoReplace,
             expected_revision_no: None,
@@ -1195,9 +1195,8 @@ async fn new_candidate_with_4097_operations_is_rejected_after_identity_computati
         commit_id: CommitId::parse("over-operation-new").expect("valid commit id"),
         message: None,
         operations: (0..=loonfs_core::limits::MAX_COMMIT_OPERATIONS)
-            .map(|index| FilesystemOperation::CreateDir {
-                absolute_path: AbsolutePath::parse(format!("/over-operation-{index}"))
-                    .expect("path"),
+            .map(|index| FilesystemOperation::CreateDirectory {
+                path: AbsolutePath::parse(format!("/over-operation-{index}")).expect("path"),
                 parents: false,
             })
             .collect(),
@@ -1227,8 +1226,8 @@ async fn visible_commit_id_retry_aliases_across_writer_takeover() {
 
     let mkdir = commit_request(
         "retry-across-writer",
-        FilesystemOperation::CreateDir {
-            absolute_path: AbsolutePath::parse("/alpha").expect("path"),
+        FilesystemOperation::CreateDirectory {
+            path: AbsolutePath::parse("/alpha").expect("path"),
             parents: false,
         },
     );
@@ -1264,15 +1263,15 @@ async fn batch_commit_rejects_duplicate_commit_id_with_different_fingerprint() {
         vec![
             commit_request(
                 "req-conflict",
-                FilesystemOperation::CreateDir {
-                    absolute_path: AbsolutePath::parse("/alpha").expect("path"),
+                FilesystemOperation::CreateDirectory {
+                    path: AbsolutePath::parse("/alpha").expect("path"),
                     parents: false,
                 },
             ),
             commit_request(
                 "req-conflict",
-                FilesystemOperation::CreateDir {
-                    absolute_path: AbsolutePath::parse("/beta").expect("path"),
+                FilesystemOperation::CreateDirectory {
+                    path: AbsolutePath::parse("/beta").expect("path"),
                     parents: false,
                 },
             ),
@@ -1330,7 +1329,7 @@ async fn path_publishes_use_durable_path_commit_receipt_index() {
     let put = commit_request(
         "same-path-request",
         FilesystemOperation::PutFile {
-            absolute_path: AbsolutePath::parse("/same/path.txt").expect("path"),
+            path: AbsolutePath::parse("/same/path.txt").expect("path"),
             content_ref: content.content_ref.clone(),
             behavior: DestinationBehavior::NoReplace,
             expected_revision_no: None,
@@ -1350,7 +1349,7 @@ async fn path_publishes_use_durable_path_commit_receipt_index() {
         commit_request(
             "same-path-request",
             FilesystemOperation::DeletePath {
-                absolute_path: AbsolutePath::parse("/same/path.txt").expect("path"),
+                path: AbsolutePath::parse("/same/path.txt").expect("path"),
                 behavior: DeleteDirectoryBehavior::NonRecursive,
                 expected_inode_id: None,
             },
@@ -1600,7 +1599,7 @@ async fn idempotent_path_retry_returns_receipt_before_content_validation() {
                     commit_id.clone(),
                     None,
                     FilesystemOperation::PutFile {
-                        absolute_path: AbsolutePath::parse("/docs/idempotent.txt").expect("path"),
+                        path: AbsolutePath::parse("/docs/idempotent.txt").expect("path"),
                         content_ref: content.content_ref.clone(),
                         behavior: DestinationBehavior::NoReplace,
                         expected_revision_no: None,
@@ -1631,7 +1630,7 @@ async fn idempotent_path_retry_returns_receipt_before_content_validation() {
             commit_id,
             None,
             FilesystemOperation::PutFile {
-                absolute_path: AbsolutePath::parse("/docs/idempotent.txt").expect("path"),
+                path: AbsolutePath::parse("/docs/idempotent.txt").expect("path"),
                 content_ref: content.content_ref,
                 behavior: DestinationBehavior::NoReplace,
                 expected_revision_no: None,

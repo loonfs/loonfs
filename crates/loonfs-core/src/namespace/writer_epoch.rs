@@ -371,8 +371,8 @@ mod tests {
         crate::path::write::CommitRequest::single(
             CommitId::parse(commit_id).expect("valid commit id"),
             None,
-            crate::path::write::FilesystemOperation::CreateDir {
-                absolute_path: loonfs_api::AbsolutePath::parse(format!("/{display_name}"))
+            crate::path::write::FilesystemOperation::CreateDirectory {
+                path: loonfs_api::AbsolutePath::parse(format!("/{display_name}"))
                     .expect("valid path"),
                 parents: false,
             },

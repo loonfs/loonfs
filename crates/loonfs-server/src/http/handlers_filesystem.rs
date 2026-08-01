@@ -13,14 +13,13 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use loonfs::publish::{
     ensure_mutation_path, CommitCandidate, CommitRequest, ContentPreparationError,
-    FilesystemOperation as CommitOperation,
 };
 use loonfs::{payload_class, ErrorCode, ListChangesOptions, TraceStoreKind};
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
-// The wire request and the core planner's request share one name across two
-// crates because they are the same language; the alias keeps both readable
-// in the handler that maps one onto the other.
+// The wire commit request and the runtime's differ only by the content
+// tokens, which this handler resolves and strips; the operations inside them
+// are one type. The alias keeps the two request names readable side by side.
 use loonfs_api::{
     decode_cursor,
     v0::{ChangesResponse, CommitResponse as ApiCommitResponse},
@@ -301,6 +300,23 @@ pub(super) async fn list_file_revisions(
     Ok(Json(response))
 }
 
+/// Every path an operation would mutate.
+fn mutation_paths(operation: &FilesystemOperation) -> Vec<&AbsolutePath> {
+    match operation {
+        FilesystemOperation::CreateDirectory { path, .. }
+        | FilesystemOperation::PutFile { path, .. }
+        | FilesystemOperation::DeletePath { path, .. }
+        | FilesystemOperation::Undelete { path, .. }
+        | FilesystemOperation::RestoreRevision { path, .. } => vec![path],
+        FilesystemOperation::MovePath {
+            from_path, to_path, ..
+        }
+        | FilesystemOperation::CopyPath {
+            from_path, to_path, ..
+        } => vec![from_path, to_path],
+    }
+}
+
 #[cfg_attr(
     feature = "openapi",
     utoipa::path(
@@ -370,80 +386,17 @@ pub(super) async fn apply_commit(
     };
     // Absolute-path grammar was validated while decoding the wire body. The
     // root remains a valid read path but is not a legal mutation target.
-    let validate_path = |path: AbsolutePath| {
-        ensure_mutation_path(&path).map_err(|error| {
+    //
+    // Every planner re-asserts this, so the pass is a duplicate; it stays
+    // because it rejects before the commit queue, and because dropping it
+    // would start attributing root rejections to an operation index the
+    // wire has never carried for them.
+    for path in operations.iter().flat_map(mutation_paths) {
+        ensure_mutation_path(path).map_err(|error| {
             ApiResponseError::core_for_namespace(&namespace_id, error)
                 .with_commit_id(&commit_id_for_errors)
         })?;
-        Ok(path)
-    };
-    let operations = operations
-        .into_iter()
-        .map(|operation| {
-            Ok(match operation {
-                FilesystemOperation::CreateDirectory { path, parents } => {
-                    CommitOperation::CreateDir {
-                        absolute_path: validate_path(path)?,
-                        parents,
-                    }
-                }
-                FilesystemOperation::PutFile {
-                    path,
-                    content_ref,
-                    behavior,
-                    expected_revision_no,
-                } => CommitOperation::PutFile {
-                    absolute_path: validate_path(path)?,
-                    content_ref,
-                    behavior,
-                    expected_revision_no,
-                },
-                FilesystemOperation::DeletePath {
-                    path,
-                    behavior,
-                    expected_inode_id,
-                } => CommitOperation::DeletePath {
-                    absolute_path: validate_path(path)?,
-                    behavior,
-                    expected_inode_id,
-                },
-                FilesystemOperation::MovePath {
-                    from_path,
-                    to_path,
-                    behavior,
-                } => CommitOperation::MovePath {
-                    from_path: validate_path(from_path)?,
-                    to_path: validate_path(to_path)?,
-                    behavior,
-                },
-                FilesystemOperation::CopyPath {
-                    from_path,
-                    to_path,
-                    behavior,
-                } => CommitOperation::CopyFilePath {
-                    from_path: validate_path(from_path)?,
-                    to_path: validate_path(to_path)?,
-                    behavior,
-                },
-                FilesystemOperation::RestoreRevision {
-                    path,
-                    source_revision_no,
-                } => CommitOperation::RestoreRevision {
-                    absolute_path: validate_path(path)?,
-                    source_revision_no,
-                },
-                FilesystemOperation::Undelete {
-                    inode_id,
-                    deleted_at_seq,
-                    path,
-                } => CommitOperation::Undelete {
-                    inode_id,
-                    deleted_at_seq,
-                    absolute_path: validate_path(path)?,
-                },
-            })
-        })
-        .collect::<Result<Vec<_>, ApiResponseError>>()?;
+    }
     let request = CommitRequest {
         commit_id,
         message,

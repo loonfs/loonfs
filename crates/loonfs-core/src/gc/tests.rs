@@ -951,7 +951,7 @@ async fn publish_completed_content<S: ObjectStore>(
                     loonfs_api::CommitId::parse("publish-completed-content").expect("commit id"),
                     None,
                     FilesystemOperation::PutFile {
-                        absolute_path: loonfs_api::AbsolutePath::parse(path).expect("path"),
+                        path: loonfs_api::AbsolutePath::parse(path).expect("path"),
                         content_ref,
                         behavior: loonfs_api::DestinationBehavior::NoReplace,
                         expected_revision_no: None,

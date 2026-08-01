@@ -78,8 +78,8 @@ impl VisibilityHarness {
     }
 
     async fn create_directory(&self, path: &str) -> Result<CommitResponse, CoreError> {
-        self.publish_operation(FilesystemOperation::CreateDir {
-            absolute_path: AbsolutePath::parse(path).expect("valid path"),
+        self.publish_operation(FilesystemOperation::CreateDirectory {
+            path: AbsolutePath::parse(path).expect("valid path"),
             parents: false,
         })
         .await
@@ -105,7 +105,7 @@ impl VisibilityHarness {
                 CommitId::generate(),
                 None,
                 FilesystemOperation::PutFile {
-                    absolute_path: AbsolutePath::parse(path).expect("valid path"),
+                    path: AbsolutePath::parse(path).expect("valid path"),
                     content_ref,
                     behavior,
                     expected_revision_no: None,
@@ -122,7 +122,7 @@ impl VisibilityHarness {
         behavior: DeleteDirectoryBehavior,
     ) -> Result<CommitResponse, CoreError> {
         self.publish_operation(FilesystemOperation::DeletePath {
-            absolute_path: AbsolutePath::parse(path).expect("valid path"),
+            path: AbsolutePath::parse(path).expect("valid path"),
             behavior,
             expected_inode_id: None,
         })
@@ -139,7 +139,7 @@ impl VisibilityHarness {
     }
 
     async fn copy_file(&self, from_path: &str, to_path: &str) -> Result<CommitResponse, CoreError> {
-        self.publish_operation(FilesystemOperation::CopyFilePath {
+        self.publish_operation(FilesystemOperation::CopyPath {
             from_path: AbsolutePath::parse(from_path).expect("valid source path"),
             to_path: AbsolutePath::parse(to_path).expect("valid destination path"),
             behavior: DestinationBehavior::NoReplace,
@@ -153,7 +153,7 @@ impl VisibilityHarness {
         source_revision_no: RevisionNo,
     ) -> Result<CommitResponse, CoreError> {
         self.publish_operation(FilesystemOperation::RestoreRevision {
-            absolute_path: AbsolutePath::parse(path).expect("valid path"),
+            path: AbsolutePath::parse(path).expect("valid path"),
             source_revision_no,
         })
         .await
@@ -168,7 +168,7 @@ impl VisibilityHarness {
         self.publish_operation(FilesystemOperation::Undelete {
             inode_id,
             deleted_at_seq,
-            absolute_path: AbsolutePath::parse(path).expect("valid path"),
+            path: AbsolutePath::parse(path).expect("valid path"),
         })
         .await
     }
@@ -521,7 +521,7 @@ async fn move_across_a_delete_boundary_preserves_visibility_equivalence() {
     let rejected = harness
         .batched_commit(vec![
             FilesystemOperation::DeletePath {
-                absolute_path: AbsolutePath::parse("/reverse").expect("valid path"),
+                path: AbsolutePath::parse("/reverse").expect("valid path"),
                 behavior: DeleteDirectoryBehavior::Recursive,
                 expected_inode_id: None,
             },
@@ -551,7 +551,7 @@ async fn move_across_a_delete_boundary_preserves_visibility_equivalence() {
                 behavior: DestinationBehavior::NoReplace,
             },
             FilesystemOperation::DeletePath {
-                absolute_path: AbsolutePath::parse("/source").expect("valid path"),
+                path: AbsolutePath::parse("/source").expect("valid path"),
                 behavior: DeleteDirectoryBehavior::Recursive,
                 expected_inode_id: None,
             },

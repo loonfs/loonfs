@@ -3,7 +3,7 @@
 use crate::common::http_split_support::*;
 use crate::common::start_server;
 use loonfs_api::{DeleteDirectoryBehavior, DestinationBehavior};
-use loonfs_client::{ClientError, CommitOptions, DeleteOptions, NamespacePath, PutFileOptions};
+use loonfs_client::{ClientError, CopyOptions, DeleteOptions, NamespacePath, PutFileOptions};
 use loonfs_test_support::http::raw_agent;
 use loonfs_test_support::ids::namespace_id;
 use tempfile::tempdir;
@@ -95,8 +95,11 @@ async fn http_put_no_replace_and_copy_preserve_cli_semantics() {
         .copy_path(
             &source,
             &destination,
-            DestinationBehavior::NoReplace,
-            &CommitOptions::default(),
+            &CopyOptions {
+                behavior: DestinationBehavior::NoReplace,
+                commit_id: None,
+                message: None,
+            },
         )
         .await
         .expect("copy path");

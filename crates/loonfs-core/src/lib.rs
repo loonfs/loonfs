@@ -45,8 +45,8 @@
 //!     vec![CommitCandidate::new(CommitRequest::single(
 //!         CommitId::generate(),
 //!         None,
-//!         FilesystemOperation::CreateDir {
-//!             absolute_path: AbsolutePath::parse("/plans").expect("path"),
+//!         FilesystemOperation::CreateDirectory {
+//!             path: AbsolutePath::parse("/plans").expect("path"),
 //!             parents: false,
 //!         },
 //!     ))],

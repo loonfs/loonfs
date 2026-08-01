@@ -494,7 +494,7 @@ fn concurrent_puts_coalesce_into_one_wal_segment() {
                         CommitId::parse(commit_id).expect("valid commit id"),
                         None,
                         FilesystemOperation::PutFile {
-                            absolute_path: parse_mutation_path(path).expect("valid mutation path"),
+                            path: parse_mutation_path(path).expect("valid mutation path"),
                             content_ref,
                             behavior: DestinationBehavior::NoReplace,
                             expected_revision_no: None,
@@ -734,8 +734,8 @@ fn a_mutation_request_appears_in_change_feed() {
             CommitRequest::single(
                 commit_id.clone(),
                 Some("create docs".to_owned()),
-                FilesystemOperation::CreateDir {
-                    absolute_path: parse_mutation_path("/docs").expect("valid mutation path"),
+                FilesystemOperation::CreateDirectory {
+                    path: parse_mutation_path("/docs").expect("valid mutation path"),
                     parents: false,
                 },
             ),

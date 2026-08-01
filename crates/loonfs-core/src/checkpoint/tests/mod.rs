@@ -131,7 +131,7 @@ pub(crate) async fn write_test_file<S: ObjectStore>(
                     CommitId::parse(commit_id).expect("commit id"),
                     None,
                     FilesystemOperation::PutFile {
-                        absolute_path: AbsolutePath::parse(path).expect("path"),
+                        path: AbsolutePath::parse(path).expect("path"),
                         content_ref,
                         behavior: DestinationBehavior::NoReplace,
                         expected_revision_no: None,

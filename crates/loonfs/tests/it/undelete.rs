@@ -593,16 +593,14 @@ fn undelete_rejects_deletions_from_the_same_commit() {
                 message: None,
                 operations: vec![
                     FilesystemOperation::DeletePath {
-                        absolute_path: parse_mutation_path("/docs/report.txt")
-                            .expect("valid mutation path"),
+                        path: parse_mutation_path("/docs/report.txt").expect("valid mutation path"),
                         behavior: DeleteDirectoryBehavior::Recursive,
                         expected_inode_id: Some(entry.inode_id),
                     },
                     FilesystemOperation::Undelete {
                         inode_id: entry.inode_id,
                         deleted_at_seq: guessed_seq,
-                        absolute_path: parse_mutation_path("/resurrected.txt")
-                            .expect("valid mutation path"),
+                        path: parse_mutation_path("/resurrected.txt").expect("valid mutation path"),
                     },
                 ],
             },
