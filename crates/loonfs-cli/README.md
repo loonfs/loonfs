@@ -12,7 +12,13 @@ Loon CLI Command Reference
 
 Global flags
   --json
-    Emit JSON instead of human output
+    Emit JSON instead of human output. A failure prints the same envelope
+    on stderr with an `error` object instead of `data`, and that includes a
+    command line the parser rejected — an unknown command, a bad value, a
+    missing option — which carries `"kind": "parse_error"` and the code
+    `invalid_usage`. A parse failure keeps its own exit status 2, distinct
+    from the 1 a command that actually ran and failed reports, so the two
+    stay separable without reading the message
 
   --no-input
     Never prompt; fail instead when a value would be asked for

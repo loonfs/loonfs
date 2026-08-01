@@ -19,7 +19,8 @@ use serde::{Deserialize, Serialize};
 ///   `no_default_namespace`, `profile_already_exists`,
 ///   `config_already_exists`, `destination_exists`,
 ///   `non_interactive_input_required`, `json_not_supported_for_streaming`,
-///   `io_error`, and `cancelled`. Overlaps with backend-local codes are
+///   `invalid_usage`, `io_error`, and `cancelled`. Overlaps with
+///   backend-local codes are
 ///   deliberate: the same string means the same thing on both sides of the
 ///   seam — a local configuration failure is `invalid_config` whether the
 ///   CLI or the backend seam caught it, and the registry codes are reserved
@@ -134,6 +135,13 @@ impl CliError {
                 path.display()
             ),
         )
+    }
+
+    /// A command line the parser rejected: an unknown command, a bad value,
+    /// a missing option. Distinct from `invalid_input`, which a command that
+    /// ran reports about what it was asked to do.
+    pub(crate) fn invalid_usage(message: impl Into<String>) -> Self {
+        Self::new("invalid_usage", message)
     }
 
     pub(crate) fn json_not_supported_for_streaming() -> Self {

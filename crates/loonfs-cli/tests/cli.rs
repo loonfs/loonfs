@@ -1515,6 +1515,65 @@ fn ambient_provider_credentials_do_not_look_like_flags() {
         .contains("`--access-key-id` does not apply"));
 }
 
+/// A command line the parser rejected is a failure like any other under
+/// `--json`, and keeps clap's own exit status so a script can still tell a
+/// command that never ran from one that ran and failed.
+#[test]
+fn json_covers_command_lines_the_parser_rejects() {
+    let harness = Harness::new();
+
+    for arguments in [
+        vec!["--json", "bogus-command"],
+        vec!["--json", "mkdir"],
+        vec![
+            "--json",
+            "admin",
+            "run",
+            "--namespace",
+            "demo",
+            "--drain",
+            "--max-steps",
+            "abc",
+        ],
+        // The flag is global, so it still counts after the subcommand.
+        vec!["stat", "--json", "--nonexistent-flag"],
+    ] {
+        let output = harness.run(&arguments);
+        assert_failure(&output);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "a parse failure keeps clap's usage status for {arguments:?}"
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "the failure belongs on stderr for {arguments:?}"
+        );
+        let envelope = parse_json(&output.stderr);
+        assert_eq!(envelope["kind"], "parse_error");
+        assert_eq!(envelope["format_version"], 1);
+        assert!(envelope["data"].is_null());
+        assert_eq!(envelope["error"]["code"], "invalid_usage");
+        assert!(!envelope["error"]["message"]
+            .as_str()
+            .expect("json string")
+            .is_empty());
+    }
+
+    // Without --json the plain-text rendering and the status are unchanged.
+    let plain = harness.run(&["bogus-command"]);
+    assert_eq!(plain.status.code(), Some(2));
+    assert!(stderr_string(&plain).contains("unrecognized subcommand"));
+    assert!(!stderr_string(&plain).starts_with('{'));
+
+    // Help and version are not failures, whatever else is on the line.
+    let help = harness.run(&["--json", "--help"]);
+    assert_success(&help);
+    assert!(stdout_string(&help).contains("Usage:"));
+    let version = harness.run(&["--json", "--version"]);
+    assert_success(&version);
+}
+
 #[test]
 fn init_rejects_existing_config_file() {
     let harness = Harness::new();
