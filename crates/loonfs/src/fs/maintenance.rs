@@ -9,9 +9,9 @@ use crate::FsAdmin;
 use crate::NamespaceStatusResponse;
 use crate::{
     AdvanceRetentionResponse, CheckpointId, CreateCheckpointOptions, CreateCheckpointResponse,
-    ErrorCode, FlushWalOutcome, FlushWalResponse, MaintenanceStepKind, MaintenanceStepOptions,
-    MaintenanceStepResponse, NamespaceId, ReleaseCheckpointResponse, ReorganizeStepOutcome,
-    SharedObjectStore, WalFlushStepOutcome,
+    ErrorCode, FlushWalOutcome, FlushWalResponse, ListCheckpointsResponse, MaintenanceStepKind,
+    MaintenanceStepOptions, MaintenanceStepResponse, NamespaceId, ReleaseCheckpointResponse,
+    ReorganizeStepOutcome, SharedObjectStore, WalFlushStepOutcome,
 };
 use crate::{Result, RuntimeError};
 use loonfs_core::cache::load_namespace_head_summary;
@@ -337,6 +337,26 @@ impl FsAdmin {
             .await
             .map_err(RuntimeError::from);
         self.finish_namespace_mutation(namespace_id, result)
+    }
+
+    /// Lists every active checkpoint record on a namespace, oldest first.
+    ///
+    /// This is how a pin is found again when the creation response is gone:
+    /// every call to [`Self::create_checkpoint`] mints its own record under
+    /// its own id, so a label identifies nothing, and a record nobody can
+    /// name is a garbage-collection root nobody can release. A record whose
+    /// expiry has passed but which no collection pass has released yet is
+    /// still active and still listed, with its expiry in the answer.
+    ///
+    /// A read: it releases nothing and reaps nothing.
+    pub async fn list_checkpoints(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<ListCheckpointsResponse> {
+        self.engine(namespace_id)
+            .list_checkpoints()
+            .await
+            .map_err(RuntimeError::from)
     }
 
     /// Releases a user-owned checkpoint by id. Idempotent.

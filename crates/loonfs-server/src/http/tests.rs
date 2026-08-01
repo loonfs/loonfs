@@ -1179,6 +1179,14 @@ async fn http_answers_401_in_envelope_for_missing_and_wrong_tokens() {
             "unauthorized",
             Some("missing or invalid bearer token"),
         );
+        // The checkpoint inventory names this deployment's garbage-collection
+        // roots, so it answers behind the same token as everything else.
+        assert_api_error(
+            client.list_checkpoints(&namespace_id("demo")).await,
+            401,
+            "unauthorized",
+            Some("missing or invalid bearer token"),
+        );
     }
 
     server.abort();

@@ -103,6 +103,67 @@
       }
     },
     "/v0/admin/namespaces/{namespace}/checkpoints": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "List checkpoints",
+        "description": "Lists every active checkpoint record on the namespace, oldest first. Each record is a garbage-collection root, and its id is what the release endpoint takes; because a checkpoint name is a label rather than a key, this is the only way to find a pin whose creation response is gone. An expired record that no collection pass has released yet is still active and is listed, with its expiry in the entry — the operator is looking for roots, and a record that still pins its basis is one. Released records are absent: a release is what stops a record pinning anything.",
+        "operationId": "list_checkpoints",
+        "parameters": [
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "Namespace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Active checkpoint records",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListCheckpointsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid namespace id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
       "post": {
         "tags": [
           "admin"
@@ -3026,6 +3087,97 @@
         "type": "string",
         "description": "Durable checkpoint identifier.\n\nA checkpoint is a durable bookmark to a namespace manifest version."
       },
+      "CheckpointOwnerSummary": {
+        "oneOf": [
+          {
+            "type": "object",
+            "title": "CheckpointOwnerUser",
+            "description": "An operator-created pin, released by id or by its own expiry.",
+            "required": [
+              "name",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "user"
+                ]
+              },
+              "name": {
+                "type": "string",
+                "description": "The label the creator recorded. Not a key: several records may\ncarry one label over different bases."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "title": "CheckpointOwnerFork",
+            "description": "A fork target keeping its source basis alive for the length of one\nfork attempt.",
+            "required": [
+              "target_namespace_id",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "fork"
+                ]
+              },
+              "target_namespace_id": {
+                "$ref": "#/components/schemas/NamespaceId",
+                "description": "Namespace whose continued existence keeps this pin standing."
+              }
+            }
+          }
+        ],
+        "description": "Who a checkpoint record answers to, as the record durably records it.\n\nThe two owners have different releases, so a listing that names the\nowner also says which records the release endpoint will act on: a user\npin is released by id, and a fork lease is released by deleting the\ntarget namespace it protects."
+      },
+      "CheckpointSummary": {
+        "type": "object",
+        "description": "One active checkpoint record, reported from what the record carries.",
+        "required": [
+          "checkpoint_id",
+          "owner",
+          "created_at_ms",
+          "checkpoint_seq",
+          "manifest_id"
+        ],
+        "properties": {
+          "checkpoint_id": {
+            "$ref": "#/components/schemas/CheckpointId",
+            "description": "Durable checkpoint id, as the creation response returned it. This is\nwhat the release endpoint takes."
+          },
+          "checkpoint_seq": {
+            "$ref": "#/components/schemas/ChangeSeq",
+            "description": "Sequence the pinned basis covers — the same number the creation\nresponse reported as `checkpoint_seq`."
+          },
+          "created_at_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the record was written, in Unix milliseconds.",
+            "minimum": 0
+          },
+          "expires_at_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When garbage collection may release the record without being asked,\nin Unix milliseconds. Absent means the pin holds until it is\nreleased. An instant already in the past is a record whose expiry\nhas passed and which no collection pass has reached yet: it is still\na root, so it is still listed.",
+            "minimum": 0
+          },
+          "manifest_id": {
+            "$ref": "#/components/schemas/ManifestId",
+            "description": "Manifest the record pins."
+          },
+          "owner": {
+            "$ref": "#/components/schemas/CheckpointOwnerSummary",
+            "description": "Who the record answers to, and the label a user pin carries."
+          }
+        }
+      },
       "ChecksumAlgorithm": {
         "type": "string",
         "description": "Algorithm of a stored full-object checksum.\n\nEvery algorithm here covers the complete object. There is deliberately no\nchecksum-*type* field: full-object coverage is an invariant of this\nformat, established when the object is written, never read back from a\nprovider. (Cloudflare R2 never reports `x-amz-checksum-type` at all, so a\ntype read back would be unavailable exactly where it would matter.)\n\n[`ChecksumAlgorithm::Sha256`] and [`ChecksumAlgorithm::Crc64nvme`] both\nhave producers: every path that moves bytes through LoonFS hashes them,\nand direct multipart upload carries the CRC-64/NVME the S3-compatible\nproviders compute over the assembled object. `Crc32c` decodes and\nround-trips without a producer.",
@@ -4291,6 +4443,10 @@
             "description": "Active checkpoint records released because their basis manifest is\nverifiably gone.",
             "minimum": 0
           },
+          "retained": {
+            "$ref": "#/components/schemas/RetainedCandidates",
+            "description": "The same total, split by the decision that spared each candidate.\nThe total above stays because it is what every existing consumer\nreads; this says why."
+          },
           "retained_candidates": {
             "type": "integer",
             "format": "int64",
@@ -4638,6 +4794,27 @@
           "file",
           "dir"
         ]
+      },
+      "ListCheckpointsResponse": {
+        "type": "object",
+        "description": "Every active checkpoint record a namespace currently carries.",
+        "required": [
+          "namespace_id",
+          "checkpoints"
+        ],
+        "properties": {
+          "checkpoints": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CheckpointSummary"
+            },
+            "description": "Active records, oldest first. Released records are absent because a\nrelease is what stops a record pinning anything; a released record\nthat garbage collection has not yet deleted is not reported either."
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace the records belong to."
+          }
+        }
       },
       "ListFileRevisionsResponse": {
         "type": "object",
@@ -5045,6 +5222,77 @@
           }
         ],
         "description": "What the metadata-reorganization part of a maintenance step did.\n\nDeliberately coarse: the run counts and byte budgets a reorganization\nconsumes are engine policy, not a wire contract."
+      },
+      "RetainedCandidates": {
+        "type": "object",
+        "description": "Why a pass kept what it kept: `retained_candidates` split by the\ndecision that spared each candidate.\n\nThe reasons are a closed set — one per place the sweep decides against\ndeleting — so every field is always reported, and a zero is the answer\nthat nothing was kept for that reason. The counts sum to\n`retained_candidates`.\n\nRetention is a decision per candidate examined, not per object in the\nnamespace: one object examined by two passes is counted by each.",
+        "required": [
+          "referenced",
+          "grace_window",
+          "no_provider_timestamp",
+          "degraded_roots",
+          "unrecognized_key",
+          "checkpoint_not_releasable",
+          "upload_session_window",
+          "upload_session_undecided",
+          "content_scan_deferred"
+        ],
+        "properties": {
+          "checkpoint_not_releasable": {
+            "type": "integer",
+            "format": "int64",
+            "description": "A checkpoint record this pass could have advanced but could not\nprove ready: a lost compare-and-swap, an unreadable record, a fork\ntarget not provably gone, a released record still inside its grace\nwindow, or an active pin that is simply doing its job. The pins\nthemselves are listed by\n`GET /v0/admin/namespaces/{ns}/checkpoints`.",
+            "minimum": 0
+          },
+          "content_scan_deferred": {
+            "type": "integer",
+            "format": "int64",
+            "description": "A completed session whose content reclamation was skipped because\nthe reference scan did not fit in `max_objects`\n(`content_reclamation_deferred` is set too).",
+            "minimum": 0
+          },
+          "degraded_roots": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Root resolution failed somewhere in this pass, so manifest and table\ndeletion was suppressed wholesale (`degraded_retention` is set too).",
+            "minimum": 0
+          },
+          "grace_window": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unreachable, but younger than the grace window by the object's own\nprovider timestamp. A later pass deletes it.",
+            "minimum": 0
+          },
+          "no_provider_timestamp": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unreachable, and the provider reported no last-modified time at all,\nso the object's age is unknown and it is treated as young.",
+            "minimum": 0
+          },
+          "referenced": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Selected as unreachable, then found reachable by the re-verification\nthat runs immediately before every deletion. A candidate the pass\nalready knew was reachable is never examined at all, so this counts\nthe namespace moving underneath the pass rather than the size of its\nlive set.",
+            "minimum": 0
+          },
+          "unrecognized_key": {
+            "type": "integer",
+            "format": "int64",
+            "description": "A key under a swept family that this collector does not recognize as\none of its own. Never deleted, whatever its age.",
+            "minimum": 0
+          },
+          "upload_session_undecided": {
+            "type": "integer",
+            "format": "int64",
+            "description": "An upload session held over for a reason no clock resolves: a lost\ncompare-and-swap, a record that vanished mid-pass, or a reference\nset this pass could not establish. Only a later pass answers it.",
+            "minimum": 0
+          },
+          "upload_session_window": {
+            "type": "integer",
+            "format": "int64",
+            "description": "An upload session waiting out a window a clock resolves: an open\nsession's lease plus the grace, an aborted session's grace, or a\ncompleted session's derived content-reclamation grace.\n`next_reclamation_at_ms` reports the soonest of these.",
+            "minimum": 0
+          }
+        }
       },
       "RevisionNo": {
         "type": "integer",

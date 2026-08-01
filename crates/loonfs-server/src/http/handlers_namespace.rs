@@ -12,11 +12,11 @@ use loonfs_api::ApiError;
 use loonfs_api::ChangeSeq;
 use loonfs_api::{
     CheckpointId, CreateCheckpointRequest, CreateCheckpointResponse, CreateNamespaceRequest,
-    ErrorCode, ForkNamespaceRequest, MaintenanceStepRequest, MaintenanceStepResponse,
-    ReleaseCheckpointResponse, FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_QUERY_GREP,
-    FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT, LIMIT_DOWNLOAD_MAX_CONCURRENT,
-    LIMIT_DOWNLOAD_MAX_CONTENT_BYTES, LIMIT_QUERY_GREP_DEFAULT, LIMIT_QUERY_GREP_MAX,
-    LIMIT_QUERY_GREP_SCAN_BUDGET_FILES, LIMIT_QUERY_GREP_TAIL_BUDGET_FILES,
+    ErrorCode, ForkNamespaceRequest, ListCheckpointsResponse, MaintenanceStepRequest,
+    MaintenanceStepResponse, ReleaseCheckpointResponse, FEATURE_DOWNLOADS_DIRECT_GET,
+    FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
+    LIMIT_DOWNLOAD_MAX_CONCURRENT, LIMIT_DOWNLOAD_MAX_CONTENT_BYTES, LIMIT_QUERY_GREP_DEFAULT,
+    LIMIT_QUERY_GREP_MAX, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES, LIMIT_QUERY_GREP_TAIL_BUDGET_FILES,
     LIMIT_UPLOAD_MAX_CONCURRENT, LIMIT_UPLOAD_MAX_CONTENT_BYTES, PROFILE_QUERY_V0,
 };
 
@@ -280,6 +280,38 @@ pub(super) async fn create_checkpoint(
             &namespace_id,
             loonfs::CreateCheckpointOptions::from_request(request),
         )
+        .await
+        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+    Ok(Json(response))
+}
+
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        get,
+        path = "/v0/admin/namespaces/{namespace}/checkpoints",
+        tag = "admin",
+        summary = "List checkpoints",
+        description = "Lists every active checkpoint record on the namespace, oldest first. Each record is a garbage-collection root, and its id is what the release endpoint takes; because a checkpoint name is a label rather than a key, this is the only way to find a pin whose creation response is gone. An expired record that no collection pass has released yet is still active and is listed, with its expiry in the entry — the operator is looking for roots, and a record that still pins its basis is one. Released records are absent: a release is what stops a record pinning anything.",
+        params(("namespace" = String, Path, description = "Namespace id")),
+        responses(
+            (status = 200, description = "Active checkpoint records", body = ListCheckpointsResponse),
+            (status = 400, description = "Invalid namespace id", body = ApiError),
+            (status = 401, description = "Unauthorized", body = ApiError),
+            (status = 404, description = "Namespace not found", body = ApiError)
+        )
+    )
+)]
+pub(super) async fn list_checkpoints(
+    State(state): State<AppState>,
+    namespace: NamespaceIdPath,
+    headers: HeaderMap,
+) -> Result<Json<ListCheckpointsResponse>, ApiResponseError> {
+    authorize(&state.config, &headers)?;
+    let namespace_id = namespace.into_id()?;
+    let response = state
+        .admin
+        .list_checkpoints(&namespace_id)
         .await
         .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
     Ok(Json(response))

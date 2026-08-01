@@ -28,8 +28,8 @@ use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, ChangeSeq,
     CheckpointId, ContentRef, CreateCheckpointResponse, DeleteNamespaceResponse,
     DirectoryPageCursor, FileRevision, FileRevisionsPageCursor, FlushWalResponse, InodeId,
-    NamespaceId, NamespaceSummary, Page, PageRequest, ReleaseCheckpointResponse, RevisionNo,
-    StorageChecksum, TrashEntry, TrashPageCursor, UploadId,
+    ListCheckpointsResponse, NamespaceId, NamespaceSummary, Page, PageRequest,
+    ReleaseCheckpointResponse, RevisionNo, StorageChecksum, TrashEntry, TrashPageCursor, UploadId,
 };
 use loonfs_objectstore::{ByteStream, ObjectStore};
 use std::num::NonZeroU64;
@@ -763,6 +763,15 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             &context,
         )
         .await
+    }
+
+    /// Lists every active checkpoint record on the namespace, oldest first.
+    ///
+    /// A read: nothing here releases, expires, or reaps a record. A record
+    /// whose expiry has passed but which no collection pass has released is
+    /// still active and is still listed, with that expiry in the answer.
+    pub async fn list_checkpoints(&self) -> Result<ListCheckpointsResponse> {
+        crate::checkpoint::list_checkpoints(&self.store, &self.namespace_id).await
     }
 
     /// Releases a user-owned checkpoint by id.

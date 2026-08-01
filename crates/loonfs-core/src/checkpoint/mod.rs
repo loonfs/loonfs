@@ -13,8 +13,8 @@
 //! - [`build`] segments metadata rows and writes the immutable SST objects.
 //! - [`publish`] writes manifest objects and advances `metadata/root.json`
 //!   by compare-and-swap.
-//! - [`record`] and [`release`] manage durable checkpoint records, and
-//!   [`files`] enumerates the files a record's manifest pins.
+//! - [`record`], [`list`], and [`release`] manage durable checkpoint
+//!   records, and [`files`] enumerates the files a record's manifest pins.
 //! - [`load`] and [`validate`] provide envelope-only loading and
 //!   descriptor-only table verification (full-row inspection
 //!   materialization is test-only).
@@ -34,6 +34,7 @@ mod data_block_load;
 mod error;
 mod files;
 mod flush;
+mod list;
 mod load;
 mod publish;
 pub(crate) mod record;
@@ -61,6 +62,7 @@ pub(crate) use self::runs::MetadataLsmPolicy;
 pub(crate) use self::create::create_checkpoint;
 pub(crate) use self::files::list_checkpoint_files_page;
 pub(crate) use self::flush::flush_wal;
+pub(crate) use self::list::list_checkpoints;
 pub(crate) use self::load::{
     head_from_manifest, load_basis_metadata_tables, load_namespace_manifest_envelope,
     load_namespace_manifest_envelope_if_present, load_verified_manifest_tables,

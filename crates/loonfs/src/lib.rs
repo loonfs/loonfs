@@ -53,17 +53,19 @@ pub use loonfs_api::v0::{
 };
 pub use loonfs_api::{
     AdvanceRetentionResponse, AuthoritativeFileBytes, AuthoritativePathEntry, CapabilityDocument,
-    ChangeSeq, CheckpointId, ChecksumAlgorithm, CommitId, ContentId, ContentRef, ContentRefKind,
-    CreateCheckpointRequest, CreateCheckpointResponse, DeleteDirectoryBehavior,
-    DeleteNamespaceResponse, DestinationBehavior, DirectoryPageCursor, EffectiveLimit,
-    FileRevision, FileRevisionsPageCursor, FlushWalOutcome, FlushWalResponse, GcRequest,
-    GcResponse, InodeId, InodeKind, ListFileRevisionsResponse, ListPathEntriesResponse,
+    ChangeSeq, CheckpointId, CheckpointOwnerSummary, CheckpointSummary, ChecksumAlgorithm,
+    CommitId, ContentId, ContentRef, ContentRefKind, CreateCheckpointRequest,
+    CreateCheckpointResponse, DeleteDirectoryBehavior, DeleteNamespaceResponse,
+    DestinationBehavior, DirectoryPageCursor, EffectiveLimit, FileRevision,
+    FileRevisionsPageCursor, FlushWalOutcome, FlushWalResponse, GcRequest, GcResponse, InodeId,
+    InodeKind, ListCheckpointsResponse, ListFileRevisionsResponse, ListPathEntriesResponse,
     MaintenanceStepKind, MaintenanceStepRequest, MaintenanceStepResponse, ManifestId, NameKey,
     NamespaceId, NamespaceStatusResponse, NamespaceSummary, Page, PageRequest, PaginationPolicy,
-    ReleaseCheckpointResponse, ReorganizeStepOutcome, RevisionNo, UploadId, WalFlushStepOutcome,
-    FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE,
-    FEATURE_NAMESPACES_FORK, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
-    PROFILE_ADMIN_V0, PROFILE_CORE_V0, PROTOCOL_VERSION,
+    ReleaseCheckpointResponse, ReorganizeStepOutcome, RetainedCandidates, RetainedReason,
+    RevisionNo, UploadId, WalFlushStepOutcome, FEATURE_DOWNLOADS_DIRECT_GET,
+    FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK,
+    FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT, PROFILE_ADMIN_V0,
+    PROFILE_CORE_V0, PROTOCOL_VERSION,
 };
 pub use loonfs_core::cache::{MetadataTableCacheConfig, Recency};
 pub use loonfs_core::limits::{
@@ -71,7 +73,7 @@ pub use loonfs_core::limits::{
 };
 pub use loonfs_core::time::current_time_ms;
 pub use loonfs_core::{
-    delete_if_aged, BootstrapNamespaceError, CheckpointFile, CheckpointFilesPage,
+    delete_if_aged, AgedSweep, BootstrapNamespaceError, CheckpointFile, CheckpointFilesPage,
     CheckpointFilesPageCursor, CurrentFileState, DeleteNamespaceOptions, Error as CoreError,
     ErrorCode, ErrorKind, FileContentStream, GcConfig, MetadataViewError, PassBudget,
     StoreFailureClass, WriterFence, CONTENT_READ_CHUNK_BYTES, MAX_RESOLVE_CURRENT_FILES,

@@ -791,6 +791,10 @@ mod tests {
             deleted_content_objects: 5,
             released_missing_basis_checkpoints: 0,
             retained_candidates: 2,
+            retained: loonfs_api::RetainedCandidates {
+                referenced: 2,
+                ..loonfs_api::RetainedCandidates::default()
+            },
             degraded_retention: false,
             content_reclamation_deferred: false,
             next_cursor: None,

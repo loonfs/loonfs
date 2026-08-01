@@ -640,6 +640,10 @@ pub(crate) struct ChangesArgs {
 pub(crate) enum AdminCommand {
     /// Pin the namespace's current state under a named checkpoint.
     Checkpoint(AdminCheckpointArgs),
+    /// List the namespace's active checkpoint pins, oldest first. A
+    /// checkpoint name is a label, not a key, so this is how a pin is found
+    /// again when its id has been lost.
+    CheckpointList(AdminNamespaceArgs),
     /// Release a checkpoint pin.
     CheckpointRelease(AdminCheckpointReleaseArgs),
     /// Flush the WAL tail into a durable segment.
@@ -880,6 +884,7 @@ pub(crate) enum CommandKind {
     FilesystemCp,
     Changes,
     AdminCheckpoint,
+    AdminCheckpointList,
     AdminCheckpointRelease,
     AdminFlush,
     AdminRetentionAdvance,
@@ -927,6 +932,7 @@ impl CommandKind {
             CommandKind::FilesystemCp => "filesystem_cp",
             CommandKind::Changes => "changes",
             CommandKind::AdminCheckpoint => "admin_checkpoint",
+            CommandKind::AdminCheckpointList => "admin_checkpoint_list",
             CommandKind::AdminCheckpointRelease => "admin_checkpoint_release",
             CommandKind::AdminFlush => "admin_flush",
             CommandKind::AdminRetentionAdvance => "admin_retention_advance",
@@ -985,6 +991,7 @@ impl Cli {
             Command::Changes(_) => CommandKind::Changes,
             Command::Admin { command } => match command {
                 AdminCommand::Checkpoint(_) => CommandKind::AdminCheckpoint,
+                AdminCommand::CheckpointList(_) => CommandKind::AdminCheckpointList,
                 AdminCommand::CheckpointRelease(_) => CommandKind::AdminCheckpointRelease,
                 AdminCommand::Flush(_) => CommandKind::AdminFlush,
                 AdminCommand::RetentionAdvance(_) => CommandKind::AdminRetentionAdvance,

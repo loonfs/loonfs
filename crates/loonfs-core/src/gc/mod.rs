@@ -21,5 +21,5 @@ mod uploads;
 
 pub use budget::PassBudget;
 pub use config::GcConfig;
-pub use reap::delete_if_aged;
+pub use reap::{delete_if_aged, AgedSweep};
 pub use run::gc_namespace;

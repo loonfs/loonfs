@@ -22,9 +22,9 @@ use loonfs_api::{
     },
     AuthoritativePathEntry, ChangeSeq, CheckpointId, CommitResponse, CreateCheckpointRequest,
     CreateCheckpointResponse, EffectiveLimit, ErrorCode, GrepRequest, GrepResponse, InodeId,
-    ListFileRevisionsResponse, ListPathEntriesResponse, ListTrashResponse, MaintenanceStepRequest,
-    MaintenanceStepResponse, NamespaceId, NamespaceStatusResponse, NamespaceSummary,
-    PaginationPolicy, ReleaseCheckpointResponse, RevisionNo,
+    ListCheckpointsResponse, ListFileRevisionsResponse, ListPathEntriesResponse, ListTrashResponse,
+    MaintenanceStepRequest, MaintenanceStepResponse, NamespaceId, NamespaceStatusResponse,
+    NamespaceSummary, PaginationPolicy, ReleaseCheckpointResponse, RevisionNo,
 };
 use loonfs_client::NamespacePath;
 use loonfs_grep::{
@@ -769,6 +769,16 @@ impl EmbeddedBackend {
     ) -> Result<CreateCheckpointResponse, BackendError> {
         self.admin
             .create_checkpoint(namespace_id, CreateCheckpointOptions::from_request(request))
+            .await
+            .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
+    }
+
+    pub(super) async fn list_checkpoints(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<ListCheckpointsResponse, BackendError> {
+        self.admin
+            .list_checkpoints(namespace_id)
             .await
             .map_err(|error| map_namespace_scoped_runtime_error(namespace_id, error))
     }

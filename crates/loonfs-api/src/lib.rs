@@ -124,13 +124,15 @@ pub use path::{
 // in `v0`; add here only what most consumers touch.
 pub use v0::{
     AdvanceRetentionResponse, ApiError, AuthoritativeFileBytes, AuthoritativePathEntry,
-    CommitRequest, CommitResponse, CreateCheckpointRequest, CreateCheckpointResponse,
-    CreateNamespaceRequest, DeleteDirectoryBehavior, DeleteNamespaceResponse, DestinationBehavior,
-    ErrorDetails, FileRevision, FilesystemOperation, FlushWalOutcome, FlushWalResponse,
-    ForkNamespaceRequest, GcRequest, GcResponse, GrepMatch, GrepRequest, GrepResponse,
+    CheckpointOwnerSummary, CheckpointSummary, CommitRequest, CommitResponse,
+    CreateCheckpointRequest, CreateCheckpointResponse, CreateNamespaceRequest,
+    DeleteDirectoryBehavior, DeleteNamespaceResponse, DestinationBehavior, ErrorDetails,
+    FileRevision, FilesystemOperation, FlushWalOutcome, FlushWalResponse, ForkNamespaceRequest,
+    GcRequest, GcResponse, GrepMatch, GrepRequest, GrepResponse, ListCheckpointsResponse,
     ListFileRevisionsResponse, ListPathEntriesResponse, ListTrashResponse, MaintenanceStepKind,
     MaintenanceStepRequest, MaintenanceStepResponse, NamespaceStatusResponse, NamespaceSummary,
-    ReleaseCheckpointResponse, ReorganizeStepOutcome, TrashEntry, WalFlushStepOutcome,
+    ReleaseCheckpointResponse, ReorganizeStepOutcome, RetainedCandidates, RetainedReason,
+    TrashEntry, WalFlushStepOutcome,
 };
 
 #[cfg(test)]

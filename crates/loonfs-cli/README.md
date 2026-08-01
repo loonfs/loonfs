@@ -234,7 +234,9 @@ Maintenance
     Run mark-and-sweep collection, looping bounded passes through
     completion; --max-objects examines at most that many candidates and
     returns after one pass, and --grace-window-ms protects objects younger
-    than the window
+    than the window. A run that takes more than one pass reports each pass
+    on standard error as it lands, and the summary says what the pass kept
+    and mostly why; --json carries every retention reason
 
   loonfs admin probe-store
     Prove the profile's object store honours the contract LoonFS depends on
@@ -246,6 +248,13 @@ Maintenance
   loonfs admin checkpoint --name <label> [--ttl-ms <ms>]
     Pin the namespace's current state under a named checkpoint; --ttl-ms
     expires the pin, and an omitted TTL holds it until release
+
+  loonfs admin checkpoint-list
+    List the namespace's active checkpoint pins, oldest first: when each was
+    taken, when it expires, the sequence it pins, its label or fork target,
+    and the id `checkpoint-release` takes. A name is a label rather than a
+    key, so this is how a pin is found again once its id has been lost; a
+    pin whose expiry has passed is still listed until collection releases it
 
   loonfs admin checkpoint-release <checkpoint-id>
     Release a checkpoint pin
