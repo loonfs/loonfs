@@ -20,18 +20,19 @@ use crate::backend_error::{map_namespace_scoped_runtime_error, BackendError};
 use crate::payload::LocalPayload;
 use crate::progress::ProgressReporter;
 use crate::resolve::ResolvedTarget;
+use crate::uploads::UploadJournal;
 use bytes::Bytes;
 use loonfs_api::{
     v0::{
         ChangesResponse, DisableGrepIndexResponse, EnableGrepIndexResponse, GrepGcRequest,
         GrepGcResponse, GrepIndexLifecycle, GrepIndexStatusResponse, StoreProbeRequest,
-        StoreProbeResponse,
+        StoreProbeResponse, UploadStatusResponse,
     },
-    AuthoritativePathEntry, ChangeSeq, CheckpointId, CommitResponse, CreateCheckpointRequest,
-    CreateCheckpointResponse, DeleteNamespaceResponse, GrepRequest, GrepResponse, InodeId,
-    ListFileRevisionsResponse, ListPathEntriesResponse, ListTrashResponse, MaintenanceStepRequest,
-    MaintenanceStepResponse, NamespaceId, NamespaceStatusResponse, NamespaceSummary,
-    ReleaseCheckpointResponse, RevisionNo,
+    AuthoritativePathEntry, ChangeSeq, CheckpointId, CommitResponse, ContentRef,
+    CreateCheckpointRequest, CreateCheckpointResponse, DeleteNamespaceResponse, GrepRequest,
+    GrepResponse, InodeId, ListFileRevisionsResponse, ListPathEntriesResponse, ListTrashResponse,
+    MaintenanceStepRequest, MaintenanceStepResponse, NamespaceId, NamespaceStatusResponse,
+    NamespaceSummary, ReleaseCheckpointResponse, RevisionNo, UploadId,
 };
 use loonfs_client::{
     CopyOptions, CreateDirectoryOptions, DeleteOptions, DirectDownloadStream, MoveOptions,
@@ -87,10 +88,14 @@ pub(crate) enum FileDownload {
     Streamed {
         namespace_id: NamespaceId,
         stream: Box<FileContentStream<SharedObjectStore>>,
+        resumed_from: u64,
     },
     /// A remote object-store response, streamed and verified by the client
     /// against the content reference in its download grant.
-    Direct(Box<DirectDownloadStream>),
+    Direct {
+        stream: Box<DirectDownloadStream>,
+        resumed_from: u64,
+    },
     /// Bytes the transport already holds whole.
     Whole(Vec<u8>),
 }
@@ -107,12 +112,40 @@ impl FileDownload {
             Self::Streamed {
                 namespace_id,
                 stream,
+                ..
             } => stream.next_chunk().await.map_err(|error| {
                 map_namespace_scoped_runtime_error(namespace_id, RuntimeError::Core(error))
             }),
-            Self::Direct(stream) => stream.next_chunk().await.map_err(BackendError::from),
+            Self::Direct { stream, .. } => stream.next_chunk().await.map_err(BackendError::from),
             Self::Whole(bytes) if bytes.is_empty() => Ok(None),
             Self::Whole(bytes) => Ok(Some(Bytes::from(std::mem::take(bytes)))),
+        }
+    }
+
+    /// Where this download actually starts, which is not always where it was
+    /// asked to: a transport that answers whole has no partial answer to
+    /// pick up from and begins at zero however much the caller holds.
+    pub(crate) fn resumed_from(&self) -> u64 {
+        match self {
+            Self::Streamed { resumed_from, .. } | Self::Direct { resumed_from, .. } => {
+                *resumed_from
+            }
+            Self::Whole(_) => 0,
+        }
+    }
+
+    /// Hands a resumed download the bytes below its start, so its
+    /// verification still covers the whole file.
+    ///
+    /// Both streaming arms check a digest over the complete object, so a
+    /// download that skipped a prefix refuses to read until it has been told
+    /// what the prefix was. A held answer never resumed, so it has nothing
+    /// to be told.
+    pub(crate) fn fold_resumed_prefix(&mut self, bytes: &[u8]) {
+        match self {
+            Self::Streamed { stream, .. } => stream.fold_resumed_prefix(bytes),
+            Self::Direct { stream, .. } => stream.fold_resumed_prefix(bytes),
+            Self::Whole(_) => {}
         }
     }
 }
@@ -171,6 +204,16 @@ impl MaintenanceDrainProgress {
 /// in. Remote profiles are served by a server that runs its own runner;
 /// stepping one from here would be a second scheduler over the same
 /// namespaces, and there is no remote step to drive anyway.
+/// Refuses upload-session bookkeeping to a profile that has no sessions.
+/// An embedded profile stages content through its own runtime, so there is
+/// no session to ask after and nothing an interrupted upload could rejoin.
+fn upload_sessions_need_a_remote_profile() -> BackendError {
+    BackendError::new(
+        loonfs_api::ErrorCode::NotSupported.as_str(),
+        "upload sessions belong to a server; an embedded profile stages content itself",
+    )
+}
+
 fn maintenance_host_needs_an_embedded_profile() -> BackendError {
     BackendError::new(
         loonfs_api::ErrorCode::NotSupported.as_str(),
@@ -336,18 +379,31 @@ impl ResolvedTarget {
     /// A remote file past the deployment's proxy cap streams straight from
     /// object storage under a download grant; a smaller proxied response
     /// arrives whole. Every arm is verified before it reports its end.
+    ///
+    /// `start_offset` asks the two streaming arms to skip bytes the caller
+    /// already holds — a download picking up where an interrupted one
+    /// stopped. Only they can: a proxied read and a retained revision arrive
+    /// in one response, so they start over and say so through
+    /// [`FileDownload::resumed_from`].
     pub(crate) async fn open_file_download(
         &self,
         spec: &NamespacePath,
         revision_no: Option<RevisionNo>,
         size_bytes: Option<u64>,
+        start_offset: u64,
     ) -> Result<FileDownload, BackendError> {
         if let (Self::Remote(target), Some(size_bytes)) = (self, size_bytes) {
             if target.client.offers_direct_download(size_bytes).await {
                 let grant = target.client.begin_download(spec, revision_no).await?;
-                return Ok(FileDownload::Direct(Box::new(
-                    target.client.open_direct_download(&grant).await?,
-                )));
+                return Ok(FileDownload::Direct {
+                    stream: Box::new(
+                        target
+                            .client
+                            .open_direct_download_at(&grant, start_offset)
+                            .await?,
+                    ),
+                    resumed_from: start_offset,
+                });
             }
         }
         if let Some(revision_no) = revision_no {
@@ -358,7 +414,8 @@ impl ResolvedTarget {
         match self {
             Self::Embedded(target) => Ok(FileDownload::Streamed {
                 namespace_id: spec.namespace().clone(),
-                stream: Box::new(target.backend.read_file_stream(spec).await?),
+                stream: Box::new(target.backend.read_file_stream(spec, start_offset).await?),
+                resumed_from: start_offset,
             }),
             Self::Remote(target) => Ok(FileDownload::Whole(
                 target.client.get_file_bytes(spec).await?,
@@ -546,12 +603,18 @@ impl ResolvedTarget {
     /// spell a byte stream in their own terms, and only one arm ever runs.
     /// `progress` counts what the payload gives up, so both arms report the
     /// same bytes for the same file.
+    /// `journal` is where a remote profile records a direct multipart upload
+    /// so an interrupted one can pick up. Only that transport has anything
+    /// to record: an embedded profile stages through its own runtime with no
+    /// session to rejoin, and a proxied upload is one request with no parts
+    /// to have half-finished.
     pub(crate) async fn put_file_stream(
         &self,
         spec: &NamespacePath,
         payload: &LocalPayload,
         options: &PutFileOptions,
         progress: &Arc<ProgressReporter>,
+        journal: Option<&UploadJournal>,
     ) -> Result<CommitResponse, BackendError> {
         match self {
             Self::Embedded(target) => {
@@ -560,8 +623,47 @@ impl ResolvedTarget {
             }
             Self::Remote(target) => {
                 let source = payload.open_source(progress).await?;
-                Ok(target.client.put_file_stream(spec, source, options).await?)
+                let Some(journal) = journal else {
+                    return Ok(target.client.put_file_stream(spec, source, options).await?);
+                };
+                let resume = journal.resume();
+                Ok(target
+                    .client
+                    .put_file_stream_resumable(spec, source, options, journal, resume.as_ref())
+                    .await?)
             }
+        }
+    }
+
+    /// Reads what became of an upload session a previous run opened.
+    pub(crate) async fn read_upload_status(
+        &self,
+        namespace_id: &NamespaceId,
+        upload_id: &UploadId,
+    ) -> Result<UploadStatusResponse, BackendError> {
+        match self {
+            Self::Embedded(_) => Err(upload_sessions_need_a_remote_profile()),
+            Self::Remote(target) => Ok(target
+                .client
+                .read_upload_status(namespace_id, upload_id)
+                .await?),
+        }
+    }
+
+    /// Commits content an upload session already completed, moving no bytes.
+    pub(crate) async fn commit_completed_upload(
+        &self,
+        spec: &NamespacePath,
+        content_ref: ContentRef,
+        validated_content_token: Option<String>,
+        options: &PutFileOptions,
+    ) -> Result<CommitResponse, BackendError> {
+        match self {
+            Self::Embedded(_) => Err(upload_sessions_need_a_remote_profile()),
+            Self::Remote(target) => Ok(target
+                .client
+                .commit_completed_upload(spec, content_ref, validated_content_token, options)
+                .await?),
         }
     }
 

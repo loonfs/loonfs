@@ -240,15 +240,23 @@ impl EmbeddedBackend {
 
     /// Opens a file's content as bounded chunks, at the runtime's own chunk
     /// size: what a download costs this process is that chunk, not the file.
+    ///
+    /// `start_offset` skips what the caller already holds; the stream still
+    /// verifies the whole object, so those bytes reach it through
+    /// [`FileContentStream::fold_resumed_prefix`] before it reads anything.
     pub(super) async fn read_file_stream(
         &self,
         spec: &NamespacePath,
+        start_offset: u64,
     ) -> Result<FileContentStream<SharedObjectStore>, BackendError> {
         self.reader
             .read_file_stream(
                 spec.namespace(),
                 spec.absolute_path().as_str(),
-                ReadFileStreamOptions::default(),
+                ReadFileStreamOptions {
+                    start_offset,
+                    ..ReadFileStreamOptions::default()
+                },
             )
             .await
             .map_err(|error| map_namespace_scoped_runtime_error(spec.namespace(), error))

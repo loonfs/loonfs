@@ -92,6 +92,19 @@ pub enum CoreError {
     /// splits the batch; nothing was read.
     #[error("asked for {requested} items, over the {max} one batch answers")]
     BatchTooLarge { requested: usize, max: usize },
+    /// A streamed read was asked to start past the end of the content it
+    /// reads. Nothing was read.
+    #[error("cannot start a read at offset {start_offset} of {size_bytes}-byte content")]
+    ResumeOffsetOutOfRange { start_offset: u64, size_bytes: u64 },
+    /// A streamed read that starts past zero was driven before the bytes it
+    /// skipped were folded into its verification. Verification covers the
+    /// whole object, so it cannot begin until the caller has handed over
+    /// what it already holds. Nothing was read.
+    #[error(
+        "a read resumed at offset {start_offset} was given {folded} bytes of what it skipped; \
+         verification covers the whole object, so all of them are needed first"
+    )]
+    ResumePrefixIncomplete { start_offset: u64, folded: u64 },
     #[error("expected file at `{path}` but found `{kind}`")]
     ExpectedFile { path: String, kind: InodeKind },
     #[error("expected directory at `{path}` but found `{kind}`")]
@@ -371,6 +384,8 @@ impl CoreError {
             | CoreError::InvalidUploadContent(_)
             | CoreError::InvalidCursor(_)
             | CoreError::BatchTooLarge { .. }
+            | CoreError::ResumeOffsetOutOfRange { .. }
+            | CoreError::ResumePrefixIncomplete { .. }
             | CoreError::NonDirectoryPathComponent(_) => ErrorCode::InvalidRequest,
             CoreError::PathNotFound(_) => ErrorCode::PathNotFound,
             CoreError::RevisionNotFound { .. } => ErrorCode::RevisionNotFound,

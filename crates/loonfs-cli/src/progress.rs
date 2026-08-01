@@ -69,6 +69,9 @@ impl ProgressOp {
 #[derive(Debug)]
 struct ProgressState {
     bytes_done: u64,
+    /// Bytes this run actually moved, which is what a rate is about. It
+    /// trails `bytes_done` by whatever an interrupted run left behind.
+    bytes_moved: u64,
     bytes_total: Option<u64>,
     files_done: u64,
     files_total: Option<u64>,
@@ -140,6 +143,7 @@ impl ProgressReporter {
             started_ms,
             state: Mutex::new(ProgressState {
                 bytes_done: 0,
+                bytes_moved: 0,
                 bytes_total: None,
                 files_done: 0,
                 files_total: None,
@@ -173,6 +177,20 @@ impl ProgressReporter {
         self.lock().bytes_done
     }
 
+    /// Credits bytes a previous, interrupted run already moved.
+    ///
+    /// They count toward the total and the percentage, because they are
+    /// part of the file that will be there at the end. They do not count
+    /// toward the rate: this run did not move them, and pretending it did
+    /// would make the first estimate of what is left a fantasy.
+    pub(crate) fn already_done(&self, bytes: u64) {
+        if !self.enabled() || bytes == 0 {
+            return;
+        }
+        let mut state = self.lock();
+        state.bytes_done = state.bytes_done.saturating_add(bytes);
+    }
+
     /// Adds bytes a transfer just moved, reporting when a report is due.
     pub(crate) fn advance(&self, bytes: u64) {
         if !self.enabled() {
@@ -181,6 +199,7 @@ impl ProgressReporter {
         let now_ms = self.timer.monotonic_now_ms();
         let mut state = self.lock();
         state.bytes_done = state.bytes_done.saturating_add(bytes);
+        state.bytes_moved = state.bytes_moved.saturating_add(bytes);
         if state.due(now_ms) {
             self.report(&mut state, now_ms);
         }
@@ -230,22 +249,24 @@ impl ProgressReporter {
     }
 
     /// A stretch where time passes and bytes do not — the commit a finished
-    /// upload waits on. Emitted at the transition, not on a timer.
+    /// upload waits on, or the head start a resumed download begins from.
+    /// Emitted at the transition, not on a timer.
     pub(crate) fn phase(&self, phase: &str) {
         if !self.enabled() {
             return;
         }
         let now_ms = self.timer.monotonic_now_ms();
+        let mut state = self.lock();
         match self.mode {
             ProgressMode::Events => self.emit_event(&Event::Phase {
                 kind: "phase",
                 op: self.op.as_str(),
                 path: &self.path,
                 phase,
+                bytes_done: state.bytes_done,
                 elapsed_ms: now_ms.saturating_sub(self.started_ms),
             }),
             ProgressMode::Human => {
-                let mut state = self.lock();
                 let line = format!("{} {} {phase}...", self.op.as_str(), self.path);
                 self.draw(&mut state, &line);
             }
@@ -284,7 +305,7 @@ impl ProgressReporter {
 
     fn report(&self, state: &mut ProgressState, now_ms: u64) {
         let elapsed_ms = now_ms.saturating_sub(self.started_ms);
-        let rate_bps = rate_bps(state.bytes_done, elapsed_ms);
+        let rate_bps = rate_bps(state.bytes_moved, elapsed_ms);
         match self.mode {
             ProgressMode::Events => self.emit_event(&Event::Progress {
                 kind: "progress",
@@ -392,6 +413,7 @@ enum Event<'a> {
         op: &'static str,
         path: &'a str,
         phase: &'a str,
+        bytes_done: u64,
         elapsed_ms: u64,
     },
 }
@@ -449,6 +471,7 @@ mod tests {
     fn state(bytes_done: u64, bytes_total: Option<u64>) -> ProgressState {
         ProgressState {
             bytes_done,
+            bytes_moved: bytes_done,
             bytes_total,
             files_done: 0,
             files_total: None,
@@ -477,6 +500,7 @@ mod tests {
     fn a_report_waits_for_the_interval_or_a_new_percentage() {
         let mut state = ProgressState {
             bytes_done: 10,
+            bytes_moved: 10,
             bytes_total: Some(1_000),
             files_done: 0,
             files_total: None,

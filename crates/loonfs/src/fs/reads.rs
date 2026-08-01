@@ -180,6 +180,12 @@ impl FsReader {
     ///
     /// The deployment's buffered-read cap does not apply here. That cap
     /// bounds what one call materializes, and this call materializes a chunk.
+    ///
+    /// [`ReadFileStreamOptions::start_offset`] resumes a read the caller
+    /// already began. Verification stays over the whole object, so a
+    /// resumed stream refuses to fetch anything until it has been handed
+    /// the bytes below its start through
+    /// [`FileContentStream::fold_resumed_prefix`].
     pub async fn read_file_stream(
         &self,
         namespace_id: &NamespaceId,
@@ -188,7 +194,12 @@ impl FsReader {
     ) -> Result<FileContentStream<SharedObjectStore>> {
         let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
         let stream = engine
-            .read_file_stream(absolute_path, &read_context, options.chunk_bytes)
+            .read_file_stream(
+                absolute_path,
+                &read_context,
+                options.chunk_bytes,
+                options.start_offset,
+            )
             .await?;
         self.core
             .inner

@@ -202,13 +202,43 @@ pub struct DirectDownloadStream {
     path: AbsolutePath,
     sha256: Option<Sha256>,
     size_bytes: u64,
+    /// Offset this stream was opened at: zero for the whole object, and the
+    /// length of what the caller already holds for a resumed download.
+    resumed_from: u64,
+    /// How much of that head start the caller has folded in. Nothing is
+    /// read until it reaches `resumed_from`, because the verdict is over
+    /// the whole object either way.
+    prefix_folded: u64,
     finished: bool,
 }
 
 impl DirectDownloadStream {
+    /// Hands the stream part of what the caller already holds, in order,
+    /// from the object's first byte.
+    ///
+    /// A resumed download still checks the whole object's digest, so the
+    /// bytes it will never receive have to be folded into the same hash as
+    /// the ones it does. Feeding the wrong bytes fails the download at its
+    /// end, which is right: the grant's reference is the authority on what
+    /// the object holds, not the partial copy on the caller's disk.
+    pub fn fold_resumed_prefix(&mut self, bytes: &[u8]) {
+        if let Some(sha256) = self.sha256.as_mut() {
+            sha256.update(bytes);
+        }
+        self.prefix_folded = self.prefix_folded.saturating_add(bytes.len() as u64);
+    }
+
     /// Returns the next response-body chunk, or `None` once the complete
     /// object has passed its declared-length and whole-file digest checks.
     pub async fn next_chunk(&mut self) -> Result<Option<Bytes>> {
+        if self.prefix_folded != self.resumed_from {
+            return Err(ClientError::Http(format!(
+                "a download of `{}` resumed at offset {} was given {} bytes of what it \
+                 skipped; verification covers the whole object, so all of them are needed \
+                 first",
+                self.path, self.resumed_from, self.prefix_folded
+            )));
+        }
         if self.finished {
             return Ok(None);
         }
@@ -259,6 +289,47 @@ impl DirectDownloadStream {
             }
         }
     }
+}
+
+/// What a caller keeps so an interrupted direct multipart upload can pick
+/// up rather than start over.
+///
+/// The parts are the caller's own bookkeeping, deliberately: an upload
+/// session records the geometry it was opened with and nothing per part, so
+/// the only account of which parts landed is the one the uploading client
+/// kept. Resuming with fewer parts than actually landed re-sends them,
+/// which is harmless; resuming with parts that did not land fails the
+/// completion, which is the assembly refusing to be wrong.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MultipartUploadResume {
+    pub upload_id: UploadId,
+    /// The part size the session was opened with. A resumed upload must cut
+    /// the payload exactly as the interrupted one did, or the parts it
+    /// sends will not line up with the ones already there.
+    pub part_size_bytes: u64,
+    pub parts: Vec<CompletedUploadPart>,
+}
+
+/// Where a caller records a direct multipart upload as it happens, so a
+/// later run can resume it.
+///
+/// Both methods are called on the thread driving the upload, between
+/// network round trips, so an implementation that writes to disk is doing
+/// it at the right moment: after the part it describes is durable, and
+/// before the next one starts.
+pub trait MultipartUploadJournal: Send + Sync {
+    /// A session was opened, with the part geometry the server chose.
+    fn began(&self, upload_id: &UploadId, part_size_bytes: u64);
+    /// One part landed in object storage.
+    fn part_completed(&self, part: &CompletedUploadPart);
+}
+
+/// How one upload survives an interruption: what an earlier run got
+/// through, and where this one writes down what it gets through.
+#[derive(Clone, Copy, Default)]
+struct UploadContinuity<'a> {
+    resume: Option<&'a MultipartUploadResume>,
+    journal: Option<&'a dyn MultipartUploadJournal>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -629,6 +700,23 @@ impl Client {
         &self,
         download: &BeginDownloadResponse,
     ) -> Result<DirectDownloadStream> {
+        self.open_direct_download_at(download, 0).await
+    }
+
+    /// Opens a download grant's body from `start_offset`, for a caller that
+    /// already holds the bytes below it.
+    ///
+    /// The offset rides a `Range` header, which the presigned signature does
+    /// not cover: one grant serves the whole object or any part of it, so a
+    /// resumed download needs no different grant than a fresh one. The
+    /// stream still reports on the whole object, so a nonzero offset obliges
+    /// the caller to hand over what it holds through
+    /// [`DirectDownloadStream::fold_resumed_prefix`] before driving it.
+    pub async fn open_direct_download_at(
+        &self,
+        download: &BeginDownloadResponse,
+        start_offset: u64,
+    ) -> Result<DirectDownloadStream> {
         let ObjectTransferAccess::PresignedUrl {
             method,
             url,
@@ -640,9 +728,18 @@ impl Client {
                 "unsupported presigned download method `{method}`"
             )));
         }
+        if start_offset > download.content_ref.size_bytes {
+            return Err(ClientError::Http(format!(
+                "cannot resume a download of `{}` at offset {start_offset} of {} bytes",
+                download.absolute_path, download.content_ref.size_bytes
+            )));
+        }
         let mut request = WireRequest::presigned(reqwest::Method::GET, url);
         for (name, value) in headers {
             request = request.header(name, value);
+        }
+        if start_offset > 0 {
+            request = request.header("range", format!("bytes={start_offset}-"));
         }
         let body = self.call_for_response_stream(&request).await?;
         Ok(DirectDownloadStream {
@@ -654,7 +751,11 @@ impl Client {
                 .whole_file_sha256
                 .as_ref()
                 .map(|_| Sha256::new()),
-            size_bytes: 0,
+            // The counter measures the whole object, not this response, so
+            // the length check at the end lands where it always did.
+            size_bytes: start_offset,
+            resumed_from: start_offset,
+            prefix_folded: 0,
             finished: false,
         })
     }
@@ -1186,7 +1287,11 @@ impl Client {
     ) -> Result<StagedContent> {
         if bytes.len() as u64 >= STREAMING_PUT_MIN_BYTES && self.offers_direct_multipart().await {
             return self
-                .stage_via_multipart(namespace_id, MultipartPayload::Held(bytes))
+                .stage_via_multipart(
+                    namespace_id,
+                    MultipartPayload::Held(bytes),
+                    UploadContinuity::default(),
+                )
                 .await;
         }
         self.stage_bytes_via_server(namespace_id, bytes).await
@@ -1202,6 +1307,7 @@ impl Client {
         &self,
         namespace_id: &NamespaceId,
         source: PayloadSource,
+        continuity: UploadContinuity<'_>,
     ) -> Result<StagedContent> {
         // A source that knows it is small has nothing to gain from parts,
         // exactly as a held payload of that size does not. A source that
@@ -1213,9 +1319,11 @@ impl Client {
         if !known_small && self.offers_direct_multipart().await {
             let (stream, _) = source.into_stream();
             return self
-                .stage_via_multipart(namespace_id, MultipartPayload::Streamed(stream))
+                .stage_via_multipart(namespace_id, MultipartPayload::Streamed(stream), continuity)
                 .await;
         }
+        // Nothing to resume off this path: a proxied upload is one request
+        // with no session behind it, so there are no parts to have landed.
         self.stage_source_via_server(namespace_id, source).await
     }
 
@@ -1242,18 +1350,36 @@ impl Client {
         &self,
         namespace_id: &NamespaceId,
         payload: MultipartPayload<'_>,
+        continuity: UploadContinuity<'_>,
     ) -> Result<StagedContent> {
-        let begin = self
-            .begin_direct_multipart(namespace_id, DirectMultipartUploadOptions::default())
-            .await?;
-        let upload_id = begin.upload_id.clone();
-        let Some(multipart) = begin.direct_multipart else {
-            return Err(ClientError::Http(
-                "server accepted direct_multipart without part geometry".to_owned(),
-            ));
+        // A resumed upload rejoins the session a previous run opened, at the
+        // part size that run was given. Asking for a new one would open a
+        // second session and orphan the parts already in object storage.
+        let (upload_id, part_size_bytes) = match continuity.resume {
+            Some(resume) => (resume.upload_id.clone(), resume.part_size_bytes),
+            None => {
+                let begin = self
+                    .begin_direct_multipart(namespace_id, DirectMultipartUploadOptions::default())
+                    .await?;
+                let Some(multipart) = begin.direct_multipart else {
+                    return Err(ClientError::Http(
+                        "server accepted direct_multipart without part geometry".to_owned(),
+                    ));
+                };
+                if let Some(journal) = continuity.journal {
+                    journal.began(&begin.upload_id, multipart.part_size_bytes);
+                }
+                (begin.upload_id, multipart.part_size_bytes)
+            }
         };
         let uploaded = self
-            .upload_every_part(namespace_id, &upload_id, payload, multipart.part_size_bytes)
+            .upload_every_part(
+                namespace_id,
+                &upload_id,
+                payload,
+                part_size_bytes,
+                continuity,
+            )
             .await;
         let uploaded = match uploaded {
             Ok(uploaded) => uploaded,
@@ -1297,15 +1423,24 @@ impl Client {
     /// in a single request, uploads them together, and only then reads the
     /// next wave — so the payload's length never enters into how much of it
     /// is resident.
+    /// A resumed upload still reads every byte: the whole-object checksum
+    /// completion verifies the assembly against is folded over the payload
+    /// in one forward pass, so a part already in object storage is cut,
+    /// folded, and then let go rather than sent again. What resuming saves
+    /// is the network, which is the part that was expensive.
     async fn upload_every_part(
         &self,
         namespace_id: &NamespaceId,
         upload_id: &UploadId,
         payload: MultipartPayload<'_>,
         part_size_bytes: u64,
+        continuity: UploadContinuity<'_>,
     ) -> Result<UploadedObject> {
         let part_size = usize::try_from(part_size_bytes)
             .map_err(|_| ClientError::Http("part size does not fit this platform".to_owned()))?;
+        let landed = continuity
+            .resume
+            .map_or::<&[CompletedUploadPart], _>(&[], |resume| &resume.parts);
         let mut source = payload.into_parts_of(part_size);
         let mut whole_object = Crc64Nvme::new();
         let mut size_bytes = 0u64;
@@ -1314,28 +1449,38 @@ impl Client {
 
         loop {
             let mut wave = Vec::with_capacity(DIRECT_MULTIPART_PARTS_IN_FLIGHT);
+            let mut source_ended = false;
             while wave.len() < DIRECT_MULTIPART_PARTS_IN_FLIGHT {
                 let Some(bytes) = source.next_part().await? else {
+                    source_ended = true;
                     break;
                 };
                 whole_object.update(&bytes);
                 size_bytes += bytes.len() as u64;
+                let part_number = next_part_number;
+                next_part_number += 1;
+                if let Some(landed) = landed.iter().find(|part| part.part_number == part_number) {
+                    parts.push(landed.clone());
+                    continue;
+                }
                 wave.push(PendingPart {
                     claim: UploadPartChecksumClaim {
-                        part_number: next_part_number,
+                        part_number,
                         crc64nvme: StorageChecksum::crc64nvme(&bytes).value,
                     },
                     bytes,
                 });
-                next_part_number += 1;
             }
-            if wave.is_empty() {
-                break;
+            if !wave.is_empty() {
+                let uploaded = self.upload_wave(namespace_id, upload_id, wave).await?;
+                if let Some(journal) = continuity.journal {
+                    for part in &uploaded {
+                        journal.part_completed(part);
+                    }
+                }
+                parts.extend(uploaded);
             }
-            let complete = wave.len() == DIRECT_MULTIPART_PARTS_IN_FLIGHT;
-            parts.extend(self.upload_wave(namespace_id, upload_id, wave).await?);
-            if !complete {
-                // A short wave is the only proof the source ended.
+            if source_ended {
                 break;
             }
         }
@@ -1558,13 +1703,86 @@ impl Client {
         source: PayloadSource,
         options: &PutFileOptions,
     ) -> Result<ApiCommitResponse> {
+        self.put_file_stream_continuing(spec, source, options, UploadContinuity::default())
+            .await
+    }
+
+    /// [`Self::put_file_stream`] for a caller that intends to survive an
+    /// interruption.
+    ///
+    /// `journal` is told the session's id and geometry when it opens and
+    /// told every part as it lands; `resume` hands back what an earlier run
+    /// of the same upload recorded, so this one sends only the parts still
+    /// missing. Both apply to the direct multipart transport alone: a
+    /// proxied upload is a single request with no session behind it and
+    /// nothing to resume from, and it ignores them.
+    ///
+    /// The source is read from its first byte either way. That is not
+    /// waste — the checksum the assembly is verified against covers the
+    /// whole object, so every byte has to be folded whether or not it also
+    /// has to be sent — and it means the source has to be one that can be
+    /// opened again. A pipe cannot, which is why nothing that reads one
+    /// should be calling this.
+    pub async fn put_file_stream_resumable(
+        &self,
+        spec: &NamespacePath,
+        source: PayloadSource,
+        options: &PutFileOptions,
+        journal: &dyn MultipartUploadJournal,
+        resume: Option<&MultipartUploadResume>,
+    ) -> Result<ApiCommitResponse> {
+        self.put_file_stream_continuing(
+            spec,
+            source,
+            options,
+            UploadContinuity {
+                resume,
+                journal: Some(journal),
+            },
+        )
+        .await
+    }
+
+    async fn put_file_stream_continuing(
+        &self,
+        spec: &NamespacePath,
+        source: PayloadSource,
+        options: &PutFileOptions,
+        continuity: UploadContinuity<'_>,
+    ) -> Result<ApiCommitResponse> {
         let staged = self
-            .stage_source_as_content_ref(spec.namespace(), source)
+            .stage_source_as_content_ref(spec.namespace(), source, continuity)
             .await?;
         // The staged reference is what the server verified about the bytes
         // that just went past, and with the payload gone it is the only
         // description of them that still exists.
         let uploaded = staged.content_ref.clone();
+        self.commit_staged_file(spec, staged, options, UploadedContent::Streamed(&uploaded))
+            .await
+    }
+
+    /// Commits content an upload session already completed, for a caller
+    /// that finished the transfer and was interrupted before the commit.
+    ///
+    /// The reference and the token come from
+    /// [`Self::read_upload_status`] reporting the session `Completed`: the
+    /// bytes are in object storage and admitted, so the only thing left to
+    /// do is name them at a path. Nothing is re-uploaded.
+    pub async fn commit_completed_upload(
+        &self,
+        spec: &NamespacePath,
+        content_ref: ContentRef,
+        validated_content_token: Option<String>,
+        options: &PutFileOptions,
+    ) -> Result<ApiCommitResponse> {
+        let uploaded = content_ref.clone();
+        let staged = StagedContent {
+            validated_content_token: validated_content_token.map(|token| ValidatedContentToken {
+                content_ref: content_ref.clone(),
+                token,
+            }),
+            content_ref,
+        };
         self.commit_staged_file(spec, staged, options, UploadedContent::Streamed(&uploaded))
             .await
     }

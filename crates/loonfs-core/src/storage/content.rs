@@ -268,6 +268,14 @@ pub struct FileContentStream<S> {
     chunk_bytes: NonZeroU64,
     /// Offset the next ranged read starts at; also how much has been read.
     next_offset: u64,
+    /// Offset this stream was opened at. Zero for a read of the whole
+    /// object, and the length of what the caller already holds for a
+    /// resumed one.
+    resumed_from: u64,
+    /// How much of that head start the caller has folded in so far. The
+    /// stream fetches nothing until this reaches `resumed_from`, because
+    /// the verdict is over the whole object either way.
+    prefix_folded: u64,
     /// The checksum the complete object must produce, folded so far.
     digest: StreamingChecksum,
     /// The value `digest` is closed against.
@@ -287,12 +295,16 @@ impl<S: ObjectStore> FileContentStream<S> {
     /// wrong-sized object fail without a partial answer having been handed
     /// out. The reference's checksum algorithm is resolved here for the same
     /// reason.
+    /// `start_offset` is where the caller already is: bytes below it are
+    /// never fetched, and [`Self::fold_resumed_prefix`] is how they still
+    /// reach the digest.
     pub(crate) async fn open(
         store: S,
         content_store_id: &ContentStoreId,
         entry: AuthoritativePathEntry,
         content_ref: ContentRef,
         chunk_bytes: NonZeroU64,
+        start_offset: u64,
     ) -> Result<Self, DurableContentValidationError> {
         let object_key = content_object_key_for_ref(content_store_id, &content_ref)?;
         validate_content_size(&store, &object_key, &content_ref).await?;
@@ -309,11 +321,26 @@ impl<S: ObjectStore> FileContentStream<S> {
             object_key,
             content_ref,
             chunk_bytes,
-            next_offset: 0,
+            next_offset: start_offset,
+            resumed_from: start_offset,
+            prefix_folded: 0,
             digest,
             expected,
             completion: None,
         })
+    }
+
+    /// Hands the stream part of what the caller already holds, in order,
+    /// from the object's first byte.
+    ///
+    /// A resumed read still reports on the whole object, so the bytes it
+    /// will never fetch have to be folded into the same digest that closes
+    /// over the ones it does. Feeding the wrong bytes fails verification at
+    /// the end, which is exactly right: the reference is the authority on
+    /// what the object holds, not the partial copy on the caller's disk.
+    pub fn fold_resumed_prefix(&mut self, bytes: &[u8]) {
+        self.digest.update(bytes);
+        self.prefix_folded = self.prefix_folded.saturating_add(bytes.len() as u64);
     }
 
     /// The authoritative metadata entry the path resolved to.
@@ -330,14 +357,22 @@ impl<S: ObjectStore> FileContentStream<S> {
     ///
     /// `Ok(None)` is returned only after the folded digest and the byte count
     /// agree with the reference; a mismatch fails this call instead. Chunks
-    /// arrive in order, and every one but the last is exactly the chunk size
-    /// this stream was opened with.
+    /// arrive in order from wherever the stream started, and every one but
+    /// the last is exactly the chunk size this stream was opened with.
     ///
     /// This is the method callers outside this crate hold, so it speaks the
     /// crate's error type: a content object that disagrees with its reference
     /// is namespace corruption, and it is classified as such here rather than
-    /// at every call site.
+    /// at every call site. A resumed stream that has not been told what it
+    /// skipped is the caller's own mistake instead, and says so before
+    /// anything is fetched.
     pub async fn next_chunk(&mut self) -> Result<Option<Bytes>, CoreError> {
+        if self.prefix_folded != self.resumed_from {
+            return Err(CoreError::ResumePrefixIncomplete {
+                start_offset: self.resumed_from,
+                folded: self.prefix_folded,
+            });
+        }
         Ok(self.next_verified_chunk().await?)
     }
 
@@ -394,9 +429,11 @@ impl<S: ObjectStore> FileContentStream<S> {
     ///
     /// The byte count needs no check of its own here. Every chunk is required
     /// to arrive exactly as long as it was asked for, and no chunk is asked
-    /// for past the declared size, so reaching this point *is* having read
-    /// exactly `size_bytes` — checked against the object's own length by the
-    /// head request [`Self::open`] made.
+    /// for past the declared size, so reaching this point *is* having folded
+    /// exactly `size_bytes` — the resumed head start, which the first
+    /// [`Self::next_chunk`] refuses to start without, plus everything
+    /// fetched from it to the end. The object's own length was checked
+    /// against the reference by the head request [`Self::open`] made.
     fn completion(&mut self) -> Result<(), DurableContentValidationError> {
         let verdict = match self.completion.take() {
             Some(verdict) => verdict,
@@ -1092,12 +1129,22 @@ mod tests {
         content_store_id: &ContentStoreId,
         content_ref: &ContentRef,
     ) -> Result<FileContentStream<S>, DurableContentValidationError> {
+        open_stream_at(store, content_store_id, content_ref, 0).await
+    }
+
+    async fn open_stream_at<S: ObjectStore>(
+        store: S,
+        content_store_id: &ContentStoreId,
+        content_ref: &ContentRef,
+        start_offset: u64,
+    ) -> Result<FileContentStream<S>, DurableContentValidationError> {
         FileContentStream::open(
             store,
             content_store_id,
             test_entry(),
             content_ref.clone(),
             test_chunk_bytes(),
+            start_offset,
         )
         .await
     }
@@ -1143,6 +1190,96 @@ mod tests {
         while stream.next_chunk().await.expect("chunk").is_some() {}
         assert!(stream.next_chunk().await.expect("verified end").is_none());
         assert!(stream.next_chunk().await.expect("verified end").is_none());
+    }
+
+    /// A resumed read fetches only what it does not already have, and still
+    /// closes its verdict over the whole object.
+    #[tokio::test]
+    async fn a_resumed_read_fetches_only_the_rest_and_verifies_all_of_it() {
+        let (_temp_dir, inner, content_store_id) = test_store();
+        let store = CountingStore::new(inner, KeyPredicate::content_blob());
+        let bytes = payload(3 * TEST_CHUNK_BYTES as usize);
+        let content_ref = content_ref(&bytes);
+        put_content_object(&store, &content_store_id, &content_ref, &bytes).await;
+
+        let held = 2 * TEST_CHUNK_BYTES as usize;
+        store.reset();
+        let mut stream = open_stream_at(&store, &content_store_id, &content_ref, held as u64)
+            .await
+            .expect("open stream");
+        stream.fold_resumed_prefix(&bytes[..held]);
+        let mut fetched = Vec::new();
+        while let Some(chunk) = stream.next_chunk().await.expect("chunk") {
+            fetched.extend_from_slice(&chunk);
+        }
+        assert_eq!(
+            fetched,
+            bytes[held..],
+            "a resumed read hands back only what it fetched"
+        );
+        assert_eq!(
+            store.count(OperationClass::Read),
+            1,
+            "one chunk was left to fetch, so one ranged read happened"
+        );
+    }
+
+    /// The prefix is part of the verdict, not a formality: bytes that are
+    /// not the object's fail the read at its end, and a stream driven before
+    /// it has them refuses to fetch anything at all.
+    #[tokio::test]
+    async fn a_resumed_read_holds_the_prefix_to_the_same_verdict() {
+        let (_temp_dir, inner, content_store_id) = test_store();
+        let store = CountingStore::new(inner, KeyPredicate::content_blob());
+        let bytes = payload(2 * TEST_CHUNK_BYTES as usize);
+        let content_ref = content_ref(&bytes);
+        put_content_object(&store, &content_store_id, &content_ref, &bytes).await;
+        let held = TEST_CHUNK_BYTES as usize;
+
+        store.reset();
+        let mut unfed = open_stream_at(&store, &content_store_id, &content_ref, held as u64)
+            .await
+            .expect("open stream");
+        let err = unfed.next_chunk().await.expect_err("prefix still owed");
+        assert!(
+            matches!(
+                err,
+                CoreError::ResumePrefixIncomplete {
+                    start_offset,
+                    folded: 0
+                } if start_offset == held as u64
+            ),
+            "unexpected error: {err}"
+        );
+        assert_eq!(
+            store.count(OperationClass::Read),
+            0,
+            "nothing is fetched until the stream has what it skipped"
+        );
+
+        let mut wrong = open_stream_at(&store, &content_store_id, &content_ref, held as u64)
+            .await
+            .expect("open stream");
+        wrong.fold_resumed_prefix(&vec![0u8; held]);
+        let verdict = loop {
+            match wrong.next_chunk().await {
+                Ok(Some(_)) => continue,
+                // A verified end is the only thing that reports `None`, so
+                // this arm would mean bad bytes had been accepted.
+                #[allow(clippy::panic, reason = "the failure this test exists to catch")]
+                Ok(None) => panic!("a prefix that is not the object's verified"),
+                Err(error) => break error,
+            }
+        };
+        assert!(
+            matches!(
+                verdict,
+                CoreError::DurableContent(
+                    DurableContentValidationError::ContentChecksumMismatch { .. }
+                )
+            ),
+            "a prefix that is not the object's fails the whole read: {verdict}"
+        );
     }
 
     /// An empty file has nothing to fetch and still verifies: the digest of

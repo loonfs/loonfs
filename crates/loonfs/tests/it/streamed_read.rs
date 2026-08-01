@@ -35,6 +35,7 @@ fn payload(len: usize) -> Vec<u8> {
 fn chunked() -> ReadFileStreamOptions {
     ReadFileStreamOptions {
         chunk_bytes: NonZeroU64::new(CHUNK_BYTES).expect("non-zero chunk size"),
+        ..ReadFileStreamOptions::default()
     }
 }
 

@@ -135,6 +135,15 @@ pub struct ReadFileStreamOptions {
     /// declares its own. Non-zero by type, so there is no chunk size that
     /// makes no progress.
     pub chunk_bytes: NonZeroU64,
+    /// Where the read starts, for a caller that already holds the bytes
+    /// below it — an interrupted download picking up where it stopped.
+    ///
+    /// The read still reports on the whole object, so a nonzero offset
+    /// obliges the caller to hand over what it holds through
+    /// [`FileContentStream::fold_resumed_prefix`](loonfs_core::FileContentStream::fold_resumed_prefix)
+    /// before driving the stream. Zero reads from the first byte and asks
+    /// nothing of the caller.
+    pub start_offset: u64,
 }
 
 impl Default for ReadFileStreamOptions {
@@ -142,6 +151,7 @@ impl Default for ReadFileStreamOptions {
         Self {
             chunk_bytes: NonZeroU64::new(loonfs_core::CONTENT_READ_CHUNK_BYTES)
                 .expect("the default read chunk size is non-zero"),
+            start_offset: 0,
         }
     }
 }

@@ -51,6 +51,21 @@ impl LocalPayload {
         }
     }
 
+    /// The local file an interrupted upload of this payload could pick up
+    /// from, when there is one.
+    ///
+    /// Two things have to hold. The payload must travel in parts — a
+    /// smaller one is a single request, which either happened or did not —
+    /// and its source must be openable a second time, because a resumed
+    /// upload reads every byte again to fold the checksum the assembly is
+    /// verified against. A pipe fails the second on its own.
+    pub(crate) fn resumable_source(&self) -> Option<&Path> {
+        match self {
+            Self::File { path, size_bytes } if *size_bytes >= STREAMING_PUT_MIN_BYTES => Some(path),
+            _ => None,
+        }
+    }
+
     /// Opens the payload for the in-process runtime.
     pub(crate) async fn open_byte_stream(
         &self,

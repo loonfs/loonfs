@@ -12,7 +12,7 @@ use futures::stream::StreamExt;
 use loonfs_api::v0::{DirectMultipartUpload, UploadMode};
 use loonfs_api::{CapabilityDocument, ContentId, ContentRef, PROFILE_CORE_V0, PROTOCOL_VERSION};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// Part geometry the scripted server hands back. Smaller than the default
 /// so the test's payload stays cheap, and a server is free to choose it.
@@ -136,6 +136,19 @@ fn client() -> Client {
     .expect("valid client config")
 }
 
+/// A client whose failures are the test's own, not the retry policy's, so a
+/// scripted conversation is exactly as long as it reads.
+fn client_without_retry() -> Client {
+    Client::new(ClientConfig {
+        server_url: "http://example.invalid".to_owned(),
+        auth_token: None,
+        request_timeout_ms: None,
+        disable_transient_retry: true,
+        ca_cert_path: None,
+    })
+    .expect("valid client config")
+}
+
 fn json(value: &impl serde::Serialize) -> Outcome {
     Outcome::Success(serde_json::to_vec(value).expect("serialize scripted response"))
 }
@@ -238,6 +251,149 @@ fn multipart_script(parts: u32, uploaded: ContentRef) -> Vec<Outcome> {
     script.push(completed(uploaded));
     script.push(commit_landed());
     script
+}
+
+/// A journal that keeps what it is told, so a test can hand it back as the
+/// record of an interrupted run.
+#[derive(Debug, Default)]
+struct RecordingJournal {
+    began: Mutex<Option<(UploadId, u64)>>,
+    parts: Mutex<Vec<CompletedUploadPart>>,
+}
+
+impl RecordingJournal {
+    fn resume(&self) -> MultipartUploadResume {
+        let began = self.began.lock().expect("journal lock").clone();
+        let (upload_id, part_size_bytes) = began.expect("the session was opened");
+        MultipartUploadResume {
+            upload_id,
+            part_size_bytes,
+            parts: self.parts.lock().expect("journal lock").clone(),
+        }
+    }
+
+    fn part_numbers(&self) -> Vec<u32> {
+        self.parts
+            .lock()
+            .expect("journal lock")
+            .iter()
+            .map(|part| part.part_number)
+            .collect()
+    }
+}
+
+impl MultipartUploadJournal for RecordingJournal {
+    fn began(&self, upload_id: &UploadId, part_size_bytes: u64) {
+        *self.began.lock().expect("journal lock") = Some((upload_id.clone(), part_size_bytes));
+    }
+
+    fn part_completed(&self, part: &CompletedUploadPart) {
+        self.parts.lock().expect("journal lock").push(part.clone());
+    }
+}
+
+/// The conversation a resumed upload has: no `begin` — it rejoins the
+/// session it was given — and signing plus uploads only for the parts still
+/// missing.
+fn resumed_script(missing: &[u32], uploaded: ContentRef) -> Vec<Outcome> {
+    let mut script = vec![capabilities(true)];
+    let window = DIRECT_MULTIPART_PARTS_IN_FLIGHT;
+    for wave in missing.chunks(window) {
+        script.push(signed_parts(wave[0], wave.len() as u32));
+        for part_number in wave {
+            script.push(Outcome::PartAccepted(format!("\"etag-{part_number}\"")));
+        }
+    }
+    script.push(completed(uploaded));
+    script.push(commit_landed());
+    script
+}
+
+/// An upload interrupted after some parts landed picks the session back up
+/// and sends only what is missing. Every byte is still read — the assembly
+/// is verified against a checksum over the whole object — but the parts
+/// already in object storage are not sent a second time.
+#[tokio::test]
+async fn a_resumed_multipart_put_uploads_only_the_parts_that_are_missing() {
+    let payload = payload(TEST_PAYLOAD_BYTES);
+    let uploaded = content_ref(&payload);
+    let journal = RecordingJournal::default();
+
+    // The first run gets through two waves and is cut off before the third
+    // is signed: the script runs out where the interruption did.
+    let landed = DIRECT_MULTIPART_PARTS_IN_FLIGHT as u32 * 2;
+    let mut first = vec![capabilities(true), begin_multipart()];
+    for wave in 0..2u32 {
+        let first_part = wave * DIRECT_MULTIPART_PARTS_IN_FLIGHT as u32 + 1;
+        first.push(signed_parts(
+            first_part,
+            DIRECT_MULTIPART_PARTS_IN_FLIGHT as u32,
+        ));
+        for part_number in first_part..first_part + DIRECT_MULTIPART_PARTS_IN_FLIGHT as u32 {
+            first.push(Outcome::PartAccepted(format!("\"etag-{part_number}\"")));
+        }
+    }
+    // The signing request for the third wave never lands, and the abort
+    // that follows a failed session does not either. Retry is off so each
+    // is one attempt and the script stays exactly this long.
+    first.push(Outcome::TransportFailure);
+    first.push(Outcome::TransportFailure);
+    let transport = test_transport::script(first);
+    let interrupted = client_without_retry()
+        .put_file_stream_resumable(
+            &spec(),
+            PayloadSource::sized_stream(
+                futures::stream::once({
+                    let payload = payload.clone();
+                    async move { Ok(Bytes::from(payload)) }
+                })
+                .boxed(),
+                payload.len() as u64,
+            ),
+            &PutFileOptions::default(),
+            &journal,
+            None,
+        )
+        .await;
+    assert!(interrupted.is_err(), "the third wave never got signed");
+    assert_eq!(
+        journal.part_numbers(),
+        (1..=landed).collect::<Vec<_>>(),
+        "the journal holds exactly the parts that landed"
+    );
+    let resume = journal.resume();
+    assert_eq!(resume.part_size_bytes, TEST_PART_BYTES);
+    drop(transport);
+
+    // The rerun sends only parts 9 onward.
+    let missing: Vec<u32> = (landed + 1..=TEST_PAYLOAD_PARTS).collect();
+    let (source, retention) = watched_source(&payload, TEST_PART_BYTES as usize);
+    let transport = test_transport::script(resumed_script(&missing, uploaded));
+    let resumed_journal = RecordingJournal::default();
+    client()
+        .put_file_stream_resumable(
+            &spec(),
+            source,
+            &PutFileOptions::default(),
+            &resumed_journal,
+            Some(&resume),
+        )
+        .await
+        .expect("a resumed multipart put should land");
+
+    assert_eq!(
+        resumed_journal.part_numbers(),
+        missing,
+        "only the missing parts were uploaded"
+    );
+    assert_eq!(
+        retention.total_bytes(),
+        TEST_PAYLOAD_BYTES as u64,
+        "every byte is still folded into the whole-object checksum"
+    );
+    // capabilities + one signing request + one PUT per missing part +
+    // completion + commit, and no `begin`: the session was rejoined.
+    assert_eq!(transport.attempts(), 1 + 1 + missing.len() + 2);
 }
 
 /// A large put reads its source once and never holds more of it than the

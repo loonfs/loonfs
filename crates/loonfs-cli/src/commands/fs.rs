@@ -6,6 +6,7 @@ use super::context::{
     fail, namespace_path, parse_user_path, render_target, resolve_command_context, CommandContext,
 };
 use super::output::{CommandData, CommandFailure, CommandOutput};
+use super::partial::{self, PartialDownload, PartialMeta};
 use super::recursive;
 use crate::args::{
     CommandKind, FilesystemCatArgs, FilesystemGetArgs, FilesystemGrepArgs, FilesystemLsArgs,
@@ -17,6 +18,8 @@ use crate::backend::FileDownload;
 use crate::error::CliError;
 use crate::payload::{read_whole_file, LocalPayload, STDIN_PATH};
 use crate::progress::{ProgressOp, ProgressReporter};
+use crate::uploads::{SourceIdentity, UploadJournal};
+use loonfs_api::v0::UploadSessionStatus;
 use loonfs_api::{
     CommitId, DeleteDirectoryBehavior, DestinationBehavior, ErrorCode, InodeKind, RevisionNo,
 };
@@ -35,49 +38,6 @@ fn parse_commit_id_arg(commit_id: Option<&str>) -> Result<Option<CommitId>, CliE
                 .map_err(|error| CliError::invalid_input(format!("invalid --commit-id: {error}")))
         })
         .transpose()
-}
-
-/// Opens the same-directory temp file a download is written into.
-///
-/// Dropping it deletes it, which is what makes a failed or interrupted
-/// download leave nothing behind at the target.
-fn open_partial_file(destination: &Path) -> std::io::Result<tempfile::NamedTempFile> {
-    let file_name = destination
-        .file_name()
-        .ok_or_else(|| std::io::Error::other("destination has no file name"))?;
-    let mut prefix = std::ffi::OsString::from(".");
-    prefix.push(file_name);
-    prefix.push(".loonfs-partial-");
-    tempfile::Builder::new()
-        .prefix(&prefix)
-        .tempfile_in(partial_file_parent(destination))
-}
-
-/// The directory a destination's partial file is created in — its own, and
-/// the working directory for a bare file name.
-fn partial_file_parent(destination: &Path) -> &Path {
-    destination
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."))
-}
-
-/// Installs a completed download at its destination with one rename.
-///
-/// Only a download that finished — and, when it was streamed, verified —
-/// reaches this, so the file at the destination is never a truncated or
-/// unverified one.
-fn install_partial_file(
-    temp: tempfile::NamedTempFile,
-    destination: &Path,
-    force: bool,
-) -> std::io::Result<()> {
-    let persisted = if force {
-        temp.persist(destination)
-    } else {
-        temp.persist_noclobber(destination)
-    };
-    persisted.map(|_| ()).map_err(|error| error.error)
 }
 
 pub(crate) async fn run_filesystem_ls(
@@ -350,54 +310,78 @@ pub(crate) async fn run_filesystem_get(
     }
 
     let revision_no = args.revision.map(RevisionNo);
+    if args.local_destination.as_deref() == Some("-") {
+        // No progress and no resume: standard output is carrying the file,
+        // and bytes already piped onward are somewhere this CLI cannot see.
+        let mut download = context
+            .target
+            .open_file_download(&spec, revision_no, entry.size_bytes, 0)
+            .await
+            .map_err(|error| context.fail(kind, error))?;
+        stream_download_to_stdout(&mut download)
+            .await
+            .map_err(|error| context.fail(kind, error))?;
+        return Ok(CommandOutput {
+            kind,
+            profile: Some(context.profile_name),
+            mode: Some(context.mode),
+            data: CommandData::StreamedToStdout,
+        });
+    }
+
+    let derived_name = args.local_destination.is_none();
+    let destination = destination_path_for_get(
+        spec.absolute_path().as_str(),
+        args.local_destination.as_deref(),
+    )
+    .map_err(|error| context.fail(kind, error))?;
+    // Where a download starts is decided before it is opened: the bytes an
+    // interrupted run left are named after this destination, and how many of
+    // them still describe the content resolved just now is how far in this
+    // one begins. A file with no content reference to compare against — one
+    // this build cannot identify — starts over.
+    let meta = entry
+        .content_ref
+        .as_ref()
+        .map(|content_ref| PartialMeta::describe(content_ref, revision_no));
+    let start_offset = meta
+        .as_ref()
+        .map_or(0, |meta| partial::resumable_bytes(&destination, meta));
     let mut download = context
         .target
-        .open_file_download(&spec, revision_no, entry.size_bytes)
+        .open_file_download(&spec, revision_no, entry.size_bytes, start_offset)
         .await
         .map_err(|error| context.fail(kind, error))?;
-    let data = match args.local_destination.as_deref() {
-        Some("-") => {
-            // No progress: standard output is carrying the file, and a
-            // caller piping bytes onward is not watching a line anyway.
-            stream_download_to_stdout(&mut download)
-                .await
-                .map_err(|error| context.fail(kind, error))?;
-            CommandData::StreamedToStdout
-        }
-        other => {
-            let derived_name = other.is_none();
-            let destination = destination_path_for_get(spec.absolute_path().as_str(), other)
-                .map_err(|error| context.fail(kind, error))?;
-            let progress = Arc::new(ProgressReporter::new(
-                runtime,
-                ProgressOp::Get,
-                spec.absolute_path().as_str(),
-            ));
-            progress.expect(entry.size_bytes, Some(1));
-            progress.file_started(spec.absolute_path().as_str(), entry.size_bytes);
-            // The local working copy is the one thing this CLI touches
-            // that has no revision history behind it, so clobbering it is
-            // opt-in. `persist_noclobber` closes the race between checking
-            // and installing the completed temporary file.
-            let written = stream_download_to_file(
-                &mut download,
-                &destination,
-                args.force,
-                derived_name,
-                &progress,
-            )
-            .await;
-            if let Ok(bytes_written) = &written {
-                progress.file_finished(spec.absolute_path().as_str(), *bytes_written);
-            }
-            progress.finish();
-            let bytes_written = written.map_err(|error| context.fail(kind, error))?;
-            CommandData::FileTransfer {
-                target: render_target(&context.namespace, spec.absolute_path()),
-                destination: destination.display().to_string(),
-                bytes_written,
-            }
-        }
+
+    let progress = Arc::new(ProgressReporter::new(
+        runtime,
+        ProgressOp::Get,
+        spec.absolute_path().as_str(),
+    ));
+    progress.expect(entry.size_bytes, Some(1));
+    progress.file_started(spec.absolute_path().as_str(), entry.size_bytes);
+    // The local working copy is the one thing this CLI touches that has no
+    // revision history behind it, so clobbering it is opt-in.
+    // `persist_noclobber` closes the race between checking and installing
+    // the completed partial file.
+    let written = stream_download_to_file(
+        &mut download,
+        &destination,
+        meta.as_ref(),
+        args.force,
+        derived_name,
+        &progress,
+    )
+    .await;
+    if let Ok(bytes_written) = &written {
+        progress.file_finished(spec.absolute_path().as_str(), *bytes_written);
+    }
+    progress.finish();
+    let bytes_written = written.map_err(|error| context.fail(kind, error))?;
+    let data = CommandData::FileTransfer {
+        target: render_target(&context.namespace, spec.absolute_path()),
+        destination: destination.display().to_string(),
+        bytes_written,
     };
 
     Ok(CommandOutput {
@@ -411,29 +395,47 @@ pub(crate) async fn run_filesystem_get(
 /// Writes a download into its destination through the partial file, and
 /// installs it only once the download has ended cleanly.
 ///
-/// The temp file is dropped — and so deleted — on any failure, including a
-/// streamed download whose content failed verification at its last chunk. An
-/// integrity failure therefore leaves no file at the destination at all,
-/// never a complete-looking one.
+/// The partial file is deleted on any failure, including a streamed download
+/// whose content failed verification at its last chunk. An integrity failure
+/// therefore leaves no file at the destination at all, never a
+/// complete-looking one, and nothing beside it for a rerun to build on.
+///
+/// A download that never reported anything — a killed process — is the one
+/// that leaves its partial and its note behind, and the one a rerun picks
+/// up. Whatever it picks up is folded into the same verification the whole
+/// file gets, so bytes that turn out not to be the file's fail the rerun
+/// rather than reaching the destination.
 pub(super) async fn stream_download_to_file(
     download: &mut FileDownload,
     destination: &Path,
+    meta: Option<&PartialMeta>,
     force: bool,
     derived_name: bool,
     progress: &ProgressReporter,
 ) -> Result<u64, CliError> {
-    let mut temp = open_partial_file(destination)
+    let resumed_from = download.resumed_from();
+    let mut partial = PartialDownload::open(destination, meta, resumed_from)
         .map_err(|error| local_open_error(destination, error, force, derived_name))?;
-    let mut bytes_written = 0u64;
+    partial
+        .fold_into(download)
+        .map_err(|error| local_destination_error(destination, error, force, derived_name))?;
+    progress.already_done(resumed_from);
+    if resumed_from > 0 {
+        // Folding a head start back into the verification takes time and
+        // moves nothing, and it is the one thing about this run a caller
+        // could not otherwise tell: it fetches less than the file.
+        progress.phase("resuming");
+    }
+    let mut bytes_written = resumed_from;
     while let Some(chunk) = download.next_chunk().await? {
-        temp.write_all(&chunk)
+        partial
+            .write_all(&chunk)
             .map_err(|error| local_destination_error(destination, error, force, derived_name))?;
         bytes_written += chunk.len() as u64;
         progress.advance(chunk.len() as u64);
     }
-    temp.flush()
-        .map_err(|error| local_destination_error(destination, error, force, derived_name))?;
-    install_partial_file(temp, destination, force)
+    partial
+        .install(destination, force)
         .map_err(|error| local_destination_error(destination, error, force, derived_name))?;
     Ok(bytes_written)
 }
@@ -461,9 +463,9 @@ async fn stream_download_to_stdout(download: &mut FileDownload) -> Result<(), Cl
 /// Shapes the failure to open a download's partial file.
 ///
 /// A missing directory is the one failure whose underlying error is about the
-/// wrong thing: it names the temporary file this CLI picked, whose random
-/// suffix the caller never asked for and cannot act on. The parent they have
-/// to create is what the message says instead.
+/// wrong thing: it names the partial file this CLI picked, which the caller
+/// never asked for and cannot act on. The parent they have to create is what
+/// the message says instead.
 fn local_open_error(
     destination: &Path,
     error: std::io::Error,
@@ -476,7 +478,7 @@ fn local_open_error(
             format!(
                 "i/o error for `{}`: parent directory `{}` does not exist",
                 destination.display(),
-                partial_file_parent(destination).display()
+                partial::parent_of(destination).display()
             ),
         );
     }
@@ -706,6 +708,20 @@ async fn commit_put(
     ));
     progress.expect(size_bytes, Some(1));
     progress.file_started(spec.absolute_path().as_str(), size_bytes);
+    // Only a payload large enough to travel in parts has anything an
+    // interruption could leave half-done, and only a source that can be
+    // opened twice can pick it up: a pipe is gone once it is read.
+    let journal = match payload.resumable_source() {
+        Some(local_path) => resume_journal(context, spec, local_path),
+        None => None,
+    };
+    if let Some(journal) = journal.as_ref() {
+        if let Some(committed) =
+            commit_a_finished_upload(kind, context, spec, options, journal, &progress).await?
+        {
+            return Ok(committed);
+        }
+    }
     let result = match payload.holdable_file() {
         // A payload small enough to hold travels as one request, so there is
         // no midpoint to report: it is read, and then the commit is all
@@ -721,11 +737,16 @@ async fn commit_put(
         None => {
             context
                 .target
-                .put_file_stream(spec, payload, options, &progress)
+                .put_file_stream(spec, payload, options, &progress, journal.as_ref())
                 .await
         }
     };
     if result.is_ok() {
+        // The record exists to survive an interruption, and this upload was
+        // not interrupted.
+        if let Some(journal) = journal.as_ref() {
+            journal.forget();
+        }
         let moved = progress.bytes_done();
         progress.file_finished(spec.absolute_path().as_str(), moved);
     }
@@ -743,6 +764,82 @@ async fn commit_put(
             inode_id: None,
         },
     })
+}
+
+/// The record an interrupted upload of this payload would have left, or
+/// nothing when there is nowhere to keep one.
+fn resume_journal(
+    context: &CommandContext,
+    spec: &NamespacePath,
+    local_path: &Path,
+) -> Option<UploadJournal> {
+    let source = SourceIdentity::of(local_path).ok()?;
+    UploadJournal::for_upload(
+        &context.profile_name,
+        context.namespace.as_str(),
+        spec.absolute_path().as_str(),
+        local_path,
+        source,
+    )
+}
+
+/// Commits an upload whose bytes all landed before it was interrupted,
+/// without sending any of them again.
+///
+/// An interruption between the last part and the commit leaves a session
+/// the server already completed: the object is assembled and admitted, and
+/// only the commit is missing. Asking the session what became of it is one
+/// round trip and saves the whole transfer. Any other answer — still open,
+/// aborted, or gone — leaves this to the ordinary upload, which the
+/// recorded parts make cheap anyway.
+async fn commit_a_finished_upload(
+    kind: CommandKind,
+    context: &CommandContext,
+    spec: &NamespacePath,
+    options: &PutFileOptions,
+    journal: &UploadJournal,
+    progress: &ProgressReporter,
+) -> Result<Option<CommandOutput>, CommandFailure> {
+    let Some(resume) = journal.resume() else {
+        return Ok(None);
+    };
+    let Ok(status) = context
+        .target
+        .read_upload_status(&context.namespace, &resume.upload_id)
+        .await
+    else {
+        return Ok(None);
+    };
+    let UploadSessionStatus::Completed {
+        content_ref,
+        validated_content_token,
+        ..
+    } = status.status
+    else {
+        return Ok(None);
+    };
+    progress.already_done(content_ref.size_bytes);
+    progress.phase("committing");
+    let result = context
+        .target
+        .commit_completed_upload(spec, content_ref, validated_content_token, options)
+        .await;
+    if result.is_ok() {
+        journal.forget();
+    }
+    progress.finish();
+    let result = result.map_err(|error| context.fail(kind, error))?;
+    Ok(Some(CommandOutput {
+        kind,
+        profile: Some(context.profile_name.clone()),
+        mode: Some(context.mode.clone()),
+        data: CommandData::FileMutation {
+            target: render_target(&context.namespace, spec.absolute_path()),
+            committed_seq: result.committed_seq,
+            commit_id: result.commit_id,
+            inode_id: None,
+        },
+    }))
 }
 
 fn put_file_options(args: &FilesystemPutArgs) -> Result<PutFileOptions, CliError> {
