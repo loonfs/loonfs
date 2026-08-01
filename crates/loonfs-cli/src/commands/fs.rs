@@ -64,9 +64,10 @@ pub(super) fn write_local_file_atomically(
 
 pub(crate) async fn run_filesystem_ls(
     kind: CommandKind,
+    config_path: &Path,
     args: FilesystemLsArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, &args.target).await?;
+    let context = resolve_command_context(kind, config_path, &args.target).await?;
     let allow_root = true;
     let spec = namespace_path(
         &context.namespace,
@@ -89,9 +90,10 @@ pub(crate) async fn run_filesystem_ls(
 
 pub(crate) async fn run_filesystem_stat(
     kind: CommandKind,
+    config_path: &Path,
     args: FilesystemPathArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, &args.target).await?;
+    let context = resolve_command_context(kind, config_path, &args.target).await?;
     let allow_root = true;
     let spec = namespace_path(&context.namespace, &args.path, allow_root)
         .map_err(|error| context.fail(kind, error))?;
@@ -111,9 +113,10 @@ pub(crate) async fn run_filesystem_stat(
 
 pub(crate) async fn run_filesystem_grep(
     kind: CommandKind,
+    config_path: &Path,
     args: FilesystemGrepArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, &args.target).await?;
+    let context = resolve_command_context(kind, config_path, &args.target).await?;
     let path_prefix = args
         .path_prefix
         .as_deref()
@@ -168,9 +171,10 @@ pub(crate) async fn run_filesystem_grep(
 
 pub(crate) async fn run_filesystem_cat(
     kind: CommandKind,
+    config_path: &Path,
     args: FilesystemCatArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, &args.target).await?;
+    let context = resolve_command_context(kind, config_path, &args.target).await?;
     let allow_root = false;
     let spec = namespace_path(&context.namespace, &args.path, allow_root)
         .map_err(|error| context.fail(kind, error))?;
@@ -196,10 +200,11 @@ pub(crate) async fn run_filesystem_cat(
 
 pub(crate) async fn run_filesystem_get(
     kind: CommandKind,
+    config_path: &Path,
     args: FilesystemGetArgs,
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, &args.target).await?;
+    let context = resolve_command_context(kind, config_path, &args.target).await?;
     if runtime.json && args.local_destination.as_deref() == Some("-") {
         return Err(fail(
             kind,
@@ -316,9 +321,10 @@ pub(crate) async fn run_filesystem_get(
 
 pub(crate) async fn run_filesystem_trash(
     kind: CommandKind,
+    config_path: &Path,
     args: TrashArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, &args.target).await?;
+    let context = resolve_command_context(kind, config_path, &args.target).await?;
     let response = context
         .target
         .list_trash(&context.namespace, args.limit, args.cursor.as_deref())
@@ -334,9 +340,10 @@ pub(crate) async fn run_filesystem_trash(
 
 pub(crate) async fn run_filesystem_revisions(
     kind: CommandKind,
+    config_path: &Path,
     args: FilesystemRevisionsArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, &args.target).await?;
+    let context = resolve_command_context(kind, config_path, &args.target).await?;
     let allow_root = false;
     let spec = namespace_path(&context.namespace, &args.path, allow_root)
         .map_err(|error| context.fail(kind, error))?;
@@ -360,10 +367,11 @@ pub(crate) async fn run_filesystem_revisions(
 
 pub(crate) async fn run_filesystem_put(
     kind: CommandKind,
+    config_path: &Path,
     args: FilesystemPutArgs,
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, &args.target).await?;
+    let context = resolve_command_context(kind, config_path, &args.target).await?;
     let local_path = PathBuf::from(&args.local_path);
     if local_path == Path::new(STDIN_PATH) {
         return run_filesystem_put_stdin(kind, args, context).await;
@@ -528,9 +536,10 @@ fn put_file_options(args: &FilesystemPutArgs) -> Result<PutFileOptions, CliError
 
 pub(crate) async fn run_filesystem_rm(
     kind: CommandKind,
+    config_path: &Path,
     args: FilesystemRmArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, &args.target).await?;
+    let context = resolve_command_context(kind, config_path, &args.target).await?;
     let allow_root = false;
     let spec = namespace_path(&context.namespace, &args.path, allow_root)
         .map_err(|error| context.fail(kind, error))?;
@@ -578,9 +587,10 @@ pub(crate) async fn run_filesystem_rm(
 
 pub(crate) async fn run_filesystem_restore(
     kind: CommandKind,
+    config_path: &Path,
     args: FilesystemRestoreArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, &args.target).await?;
+    let context = resolve_command_context(kind, config_path, &args.target).await?;
     let allow_root = false;
     let spec = namespace_path(&context.namespace, &args.path, allow_root)
         .map_err(|error| context.fail(kind, error))?;
@@ -614,9 +624,10 @@ pub(crate) async fn run_filesystem_restore(
 
 pub(crate) async fn run_filesystem_undelete(
     kind: CommandKind,
+    config_path: &Path,
     args: FilesystemUndeleteArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, &args.target).await?;
+    let context = resolve_command_context(kind, config_path, &args.target).await?;
     let allow_root = false;
     let spec = namespace_path(&context.namespace, &args.path, allow_root)
         .map_err(|error| context.fail(kind, error))?;
@@ -651,9 +662,10 @@ pub(crate) async fn run_filesystem_undelete(
 
 pub(crate) async fn run_filesystem_mkdir(
     kind: CommandKind,
+    config_path: &Path,
     args: FilesystemMkdirArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, &args.target).await?;
+    let context = resolve_command_context(kind, config_path, &args.target).await?;
     let allow_root = false;
     let spec = namespace_path(&context.namespace, &args.path, allow_root)
         .map_err(|error| context.fail(kind, error))?;
@@ -685,18 +697,20 @@ pub(crate) async fn run_filesystem_mkdir(
 
 pub(crate) async fn run_filesystem_mv(
     kind: CommandKind,
+    config_path: &Path,
     args: FilesystemTransferArgs,
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
-    run_filesystem_transfer(kind, args, TransferKind::Move, runtime).await
+    run_filesystem_transfer(kind, config_path, args, TransferKind::Move, runtime).await
 }
 
 pub(crate) async fn run_filesystem_cp(
     kind: CommandKind,
+    config_path: &Path,
     args: FilesystemTransferArgs,
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
-    run_filesystem_transfer(kind, args, TransferKind::Copy, runtime).await
+    run_filesystem_transfer(kind, config_path, args, TransferKind::Copy, runtime).await
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -707,11 +721,12 @@ enum TransferKind {
 
 async fn run_filesystem_transfer(
     kind: CommandKind,
+    config_path: &Path,
     args: FilesystemTransferArgs,
     transfer_kind: TransferKind,
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, &args.target).await?;
+    let context = resolve_command_context(kind, config_path, &args.target).await?;
     if args.recursive && transfer_kind == TransferKind::Move {
         return Err(context.fail(
             kind,

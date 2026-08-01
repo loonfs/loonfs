@@ -46,10 +46,11 @@ impl CommandContext {
 
 pub(crate) async fn resolve_command_context(
     kind: CommandKind,
+    config_path: &Path,
     target: &TargetSelectorArgs,
 ) -> Result<CommandContext, CommandFailure> {
     let explicit_profile = target.profile.profile.as_deref();
-    let loaded = load_cli_config()
+    let loaded = load_cli_config(config_path)
         .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
     let resolved = resolve_target_profile_from_config(
         &loaded.config,

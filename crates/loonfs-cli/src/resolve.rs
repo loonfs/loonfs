@@ -3,7 +3,7 @@
 
 use crate::backend::EmbeddedBackend;
 use crate::backend_error::map_runtime_error;
-use crate::config::{default_config_path, load_config, CliConfig, ProfileConfig, StoreConfig};
+use crate::config::{load_config, CliConfig, ProfileConfig, StoreConfig};
 use crate::error::CliError;
 use crate::profiles::{default_namespace, resolve_profile};
 use loonfs::{FsAdmin, FsBackgroundWork, FsWriter, SharedObjectStore, TraceStoreKind};
@@ -25,17 +25,20 @@ pub(crate) struct ResolvedNamespace {
     pub namespace: NamespaceId,
 }
 
-pub(crate) fn load_cli_config() -> Result<LoadedConfig, CliError> {
-    let path = default_config_path()?;
-    let config = load_config(&path)?;
-    Ok(LoadedConfig { path, config })
+pub(crate) fn load_cli_config(config_path: &std::path::Path) -> Result<LoadedConfig, CliError> {
+    let config = load_config(config_path)?;
+    Ok(LoadedConfig {
+        path: config_path.to_path_buf(),
+        config,
+    })
 }
 
 pub(crate) async fn resolve_target_profile(
+    config_path: &std::path::Path,
     explicit_profile: Option<&str>,
     no_retry: bool,
 ) -> Result<ResolvedProfile, CliError> {
-    let loaded = load_cli_config()?;
+    let loaded = load_cli_config(config_path)?;
     resolve_target_profile_from_config(&loaded.config, explicit_profile, no_retry).await
 }
 

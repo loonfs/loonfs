@@ -19,34 +19,41 @@ use loonfs_api::{
 };
 use loonfs_grep::{GREP_GC_JOB, GREP_INDEX_JOB};
 use std::collections::BTreeSet;
+use std::path::Path;
 
 // --- maintenance/admin plane ---
 
 pub(crate) async fn run_admin_command(
     kind: CommandKind,
+    config_path: &Path,
     command: AdminCommand,
 ) -> Result<CommandOutput, CommandFailure> {
     match command {
-        AdminCommand::Checkpoint(args) => run_admin_checkpoint(kind, args).await,
-        AdminCommand::CheckpointRelease(args) => run_admin_checkpoint_release(kind, args).await,
-        AdminCommand::Flush(args) => run_admin_flush(kind, args).await,
-        AdminCommand::RetentionAdvance(args) => run_admin_retention_advance(kind, args).await,
-        AdminCommand::Run(args) => run_admin_run(kind, args).await,
-        AdminCommand::Step(args) => run_admin_step(kind, args).await,
-        AdminCommand::Gc(args) => run_admin_gc(kind, args).await,
-        AdminCommand::ProbeStore(args) => run_admin_probe_store(kind, args).await,
-        AdminCommand::IndexEnable(args) => run_admin_index_enable(kind, args).await,
-        AdminCommand::IndexDisable(args) => run_admin_index_disable(kind, args).await,
-        AdminCommand::IndexStatus(args) => run_admin_index_status(kind, args).await,
-        AdminCommand::IndexGc(args) => run_admin_index_gc(kind, args).await,
+        AdminCommand::Checkpoint(args) => run_admin_checkpoint(kind, config_path, args).await,
+        AdminCommand::CheckpointRelease(args) => {
+            run_admin_checkpoint_release(kind, config_path, args).await
+        }
+        AdminCommand::Flush(args) => run_admin_flush(kind, config_path, args).await,
+        AdminCommand::RetentionAdvance(args) => {
+            run_admin_retention_advance(kind, config_path, args).await
+        }
+        AdminCommand::Run(args) => run_admin_run(kind, config_path, args).await,
+        AdminCommand::Step(args) => run_admin_step(kind, config_path, args).await,
+        AdminCommand::Gc(args) => run_admin_gc(kind, config_path, args).await,
+        AdminCommand::ProbeStore(args) => run_admin_probe_store(kind, config_path, args).await,
+        AdminCommand::IndexEnable(args) => run_admin_index_enable(kind, config_path, args).await,
+        AdminCommand::IndexDisable(args) => run_admin_index_disable(kind, config_path, args).await,
+        AdminCommand::IndexStatus(args) => run_admin_index_status(kind, config_path, args).await,
+        AdminCommand::IndexGc(args) => run_admin_index_gc(kind, config_path, args).await,
     }
 }
 
 async fn run_admin_step(
     kind: CommandKind,
+    config_path: &Path,
     args: AdminStepArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, &args.target).await?;
+    let context = resolve_command_context(kind, config_path, &args.target).await?;
     let request = MaintenanceStepRequest {
         max_wal_tail_segments: args.max_wal_tail_segments,
         retention: args.retention.then_some(true),
@@ -69,9 +76,10 @@ async fn run_admin_step(
 
 async fn run_admin_gc(
     kind: CommandKind,
+    config_path: &Path,
     args: AdminGcArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, &args.target).await?;
+    let context = resolve_command_context(kind, config_path, &args.target).await?;
     let single_pass = args.max_objects.is_some();
     let mut request = GcRequest {
         grace_window_ms: args.grace_window_ms,
@@ -132,9 +140,10 @@ fn accumulate_gc_response(total: &mut loonfs_api::GcResponse, pass: loonfs_api::
 
 async fn run_admin_checkpoint(
     kind: CommandKind,
+    config_path: &Path,
     args: AdminCheckpointArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, &args.target).await?;
+    let context = resolve_command_context(kind, config_path, &args.target).await?;
     let request = CreateCheckpointRequest {
         name: args.name,
         ttl_ms: args.ttl_ms,
@@ -155,9 +164,10 @@ async fn run_admin_checkpoint(
 
 async fn run_admin_checkpoint_release(
     kind: CommandKind,
+    config_path: &Path,
     args: AdminCheckpointReleaseArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, &args.target).await?;
+    let context = resolve_command_context(kind, config_path, &args.target).await?;
     let checkpoint_id = CheckpointId::parse(&args.checkpoint_id).map_err(|error| {
         context.fail(
             kind,
@@ -180,9 +190,10 @@ async fn run_admin_checkpoint_release(
 
 async fn run_admin_flush(
     kind: CommandKind,
+    config_path: &Path,
     args: AdminNamespaceArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, &args.target).await?;
+    let context = resolve_command_context(kind, config_path, &args.target).await?;
     let response = context
         .target
         .maintenance_step(
@@ -209,9 +220,10 @@ async fn run_admin_flush(
 
 async fn run_admin_retention_advance(
     kind: CommandKind,
+    config_path: &Path,
     args: AdminNamespaceArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, &args.target).await?;
+    let context = resolve_command_context(kind, config_path, &args.target).await?;
     let response = context
         .target
         .maintenance_step(
@@ -242,10 +254,11 @@ async fn run_admin_retention_advance(
 /// continuously until a signal, or as one bounded catch-up with `--drain`.
 async fn run_admin_run(
     kind: CommandKind,
+    config_path: &Path,
     args: AdminRunArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let explicit_profile = args.profile.profile.as_deref();
-    let resolved = resolve_target_profile(explicit_profile, args.profile.no_retry)
+    let resolved = resolve_target_profile(config_path, explicit_profile, args.profile.no_retry)
         .await
         .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
     let mode = resolved.target.mode_str().to_owned();
@@ -309,10 +322,11 @@ async fn run_admin_run(
 /// store is the subject.
 async fn run_admin_probe_store(
     kind: CommandKind,
+    config_path: &Path,
     args: AdminProbeStoreArgs,
 ) -> Result<CommandOutput, CommandFailure> {
     let explicit_profile = args.profile.profile.as_deref();
-    let resolved = resolve_target_profile(explicit_profile, args.profile.no_retry)
+    let resolved = resolve_target_profile(config_path, explicit_profile, args.profile.no_retry)
         .await
         .map_err(|error| fail(kind, explicit_profile.map(ToOwned::to_owned), None, error))?;
     let mode = resolved.target.mode_str().to_owned();
@@ -386,9 +400,10 @@ async fn shutdown_signal() {
 
 pub(crate) async fn run_admin_changes(
     kind: CommandKind,
+    config_path: &Path,
     args: ChangesArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, &args.target).await?;
+    let context = resolve_command_context(kind, config_path, &args.target).await?;
     let after_seq = ChangeSeq(args.after.unwrap_or(0));
     let response = context
         .target
@@ -412,9 +427,10 @@ pub(crate) async fn run_admin_changes(
 /// being written to cannot keep this command running.
 async fn run_admin_index_enable(
     kind: CommandKind,
+    config_path: &Path,
     args: AdminIndexEnableArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, &args.target).await?;
+    let context = resolve_command_context(kind, config_path, &args.target).await?;
     let response = context
         .target
         .enable_grep_index(&context.namespace)
@@ -476,9 +492,10 @@ async fn run_admin_index_enable(
 
 async fn run_admin_index_status(
     kind: CommandKind,
+    config_path: &Path,
     args: AdminNamespaceArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, &args.target).await?;
+    let context = resolve_command_context(kind, config_path, &args.target).await?;
     let response = context
         .target
         .grep_index_status(&context.namespace)
@@ -497,9 +514,10 @@ async fn run_admin_index_status(
 /// asks for one pass and its resume token.
 async fn run_admin_index_gc(
     kind: CommandKind,
+    config_path: &Path,
     args: AdminIndexGcArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, &args.target).await?;
+    let context = resolve_command_context(kind, config_path, &args.target).await?;
     let single_pass = args.max_objects.is_some();
     // An omitted budget is left omitted: grep resolves it to the same
     // per-pass default the runtime uses, and one authority for that number
@@ -549,9 +567,10 @@ fn accumulate_grep_gc_response(
 
 async fn run_admin_index_disable(
     kind: CommandKind,
+    config_path: &Path,
     args: AdminNamespaceArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, &args.target).await?;
+    let context = resolve_command_context(kind, config_path, &args.target).await?;
     let response = context
         .target
         .disable_grep_index(&context.namespace)

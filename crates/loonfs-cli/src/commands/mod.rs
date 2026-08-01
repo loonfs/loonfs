@@ -13,6 +13,7 @@ mod recursive;
 pub(crate) use self::output::{CommandData, CommandFailure, CommandOutput, MaintenanceKeyReport};
 
 use crate::args::{Cli, Command, RuntimeBehavior};
+use crate::config::resolve_config_location;
 
 pub(crate) async fn run(
     cli: Cli,
@@ -28,6 +29,12 @@ pub(crate) async fn run(
         });
     }
 
+    // One resolution for the whole invocation: every command below reads
+    // and writes the same file, whichever way it was named.
+    let location = resolve_config_location(cli.config.as_deref())
+        .map_err(|error| context::fail(kind, None, None, error))?;
+    let config_path = location.path.as_path();
+
     match cli.command {
         Command::Version => Ok(CommandOutput {
             kind,
@@ -39,29 +46,31 @@ pub(crate) async fn run(
                 commit_date: env!("LOON_GIT_COMMIT_DATE").to_owned(),
             },
         }),
-        Command::Init(args) => config::run_config_init(kind, args, runtime),
-        Command::Config { command } => config::run_config_command(kind, command),
-        Command::Profile { command } => profile::run_profile_command(kind, command, runtime),
-        Command::Namespace { command } => {
-            namespace::run_namespace_command(kind, command, runtime).await
+        Command::Init(args) => config::run_config_init(kind, config_path, args, runtime),
+        Command::Config { command } => config::run_config_command(kind, &location, command),
+        Command::Profile { command } => {
+            profile::run_profile_command(kind, config_path, command, runtime)
         }
-        Command::Use(args) => namespace::run_namespace_use(kind, args).await,
-        Command::Current(args) => namespace::run_namespace_current(kind, args).await,
-        Command::Ls(args) => fs::run_filesystem_ls(kind, args).await,
-        Command::Stat(args) => fs::run_filesystem_stat(kind, args).await,
-        Command::Cat(args) => fs::run_filesystem_cat(kind, args).await,
-        Command::Grep(args) => fs::run_filesystem_grep(kind, args).await,
-        Command::Get(args) => fs::run_filesystem_get(kind, args, runtime).await,
-        Command::Put(args) => fs::run_filesystem_put(kind, args, runtime).await,
-        Command::Revisions(args) => fs::run_filesystem_revisions(kind, args).await,
-        Command::Restore(args) => fs::run_filesystem_restore(kind, args).await,
-        Command::Undelete(args) => fs::run_filesystem_undelete(kind, args).await,
-        Command::Mkdir(args) => fs::run_filesystem_mkdir(kind, args).await,
-        Command::Rm(args) => fs::run_filesystem_rm(kind, args).await,
-        Command::Mv(args) => fs::run_filesystem_mv(kind, args, runtime).await,
-        Command::Cp(args) => fs::run_filesystem_cp(kind, args, runtime).await,
-        Command::Trash(args) => fs::run_filesystem_trash(kind, args).await,
-        Command::Changes(args) => admin::run_admin_changes(kind, args).await,
-        Command::Admin { command } => admin::run_admin_command(kind, command).await,
+        Command::Namespace { command } => {
+            namespace::run_namespace_command(kind, config_path, command, runtime).await
+        }
+        Command::Use(args) => namespace::run_namespace_use(kind, config_path, args).await,
+        Command::Current(args) => namespace::run_namespace_current(kind, config_path, args).await,
+        Command::Ls(args) => fs::run_filesystem_ls(kind, config_path, args).await,
+        Command::Stat(args) => fs::run_filesystem_stat(kind, config_path, args).await,
+        Command::Cat(args) => fs::run_filesystem_cat(kind, config_path, args).await,
+        Command::Grep(args) => fs::run_filesystem_grep(kind, config_path, args).await,
+        Command::Get(args) => fs::run_filesystem_get(kind, config_path, args, runtime).await,
+        Command::Put(args) => fs::run_filesystem_put(kind, config_path, args, runtime).await,
+        Command::Revisions(args) => fs::run_filesystem_revisions(kind, config_path, args).await,
+        Command::Restore(args) => fs::run_filesystem_restore(kind, config_path, args).await,
+        Command::Undelete(args) => fs::run_filesystem_undelete(kind, config_path, args).await,
+        Command::Mkdir(args) => fs::run_filesystem_mkdir(kind, config_path, args).await,
+        Command::Rm(args) => fs::run_filesystem_rm(kind, config_path, args).await,
+        Command::Mv(args) => fs::run_filesystem_mv(kind, config_path, args, runtime).await,
+        Command::Cp(args) => fs::run_filesystem_cp(kind, config_path, args, runtime).await,
+        Command::Trash(args) => fs::run_filesystem_trash(kind, config_path, args).await,
+        Command::Changes(args) => admin::run_admin_changes(kind, config_path, args).await,
+        Command::Admin { command } => admin::run_admin_command(kind, config_path, command).await,
     }
 }
