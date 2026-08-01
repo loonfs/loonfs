@@ -51,17 +51,30 @@ pub(crate) struct ReadConfig {
 /// same way: a zero budget.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeCacheConfig {
-    /// Maximum namespaces retained in runtime caches (control anchors,
-    /// catalogs, commit engines, and WAL-tail projection entries).
-    /// Setting this to zero disables those caches — a diagnostic mode that
-    /// trades speed for re-reads. Cache settings never change behavior:
-    /// maintenance scheduling is controlled only by
+    /// Maximum namespaces each entry-counted runtime cache retains: the
+    /// head anchors, the read-side WAL-tail projection entries, and the tail
+    /// projections a writer's namespace publishers hold. Setting this to
+    /// zero disables those caches — a diagnostic mode that trades speed for
+    /// re-reads. Cache settings never change behavior: maintenance
+    /// scheduling is controlled only by
     /// [`FsBackgroundWork`](crate::FsBackgroundWork).
+    ///
+    /// It does not bound what a writer keeps per namespace it has mutated.
+    /// One writer session — the epoch it acquired and its terminal fencing
+    /// record — and the empty publisher around it are retained for every
+    /// live namespace, at a few dozen bytes each. That is deliberate:
+    /// nothing in the store can rebuild "this session was fenced", so
+    /// evicting it would let a fenced writer reacquire the epoch (see
+    /// [`WriterSessionState`](loonfs_core::publish::WriterSessionState)).
     pub max_cached_namespaces: usize,
-    /// Maximum metadata rows retained across cached WAL-tail projections;
-    /// zero disables the projection cache.
+    /// Maximum metadata rows retained across WAL-tail projections. The read
+    /// cache and the publish side each hold their own total against it, so
+    /// this is the ceiling per side rather than for the process. Zero
+    /// disables the projection cache.
     pub max_cached_wal_tail_projection_rows: usize,
-    /// Approximate decoded-byte budget for cached WAL-tail projections.
+    /// Approximate decoded-byte budget for WAL-tail projections, per side
+    /// like the row budget. Both budgets also cap one projection: a publish
+    /// whose tail outgrows either keeps nothing.
     pub max_cached_wal_tail_projection_decoded_bytes: usize,
     /// Cache settings for decoded metadata tables.
     pub metadata_table_cache: MetadataTableCacheConfig,

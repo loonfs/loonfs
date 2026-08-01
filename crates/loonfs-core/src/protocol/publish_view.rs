@@ -64,6 +64,18 @@ impl Default for PublishTailOptions {
     }
 }
 
+/// What one retained publish-tail projection weighs, in the same two units
+/// [`PublishTailOptions`] bounds.
+///
+/// Runtimes that retain a projection per namespace bound the total with
+/// these, so the accounting reads the weight the reuse check already
+/// computed instead of walking the state again.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PublishTailWeight {
+    pub rows: usize,
+    pub decoded_bytes: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PublishTailProjection {
     pub(crate) namespace_id: NamespaceId,
@@ -97,9 +109,17 @@ impl PublishTailProjection {
             && self.manifest_payload_checksum == manifest_payload_checksum
     }
 
+    pub(crate) fn weight(&self) -> PublishTailWeight {
+        PublishTailWeight {
+            rows: self.tail_state.row_count(),
+            decoded_bytes: self.tail_state.decoded_bytes(),
+        }
+    }
+
     pub(crate) fn within_limits(&self, options: &PublishTailOptions) -> bool {
-        self.tail_state.row_count() <= options.max_tail_rows
-            && self.tail_state.decoded_bytes() <= options.max_tail_decoded_bytes
+        let weight = self.weight();
+        weight.rows <= options.max_tail_rows
+            && weight.decoded_bytes <= options.max_tail_decoded_bytes
     }
 }
 

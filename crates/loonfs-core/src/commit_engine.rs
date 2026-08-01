@@ -11,7 +11,9 @@ use crate::namespace::basis::MetadataBasis;
 use crate::namespace::writer_epoch::acquire_writer_epoch;
 use crate::options::DeleteNamespaceOptions;
 use crate::path::write::{commit_fingerprint, CommitRequest, FilesystemOperation};
-use crate::protocol::{load_publish_metadata_view, PublishTailOptions, PublishTailProjection};
+use crate::protocol::{
+    load_publish_metadata_view, PublishTailOptions, PublishTailProjection, PublishTailWeight,
+};
 use crate::storage::content_admission::{ContentAdmission, ContentTokenError, PreparedContent};
 use crate::timing::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_api::v0::CommitResponse as ApiCommitResponse;
@@ -298,6 +300,18 @@ impl NamespaceCommitEngine {
         // re-checked against the head on every publish view load, and a
         // fenced session stays fenced.
         self.publish_tail_projection = None;
+    }
+
+    /// What the tail projection this engine retains weighs, or `None` when
+    /// it retains none.
+    ///
+    /// A runtime holding one engine per namespace bounds its total retention
+    /// with this; the per-projection ceiling in [`PublishTailOptions`] only
+    /// bounds one.
+    pub fn retained_tail_weight(&self) -> Option<PublishTailWeight> {
+        self.publish_tail_projection
+            .as_ref()
+            .map(PublishTailProjection::weight)
     }
 
     /// This session's writer epoch for the namespace, acquired on first use

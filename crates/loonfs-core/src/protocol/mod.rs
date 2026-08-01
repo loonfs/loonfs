@@ -30,8 +30,8 @@ pub(crate) use self::batch::{
     publish_namespace_commits_batch_against_publish_view, PublishBatchAgainstViewResult,
 };
 pub(crate) use self::changes::list_changes_after;
-pub use self::publish_view::PublishTailOptions;
 pub(crate) use self::publish_view::{load_publish_metadata_view, PublishTailProjection};
+pub use self::publish_view::{PublishTailOptions, PublishTailWeight};
 pub use self::uploads::CompletedUpload;
 pub(crate) use self::uploads::{
     abort_upload, begin_direct_multipart_upload_target, begin_direct_put_upload_target,

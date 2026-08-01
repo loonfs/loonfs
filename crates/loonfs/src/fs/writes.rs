@@ -774,7 +774,9 @@ pub(crate) async fn publish_batch_with_engine(
         Ok(context) => context,
         Err(error) => return candidates.iter().map(|_| Err(error.clone())).collect(),
     };
-    let cache_config = &core.inner.config.runtime_cache;
+    let cache_config = core.runtime_cache_config();
+    // The per-projection ceiling. The publisher applies the same two knobs
+    // as an aggregate over every projection it retains.
     let tail_options = loonfs_core::publish::PublishTailOptions {
         max_tail_rows: cache_config.max_cached_wal_tail_projection_rows,
         max_tail_decoded_bytes: cache_config.max_cached_wal_tail_projection_decoded_bytes,
