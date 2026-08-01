@@ -109,6 +109,13 @@ impl ProgressState {
             done.saturating_mul(100) / total
         })
     }
+
+    /// Whether this operation covers more than one file — a tree, or an
+    /// operation that never said how many. What one file's progress means
+    /// for the whole depends on it.
+    fn many_files(&self) -> bool {
+        self.files_total.is_none_or(|total| total > 1)
+    }
 }
 
 /// Counts one operation's bytes and says so, at a rate a human or an agent
@@ -251,12 +258,20 @@ impl ProgressReporter {
     /// A stretch where time passes and bytes do not — the commit a finished
     /// upload waits on, or the head start a resumed download begins from.
     /// Emitted at the transition, not on a timer.
+    ///
+    /// A transfer of several files reports none of these. Each file of a
+    /// tree passes through the same stretches, several at a time, so one
+    /// file entering its commit says nothing about where the operation is —
+    /// and on a terminal it would leave the line flickering between the two.
     pub(crate) fn phase(&self, phase: &str) {
         if !self.enabled() {
             return;
         }
-        let now_ms = self.timer.monotonic_now_ms();
         let mut state = self.lock();
+        if state.many_files() {
+            return;
+        }
+        let now_ms = self.timer.monotonic_now_ms();
         match self.mode {
             ProgressMode::Events => self.emit_event(&Event::Phase {
                 kind: "phase",
@@ -330,7 +345,7 @@ impl ProgressReporter {
     }
 
     fn human_line(&self, state: &ProgressState, rate_bps: u64) -> String {
-        let tree = state.files_total.is_none_or(|total| total > 1);
+        let tree = state.many_files();
         let mut line = format!("{} {}", self.op.as_str(), self.path);
         if let Some(files_total) = state.files_total.filter(|_| tree) {
             line.push_str(&format!("  {}/{files_total} files", state.files_done));

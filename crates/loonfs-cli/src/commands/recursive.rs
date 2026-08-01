@@ -13,6 +13,7 @@ use super::context::CommandContext;
 use super::output::{CommandData, CommandFailure, CommandOutput, TreeTransferFailure};
 use crate::args::{CommandKind, RuntimeBehavior};
 use crate::error::CliError;
+use crate::payload::LocalPayload;
 use crate::progress::{ProgressOp, ProgressReporter};
 use crate::render::write_stderr_progress;
 use futures::StreamExt;
@@ -176,41 +177,50 @@ pub(crate) async fn run_put_tree(
     ));
     progress.expect(tree_bytes(&files), Some(files.len() as u64));
     let outcomes = futures::stream::iter(files.into_iter().map(|job| {
-        let backend = &context.target;
-        let namespace = context.namespace.clone();
         let message = message.clone();
         let progress = Arc::clone(&progress);
         let remote = format!("{}/{}", remote_root.trim_end_matches('/'), job.remote);
         async move {
-            let spec = match NamespacePath::parse(namespace.as_str(), &remote) {
+            let spec = match NamespacePath::parse(context.namespace.as_str(), &remote) {
                 Ok(spec) => spec,
                 Err(error) => return (remote, Err(CliError::invalid_input(error.to_string()))),
             };
-            progress.file_started(&remote, job.size_bytes);
-            let bytes = match std::fs::read(&job.local) {
-                Ok(bytes) => bytes,
-                Err(error) => return (remote, Err(CliError::io_for_path(&job.local, error))),
+            // The walk states a file's length when the filesystem gave it
+            // one, and that length is what decides how the payload travels.
+            // A file that still cannot state one fails on its own rather
+            // than taking the tree with it.
+            let size_bytes = match job.size_bytes {
+                Some(size_bytes) => size_bytes,
+                None => match std::fs::metadata(&job.local) {
+                    Ok(metadata) => metadata.len(),
+                    Err(error) => return (remote, Err(CliError::io_for_path(&job.local, error))),
+                },
             };
-            let result = backend
-                .put_file_bytes(
-                    &spec,
-                    &bytes,
-                    &PutFileOptions {
-                        behavior,
-                        commit_id: None,
-                        message: message.clone(),
-                        expected_revision_no: None,
-                    },
-                )
-                .await
-                .map(|_| spec_target(&spec))
-                .map_err(CliError::from);
-            // One file of a tree uploads as a single request, so the tree's
-            // count advances a whole file at a time: what it reports is
-            // files stored, measured in bytes.
+            progress.file_started(&remote, Some(size_bytes));
+            // One file of a tree travels exactly as a single `put` of it
+            // would: held whole while it is small enough to hold, read once
+            // in pieces past that, and resumed from its own record where a
+            // single put would resume. So a tree holding a file this process
+            // could not hold costs no more memory than a tree of small ones,
+            // and its bytes are counted as they are read rather than a whole
+            // file at a time.
+            let payload = LocalPayload::file(&job.local, size_bytes);
+            let result = super::fs::put_payload(
+                context,
+                &spec,
+                &payload,
+                &PutFileOptions {
+                    behavior,
+                    commit_id: None,
+                    message,
+                    expected_revision_no: None,
+                },
+                &progress,
+            )
+            .await
+            .map(|_| spec_target(&spec));
             if result.is_ok() {
-                progress.advance(bytes.len() as u64);
-                progress.file_finished(&remote, bytes.len() as u64);
+                progress.file_finished(&remote, size_bytes);
             }
             (remote, result)
         }
@@ -610,4 +620,135 @@ async fn walk_remote_tree(
         }
     }
     Ok(tree)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::args::RuntimeBehavior;
+    use crate::progress::ProgressMode;
+    use crate::resolve::{EmbeddedTarget, ResolvedTarget};
+    use loonfs::{SharedObjectStore, TraceStoreKind};
+    use loonfs_api::NamespaceId;
+    use loonfs_objectstore::local_fs_store::LocalFsStore;
+    use loonfs_objectstore::PROVIDER_MULTIPART_PART_BYTES;
+    use loonfs_test_support::stores::BufferWatchStore;
+
+    /// A file of two transfer parts and a bit: enough that holding it whole
+    /// would show up plainly against holding one part of it, and enough that
+    /// the end of the payload is discovered rather than computed.
+    const LARGE_FILE_BYTES: usize = 2 * PROVIDER_MULTIPART_PART_BYTES as usize + 4_096;
+    const SMALL_FILE: &[u8] = b"small enough to hold";
+
+    fn payload(len: usize) -> Vec<u8> {
+        (0..len).map(|offset| (offset % 251) as u8).collect()
+    }
+
+    /// A run nobody is watching: the accounting still happens, it is just
+    /// not reported, which is what a test wants of it.
+    fn unwatched() -> RuntimeBehavior {
+        RuntimeBehavior {
+            json: true,
+            no_input: true,
+            interactive: false,
+            progress: ProgressMode::Off,
+        }
+    }
+
+    /// A tree upload against a store that reports every payload buffer it is
+    /// handed, and the namespace to upload into.
+    async fn watched_context(
+        store_dir: &std::path::Path,
+    ) -> (CommandContext, Arc<BufferWatchStore<LocalFsStore>>) {
+        let watched = Arc::new(BufferWatchStore::watching_content(
+            LocalFsStore::new(store_dir).expect("create local-fs store"),
+        ));
+        let store: SharedObjectStore = watched.clone();
+        let target =
+            EmbeddedTarget::over_store(store, Some("put-tree-test"), TraceStoreKind::LocalFs)
+                .await
+                .expect("build embedded target");
+        let namespace = NamespaceId::parse("demo").expect("valid namespace id");
+        let context = CommandContext {
+            profile_name: "default".to_owned(),
+            mode: "embedded".to_owned(),
+            namespace: namespace.clone(),
+            target: ResolvedTarget::Embedded(Box::new(target)),
+        };
+        context
+            .target
+            .create_namespace(&namespace)
+            .await
+            .expect("create namespace");
+        (context, watched)
+    }
+
+    /// A tree's largest file is never held whole. Each file travels the way
+    /// a single `put` of it would, so the payload of one too large to hold
+    /// crosses the store boundary in transfer parts — and the measurement is
+    /// retention at that boundary, not a reading of the process.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_recursive_put_never_holds_a_whole_file() {
+        let store_dir = tempfile::tempdir().expect("tempdir");
+        let (context, watched) = watched_context(store_dir.path()).await;
+
+        let tree = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(tree.path().join("docs")).expect("create tree dirs");
+        let large = payload(LARGE_FILE_BYTES);
+        std::fs::write(tree.path().join("docs/big.bin"), &large).expect("write large file");
+        std::fs::write(tree.path().join("small.txt"), SMALL_FILE).expect("write small file");
+
+        let output = match run_put_tree(
+            CommandKind::FilesystemPut,
+            &context,
+            tree.path(),
+            "/up",
+            false,
+            None,
+            unwatched(),
+        )
+        .await
+        {
+            Ok(output) => output,
+            Err(failure) => unreachable!("recursive put failed: {:?}", failure.error),
+        };
+        let CommandData::TreeTransfer {
+            files, failures, ..
+        } = output.data
+        else {
+            unreachable!("a recursive put reports a tree transfer");
+        };
+        assert_eq!(files, 2);
+        assert!(failures.is_empty(), "{failures:?}");
+
+        // Read the peaks before reading anything back: a download crosses
+        // the same boundary and would count as payload too.
+        let peaks = watched.peaks();
+        assert_eq!(
+            peaks.total_bytes,
+            (LARGE_FILE_BYTES + SMALL_FILE.len()) as u64,
+            "every payload byte crossed the store boundary exactly once"
+        );
+        assert!(
+            peaks.largest_buffer_bytes <= PROVIDER_MULTIPART_PART_BYTES,
+            "no single buffer may exceed one part: largest was {}",
+            peaks.largest_buffer_bytes
+        );
+        assert!(
+            peaks.peak_live_bytes <= PROVIDER_MULTIPART_PART_BYTES + SMALL_FILE.len() as u64,
+            "the tree held {} bytes at once, past one part of its largest file",
+            peaks.peak_live_bytes
+        );
+
+        let spec = NamespacePath::parse("demo", "/up/docs/big.bin").expect("valid namespace path");
+        assert_eq!(
+            context
+                .target
+                .get_file_bytes(&spec)
+                .await
+                .expect("read the uploaded file back"),
+            large,
+            "the file that landed is the file that was walked"
+        );
+    }
 }

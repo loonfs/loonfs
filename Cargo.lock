@@ -1226,6 +1226,7 @@ dependencies = [
  "loonfs-client",
  "loonfs-grep",
  "loonfs-objectstore",
+ "loonfs-test-support",
  "serde",
  "serde_json",
  "tempfile",

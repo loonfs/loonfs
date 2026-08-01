@@ -37,6 +37,9 @@ walkdir.workspace = true
 [dev-dependencies]
 ureq.workspace = true
 insta = { version = "1.39", features = ["json"] }
+# The store wrappers that make "this transfer never held the file" a
+# checkable claim rather than a comment.
+loonfs-test-support = { path = "../loonfs-test-support" }
 
 [lints]
 workspace = true

@@ -768,6 +768,10 @@ fn commit_messages_ride_the_feed_and_bind_identity() {
     );
 }
 
+/// A file small enough that a tree holding it uploads it in one request,
+/// beside one that is not.
+const SMALL_TREE_FILE: &[u8] = b"small enough to hold";
+
 /// A payload past the size at which a put stops holding its bytes whole.
 /// It is the smallest payload that exercises the streaming path at all.
 fn streaming_payload() -> Vec<u8> {
@@ -924,6 +928,12 @@ fn a_recursive_transfer_counts_files_and_bytes_for_the_whole_tree() {
     assert_eq!(last["bytes_done"], tree_bytes);
     assert_eq!(last["bytes_total"], tree_bytes);
     assert_eq!(last["files_total"], 3);
+    assert!(
+        events_of_kind(&put, "phase").is_empty(),
+        "several files of a tree are in flight at once, so no one file's \
+         commit is the operation's: {:?}",
+        events_of_kind(&put, "phase")
+    );
 
     let back = harness.temp_dir.path().join("back");
     let get = harness.run(&[
@@ -945,6 +955,169 @@ fn a_recursive_transfer_counts_files_and_bytes_for_the_whole_tree() {
     assert_eq!(last["bytes_total"], tree_bytes);
     assert_eq!(last["files_done"], 3);
     assert_eq!(last["files_total"], 3);
+}
+
+/// A tree's large file is read once, a piece at a time, exactly as a single
+/// `put` of it is. So the tree's byte count moves through that file rather
+/// than jumping over it once the whole thing has been read — which is what
+/// an upload that held each file whole could only ever report.
+#[test]
+fn a_recursive_put_counts_a_large_file_as_it_is_read() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+
+    let tree = harness.temp_dir.path().join("tree");
+    fs::create_dir_all(tree.join("docs")).expect("create tree dirs");
+    let payload = streaming_payload();
+    fs::write(tree.join("docs/big.bin"), &payload).expect("write big");
+    fs::write(tree.join("small.txt"), SMALL_TREE_FILE).expect("write small");
+    let tree_bytes = (payload.len() + SMALL_TREE_FILE.len()) as u64;
+
+    let put = harness.run(&[
+        "--json",
+        "put",
+        "-r",
+        tree.to_str().expect("utf-8 path"),
+        "/up",
+    ]);
+    assert_success(&put);
+    assert_eq!(json_data(&put)["files"], 2);
+
+    let counts: Vec<u64> = events_of_kind(&put, "progress")
+        .iter()
+        .map(|event| event["bytes_done"].as_u64().expect("a byte count"))
+        .collect();
+    // The only counts a whole-file-at-a-time upload could ever report.
+    let whole_files = [
+        0,
+        SMALL_TREE_FILE.len() as u64,
+        payload.len() as u64,
+        tree_bytes,
+    ];
+    assert!(
+        counts.iter().any(|count| !whole_files.contains(count)),
+        "a payload read in pieces reports counts taken part way through it: {counts:?}"
+    );
+    assert_eq!(counts.last(), Some(&tree_bytes), "{counts:?}");
+    assert_eq!(
+        download(&harness, "/up/docs/big.bin", "big-back.bin"),
+        payload
+    );
+}
+
+/// The same tree over the remote transport, where a large file is the one
+/// upload with parts to lose. Each file keeps its own resume record, named
+/// by the profile, namespace, remote path, and local file that decide which
+/// upload it is — and a run that committed leaves none of them behind.
+#[test]
+fn a_recursive_put_streams_a_large_file_over_the_remote_transport() {
+    let harness = Harness::new();
+    let remote_server =
+        harness.start_external_server(harness.write_server_config("remote", "recursive-remote"));
+    assert_success(&harness.run(&[
+        "--json",
+        "profile",
+        "create",
+        "default",
+        "--mode",
+        "remote",
+        "--server-url",
+        &remote_server.server_url,
+        "--auth-token",
+        "test-token",
+    ]));
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+
+    let tree = harness.temp_dir.path().join("tree");
+    fs::create_dir_all(tree.join("docs")).expect("create tree dirs");
+    let payload = streaming_payload();
+    fs::write(tree.join("docs/big.bin"), &payload).expect("write big");
+    fs::write(tree.join("small.txt"), SMALL_TREE_FILE).expect("write small");
+
+    let state_home = harness.temp_dir.path().join("state");
+    let put = harness.run_with_env(
+        &[("XDG_STATE_HOME", state_home.as_path())],
+        &[
+            "--json",
+            "put",
+            "-r",
+            tree.to_str().expect("utf-8 path"),
+            "/up",
+        ],
+    );
+    assert_success(&put);
+    assert_eq!(json_data(&put)["files"], 2);
+    assert_eq!(
+        download(&harness, "/up/docs/big.bin", "big-back.bin"),
+        payload
+    );
+    assert_eq!(
+        download(&harness, "/up/small.txt", "small-back.txt"),
+        SMALL_TREE_FILE
+    );
+
+    let records: Vec<PathBuf> = fs::read_dir(state_home.join("loonfs").join("uploads"))
+        .map(|entries| {
+            entries
+                .map(|entry| entry.expect("dir entry").path())
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        records.is_empty(),
+        "an upload that committed keeps no record for a rerun to pick up: {records:?}"
+    );
+}
+
+/// What a tree holds that is neither a file nor a directory is named and
+/// skipped rather than silently dropped, and the walk carries on around it.
+/// Unix only: nothing else in the suite can make one.
+#[cfg(unix)]
+#[test]
+fn a_recursive_put_names_what_it_will_not_transfer() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+
+    let tree = harness.temp_dir.path().join("tree");
+    fs::create_dir_all(&tree).expect("create tree dir");
+    fs::write(tree.join("real.txt"), b"real").expect("write file");
+    std::os::unix::fs::symlink(tree.join("real.txt"), tree.join("link.txt")).expect("make symlink");
+
+    let put = harness.run(&[
+        "--json",
+        "put",
+        "-r",
+        tree.to_str().expect("utf-8 path"),
+        "/up",
+    ]);
+    assert_failure(&put);
+    let data = json_data(&put);
+    assert_eq!(
+        data["files"], 1,
+        "the regular file still transferred: {data}"
+    );
+    let failures = data["failures"].as_array().expect("failures");
+    assert_eq!(failures.len(), 1, "{data}");
+    assert!(
+        failures[0]["path"]
+            .as_str()
+            .expect("a path")
+            .ends_with("link.txt"),
+        "{data}"
+    );
+    assert!(
+        failures[0]["error"]["message"]
+            .as_str()
+            .expect("a message")
+            .contains("symlinks and special"),
+        "{data}"
+    );
+    assert_success(&harness.run(&["--json", "stat", "/up/real.txt"]));
 }
 
 /// Nobody asked, so nobody is told: a run whose standard error is a pipe
