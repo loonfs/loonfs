@@ -212,6 +212,7 @@ fn accumulate_gc_response(total: &mut loonfs_api::GcResponse, pass: loonfs_api::
     total.deleted_manifests += pass.deleted_manifests;
     total.deleted_checkpoint_records += pass.deleted_checkpoint_records;
     total.released_fork_checkpoints += pass.released_fork_checkpoints;
+    total.released_expired_checkpoints += pass.released_expired_checkpoints;
     total.deleted_upload_sessions += pass.deleted_upload_sessions;
     total.deleted_content_objects += pass.deleted_content_objects;
     total.released_missing_basis_checkpoints += pass.released_missing_basis_checkpoints;
@@ -219,6 +220,14 @@ fn accumulate_gc_response(total: &mut loonfs_api::GcResponse, pass: loonfs_api::
     total.retained.add(&pass.retained);
     total.degraded_retention |= pass.degraded_retention;
     total.content_reclamation_deferred |= pass.content_reclamation_deferred;
+    // The summary keeps the soonest obligation any pass reported — the same
+    // soonest-wake rule the maintenance runner applies. A later pass with
+    // nothing deferred does not erase an earlier pass's pending horizon.
+    total.next_reclamation_at_ms = match (total.next_reclamation_at_ms, pass.next_reclamation_at_ms)
+    {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    };
     total.next_cursor = pass.next_cursor;
 }
 
@@ -700,6 +709,31 @@ mod tests {
     use super::*;
     use crate::progress::ProgressMode;
     use loonfs_api::{GcResponse, NamespaceId, RetainedReason};
+
+    /// The multi-pass summary folds every counter and keeps the soonest
+    /// reclamation obligation any pass reported: a later pass with nothing
+    /// deferred does not erase an earlier pass's pending horizon.
+    #[test]
+    fn the_summary_folds_expired_releases_and_keeps_the_soonest_horizon() {
+        let namespace = NamespaceId::parse("demo").expect("namespace id");
+        let mut total = GcResponse::empty(namespace.clone());
+
+        let mut first = GcResponse::empty(namespace.clone());
+        first.released_expired_checkpoints = 2;
+        first.next_reclamation_at_ms = Some(9_000);
+        accumulate_gc_response(&mut total, first);
+
+        let mut second = GcResponse::empty(namespace.clone());
+        second.released_expired_checkpoints = 1;
+        accumulate_gc_response(&mut total, second);
+
+        let mut third = GcResponse::empty(namespace);
+        third.next_reclamation_at_ms = Some(12_000);
+        accumulate_gc_response(&mut total, third);
+
+        assert_eq!(total.released_expired_checkpoints, 3);
+        assert_eq!(total.next_reclamation_at_ms, Some(9_000));
+    }
 
     fn runtime(json: bool) -> RuntimeBehavior {
         RuntimeBehavior {

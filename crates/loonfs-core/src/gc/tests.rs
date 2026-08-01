@@ -2725,6 +2725,7 @@ fn accumulate_report(total: &mut GcResponse, pass: &GcResponse) {
     total.deleted_manifests += pass.deleted_manifests;
     total.deleted_checkpoint_records += pass.deleted_checkpoint_records;
     total.released_fork_checkpoints += pass.released_fork_checkpoints;
+    total.released_expired_checkpoints += pass.released_expired_checkpoints;
     total.deleted_upload_sessions += pass.deleted_upload_sessions;
     total.deleted_content_objects += pass.deleted_content_objects;
     total.released_missing_basis_checkpoints += pass.released_missing_basis_checkpoints;
@@ -2732,6 +2733,11 @@ fn accumulate_report(total: &mut GcResponse, pass: &GcResponse) {
     total.retained.add(&pass.retained);
     total.degraded_retention |= pass.degraded_retention;
     total.content_reclamation_deferred |= pass.content_reclamation_deferred;
+    total.next_reclamation_at_ms = match (total.next_reclamation_at_ms, pass.next_reclamation_at_ms)
+    {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    };
 }
 
 #[tokio::test]
