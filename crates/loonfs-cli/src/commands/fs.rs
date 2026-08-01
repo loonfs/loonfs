@@ -21,7 +21,8 @@ use crate::progress::{ProgressOp, ProgressReporter};
 use crate::uploads::{SourceIdentity, UploadJournal};
 use loonfs_api::v0::UploadSessionStatus;
 use loonfs_api::{
-    CommitId, DeleteDirectoryBehavior, DestinationBehavior, ErrorCode, InodeKind, RevisionNo,
+    CommitId, CommitResponse, DeleteDirectoryBehavior, DestinationBehavior, ErrorCode, InodeKind,
+    RevisionNo,
 };
 use loonfs_client::{CreateDirectoryOptions, DeleteOptions, NamespacePath, PutFileOptions};
 use std::fs;
@@ -688,10 +689,6 @@ async fn run_filesystem_put_stdin(
 }
 
 /// Writes one payload and renders what the commit did.
-///
-/// The payload decides how it travels: one that is small enough to hold
-/// goes as bytes, and one that is large — or that cannot say how large it
-/// is — is read once, in pieces, whichever transport the profile selects.
 async fn commit_put(
     kind: CommandKind,
     context: &CommandContext,
@@ -708,45 +705,8 @@ async fn commit_put(
     ));
     progress.expect(size_bytes, Some(1));
     progress.file_started(spec.absolute_path().as_str(), size_bytes);
-    // Only a payload large enough to travel in parts has anything an
-    // interruption could leave half-done, and only a source that can be
-    // opened twice can pick it up: a pipe is gone once it is read.
-    let journal = match payload.resumable_source() {
-        Some(local_path) => resume_journal(context, spec, local_path),
-        None => None,
-    };
-    if let Some(journal) = journal.as_ref() {
-        if let Some(committed) =
-            commit_a_finished_upload(kind, context, spec, options, journal, &progress).await?
-        {
-            return Ok(committed);
-        }
-    }
-    let result = match payload.holdable_file() {
-        // A payload small enough to hold travels as one request, so there is
-        // no midpoint to report: it is read, and then the commit is all
-        // that is left.
-        Some(path) => {
-            let bytes = read_whole_file(path)
-                .await
-                .map_err(|error| context.fail(kind, error))?;
-            progress.advance(bytes.len() as u64);
-            progress.phase("committing");
-            context.target.put_file_bytes(spec, &bytes, options).await
-        }
-        None => {
-            context
-                .target
-                .put_file_stream(spec, payload, options, &progress, journal.as_ref())
-                .await
-        }
-    };
+    let result = put_payload(context, spec, payload, options, &progress).await;
     if result.is_ok() {
-        // The record exists to survive an interruption, and this upload was
-        // not interrupted.
-        if let Some(journal) = journal.as_ref() {
-            journal.forget();
-        }
         let moved = progress.bytes_done();
         progress.file_finished(spec.absolute_path().as_str(), moved);
     }
@@ -764,6 +724,67 @@ async fn commit_put(
             inode_id: None,
         },
     })
+}
+
+/// Uploads one payload and commits it at `spec`: the one way this CLI
+/// moves a file, whether the command named it or a recursive walk found it.
+///
+/// The payload decides how it travels, and nothing else does. One small
+/// enough to hold goes as bytes; one that is large — or that cannot say how
+/// large it is — is read once, in pieces, whichever transport the profile
+/// selects, so what the upload costs in memory follows the transport's
+/// window and not the file's length. Where a payload travels in parts, an
+/// interrupted transfer of it is picked up rather than started over.
+///
+/// `progress` counts what the payload gives up. A tree hands the same
+/// reporter to every file it is uploading, which is why the counting lives
+/// here rather than in the callers.
+pub(super) async fn put_payload(
+    context: &CommandContext,
+    spec: &NamespacePath,
+    payload: &LocalPayload,
+    options: &PutFileOptions,
+    progress: &Arc<ProgressReporter>,
+) -> Result<CommitResponse, CliError> {
+    // Only a payload large enough to travel in parts has anything an
+    // interruption could leave half-done, and only a source that can be
+    // opened twice can pick it up: a pipe is gone once it is read.
+    let journal = match payload.resumable_source() {
+        Some(local_path) => resume_journal(context, spec, local_path),
+        None => None,
+    };
+    if let Some(journal) = journal.as_ref() {
+        if let Some(committed) =
+            commit_a_finished_upload(context, spec, options, journal, progress).await?
+        {
+            return Ok(committed);
+        }
+    }
+    let result = match payload.holdable_file() {
+        // A payload small enough to hold travels as one request, so there is
+        // no midpoint to report: it is read, and then the commit is all
+        // that is left.
+        Some(path) => {
+            let bytes = read_whole_file(path).await?;
+            progress.advance(bytes.len() as u64);
+            progress.phase("committing");
+            context.target.put_file_bytes(spec, &bytes, options).await
+        }
+        None => {
+            context
+                .target
+                .put_file_stream(spec, payload, options, progress, journal.as_ref())
+                .await
+        }
+    };
+    if result.is_ok() {
+        // The record exists to survive an interruption, and this upload was
+        // not interrupted.
+        if let Some(journal) = journal.as_ref() {
+            journal.forget();
+        }
+    }
+    result.map_err(CliError::from)
 }
 
 /// The record an interrupted upload of this payload would have left, or
@@ -793,13 +814,12 @@ fn resume_journal(
 /// aborted, or gone — leaves this to the ordinary upload, which the
 /// recorded parts make cheap anyway.
 async fn commit_a_finished_upload(
-    kind: CommandKind,
     context: &CommandContext,
     spec: &NamespacePath,
     options: &PutFileOptions,
     journal: &UploadJournal,
     progress: &ProgressReporter,
-) -> Result<Option<CommandOutput>, CommandFailure> {
+) -> Result<Option<CommitResponse>, CliError> {
     let Some(resume) = journal.resume() else {
         return Ok(None);
     };
@@ -827,19 +847,7 @@ async fn commit_a_finished_upload(
     if result.is_ok() {
         journal.forget();
     }
-    progress.finish();
-    let result = result.map_err(|error| context.fail(kind, error))?;
-    Ok(Some(CommandOutput {
-        kind,
-        profile: Some(context.profile_name.clone()),
-        mode: Some(context.mode.clone()),
-        data: CommandData::FileMutation {
-            target: render_target(&context.namespace, spec.absolute_path()),
-            committed_seq: result.committed_seq,
-            commit_id: result.commit_id,
-            inode_id: None,
-        },
-    }))
+    Ok(Some(result?))
 }
 
 fn put_file_options(args: &FilesystemPutArgs) -> Result<PutFileOptions, CliError> {

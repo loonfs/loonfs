@@ -138,16 +138,29 @@ impl EmbeddedTarget {
         store_config: &StoreConfig,
         writer_id: Option<&str>,
     ) -> Result<Self, CliError> {
-        let writer_id = writer_id
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(default_writer_id);
-        let trace_store_kind = TraceStoreKind::from(store_config.kind());
         // One command drives all three handles from one runtime, so they
         // deliberately share one provider client.
         let store: SharedObjectStore = store_config
             .configured_object_store()
             .map_err(|err| CliError::invalid_config(format!("invalid store config: {err}")))?
             .into_shared();
+        Self::over_store(store, writer_id, TraceStoreKind::from(store_config.kind())).await
+    }
+
+    /// Opens the runtime handles over a store the caller already holds.
+    ///
+    /// [`Self::new`] opens the profile's configured store and hands it here.
+    /// It is a seam rather than an extension point: it exists so a caller
+    /// that has to watch what crosses the store boundary can hand in a store
+    /// it wrapped.
+    pub(crate) async fn over_store(
+        store: SharedObjectStore,
+        writer_id: Option<&str>,
+        trace_store_kind: TraceStoreKind,
+    ) -> Result<Self, CliError> {
+        let writer_id = writer_id
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(default_writer_id);
         let writer = FsWriter::builder_with_store(store.clone())
             .writer_id(writer_id.clone())
             // The server's policy: publishes past the WAL threshold schedule

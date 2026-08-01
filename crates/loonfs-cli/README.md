@@ -401,6 +401,12 @@ Interrupted transfers
   proxied uploads, and `loonfs put -` keep no record: there is no session
   to rejoin, and a pipe cannot be read a second time.
 
+  A tree resumes file by file, on the same terms. Each file of a `put -r`
+  keeps its own record, named by the profile, namespace, remote path, and
+  local file that decide which upload it is, so rerunning the command
+  picks up whichever files were interrupted and re-uploads none that
+  committed.
+
 Transfer progress
   `loonfs get` and `loonfs put`, one file or a whole tree, say where they
   have got to while they run. Never on stdout, which carries either the
@@ -441,7 +447,9 @@ Transfer progress
       starts, with `bytes_done` as it stood at that moment. `committing`
       says an upload's payload has been read and the commit is what is
       left; `resuming` says a download picked up bytes an interrupted run
-      left behind, and `bytes_done` is how many.
+      left behind, and `bytes_done` is how many. Only a transfer of one
+      file reports these: a tree has several files in flight at once, so
+      no one file's stretch is the operation's.
 
   `op` is `get` or `put`. --no-progress silences both forms, and neither is
   produced for `loonfs cat` or for `loonfs get ... -`, which hand the file
@@ -473,7 +481,10 @@ Behavior notes
 
   `loonfs put` reads a large file or a pipe once, a piece at a time, so what
   it costs in memory follows the transfer and not the payload's size; a
-  file small enough to hold is still uploaded in one request
+  file small enough to hold is still uploaded in one request. `put -r`
+  uploads every file of a tree the same way, so a tree holding a file
+  larger than this process could hold costs no more memory than a tree of
+  small ones
 
   If `loonfs get` omits the local destination, the CLI writes to `./<remote-filename>`
 
@@ -506,9 +517,9 @@ Behavior notes
   How much of a transfer is watchable follows how it travels. A streamed or
   direct download reports bytes as they land, and so does a streamed
   upload; a proxied download and a small buffered upload are one request
-  each, so they go from nothing to done in one step. A recursive put
-  uploads one file per request, so a tree's byte count advances a whole
-  file at a time
+  each, so they go from nothing to done in one step. A tree is the same
+  file by file: its byte count moves through a large file as that file is
+  read, and advances a whole file at a time over the small ones
 
   An embedded profile's edit latency grows with the WAL tail between
   maintenance passes: every write appends, and reads replay what has not
