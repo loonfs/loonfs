@@ -1417,6 +1417,105 @@ fn profile_names_matching_top_level_config_keys_are_allowed() {
 }
 
 #[test]
+fn ambient_provider_credentials_do_not_look_like_flags() {
+    // An AWS key exported for something else is not `--access-key-id`
+    // passed to this command, so a provider that cannot use it ignores it.
+    let harness = Harness::new();
+    let ambient = &[
+        ("AWS_ACCESS_KEY_ID", "ambient-access"),
+        ("AWS_SECRET_ACCESS_KEY", "ambient-secret"),
+        ("AWS_SESSION_TOKEN", "ambient-session"),
+        ("LOONFS_AUTH_TOKEN", "ambient-token"),
+    ];
+
+    let gcs = harness.run_with_env(
+        ambient,
+        &[
+            "--json",
+            "profile",
+            "create",
+            "gcs",
+            "--mode",
+            "embedded",
+            "--store-kind",
+            "gcp-gcs",
+            "--bucket",
+            "bucket",
+            "--service-account-key-path",
+            "/tmp/service-account.json",
+        ],
+    );
+    assert_success(&gcs);
+    assert_eq!(json_data(&gcs)["store"]["kind"], "gcp-gcs");
+
+    let local_fs = harness.run_with_env(
+        ambient,
+        &[
+            "--json",
+            "profile",
+            "create",
+            "local",
+            "--mode",
+            "embedded",
+            "--store-kind",
+            "local-fs",
+            "--root",
+            harness.store_root("local").to_str().expect("utf-8 path"),
+        ],
+    );
+    assert_success(&local_fs);
+
+    // The same environment still fills the providers that use it.
+    let s3 = harness.run_with_env(
+        ambient,
+        &[
+            "--json",
+            "profile",
+            "create",
+            "s3",
+            "--mode",
+            "embedded",
+            "--store-kind",
+            "aws-s3",
+            "--bucket",
+            "bucket",
+            "--region",
+            "us-east-1",
+        ],
+    );
+    assert_success(&s3);
+    assert_eq!(json_data(&s3)["store"]["access_key_id"], "<redacted>");
+
+    // And a typed flag that does not apply is still rejected.
+    let typed = harness.run_with_env(
+        ambient,
+        &[
+            "--json",
+            "profile",
+            "create",
+            "gcs-typed",
+            "--mode",
+            "embedded",
+            "--store-kind",
+            "gcp-gcs",
+            "--bucket",
+            "bucket",
+            "--service-account-key-path",
+            "/tmp/service-account.json",
+            "--access-key-id",
+            "typed-access",
+        ],
+    );
+    assert_failure(&typed);
+    let error = json_error(&typed);
+    assert_eq!(error["code"], "invalid_input");
+    assert!(error["message"]
+        .as_str()
+        .expect("json string")
+        .contains("`--access-key-id` does not apply"));
+}
+
+#[test]
 fn init_rejects_existing_config_file() {
     let harness = Harness::new();
     harness.write_cli_config(format!(
@@ -3061,6 +3160,17 @@ impl Harness {
             .write_all(stdin)
             .expect("write stdin");
         child.wait_with_output().expect("run loonfs")
+    }
+
+    /// Runs the CLI with extra environment variables set, for the paths
+    /// where the environment is part of the behavior under test.
+    fn run_with_env(&self, env: &[(&str, &str)], args: &[&str]) -> Output {
+        let mut command = Command::new(loon_binary_path());
+        command.env("HOME", &self.home_dir);
+        for (name, value) in env {
+            command.env(name, value);
+        }
+        command.args(args).output().expect("run loonfs")
     }
 
     fn store_root(&self, name: &str) -> PathBuf {

@@ -2,7 +2,9 @@
 
 use super::context::fail;
 use super::output::{CommandData, CommandFailure, CommandOutput};
-use super::profile_config::{build_profile_from_create_spec, create_profile_spec_from_init};
+use super::profile_config::{
+    build_profile_from_create_spec, create_profile_spec_from_init, AmbientCredentials,
+};
 use crate::args::{CommandKind, ConfigCommand, InitArgs, RuntimeBehavior};
 use crate::config::{
     default_config_path, load_config_for_repair, load_or_default_config, redacted_config_table,
@@ -33,7 +35,11 @@ pub(crate) fn run_config_init(
             None if runtime.interactive => prompt::prompt_line_default("profile name", "default")?,
             None => "default".to_owned(),
         };
-        let profile = build_profile_from_create_spec(create_profile_spec_from_init(args), runtime)?;
+        let profile = build_profile_from_create_spec(
+            create_profile_spec_from_init(args),
+            &AmbientCredentials::from_env(),
+            runtime,
+        )?;
 
         let mut config = load_or_default_config(&config_path)?;
         let (profile_name, redacted) = add_profile(&mut config, &name, profile)?;

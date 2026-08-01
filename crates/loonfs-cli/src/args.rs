@@ -111,20 +111,22 @@ pub(crate) struct InitArgs {
     /// AWS region.
     #[arg(long)]
     pub region: Option<String>,
-    // Provider secrets fall back to the standard environment variables so
-    // quickstarts never need them on the command line (argv is visible to
-    // `ps` and lands in shell history).
-    /// AWS or R2 access key id.
-    #[arg(long, env = "AWS_ACCESS_KEY_ID")]
+    // Provider secrets fall back to the standard environment variables, but
+    // not through clap's `env`: a value clap filled from the environment is
+    // indistinguishable from one the caller typed, which turns an ambient
+    // AWS key into a flag "passed" to a GCS profile. The fallback is applied
+    // where the value is consumed instead — see `AmbientCredentials`.
+    /// AWS or R2 access key id (env AWS_ACCESS_KEY_ID).
+    #[arg(long)]
     pub access_key_id: Option<String>,
-    /// AWS or R2 secret access key.
-    #[arg(long, env = "AWS_SECRET_ACCESS_KEY")]
+    /// AWS or R2 secret access key (env AWS_SECRET_ACCESS_KEY).
+    #[arg(long)]
     pub secret_access_key: Option<String>,
     /// Custom provider endpoint URL.
     #[arg(long)]
     pub endpoint_url: Option<String>,
-    /// Optional AWS session token.
-    #[arg(long, env = "AWS_SESSION_TOKEN")]
+    /// Optional AWS session token (env AWS_SESSION_TOKEN).
+    #[arg(long)]
     pub session_token: Option<String>,
     /// Use path-style S3 addressing.
     #[arg(long)]
@@ -147,8 +149,8 @@ pub(crate) struct InitArgs {
     /// Remote LoonFS server URL.
     #[arg(long)]
     pub server_url: Option<String>,
-    /// Remote LoonFS bearer token.
-    #[arg(long, env = "LOONFS_AUTH_TOKEN")]
+    /// Remote LoonFS bearer token (env LOONFS_AUTH_TOKEN).
+    #[arg(long)]
     pub auth_token: Option<String>,
     /// PEM bundle of extra certificate authorities to trust for an
     /// https server URL, when a private CA issued the certificate.
@@ -194,17 +196,17 @@ pub(crate) struct ProfileCreateArgs {
     #[arg(long)]
     pub region: Option<String>,
     // Same environment fallbacks as `InitArgs`, and for the same reason.
-    /// AWS or R2 access key id.
-    #[arg(long, env = "AWS_ACCESS_KEY_ID")]
+    /// AWS or R2 access key id (env AWS_ACCESS_KEY_ID).
+    #[arg(long)]
     pub access_key_id: Option<String>,
-    /// AWS or R2 secret access key.
-    #[arg(long, env = "AWS_SECRET_ACCESS_KEY")]
+    /// AWS or R2 secret access key (env AWS_SECRET_ACCESS_KEY).
+    #[arg(long)]
     pub secret_access_key: Option<String>,
     /// Custom provider endpoint URL.
     #[arg(long)]
     pub endpoint_url: Option<String>,
-    /// Optional AWS session token.
-    #[arg(long, env = "AWS_SESSION_TOKEN")]
+    /// Optional AWS session token (env AWS_SESSION_TOKEN).
+    #[arg(long)]
     pub session_token: Option<String>,
     /// Use path-style S3 addressing.
     #[arg(long)]
@@ -227,8 +229,8 @@ pub(crate) struct ProfileCreateArgs {
     /// Remote LoonFS server URL.
     #[arg(long)]
     pub server_url: Option<String>,
-    /// Remote LoonFS bearer token.
-    #[arg(long, env = "LOONFS_AUTH_TOKEN")]
+    /// Remote LoonFS bearer token (env LOONFS_AUTH_TOKEN).
+    #[arg(long)]
     pub auth_token: Option<String>,
     /// PEM bundle of extra certificate authorities to trust for an
     /// https server URL, when a private CA issued the certificate.

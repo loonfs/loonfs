@@ -235,7 +235,10 @@ Profile options
   A field the store requires and the command line omits is asked for on a
   terminal, and is an error under --no-input or --json. Secrets fall back to
   the standard environment variables, so a quickstart never has to put them
-  in argv.
+  in argv. A variable a provider has no use for is ignored: an exported
+  AWS key does not make a gcp-gcs profile fail as though --access-key-id
+  had been passed. A flag actually typed on the command line is still
+  rejected when it does not apply.
 
   Mode:
     --mode <embedded|remote>

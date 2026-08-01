@@ -38,6 +38,56 @@ const AWS_REGIONS: &[&str] = &[
     "il-central-1",
 ];
 
+// --- ambient credentials ---
+
+/// Environment variable the S3-compatible providers read their access-key
+/// id from.
+const ACCESS_KEY_ID_ENV: &str = "AWS_ACCESS_KEY_ID";
+/// Environment variable the S3-compatible providers read their secret from.
+const SECRET_ACCESS_KEY_ENV: &str = "AWS_SECRET_ACCESS_KEY";
+/// Environment variable a temporary AWS credential's token comes from.
+const SESSION_TOKEN_ENV: &str = "AWS_SESSION_TOKEN";
+/// Environment variable a remote profile's bearer token comes from.
+const AUTH_TOKEN_ENV: &str = "LOONFS_AUTH_TOKEN";
+
+/// Credentials this process's environment happens to carry.
+///
+/// They are read here rather than through clap's `env` because of what the
+/// two spellings mean. A clap-filled value is indistinguishable from one the
+/// caller typed, so an `AWS_ACCESS_KEY_ID` exported for something else looked
+/// like `--access-key-id` passed to a `gcp-gcs` profile, and the
+/// applicability check rejected a flag nobody wrote. Ambient credentials are
+/// advisory: a provider with no use for one never sees it, while an explicit
+/// flag that does not apply is still an error.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct AmbientCredentials {
+    access_key_id: Option<String>,
+    secret_access_key: Option<String>,
+    session_token: Option<String>,
+    auth_token: Option<String>,
+}
+
+impl AmbientCredentials {
+    /// Reads the standard variables once, so profile building stays a
+    /// function of its inputs.
+    pub(super) fn from_env() -> Self {
+        Self {
+            access_key_id: env_secret(ACCESS_KEY_ID_ENV),
+            secret_access_key: env_secret(SECRET_ACCESS_KEY_ENV),
+            session_token: env_secret(SESSION_TOKEN_ENV),
+            auth_token: env_secret(AUTH_TOKEN_ENV),
+        }
+    }
+}
+
+/// A set variable whose value is blank carries no credential, and is treated
+/// as unset rather than stored and later rejected by validation.
+fn env_secret(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+}
+
 // --- provider flag matrix ---
 
 /// A target a provider flag can apply to: one of the embedded store kinds or
@@ -324,6 +374,7 @@ pub(super) fn create_profile_spec_from_create(args: ProfileCreateArgs) -> Create
 
 pub(super) fn build_profile_from_create_spec(
     spec: CreateProfileSpec,
+    ambient: &AmbientCredentials,
     runtime: RuntimeBehavior,
 ) -> Result<ProfileConfig, CliError> {
     let mode = match spec.mode.as_deref() {
@@ -341,14 +392,15 @@ pub(super) fn build_profile_from_create_spec(
     };
 
     match mode.as_str() {
-        "embedded" => build_embedded_profile(spec, runtime),
-        "remote" => build_remote_profile(spec, runtime),
+        "embedded" => build_embedded_profile(spec, ambient, runtime),
+        "remote" => build_remote_profile(spec, ambient, runtime),
         _ => unreachable!("mode is validated to `embedded` or `remote` above"),
     }
 }
 
 fn build_embedded_profile(
     spec: CreateProfileSpec,
+    ambient: &AmbientCredentials,
     runtime: RuntimeBehavior,
 ) -> Result<ProfileConfig, CliError> {
     reject_inapplicable_create_flags(&spec, EMBEDDED_TARGETS, "embedded")?;
@@ -375,6 +427,7 @@ fn build_embedded_profile(
                         store_kind: Some(choice),
                         ..spec
                     },
+                    ambient,
                     runtime,
                 )
             });
@@ -395,15 +448,20 @@ fn build_embedded_profile(
             endpoint_url: spec.endpoint_url,
             access_key_id: require_or_prompt_secret(
                 spec.access_key_id.as_ref(),
+                ambient.access_key_id.as_ref(),
                 "access-key-id",
                 runtime,
             )?,
             secret_access_key: require_or_prompt_secret(
                 spec.secret_access_key.as_ref(),
+                ambient.secret_access_key.as_ref(),
                 "secret-access-key",
                 runtime,
             )?,
-            session_token: spec.session_token.map(SecretString::from),
+            session_token: spec
+                .session_token
+                .or_else(|| ambient.session_token.clone())
+                .map(SecretString::from),
             key_prefix: spec.key_prefix,
             force_path_style: spec.force_path_style,
         },
@@ -411,13 +469,17 @@ fn build_embedded_profile(
             bucket: require_or_prompt(spec.bucket.as_ref(), "bucket", runtime)?,
             account_id: require_or_prompt(spec.account_id.as_ref(), "account-id", runtime)?,
             endpoint_url: require_or_prompt(spec.endpoint_url.as_ref(), "endpoint-url", runtime)?,
+            // R2 speaks the S3 API, so its credentials arrive under the same
+            // environment names.
             access_key_id: require_or_prompt_secret(
                 spec.access_key_id.as_ref(),
+                ambient.access_key_id.as_ref(),
                 "access-key-id",
                 runtime,
             )?,
             secret_access_key: require_or_prompt_secret(
                 spec.secret_access_key.as_ref(),
+                ambient.secret_access_key.as_ref(),
                 "secret-access-key",
                 runtime,
             )?,
@@ -439,7 +501,14 @@ fn build_embedded_profile(
                 "container-name",
                 runtime,
             )?,
-            access_key: require_or_prompt_secret(spec.access_key.as_ref(), "access-key", runtime)?,
+            // Azure's shared key has no environment fallback here: the CLI
+            // has never read one, and inventing a name would be a guess.
+            access_key: require_or_prompt_secret(
+                spec.access_key.as_ref(),
+                None,
+                "access-key",
+                runtime,
+            )?,
             endpoint_url: spec.endpoint_url,
             key_prefix: spec.key_prefix,
         },
@@ -454,6 +523,7 @@ fn build_embedded_profile(
 
 fn build_remote_profile(
     spec: CreateProfileSpec,
+    ambient: &AmbientCredentials,
     runtime: RuntimeBehavior,
 ) -> Result<ProfileConfig, CliError> {
     reject_inapplicable_create_flags(&spec, &[FlagTarget::Remote], "remote")?;
@@ -461,9 +531,12 @@ fn build_remote_profile(
     Ok(ProfileConfig::Remote {
         server_url: require_or_prompt(spec.server_url.as_ref(), "server-url", runtime)?,
         default_namespace: None,
+        // An explicitly-blank `--auth-token` clears the token rather than
+        // falling through to the environment: the caller said "no token".
         auth_token: match spec.auth_token {
             Some(token) if token.trim().is_empty() => None,
-            other => other.map(SecretString::from),
+            Some(token) => Some(SecretString::from(token)),
+            None => ambient.auth_token.clone().map(SecretString::from),
         },
         ca_cert_path: blank_to_none(spec.ca_cert_path),
     })
@@ -489,12 +562,17 @@ fn require_or_prompt(
 
 /// Like [`require_or_prompt`] but prompts with hidden input and returns the
 /// value wrapped as a secret.
+///
+/// The explicit flag wins, then this provider's ambient credential, then a
+/// prompt. `ambient` is `None` where the provider has no environment name to
+/// fall back to.
 fn require_or_prompt_secret(
     value: Option<&String>,
+    ambient: Option<&String>,
     field: &str,
     runtime: RuntimeBehavior,
 ) -> Result<SecretString, CliError> {
-    match value {
+    match value.or(ambient) {
         Some(v) if !v.trim().is_empty() => Ok(SecretString::from(v.clone())),
         _ if runtime.interactive => prompt::prompt_secret(field).map(SecretString::from),
         _ => Err(CliError::non_interactive_field_required(field)),
@@ -775,9 +853,12 @@ mod tests {
     #![allow(clippy::panic)]
     // Profile tests use panic in unexpected match arms for precise diagnostics.
 
-    use super::{apply_update_flags, build_profile_from_create_spec, CreateProfileSpec};
+    use super::{
+        apply_update_flags, build_profile_from_create_spec, AmbientCredentials, CreateProfileSpec,
+    };
     use crate::args::{ProfileUpdateArgs, RuntimeBehavior};
     use crate::config::{ProfileConfig, StoreConfig};
+    use loonfs_objectstore::SecretString;
 
     #[test]
     fn create_profile_supports_azure_abs() {
@@ -792,6 +873,7 @@ mod tests {
                 key_prefix: Some("tenant-a".to_owned()),
                 ..empty_spec()
             },
+            &AmbientCredentials::default(),
             non_interactive_runtime(),
         )
         .expect("build azure profile");
@@ -835,6 +917,7 @@ mod tests {
                 bucket: Some("bucket".to_owned()),
                 ..empty_spec()
             },
+            &AmbientCredentials::default(),
             non_interactive_runtime(),
         )
         .expect_err("bucket must not apply to remote");
@@ -851,6 +934,7 @@ mod tests {
                 server_url: Some("http://127.0.0.1:9400".to_owned()),
                 ..empty_spec()
             },
+            &AmbientCredentials::default(),
             non_interactive_runtime(),
         )
         .expect_err("server-url must not apply to embedded");
@@ -867,6 +951,7 @@ mod tests {
                 bucket: Some("bucket".to_owned()),
                 ..empty_spec()
             },
+            &AmbientCredentials::default(),
             non_interactive_runtime(),
         )
         .expect_err("bucket must not apply to local-fs");
@@ -874,6 +959,179 @@ mod tests {
             local_fs_with_bucket.message,
             "`--bucket` does not apply to local-fs profiles"
         );
+    }
+
+    #[test]
+    fn ambient_credentials_a_provider_cannot_use_are_ignored() {
+        // An exported AWS key is not a flag anybody passed, so a provider
+        // that has no use for it must not see it at all.
+        let ambient = AmbientCredentials {
+            access_key_id: Some("ambient-access".to_owned()),
+            secret_access_key: Some("ambient-secret".to_owned()),
+            session_token: Some("ambient-session".to_owned()),
+            auth_token: Some("ambient-token".to_owned()),
+        };
+
+        let gcs = build_profile_from_create_spec(
+            CreateProfileSpec {
+                mode: Some("embedded".to_owned()),
+                store_kind: Some("gcp-gcs".to_owned()),
+                bucket: Some("bucket".to_owned()),
+                service_account_key_path: Some("/tmp/service-account.json".to_owned()),
+                ..empty_spec()
+            },
+            &ambient,
+            non_interactive_runtime(),
+        )
+        .expect("an ambient AWS key must not block a gcs profile");
+        assert!(matches!(
+            gcs,
+            ProfileConfig::Embedded {
+                store: StoreConfig::GcpGcs { .. },
+                ..
+            }
+        ));
+
+        let local_fs = build_profile_from_create_spec(
+            CreateProfileSpec {
+                mode: Some("embedded".to_owned()),
+                store_kind: Some("local-fs".to_owned()),
+                root: Some("/tmp/store".to_owned()),
+                ..empty_spec()
+            },
+            &ambient,
+            non_interactive_runtime(),
+        )
+        .expect("an ambient bearer token must not block an embedded profile");
+        assert!(matches!(
+            local_fs,
+            ProfileConfig::Embedded {
+                store: StoreConfig::LocalFs { .. },
+                ..
+            }
+        ));
+
+        // An explicit flag that does not apply is still an error: only the
+        // ambient path is silent.
+        let explicit = build_profile_from_create_spec(
+            CreateProfileSpec {
+                mode: Some("embedded".to_owned()),
+                store_kind: Some("gcp-gcs".to_owned()),
+                bucket: Some("bucket".to_owned()),
+                service_account_key_path: Some("/tmp/service-account.json".to_owned()),
+                access_key_id: Some("typed-access".to_owned()),
+                ..empty_spec()
+            },
+            &ambient,
+            non_interactive_runtime(),
+        )
+        .expect_err("a typed --access-key-id must not apply to gcs");
+        assert_eq!(
+            explicit.message,
+            "`--access-key-id` does not apply to gcp-gcs profiles"
+        );
+    }
+
+    #[test]
+    fn ambient_credentials_fill_the_providers_that_use_them() {
+        let ambient = AmbientCredentials {
+            access_key_id: Some("ambient-access".to_owned()),
+            secret_access_key: Some("ambient-secret".to_owned()),
+            session_token: Some("ambient-session".to_owned()),
+            auth_token: Some("ambient-token".to_owned()),
+        };
+
+        let s3 = build_profile_from_create_spec(
+            CreateProfileSpec {
+                mode: Some("embedded".to_owned()),
+                store_kind: Some("aws-s3".to_owned()),
+                bucket: Some("bucket".to_owned()),
+                region: Some("us-east-1".to_owned()),
+                // The typed secret wins over the ambient one.
+                secret_access_key: Some("typed-secret".to_owned()),
+                ..empty_spec()
+            },
+            &ambient,
+            non_interactive_runtime(),
+        )
+        .expect("build s3 profile from the environment");
+        match s3 {
+            ProfileConfig::Embedded {
+                store:
+                    StoreConfig::AwsS3 {
+                        access_key_id,
+                        secret_access_key,
+                        session_token,
+                        ..
+                    },
+                ..
+            } => {
+                assert_eq!(access_key_id.expose(), "ambient-access");
+                assert_eq!(secret_access_key.expose(), "typed-secret");
+                assert_eq!(
+                    session_token.as_ref().map(SecretString::expose),
+                    Some("ambient-session")
+                );
+            }
+            other => panic!("expected an aws-s3 profile, got {other:?}"),
+        }
+
+        let r2 = build_profile_from_create_spec(
+            CreateProfileSpec {
+                mode: Some("embedded".to_owned()),
+                store_kind: Some("cloudflare-r2".to_owned()),
+                bucket: Some("bucket".to_owned()),
+                account_id: Some("account".to_owned()),
+                endpoint_url: Some("https://account.r2.cloudflarestorage.com".to_owned()),
+                ..empty_spec()
+            },
+            &ambient,
+            non_interactive_runtime(),
+        )
+        .expect("r2 reads the same S3-compatible environment");
+        match r2 {
+            ProfileConfig::Embedded {
+                store: StoreConfig::CloudflareR2 { access_key_id, .. },
+                ..
+            } => assert_eq!(access_key_id.expose(), "ambient-access"),
+            other => panic!("expected a cloudflare-r2 profile, got {other:?}"),
+        }
+
+        let remote = build_profile_from_create_spec(
+            CreateProfileSpec {
+                mode: Some("remote".to_owned()),
+                server_url: Some("http://127.0.0.1:9400".to_owned()),
+                ..empty_spec()
+            },
+            &ambient,
+            non_interactive_runtime(),
+        )
+        .expect("build remote profile from the environment");
+        match remote {
+            ProfileConfig::Remote { auth_token, .. } => assert_eq!(
+                auth_token.as_ref().map(SecretString::expose),
+                Some("ambient-token")
+            ),
+            other => panic!("expected a remote profile, got {other:?}"),
+        }
+
+        // An explicitly blank token says "no token" and does not fall
+        // through to the environment.
+        let cleared = build_profile_from_create_spec(
+            CreateProfileSpec {
+                mode: Some("remote".to_owned()),
+                server_url: Some("http://127.0.0.1:9400".to_owned()),
+                auth_token: Some(String::new()),
+                ..empty_spec()
+            },
+            &ambient,
+            non_interactive_runtime(),
+        )
+        .expect("blank token clears the field");
+        match cleared {
+            ProfileConfig::Remote { auth_token, .. } => assert!(auth_token.is_none()),
+            other => panic!("expected a remote profile, got {other:?}"),
+        }
     }
 
     #[test]
