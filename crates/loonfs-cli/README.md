@@ -105,8 +105,11 @@ Namespace management
     Show the active profile and its default namespace
 
 Reading
-  loonfs ls [path]
-    List the entries of a directory, `/` when the path is omitted
+  loonfs ls [path] [--limit <n>] [--cursor <cursor>]
+    List the entries of a directory, `/` when the path is omitted. Without
+    --limit the whole directory is printed, however large; --limit stops
+    after that many entries in total and reports a next_cursor, which
+    --cursor resumes from
 
   loonfs stat <path>
     Describe one path: kind, size, revision, and content digest
@@ -120,11 +123,13 @@ Reading
     path; --force overwrites the local destination and --revision downloads
     an older revision of one file
 
-  loonfs grep <pattern> [--path-prefix <path>] [-i] [--limit <n>] [--allow-scan] [--allow-stale]
+  loonfs grep <pattern> [--path-prefix <path>] [-i] [--limit <n>]
+                        [--max-matches <n>] [--allow-scan] [--allow-stale]
     Search file content through the gram index with a pattern in the Rust
     regex dialect, and print every match; -i ignores ASCII case,
-    --path-prefix narrows to a subtree, --limit sizes a page rather than
-    capping the results,
+    --path-prefix narrows to a subtree, --limit sizes a page (bounded by the
+    deployment's query.grep.max_limit) while --max-matches caps the total
+    and reports that it stopped early,
     --allow-scan permits a capped scan for a pattern with no literal bytes,
     and --allow-stale accepts indexed-only results when the unindexed tail
     exceeds the scan budget

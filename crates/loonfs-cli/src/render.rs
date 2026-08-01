@@ -481,17 +481,27 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             }
             lines.join("\n")
         }
-        CommandData::PathEntries { entries } => entries
-            .iter()
-            .map(|entry| {
-                let size = entry
-                    .size_bytes
-                    .map(|value: u64| value.to_string())
-                    .unwrap_or_else(|| "-".to_owned());
-                format!("{}\t{}\t{}", entry.inode_kind, size, entry.absolute_path)
-            })
-            .collect::<Vec<_>>()
-            .join("\n"),
+        CommandData::PathEntries {
+            entries,
+            next_cursor,
+        } => {
+            let mut lines: Vec<String> = entries
+                .iter()
+                .map(|entry| {
+                    let size = entry
+                        .size_bytes
+                        .map(|value: u64| value.to_string())
+                        .unwrap_or_else(|| "-".to_owned());
+                    format!("{}\t{}\t{}", entry.inode_kind, size, entry.absolute_path)
+                })
+                .collect();
+            if let Some(cursor) = next_cursor {
+                lines.push(format!(
+                    "next_cursor: {cursor} (more entries; resume with --cursor)"
+                ));
+            }
+            lines.join("\n")
+        }
         CommandData::GrepIndexEnabled {
             namespace_id,
             already_enabled,
@@ -617,6 +627,7 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             pattern,
             matches,
             tail_scanned,
+            truncated,
             ..
         } => {
             let mut lines: Vec<String> = matches
@@ -628,7 +639,14 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
                     )
                 })
                 .collect();
-            lines.push(format!("{} matches for `{pattern}`", matches.len()));
+            if *truncated {
+                lines.push(format!(
+                    "{} matches for `{pattern}` (stopped at --max-matches; there are more)",
+                    matches.len()
+                ));
+            } else {
+                lines.push(format!("{} matches for `{pattern}`", matches.len()));
+            }
             if !tail_scanned {
                 lines.push(
                     "warning: recent commits were not scanned (allow_stale); results may be stale"

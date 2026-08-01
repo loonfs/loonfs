@@ -125,6 +125,11 @@ pub(crate) enum CommandData {
     Trash(loonfs_api::ListTrashResponse),
     PathEntries {
         entries: Vec<AuthoritativePathEntry>,
+        /// Where a bounded listing stopped, and how to resume it. Present
+        /// only when `--limit` cut the listing short; its presence is what
+        /// says the directory holds more than was printed.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        next_cursor: Option<String>,
     },
     PathEntry(AuthoritativePathEntry),
     GrepMatches {
@@ -137,6 +142,9 @@ pub(crate) enum CommandData {
         built_through_seq: ChangeSeq,
         matches: Vec<GrepMatch>,
         tail_scanned: bool,
+        /// True when `--max-matches` stopped the search with matches left
+        /// to find.
+        truncated: bool,
     },
     FileRevisions {
         target: String,

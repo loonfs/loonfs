@@ -367,6 +367,13 @@ pub(crate) struct FilesystemLsArgs {
     #[command(flatten)]
     pub target: TargetSelectorArgs,
     pub path: Option<String>,
+    /// Stop after this many entries in total. Without it the command
+    /// follows cursors and prints the whole directory, however large.
+    #[arg(long)]
+    pub limit: Option<u32>,
+    /// Resume cursor from a previous bounded listing.
+    #[arg(long)]
+    pub cursor: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -450,10 +457,14 @@ pub(crate) struct FilesystemGrepArgs {
     /// Match ASCII letters without regard to case.
     #[arg(short = 'i', long)]
     pub ignore_case: bool,
-    /// Matches fetched per page, not a cap on total results; the command
-    /// follows cursors to completion and prints every match.
+    /// Matches fetched per page, bounded by the deployment's
+    /// `query.grep.max_limit`. To bound the total, use --max-matches.
     #[arg(long)]
     pub limit: Option<u32>,
+    /// Stop after this many matches in total. Without it the command
+    /// follows cursors to completion and prints every match.
+    #[arg(long)]
+    pub max_matches: Option<u32>,
     /// Permit a capped exhaustive scan for patterns with no literal bytes.
     #[arg(long)]
     pub allow_scan: bool,

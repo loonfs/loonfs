@@ -2302,6 +2302,87 @@ fn embedded_grep_works_after_index_enable() {
     );
 }
 
+/// `--max-matches` caps the whole search, which `--limit` cannot: `--limit`
+/// sizes one page and the deployment rejects a page larger than its own
+/// maximum.
+#[test]
+fn grep_max_matches_caps_the_search_while_limit_sizes_a_page() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "code"]));
+    assert_success(&harness.run(&["use", "code"]));
+
+    let payload = harness.temp_dir.path().join("notes.txt");
+    fs::write(&payload, b"TODO one\nTODO two\nTODO three\nTODO four\n").expect("write payload");
+    assert_success(&harness.run(&["put", payload.to_str().expect("utf-8 path"), "/notes.txt"]));
+    assert_success(&harness.run(&["--json", "admin", "index-enable"]));
+
+    let all = harness.run(&["--json", "grep", "TODO"]);
+    assert_success(&all);
+    let all_data = json_data(&all);
+    assert_eq!(all_data["matches"].as_array().expect("json array").len(), 4);
+    assert_eq!(all_data["truncated"], false);
+
+    let capped = harness.run(&["--json", "grep", "TODO", "--max-matches", "2"]);
+    assert_success(&capped);
+    let capped_data = json_data(&capped);
+    assert_eq!(
+        capped_data["matches"].as_array().expect("json array").len(),
+        2
+    );
+    assert_eq!(capped_data["truncated"], true);
+
+    // A cap the search never reaches is not a truncation.
+    let roomy = harness.run(&["--json", "grep", "TODO", "--max-matches", "99"]);
+    assert_success(&roomy);
+    assert_eq!(
+        json_data(&roomy)["matches"]
+            .as_array()
+            .expect("json array")
+            .len(),
+        4
+    );
+    assert_eq!(json_data(&roomy)["truncated"], false);
+
+    // A small page still returns every match, because it bounds a page and
+    // the command follows the cursor.
+    let paged = harness.run(&["--json", "grep", "TODO", "--limit", "1"]);
+    assert_success(&paged);
+    assert_eq!(
+        json_data(&paged)["matches"]
+            .as_array()
+            .expect("json array")
+            .len(),
+        4
+    );
+    assert_eq!(json_data(&paged)["truncated"], false);
+
+    // The two compose: pages of one, stopped after three.
+    let both = harness.run(&[
+        "--json",
+        "grep",
+        "TODO",
+        "--limit",
+        "1",
+        "--max-matches",
+        "3",
+    ]);
+    assert_success(&both);
+    assert_eq!(
+        json_data(&both)["matches"]
+            .as_array()
+            .expect("json array")
+            .len(),
+        3
+    );
+    assert_eq!(json_data(&both)["truncated"], true);
+
+    // The human rendering says it stopped early.
+    let human = harness.run(&["grep", "TODO", "--max-matches", "2"]);
+    assert_success(&human);
+    assert!(stdout_string(&human).contains("--max-matches"));
+}
+
 #[test]
 fn index_enable_leaves_core_maintenance_decoupled() {
     let harness = Harness::new();
@@ -3110,6 +3191,76 @@ fn cp_and_mv_land_inside_an_existing_directory_in_both_modes() {
         assert_success(&tree);
         assert_eq!(json_data(&tree)["destination"], "demo:/archive/docs");
     }
+}
+
+/// `ls` bounds its own output on request, and the cursor it reports
+/// resumes exactly where it stopped.
+#[test]
+fn ls_limit_bounds_the_whole_listing_and_resumes_from_its_cursor() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+
+    let payload = harness.temp_dir.path().join("entry.txt");
+    fs::write(&payload, b"bytes\n").expect("payload");
+    for index in 0..5 {
+        assert_success(&harness.run(&[
+            "put",
+            payload.to_str().expect("utf-8 path"),
+            &format!("/f{index}.txt"),
+        ]));
+    }
+
+    // Unbounded still prints everything and reports no cursor.
+    let all = harness.run(&["--json", "ls"]);
+    assert_success(&all);
+    let all_data = json_data(&all);
+    assert_eq!(all_data["entries"].as_array().expect("json array").len(), 5);
+    assert!(all_data.get("next_cursor").is_none());
+
+    // A bound stops at exactly that many entries and hands back a cursor.
+    let first = harness.run(&["--json", "ls", "--limit", "2"]);
+    assert_success(&first);
+    let first_data = json_data(&first);
+    let first_entries = first_data["entries"].as_array().expect("json array");
+    assert_eq!(first_entries.len(), 2);
+    let cursor = first_data["next_cursor"]
+        .as_str()
+        .expect("a truncated listing reports where it stopped")
+        .to_owned();
+
+    let second = harness.run(&["--json", "ls", "--limit", "2", "--cursor", &cursor]);
+    assert_success(&second);
+    let second_data = json_data(&second);
+    let second_entries = second_data["entries"].as_array().expect("json array");
+    assert_eq!(second_entries.len(), 2);
+    assert_ne!(
+        second_entries[0]["absolute_path"], first_entries[0]["absolute_path"],
+        "the cursor resumes after the entries already printed"
+    );
+
+    // The last page fits inside the bound and reports no cursor.
+    let rest = harness.run(&[
+        "--json",
+        "ls",
+        "--limit",
+        "10",
+        "--cursor",
+        second_data["next_cursor"].as_str().expect("second cursor"),
+    ]);
+    assert_success(&rest);
+    let rest_data = json_data(&rest);
+    assert_eq!(
+        rest_data["entries"].as_array().expect("json array").len(),
+        1
+    );
+    assert!(rest_data.get("next_cursor").is_none());
+
+    // The human rendering says the listing stopped early.
+    let human = harness.run(&["ls", "--limit", "2"]);
+    assert_success(&human);
+    assert!(stdout_string(&human).contains("next_cursor:"));
 }
 
 /// The admin plane and the change feed work end to end, and both profile

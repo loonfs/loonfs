@@ -76,17 +76,64 @@ pub(crate) async fn run_filesystem_ls(
         allow_root,
     )
     .map_err(|error| context.fail(kind, error))?;
-    let entries = context
-        .target
-        .list_path_entries_all(&spec)
-        .await
-        .map_err(|error| context.fail(kind, error))?;
+    let (entries, next_cursor) = match (args.limit, args.cursor.as_deref()) {
+        // Unbounded is still the default: a listing nobody bounded prints
+        // the whole directory, as it always has.
+        (None, None) => {
+            let entries = context
+                .target
+                .list_path_entries_all(&spec)
+                .await
+                .map_err(|error| context.fail(kind, error))?;
+            (entries, None)
+        }
+        (limit, cursor) => list_bounded_path_entries(&context, kind, &spec, limit, cursor).await?,
+    };
     Ok(CommandOutput {
         kind,
         profile: Some(context.profile_name),
         mode: Some(context.mode),
-        data: CommandData::PathEntries { entries },
+        data: CommandData::PathEntries {
+            entries,
+            next_cursor,
+        },
     })
+}
+
+/// Reads pages until `limit` entries are in hand, and reports the cursor
+/// that resumes where it stopped.
+///
+/// `limit` bounds the total, not one page, so the loop asks for what it
+/// still needs — clamped to a page size every deployment accepts, because a
+/// caller-supplied page limit above `pagination.max_limit` is rejected
+/// rather than clamped by the server. An absent `limit` follows the cursor
+/// to the end, which is what `--cursor` alone asks for.
+async fn list_bounded_path_entries(
+    context: &CommandContext,
+    kind: CommandKind,
+    spec: &NamespacePath,
+    limit: Option<u32>,
+    cursor: Option<&str>,
+) -> Result<(Vec<loonfs_api::AuthoritativePathEntry>, Option<String>), CommandFailure> {
+    let mut entries = Vec::new();
+    let mut cursor = cursor.map(ToOwned::to_owned);
+    loop {
+        let page_limit = limit.map(|limit| {
+            let remaining = limit.saturating_sub(entries.len() as u32);
+            remaining.min(loonfs_api::DEFAULT_PAGE_LIMIT)
+        });
+        let page = context
+            .target
+            .list_path_entries_page(spec, page_limit, cursor.as_deref())
+            .await
+            .map_err(|error| context.fail(kind, error))?;
+        entries.extend(page.entries);
+        cursor = page.next_cursor;
+        let filled = limit.is_some_and(|limit| entries.len() as u32 >= limit);
+        if filled || cursor.is_none() {
+            return Ok((entries, cursor));
+        }
+    }
 }
 
 pub(crate) async fn run_filesystem_stat(
@@ -133,24 +180,38 @@ pub(crate) async fn run_filesystem_grep(
     };
     let mut matches = Vec::new();
     let mut tail_scanned = true;
+    let mut truncated = false;
+    // `--limit` sizes a page and is bounded by the deployment's
+    // `query.grep.max_limit`; `--max-matches` bounds the whole command. They
+    // are separate because a total cap larger than that per-page maximum
+    // would be rejected if it were sent as one.
+    let max_matches = args.max_matches.map(|max| max as usize);
     let (namespace_id, head_seq, built_through_seq) = loop {
         let response = context
             .target
             .grep(&context.namespace, &request)
             .await
             .map_err(|error| context.fail(kind, error))?;
+        let snapshot = (
+            response.namespace_id,
+            response.head_seq,
+            response.built_through_seq,
+        );
         matches.extend(response.matches);
         tail_scanned &= response.tail_scanned;
+        if let Some(max_matches) = max_matches {
+            if matches.len() >= max_matches {
+                // A page can overshoot the cap; the extra matches are real
+                // but were not asked for.
+                truncated = matches.len() > max_matches || response.next_cursor.is_some();
+                matches.truncate(max_matches);
+                break snapshot;
+            }
+        }
         match response.next_cursor {
             Some(cursor) => request.cursor = Some(cursor),
-            None => {
-                // The final page's snapshot describes the completed query.
-                break (
-                    response.namespace_id,
-                    response.head_seq,
-                    response.built_through_seq,
-                );
-            }
+            // The final page's snapshot describes the completed query.
+            None => break snapshot,
         }
     };
     Ok(CommandOutput {
@@ -164,6 +225,7 @@ pub(crate) async fn run_filesystem_grep(
             built_through_seq,
             matches,
             tail_scanned,
+            truncated,
         },
     })
 }

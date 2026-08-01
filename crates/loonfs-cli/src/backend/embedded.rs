@@ -21,9 +21,9 @@ use loonfs_api::{
     },
     AuthoritativePathEntry, ChangeSeq, CheckpointId, CommitResponse, CreateCheckpointRequest,
     CreateCheckpointResponse, EffectiveLimit, ErrorCode, GrepRequest, GrepResponse, InodeId,
-    ListFileRevisionsResponse, ListTrashResponse, MaintenanceStepRequest, MaintenanceStepResponse,
-    NamespaceId, NamespaceStatusResponse, NamespaceSummary, PaginationPolicy,
-    ReleaseCheckpointResponse, RevisionNo,
+    ListFileRevisionsResponse, ListPathEntriesResponse, ListTrashResponse, MaintenanceStepRequest,
+    MaintenanceStepResponse, NamespaceId, NamespaceStatusResponse, NamespaceSummary,
+    PaginationPolicy, ReleaseCheckpointResponse, RevisionNo,
 };
 use loonfs_client::NamespacePath;
 use loonfs_grep::{
@@ -192,6 +192,27 @@ impl EmbeddedBackend {
             .await
             .map_err(|error| map_namespace_scoped_runtime_error(spec.namespace(), error))?
             .entries)
+    }
+
+    pub(super) async fn list_path_entries_page(
+        &self,
+        spec: &NamespacePath,
+        limit: Option<u32>,
+        cursor: Option<&str>,
+    ) -> Result<ListPathEntriesResponse, BackendError> {
+        let request = loonfs_api::PageRequest {
+            limit: resolve_cli_page_limit(limit)?,
+            cursor: cursor
+                .map(loonfs_api::decode_cursor)
+                .transpose()
+                .map_err(|error| {
+                    BackendError::new(ErrorCode::InvalidRequest.as_str(), error.to_string())
+                })?,
+        };
+        self.reader
+            .list_path_entries_page(spec.namespace(), spec.absolute_path().as_str(), request)
+            .await
+            .map_err(|error| map_namespace_scoped_runtime_error(spec.namespace(), error))
     }
 
     pub(super) async fn stat_path(
