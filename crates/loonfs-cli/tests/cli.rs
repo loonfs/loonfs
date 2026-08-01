@@ -2871,6 +2871,188 @@ fn every_advertised_capability_maps_to_a_cli_command_path() {
     }
 }
 
+/// `mkdir -p` on a directory that is already there succeeds, the way Unix
+/// does, and still fails on a file — in both profile modes.
+#[test]
+fn mkdir_parents_is_idempotent_over_an_existing_directory_in_both_modes() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("embedded");
+    let remote_server =
+        harness.start_external_server(harness.write_server_config("remote", "mkdir-idempotent"));
+    assert_success(&harness.run(&[
+        "--json",
+        "profile",
+        "create",
+        "remote",
+        "--mode",
+        "remote",
+        "--server-url",
+        &remote_server.server_url,
+        "--auth-token",
+        "test-token",
+    ]));
+
+    let payload = harness.temp_dir.path().join("file.txt");
+    fs::write(&payload, b"bytes\n").expect("payload");
+
+    for profile in ["embedded", "remote"] {
+        assert_success(&harness.run(&["namespace", "create", "--profile", profile, "demo"]));
+        assert_success(&harness.run(&["use", "--profile", profile, "demo"]));
+
+        let created = harness.run(&["--json", "mkdir", "-p", "/a/b", "--profile", profile]);
+        assert_success(&created);
+        assert_eq!(json_data(&created)["kind"], "file_mutation");
+
+        // The second -p is a no-op, not a conflict: no commit, and the
+        // output says what is already there.
+        let again = harness.run(&["--json", "mkdir", "-p", "/a/b", "--profile", profile]);
+        assert_success(&again);
+        let again_data = json_data(&again);
+        assert_eq!(again_data["kind"], "directory_already_exists");
+        assert_eq!(again_data["target"], "demo:/a/b");
+        assert!(again_data["inode_id"].is_number());
+
+        // Without -p the conflict still surfaces.
+        let strict = harness.run(&["--json", "mkdir", "/a/b", "--profile", profile]);
+        assert_failure(&strict);
+        assert_eq!(json_error(&strict)["code"], "path_conflict");
+
+        // A file at the target is a conflict even with -p.
+        assert_success(&harness.run(&[
+            "put",
+            "--profile",
+            profile,
+            payload.to_str().expect("utf-8 path"),
+            "/a/file.txt",
+        ]));
+        let over_file =
+            harness.run(&["--json", "mkdir", "-p", "/a/file.txt", "--profile", profile]);
+        assert_failure(&over_file);
+        assert_eq!(json_error(&over_file)["code"], "path_conflict");
+    }
+}
+
+/// `cp` and `mv` land inside a destination that is already a directory, the
+/// way Unix does; a destination that is a file keeps its overwrite rules.
+#[test]
+fn cp_and_mv_land_inside_an_existing_directory_in_both_modes() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("embedded");
+    let remote_server =
+        harness.start_external_server(harness.write_server_config("remote", "transfer-into-dir"));
+    assert_success(&harness.run(&[
+        "--json",
+        "profile",
+        "create",
+        "remote",
+        "--mode",
+        "remote",
+        "--server-url",
+        &remote_server.server_url,
+        "--auth-token",
+        "test-token",
+    ]));
+
+    let payload = harness.temp_dir.path().join("report.pdf");
+    fs::write(&payload, b"report bytes\n").expect("payload");
+    let other = harness.temp_dir.path().join("other.txt");
+    fs::write(&other, b"other bytes\n").expect("other payload");
+
+    for profile in ["embedded", "remote"] {
+        assert_success(&harness.run(&["namespace", "create", "--profile", profile, "demo"]));
+        assert_success(&harness.run(&["use", "--profile", profile, "demo"]));
+        assert_success(&harness.run(&["mkdir", "/docs", "--profile", profile]));
+        assert_success(&harness.run(&[
+            "put",
+            "--profile",
+            profile,
+            payload.to_str().expect("utf-8 path"),
+            "/report.pdf",
+        ]));
+
+        // No trailing slash, and /docs is a directory: the file keeps its
+        // own name inside it.
+        let copied = harness.run(&["--json", "cp", "/report.pdf", "/docs", "--profile", profile]);
+        assert_success(&copied);
+        assert_eq!(json_data(&copied)["to"], "demo:/docs/report.pdf");
+
+        let moved = harness.run(&["--json", "mv", "/report.pdf", "/docs", "--profile", profile]);
+        assert_failure(&moved);
+        assert_eq!(
+            json_error(&moved)["code"],
+            "path_conflict",
+            "the copy already occupies /docs/report.pdf"
+        );
+        let forced = harness.run(&[
+            "--json",
+            "mv",
+            "/report.pdf",
+            "/docs",
+            "--force",
+            "--profile",
+            profile,
+        ]);
+        assert_success(&forced);
+        assert_eq!(json_data(&forced)["to"], "demo:/docs/report.pdf");
+
+        // A destination that does not exist is still the exact path typed.
+        let renamed = harness.run(&[
+            "--json",
+            "cp",
+            "/docs/report.pdf",
+            "/docs/renamed.pdf",
+            "--profile",
+            profile,
+        ]);
+        assert_success(&renamed);
+        assert_eq!(json_data(&renamed)["to"], "demo:/docs/renamed.pdf");
+
+        // A destination that is a file keeps the overwrite rules it had.
+        assert_success(&harness.run(&[
+            "put",
+            "--profile",
+            profile,
+            other.to_str().expect("utf-8 path"),
+            "/other.txt",
+        ]));
+        let onto_file = harness.run(&[
+            "--json",
+            "cp",
+            "/other.txt",
+            "/docs/renamed.pdf",
+            "--profile",
+            profile,
+        ]);
+        assert_failure(&onto_file);
+        assert_eq!(json_error(&onto_file)["code"], "path_conflict");
+        let onto_file_forced = harness.run(&[
+            "--json",
+            "cp",
+            "/other.txt",
+            "/docs/renamed.pdf",
+            "--force",
+            "--profile",
+            profile,
+        ]);
+        assert_success(&onto_file_forced);
+        assert_eq!(json_data(&onto_file_forced)["to"], "demo:/docs/renamed.pdf");
+
+        // A directory tree lands inside an existing directory too.
+        assert_success(&harness.run(&["mkdir", "/archive", "--profile", profile]));
+        let tree = harness.run(&[
+            "--json",
+            "cp",
+            "-r",
+            "/docs",
+            "/archive",
+            "--profile",
+            profile,
+        ]);
+        assert_success(&tree);
+        assert_eq!(json_data(&tree)["destination"], "demo:/archive/docs");
+    }
+}
+
 /// The admin plane and the change feed work end to end, and both profile
 /// modes emit the same `--json` shapes and error codes for them.
 #[test]

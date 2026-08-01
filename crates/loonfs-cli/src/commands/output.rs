@@ -168,6 +168,15 @@ pub(crate) enum CommandData {
         #[serde(skip_serializing_if = "Option::is_none")]
         inode_id: Option<InodeId>,
     },
+    /// A `mkdir -p` whose target was already a directory. Nothing was
+    /// committed, so there is no commit to report — the directory the
+    /// caller asked for is simply there.
+    DirectoryAlreadyExists {
+        target: String,
+        inode_id: InodeId,
+        /// Namespace head the existing directory was observed at.
+        head_seq: ChangeSeq,
+    },
     PathMove {
         from: String,
         to: String,

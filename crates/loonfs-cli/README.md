@@ -132,7 +132,8 @@ Writing
     stacking on it
 
   loonfs mkdir <path> [-p]
-    Create a directory; -p creates missing parents as well
+    Create a directory; -p creates missing parents as well and succeeds when
+    the directory is already there
 
   loonfs rm <path> [-r]
     Delete a file, or with -r a directory and everything under it as one
@@ -338,6 +339,15 @@ Behavior notes
 
   A remote path ending in `/` names the directory a `put`, `mv`, or `cp`
   lands in, and the item keeps its own name
+
+  A `mv` or `cp` destination that is already a directory means the same
+  thing without the trailing slash, so `loonfs cp /report.pdf /docs` lands
+  at `/docs/report.pdf`. A destination that does not exist is the exact
+  path given, and one that is a file keeps the overwrite rules --force
+  governs
+
+  `loonfs mkdir -p` succeeds when the target is already a directory and
+  commits nothing; a file at the target is still `path_conflict`
 
   `loonfs put -` reads standard input and needs an explicit remote path,
   because a pipe has no local name to derive one from

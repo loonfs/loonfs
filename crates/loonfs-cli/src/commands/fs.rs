@@ -2,8 +2,8 @@
 //! and grep.
 
 use super::context::{
-    default_remote_put_path, destination_path_for_get, destination_user_path, fail, namespace_path,
-    parse_user_path, render_target, resolve_command_context, CommandContext,
+    default_remote_put_path, destination_path_for_get, destination_user_path, directory_intent,
+    fail, namespace_path, parse_user_path, render_target, resolve_command_context, CommandContext,
 };
 use super::output::{CommandData, CommandFailure, CommandOutput};
 use super::recursive;
@@ -15,7 +15,9 @@ use crate::args::{
 };
 use crate::error::CliError;
 use crate::payload::{read_whole_file, LocalPayload, STDIN_PATH};
-use loonfs_api::{CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeKind, RevisionNo};
+use loonfs_api::{
+    CommitId, DeleteDirectoryBehavior, DestinationBehavior, ErrorCode, InodeKind, RevisionNo,
+};
 use loonfs_client::{CreateDirectoryOptions, DeleteOptions, NamespacePath, PutFileOptions};
 use std::fs;
 use std::io::Write;
@@ -664,11 +666,36 @@ pub(crate) async fn run_filesystem_mkdir(
         commit_id,
         message: args.message.clone(),
     };
-    let result = context
-        .target
-        .create_directory(&spec, &options)
-        .await
-        .map_err(|error| context.fail(kind, error))?;
+    let result = match context.target.create_directory(&spec, &options).await {
+        Ok(result) => result,
+        // Unix `mkdir -p` treats a directory that is already there as
+        // success. The conflict is what says the path is occupied, and a
+        // stat then says by what: a directory is the state `-p` asked for,
+        // anything else is the conflict the caller has to hear about.
+        // Reading the conflict rather than pre-checking keeps the ordinary
+        // path one round trip, and a pre-check would race just the same.
+        Err(error) if args.parents && error.code == ErrorCode::PathConflict.as_str() => {
+            let existing = context
+                .target
+                .stat_path(&spec)
+                .await
+                .map_err(|_| context.fail(kind, error.clone()))?;
+            if existing.inode_kind != InodeKind::Directory {
+                return Err(context.fail(kind, error));
+            }
+            return Ok(CommandOutput {
+                kind,
+                profile: Some(context.profile_name),
+                mode: Some(context.mode),
+                data: CommandData::DirectoryAlreadyExists {
+                    target: render_target(&context.namespace, spec.absolute_path()),
+                    inode_id: existing.inode_id,
+                    head_seq: existing.head_seq,
+                },
+            });
+        }
+        Err(error) => return Err(context.fail(kind, error)),
+    };
 
     Ok(CommandOutput {
         kind,
@@ -705,6 +732,40 @@ enum TransferKind {
     Copy,
 }
 
+/// Applies the `cp`/`mv` habit for a destination that is an existing
+/// directory: the item lands inside it under its own name.
+///
+/// A trailing slash already said "into this directory" before the command
+/// ran, and this covers the spelling without one, which Unix reads the same
+/// way. Only an existing directory redirects: a destination that does not
+/// exist is the full path the caller typed, and a destination that is a file
+/// stays the overwrite question `--force` answers.
+///
+/// The stat can go stale between here and the commit. That is the same
+/// window `cp` has on any filesystem, and losing it fails the transfer
+/// rather than writing somewhere unexpected — the commit still names the
+/// exact path resolved here.
+async fn resolve_transfer_destination(
+    context: &CommandContext,
+    named: NamespacePath,
+    source_leaf: &str,
+) -> Result<NamespacePath, CliError> {
+    let Ok(existing) = context.target.stat_path(&named).await else {
+        // Absent, or unreadable for a reason the transfer itself will
+        // report: either way this is not a directory to land inside.
+        return Ok(named);
+    };
+    if existing.inode_kind != InodeKind::Directory {
+        return Ok(named);
+    }
+    let leaf = loonfs_api::DisplayName::parse(source_leaf)
+        .map_err(|error| CliError::invalid_input(error.to_string()))?;
+    Ok(NamespacePath::new(
+        context.namespace.clone(),
+        named.absolute_path().join(&leaf),
+    ))
+}
+
 async fn run_filesystem_transfer(
     kind: CommandKind,
     args: FilesystemTransferArgs,
@@ -731,9 +792,19 @@ async fn run_filesystem_transfer(
                 CliError::invalid_input("root path is not allowed for this command"),
             )
         })?;
-    let to = destination_user_path(&args.destination_path, &source_leaf, true)
+    let named_destination = destination_user_path(&args.destination_path, &source_leaf, true)
         .map(|path| NamespacePath::new(context.namespace.clone(), path))
         .map_err(|error| context.fail(kind, error))?;
+    // A destination spelled with a trailing slash already named the
+    // directory to land in, and the leaf is already appended; looking again
+    // would append it twice.
+    let to = if directory_intent(&args.destination_path) || args.destination_path == "/" {
+        named_destination
+    } else {
+        resolve_transfer_destination(&context, named_destination, &source_leaf)
+            .await
+            .map_err(|error| context.fail(kind, error))?
+    };
 
     let commit_id = parse_commit_id_arg(args.commit_id.as_deref())
         .map_err(|error| context.fail(kind, error))?;

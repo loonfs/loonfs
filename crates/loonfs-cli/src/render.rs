@@ -719,6 +719,9 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             }
             _ => format!("{target} @ seq {committed_seq} (commit {commit_id})"),
         },
+        CommandData::DirectoryAlreadyExists { target, .. } => {
+            format!("{target} is already a directory")
+        }
         CommandData::PathMove {
             from,
             to,
