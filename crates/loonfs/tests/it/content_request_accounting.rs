@@ -206,7 +206,7 @@ fn put_request(commit_id: &str, path: &str, content_ref: loonfs::ContentRef) -> 
         CommitId::parse(commit_id).expect("valid commit id"),
         None,
         FilesystemOperation::PutFile {
-            absolute_path: parse_mutation_path(path).expect("valid mutation path"),
+            path: parse_mutation_path(path).expect("valid mutation path"),
             content_ref,
             behavior: DestinationBehavior::NoReplace,
             expected_revision_no: None,
@@ -683,7 +683,7 @@ async fn replacing_put_fails_unprepared_without_content_io() {
                 CommitId::parse("unprepared-replace").expect("valid commit id"),
                 None,
                 FilesystemOperation::PutFile {
-                    absolute_path: parse_mutation_path("/file.txt").expect("valid mutation path"),
+                    path: parse_mutation_path("/file.txt").expect("valid mutation path"),
                     content_ref: content_ref.clone(),
                     behavior: DestinationBehavior::Replace,
                     expected_revision_no: None,
@@ -729,7 +729,7 @@ async fn prepared_commit_after_concurrent_preparations_uses_no_publication_conte
     // One request, four puts, three distinct refs: two of the puts share a
     // ref, so one proof covers both.
     let put = |path: &str, content_ref: loonfs::ContentRef| FilesystemOperation::PutFile {
-        absolute_path: parse_mutation_path(path).expect("valid mutation path"),
+        path: parse_mutation_path(path).expect("valid mutation path"),
         content_ref,
         behavior: DestinationBehavior::NoReplace,
         expected_revision_no: None,
@@ -797,7 +797,7 @@ async fn restore_revision_uses_retained_metadata_without_content_io() {
                 CommitId::parse("restore-first-revision").expect("valid commit id"),
                 None,
                 FilesystemOperation::RestoreRevision {
-                    absolute_path: parse_mutation_path("/file.txt").expect("valid mutation path"),
+                    path: parse_mutation_path("/file.txt").expect("valid mutation path"),
                     source_revision_no: RevisionNo(1),
                 },
             ),
@@ -900,8 +900,8 @@ async fn new_rejected_preparation_fails_before_path_planning_without_content_ope
     let intent = CommitRequest::single(
         CommitId::parse("new-rejected").expect("valid commit id"),
         None,
-        FilesystemOperation::CreateDir {
-            absolute_path: parse_mutation_path("/missing/child").expect("valid mutation path"),
+        FilesystemOperation::CreateDirectory {
+            path: parse_mutation_path("/missing/child").expect("valid mutation path"),
             parents: false,
         },
     );
@@ -1068,9 +1068,8 @@ async fn mixed_batch_publishes_admitted_put_and_rejects_unprepared_put_without_c
                     CommitRequest::single(
                         CommitId::parse("mixed-blocker").expect("valid commit id"),
                         None,
-                        FilesystemOperation::CreateDir {
-                            absolute_path: parse_mutation_path("/hold")
-                                .expect("valid mutation path"),
+                        FilesystemOperation::CreateDirectory {
+                            path: parse_mutation_path("/hold").expect("valid mutation path"),
                             parents: false,
                         },
                     ),

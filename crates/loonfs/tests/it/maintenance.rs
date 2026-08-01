@@ -486,8 +486,8 @@ fn create_directory_request(commit_id: &str, absolute_path: &str) -> CommitReque
     CommitRequest::single(
         CommitId::parse(commit_id).expect("valid commit id"),
         None,
-        FilesystemOperation::CreateDir {
-            absolute_path: parse_mutation_path(absolute_path).expect("valid mutation path"),
+        FilesystemOperation::CreateDirectory {
+            path: parse_mutation_path(absolute_path).expect("valid mutation path"),
             parents: false,
         },
     )

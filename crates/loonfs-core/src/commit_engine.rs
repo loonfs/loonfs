@@ -575,9 +575,8 @@ mod tests {
         CommitRequest::single(
             CommitId::parse(commit_id).expect("valid commit id"),
             None,
-            FilesystemOperation::CreateDir {
-                absolute_path: loonfs_api::AbsolutePath::parse(format!("/{name}"))
-                    .expect("valid path"),
+            FilesystemOperation::CreateDirectory {
+                path: loonfs_api::AbsolutePath::parse(format!("/{name}")).expect("valid path"),
                 parents: false,
             },
         )
@@ -606,8 +605,8 @@ mod tests {
             commit_id: CommitId::parse("too-many-ops").expect("valid commit id"),
             message: None,
             operations: (0..=crate::limits::MAX_COMMIT_OPERATIONS)
-                .map(|index| FilesystemOperation::CreateDir {
-                    absolute_path: loonfs_api::AbsolutePath::parse(format!("/dir-{index}"))
+                .map(|index| FilesystemOperation::CreateDirectory {
+                    path: loonfs_api::AbsolutePath::parse(format!("/dir-{index}"))
                         .expect("valid path"),
                     parents: false,
                 })
@@ -634,8 +633,8 @@ mod tests {
         let oversized_message = CommitCandidate::new(CommitRequest {
             commit_id: CommitId::parse("too-long-message").expect("valid commit id"),
             message: Some("m".repeat(crate::limits::MAX_COMMIT_MESSAGE_BYTES + 1)),
-            operations: vec![FilesystemOperation::CreateDir {
-                absolute_path: loonfs_api::AbsolutePath::parse("/docs").expect("valid path"),
+            operations: vec![FilesystemOperation::CreateDirectory {
+                path: loonfs_api::AbsolutePath::parse("/docs").expect("valid path"),
                 parents: false,
             }],
         });
@@ -652,8 +651,8 @@ mod tests {
             commit_id: CommitId::parse("oversized-batch").expect("valid commit id"),
             message: None,
             operations: (0..=crate::limits::MAX_COMMIT_OPERATIONS)
-                .map(|index| FilesystemOperation::CreateDir {
-                    absolute_path: loonfs_api::AbsolutePath::parse(format!("/dir-{index}"))
+                .map(|index| FilesystemOperation::CreateDirectory {
+                    path: loonfs_api::AbsolutePath::parse(format!("/dir-{index}"))
                         .expect("valid path"),
                     parents: false,
                 })
@@ -669,8 +668,8 @@ mod tests {
             commit_id: CommitId::parse("largest-batch").expect("valid commit id"),
             message: None,
             operations: (0..crate::limits::MAX_COMMIT_OPERATIONS)
-                .map(|index| FilesystemOperation::CreateDir {
-                    absolute_path: loonfs_api::AbsolutePath::parse(format!("/dir-{index}"))
+                .map(|index| FilesystemOperation::CreateDirectory {
+                    path: loonfs_api::AbsolutePath::parse(format!("/dir-{index}"))
                         .expect("valid path"),
                     parents: false,
                 })
@@ -685,8 +684,8 @@ mod tests {
     /// durable record or the fingerprint path.
     #[test]
     fn a_message_past_the_byte_ceiling_is_rejected() {
-        let operations = vec![FilesystemOperation::CreateDir {
-            absolute_path: loonfs_api::AbsolutePath::parse("/docs").expect("valid path"),
+        let operations = vec![FilesystemOperation::CreateDirectory {
+            path: loonfs_api::AbsolutePath::parse("/docs").expect("valid path"),
             parents: false,
         }];
 

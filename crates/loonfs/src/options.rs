@@ -2,23 +2,25 @@
 //! request-to-options resolutions the server and embedded hosts share.
 //!
 //! The options that also parameterize the HTTP client's identical operations
-//! — [`PutFileOptions`], [`CreateDirectoryOptions`], [`DeleteOptions`] — are
-//! defined once in [`loonfs_api::options`] and re-exported here, so the two
-//! surfaces cannot drift a field apart. What stays defined below is either
-//! runtime-only (maintenance, checkpoints, namespace creation, change-feed
-//! paging) or shaped differently from the client's equivalent.
+//! are defined once in [`loonfs_api::options`] and re-exported here, so the
+//! two surfaces cannot drift a field apart. That is every path operation. What
+//! stays defined below is runtime-only: maintenance, checkpoints, namespace
+//! creation, and change-feed paging.
 //!
 //! Results are the `loonfs-api` wire shapes themselves: the handles return
 //! `MaintenanceStepResponse` and `GcResponse` directly, the same way they
 //! already return `CommitResponse` and `FlushWalResponse`.
 
-use crate::{CommitId, DestinationBehavior, EffectiveLimit, GcConfig};
+use crate::{EffectiveLimit, GcConfig};
 use loonfs_api::v0::{
     CreateCheckpointRequest, GcRequest, MaintenanceStepKind, MaintenanceStepRequest,
 };
 use loonfs_core::publish::WalTailPolicy;
 
-pub use loonfs_api::options::{CreateDirectoryOptions, DeleteOptions, PutFileOptions};
+pub use loonfs_api::options::{
+    CopyOptions, CreateDirectoryOptions, DeleteOptions, MoveOptions, PutFileOptions,
+    RestoreRevisionOptions, UndeleteOptions,
+};
 
 /// Options for one maintenance step.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,46 +114,6 @@ impl CreateCheckpointOptions {
 pub struct CreateNamespaceOptions {
     /// If true, creating an already-existing namespace is treated as success.
     pub allow_existing: bool,
-}
-
-/// Options for moving a path.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct MoveOptions {
-    /// Create-only or replace-existing behavior for the destination.
-    pub behavior: DestinationBehavior,
-    /// Optional idempotency key.
-    pub commit_id: Option<CommitId>,
-    /// Annotation recorded on the commit; part of the commit's identity.
-    pub message: Option<String>,
-}
-
-/// Options for copying a file path.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct CopyOptions {
-    /// Create-only or replace-existing behavior for the destination.
-    pub behavior: DestinationBehavior,
-    /// Optional idempotency key.
-    pub commit_id: Option<CommitId>,
-    /// Annotation recorded on the commit; part of the commit's identity.
-    pub message: Option<String>,
-}
-
-/// Options for restoring a file revision by path.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct RestoreRevisionOptions {
-    /// Optional idempotency key.
-    pub commit_id: Option<CommitId>,
-    /// Annotation recorded on the commit; part of the commit's identity.
-    pub message: Option<String>,
-}
-
-/// Options for recovering a deleted file or subtree.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct UndeleteOptions {
-    /// Optional idempotency key.
-    pub commit_id: Option<CommitId>,
-    /// Annotation recorded on the commit; part of the commit's identity.
-    pub message: Option<String>,
 }
 
 /// Options for reading the change feed.

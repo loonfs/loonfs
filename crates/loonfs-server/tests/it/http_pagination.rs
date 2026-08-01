@@ -7,7 +7,8 @@ use loonfs_api::{
     ListPathEntriesResponse, RevisionNo,
 };
 use loonfs_client::{
-    ClientError, CommitOptions, CreateDirectoryOptions, NamespacePath, PutFileOptions,
+    ClientError, CreateDirectoryOptions, MoveOptions, NamespacePath, PutFileOptions,
+    RestoreRevisionOptions,
 };
 use loonfs_test_support::http::raw_agent;
 use loonfs_test_support::ids::namespace_id;
@@ -258,7 +259,7 @@ async fn http_restore_revision_appends_new_head_and_reports_change() {
         .restore_file_revision(
             &target,
             RevisionNo(1),
-            &CommitOptions {
+            &RestoreRevisionOptions {
                 commit_id: Some(CommitId::parse("req-restore-restore").expect("valid commit id")),
                 message: Some("restore revision".to_owned()),
             },
@@ -390,8 +391,11 @@ async fn http_revision_routes_list_read_and_restore_by_path() {
         .move_path(
             &target,
             &moved,
-            DestinationBehavior::NoReplace,
-            &CommitOptions::default(),
+            &MoveOptions {
+                behavior: DestinationBehavior::NoReplace,
+                commit_id: None,
+                message: None,
+            },
         )
         .await
         .expect("move path");
@@ -410,7 +414,7 @@ async fn http_revision_routes_list_read_and_restore_by_path() {
 
     harness
         .client
-        .restore_file_revision(&moved, RevisionNo(1), &CommitOptions::default())
+        .restore_file_revision(&moved, RevisionNo(1), &RestoreRevisionOptions::default())
         .await
         .expect("path restore");
     assert_eq!(
@@ -453,7 +457,7 @@ async fn http_restore_revision_missing_source_returns_revision_not_found() {
         .restore_file_revision(
             &target,
             RevisionNo(99),
-            &CommitOptions {
+            &RestoreRevisionOptions {
                 commit_id: Some(
                     CommitId::parse("req-restore-missing-source-restore").expect("valid commit id"),
                 ),

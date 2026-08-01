@@ -116,7 +116,7 @@ impl ObjectStore for ContentStoreAccessLimitStore {
 
 fn put_file(absolute_path: &str, content_ref: loonfs_api::ContentRef) -> FilesystemOperation {
     FilesystemOperation::PutFile {
-        absolute_path: AbsolutePath::parse(absolute_path).expect("path"),
+        path: AbsolutePath::parse(absolute_path).expect("path"),
         content_ref,
         behavior: DestinationBehavior::NoReplace,
         expected_revision_no: None,
@@ -124,15 +124,15 @@ fn put_file(absolute_path: &str, content_ref: loonfs_api::ContentRef) -> Filesys
 }
 
 fn create_dir(absolute_path: &str) -> FilesystemOperation {
-    FilesystemOperation::CreateDir {
-        absolute_path: AbsolutePath::parse(absolute_path).expect("path"),
+    FilesystemOperation::CreateDirectory {
+        path: AbsolutePath::parse(absolute_path).expect("path"),
         parents: false,
     }
 }
 
 fn delete_path(absolute_path: &str) -> FilesystemOperation {
     FilesystemOperation::DeletePath {
-        absolute_path: AbsolutePath::parse(absolute_path).expect("path"),
+        path: AbsolutePath::parse(absolute_path).expect("path"),
         behavior: DeleteDirectoryBehavior::NonRecursive,
         expected_inode_id: None,
     }
@@ -337,7 +337,7 @@ async fn a_later_batch_candidate_observes_the_earlier_one() {
                 commit_id("delete-with-stale-binding"),
                 None,
                 FilesystemOperation::DeletePath {
-                    absolute_path: AbsolutePath::parse("/docs/readme.txt").expect("path"),
+                    path: AbsolutePath::parse("/docs/readme.txt").expect("path"),
                     behavior: DeleteDirectoryBehavior::NonRecursive,
                     expected_inode_id: Some(file_inode),
                 },
@@ -446,7 +446,7 @@ async fn restore_revision_does_not_revalidate_retained_content_before_publish() 
         &namespace_id("demo"),
         commit_id("restore-replace"),
         FilesystemOperation::PutFile {
-            absolute_path: AbsolutePath::parse("/restore.txt").expect("path"),
+            path: AbsolutePath::parse("/restore.txt").expect("path"),
             content_ref: second.content_ref,
             behavior: DestinationBehavior::Replace,
             expected_revision_no: None,
@@ -469,7 +469,7 @@ async fn restore_revision_does_not_revalidate_retained_content_before_publish() 
         &namespace_id("demo"),
         commit_id("restore-missing-content"),
         FilesystemOperation::RestoreRevision {
-            absolute_path: AbsolutePath::parse("/restore.txt").expect("path"),
+            path: AbsolutePath::parse("/restore.txt").expect("path"),
             source_revision_no: RevisionNo(1),
         },
         &context,
@@ -548,7 +548,7 @@ async fn a_guarded_put_fails_unprepared_before_revision_validation_without_conte
             commit_id("replace-stale-missing-content"),
             None,
             FilesystemOperation::PutFile {
-                absolute_path: AbsolutePath::parse("/docs/replace.txt").expect("path"),
+                path: AbsolutePath::parse("/docs/replace.txt").expect("path"),
                 content_ref: missing_content.clone(),
                 behavior: DestinationBehavior::Replace,
                 expected_revision_no: Some(RevisionNo(99)),
@@ -594,7 +594,7 @@ async fn restore_revision_missing_source_is_revision_not_found() {
         &namespace_id("demo"),
         commit_id("restore-missing-source"),
         FilesystemOperation::RestoreRevision {
-            absolute_path: AbsolutePath::parse("/docs/restore.txt").expect("path"),
+            path: AbsolutePath::parse("/docs/restore.txt").expect("path"),
             source_revision_no: RevisionNo(99),
         },
         &context,
@@ -879,7 +879,7 @@ async fn a_revision_guard_observes_an_earlier_operation_of_the_same_request() {
 
     let replace =
         |content_ref: loonfs_api::ContentRef, expected: u64| FilesystemOperation::PutFile {
-            absolute_path: AbsolutePath::parse("/docs/guarded.txt").expect("path"),
+            path: AbsolutePath::parse("/docs/guarded.txt").expect("path"),
             content_ref,
             behavior: DestinationBehavior::Replace,
             expected_revision_no: Some(RevisionNo(expected)),

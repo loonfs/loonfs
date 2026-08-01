@@ -107,7 +107,7 @@ async fn put_prepared_file_content<S: ObjectStore + ?Sized>(
         namespace_id,
         normalized_commit_id(commit_id),
         FilesystemOperation::PutFile {
-            absolute_path: parse_mutation_path(absolute_path)?,
+            path: parse_mutation_path(absolute_path)?,
             content_ref,
             behavior,
             expected_revision_no: None,
@@ -150,7 +150,7 @@ async fn delete_path_with_behavior<S: ObjectStore + ?Sized>(
         namespace_id,
         commit_id,
         FilesystemOperation::DeletePath {
-            absolute_path: parse_mutation_path(absolute_path)?,
+            path: parse_mutation_path(absolute_path)?,
             behavior,
             expected_inode_id: None,
         },
@@ -198,7 +198,7 @@ pub(crate) async fn restore_file_revision<S: ObjectStore + ?Sized>(
         namespace_id,
         commit_id,
         FilesystemOperation::RestoreRevision {
-            absolute_path: parse_mutation_path(absolute_path)?,
+            path: parse_mutation_path(absolute_path)?,
             source_revision_no,
         },
         Vec::new(),

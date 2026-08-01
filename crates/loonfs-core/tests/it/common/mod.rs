@@ -243,7 +243,7 @@ pub(crate) mod commit_split_support {
             namespace_id,
             test_commit_id(commit_id),
             FilesystemOperation::PutFile {
-                absolute_path: AbsolutePath::parse(absolute_path).expect("path"),
+                path: AbsolutePath::parse(absolute_path).expect("path"),
                 content_ref: content.content_ref,
                 behavior,
                 expected_revision_no: None,
@@ -284,8 +284,8 @@ pub(crate) mod commit_split_support {
             store,
             namespace_id,
             test_commit_id(commit_id),
-            FilesystemOperation::CreateDir {
-                absolute_path: AbsolutePath::parse(absolute_path).expect("path"),
+            FilesystemOperation::CreateDirectory {
+                path: AbsolutePath::parse(absolute_path).expect("path"),
                 parents: false,
             },
             context,

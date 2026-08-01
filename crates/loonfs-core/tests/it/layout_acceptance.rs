@@ -45,7 +45,7 @@ async fn put_file<S: ObjectStore + ?Sized>(
                     loonfs_api::CommitId::generate(),
                     None,
                     FilesystemOperation::PutFile {
-                        absolute_path: AbsolutePath::parse(absolute_path).expect("path"),
+                        path: AbsolutePath::parse(absolute_path).expect("path"),
                         content_ref,
                         behavior: loonfs_api::DestinationBehavior::NoReplace,
                         expected_revision_no: None,

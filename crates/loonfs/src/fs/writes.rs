@@ -445,7 +445,7 @@ impl FsWriter {
                 options.commit_id.unwrap_or_else(CommitId::generate),
                 options.message.clone(),
                 FilesystemOperation::PutFile {
-                    absolute_path: loonfs_core::path::parse_mutation_path(absolute_path)?,
+                    path: loonfs_core::path::parse_mutation_path(absolute_path)?,
                     content_ref,
                     behavior: options.behavior,
                     expected_revision_no: options.expected_revision_no,
@@ -573,8 +573,8 @@ impl FsWriter {
             CommitRequest::single(
                 options.commit_id.unwrap_or_else(CommitId::generate),
                 options.message.clone(),
-                FilesystemOperation::CreateDir {
-                    absolute_path: loonfs_core::path::parse_mutation_path(absolute_path)?,
+                FilesystemOperation::CreateDirectory {
+                    path: loonfs_core::path::parse_mutation_path(absolute_path)?,
                     parents: options.parents,
                 },
             ),
@@ -600,7 +600,7 @@ impl FsWriter {
                 options.commit_id.unwrap_or_else(CommitId::generate),
                 options.message.clone(),
                 FilesystemOperation::DeletePath {
-                    absolute_path: loonfs_core::path::parse_mutation_path(absolute_path)?,
+                    path: loonfs_core::path::parse_mutation_path(absolute_path)?,
                     behavior: options.behavior,
                     expected_inode_id: options.expected_inode_id,
                 },
@@ -646,7 +646,7 @@ impl FsWriter {
             CommitRequest::single(
                 options.commit_id.unwrap_or_else(CommitId::generate),
                 options.message.clone(),
-                FilesystemOperation::CopyFilePath {
+                FilesystemOperation::CopyPath {
                     from_path: loonfs_core::path::parse_mutation_path(from_path)?,
                     to_path: loonfs_core::path::parse_mutation_path(to_path)?,
                     behavior: options.behavior,
@@ -670,7 +670,7 @@ impl FsWriter {
                 options.commit_id.unwrap_or_else(CommitId::generate),
                 options.message.clone(),
                 FilesystemOperation::RestoreRevision {
-                    absolute_path: loonfs_core::path::parse_mutation_path(absolute_path)?,
+                    path: loonfs_core::path::parse_mutation_path(absolute_path)?,
                     source_revision_no,
                 },
             ),
@@ -697,7 +697,7 @@ impl FsWriter {
                 FilesystemOperation::Undelete {
                     inode_id,
                     deleted_at_seq,
-                    absolute_path: loonfs_core::path::parse_mutation_path(absolute_path)?,
+                    path: loonfs_core::path::parse_mutation_path(absolute_path)?,
                 },
             ),
         )

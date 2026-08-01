@@ -355,10 +355,10 @@ fn single_live_worker(publisher: &NamespacePublisher) -> bool {
         .is_some_and(|worker| !worker.liveness.is_finished())
 }
 
-/// Yields until the publisher's queue holds candidates the worker has not
-/// taken yet.
-async fn wait_for_queued_candidates(publisher: &NamespacePublisher) {
-    while queued_candidates(&publisher_state(publisher)) == 0 {
+/// Yields until the publisher's queue holds at least `expected` candidates
+/// the worker has not taken yet.
+async fn wait_for_queued_candidates(publisher: &NamespacePublisher, expected: usize) {
+    while queued_candidates(&publisher_state(publisher)) < expected {
         tokio::task::yield_now().await;
     }
 }
@@ -410,8 +410,8 @@ fn create_directory_request(
     CommitRequest::single(
         CommitId::parse(commit_id.into()).expect("valid commit id"),
         None,
-        FilesystemOperation::CreateDir {
-            absolute_path: AbsolutePath::parse(format!("/{}", directory_name.as_ref()))
+        FilesystemOperation::CreateDirectory {
+            path: AbsolutePath::parse(format!("/{}", directory_name.as_ref()))
                 .expect("valid absolute path"),
             parents: false,
         },
@@ -1110,40 +1110,69 @@ async fn mutations_admitted_after_a_queued_delete_wait_behind_it() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn publisher_batches_concurrent_distinct_commits_into_one_wal_segment() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let writer = test_writer_with_interval(store.clone(), 400).await;
+    let store = Arc::new(blocking_head_cas_store(temp_dir.path(), &namespace_id));
+    let shared = store.clone() as SharedStore;
+    let writer = test_writer(shared.clone()).await;
     writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
         .await
         .expect("bootstrap");
     let registry = writer.publisher();
 
-    // Warm the namespace: a cold one publishes its first submission
-    // immediately, so truly concurrent submissions could split across
-    // two publications. Inside the pacing interval the open batch
-    // deterministically holds both.
-    registry
-        .submit_commit(
-            namespace_id.clone(),
-            create_directory_request("warmup", "warmup"),
-        )
-        .await
-        .expect("warmup commit");
+    // Hold the cold publication in flight so both concurrent submissions are
+    // deterministically admitted to the pending batch behind it.
+    store.block_next();
+    let warmup = {
+        let registry = registry.clone();
+        let namespace_id = namespace_id.clone();
+        tokio::spawn(async move {
+            registry
+                .submit_commit(namespace_id, create_directory_request("warmup", "warmup"))
+                .await
+        })
+    };
+    store.wait_until_blocked().await;
 
     let request_a = create_directory_request("req-a", "alpha");
     let request_b = create_directory_request("req-b", "beta");
+    let response_a = {
+        let registry = registry.clone();
+        let namespace_id = namespace_id.clone();
+        tokio::spawn(async move { registry.submit_commit(namespace_id, request_a).await })
+    };
+    let response_b = {
+        let registry = registry.clone();
+        let namespace_id = namespace_id.clone();
+        tokio::spawn(async move { registry.submit_commit(namespace_id, request_b).await })
+    };
+    let publisher = registry.publisher_for(&namespace_id).expect("publisher");
+    wait_for_queued_candidates(&publisher, 2).await;
 
-    let (response_a, response_b) = tokio::join!(
-        registry.submit_commit(namespace_id.clone(), request_a),
-        registry.submit_commit(namespace_id.clone(), request_b)
+    store.release();
+    assert_eq!(
+        warmup
+            .await
+            .expect("warmup task")
+            .expect("warmup response")
+            .committed_seq,
+        ChangeSeq(1)
     );
-    assert_eq!(response_a.expect("response a").committed_seq, ChangeSeq(2));
-    assert_eq!(response_b.expect("response b").committed_seq, ChangeSeq(3));
+    let response_a = response_a
+        .await
+        .expect("response a task")
+        .expect("response a");
+    let response_b = response_b
+        .await
+        .expect("response b task")
+        .expect("response b");
+    let mut committed_seqs = [response_a.committed_seq, response_b.committed_seq];
+    committed_seqs.sort_unstable();
+    assert_eq!(committed_seqs, [ChangeSeq(2), ChangeSeq(3)]);
 
     // The warmup published alone; the two concurrent submissions share
     // one segment.
-    let wal_keys = store
+    let wal_keys = shared
         .list_prefix(&wal_segment_prefix("demo"))
         .await
         .expect("list wal");
@@ -1155,9 +1184,10 @@ async fn publisher_batches_concurrent_distinct_commits_into_one_wal_segment() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn publisher_batches_plain_and_prepared_mutations_together() {
     let temp_dir = tempdir().expect("tempdir");
-    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
     let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let writer = test_writer_with_interval(store.clone(), 400).await;
+    let store = Arc::new(blocking_head_cas_store(temp_dir.path(), &namespace_id));
+    let shared = store.clone() as SharedStore;
+    let writer = test_writer(shared.clone()).await;
     writer
         .create_namespace(&namespace_id, CreateNamespaceOptions::default())
         .await
@@ -1177,54 +1207,82 @@ async fn publisher_batches_plain_and_prepared_mutations_together() {
         .upload_content(&namespace_id, &upload.upload_id, b"hello")
         .await
         .expect("stage content");
-    let catalog = loonfs_core::control::load_namespace_catalog_entry(&store, &namespace_id)
+    let catalog = loonfs_core::control::load_namespace_catalog_entry(&shared, &namespace_id)
         .await
         .expect("load namespace catalog");
     let prepared_content =
-        loonfs_core::content::prepare_existing_content_ref(&store, &catalog, staged.content_ref)
+        loonfs_core::content::prepare_existing_content_ref(&shared, &catalog, staged.content_ref)
             .await
             .expect("prepare existing content");
     let registry = writer.publisher();
 
-    // Warm the namespace so the pacing interval deterministically holds
-    // the two concurrent submissions in one batch.
-    registry
-        .submit_commit(
-            namespace_id.clone(),
-            create_directory_request("warmup", "warmup"),
-        )
-        .await
-        .expect("warmup commit");
+    // Hold the cold publication in flight so both concurrent submissions are
+    // deterministically admitted to the pending batch behind it.
+    store.block_next();
+    let warmup = {
+        let registry = registry.clone();
+        let namespace_id = namespace_id.clone();
+        tokio::spawn(async move {
+            registry
+                .submit_commit(namespace_id, create_directory_request("warmup", "warmup"))
+                .await
+        })
+    };
+    store.wait_until_blocked().await;
 
     let plain = create_directory_request("plain-mutation", "alpha");
     let prepared = CommitRequest::single(
         CommitId::parse("prepared-put").expect("valid commit id"),
         None,
         FilesystemOperation::PutFile {
-            absolute_path: AbsolutePath::parse("/file.txt").expect("path"),
+            path: AbsolutePath::parse("/file.txt").expect("path"),
             content_ref: prepared_content.content_ref().clone(),
             behavior: DestinationBehavior::NoReplace,
             expected_revision_no: None,
         },
     );
-    let (plain_response, prepared_response) = tokio::join!(
-        registry.submit_commit(namespace_id.clone(), plain),
-        registry.submit_commit_with_prepared_content(
-            namespace_id.clone(),
-            prepared,
-            vec![prepared_content]
-        )
-    );
-    assert_eq!(
-        plain_response.expect("plain response").committed_seq,
-        ChangeSeq(2)
-    );
-    assert_eq!(
-        prepared_response.expect("prepared response").committed_seq,
-        ChangeSeq(3)
-    );
+    let plain_response = {
+        let registry = registry.clone();
+        let namespace_id = namespace_id.clone();
+        tokio::spawn(async move { registry.submit_commit(namespace_id, plain).await })
+    };
+    let prepared_response = {
+        let registry = registry.clone();
+        let namespace_id = namespace_id.clone();
+        tokio::spawn(async move {
+            registry
+                .submit_commit_with_prepared_content(namespace_id, prepared, vec![prepared_content])
+                .await
+        })
+    };
+    let publisher = registry.publisher_for(&namespace_id).expect("publisher");
+    wait_for_queued_candidates(&publisher, 2).await;
 
-    let wal_keys = store
+    store.release();
+    assert_eq!(
+        warmup
+            .await
+            .expect("warmup task")
+            .expect("warmup response")
+            .committed_seq,
+        ChangeSeq(1)
+    );
+    let plain_response = plain_response
+        .await
+        .expect("plain task")
+        .expect("plain response");
+    let prepared_response = prepared_response
+        .await
+        .expect("prepared task")
+        .expect("prepared response");
+    let mut committed_seqs = [
+        plain_response.committed_seq,
+        prepared_response.committed_seq,
+    ];
+    committed_seqs.sort_unstable();
+    assert_eq!(committed_seqs, [ChangeSeq(2), ChangeSeq(3)]);
+
+    let wal_keys = shared
         .list_prefix(&wal_segment_prefix("demo"))
         .await
         .expect("list wal");
@@ -1356,7 +1414,7 @@ async fn worker_survives_panic_and_processes_later_queue_items() {
         .get(&namespace_id)
         .expect("publisher exists while blocked")
         .clone();
-    wait_for_queued_candidates(&publisher).await;
+    wait_for_queued_candidates(&publisher, 1).await;
 
     store.release_into_panic();
     registry.close_admission();
@@ -1501,7 +1559,7 @@ async fn delete_queued_mid_publish_waits_behind_admitted_work() {
                 .await
         })
     };
-    wait_for_queued_candidates(&publisher).await;
+    wait_for_queued_candidates(&publisher, 1).await;
 
     let delete = {
         let registry = registry.clone();

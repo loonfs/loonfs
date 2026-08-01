@@ -32,8 +32,8 @@ use loonfs_api::{
     },
     AbsolutePath, AuthoritativePathEntry, CapabilityDocument, ChangeSeq, CheckpointId,
     ChecksumAlgorithm, CommitId, CommitRequest, ContentRef, Crc64Nvme, CreateCheckpointRequest,
-    CreateCheckpointResponse, CreateNamespaceRequest, DeleteNamespaceResponse, DestinationBehavior,
-    ErrorCode, FilesystemOperation, ForkNamespaceRequest, GrepRequest, GrepResponse, InodeId,
+    CreateCheckpointResponse, CreateNamespaceRequest, DeleteNamespaceResponse, ErrorCode,
+    FilesystemOperation, ForkNamespaceRequest, GrepRequest, GrepResponse, InodeId,
     ListFileRevisionsResponse, ListPathEntriesResponse, ListTrashResponse, MaintenanceStepRequest,
     MaintenanceStepResponse, NamespaceId, NamespaceStatusResponse, NamespaceSummary,
     ReleaseCheckpointResponse, RevisionNo, StorageChecksum, UploadId,
@@ -164,7 +164,10 @@ pub use ClientError as Error;
 
 /// Per-operation options, defined once in `loonfs-api` and shared with the
 /// embedded `loonfs` runtime so the two surfaces cannot drift a field apart.
-pub use loonfs_api::options::{CreateDirectoryOptions, DeleteOptions, PutFileOptions};
+pub use loonfs_api::options::{
+    CopyOptions, CreateDirectoryOptions, DeleteOptions, MoveOptions, PutFileOptions,
+    RestoreRevisionOptions, UndeleteOptions,
+};
 
 /// Result type returned by the client.
 pub type Result<T> = std::result::Result<T, ClientError>;
@@ -291,25 +294,6 @@ fn signed_access(signed: &[SignedUploadPart], part_number: u32) -> Result<Object
 pub struct NamespacePath {
     namespace: NamespaceId,
     absolute_path: AbsolutePath,
-}
-
-/// Options for client commits whose only optional input is a commit id.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct CommitOptions {
-    /// Idempotency key for the commit; retrying with the same id replays
-    /// the landed commit instead of double-committing. A fresh id is
-    /// generated when absent.
-    pub commit_id: Option<CommitId>,
-    /// Annotation recorded on the commit and reported by the change feed.
-    /// Part of the commit's identity: the same `commit_id` with a different
-    /// message is a `commit_id_reuse_conflict`.
-    pub message: Option<String>,
-}
-
-impl CommitOptions {
-    fn resolve_commit_id(&self) -> CommitId {
-        self.commit_id.clone().unwrap_or_else(CommitId::generate)
-    }
 }
 
 impl Client {
@@ -1541,8 +1525,7 @@ impl Client {
         &self,
         from: &NamespacePath,
         to: &NamespacePath,
-        behavior: DestinationBehavior,
-        options: &CommitOptions,
+        options: &MoveOptions,
     ) -> Result<ApiCommitResponse> {
         if from.namespace() != to.namespace() {
             return Err(ClientError::InvalidNamespacePath(format!(
@@ -1551,7 +1534,7 @@ impl Client {
                 to.namespace()
             )));
         }
-        let commit_id = options.resolve_commit_id();
+        let commit_id = options.commit_id.clone().unwrap_or_else(CommitId::generate);
         let response = self
             .commit(
                 from.namespace(),
@@ -1561,7 +1544,7 @@ impl Client {
                     FilesystemOperation::MovePath {
                         from_path: from.absolute_path().clone(),
                         to_path: to.absolute_path().clone(),
-                        behavior,
+                        behavior: options.behavior,
                     },
                 ),
             )
@@ -1573,8 +1556,7 @@ impl Client {
         &self,
         from: &NamespacePath,
         to: &NamespacePath,
-        behavior: DestinationBehavior,
-        options: &CommitOptions,
+        options: &CopyOptions,
     ) -> Result<ApiCommitResponse> {
         if from.namespace() != to.namespace() {
             return Err(ClientError::InvalidNamespacePath(format!(
@@ -1583,7 +1565,7 @@ impl Client {
                 to.namespace()
             )));
         }
-        let commit_id = options.resolve_commit_id();
+        let commit_id = options.commit_id.clone().unwrap_or_else(CommitId::generate);
         let response = self
             .commit(
                 from.namespace(),
@@ -1593,7 +1575,7 @@ impl Client {
                     FilesystemOperation::CopyPath {
                         from_path: from.absolute_path().clone(),
                         to_path: to.absolute_path().clone(),
-                        behavior,
+                        behavior: options.behavior,
                     },
                 ),
             )
@@ -1609,9 +1591,9 @@ impl Client {
         spec: &NamespacePath,
         inode_id: InodeId,
         deleted_at_seq: ChangeSeq,
-        options: &CommitOptions,
+        options: &UndeleteOptions,
     ) -> Result<ApiCommitResponse> {
-        let commit_id = options.resolve_commit_id();
+        let commit_id = options.commit_id.clone().unwrap_or_else(CommitId::generate);
         let response = self
             .commit(
                 spec.namespace(),
@@ -1633,9 +1615,9 @@ impl Client {
         &self,
         spec: &NamespacePath,
         source_revision_no: RevisionNo,
-        options: &CommitOptions,
+        options: &RestoreRevisionOptions,
     ) -> Result<ApiCommitResponse> {
-        let commit_id = options.resolve_commit_id();
+        let commit_id = options.commit_id.clone().unwrap_or_else(CommitId::generate);
         let response = self
             .commit(
                 spec.namespace(),

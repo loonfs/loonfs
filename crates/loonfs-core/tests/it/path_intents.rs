@@ -41,7 +41,7 @@ async fn delete_path<S: ObjectStore + ?Sized>(
         namespace_id,
         test_commit_id(commit_id),
         FilesystemOperation::DeletePath {
-            absolute_path: AbsolutePath::parse(absolute_path).expect("path"),
+            path: AbsolutePath::parse(absolute_path).expect("path"),
             behavior: DeleteDirectoryBehavior::Recursive,
             expected_inode_id: None,
         },
@@ -62,7 +62,7 @@ async fn delete_path_non_recursive<S: ObjectStore + ?Sized>(
         namespace_id,
         test_commit_id(commit_id),
         FilesystemOperation::DeletePath {
-            absolute_path: AbsolutePath::parse(absolute_path).expect("path"),
+            path: AbsolutePath::parse(absolute_path).expect("path"),
             behavior: DeleteDirectoryBehavior::NonRecursive,
             expected_inode_id: None,
         },
@@ -105,7 +105,7 @@ async fn copy_file_path<S: ObjectStore + ?Sized>(
         store,
         namespace_id,
         test_commit_id(commit_id),
-        FilesystemOperation::CopyFilePath {
+        FilesystemOperation::CopyPath {
             from_path: AbsolutePath::parse(from_path).expect("path"),
             to_path: AbsolutePath::parse(to_path).expect("path"),
             behavior: DestinationBehavior::NoReplace,
@@ -128,7 +128,7 @@ async fn restore_file_revision<S: ObjectStore + ?Sized>(
         namespace_id,
         test_commit_id(commit_id),
         FilesystemOperation::RestoreRevision {
-            absolute_path: AbsolutePath::parse(absolute_path).expect("path"),
+            path: AbsolutePath::parse(absolute_path).expect("path"),
             source_revision_no,
         },
         context,
@@ -983,8 +983,8 @@ async fn name_key_stays_typed_through_planning_and_fingerprint() {
     let request = CommitRequest::single(
         CommitId::parse("typed-name-key").expect("valid commit id"),
         Some("typed boundary".to_owned()),
-        FilesystemOperation::CreateDir {
-            absolute_path: AbsolutePath::parse("/Caf\u{e9}").expect("path"),
+        FilesystemOperation::CreateDirectory {
+            path: AbsolutePath::parse("/Caf\u{e9}").expect("path"),
             parents: false,
         },
     );
@@ -1042,7 +1042,7 @@ async fn path_intents_cover_basic_mutations() {
         &namespace_id,
         CommitId::parse("put-path").expect("valid commit id"),
         FilesystemOperation::PutFile {
-            absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
+            path: AbsolutePath::parse("/docs/a.txt").expect("path"),
             content_ref: content.content_ref.clone(),
             behavior: DestinationBehavior::NoReplace,
             expected_revision_no: None,
@@ -1072,7 +1072,7 @@ async fn path_intents_cover_basic_mutations() {
         &store,
         &namespace_id,
         CommitId::parse("copy-path").expect("valid commit id"),
-        FilesystemOperation::CopyFilePath {
+        FilesystemOperation::CopyPath {
             from_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/c.txt").expect("path"),
             behavior: DestinationBehavior::NoReplace,
@@ -1088,7 +1088,7 @@ async fn path_intents_cover_basic_mutations() {
         &namespace_id,
         CommitId::parse("delete-path").expect("valid commit id"),
         FilesystemOperation::DeletePath {
-            absolute_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
+            path: AbsolutePath::parse("/docs/b.txt").expect("path"),
             behavior: DeleteDirectoryBehavior::NonRecursive,
             expected_inode_id: None,
         },
@@ -1128,7 +1128,7 @@ async fn path_intents_in_one_batch_see_tentative_state() {
                     CommitId::parse("put-batched-path").expect("valid commit id"),
                     None,
                     FilesystemOperation::PutFile {
-                        absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
+                        path: AbsolutePath::parse("/docs/a.txt").expect("path"),
                         content_ref: content.content_ref,
                         behavior: DestinationBehavior::NoReplace,
                         expected_revision_no: None,
@@ -1464,7 +1464,7 @@ async fn path_move_writes_unbind_and_old_binding_stops_resolving() {
         &namespace_id("demo"),
         CommitId::parse("delete-old-binding").expect("valid commit id"),
         FilesystemOperation::DeletePath {
-            absolute_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
+            path: AbsolutePath::parse("/docs/a.txt").expect("path"),
             behavior: DeleteDirectoryBehavior::NonRecursive,
             expected_inode_id: Some(file.inode_id),
         },
@@ -1479,7 +1479,7 @@ async fn path_move_writes_unbind_and_old_binding_stops_resolving() {
         &namespace_id("demo"),
         CommitId::parse("delete-new-binding").expect("valid commit id"),
         FilesystemOperation::DeletePath {
-            absolute_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
+            path: AbsolutePath::parse("/docs/b.txt").expect("path"),
             behavior: DeleteDirectoryBehavior::NonRecursive,
             expected_inode_id: Some(file.inode_id),
         },
@@ -1919,7 +1919,7 @@ async fn copy_replace_appends_a_revision_to_the_destination_inode() {
         &store,
         &namespace_id,
         CommitId::parse("copy-replace").expect("valid commit id"),
-        FilesystemOperation::CopyFilePath {
+        FilesystemOperation::CopyPath {
             from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
             to_path: AbsolutePath::parse("/docs/b.txt").expect("path"),
             behavior: DestinationBehavior::Replace,

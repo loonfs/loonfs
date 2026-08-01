@@ -4,7 +4,7 @@
 
 use crate::common::http_split_support::*;
 use crate::common::start_server;
-use loonfs::publish::{CommitRequest as CoreCommitRequest, FilesystemOperation as CoreOperation};
+use loonfs::publish::CommitRequest as CoreCommitRequest;
 use loonfs::{CreateNamespaceOptions, FsWriter, ListChangesOptions, StoreConfig};
 use loonfs_api::{
     v0::CommittedChange, AbsolutePath, ChangeSeq, CommitId, CommitRequest, ContentRef,
@@ -51,8 +51,12 @@ fn change_identity(change: &CommittedChange) -> (ChangeSeq, String, Option<Strin
     )
 }
 
-/// The directory-then-two-files batch, in the wire language.
-fn wire_batch(first: &ContentRef, second: &ContentRef) -> Vec<FilesystemOperation> {
+/// The directory-then-two-files batch.
+///
+/// Both transports below build their operations from this one helper, which
+/// they can because there is one operation language: the served arm and the
+/// embedded arm differ only in the content each staged.
+fn batch(first: &ContentRef, second: &ContentRef) -> Vec<FilesystemOperation> {
     vec![
         FilesystemOperation::CreateDirectory {
             path: absolute(REPORTS_DIR),
@@ -108,7 +112,7 @@ async fn a_batch_commits_once_and_matches_the_same_batch_embedded() {
                     validated_content_token(&first),
                     validated_content_token(&second),
                 ],
-                operations: wire_batch(&first.content_ref, &second.content_ref),
+                operations: batch(&first.content_ref, &second.content_ref),
             },
         )
         .await
@@ -169,24 +173,7 @@ async fn a_batch_commits_once_and_matches_the_same_batch_embedded() {
             CoreCommitRequest {
                 commit_id: commit_id("batch-one"),
                 message: Some("import the reports".to_owned()),
-                operations: vec![
-                    CoreOperation::CreateDir {
-                        absolute_path: absolute(REPORTS_DIR),
-                        parents: false,
-                    },
-                    CoreOperation::PutFile {
-                        absolute_path: absolute(FIRST_FILE),
-                        content_ref: first_prepared.content_ref().clone(),
-                        behavior: DestinationBehavior::NoReplace,
-                        expected_revision_no: None,
-                    },
-                    CoreOperation::PutFile {
-                        absolute_path: absolute(SECOND_FILE),
-                        content_ref: second_prepared.content_ref().clone(),
-                        behavior: DestinationBehavior::NoReplace,
-                        expected_revision_no: None,
-                    },
-                ],
+                operations: batch(first_prepared.content_ref(), second_prepared.content_ref()),
             },
             vec![first_prepared, second_prepared],
         )
@@ -374,6 +361,118 @@ async fn an_empty_operation_list_is_rejected() {
     harness.server.abort();
 }
 
+/// The root is readable but never a mutation target, alone or inside a
+/// batch, and rejecting it commits nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_root_path_is_rejected_as_a_mutation_target() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loonfs-server-root-mutation",
+        "http-root-mutation",
+    ))
+    .await;
+
+    let namespace = namespace_id("demo");
+    harness
+        .client
+        .create_namespace(&namespace)
+        .await
+        .expect("create namespace");
+
+    let alone = harness
+        .client
+        .commit(
+            &namespace,
+            &CommitRequest {
+                commit_id: commit_id("root-alone"),
+                message: None,
+                content_tokens: Vec::new(),
+                operations: vec![FilesystemOperation::CreateDirectory {
+                    path: absolute("/"),
+                    parents: false,
+                }],
+            },
+        )
+        .await
+        .expect_err("the root cannot be created");
+    match alone {
+        ClientError::Api {
+            status,
+            code,
+            details,
+            ..
+        } => {
+            assert_eq!(status, 400);
+            assert_eq!(code, ErrorCode::InvalidRequest.as_str());
+            // One operation has one place to fail, so nothing disambiguates it.
+            assert_eq!(
+                details.and_then(|details| details.operation_index),
+                None,
+                "a one-operation request names no position"
+            );
+        }
+        other => unreachable!("expected invalid_request, got {other:?}"),
+    }
+
+    let in_batch = harness
+        .client
+        .commit(
+            &namespace,
+            &CommitRequest {
+                commit_id: commit_id("root-in-batch"),
+                message: None,
+                content_tokens: Vec::new(),
+                operations: vec![
+                    FilesystemOperation::CreateDirectory {
+                        path: absolute(REPORTS_DIR),
+                        parents: false,
+                    },
+                    FilesystemOperation::DeletePath {
+                        path: absolute("/"),
+                        behavior: DeleteDirectoryBehavior::Recursive,
+                        expected_inode_id: None,
+                    },
+                ],
+            },
+        )
+        .await
+        .expect_err("the root cannot be deleted");
+    match in_batch {
+        ClientError::Api {
+            status,
+            code,
+            details,
+            ..
+        } => {
+            assert_eq!(status, 400);
+            assert_eq!(code, ErrorCode::InvalidRequest.as_str());
+            // The root check runs over the whole request before anything is
+            // planned, so this is the one rejection a batch does not attribute
+            // to a position. Every other failure names its operation.
+            assert_eq!(
+                details.and_then(|details| details.operation_index),
+                None,
+                "the pre-queue root check rejects the request, not an operation"
+            );
+        }
+        other => unreachable!("expected invalid_request, got {other:?}"),
+    }
+
+    // The valid first operation of the rejected batch did not land either.
+    assert_eq!(
+        harness
+            .client
+            .namespace_status(&namespace)
+            .await
+            .expect("status")
+            .head_seq,
+        ChangeSeq(0)
+    );
+
+    harness.server.abort();
+}
+
 /// Replay over the wire: the same id with the same batch returns the
 /// original receipt, and the same id with a different batch conflicts.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -460,15 +559,15 @@ async fn a_commit_id_used_embedded_replays_over_http() {
 
     let operations = || {
         vec![
-            CoreOperation::CreateDir {
-                absolute_path: absolute(REPORTS_DIR),
+            FilesystemOperation::CreateDirectory {
+                path: absolute(REPORTS_DIR),
                 parents: false,
             },
-            CoreOperation::CreateDir {
-                absolute_path: absolute("/reports/2026"),
+            FilesystemOperation::CreateDirectory {
+                path: absolute("/reports/2026"),
                 parents: false,
             },
-            CoreOperation::MovePath {
+            FilesystemOperation::MovePath {
                 from_path: absolute("/reports/2026"),
                 to_path: absolute("/reports/2025"),
                 behavior: DestinationBehavior::NoReplace,

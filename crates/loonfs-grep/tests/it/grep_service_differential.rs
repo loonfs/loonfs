@@ -105,7 +105,7 @@ async fn publish_same_content_files(
                     CommitId::generate(),
                     None,
                     FilesystemOperation::PutFile {
-                        absolute_path: AbsolutePath::parse(format!("/{prefix}-{index:04}.txt"))
+                        path: AbsolutePath::parse(format!("/{prefix}-{index:04}.txt"))
                             .expect("batch path"),
                         content_ref: content_ref.clone(),
                         behavior: DestinationBehavior::NoReplace,

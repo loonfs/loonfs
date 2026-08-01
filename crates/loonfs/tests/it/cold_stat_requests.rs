@@ -116,10 +116,8 @@ async fn cold_stat_pays_no_per_run_filter_fetches() {
                     loonfs::CommitId::generate(),
                     None,
                     loonfs::publish::FilesystemOperation::PutFile {
-                        absolute_path: AbsolutePath::parse(format!(
-                            "/tree/dir-000000/file-{index:09}.txt"
-                        ))
-                        .expect("path"),
+                        path: AbsolutePath::parse(format!("/tree/dir-000000/file-{index:09}.txt"))
+                            .expect("path"),
                         content_ref: content_ref.clone(),
                         behavior: loonfs::DestinationBehavior::NoReplace,
                         expected_revision_no: None,

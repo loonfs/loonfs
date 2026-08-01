@@ -6,7 +6,9 @@ use loonfs_api::v0::{
     CreateCheckpointRequest, MaintenanceStepKind, MaintenanceStepRequest, ValidatedContentToken,
 };
 use loonfs_api::{AbsolutePath, CommitId, CommitRequest, DestinationBehavior, FilesystemOperation};
-use loonfs_client::{ClientError, CommitOptions, DeleteOptions, NamespacePath, PutFileOptions};
+use loonfs_client::{
+    ClientError, CopyOptions, DeleteOptions, MoveOptions, NamespacePath, PutFileOptions,
+};
 use loonfs_test_support::ids::namespace_id;
 use tempfile::tempdir;
 
@@ -319,8 +321,8 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
         .copy_path(
             &source,
             &copied,
-            DestinationBehavior::NoReplace,
-            &CommitOptions {
+            &CopyOptions {
+                behavior: DestinationBehavior::NoReplace,
                 commit_id: Some(CommitId::parse("req-v1-copy").expect("valid commit id")),
                 message: None,
             },
@@ -332,8 +334,8 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
         .copy_path(
             &source,
             &copied,
-            DestinationBehavior::NoReplace,
-            &CommitOptions {
+            &CopyOptions {
+                behavior: DestinationBehavior::NoReplace,
                 commit_id: Some(CommitId::parse("req-v1-copy").expect("valid commit id")),
                 message: None,
             },
@@ -360,8 +362,8 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
         .move_path(
             &copied,
             &moved,
-            DestinationBehavior::NoReplace,
-            &CommitOptions {
+            &MoveOptions {
+                behavior: DestinationBehavior::NoReplace,
                 commit_id: Some(CommitId::parse("req-v1-move").expect("valid commit id")),
                 message: None,
             },
@@ -373,8 +375,8 @@ async fn http_delete_move_and_copy_commit_ids_are_idempotent() {
         .move_path(
             &copied,
             &moved,
-            DestinationBehavior::NoReplace,
-            &CommitOptions {
+            &MoveOptions {
+                behavior: DestinationBehavior::NoReplace,
                 commit_id: Some(CommitId::parse("req-v1-move").expect("valid commit id")),
                 message: None,
             },
@@ -458,8 +460,11 @@ async fn two_servers_share_one_store_with_last_writer_wins_fencing() {
         .move_path(
             &host_a_target,
             &host_b_target,
-            DestinationBehavior::NoReplace,
-            &CommitOptions::default(),
+            &MoveOptions {
+                behavior: DestinationBehavior::NoReplace,
+                commit_id: None,
+                message: None,
+            },
         )
         .await
         .expect("host b takes over on first write");

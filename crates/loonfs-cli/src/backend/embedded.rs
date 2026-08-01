@@ -20,12 +20,12 @@ use loonfs_api::{
         StoreProbeResponse,
     },
     AuthoritativePathEntry, ChangeSeq, CheckpointId, CommitResponse, CreateCheckpointRequest,
-    CreateCheckpointResponse, DestinationBehavior, EffectiveLimit, ErrorCode, GrepRequest,
-    GrepResponse, InodeId, ListFileRevisionsResponse, ListTrashResponse, MaintenanceStepRequest,
-    MaintenanceStepResponse, NamespaceId, NamespaceStatusResponse, NamespaceSummary,
-    PaginationPolicy, ReleaseCheckpointResponse, RevisionNo,
+    CreateCheckpointResponse, EffectiveLimit, ErrorCode, GrepRequest, GrepResponse, InodeId,
+    ListFileRevisionsResponse, ListTrashResponse, MaintenanceStepRequest, MaintenanceStepResponse,
+    NamespaceId, NamespaceStatusResponse, NamespaceSummary, PaginationPolicy,
+    ReleaseCheckpointResponse, RevisionNo,
 };
-use loonfs_client::{CommitOptions, NamespacePath};
+use loonfs_client::NamespacePath;
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepDisableOutcome, GrepEnableOutcome, GrepError, GrepIndexSnapshot,
     GrepMaintenanceJob, GrepService, GrepWorker, NamespaceReads, GREP_INDEX_JOB,
@@ -639,19 +639,14 @@ impl EmbeddedBackend {
         &self,
         from: &NamespacePath,
         to: &NamespacePath,
-        behavior: DestinationBehavior,
-        options: &CommitOptions,
+        options: &MoveOptions,
     ) -> Result<CommitResponse, BackendError> {
         self.publish_with_maintenance_recovery(from.namespace(), || {
             self.writer.move_path(
                 from.namespace(),
                 from.absolute_path().as_str(),
                 to.absolute_path().as_str(),
-                MoveOptions {
-                    behavior,
-                    commit_id: options.commit_id.clone(),
-                    message: options.message.clone(),
-                },
+                options.clone(),
             )
         })
         .await
@@ -661,19 +656,14 @@ impl EmbeddedBackend {
         &self,
         from: &NamespacePath,
         to: &NamespacePath,
-        behavior: DestinationBehavior,
-        options: &CommitOptions,
+        options: &CopyOptions,
     ) -> Result<CommitResponse, BackendError> {
         self.publish_with_maintenance_recovery(from.namespace(), || {
             self.writer.copy_path(
                 from.namespace(),
                 from.absolute_path().as_str(),
                 to.absolute_path().as_str(),
-                CopyOptions {
-                    behavior,
-                    commit_id: options.commit_id.clone(),
-                    message: options.message.clone(),
-                },
+                options.clone(),
             )
         })
         .await
@@ -683,17 +673,14 @@ impl EmbeddedBackend {
         &self,
         spec: &NamespacePath,
         source_revision_no: RevisionNo,
-        options: &CommitOptions,
+        options: &RestoreRevisionOptions,
     ) -> Result<CommitResponse, BackendError> {
         self.publish_with_maintenance_recovery(spec.namespace(), || {
             self.writer.restore_file_revision(
                 spec.namespace(),
                 spec.absolute_path().as_str(),
                 source_revision_no,
-                RestoreRevisionOptions {
-                    commit_id: options.commit_id.clone(),
-                    message: options.message.clone(),
-                },
+                options.clone(),
             )
         })
         .await
@@ -704,7 +691,7 @@ impl EmbeddedBackend {
         spec: &NamespacePath,
         inode_id: InodeId,
         deleted_at_seq: ChangeSeq,
-        options: &CommitOptions,
+        options: &UndeleteOptions,
     ) -> Result<CommitResponse, BackendError> {
         self.publish_with_maintenance_recovery(spec.namespace(), || {
             self.writer.undelete(
@@ -712,10 +699,7 @@ impl EmbeddedBackend {
                 inode_id,
                 deleted_at_seq,
                 spec.absolute_path().as_str(),
-                UndeleteOptions {
-                    commit_id: options.commit_id.clone(),
-                    message: options.message.clone(),
-                },
+                options.clone(),
             )
         })
         .await

@@ -394,7 +394,7 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
             .await
             .expect("prepare atomic-commit content");
         operations.push(FilesystemOperation::PutFile {
-            absolute_path: AbsolutePath::parse(format!("/bounded-{index:04}.txt"))
+            path: AbsolutePath::parse(format!("/bounded-{index:04}.txt"))
                 .expect("valid absolute path"),
             content_ref: content.content_ref().clone(),
             behavior: DestinationBehavior::NoReplace,

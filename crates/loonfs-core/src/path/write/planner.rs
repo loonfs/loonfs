@@ -39,6 +39,17 @@ pub(crate) struct PlannedCommit {
 /// identity fingerprints"): the same normalized request must fingerprint
 /// identically across releases. A pinned-value test below fails if the
 /// encoding drifts.
+///
+/// The variant names, the field names, and the field order below are all part
+/// of that preimage under the [`COMMIT_FINGERPRINT_DOMAIN`] tag, and none of
+/// them tracks the wire enum. They deliberately differ from it — `CreateDir`
+/// against the wire's `CreateDirectory`, `absolute_path` against its `path`,
+/// `behavior` ahead of `content_ref` in the put — because renaming a wire
+/// field must not silently restate every already-published commit's identity.
+/// [`operation_fingerprint_input`] is the one place the wire spelling is
+/// translated into this one; nothing else may name these variants. Change any
+/// of it and every stored fingerprint disagrees with its recomputed value,
+/// which the pinned tests below exist to catch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum OperationFingerprintInput<'a> {
@@ -112,32 +123,36 @@ fn content_ref_fingerprint_input(content_ref: &ContentRef) -> ContentRefFingerpr
     }
 }
 
+/// Renames one wire operation into its durable preimage.
+///
+/// This is the whole of the wire-to-fingerprint translation. The left side
+/// follows [`FilesystemOperation`] and may be renamed with it; the right side
+/// is frozen (see [`OperationFingerprintInput`]).
 fn operation_fingerprint_input(operation: &FilesystemOperation) -> OperationFingerprintInput<'_> {
     match operation {
-        FilesystemOperation::CreateDir {
-            absolute_path,
-            parents,
-        } => OperationFingerprintInput::CreateDir {
-            absolute_path: absolute_path.as_str(),
-            parents: *parents,
-        },
+        FilesystemOperation::CreateDirectory { path, parents } => {
+            OperationFingerprintInput::CreateDir {
+                absolute_path: path.as_str(),
+                parents: *parents,
+            }
+        }
         FilesystemOperation::PutFile {
-            absolute_path,
+            path,
             content_ref,
             behavior,
             expected_revision_no,
         } => OperationFingerprintInput::PutFile {
-            absolute_path: absolute_path.as_str(),
+            absolute_path: path.as_str(),
             behavior: *behavior,
             content_ref: content_ref_fingerprint_input(content_ref),
             expected_revision_no: *expected_revision_no,
         },
         FilesystemOperation::DeletePath {
-            absolute_path,
+            path,
             behavior,
             expected_inode_id,
         } => OperationFingerprintInput::DeletePath {
-            absolute_path: absolute_path.as_str(),
+            absolute_path: path.as_str(),
             behavior: *behavior,
             expected_inode_id: *expected_inode_id,
         },
@@ -150,7 +165,7 @@ fn operation_fingerprint_input(operation: &FilesystemOperation) -> OperationFing
             to_path: to_path.as_str(),
             behavior: *behavior,
         },
-        FilesystemOperation::CopyFilePath {
+        FilesystemOperation::CopyPath {
             from_path,
             to_path,
             behavior,
@@ -160,20 +175,20 @@ fn operation_fingerprint_input(operation: &FilesystemOperation) -> OperationFing
             behavior: *behavior,
         },
         FilesystemOperation::RestoreRevision {
-            absolute_path,
+            path,
             source_revision_no,
         } => OperationFingerprintInput::RestoreRevision {
-            absolute_path: absolute_path.as_str(),
+            absolute_path: path.as_str(),
             source_revision_no: *source_revision_no,
         },
         FilesystemOperation::Undelete {
             inode_id,
             deleted_at_seq,
-            absolute_path,
+            path,
         } => OperationFingerprintInput::Undelete {
             inode_id: *inode_id,
             deleted_at_seq: *deleted_at_seq,
-            absolute_path: absolute_path.as_str(),
+            absolute_path: path.as_str(),
         },
     }
 }
@@ -287,18 +302,17 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
     view: &PublishPathPlanningView<'_, '_, '_, S>,
 ) -> Result<PlannedOperation> {
     match operation {
-        FilesystemOperation::CreateDir {
-            absolute_path,
-            parents,
-        } => plan_publish_create_directory(absolute_path, *parents, view).await,
+        FilesystemOperation::CreateDirectory { path, parents } => {
+            plan_publish_create_directory(path, *parents, view).await
+        }
         FilesystemOperation::PutFile {
-            absolute_path,
+            path,
             content_ref,
             behavior,
             expected_revision_no,
         } => {
             plan_publish_put_file_content_ref(
-                absolute_path,
+                path,
                 content_ref.clone(),
                 *behavior,
                 *expected_revision_no,
@@ -307,29 +321,29 @@ async fn plan_operation<S: ObjectStore + ?Sized>(
             .await
         }
         FilesystemOperation::DeletePath {
-            absolute_path,
+            path,
             behavior,
             expected_inode_id,
-        } => plan_publish_delete_path(absolute_path, *behavior, *expected_inode_id, view).await,
+        } => plan_publish_delete_path(path, *behavior, *expected_inode_id, view).await,
         FilesystemOperation::MovePath {
             from_path,
             to_path,
             behavior,
         } => plan_publish_move_path(from_path, to_path, *behavior, view).await,
-        FilesystemOperation::CopyFilePath {
+        FilesystemOperation::CopyPath {
             from_path,
             to_path,
             behavior,
         } => plan_publish_copy_file_path(from_path, to_path, *behavior, view).await,
         FilesystemOperation::RestoreRevision {
-            absolute_path,
+            path,
             source_revision_no,
-        } => plan_publish_restore_revision(absolute_path, *source_revision_no, view).await,
+        } => plan_publish_restore_revision(path, *source_revision_no, view).await,
         FilesystemOperation::Undelete {
             inode_id,
             deleted_at_seq,
-            absolute_path,
-        } => plan_publish_undelete(*inode_id, *deleted_at_seq, absolute_path, view).await,
+            path,
+        } => plan_publish_undelete(*inode_id, *deleted_at_seq, path, view).await,
     }
 }
 
@@ -425,8 +439,8 @@ mod tests {
     }
 
     fn create_dir(path: &str) -> FilesystemOperation {
-        FilesystemOperation::CreateDir {
-            absolute_path: AbsolutePath::parse(path).expect("path"),
+        FilesystemOperation::CreateDirectory {
+            path: AbsolutePath::parse(path).expect("path"),
             parents: false,
         }
     }
@@ -456,7 +470,7 @@ mod tests {
     fn guarded_delete_fingerprint_value_is_pinned() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let mut fixed = request(FilesystemOperation::DeletePath {
-            absolute_path: AbsolutePath::parse("/docs").expect("path"),
+            path: AbsolutePath::parse("/docs").expect("path"),
             behavior: DeleteDirectoryBehavior::NonRecursive,
             expected_inode_id: Some(InodeId(42)),
         });
@@ -481,7 +495,7 @@ mod tests {
     fn put_file_fingerprint_value_is_pinned() {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let mut fixed = request(FilesystemOperation::PutFile {
-            absolute_path: AbsolutePath::parse("/docs/report.txt").expect("path"),
+            path: AbsolutePath::parse("/docs/report.txt").expect("path"),
             content_ref: ContentRef::blob_v1(
                 loonfs_api::ContentId::parse("con_0123456789abcdef0123456789abcdef")
                     .expect("content id"),
@@ -517,7 +531,7 @@ mod tests {
         };
         let build = |content_ref| {
             request(FilesystemOperation::PutFile {
-                absolute_path: AbsolutePath::parse("/docs/report.txt").expect("path"),
+                path: AbsolutePath::parse("/docs/report.txt").expect("path"),
                 content_ref,
                 behavior: DestinationBehavior::NoReplace,
                 expected_revision_no: None,
@@ -537,7 +551,7 @@ mod tests {
         let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
         let build = |content_ref| {
             request(FilesystemOperation::PutFile {
-                absolute_path: AbsolutePath::parse("/docs/report.txt").expect("path"),
+                path: AbsolutePath::parse("/docs/report.txt").expect("path"),
                 content_ref,
                 behavior: DestinationBehavior::NoReplace,
                 expected_revision_no: None,
@@ -738,7 +752,7 @@ mod tests {
             &store,
             &namespace_id,
             &request(FilesystemOperation::PutFile {
-                absolute_path: AbsolutePath::parse("/docs/nested/a.txt").expect("path"),
+                path: AbsolutePath::parse("/docs/nested/a.txt").expect("path"),
                 content_ref: staged.content_ref.clone(),
                 behavior: DestinationBehavior::NoReplace,
                 expected_revision_no: None,
@@ -837,7 +851,7 @@ mod tests {
         let planned = plan_against_current_state(
             &store,
             &namespace_id,
-            &request(FilesystemOperation::CopyFilePath {
+            &request(FilesystemOperation::CopyPath {
                 from_path: AbsolutePath::parse("/docs/a.txt").expect("path"),
                 to_path: AbsolutePath::parse("/docs/copy.txt").expect("path"),
                 behavior: DestinationBehavior::NoReplace,
@@ -945,7 +959,7 @@ mod tests {
             &store,
             &namespace_id,
             &request(FilesystemOperation::PutFile {
-                absolute_path: AbsolutePath::parse("/dead/new.txt").expect("path"),
+                path: AbsolutePath::parse("/dead/new.txt").expect("path"),
                 content_ref: staged.content_ref,
                 behavior: DestinationBehavior::NoReplace,
                 expected_revision_no: None,
@@ -973,7 +987,7 @@ mod tests {
                 operations: vec![
                     create_dir("/reports"),
                     FilesystemOperation::PutFile {
-                        absolute_path: AbsolutePath::parse("/reports/a.txt").expect("path"),
+                        path: AbsolutePath::parse("/reports/a.txt").expect("path"),
                         content_ref: staged.content_ref.clone(),
                         behavior: DestinationBehavior::NoReplace,
                         expected_revision_no: None,
@@ -1025,12 +1039,12 @@ mod tests {
                 message: None,
                 operations: vec![
                     FilesystemOperation::DeletePath {
-                        absolute_path: AbsolutePath::parse("/docs/tmp.txt").expect("path"),
+                        path: AbsolutePath::parse("/docs/tmp.txt").expect("path"),
                         behavior: DeleteDirectoryBehavior::NonRecursive,
                         expected_inode_id: None,
                     },
                     FilesystemOperation::PutFile {
-                        absolute_path: AbsolutePath::parse("/docs/tmp.txt").expect("path"),
+                        path: AbsolutePath::parse("/docs/tmp.txt").expect("path"),
                         content_ref: staged.content_ref.clone(),
                         behavior: DestinationBehavior::NoReplace,
                         expected_revision_no: None,
@@ -1063,7 +1077,7 @@ mod tests {
                 operations: vec![
                     create_dir("/first"),
                     FilesystemOperation::DeletePath {
-                        absolute_path: AbsolutePath::parse("/missing").expect("path"),
+                        path: AbsolutePath::parse("/missing").expect("path"),
                         behavior: DeleteDirectoryBehavior::NonRecursive,
                         expected_inode_id: None,
                     },

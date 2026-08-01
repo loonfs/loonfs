@@ -233,7 +233,7 @@ async fn undelete<S: ObjectStore + ?Sized>(
         FilesystemOperation::Undelete {
             inode_id,
             deleted_at_seq,
-            absolute_path: AbsolutePath::parse(absolute_path).expect("path"),
+            path: AbsolutePath::parse(absolute_path).expect("path"),
         },
         context,
     )
