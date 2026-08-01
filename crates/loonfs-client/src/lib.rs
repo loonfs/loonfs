@@ -2042,22 +2042,25 @@ impl Client {
     /// path.
     pub async fn undelete(
         &self,
-        spec: &NamespacePath,
+        namespace: &NamespaceId,
         inode_id: InodeId,
         deleted_at_seq: ChangeSeq,
+        path: Option<&AbsolutePath>,
         options: &UndeleteOptions,
     ) -> Result<ApiCommitResponse> {
+        // An absent destination restores in place: the entry re-binds under
+        // the parent and name its deletion recorded.
         let commit_id = options.commit_id.clone().unwrap_or_else(CommitId::generate);
         let response = self
             .commit(
-                spec.namespace(),
+                namespace,
                 &CommitRequest::single(
                     commit_id,
                     options.message.clone(),
                     FilesystemOperation::Undelete {
                         inode_id,
                         deleted_at_seq,
-                        path: spec.absolute_path().clone(),
+                        path: path.cloned(),
                     },
                 ),
             )

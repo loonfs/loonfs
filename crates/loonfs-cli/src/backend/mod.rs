@@ -28,7 +28,7 @@ use loonfs_api::{
         GrepGcResponse, GrepIndexLifecycle, GrepIndexStatusResponse, StoreProbeRequest,
         StoreProbeResponse, UploadStatusResponse,
     },
-    AuthoritativePathEntry, ChangeSeq, CheckpointId, CommitResponse, ContentRef,
+    AbsolutePath, AuthoritativePathEntry, ChangeSeq, CheckpointId, CommitResponse, ContentRef,
     CreateCheckpointRequest, CreateCheckpointResponse, DeleteNamespaceResponse, GrepRequest,
     GrepResponse, InodeId, ListCheckpointsResponse, ListFileRevisionsResponse,
     ListPathEntriesResponse, ListTrashResponse, MaintenanceStepRequest, MaintenanceStepResponse,
@@ -741,12 +741,14 @@ impl ResolvedTarget {
         }
     }
 
-    /// Recovers a deleted file or subtree to the spec's path; `inode_id`
-    /// and `deleted_at_seq` are the identity and committed sequence the
-    /// delete reported.
+    /// Recovers a deleted file or subtree; `inode_id` and `deleted_at_seq`
+    /// are the identity and committed sequence the delete reported. An
+    /// absent `path` restores in place, under the parent and name the
+    /// deletion recorded.
     pub(crate) async fn undelete(
         &self,
-        spec: &NamespacePath,
+        namespace: &NamespaceId,
+        path: Option<&AbsolutePath>,
         inode_id: InodeId,
         deleted_at_seq: ChangeSeq,
         options: &UndeleteOptions,
@@ -755,12 +757,12 @@ impl ResolvedTarget {
             Self::Embedded(target) => {
                 target
                     .backend
-                    .undelete(spec, inode_id, deleted_at_seq, options)
+                    .undelete(namespace, path, inode_id, deleted_at_seq, options)
                     .await
             }
             Self::Remote(target) => Ok(target
                 .client
-                .undelete(spec, inode_id, deleted_at_seq, options)
+                .undelete(namespace, inode_id, deleted_at_seq, path, options)
                 .await?),
         }
     }

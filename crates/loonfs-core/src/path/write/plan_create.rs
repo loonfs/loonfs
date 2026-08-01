@@ -6,7 +6,9 @@ use super::planning_helpers::{
     publish_reject_tombstoned_path_ancestor, publish_resolve_parent_directory, PlannedOperation,
     PublishPathPlanningView,
 };
-use crate::commit::{CommitOp as ApiCommitOp, CommitPrecondition as ApiCommitPrecondition};
+use crate::commit::{
+    CommitOp as ApiCommitOp, CommitPrecondition as ApiCommitPrecondition, CommitValidationError,
+};
 use crate::error::{CoreError, Result};
 use crate::path::helpers::{ensure_mutation_path, final_component};
 use loonfs_api::{
@@ -72,30 +74,60 @@ pub(super) async fn plan_publish_create_directory<S: ObjectStore + ?Sized>(
 pub(super) async fn plan_publish_undelete<S: ObjectStore + ?Sized>(
     inode_id: InodeId,
     deleted_at_seq: ChangeSeq,
-    absolute_path: &AbsolutePath,
+    absolute_path: Option<&AbsolutePath>,
     view: &PublishPathPlanningView<'_, '_, '_, S>,
 ) -> Result<PlannedOperation> {
-    ensure_mutation_path(absolute_path)?;
-    publish_reject_tombstoned_path_ancestor(view, absolute_path).await?;
-    match view
-        .metadata_state
-        .resolve_visible_path(absolute_path)
-        .await
-    {
-        Ok(existing) => {
-            return Err(CoreError::DestinationExists {
-                path: absolute_path.as_str().to_owned(),
-                existing_display_name: Some(existing.display_name),
-            });
+    let (parent_inode_id, display_name) = match absolute_path {
+        Some(absolute_path) => {
+            ensure_mutation_path(absolute_path)?;
+            publish_reject_tombstoned_path_ancestor(view, absolute_path).await?;
+            match view
+                .metadata_state
+                .resolve_visible_path(absolute_path)
+                .await
+            {
+                Ok(existing) => {
+                    return Err(CoreError::DestinationExists {
+                        path: absolute_path.as_str().to_owned(),
+                        existing_display_name: Some(existing.display_name),
+                    });
+                }
+                Err(error) if is_missing_visible_path(&error) => {}
+                Err(error) => return Err(error),
+            }
+            // The destination parent must already exist: recovery targets a
+            // place the caller can see, and commit validation re-checks the
+            // tombstone root, the parent, and the name under the publish
+            // lock.
+            let parent_inode_id = publish_resolve_parent_directory(view, absolute_path).await?;
+            (parent_inode_id, final_component(absolute_path)?.clone())
         }
-        Err(error) if is_missing_visible_path(&error) => {}
-        Err(error) => return Err(error),
-    }
-    // The destination parent must already exist: recovery targets a place
-    // the caller can see, and commit validation re-checks the tombstone
-    // root, the parent, and the name under the publish lock.
-    let parent_inode_id = publish_resolve_parent_directory(view, absolute_path).await?;
-    let display_name = final_component(absolute_path)?;
+        // In place: re-bind under the parent and name the deletion recorded,
+        // anchored on the parent's identity rather than a remembered
+        // spelling, so recovery lands correctly even when ancestors were
+        // renamed since. Planning takes no courtesy looks at the parent or
+        // the name — the preconditions below decide both under the publish
+        // lock, and their rejections already speak the right vocabulary.
+        None => {
+            let Some(deletion) = view
+                .metadata_state
+                .recoverable_deletion(deleted_at_seq, inode_id)
+                .await?
+            else {
+                return Err(CommitValidationError::UndeleteTargetNotDeleted { inode_id }.into());
+            };
+            match (deletion.parent_inode_id, deletion.display_name) {
+                (Some(parent_inode_id), Some(display_name)) => (parent_inode_id, display_name),
+                _ => {
+                    return Err(CoreError::InvalidCommitRequest(
+                        "the deletion recorded no binding to restore into; \
+                         pass a destination path"
+                            .to_owned(),
+                    ));
+                }
+            }
+        }
+    };
     Ok(PlannedOperation::new(
         vec![ApiCommitOp::Undelete {
             inode_id,

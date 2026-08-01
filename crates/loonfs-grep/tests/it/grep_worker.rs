@@ -845,7 +845,7 @@ async fn a_recursive_delete_hides_matches_and_an_undelete_restores_them() {
             &namespace_id,
             docs_inode_id,
             deleted.committed_seq,
-            "/docs",
+            Some("/docs"),
             loonfs::UndeleteOptions::default(),
         )
         .await

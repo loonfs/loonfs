@@ -100,7 +100,7 @@ fn undelete_recovers_a_deleted_file_and_generations_stay_scoped() {
         &namespace_id,
         inode_id,
         first_deletion,
-        "/docs/recovered.txt",
+        Some("/docs/recovered.txt"),
         loonfs::UndeleteOptions::default(),
     ))
     .expect("undelete");
@@ -131,7 +131,7 @@ fn undelete_recovers_a_deleted_file_and_generations_stay_scoped() {
         &namespace_id,
         inode_id,
         first_deletion,
-        "/docs/again.txt",
+        Some("/docs/again.txt"),
         loonfs::UndeleteOptions::default(),
     ))
     .expect_err("double undelete should conflict");
@@ -154,7 +154,7 @@ fn undelete_recovers_a_deleted_file_and_generations_stay_scoped() {
         &namespace_id,
         inode_id,
         first_deletion,
-        "/docs/stale.txt",
+        Some("/docs/stale.txt"),
         loonfs::UndeleteOptions::default(),
     ))
     .expect_err("stale generation handle must not clear the newer deletion");
@@ -175,7 +175,7 @@ fn undelete_recovers_a_deleted_file_and_generations_stay_scoped() {
         &namespace_id,
         inode_id,
         second_deletion,
-        "/docs/report.txt",
+        Some("/docs/report.txt"),
         loonfs::UndeleteOptions::default(),
     ))
     .expect("undelete the active generation");
@@ -230,7 +230,7 @@ fn undelete_recovers_a_deleted_subtree_and_rejects_covered_children() {
         &namespace_id,
         child_inode,
         deletion,
-        "/docs/a-alone.txt",
+        Some("/docs/a-alone.txt"),
         loonfs::UndeleteOptions::default(),
     ))
     .expect_err("child of a deleted directory is not the deletion root");
@@ -243,7 +243,7 @@ fn undelete_recovers_a_deleted_subtree_and_rejects_covered_children() {
         &namespace_id,
         directory_inode,
         deletion,
-        "/docs/notes",
+        Some("/docs/notes"),
         loonfs::UndeleteOptions::default(),
     ))
     .expect("undelete the subtree root");
@@ -308,7 +308,7 @@ fn undelete_of_an_ancestor_keeps_independently_deleted_children_hidden() {
         &namespace_id,
         directory_inode,
         ancestor_deletion,
-        "/docs/notes",
+        Some("/docs/notes"),
         loonfs::UndeleteOptions::default(),
     ))
     .expect("undelete the ancestor");
@@ -356,7 +356,7 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
             &namespace_id,
             inode_id,
             deletion,
-            "/docs/report.txt",
+            Some("/docs/report.txt"),
             loonfs::UndeleteOptions::default(),
         ))
         .expect("undelete before checkpoint");
@@ -423,7 +423,7 @@ fn undelete_survives_checkpoints_and_reopen_in_both_orders() {
             &namespace_id,
             inode_id,
             second_deletion,
-            "/docs/report.txt",
+            Some("/docs/report.txt"),
             loonfs::UndeleteOptions::default(),
         ))
         .expect("undelete a checkpointed deletion after reopen");
@@ -479,7 +479,7 @@ fn change_feed_reports_the_deletion_generation_an_undelete_takes() {
         &namespace_id,
         inode_id,
         deletion,
-        "/docs/report.txt",
+        Some("/docs/report.txt"),
         loonfs::UndeleteOptions::default(),
     ))
     .expect("undelete");
@@ -600,7 +600,9 @@ fn undelete_rejects_deletions_from_the_same_commit() {
                     FilesystemOperation::Undelete {
                         inode_id: entry.inode_id,
                         deleted_at_seq: guessed_seq,
-                        path: parse_mutation_path("/resurrected.txt").expect("valid mutation path"),
+                        path: Some(
+                            parse_mutation_path("/resurrected.txt").expect("valid mutation path"),
+                        ),
                     },
                 ],
             },

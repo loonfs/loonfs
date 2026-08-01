@@ -758,6 +758,32 @@ impl<'a, 'store, S: ObjectStore + ?Sized> MetadataView<'a, 'store, S> {
     /// row it removes, so one ascending walk decides the page: a marker hides
     /// the generation whose key it repeats, and every other listed row is an
     /// entry. Reads stop as soon as `limit` entries are in hand.
+    /// Point-reads one live recoverable deletion by its exact handle.
+    ///
+    /// Answers through the same merged walk the trash listing uses, so a
+    /// revoked generation, a stale sequence, and a never-deleted inode all
+    /// answer `None` — the pager's removal-marker rule stays the one
+    /// authority, never a second decode of the family.
+    pub(crate) async fn recoverable_deletion(
+        &self,
+        deleted_at_seq: ChangeSeq,
+        root_inode_id: InodeId,
+    ) -> Result<Option<RecoverableDeletion>, CoreError> {
+        // The pager resumes strictly after a (sequence, inode) pair, and no
+        // inode sits between a pair and its predecessor, so starting after
+        // the predecessor makes the wanted pair the first candidate. Inode
+        // zero is unallocated, so a zero predecessor cannot skip a real row.
+        let Some(predecessor) = root_inode_id.0.checked_sub(1).map(InodeId) else {
+            return Ok(None);
+        };
+        let mut page = self
+            .active_deletions_page(Some((deleted_at_seq, predecessor)), 1)
+            .await?;
+        Ok(page.pop().filter(|deletion| {
+            deletion.deleted_at_seq == deleted_at_seq && deletion.root_inode_id == root_inode_id
+        }))
+    }
+
     pub(super) async fn active_deletions_page(
         &self,
         start_after: Option<(ChangeSeq, InodeId)>,

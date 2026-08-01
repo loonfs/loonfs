@@ -520,17 +520,15 @@ pub(crate) async fn run_filesystem_trash(
         .await
         .map_err(|error| context.fail(kind, error))?;
     let hint = UndeleteHint::new(&context, location, args.target.profile.profile.is_some());
-    // The listing carries the deleted binding's leaf name, not the directory
-    // it hung under, so the offered destination is that name at the root. It
-    // is a complete command; a caller who wants the original directory back
-    // edits the path, which is the same edit `undelete` already invites.
+    // An entry that recorded its binding restores in place with no
+    // destination in the command; only a legacy entry that recorded none
+    // still needs the caller to supply one.
     let recovery_commands = response
         .entries
         .iter()
         .map(|entry| {
-            let destination = entry.display_name.as_ref().map(|name| format!("/{name}"));
             hint.command(
-                destination.as_deref(),
+                entry.display_name.is_some(),
                 entry.root_inode_id,
                 entry.deleted_at_seq,
             )
@@ -929,14 +927,16 @@ pub(crate) async fn run_filesystem_rm(
         .await
         .map_err(|error| context.fail(kind, error))?;
 
-    // The path just deleted is the destination that puts the entry back where
-    // it was, so the printed command is complete for this exact deletion.
-    let recovery_command =
-        UndeleteHint::new(&context, location, args.target.profile.profile.is_some()).command(
-            Some(spec.absolute_path().as_str()),
-            deleted_inode,
-            result.committed_seq,
-        );
+    // A delete resolved through a path always records its binding, so the
+    // printed command restores in place with no destination — and keeps
+    // working even if the enclosing directories are renamed before the
+    // paste.
+    let recovery_command = UndeleteHint::new(
+        &context,
+        location,
+        args.target.profile.profile.is_some(),
+    )
+    .command(true, deleted_inode, result.committed_seq);
 
     Ok(CommandOutput {
         kind,
@@ -997,14 +997,21 @@ pub(crate) async fn run_filesystem_undelete(
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, config_path, &args.target).await?;
     let allow_root = false;
-    let spec = namespace_path(&context.namespace, &args.path, allow_root)
+    // An absent path restores in place; the destination is then the parent
+    // and name the deletion recorded, which no path here could name better.
+    let spec = args
+        .path
+        .as_deref()
+        .map(|path| namespace_path(&context.namespace, path, allow_root))
+        .transpose()
         .map_err(|error| context.fail(kind, error))?;
     let commit_id = parse_commit_id_arg(args.commit_id.as_deref())
         .map_err(|error| context.fail(kind, error))?;
     let result = context
         .target
         .undelete(
-            &spec,
+            &context.namespace,
+            spec.as_ref().map(|spec| spec.absolute_path()),
             loonfs_api::InodeId(args.inode),
             loonfs_api::ChangeSeq(args.deleted_at),
             &loonfs_client::UndeleteOptions {
@@ -1015,12 +1022,16 @@ pub(crate) async fn run_filesystem_undelete(
         .await
         .map_err(|error| context.fail(kind, error))?;
 
+    let target = match spec.as_ref() {
+        Some(spec) => render_target(&context.namespace, spec.absolute_path()),
+        None => format!("{}:(restored in place)", context.namespace),
+    };
     Ok(CommandOutput {
         kind,
         profile: Some(context.profile_name),
         mode: Some(context.mode),
         data: CommandData::FileMutation {
-            target: render_target(&context.namespace, spec.absolute_path()),
+            target,
             committed_seq: result.committed_seq,
             commit_id: result.commit_id,
             inode_id: Some(loonfs_api::InodeId(args.inode)),

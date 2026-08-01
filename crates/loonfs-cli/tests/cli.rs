@@ -1754,23 +1754,17 @@ fn recovery_hints_name_their_namespace_and_quote_the_path() {
     let deleted_at = entry["deleted_at_seq"].as_u64().expect("the deletion seq");
     assert_eq!(
         hinted_recovery_command(&removed),
-        format!(
-            "loonfs undelete '/docs/Quarterly Report.PDF' --inode {inode} \
-             --deleted-at {deleted_at} --namespace demo"
-        )
+        format!("loonfs undelete --inode {inode} --deleted-at {deleted_at} --namespace demo")
     );
 
-    // The trash table offers the same command for the same deletion. It
-    // recovers to the recorded name at the root, because a listed deletion
-    // carries the name it deleted and not the directory that held it.
+    // The trash table offers the same command for the same deletion. Neither
+    // names a destination: a recorded binding restores in place, under the
+    // parent and name the delete recorded.
     let listed = harness.run(&["trash"]);
     assert_success(&listed);
     assert_eq!(
         trash_recovery_command(&listed, "Quarterly Report.PDF"),
-        format!(
-            "loonfs undelete '/Quarterly Report.PDF' --inode {inode} \
-             --deleted-at {deleted_at} --namespace demo"
-        )
+        format!("loonfs undelete --inode {inode} --deleted-at {deleted_at} --namespace demo")
     );
 
     // Pasting the hint into a shell recovers the file, which is the whole
@@ -3313,6 +3307,89 @@ fn rm_reports_the_inode_and_undelete_recovers_it() {
     assert_eq!(json_error(&again)["code"], "not_deleted");
 }
 
+/// A pathless undelete restores in place: it re-binds under the parent
+/// inode and name the deletion recorded. Renaming the parent between the
+/// delete and the recovery is the proof that the anchor is identity, not a
+/// remembered path — the entry comes back inside the parent's new name.
+#[test]
+fn an_undelete_without_a_path_restores_in_place() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+
+    let payload = harness.temp_dir.path().join("report.txt");
+    fs::write(&payload, b"quarterly numbers").expect("payload");
+    assert_success(&harness.run(&[
+        "put",
+        payload.to_str().expect("utf-8 path"),
+        "/docs/report.txt",
+    ]));
+
+    let removed = harness.run(&["rm", "/docs/report.txt"]);
+    assert_success(&removed);
+    // The printed recovery command names no destination: in place needs
+    // none.
+    let recovery = hinted_recovery_command(&removed);
+    assert!(
+        recovery.starts_with("loonfs undelete --inode "),
+        "{recovery}"
+    );
+    let trash = harness.run(&["--json", "trash"]);
+    assert_success(&trash);
+    let entry = json_data(&trash)["entries"][0].clone();
+    let inode_id = entry["root_inode_id"]
+        .as_u64()
+        .expect("trash reports the deleted inode id");
+    let deleted_at = entry["deleted_at_seq"]
+        .as_u64()
+        .expect("trash reports the deletion sequence");
+
+    // The parent moves on while the file sits in the trash.
+    assert_success(&harness.run(&["mv", "/docs", "/archive"]));
+
+    let recovered = harness.run(&[
+        "--json",
+        "undelete",
+        "--inode",
+        &inode_id.to_string(),
+        "--deleted-at",
+        &deleted_at.to_string(),
+    ]);
+    assert_success(&recovered);
+    assert_eq!(json_data(&recovered)["target"], "demo:(restored in place)");
+    let cat = harness.run(&["cat", "/archive/report.txt"]);
+    assert_success(&cat);
+    assert_eq!(cat.stdout, b"quarterly numbers");
+
+    // The trash listing offers the same pathless command.
+    fs::write(&payload, b"second life").expect("payload");
+    assert_success(&harness.run(&[
+        "put",
+        payload.to_str().expect("utf-8 path"),
+        "/archive/notes.txt",
+    ]));
+    assert_success(&harness.run(&["rm", "/archive/notes.txt"]));
+    let listed = harness.run(&["trash"]);
+    assert_success(&listed);
+    assert!(
+        trash_recovery_command(&listed, "notes.txt").starts_with("loonfs undelete --inode "),
+        "trash offers a pathless in-place command"
+    );
+
+    // A stale pathless handle answers the same code a pathed one does.
+    let stale = harness.run(&[
+        "--json",
+        "undelete",
+        "--inode",
+        &inode_id.to_string(),
+        "--deleted-at",
+        &deleted_at.to_string(),
+    ]);
+    assert_failure(&stale);
+    assert_eq!(json_error(&stale)["code"], "not_deleted");
+}
+
 #[test]
 fn remote_undelete_recovers_through_http() {
     let harness = Harness::new();
@@ -3352,7 +3429,7 @@ fn remote_undelete_recovers_through_http() {
     assert_eq!(
         trash_recovery_command(&listed, "wire.txt"),
         format!(
-            "loonfs undelete /wire.txt --inode {inode_id} \
+            "loonfs undelete --inode {inode_id} \
              --deleted-at {deleted_at} --namespace demo"
         )
     );

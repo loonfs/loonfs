@@ -168,7 +168,7 @@ impl VisibilityHarness {
         self.publish_operation(FilesystemOperation::Undelete {
             inode_id,
             deleted_at_seq,
-            path: AbsolutePath::parse(path).expect("valid path"),
+            path: Some(AbsolutePath::parse(path).expect("valid path")),
         })
         .await
     }
