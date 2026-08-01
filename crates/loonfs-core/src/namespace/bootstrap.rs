@@ -55,6 +55,19 @@ impl BootstrapNamespaceError {
             BootstrapNamespaceError::Core(error) => error.code(),
         }
     }
+
+    /// Returns the structured context the code's consumers report beside it,
+    /// mirroring [`CoreError::details`](crate::Error::details): only the
+    /// wrapped core failure carries any.
+    pub fn details(&self) -> Option<loonfs_api::ErrorDetails> {
+        match self {
+            BootstrapNamespaceError::Core(error) => error.details(),
+            BootstrapNamespaceError::EmptyHolderId
+            | BootstrapNamespaceError::NamespaceAlreadyExists { .. }
+            | BootstrapNamespaceError::NamespaceDeleted { .. }
+            | BootstrapNamespaceError::Head(_) => None,
+        }
+    }
 }
 
 pub(crate) async fn bootstrap_namespace<S: ObjectStore + ?Sized>(

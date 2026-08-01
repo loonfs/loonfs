@@ -121,7 +121,15 @@ pub(crate) fn map_runtime_error(error: RuntimeError) -> BackendError {
     match error {
         RuntimeError::Config(message) => BackendError::invalid_config(message),
         RuntimeError::RuntimeTask(message) => BackendError::runtime_error(message),
-        error => BackendError::new(error.code().as_str(), error.to_string()),
+        // The embedded surface reports the same structured details a server
+        // puts in its error envelope for the same condition, so `--json`
+        // consumers read one contract from both backends.
+        error => BackendError {
+            code: error.code().as_str().to_owned(),
+            message: error.to_string(),
+            request_id: None,
+            details: error.details().map(Box::new),
+        },
     }
 }
 
@@ -154,7 +162,24 @@ pub(crate) fn map_namespace_scoped_grep_error(
 
 #[cfg(test)]
 mod tests {
-    use super::{BackendError, ClientError};
+    use super::{map_runtime_error, BackendError, ClientError};
+    use loonfs::RuntimeError;
+    use loonfs_api::ChangeSeq;
+
+    #[test]
+    fn embedded_runtime_errors_carry_their_structured_details() {
+        let error = map_runtime_error(RuntimeError::Core(
+            loonfs::CoreError::StaleHeadPrecondition {
+                expected: ChangeSeq(41),
+                actual: ChangeSeq(45),
+            },
+        ));
+
+        assert_eq!(error.code, "stale_head");
+        let details = error.details.expect("core details survive the seam");
+        assert_eq!(details.expected_head_seq, Some(ChangeSeq(41)));
+        assert_eq!(details.actual_head_seq, Some(ChangeSeq(45)));
+    }
 
     #[test]
     fn api_errors_pass_their_code_and_message_through_verbatim() {

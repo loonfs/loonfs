@@ -195,4 +195,18 @@ impl RuntimeError {
             Self::RuntimeTask(_) => ErrorCode::ServerError,
         }
     }
+
+    /// Returns the structured context the code's consumers report beside it.
+    ///
+    /// The embedded surface carries the same details a server puts in its
+    /// error envelope for the same condition, so both backends serve one
+    /// contract. Only the engine attaches any; runtime-local failures have
+    /// no structured half.
+    pub fn details(&self) -> Option<loonfs_api::ErrorDetails> {
+        match self {
+            Self::Core(error) => error.details(),
+            Self::Bootstrap(error) => error.details(),
+            Self::Config(_) | Self::RuntimeTask(_) => None,
+        }
+    }
 }
