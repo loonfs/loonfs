@@ -199,6 +199,19 @@ pub enum CoreError {
     NamespaceExists { namespace_id: NamespaceId },
     #[error("namespace `{namespace_id}` is deleted")]
     NamespaceDeleted { namespace_id: NamespaceId },
+    /// A caller-supplied `expected_head_seq` did not match the head.
+    ///
+    /// Distinct from the publish path's [`CommitHeadPublishError::StaleHead`],
+    /// which reports a race the caller never asked about: this is a
+    /// precondition the caller wrote, so the rejection owes it both numbers —
+    /// what it asked for and what the namespace was actually at — and a
+    /// caller that meant to delete the current head can retry against the
+    /// sequence it found. Both carry the `stale_head` code.
+    #[error("expected head sequence {expected}, found {actual}")]
+    StaleHeadPrecondition {
+        expected: ChangeSeq,
+        actual: ChangeSeq,
+    },
     /// A batch stopped at one of its operations. A mutation commits all of
     /// its operations or none of them, so this names the operation that
     /// stopped the request and carries the failure it produced. The wire code
@@ -392,6 +405,7 @@ impl CoreError {
             CoreError::ContentTooLarge { .. } => ErrorCode::ContentTooLarge,
             CoreError::NamespaceExists { .. } => ErrorCode::NamespaceExists,
             CoreError::NamespaceDeleted { .. } => ErrorCode::NamespaceDeleted,
+            CoreError::StaleHeadPrecondition { .. } => ErrorCode::StaleHead,
             CoreError::CommitIdReuseConflict { .. } => ErrorCode::CommitIdReuseConflict,
             CoreError::ContentPreparation(_) => ErrorCode::ContentNotPrepared,
             CoreError::CommitQueueFull => ErrorCode::CommitQueueFull,
@@ -463,6 +477,11 @@ impl CoreError {
             } => Some(ErrorDetails {
                 after_seq: Some(*after_seq),
                 retention_floor_seq: Some(*retention_floor_seq),
+                ..ErrorDetails::default()
+            }),
+            CoreError::StaleHeadPrecondition { expected, actual } => Some(ErrorDetails {
+                expected_head_seq: Some(*expected),
+                actual_head_seq: Some(*actual),
                 ..ErrorDetails::default()
             }),
             CoreError::CommitValidation(error) => commit_validation_details(error),
@@ -942,6 +961,51 @@ mod tests {
         assert_eq!(details.inode_id, Some(InodeId(7)));
         assert_eq!(details.expected_revision, Some(RevisionNo(2)));
         assert_eq!(details.actual_revision, Some(RevisionNo(5)));
+        // The prose says the same thing in words, so neither revision
+        // reaches a reader as Rust formatting.
+        assert!(
+            stale
+                .to_string()
+                .ends_with("expected revision 2, found revision 5"),
+            "{stale}"
+        );
+
+        // A file with no revision at all reads as a sentence rather than
+        // printing the absent value.
+        let unversioned =
+            CoreError::CommitValidation(CommitValidationError::ReplaceFileBaseRevisionMismatch {
+                inode_id: InodeId(7),
+                expected: RevisionNo(2),
+                actual: None,
+            });
+        assert!(
+            unversioned
+                .to_string()
+                .ends_with("expected revision 2, found no revision"),
+            "{unversioned}"
+        );
+        assert_eq!(
+            unversioned
+                .details()
+                .expect("stale-revision details")
+                .actual_revision,
+            None
+        );
+
+        // A refused `expected_head_seq` carries both sequences, so a caller
+        // that still means to delete knows what to retry against.
+        let precondition = CoreError::StaleHeadPrecondition {
+            expected: ChangeSeq(41),
+            actual: ChangeSeq(45),
+        };
+        assert_eq!(precondition.code(), ErrorCode::StaleHead);
+        assert_eq!(
+            precondition.to_string(),
+            "expected head sequence 41, found 45"
+        );
+        let details = precondition.details().expect("head-sequence details");
+        assert_eq!(details.expected_head_seq, Some(ChangeSeq(41)));
+        assert_eq!(details.actual_head_seq, Some(ChangeSeq(45)));
 
         // Errors without machine-usable identity stay detail-free.
         assert!(CoreError::Internal("boom".to_owned()).details().is_none());

@@ -559,6 +559,14 @@ fn put_expected_revision_replaces_only_the_observed_revision() {
     ]);
     assert_failure(&stale);
     assert_eq!(json_error(&stale)["code"], "stale_revision");
+    // The rejection reads as a sentence, with both revisions in it and no
+    // Rust formatting of the one that may be absent.
+    let stale_error = json_error(&stale);
+    let message = stale_error["message"].as_str().unwrap_or_default();
+    assert!(
+        message.ends_with("expected revision 1, found revision 2"),
+        "{message}"
+    );
     let cat = harness.run(&["cat", "/doc.txt"]);
     assert_success(&cat);
     assert_eq!(cat.stdout, b"v2");
@@ -3436,6 +3444,53 @@ fn namespace_delete_without_yes_fails_cleanly_when_not_interactive() {
 
     let deleted = harness.run(&["--json", "namespace", "delete", "demo", "--yes"]);
     assert_success(&deleted);
+}
+
+/// A refused precondition has to say what it wanted and what it found, or
+/// the caller cannot tell a raced delete from a mistyped sequence.
+#[test]
+fn namespace_delete_reports_both_head_sequences_when_the_precondition_fails() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+
+    let payload = harness.temp_dir.path().join("doc.txt");
+    fs::write(&payload, b"body").expect("write payload");
+    assert_success(&harness.run(&["put", payload.to_str().expect("utf-8 path"), "/doc.txt"]));
+
+    let stale = harness.run(&[
+        "--json",
+        "namespace",
+        "delete",
+        "demo",
+        "--yes",
+        "--expected-head-seq",
+        "0",
+    ]);
+    assert_failure(&stale);
+    let error = json_error(&stale);
+    assert_eq!(error["code"], "stale_head");
+    assert_eq!(error["message"], "expected head sequence 0, found 1");
+
+    // The same sentence is what a human run prints, since the renderer
+    // writes the message through unchanged.
+    let human = harness.run(&[
+        "namespace",
+        "delete",
+        "demo",
+        "--yes",
+        "--expected-head-seq",
+        "0",
+    ]);
+    assert_failure(&human);
+    assert_eq!(
+        stderr_string(&human).trim_end(),
+        "expected head sequence 0, found 1"
+    );
+
+    // Refusing deleted nothing, so the namespace is still readable.
+    assert_success(&harness.run(&["--json", "ls", "/"]));
 }
 
 #[test]

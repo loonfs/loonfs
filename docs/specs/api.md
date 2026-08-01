@@ -217,6 +217,7 @@ The codes that populate it:
 | `stale_revision` | `inode_id`, `expected_revision`, `actual_revision` (absent when the inode has no current revision) |
 | `commit_id_reuse_conflict` | `commit_id`, plus `committed_seq` when the conflict was decided against a durable commit receipt — the sequence that `commit_id` already landed at. Absent when nothing has committed under the id yet and two live requests are claiming it at once |
 | `rebootstrap_required` | `after_seq`, `retention_floor_seq` |
+| `stale_head` | `expected_head_seq`, `actual_head_seq`, when the failure was a caller-supplied `expected_head_seq` precondition rather than a raced head advance. A caller that still means to delete retries against the sequence it found |
 | `not_deleted` | `inode_id`, plus `requested_deletion_seq` and `active_deletion_seq` when a live deletion exists at a different generation |
 | any failed commit | `commit_id` — the idempotency key the request committed under, echoed so failed and uncertain outcomes carry the caller's reconciliation handle (section 5.2) |
 | any commit carrying more than one operation | `operation_index` — the position of the operation that stopped the request (section 5.1) |
@@ -246,7 +247,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `content_not_prepared` | 409 | A path put or explicit create/replace operation references external content without a matching admission, or carries a rejected relevant token. Prepare the content and retry with its proof. |
 | `path_conflict` | 409 | The destination path is already bound. |
 | `directory_not_empty` | 409 | The directory has children and the operation is not recursive. |
-| `stale_head` | 409 | The write raced a head advance; retry against fresh state. |
+| `stale_head` | 409 | The write raced a head advance, or a caller-supplied `expected_head_seq` no longer matches the head; retry against fresh state. |
 | `stale_revision` | 409 | A caller-supplied base revision is no longer current. |
 | `not_deleted` | 409 | The undelete target is not the root of a live deletion; nothing to recover. |
 | `writer_fenced` | 409 | The writer epoch was superseded by another session. |
@@ -1070,7 +1071,10 @@ already swept has nothing left pointing at it and is not reclaimed.
 
 The optional `expected_head_seq` query parameter deletes only if the head is
 still at that sequence, failing with `stale_head` otherwise — the same
-race-explicit pattern preconditions give file mutations.
+race-explicit pattern preconditions give file mutations. That rejection
+reports both sequences, in the message and as `expected_head_seq` and
+`actual_head_seq` details, so a caller that still means to delete can retry
+against the sequence it found.
 
 ```json
 {

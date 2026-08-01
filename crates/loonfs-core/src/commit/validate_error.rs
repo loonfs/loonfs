@@ -83,7 +83,8 @@ pub enum CommitValidationError {
         actual_kind: InodeKind,
     },
     #[error(
-        "replace base revision mismatch for inode `{inode_id}`: expected `{expected}`, actual `{actual:?}`"
+        "replace base revision mismatch for inode `{inode_id}`: {}",
+        revision_mismatch(.expected, .actual)
     )]
     ReplaceFileBaseRevisionMismatch {
         inode_id: InodeId,
@@ -98,7 +99,8 @@ pub enum CommitValidationError {
         actual_kind: InodeKind,
     },
     #[error(
-        "restore base revision mismatch for inode `{inode_id}`: expected `{expected}`, actual `{actual:?}`"
+        "restore base revision mismatch for inode `{inode_id}`: {}",
+        revision_mismatch(.expected, .actual)
     )]
     RestoreRevisionBaseRevisionMismatch {
         inode_id: InodeId,
@@ -252,4 +254,17 @@ pub enum CommitValidationError {
     OpIndexOverflow,
     #[error("delta index overflow")]
     DeltaIndexOverflow,
+}
+
+/// What a base-revision guard asked for against what it found, in words.
+///
+/// The revision it found is absent when the file carries no revision at all,
+/// and that case reads as a sentence rather than printing the `Option` — a
+/// message is for a person, while the same pair rides the wire as typed
+/// `expected_revision` and `actual_revision` details for a program.
+fn revision_mismatch(expected: &RevisionNo, actual: &Option<RevisionNo>) -> String {
+    match actual {
+        Some(actual) => format!("expected revision {expected}, found revision {actual}"),
+        None => format!("expected revision {expected}, found no revision"),
+    }
 }
