@@ -17,8 +17,6 @@ use loonfs_grep::{
     GrepDisableOutcome, GrepEnableOutcome, GrepError, GrepIndexSnapshot, NamespaceReads,
 };
 
-const GREP_INDEX_FEATURE: &str = "grep.index";
-
 #[cfg_attr(
     feature = "openapi",
     utoipa::path(
@@ -325,8 +323,12 @@ pub(super) async fn gc_grep_index(
 fn map_grep_error(namespace_id: &loonfs_api::NamespaceId, error: GrepError) -> ApiResponseError {
     let code = error.code();
     match error {
+        // One name for the capability, whichever half is missing: a
+        // deployment that does not serve grep and a namespace whose index is
+        // not built both leave `query.grep` unavailable, which is the key
+        // capability discovery advertises it under.
         error @ (GrepError::NotEnabled | GrepError::Backfilling) => {
-            ApiResponseError::not_supported(GREP_INDEX_FEATURE, &error.to_string())
+            ApiResponseError::not_supported(FEATURE_QUERY_GREP, &error.to_string())
         }
         GrepError::Runtime(error) => ApiResponseError::runtime_for_namespace(namespace_id, error),
         error => ApiResponseError::new(status_for_core_error_code(code), code, &error.to_string()),

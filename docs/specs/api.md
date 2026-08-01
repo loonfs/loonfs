@@ -1683,7 +1683,8 @@ value is a complete absolute path, not a partial textual segment prefix. Its
 scope resolves to an inode under the namespace's name policy and filters by
 ancestry, so it requires the same canonical spelling and validation as every
 other path read. A missing data half answers `not_supported` with the
-`feature` field naming `grep.index`.
+`feature` field naming `query.grep`, the same key capability discovery
+advertises the serving half under.
 
 ### 6.13 `GET /metrics`
 
