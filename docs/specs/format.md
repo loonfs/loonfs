@@ -517,7 +517,9 @@ must be non-empty, must not contain `/` or any Unicode control character
 (general category `Cc`, which covers NUL, C0, and C1), must not be `.` or
 `..`, and must not exceed 255 UTF-8 bytes as stored. Names also satisfy a
 portability floor — the set every target filesystem can hold: a name must
-not be entirely whitespace, must not end with a space or a dot, and must not
+not contain any of the characters Windows reserves in a path component
+(`:`, `?`, `*`, `|`, `"`, `<`, `>`, `\`), must not be entirely whitespace, must
+not end with a space or a dot, and must not
 be a Windows reserved device name (`CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9`,
 `LPT1`-`LPT9`, compared case-insensitively and ignoring any extension).
 Name keys obey the same
