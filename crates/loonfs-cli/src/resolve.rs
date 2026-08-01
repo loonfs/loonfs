@@ -10,7 +10,6 @@ use loonfs::{FsAdmin, FsBackgroundWork, FsWriter, SharedObjectStore, TraceStoreK
 use loonfs_api::{ErrorCode, NamespaceId};
 use loonfs_client::{Client, ClientConfig};
 use loonfs_grep::GrepService;
-use std::sync::Arc;
 
 pub(crate) struct LoadedConfig {
     pub path: std::path::PathBuf,
@@ -142,11 +141,10 @@ impl EmbeddedTarget {
         let trace_store_kind = TraceStoreKind::from(store_config.kind());
         // One command drives all three handles from one runtime, so they
         // deliberately share one provider client.
-        let store: SharedObjectStore = Arc::new(
-            store_config
-                .configured_object_store()
-                .map_err(|err| CliError::invalid_config(format!("invalid store config: {err}")))?,
-        );
+        let store: SharedObjectStore = store_config
+            .configured_object_store()
+            .map_err(|err| CliError::invalid_config(format!("invalid store config: {err}")))?
+            .into_shared();
         let writer = FsWriter::builder_with_store(store.clone())
             .writer_id(writer_id.clone())
             // The server's policy: publishes past the WAL threshold schedule

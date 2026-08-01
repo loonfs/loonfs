@@ -188,7 +188,7 @@ pub async fn app(config: ServerConfig) -> Result<(Router, ServerLifecycle), Serv
         .direct_put_is_proven()
         .then(|| store.transfer_issuer())
         .flatten();
-    let store = Arc::new(store) as SharedObjectStore;
+    let store = store.into_shared();
     let (router, lifecycle, _state) =
         app_with_store_and_transfer_issuer(config, store, transfer_issuer).await?;
     Ok((router, lifecycle))

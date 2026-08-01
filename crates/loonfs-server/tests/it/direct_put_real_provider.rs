@@ -743,7 +743,8 @@ fn put_options(commit_id: &str) -> loonfs_client::PutFileOptions {
 async fn delete_everything_under_the_run_prefix(store_config: &StoreConfig) {
     let store = store_config
         .configured_object_store()
-        .expect("build a store for cleanup");
+        .expect("build a store for cleanup")
+        .into_shared();
     let keys = store.list_prefix("").await.expect("list the run prefix");
     for key in keys {
         store.delete(&key).await.expect("delete a run object");

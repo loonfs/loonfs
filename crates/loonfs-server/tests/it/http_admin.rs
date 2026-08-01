@@ -427,7 +427,8 @@ async fn http_checkpoint_manifest_consumption_is_strict_when_manifest_is_corrupt
     post_checkpoint(&server_url, namespace.as_str()).expect("checkpoint");
 
     let store = ConfiguredObjectStore::local_fs(&store_root, store_key_prefix.as_deref())
-        .expect("construct store");
+        .expect("construct store")
+        .into_shared();
     let root = loonfs::control::load_namespace_metadata_root_control(&store, &namespace)
         .await
         .expect("metadata root");
@@ -510,7 +511,8 @@ async fn http_admin_store_probe_reports_every_check_against_the_configured_store
         harness.store_root.as_ref().expect("local-fs test store"),
         harness.store_key_prefix.as_deref(),
     )
-    .expect("open the test store");
+    .expect("open the test store")
+    .into_shared();
     assert!(store
         .list_prefix("probe-runs/")
         .await
