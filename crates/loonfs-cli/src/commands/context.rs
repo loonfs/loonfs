@@ -2,9 +2,10 @@
 
 use super::output::CommandFailure;
 use crate::args::{CommandKind, TargetSelectorArgs};
+use crate::config::{ConfigLocation, ConfigSource};
 use crate::error::CliError;
 use crate::resolve::{load_cli_config, resolve_namespace, resolve_target_profile_from_config};
-use loonfs_api::{AbsolutePath, NamespaceId};
+use loonfs_api::{AbsolutePath, ChangeSeq, InodeId, NamespaceId};
 use loonfs_client::NamespacePath;
 use std::path::{Path, PathBuf};
 
@@ -187,6 +188,103 @@ pub(crate) fn render_target(namespace_id: &NamespaceId, absolute_path: &Absolute
     format!("{namespace_id}:{absolute_path}")
 }
 
+// --- printed recovery commands ---
+
+/// The flags a printed `loonfs undelete` has to spell so that pasting it into
+/// a later shell still reaches the filesystem this command ran against.
+///
+/// Every one of them names something the CLI would otherwise take from
+/// ambient state that drifts between the print and the paste: the namespace
+/// comes from a config value `loonfs use` rewrites, the profile from another
+/// the `profile default` command rewrites, and the config file itself from a
+/// flag or an environment variable that a later shell need not repeat. The
+/// hint is only worth printing if it survives all three, so the flags are
+/// built once per invocation and shared by every entry it prints.
+pub(crate) struct UndeleteHint {
+    /// Rendered and already shell-quoted, for example
+    /// `--namespace demo --profile prod`. Never empty: `--namespace` is
+    /// unconditional.
+    context_flags: String,
+}
+
+impl UndeleteHint {
+    pub(crate) fn new(
+        context: &CommandContext,
+        location: &ConfigLocation,
+        explicit_profile: bool,
+    ) -> Self {
+        let mut context_flags = format!(" --namespace {}", shell_quote(context.namespace.as_str()));
+        // A bare invocation resolves the config's default profile, which is
+        // exactly the profile this run used whenever `--profile` went
+        // unspelled; spelling it means the default may be some other profile,
+        // and then the hint has to say which one it meant.
+        if explicit_profile {
+            context_flags.push_str(&format!(
+                " --profile {}",
+                shell_quote(&context.profile_name)
+            ));
+        }
+        // The flag and the environment variable both name a file that a bare
+        // invocation would not find on its own — the flag because it is not
+        // spelled again, the variable because a later shell need not still
+        // export it. The default locations need no flag: they are what a bare
+        // invocation looks at.
+        if matches!(location.source, ConfigSource::Flag | ConfigSource::Env) {
+            context_flags.push_str(&format!(
+                " --config {}",
+                shell_quote(&location.path.to_string_lossy())
+            ));
+        }
+        Self { context_flags }
+    }
+
+    /// The complete `loonfs undelete` invocation that recovers one deletion:
+    /// where it should land, and the inode plus deletion sequence that
+    /// identify the exact deletion being recovered.
+    ///
+    /// `destination` is absent for a deletion that recorded no name, which
+    /// has none to offer.
+    pub(crate) fn command(
+        &self,
+        destination: Option<&str>,
+        inode_id: InodeId,
+        deleted_at: ChangeSeq,
+    ) -> String {
+        // The placeholder is deliberately left unquoted: pasted unedited, a
+        // shell rejects it instead of recovering the entry to a file
+        // literally named `<path>`.
+        let destination = destination.map_or_else(|| PATH_PLACEHOLDER.to_owned(), shell_quote);
+        format!(
+            "loonfs undelete {destination} --inode {inode_id} --deleted-at {}{}",
+            deleted_at.0, self.context_flags
+        )
+    }
+}
+
+/// Stands in for the destination of a deletion that recorded no name, which
+/// the caller has to supply before the command will run.
+const PATH_PLACEHOLDER: &str = "<path>";
+
+/// Quotes an argument for a POSIX shell, leaving it alone when it needs no
+/// quoting.
+///
+/// Names may hold spaces and quotes (they are display strings, not
+/// identifiers), and so may profile names and config paths, so a printed
+/// command that is meant to be pasted has to survive them. Single quotes take
+/// everything literally, which is why the one character they cannot hold — a
+/// single quote — is spliced in as an escaped one outside them.
+fn shell_quote(argument: &str) -> String {
+    const SAFE: &str = "@%+=:,./-_";
+    if !argument.is_empty()
+        && argument
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || SAFE.contains(character))
+    {
+        return argument.to_owned();
+    }
+    format!("'{}'", argument.replace('\'', r#"'\''"#))
+}
+
 pub(crate) fn fail(
     kind: CommandKind,
     profile: Option<String>,
@@ -203,7 +301,26 @@ pub(crate) fn fail(
 
 #[cfg(test)]
 mod tests {
-    use super::{destination_user_path, parse_user_path};
+    use super::{destination_user_path, parse_user_path, shell_quote};
+
+    #[test]
+    fn quoting_leaves_ordinary_paths_alone_and_survives_a_quote() {
+        // Quoting everything would make the common command harder to read,
+        // so an argument a shell would pass through untouched stays bare.
+        assert_eq!(shell_quote("/docs/report.txt"), "/docs/report.txt");
+        assert_eq!(shell_quote("prod-2"), "prod-2");
+
+        assert_eq!(
+            shell_quote("/docs/Quarterly Report.PDF"),
+            "'/docs/Quarterly Report.PDF'"
+        );
+        // A single quote is the one character single quotes cannot hold, so
+        // it closes them, contributes an escaped quote, and reopens them.
+        assert_eq!(shell_quote("/tom's notes"), r#"'/tom'\''s notes'"#);
+        // Empty is not "nothing to quote": bare, it would vanish as an
+        // argument entirely.
+        assert_eq!(shell_quote(""), "''");
+    }
 
     #[test]
     fn user_paths_keep_wire_strictness_except_directory_intent() {

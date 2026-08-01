@@ -446,7 +446,8 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             }
             lines.join("\n")
         }
-        CommandData::Trash(response) => {
+        CommandData::Trash(listing) => {
+            let response = &listing.response;
             let mut lines = vec![
                 format!(
                     "trash for {} (head seq {})",
@@ -454,24 +455,18 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
                 ),
                 "DELETED\tNAME\tINODE\tSEQ\tRECOVER".to_owned(),
             ];
-            for entry in &response.entries {
+            // The commands were built one per entry, in this order.
+            for (entry, recovery_command) in response.entries.iter().zip(&listing.recovery_commands)
+            {
                 let name = entry
                     .display_name
                     .as_ref()
                     .map(|name| name.as_str().to_owned())
                     .unwrap_or_else(|| "-".to_owned());
-                let destination = entry
-                    .display_name
-                    .as_ref()
-                    .map(|name| format!("/{name}"))
-                    .unwrap_or_else(|| "<path>".to_owned());
                 lines.push(format!(
-                    "{}\t{}\t{}\t{}\tloonfs undelete {} --inode {} --deleted-at {}",
+                    "{}\t{}\t{}\t{}\t{recovery_command}",
                     format_utc_ms(entry.deleted_at_ms),
                     name,
-                    entry.root_inode_id,
-                    entry.deleted_at_seq.0,
-                    destination,
                     entry.root_inode_id,
                     entry.deleted_at_seq.0,
                 ));
@@ -744,16 +739,16 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             target,
             committed_seq,
             commit_id,
-            inode_id,
+            recovery_command,
+            ..
         } => match output.kind {
             CommandKind::FilesystemPut => {
                 format!("stored {target} @ seq {committed_seq} (commit {commit_id})")
             }
-            CommandKind::FilesystemRm => match inode_id {
-                Some(inode_id) => format!(
+            CommandKind::FilesystemRm => match recovery_command {
+                Some(recovery_command) => format!(
                     "removed {target} @ seq {committed_seq} (commit {commit_id}); \
-                     recover with `loonfs undelete <path> --inode {inode_id} \
-                     --deleted-at {committed_seq}`"
+                     recover with `{recovery_command}`"
                 ),
                 None => format!("removed {target} @ seq {committed_seq} (commit {commit_id})"),
             },
