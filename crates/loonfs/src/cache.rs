@@ -5,7 +5,7 @@
 //! used; nothing here weakens read-after-write consistency.
 
 use crate::fs::{should_invalidate_after_result, ReadCore};
-use crate::{CommitResponse, CoreError, NamespaceId};
+use crate::{CommitResponse, CoreError, NamespaceId, RuntimeCacheConfig};
 use crate::{Result, RuntimeError};
 use loonfs_api::wire::control::HeadState;
 use loonfs_core::cache::{MetadataTableCacheStats, WalTailProjectionCacheStats};
@@ -290,6 +290,12 @@ impl ReadCore {
 
     pub(crate) fn control_cache_enabled(&self) -> bool {
         self.inner.config.runtime_cache.max_cached_namespaces > 0
+    }
+
+    /// The budgets every runtime cache sizes itself from, including the
+    /// publish side's retained tail projections.
+    pub(crate) fn runtime_cache_config(&self) -> &RuntimeCacheConfig {
+        &self.inner.config.runtime_cache
     }
 
     pub(crate) fn runtime_read_context(

@@ -22,6 +22,14 @@
 //! and the delete barrier run through one engine, under one session epoch,
 //! on one worker task draining one queue.
 //!
+//! That life is the namespace's, not a cache entry's, so what a publisher
+//! may hold is bounded rather than dropped: the session's epoch and fencing
+//! are a few dozen bytes nothing can rebuild, while the engine's WAL-tail
+//! projection is large and rebuildable from the store. The registry
+//! therefore keeps every publisher and bounds the projections across them,
+//! against the same budget the read-side projection cache spends
+//! (`max_cached_namespaces` and the two WAL-tail knobs beside it).
+//!
 //! Every writer owns one registry, and the direct
 //! [`FsWriter`](crate::FsWriter) mutation methods, the reference server,
 //! and any embedded host with many in-process writer agents all submit
@@ -54,14 +62,16 @@
 
 use crate::fs::{ReadCore, WriterBits};
 use crate::publish::{CommitCandidate, CommitRequest, PreparedContent};
-use crate::{CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, RuntimeError};
+use crate::{
+    CoreError, DeleteNamespaceOptions, DeleteNamespaceResponse, RuntimeCacheConfig, RuntimeError,
+};
 use futures::FutureExt;
 use loonfs_api::v0::CommitResponse as ApiCommitResponse;
 use loonfs_api::{CommitId, NamespaceId};
 use loonfs_core::commit::{CommitFingerprint, CommitHeadPublishError};
 // Publisher head-CAS races use the core-wide bounded contention retry limit.
 use loonfs_core::limits::CONTENTION_RETRY_LIMIT;
-use loonfs_core::publish::{NamespaceCommitEngine, SharedWriterSessionState};
+use loonfs_core::publish::{NamespaceCommitEngine, PublishTailWeight, SharedWriterSessionState};
 use std::collections::{HashMap, VecDeque};
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -128,6 +138,7 @@ struct RegistryShared {
 struct RegistryState {
     closed: bool,
     publishers: HashMap<NamespaceId, NamespacePublisher>,
+    projections: RetainedProjections,
 }
 
 impl RegistryShared {
@@ -141,8 +152,202 @@ impl RegistryShared {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn evict(&self, namespace_id: &NamespaceId) {
-        self.lock_state().publishers.remove(namespace_id);
+    fn evict(&self, namespace_id: &NamespaceId) -> RetainedProjectionTotals {
+        let mut state = self.lock_state();
+        state.publishers.remove(namespace_id);
+        state.projections.forget(namespace_id);
+        state.projections.totals()
+    }
+
+    /// Records what one namespace's publish left retained, then brings the
+    /// writer back under the shared projection budget.
+    ///
+    /// Victims are chosen least-recently-published first and lose their tail
+    /// projection only: never the publisher, never its engine identity,
+    /// never the writer session beside it. A victim whose engine is held —
+    /// a publication or delete is in flight — is skipped and stays
+    /// accounted, because that unit rebuilds and reports its own weight when
+    /// it finishes. Skipping therefore costs one sweep, not accounting
+    /// truth.
+    fn settle_projection(
+        &self,
+        namespace_id: &NamespaceId,
+        weight: Option<PublishTailWeight>,
+        budget: ProjectionBudget,
+    ) -> RetainedProjectionTotals {
+        let victims = {
+            let mut state = self.lock_state();
+            state.projections.record(namespace_id, weight);
+            let selected = state.projections.over_budget_victims(budget);
+            selected
+                .into_iter()
+                .map(|victim| {
+                    let publisher = state.publishers.get(&victim.namespace_id).cloned();
+                    (victim, publisher)
+                })
+                .collect::<Vec<_>>()
+        };
+        // Swept outside the registry lock: locks nest publisher-then-
+        // registry on the eviction path, never the other way around.
+        let dropped = victims
+            .into_iter()
+            .filter(|(_, publisher)| {
+                // No publisher means no engine, so nothing is retained under
+                // that namespace either way.
+                publisher
+                    .as_ref()
+                    .is_none_or(NamespacePublisher::invalidate_engine)
+            })
+            .map(|(victim, _)| victim)
+            .collect::<Vec<_>>();
+
+        let mut state = self.lock_state();
+        for victim in dropped {
+            state.projections.forget_recorded(&victim);
+        }
+        state.projections.totals()
+    }
+
+    /// Forgets one namespace's retained projection after something outside
+    /// the publish path dropped it.
+    fn forget_projection(&self, namespace_id: &NamespaceId) -> RetainedProjectionTotals {
+        let mut state = self.lock_state();
+        state.projections.forget(namespace_id);
+        state.projections.totals()
+    }
+}
+
+/// The aggregate ceiling on retained publish-tail projections: the same
+/// three knobs, read the same way, as the read-side projection cache.
+#[derive(Debug, Clone, Copy)]
+struct ProjectionBudget {
+    max_namespaces: usize,
+    max_rows: usize,
+    max_decoded_bytes: usize,
+}
+
+impl ProjectionBudget {
+    fn of(config: &RuntimeCacheConfig) -> Self {
+        Self {
+            max_namespaces: config.max_cached_namespaces,
+            max_rows: config.max_cached_wal_tail_projection_rows,
+            max_decoded_bytes: config.max_cached_wal_tail_projection_decoded_bytes,
+        }
+    }
+}
+
+/// The WAL-tail projections this writer's publishers retain, and what they
+/// weigh together.
+///
+/// The per-projection ceiling a publish already applies bounds one namespace;
+/// this bounds the writer, which is what a process publishing to thousands of
+/// namespaces actually holds.
+#[derive(Debug, Default)]
+struct RetainedProjections {
+    /// Least-recently-published first, one entry per namespace whose engine
+    /// retains a projection.
+    entries: VecDeque<RetainedProjection>,
+    rows: usize,
+    decoded_bytes: usize,
+    next_stamp: u64,
+}
+
+#[derive(Debug, Clone)]
+struct RetainedProjection {
+    namespace_id: NamespaceId,
+    weight: PublishTailWeight,
+    /// Distinguishes the projection a sweep selected from a newer one the
+    /// namespace published while that sweep ran outside the lock, so a
+    /// completed eviction never forgets a live projection.
+    stamp: u64,
+}
+
+/// What the writer retains right now, for the gauges and for tests.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct RetainedProjectionTotals {
+    projections: usize,
+    rows: usize,
+    decoded_bytes: usize,
+}
+
+impl RetainedProjections {
+    /// Records what one namespace retains after a publish; `None` is a
+    /// publish that kept nothing.
+    fn record(&mut self, namespace_id: &NamespaceId, weight: Option<PublishTailWeight>) {
+        self.forget(namespace_id);
+        let Some(weight) = weight else {
+            return;
+        };
+        self.next_stamp += 1;
+        self.rows = self.rows.saturating_add(weight.rows);
+        self.decoded_bytes = self.decoded_bytes.saturating_add(weight.decoded_bytes);
+        self.entries.push_back(RetainedProjection {
+            namespace_id: namespace_id.clone(),
+            weight,
+            stamp: self.next_stamp,
+        });
+    }
+
+    fn forget(&mut self, namespace_id: &NamespaceId) {
+        let index = self
+            .entries
+            .iter()
+            .position(|entry| entry.namespace_id == *namespace_id);
+        self.remove_entry(index);
+    }
+
+    /// Forgets exactly the projection an eviction dropped. A namespace that
+    /// published again while the sweep ran outside the lock carries a newer
+    /// stamp, so its live projection stays accounted.
+    fn forget_recorded(&mut self, recorded: &RetainedProjection) {
+        let index = self
+            .entries
+            .iter()
+            .position(|entry| entry.stamp == recorded.stamp);
+        self.remove_entry(index);
+    }
+
+    /// Drops one entry and its weight from the totals. At most one entry per
+    /// namespace exists, so callers locate it by whichever key they hold.
+    fn remove_entry(&mut self, index: Option<usize>) {
+        let Some(entry) = index.and_then(|index| self.entries.remove(index)) else {
+            return;
+        };
+        self.rows = self.rows.saturating_sub(entry.weight.rows);
+        self.decoded_bytes = self
+            .decoded_bytes
+            .saturating_sub(entry.weight.decoded_bytes);
+    }
+
+    /// The namespaces to drop, least-recently-published first, until what
+    /// remains fits the budget. Selection changes nothing: only an eviction
+    /// that actually took the engine does.
+    fn over_budget_victims(&self, budget: ProjectionBudget) -> Vec<RetainedProjection> {
+        let mut projections = self.entries.len();
+        let mut rows = self.rows;
+        let mut decoded_bytes = self.decoded_bytes;
+        let mut victims = Vec::new();
+        for entry in &self.entries {
+            if projections <= budget.max_namespaces
+                && rows <= budget.max_rows
+                && decoded_bytes <= budget.max_decoded_bytes
+            {
+                break;
+            }
+            projections = projections.saturating_sub(1);
+            rows = rows.saturating_sub(entry.weight.rows);
+            decoded_bytes = decoded_bytes.saturating_sub(entry.weight.decoded_bytes);
+            victims.push(entry.clone());
+        }
+        victims
+    }
+
+    fn totals(&self) -> RetainedProjectionTotals {
+        RetainedProjectionTotals {
+            projections: self.entries.len(),
+            rows: self.rows,
+            decoded_bytes: self.decoded_bytes,
+        }
     }
 }
 
@@ -163,6 +368,7 @@ impl PublisherRegistry {
                 state: Mutex::new(RegistryState {
                     closed: false,
                     publishers: HashMap::new(),
+                    projections: RetainedProjections::default(),
                 }),
                 panicked_units: AtomicUsize::new(0),
             }),
@@ -232,8 +438,14 @@ impl PublisherRegistry {
             .publishers
             .get(namespace_id)
             .cloned();
-        if let Some(publisher) = publisher {
-            publisher.invalidate_engine();
+        let Some(publisher) = publisher else {
+            return;
+        };
+        if publisher.invalidate_engine() {
+            let totals = self.shared.forget_projection(namespace_id);
+            self.read_core
+                .instruments()
+                .publisher_retained_projections(totals.projections, totals.decoded_bytes);
         }
     }
 
@@ -457,12 +669,42 @@ impl NamespacePublisher {
         self.lock_state().closed = true;
     }
 
-    fn invalidate_engine(&self) {
-        if let Ok(mut slot) = self.engine.try_lock() {
-            if let Some(engine) = slot.engine.as_mut() {
-                engine.invalidate();
-            }
+    /// Drops the engine's tail projection, reporting whether it took the
+    /// engine to do so. A `false` return means a publication or delete holds
+    /// the engine, and that unit's own settlement reports what it retains.
+    fn invalidate_engine(&self) -> bool {
+        let Ok(mut slot) = self.engine.try_lock() else {
+            return false;
+        };
+        if let Some(engine) = slot.engine.as_mut() {
+            engine.invalidate();
         }
+        true
+    }
+
+    /// Records what a publish left retained and sweeps the writer back under
+    /// the shared projection budget.
+    ///
+    /// Called while the publish still holds its engine, so the weight
+    /// recorded is the projection the engine actually kept: no concurrent
+    /// sweep can drop it in between and leave the ledger claiming one that
+    /// is gone. Taking the registry lock under a held engine is the one
+    /// place the nesting runs that way and it still cannot cycle, because a
+    /// sweep releases the registry lock before it reaches for an engine and
+    /// never waits for one.
+    fn settle_retained_projection(&self, weight: Option<PublishTailWeight>) {
+        let Some(shared) = self.shared.upgrade() else {
+            return;
+        };
+        let budget = ProjectionBudget::of(self.read_core.runtime_cache_config());
+        let totals = shared.settle_projection(&self.namespace_id, weight, budget);
+        self.report_retained_projections(totals);
+    }
+
+    fn report_retained_projections(&self, totals: RetainedProjectionTotals) {
+        self.read_core
+            .instruments()
+            .publisher_retained_projections(totals.projections, totals.decoded_bytes);
     }
 
     /// The path to `admit` is await-free: a submission future's first poll
@@ -775,17 +1017,19 @@ impl NamespacePublisher {
     ) -> Vec<CommitResult> {
         let mut slot = self.engine.lock().await;
         let engine = self.engine_for(&mut slot);
-        crate::fs::publish_batch_with_engine(
+        let results = crate::fs::publish_batch_with_engine(
             &self.read_core,
             writer,
             &self.namespace_id,
             engine,
             candidates,
         )
-        .await
-        .into_iter()
-        .map(|result| result.map_err(runtime_error_to_core))
-        .collect()
+        .await;
+        self.settle_retained_projection(engine.retained_tail_weight());
+        results
+            .into_iter()
+            .map(|result| result.map_err(runtime_error_to_core))
+            .collect()
     }
 
     /// The publisher's engine, built on first use. The namespace's
@@ -833,7 +1077,7 @@ impl NamespacePublisher {
                 // gets a fresh publisher whose publish fails on the durable
                 // tombstone.
                 if let Some(shared) = self.shared.upgrade() {
-                    shared.evict(&self.namespace_id);
+                    self.report_retained_projections(shared.evict(&self.namespace_id));
                 }
                 for waiter in waiters {
                     let _ = waiter.send(Ok(response.clone()));

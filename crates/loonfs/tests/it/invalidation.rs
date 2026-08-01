@@ -2,6 +2,7 @@
 //! instead of dropping them, and no cache lifecycle event — invalidation,
 //! LRU eviction, or running with caches disabled — erases writer fencing.
 
+use loonfs::metrics::{DefaultMetricsRecorder, MetricValue};
 use loonfs::{
     CreateNamespaceOptions, DeleteNamespaceOptions, FsWriter, NamespaceId, PutFileOptions,
     RuntimeCacheConfig, RuntimeError, SharedObjectStore, WriterFence,
@@ -28,6 +29,36 @@ async fn writer_with_cache(
         .build()
         .await
         .expect("build writer")
+}
+
+async fn writer_with_cache_and_metrics(
+    store: &SharedObjectStore,
+    writer_id: &str,
+    runtime_cache: RuntimeCacheConfig,
+    recorder: Arc<DefaultMetricsRecorder>,
+) -> FsWriter {
+    FsWriter::builder_with_store(store.clone())
+        .writer_id(writer_id)
+        .min_publish_interval_ms(0)
+        .runtime_cache(runtime_cache)
+        .metrics_recorder(recorder)
+        .build()
+        .await
+        .expect("build writer")
+}
+
+/// The WAL-tail projections the writer's namespace publishers retain, read
+/// off the gauge that reports them.
+fn retained_projections(recorder: &DefaultMetricsRecorder) -> i64 {
+    let snapshot = recorder.snapshot();
+    let entry = snapshot
+        .by_name("loonfs.publisher.retained_projections")
+        .next()
+        .expect("the publisher registers its retention gauges");
+    match entry.value {
+        MetricValue::Gauge(value) => value,
+        ref other => unreachable!("retention is reported as a gauge, found {other:?}"),
+    }
 }
 
 /// Asserts a terminal fencing refusal and hands back the fence it carries.
@@ -166,14 +197,15 @@ async fn fenced_session_cannot_delete_namespace() {
         .expect("live writer keeps publishing after the refused delete");
 }
 
-/// Fencing must also survive LRU eviction of the namespace's cache entry:
-/// the namespace's publisher owns the session and its engine, and no cache
-/// holds either. Before this fix, capacity pressure from touching other
-/// namespaces evicted the fenced engine, and the fresh engine's first
-/// publish silently re-acquired the epoch — the fenced writer resumed
-/// publishing and fenced the legitimate writer back.
+/// Fencing must survive the eviction that bounds retained publish state.
+/// A writer's publishers hold one WAL-tail projection per namespace, and the
+/// projection budget drops the least recently published of them; only the
+/// projection goes. The epoch this session acquired belongs to the session,
+/// which nothing evicts — before that split, capacity pressure took the
+/// engine whole, and the rebuilt engine's first publish silently re-acquired
+/// the epoch, fencing the legitimate writer back.
 #[tokio::test]
-async fn fenced_writer_stays_fenced_after_namespace_lru_eviction() {
+async fn fenced_writer_stays_fenced_after_its_tail_projection_is_evicted() {
     let temp_dir = tempdir().expect("tempdir");
     let ns_fence = NamespaceId::parse("fence").expect("valid namespace id");
     let ns_other = NamespaceId::parse("other").expect("valid namespace id");
@@ -183,11 +215,20 @@ async fn fenced_writer_stays_fenced_after_namespace_lru_eviction() {
     ));
     let store: SharedObjectStore = counting.clone();
 
-    let single_entry_cache = RuntimeCacheConfig {
+    // Room for one projection: publishing to either namespace evicts the
+    // other's.
+    let single_projection_cache = RuntimeCacheConfig {
         max_cached_namespaces: 1,
         ..RuntimeCacheConfig::default()
     };
-    let writer_a = writer_with_cache(&store, "writer-a", single_entry_cache).await;
+    let recorder = Arc::new(DefaultMetricsRecorder::new());
+    let writer_a = writer_with_cache_and_metrics(
+        &store,
+        "writer-a",
+        single_projection_cache,
+        recorder.clone(),
+    )
+    .await;
     writer_a
         .create_namespace(&ns_fence, CreateNamespaceOptions::default())
         .await
@@ -201,25 +242,44 @@ async fn fenced_writer_stays_fenced_after_namespace_lru_eviction() {
         .await
         .expect("writer a first put");
 
+    // Publishing to the other namespace pushes the first namespace's
+    // projection out of the budget. Its publisher, engine identity, and
+    // writer session stay behind.
+    writer_a
+        .put_file_bytes(&ns_other, "/spill.txt", b"s", PutFileOptions::default())
+        .await
+        .expect("writer a publishes to the other namespace");
+    assert_eq!(
+        retained_projections(&recorder),
+        1,
+        "the budget admits one namespace's projection at a time"
+    );
+
     let writer_b = writer(&store, "writer-b").await;
     writer_b
         .put_file_bytes(&ns_fence, "/b1.txt", b"b", PutFileOptions::default())
         .await
         .expect("writer b takes over the epoch");
 
-    expect_writer_fenced(
+    // The rebuilt projection publishes under the epoch the session still
+    // holds, so the takeover surfaces as fencing instead of a silent
+    // re-acquisition.
+    let fence = expect_writer_fenced(
         writer_a
             .put_file_bytes(&ns_fence, "/a2.txt", b"a", PutFileOptions::default())
             .await,
         "superseded writer surfaces fencing",
     );
+    let head_after_fencing = head_state(&store, &ns_fence).await;
+    assert_eq!(fence.active_epoch, head_after_fencing.writer_epoch);
+    assert_eq!(fence.active_writer.as_deref(), Some("writer-b"));
 
-    // Publishing to the other namespace evicts the fenced namespace's cache
-    // entry (capacity one), commit engine included.
+    // More budget pressure, now against a publisher whose session is fenced:
+    // fencing is session state, so no eviction can reach it.
     writer_a
-        .put_file_bytes(&ns_other, "/spill.txt", b"s", PutFileOptions::default())
+        .put_file_bytes(&ns_other, "/spill2.txt", b"s", PutFileOptions::default())
         .await
-        .expect("writer a publishes to the other namespace");
+        .expect("writer a keeps publishing to the other namespace");
 
     let head_cas_after_fencing = counting.count(OperationClass::CompareAndSwap);
     expect_writer_fenced(
@@ -233,6 +293,9 @@ async fn fenced_writer_stays_fenced_after_namespace_lru_eviction() {
         head_cas_after_fencing,
         "a fenced session must not touch the fenced namespace's head"
     );
+    let head = head_state(&store, &ns_fence).await;
+    assert_eq!(head.state, NamespaceState::Active);
+    assert_eq!(head.writer_epoch, head_after_fencing.writer_epoch);
     writer_b
         .put_file_bytes(&ns_fence, "/b2.txt", b"b", PutFileOptions::default())
         .await

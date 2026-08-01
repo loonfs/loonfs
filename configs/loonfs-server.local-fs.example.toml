@@ -51,6 +51,12 @@ writer_id = "loonfs-server-local"
 # Clients gate on `core.uploads.direct_put` in the capability document.
 
 # Optional runtime cache overrides; omitted fields keep the runtime defaults.
+# `max_cached_namespaces` bounds every cache counted in entries: head anchors,
+# read-side WAL-tail projections, and the WAL-tail projections the writer's
+# namespace publishers retain. The two budgets under it bound those
+# projections' size, counted once for the read side and once for the publish
+# side. What a writer keeps per namespace it has mutated — the writer session
+# and its publisher, a few dozen bytes — is not bounded by any of them.
 #[runtime_cache]
 #max_cached_namespaces = 64
 #max_cached_wal_tail_projection_rows = 1000000

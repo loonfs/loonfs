@@ -149,7 +149,7 @@ pub mod publish {
         WalTailPolicy, WriterSessionState,
     };
     pub use crate::path::write::{CommitRequest, FilesystemOperation};
-    pub use crate::protocol::PublishTailOptions;
+    pub use crate::protocol::{PublishTailOptions, PublishTailWeight};
     pub use crate::storage::content_admission::PreparedContent;
 }
 

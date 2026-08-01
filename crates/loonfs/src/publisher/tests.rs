@@ -8,7 +8,7 @@ use crate::config::ReadConfig;
 use crate::content_tokens::ContentTokenError;
 use crate::fs::WriterIdentity;
 use crate::maintenance_runner::MaintenanceRunner;
-use crate::metrics::RuntimeInstruments;
+use crate::metrics::{DefaultMetricsRecorder, MetricValue, RuntimeInstruments};
 use crate::publish::{ContentPreparationError, FilesystemOperation};
 use crate::{
     BeginUploadRequest, CreateNamespaceOptions, ErrorCode, RuntimeCacheConfig,
@@ -247,6 +247,77 @@ async fn test_writer_with_interval(
         .build()
         .await
         .expect("build writer")
+}
+
+async fn test_writer_with_cache(
+    store: SharedStore,
+    runtime_cache: RuntimeCacheConfig,
+    recorder: Arc<DefaultMetricsRecorder>,
+) -> crate::FsWriter {
+    crate::FsWriter::builder_with_store(store)
+        .writer_id("writer-a")
+        .min_publish_interval_ms(0)
+        .runtime_cache(runtime_cache)
+        .metrics_recorder(recorder)
+        .trace_mode(TraceMode::Remote)
+        .trace_store_kind(TraceStoreKind::LocalFs)
+        .build()
+        .await
+        .expect("build writer")
+}
+
+fn gauge(recorder: &DefaultMetricsRecorder, name: &str) -> i64 {
+    let snapshot = recorder.snapshot();
+    let entry = snapshot
+        .by_name(name)
+        .next()
+        .unwrap_or_else(|| panic!("no `{name}` gauge registered"));
+    match entry.value {
+        MetricValue::Gauge(value) => value,
+        ref other => panic!("expected a gauge, found {other:?}"),
+    }
+}
+
+fn retained_projections(registry: &PublisherRegistry) -> RetainedProjectionTotals {
+    registry.shared.lock_state().projections.totals()
+}
+
+/// The namespaces whose projections the registry still holds, least
+/// recently published first.
+fn retained_namespaces(registry: &PublisherRegistry) -> Vec<NamespaceId> {
+    registry
+        .shared
+        .lock_state()
+        .projections
+        .entries
+        .iter()
+        .map(|entry| entry.namespace_id.clone())
+        .collect()
+}
+
+/// Bootstraps `namespaces` under `writer` and publishes one directory into
+/// each, in order, so the registry's retention order is the namespace order.
+async fn publish_once_into_each(writer: &crate::FsWriter, namespaces: &[NamespaceId]) {
+    let registry = writer.publisher();
+    for namespace_id in namespaces {
+        writer
+            .create_namespace(namespace_id, CreateNamespaceOptions::default())
+            .await
+            .expect("bootstrap");
+        registry
+            .submit_commit(
+                namespace_id.clone(),
+                create_directory_request("seed", "docs"),
+            )
+            .await
+            .expect("commit");
+    }
+}
+
+fn test_namespaces(count: usize) -> Vec<NamespaceId> {
+    (0..count)
+        .map(|index| NamespaceId::parse(format!("ns-{index:02}")).expect("valid namespace id"))
+        .collect()
 }
 
 /// Bootstraps a namespace under the identity the standalone publisher will
@@ -1491,4 +1562,273 @@ async fn delete_queued_mid_publish_waits_behind_admitted_work() {
     assert_eq!(delete_response.head_seq, ChangeSeq(2));
     registry.close_admission();
     registry.drain().await.expect("drain settles both units");
+}
+
+/// Retained publish-tail projections are bounded across namespaces, not only
+/// one at a time: a writer that publishes to far more namespaces than the
+/// budget admits keeps a projection for the most recently published ones and
+/// nothing for the rest. The publishers stay — each one carries the writer
+/// session that nothing may evict — but they carry no tail.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retained_tail_projections_stay_within_the_namespace_count_cap() {
+    const NAMESPACES: usize = 12;
+    const RETAINED: usize = 3;
+
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let recorder = Arc::new(DefaultMetricsRecorder::new());
+    let writer = test_writer_with_cache(
+        store,
+        RuntimeCacheConfig {
+            max_cached_namespaces: RETAINED,
+            ..RuntimeCacheConfig::default()
+        },
+        recorder.clone(),
+    )
+    .await;
+    let registry = writer.publisher();
+    let namespaces = test_namespaces(NAMESPACES);
+
+    publish_once_into_each(&writer, &namespaces).await;
+
+    let totals = retained_projections(&registry);
+    assert_eq!(
+        totals.projections, RETAINED,
+        "the count cap bounds retained projections across namespaces"
+    );
+    assert!(
+        totals.rows > 0 && totals.decoded_bytes > 0,
+        "the surviving projections must be real ones: {totals:?}"
+    );
+    assert_eq!(
+        retained_namespaces(&registry),
+        namespaces[NAMESPACES - RETAINED..].to_vec(),
+        "eviction takes the least recently published namespaces first"
+    );
+    assert_eq!(
+        registry.shared.lock_state().publishers.len(),
+        NAMESPACES,
+        "bounding the projections must not evict a publisher or its session"
+    );
+
+    assert_eq!(
+        gauge(&recorder, "loonfs.publisher.retained_projections"),
+        i64::try_from(RETAINED).expect("small count"),
+        "the gauge reports what the registry retains"
+    );
+    assert_eq!(
+        gauge(&recorder, "loonfs.publisher.retained_projection_bytes"),
+        i64::try_from(totals.decoded_bytes).expect("small byte total"),
+    );
+
+    registry.close_admission();
+    registry
+        .drain()
+        .await
+        .expect("drain settles every publisher");
+}
+
+/// The row and decoded-byte budgets bound the publish side in aggregate, the
+/// same meaning the read-side projection cache gives them. A projection that
+/// fits the per-projection ceiling on its own is still evicted once the
+/// namespaces together outgrow the budget.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retained_tail_projections_stay_within_the_shared_byte_budget() {
+    const NAMESPACES: usize = 8;
+    const ADMITTED: usize = 2;
+
+    let budget_bytes = one_projection_decoded_bytes().await * ADMITTED;
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let recorder = Arc::new(DefaultMetricsRecorder::new());
+    let writer = test_writer_with_cache(
+        store,
+        RuntimeCacheConfig {
+            max_cached_wal_tail_projection_decoded_bytes: budget_bytes,
+            ..RuntimeCacheConfig::default()
+        },
+        recorder.clone(),
+    )
+    .await;
+    let registry = writer.publisher();
+    let namespaces = test_namespaces(NAMESPACES);
+
+    publish_once_into_each(&writer, &namespaces).await;
+
+    let totals = retained_projections(&registry);
+    assert!(
+        totals.decoded_bytes <= budget_bytes,
+        "retained projections must fit the shared byte budget of {budget_bytes}: {totals:?}"
+    );
+    assert!(
+        (1..=ADMITTED).contains(&totals.projections),
+        "the budget admits {ADMITTED} projections of this size, no more: {totals:?}"
+    );
+    assert_eq!(
+        gauge(&recorder, "loonfs.publisher.retained_projection_bytes"),
+        i64::try_from(totals.decoded_bytes).expect("small byte total"),
+    );
+
+    registry.close_admission();
+    registry
+        .drain()
+        .await
+        .expect("drain settles every publisher");
+}
+
+/// What one namespace's tail projection weighs after a single publish, so a
+/// budget can be stated in whole projections instead of a guessed constant.
+async fn one_projection_decoded_bytes() -> usize {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let writer = test_writer(store).await;
+    publish_once_into_each(&writer, &test_namespaces(1)).await;
+    let totals = retained_projections(&writer.publisher());
+    assert_eq!(totals.projections, 1, "one publish retains one projection");
+    totals.decoded_bytes
+}
+
+/// Caches off is the one mode that keeps nothing: every publish drops its
+/// projection where it was built, so the registry has none to account for
+/// and none to evict.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disabled_runtime_caches_retain_no_tail_projections() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let recorder = Arc::new(DefaultMetricsRecorder::new());
+    let writer =
+        test_writer_with_cache(store, RuntimeCacheConfig::disabled(), recorder.clone()).await;
+    let registry = writer.publisher();
+    let namespaces = test_namespaces(3);
+
+    publish_once_into_each(&writer, &namespaces).await;
+
+    assert_eq!(
+        retained_projections(&registry),
+        RetainedProjectionTotals::default(),
+        "a diagnostic run retains nothing to bound"
+    );
+    assert_eq!(gauge(&recorder, "loonfs.publisher.retained_projections"), 0);
+    assert_eq!(
+        registry.shared.lock_state().publishers.len(),
+        namespaces.len(),
+        "publishers and their sessions survive caches being off"
+    );
+
+    registry.close_admission();
+    registry
+        .drain()
+        .await
+        .expect("drain settles every publisher");
+}
+
+/// A landed delete takes its namespace's projection out of the accounting
+/// with the publisher itself: nothing stays charged to an id that can never
+/// rebind.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_landed_delete_forgets_the_namespace_projection() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let recorder = Arc::new(DefaultMetricsRecorder::new());
+    let writer =
+        test_writer_with_cache(store, RuntimeCacheConfig::default(), recorder.clone()).await;
+    let registry = writer.publisher();
+    let namespaces = test_namespaces(2);
+
+    publish_once_into_each(&writer, &namespaces).await;
+    assert_eq!(retained_projections(&registry).projections, 2);
+
+    registry
+        .submit_delete(namespaces[0].clone(), DeleteNamespaceOptions::default())
+        .await
+        .expect("delete namespace");
+
+    assert_eq!(
+        retained_namespaces(&registry),
+        vec![namespaces[1].clone()],
+        "the deleted namespace leaves no accounting behind"
+    );
+    assert_eq!(gauge(&recorder, "loonfs.publisher.retained_projections"), 1);
+
+    registry.close_admission();
+    registry
+        .drain()
+        .await
+        .expect("drain settles every publisher");
+}
+
+/// A namespace that is publishing keeps its engine, so a sweep skips it —
+/// and must keep it accounted rather than record an eviction that never
+/// happened. The next publish sweeps again and the skipped namespace loses
+/// its projection then.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_skipped_eviction_leaves_the_namespace_accounted() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedStore;
+    let recorder = Arc::new(DefaultMetricsRecorder::new());
+    let writer = test_writer_with_cache(
+        store,
+        RuntimeCacheConfig {
+            max_cached_namespaces: 1,
+            ..RuntimeCacheConfig::default()
+        },
+        recorder.clone(),
+    )
+    .await;
+    let registry = writer.publisher();
+    let namespaces = test_namespaces(2);
+    let (busy, other) = (namespaces[0].clone(), namespaces[1].clone());
+
+    publish_once_into_each(&writer, &namespaces[..1]).await;
+    assert_eq!(retained_namespaces(&registry), vec![busy.clone()]);
+
+    // Standing in for a publication in flight: the engine is held, so the
+    // sweep the next publish runs cannot take it.
+    let busy_publisher = registry
+        .shared
+        .lock_state()
+        .publishers
+        .get(&busy)
+        .expect("the published namespace has a publisher")
+        .clone();
+    let held_engine = busy_publisher.engine.lock().await;
+
+    writer
+        .create_namespace(&other, CreateNamespaceOptions::default())
+        .await
+        .expect("bootstrap");
+    registry
+        .submit_commit(other.clone(), create_directory_request("seed", "docs"))
+        .await
+        .expect("commit while the other engine is held");
+
+    let skipped = retained_projections(&registry);
+    assert_eq!(
+        retained_namespaces(&registry),
+        vec![busy.clone(), other.clone()],
+        "a skipped eviction must not be recorded as one"
+    );
+    assert_eq!(
+        gauge(&recorder, "loonfs.publisher.retained_projections"),
+        i64::try_from(skipped.projections).expect("small count"),
+        "the gauge reports the overshoot rather than hiding it"
+    );
+
+    drop(held_engine);
+    registry
+        .submit_commit(other.clone(), create_directory_request("second", "more"))
+        .await
+        .expect("commit once the engine is free");
+
+    assert_eq!(
+        retained_namespaces(&registry),
+        vec![other],
+        "the next sweep evicts what the previous one skipped"
+    );
+
+    registry.close_admission();
+    registry
+        .drain()
+        .await
+        .expect("drain settles every publisher");
 }

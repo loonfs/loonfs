@@ -129,6 +129,22 @@ impl RuntimeInstruments {
             .set(i64::try_from(queue_depth).unwrap_or(i64::MAX));
     }
 
+    /// Reports the WAL-tail projections this writer retains across its
+    /// namespace publishers, after one publish or eviction settled them.
+    pub(crate) fn publisher_retained_projections(&self, projections: usize, decoded_bytes: usize) {
+        let Some(installed) = &self.installed else {
+            return;
+        };
+        installed
+            .publisher
+            .retained_projections
+            .set(i64::try_from(projections).unwrap_or(i64::MAX));
+        installed
+            .publisher
+            .retained_projection_bytes
+            .set(i64::try_from(decoded_bytes).unwrap_or(i64::MAX));
+    }
+
     /// Reports one batch taken for publication.
     pub(crate) fn publisher_batch(&self, batch_size: usize) {
         let Some(installed) = &self.installed else {
@@ -396,6 +412,8 @@ struct PublisherInstruments {
     batches: Arc<dyn CounterHandle>,
     batch_size: Arc<dyn HistogramHandle>,
     queue_depth: Arc<dyn GaugeHandle>,
+    retained_projections: Arc<dyn GaugeHandle>,
+    retained_projection_bytes: Arc<dyn GaugeHandle>,
     published_ok: Arc<dyn CounterHandle>,
     published_error: Arc<dyn CounterHandle>,
 }
@@ -427,6 +445,18 @@ impl PublisherInstruments {
             queue_depth: recorder.register_gauge(
                 "loonfs.publisher.queue_depth",
                 "Candidates queued at the namespace publisher that last admitted or took work",
+                &[],
+            ),
+            // Totals, not samples: these are what the writer holds across
+            // every namespace it has published to.
+            retained_projections: recorder.register_gauge(
+                "loonfs.publisher.retained_projections",
+                "WAL-tail projections this writer's namespace publishers retain",
+                &[],
+            ),
+            retained_projection_bytes: recorder.register_gauge(
+                "loonfs.publisher.retained_projection_bytes",
+                "Decoded bytes held by the retained WAL-tail projections",
                 &[],
             ),
             published_ok: publishes("ok"),
