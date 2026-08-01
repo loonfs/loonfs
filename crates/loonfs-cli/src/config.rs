@@ -186,7 +186,13 @@ impl ProfileConfig {
 /// message shape.
 fn profile_store_error(profile_name: &str, error: &StoreConfigError) -> CliError {
     match error {
-        StoreConfigError::MissingField { field } => {
+        // A missing credential reports as a missing field here, without the
+        // shared error's environment hint: this loader does not consult the
+        // environment. A profile stores the credentials it was created
+        // with, and `profile create`/`update` is where the environment is
+        // read.
+        StoreConfigError::MissingField { field }
+        | StoreConfigError::MissingCredential { field, .. } => {
             CliError::invalid_config(format!("missing `{profile_name}.{field}`"))
         }
         StoreConfigError::InvalidField { field, reason } => {

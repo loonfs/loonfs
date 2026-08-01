@@ -15,11 +15,31 @@ use http::Uri;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+/// Environment variable the S3-compatible providers read their access-key id
+/// from when the config file leaves it out.
+pub const ACCESS_KEY_ID_ENV: &str = "AWS_ACCESS_KEY_ID";
+/// Environment variable the S3-compatible providers read their secret access
+/// key from when the config file leaves it out.
+pub const SECRET_ACCESS_KEY_ENV: &str = "AWS_SECRET_ACCESS_KEY";
+/// Environment variable a temporary AWS credential's session token comes
+/// from when the config file leaves it out.
+pub const SESSION_TOKEN_ENV: &str = "AWS_SESSION_TOKEN";
+
 /// Provider selection plus credentials, as written in config files.
 ///
 /// Serialization is transparent for secret fields and therefore writes the
 /// real credentials; only serialize a [`StoreConfig::redacted`] copy into
 /// display output.
+///
+/// # Credential precedence
+///
+/// The S3-compatible credential fields may be left out of the file and
+/// supplied through the standard environment instead — see
+/// [`StoreConfig::apply_env_credentials`]. A non-blank value in the file
+/// always wins; blank environment values are ignored. Loading a config is
+/// what decides whether that fallback applies, so each caller says for
+/// itself: the server's loader applies it, the CLI's profile loader does not
+/// (a profile stores what it was created with).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum StoreConfig {
@@ -41,8 +61,14 @@ pub enum StoreConfig {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         endpoint_url: Option<String>,
         /// Access-key id used for provider requests and direct-upload signing.
+        /// Absent here means `AWS_ACCESS_KEY_ID`, for loaders that apply the
+        /// environment fallback.
+        #[serde(default)]
         access_key_id: SecretString,
         /// Secret access key used for provider requests and direct-upload signing.
+        /// Absent here means `AWS_SECRET_ACCESS_KEY`, for loaders that apply
+        /// the environment fallback.
+        #[serde(default)]
         secret_access_key: SecretString,
         /// Temporary credential token, or `None` for long-lived credentials.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -62,9 +88,14 @@ pub enum StoreConfig {
         account_id: String,
         /// Account-level R2 S3 endpoint used with path-style bucket addressing.
         endpoint_url: String,
-        /// S3-compatible access-key id used for requests and direct-upload signing.
+        /// S3-compatible access-key id used for requests and direct-upload
+        /// signing. R2 speaks the S3 API, so an absent value here means
+        /// `AWS_ACCESS_KEY_ID` too.
+        #[serde(default)]
         access_key_id: SecretString,
         /// S3-compatible secret used for requests and direct-upload signing.
+        /// Absent here means `AWS_SECRET_ACCESS_KEY`.
+        #[serde(default)]
         secret_access_key: SecretString,
         /// Logical prefix applied inside the bucket, or `None` to expose its root.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -109,6 +140,15 @@ pub enum StoreConfigError {
         /// `store.`-rooted path suitable for direct configuration diagnostics.
         field: &'static str,
     },
+    /// Reports a required credential absent from the file and from the
+    /// environment variable that can stand in for it.
+    #[error("missing `{field}`; set it in the config or export `{env}`")]
+    MissingCredential {
+        /// `store.`-rooted path suitable for direct configuration diagnostics.
+        field: &'static str,
+        /// Standard environment variable this credential also reads from.
+        env: &'static str,
+    },
     /// Reports a present field whose value violates its provider-specific contract.
     #[error("invalid `{field}`: {reason}")]
     InvalidField {
@@ -124,6 +164,7 @@ impl StoreConfigError {
     pub fn field(&self) -> &'static str {
         match self {
             StoreConfigError::MissingField { field }
+            | StoreConfigError::MissingCredential { field, .. }
             | StoreConfigError::InvalidField { field, .. } => field,
         }
     }
@@ -238,6 +279,50 @@ impl StoreConfig {
         }
     }
 
+    /// Fills blank S3-compatible credential fields from the standard
+    /// environment variables, so a config file need not carry secrets at
+    /// all.
+    ///
+    /// A non-blank value in the file always wins, and a blank environment
+    /// value is ignored rather than stored and later rejected. Providers
+    /// with no standard variable of their own — local filesystem, GCS,
+    /// Azure — are untouched: inventing a name for them would be a guess.
+    ///
+    /// Call this after decoding and before [`Self::validate`], so a config
+    /// that relies on the environment passes validation and one that does
+    /// not is reported against the field it actually lacks.
+    pub fn apply_env_credentials(&mut self) {
+        self.apply_env_credentials_from(|name| std::env::var(name).ok());
+    }
+
+    fn apply_env_credentials_from(&mut self, lookup: impl Fn(&str) -> Option<String>) {
+        match self {
+            StoreConfig::AwsS3 {
+                access_key_id,
+                secret_access_key,
+                session_token,
+                ..
+            } => {
+                fill_secret(access_key_id, &lookup, ACCESS_KEY_ID_ENV);
+                fill_secret(secret_access_key, &lookup, SECRET_ACCESS_KEY_ENV);
+                if session_token.is_none() {
+                    *session_token = non_blank(lookup(SESSION_TOKEN_ENV)).map(SecretString::new);
+                }
+            }
+            StoreConfig::CloudflareR2 {
+                access_key_id,
+                secret_access_key,
+                ..
+            } => {
+                fill_secret(access_key_id, &lookup, ACCESS_KEY_ID_ENV);
+                fill_secret(secret_access_key, &lookup, SECRET_ACCESS_KEY_ENV);
+            }
+            StoreConfig::LocalFs { .. }
+            | StoreConfig::GcpGcs { .. }
+            | StoreConfig::AzureAbs { .. } => {}
+        }
+    }
+
     /// Checks required fields and URL shapes, reporting `store.`-rooted field
     /// paths.
     pub fn validate(&self) -> Result<(), StoreConfigError> {
@@ -255,8 +340,16 @@ impl StoreConfig {
             } => {
                 require_non_empty("store.bucket", bucket)?;
                 require_non_empty("store.region", region)?;
-                require_non_empty("store.access_key_id", access_key_id.expose())?;
-                require_non_empty("store.secret_access_key", secret_access_key.expose())?;
+                require_credential(
+                    "store.access_key_id",
+                    ACCESS_KEY_ID_ENV,
+                    access_key_id.expose(),
+                )?;
+                require_credential(
+                    "store.secret_access_key",
+                    SECRET_ACCESS_KEY_ENV,
+                    secret_access_key.expose(),
+                )?;
                 if let Some(url) = endpoint_url {
                     validate_absolute_http_url("store.endpoint_url", url)?;
                 }
@@ -271,8 +364,16 @@ impl StoreConfig {
             } => {
                 require_non_empty("store.bucket", bucket)?;
                 require_non_empty("store.account_id", account_id)?;
-                require_non_empty("store.access_key_id", access_key_id.expose())?;
-                require_non_empty("store.secret_access_key", secret_access_key.expose())?;
+                require_credential(
+                    "store.access_key_id",
+                    ACCESS_KEY_ID_ENV,
+                    access_key_id.expose(),
+                )?;
+                require_credential(
+                    "store.secret_access_key",
+                    SECRET_ACCESS_KEY_ENV,
+                    secret_access_key.expose(),
+                )?;
                 validate_absolute_http_url("store.endpoint_url", endpoint_url)?;
             }
             StoreConfig::GcpGcs {
@@ -341,6 +442,38 @@ fn require_non_empty(field: &'static str, value: &str) -> Result<(), StoreConfig
     }
 }
 
+/// Like [`require_non_empty`], for a field the standard environment can also
+/// supply; the failure names both places.
+fn require_credential(
+    field: &'static str,
+    env: &'static str,
+    value: &str,
+) -> Result<(), StoreConfigError> {
+    if value.trim().is_empty() {
+        Err(StoreConfigError::MissingCredential { field, env })
+    } else {
+        Ok(())
+    }
+}
+
+/// Replaces a blank secret with the environment's value, if it has one.
+fn fill_secret(
+    secret: &mut SecretString,
+    lookup: &impl Fn(&str) -> Option<String>,
+    env: &'static str,
+) {
+    if !secret.expose().trim().is_empty() {
+        return;
+    }
+    if let Some(value) = non_blank(lookup(env)) {
+        *secret = SecretString::new(value);
+    }
+}
+
+fn non_blank(value: Option<String>) -> Option<String> {
+    value.filter(|value| !value.trim().is_empty())
+}
+
 fn validate_absolute_http_url(field: &'static str, value: &str) -> Result<(), StoreConfigError> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -403,6 +536,7 @@ mod tests {
     // Config tests use panic in unexpected match arms for precise diagnostics.
 
     use super::{StoreConfig, StoreConfigError};
+    use crate::secret::SecretString;
     use crate::ConfiguredObjectStoreKind;
     use std::path::{Path, PathBuf};
 
@@ -530,6 +664,137 @@ service_account_key_path = "/tmp/service-account.json"
         assert!(!r2_custom.direct_put_is_proven());
         // GCS has no presigner at all, so it never reaches the question.
         assert!(!gcs.direct_put_is_proven());
+    }
+
+    #[test]
+    fn credentials_left_out_of_the_file_come_from_the_environment() {
+        let environment = |name: &str| match name {
+            "AWS_ACCESS_KEY_ID" => Some("env-access".to_owned()),
+            "AWS_SECRET_ACCESS_KEY" => Some("env-secret".to_owned()),
+            "AWS_SESSION_TOKEN" => Some("env-session".to_owned()),
+            _ => None,
+        };
+
+        // An S3 store may name no credentials at all.
+        let mut aws = parse(
+            r#"
+kind = "aws-s3"
+bucket = "bucket"
+region = "us-east-1"
+"#,
+        );
+        aws.apply_env_credentials_from(environment);
+        aws.validate().expect("the environment completed the store");
+        match &aws {
+            StoreConfig::AwsS3 {
+                access_key_id,
+                secret_access_key,
+                session_token,
+                ..
+            } => {
+                assert_eq!(access_key_id.expose(), "env-access");
+                assert_eq!(secret_access_key.expose(), "env-secret");
+                assert_eq!(
+                    session_token.as_ref().map(SecretString::expose),
+                    Some("env-session")
+                );
+            }
+            other => panic!("expected an aws-s3 store, got {other:?}"),
+        }
+
+        // R2 reads the same S3-compatible variables.
+        let mut r2 = parse(
+            r#"
+kind = "cloudflare-r2"
+bucket = "bucket"
+account_id = "account"
+endpoint_url = "https://account.r2.cloudflarestorage.com"
+"#,
+        );
+        r2.apply_env_credentials_from(environment);
+        r2.validate().expect("the environment completed the store");
+
+        // A value in the file wins, and a blank environment value is ignored.
+        let mut explicit = parse(
+            r#"
+kind = "aws-s3"
+bucket = "bucket"
+region = "us-east-1"
+access_key_id = "file-access"
+secret_access_key = "file-secret"
+"#,
+        );
+        explicit.apply_env_credentials_from(environment);
+        let blank = |_: &str| Some("   ".to_owned());
+        let mut unfilled = parse(
+            r#"
+kind = "aws-s3"
+bucket = "bucket"
+region = "us-east-1"
+"#,
+        );
+        unfilled.apply_env_credentials_from(blank);
+        match (&explicit, &unfilled) {
+            (
+                StoreConfig::AwsS3 {
+                    access_key_id,
+                    session_token,
+                    ..
+                },
+                StoreConfig::AwsS3 {
+                    access_key_id: unfilled_key,
+                    session_token: unfilled_token,
+                    ..
+                },
+            ) => {
+                assert_eq!(access_key_id.expose(), "file-access");
+                assert_eq!(
+                    session_token.as_ref().map(SecretString::expose),
+                    Some("env-session"),
+                    "an absent optional field still takes the environment"
+                );
+                assert!(unfilled_key.expose().is_empty());
+                assert!(unfilled_token.is_none());
+            }
+            other => panic!("expected two aws-s3 stores, got {other:?}"),
+        }
+
+        // Providers with no standard variable are untouched.
+        let mut gcs = parse(
+            r#"
+kind = "gcp-gcs"
+bucket = "bucket"
+service_account_key_path = "/tmp/service-account.json"
+"#,
+        );
+        let before = gcs.clone();
+        gcs.apply_env_credentials_from(environment);
+        assert_eq!(gcs, before);
+    }
+
+    #[test]
+    fn a_credential_missing_everywhere_names_its_environment_variable() {
+        let store = parse(
+            r#"
+kind = "aws-s3"
+bucket = "bucket"
+region = "us-east-1"
+secret_access_key = "secret"
+"#,
+        );
+
+        let error = store.validate().expect_err("no access key anywhere");
+        assert_eq!(
+            error,
+            StoreConfigError::MissingCredential {
+                field: "store.access_key_id",
+                env: "AWS_ACCESS_KEY_ID",
+            }
+        );
+        assert_eq!(
+            error.to_string(),
+            "missing `store.access_key_id`; set it in the config or export `AWS_ACCESS_KEY_ID`"
+        );
     }
 
     #[test]

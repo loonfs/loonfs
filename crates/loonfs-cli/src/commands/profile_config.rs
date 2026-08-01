@@ -5,7 +5,10 @@ use crate::args::{InitArgs, ProfileCreateArgs, ProfileUpdateArgs, RuntimeBehavio
 use crate::config::{ProfileConfig, StoreConfig};
 use crate::error::CliError;
 use crate::prompt;
-use loonfs_objectstore::{ConfiguredObjectStoreKind, SecretString};
+use loonfs_objectstore::{
+    ConfiguredObjectStoreKind, SecretString, ACCESS_KEY_ID_ENV, SECRET_ACCESS_KEY_ENV,
+    SESSION_TOKEN_ENV,
+};
 
 const AWS_REGIONS: &[&str] = &[
     "us-east-1",
@@ -40,14 +43,9 @@ const AWS_REGIONS: &[&str] = &[
 
 // --- ambient credentials ---
 
-/// Environment variable the S3-compatible providers read their access-key
-/// id from.
-const ACCESS_KEY_ID_ENV: &str = "AWS_ACCESS_KEY_ID";
-/// Environment variable the S3-compatible providers read their secret from.
-const SECRET_ACCESS_KEY_ENV: &str = "AWS_SECRET_ACCESS_KEY";
-/// Environment variable a temporary AWS credential's token comes from.
-const SESSION_TOKEN_ENV: &str = "AWS_SESSION_TOKEN";
-/// Environment variable a remote profile's bearer token comes from.
+/// Environment variable a remote profile's bearer token comes from. The
+/// provider credential names are the store config's own, so the CLI and the
+/// server read one set of variables.
 const AUTH_TOKEN_ENV: &str = "LOONFS_AUTH_TOKEN";
 
 /// Credentials this process's environment happens to carry.
