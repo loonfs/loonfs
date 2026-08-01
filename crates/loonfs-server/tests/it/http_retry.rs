@@ -5,9 +5,12 @@ use crate::common::start_server;
 use loonfs_api::v0::{
     CreateCheckpointRequest, MaintenanceStepKind, MaintenanceStepRequest, ValidatedContentToken,
 };
-use loonfs_api::{AbsolutePath, CommitId, CommitRequest, DestinationBehavior, FilesystemOperation};
+use loonfs_api::{
+    AbsolutePath, ChangeSeq, CommitId, CommitRequest, DestinationBehavior, FilesystemOperation,
+};
 use loonfs_client::{
-    ClientError, CopyOptions, DeleteOptions, MoveOptions, NamespacePath, PutFileOptions,
+    ClientError, CopyOptions, CreateDirectoryOptions, DeleteOptions, MoveOptions, NamespacePath,
+    PutFileOptions,
 };
 use loonfs_test_support::ids::namespace_id;
 use tempfile::tempdir;
@@ -193,6 +196,185 @@ async fn http_put_commit_id_is_idempotent_and_conflicts_on_different_bytes() {
         Err(ClientError::Api { code, .. }) => {
             assert_eq!(code, "commit_id_reuse_conflict")
         }
+        other => unreachable!("expected commit_id_reuse_conflict, got {other:?}"),
+    }
+
+    harness.server.abort();
+}
+
+/// The message is part of a commit's identity, so re-uploading the same
+/// bytes under a changed message is a different mutation and the conflict
+/// stands. The bytes matching is exactly what makes this worth pinning:
+/// content evidence alone would call this a successful retry and quietly
+/// keep the original annotation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_put_conflict_stands_when_only_the_message_changed() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loonfs-server-message",
+        "http-message",
+    ))
+    .await;
+
+    let namespace = namespace_id("demo");
+    harness
+        .client
+        .create_namespace(&namespace)
+        .await
+        .expect("create namespace");
+    let target = NamespacePath::parse("demo", "/docs/message.txt").expect("target");
+    let commit_id = CommitId::parse("req-message-put").expect("valid commit id");
+    let options = |message: &str| PutFileOptions {
+        behavior: DestinationBehavior::Replace,
+        commit_id: Some(commit_id.clone()),
+        message: Some(message.to_owned()),
+        expected_revision_no: None,
+    };
+
+    let first = harness
+        .client
+        .put_file_bytes(&target, b"stable bytes\n", &options("import batch"))
+        .await
+        .expect("first put");
+    let replay = harness
+        .client
+        .put_file_bytes(&target, b"stable bytes\n", &options("import batch"))
+        .await
+        .expect("re-uploading an identical request is idempotent");
+    assert_eq!(replay, first);
+
+    match harness
+        .client
+        .put_file_bytes(&target, b"stable bytes\n", &options("second thoughts"))
+        .await
+    {
+        Err(ClientError::Api { code, .. }) => assert_eq!(code, "commit_id_reuse_conflict"),
+        other => unreachable!("expected commit_id_reuse_conflict, got {other:?}"),
+    }
+
+    // Absent and empty are different messages too: the fingerprint takes
+    // the annotation as given, so `null` and `""` are different commits and
+    // the client compares them the same way.
+    match harness
+        .client
+        .put_file_bytes(
+            &target,
+            b"stable bytes\n",
+            &PutFileOptions {
+                message: None,
+                ..options("unused")
+            },
+        )
+        .await
+    {
+        Err(ClientError::Api { code, .. }) => assert_eq!(code, "commit_id_reuse_conflict"),
+        other => unreachable!("expected commit_id_reuse_conflict, got {other:?}"),
+    }
+
+    let changes = harness
+        .client
+        .list_changes(&namespace, ChangeSeq(0), None)
+        .await
+        .expect("list changes");
+    let committed = changes
+        .changes
+        .iter()
+        .find(|change| change.seq == first.committed_seq)
+        .expect("the committed change is on the feed");
+    assert_eq!(
+        committed.message.as_deref(),
+        Some("import batch"),
+        "the refused rerun did not rewrite the annotation that landed"
+    );
+    let entry = harness.client.stat_path(&target).await.expect("stat path");
+    assert_eq!(
+        entry.head_seq, first.committed_seq,
+        "the refused rerun published no revision"
+    );
+
+    harness.server.abort();
+}
+
+/// The mutations that upload nothing reconcile nothing — the server's own
+/// identity check is the whole answer — so a changed message conflicts
+/// there whatever the put path does. These anchor that the client-side
+/// reconciliation is not the only thing keeping the contract: one commit
+/// built by the caller, and one `mkdir`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_commit_and_mkdir_conflict_when_only_the_message_changed() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loonfs-server-message-anchor",
+        "http-message-anchor",
+    ))
+    .await;
+
+    let namespace = namespace_id("demo");
+    harness
+        .client
+        .create_namespace(&namespace)
+        .await
+        .expect("create namespace");
+
+    // A commit the caller built: the request that reaches the server is
+    // identical apart from its message.
+    let commit_id = CommitId::parse("req-message-commit").expect("valid commit id");
+    let commit_request = |message: &str| {
+        CommitRequest::single(
+            commit_id.clone(),
+            Some(message.to_owned()),
+            FilesystemOperation::CreateDirectory {
+                path: AbsolutePath::parse("/direct").expect("path"),
+                parents: true,
+            },
+        )
+    };
+    let first = harness
+        .client
+        .commit(&namespace, &commit_request("one"))
+        .await
+        .expect("first commit");
+    let replay = harness
+        .client
+        .commit(&namespace, &commit_request("one"))
+        .await
+        .expect("an identical retry replays");
+    assert_eq!(replay, first);
+    match harness
+        .client
+        .commit(&namespace, &commit_request("two"))
+        .await
+    {
+        Err(ClientError::Api { code, .. }) => assert_eq!(code, "commit_id_reuse_conflict"),
+        other => unreachable!("expected commit_id_reuse_conflict, got {other:?}"),
+    }
+
+    // And the same through the convenience call.
+    let pinned = NamespacePath::parse("demo", "/pinned").expect("pinned target");
+    let mkdir_options = |message: &str| CreateDirectoryOptions {
+        commit_id: Some(CommitId::parse("req-message-mkdir").expect("valid commit id")),
+        message: Some(message.to_owned()),
+        parents: true,
+    };
+    let first = harness
+        .client
+        .create_directory(&pinned, &mkdir_options("one"))
+        .await
+        .expect("first mkdir");
+    let replay = harness
+        .client
+        .create_directory(&pinned, &mkdir_options("one"))
+        .await
+        .expect("an identical retry replays");
+    assert_eq!(replay, first);
+    match harness
+        .client
+        .create_directory(&pinned, &mkdir_options("two"))
+        .await
+    {
+        Err(ClientError::Api { code, .. }) => assert_eq!(code, "commit_id_reuse_conflict"),
         other => unreachable!("expected commit_id_reuse_conflict, got {other:?}"),
     }
 

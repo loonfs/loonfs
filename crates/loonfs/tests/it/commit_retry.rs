@@ -10,9 +10,11 @@
 use crate::common::{open_runtime_async, store, TestRuntime};
 use bytes::Bytes;
 use futures::StreamExt;
+use loonfs::publish::{parse_mutation_path, CommitRequest, FilesystemOperation};
 use loonfs::{
-    ByteStream, CommitId, CreateNamespaceOptions, DestinationBehavior, MaintenanceStepKind,
-    MaintenanceStepOptions, NamespaceId, PutFileOptions, ReorganizeStepOutcome,
+    ByteStream, ChangeSeq, CommitId, CreateDirectoryOptions, CreateNamespaceOptions,
+    DestinationBehavior, ListChangesOptions, MaintenanceStepKind, MaintenanceStepOptions,
+    NamespaceId, PutFileOptions, ReorganizeStepOutcome,
 };
 use loonfs_api::ErrorCode;
 use tempfile::tempdir;
@@ -36,6 +38,31 @@ fn options(commit_id: &CommitId) -> PutFileOptions {
         message: None,
         expected_revision_no: None,
     }
+}
+
+fn options_with_message(commit_id: &CommitId, message: Option<&str>) -> PutFileOptions {
+    PutFileOptions {
+        message: message.map(ToOwned::to_owned),
+        ..options(commit_id)
+    }
+}
+
+/// What the feed says the commit at a sequence was annotated with.
+async fn feed_message(
+    runtime: &TestRuntime,
+    namespace_id: &NamespaceId,
+    seq: ChangeSeq,
+) -> Option<String> {
+    let page = runtime
+        .reader
+        .list_changes(namespace_id, ChangeSeq(0), ListChangesOptions::default())
+        .await
+        .expect("list changes");
+    page.changes
+        .into_iter()
+        .find(|change| change.seq == seq)
+        .expect("the committed change is on the feed")
+        .message
 }
 
 async fn namespace(runtime: &TestRuntime) -> NamespaceId {
@@ -133,6 +160,194 @@ async fn same_length_different_bytes_conflict() {
         .await
         .expect_err("same length is not the same content");
 
+    assert_eq!(error.code(), ErrorCode::CommitIdReuseConflict);
+}
+
+/// The same bytes under the same message are the same commit, so the rerun
+/// replays the sequence that already landed — the message being present
+/// changes nothing about that.
+#[tokio::test]
+async fn rerunning_a_put_with_the_same_message_replays_on_identical_bytes() {
+    let temp_dir = tempdir().expect("tempdir");
+    let runtime = open_runtime_async(store(temp_dir.path()), "writer-a").await;
+    let namespace_id = namespace(&runtime).await;
+    let commit_id = CommitId::parse("pinned-put").expect("valid commit id");
+    let options = || options_with_message(&commit_id, Some("import batch"));
+
+    let first = runtime
+        .put_file_bytes(&namespace_id, PATH, b"stable bytes\n", options())
+        .await
+        .expect("first put");
+    let rerun = runtime
+        .put_file_bytes(&namespace_id, PATH, b"stable bytes\n", options())
+        .await
+        .expect("rerunning an identical request is idempotent");
+
+    assert_eq!(rerun, first);
+    assert_eq!(
+        feed_message(&runtime, &namespace_id, first.committed_seq).await,
+        Some("import batch".to_owned())
+    );
+}
+
+/// The message is part of a commit's identity, so the same bytes under a
+/// changed message are a different mutation and the conflict stands. The
+/// bytes matching is exactly what makes this worth pinning: content
+/// evidence alone would call this a successful retry and quietly keep the
+/// original annotation.
+#[tokio::test]
+async fn a_changed_message_under_a_used_commit_id_still_conflicts() {
+    let temp_dir = tempdir().expect("tempdir");
+    let runtime = open_runtime_async(store(temp_dir.path()), "writer-a").await;
+    let namespace_id = namespace(&runtime).await;
+    let commit_id = CommitId::parse("pinned-put").expect("valid commit id");
+
+    let first = runtime
+        .put_file_bytes(
+            &namespace_id,
+            PATH,
+            b"stable bytes\n",
+            options_with_message(&commit_id, Some("import batch")),
+        )
+        .await
+        .expect("first put");
+    let error = runtime
+        .put_file_bytes(
+            &namespace_id,
+            PATH,
+            b"stable bytes\n",
+            options_with_message(&commit_id, Some("second thoughts")),
+        )
+        .await
+        .expect_err("a changed message is a different commit");
+
+    assert_eq!(error.code(), ErrorCode::CommitIdReuseConflict);
+    assert_eq!(
+        feed_message(&runtime, &namespace_id, first.committed_seq).await,
+        Some("import batch".to_owned()),
+        "the refused rerun did not rewrite the annotation that landed"
+    );
+    let entry = runtime
+        .stat_path(&namespace_id, PATH)
+        .await
+        .expect("stat path");
+    assert_eq!(
+        entry.head_seq, first.committed_seq,
+        "the refused rerun published no revision"
+    );
+}
+
+/// Absent and empty are different messages: the fingerprint serializes the
+/// annotation as given, so `null` and `""` are different commits. The
+/// reconciliation compares them the same way rather than folding both into
+/// "no message".
+#[tokio::test]
+async fn an_empty_message_does_not_replay_an_absent_one() {
+    let temp_dir = tempdir().expect("tempdir");
+    let runtime = open_runtime_async(store(temp_dir.path()), "writer-a").await;
+    let namespace_id = namespace(&runtime).await;
+    let commit_id = CommitId::parse("pinned-put").expect("valid commit id");
+
+    let first = runtime
+        .put_file_bytes(
+            &namespace_id,
+            PATH,
+            b"stable bytes\n",
+            options_with_message(&commit_id, None),
+        )
+        .await
+        .expect("first put");
+    let error = runtime
+        .put_file_bytes(
+            &namespace_id,
+            PATH,
+            b"stable bytes\n",
+            options_with_message(&commit_id, Some("")),
+        )
+        .await
+        .expect_err("an empty message is not the absent message");
+
+    assert_eq!(error.code(), ErrorCode::CommitIdReuseConflict);
+    assert_eq!(
+        feed_message(&runtime, &namespace_id, first.committed_seq).await,
+        None
+    );
+}
+
+/// The mutations that never uploaded anything reconcile nothing — the
+/// publisher's own identity check is the whole answer — so a changed
+/// message conflicts there whatever the put path does. This anchors that
+/// the reconciliation added for put did not become the only thing keeping
+/// the contract.
+#[tokio::test]
+async fn a_changed_message_on_mkdir_still_conflicts() {
+    let temp_dir = tempdir().expect("tempdir");
+    let runtime = open_runtime_async(store(temp_dir.path()), "writer-a").await;
+    let namespace_id = namespace(&runtime).await;
+    let commit_id = CommitId::parse("pinned-mkdir").expect("valid commit id");
+    let options = |message: &str| CreateDirectoryOptions {
+        commit_id: Some(commit_id.clone()),
+        message: Some(message.to_owned()),
+        parents: true,
+    };
+
+    let first = runtime
+        .writer
+        .create_directory(&namespace_id, "/pinned", options("one"))
+        .await
+        .expect("first mkdir");
+    let replay = runtime
+        .writer
+        .create_directory(&namespace_id, "/pinned", options("one"))
+        .await
+        .expect("an identical retry replays");
+    assert_eq!(replay, first);
+
+    let error = runtime
+        .writer
+        .create_directory(&namespace_id, "/pinned", options("two"))
+        .await
+        .expect_err("a changed message is a different commit");
+    assert_eq!(error.code(), ErrorCode::CommitIdReuseConflict);
+}
+
+/// The same anchor one layer down, where the caller builds the commit
+/// itself: the request that reaches the publisher is identical apart from
+/// its message, and that alone conflicts.
+#[tokio::test]
+async fn a_changed_message_on_a_direct_commit_still_conflicts() {
+    let temp_dir = tempdir().expect("tempdir");
+    let runtime = open_runtime_async(store(temp_dir.path()), "writer-a").await;
+    let namespace_id = namespace(&runtime).await;
+    let commit_id = CommitId::parse("pinned-commit").expect("valid commit id");
+    let request = |message: &str| {
+        CommitRequest::single(
+            commit_id.clone(),
+            Some(message.to_owned()),
+            FilesystemOperation::CreateDirectory {
+                path: parse_mutation_path("/direct").expect("path"),
+                parents: true,
+            },
+        )
+    };
+
+    let first = runtime
+        .writer
+        .commit(&namespace_id, request("one"))
+        .await
+        .expect("first commit");
+    let replay = runtime
+        .writer
+        .commit(&namespace_id, request("one"))
+        .await
+        .expect("an identical retry replays");
+    assert_eq!(replay, first);
+
+    let error = runtime
+        .writer
+        .commit(&namespace_id, request("two"))
+        .await
+        .expect_err("a changed message is a different commit");
     assert_eq!(error.code(), ErrorCode::CommitIdReuseConflict);
 }
 
