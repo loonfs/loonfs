@@ -139,7 +139,12 @@ async fn capabilities_endpoint_advertises_capabilities() {
     assert!(capabilities.supports("core.namespaces.create"));
     assert!(capabilities.supports("core.namespaces.fork"));
     assert!(capabilities.supports("core.namespaces.delete"));
+    // A local-filesystem deployment presigns nothing, so none of the three
+    // transfer capabilities is advertised — and because it presigns no
+    // uploads either, no file it holds can be larger than it will proxy.
     assert!(!capabilities.supports("core.uploads.direct_put"));
+    assert!(!capabilities.supports("core.uploads.direct_multipart"));
+    assert!(!capabilities.supports("core.downloads.direct_get"));
     assert_eq!(
         capabilities.limits.get(LIMIT_PAGINATION_DEFAULT),
         Some(&u64::from(DEFAULT_PAGE_LIMIT))

@@ -26,6 +26,11 @@ pub const FEATURE_NAMESPACES_DELETE: &str = "core.namespaces.delete";
 pub const FEATURE_UPLOADS_DIRECT_PUT: &str = "core.uploads.direct_put";
 /// Starting presigned `direct_multipart` upload sessions.
 pub const FEATURE_UPLOADS_DIRECT_MULTIPART: &str = "core.uploads.direct_multipart";
+/// Gates download grants that are authorized with short-lived presigned
+/// URLs. It rests on the same proof the two upload keys do, and is
+/// advertised with them, because a deployment that lets a client write an
+/// object it is too large to proxy back has to be able to hand it back.
+pub const FEATURE_DOWNLOADS_DIRECT_GET: &str = "core.downloads.direct_get";
 /// Gates grep-index content search: the serving half of the capability;
 /// the namespace's verified steady-state grep root is the data half.
 pub const FEATURE_QUERY_GREP: &str = "query.grep";

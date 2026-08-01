@@ -71,19 +71,6 @@ fn install_partial_file(
     persisted.map(|_| ()).map_err(|error| error.error)
 }
 
-/// Writes via a same-directory temp file and an atomic rename, so a failed
-/// or interrupted download never leaves a truncated file at the target.
-pub(super) fn write_local_file_atomically(
-    destination: &Path,
-    bytes: &[u8],
-    force: bool,
-) -> std::io::Result<()> {
-    let mut temp = open_partial_file(destination)?;
-    temp.write_all(bytes)?;
-    temp.flush()?;
-    install_partial_file(temp, destination, force)
-}
-
 pub(crate) async fn run_filesystem_ls(
     kind: CommandKind,
     config_path: &Path,
@@ -356,7 +343,7 @@ pub(crate) async fn run_filesystem_get(
     let revision_no = args.revision.map(RevisionNo);
     let mut download = context
         .target
-        .open_file_download(&spec, revision_no)
+        .open_file_download(&spec, revision_no, entry.size_bytes)
         .await
         .map_err(|error| context.fail(kind, error))?;
     let data = match args.local_destination.as_deref() {
@@ -401,7 +388,7 @@ pub(crate) async fn run_filesystem_get(
 /// streamed download whose content failed verification at its last chunk. An
 /// integrity failure therefore leaves no file at the destination at all,
 /// never a complete-looking one.
-async fn stream_download_to_file(
+pub(super) async fn stream_download_to_file(
     download: &mut FileDownload,
     destination: &Path,
     force: bool,

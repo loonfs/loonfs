@@ -61,9 +61,9 @@ pub use loonfs_api::{
     MaintenanceStepKind, MaintenanceStepRequest, MaintenanceStepResponse, ManifestId, NameKey,
     NamespaceId, NamespaceStatusResponse, NamespaceSummary, Page, PageRequest, PaginationPolicy,
     ReleaseCheckpointResponse, ReorganizeStepOutcome, RevisionNo, UploadId, WalFlushStepOutcome,
-    FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK,
-    FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT, PROFILE_ADMIN_V0,
-    PROFILE_CORE_V0, PROTOCOL_VERSION,
+    FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE,
+    FEATURE_NAMESPACES_FORK, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
+    PROFILE_ADMIN_V0, PROFILE_CORE_V0, PROTOCOL_VERSION,
 };
 pub use loonfs_core::cache::{MetadataTableCacheConfig, Recency};
 pub use loonfs_core::limits::{
@@ -118,6 +118,13 @@ pub mod uploads {
         DirectMultipartUploadTarget, DirectPutUploadTarget, MultipartPartTarget,
         MultipartPartTargets,
     };
+}
+
+/// Server-integration seam: the resolved direct download target a serving
+/// read turns into a presigned URL for a client-side object read. The
+/// mirror of [`uploads`], and most embedded users never need it either.
+pub mod downloads {
+    pub use loonfs_core::DirectDownloadTarget;
 }
 
 /// White-box seam over the durable control plane: typed loaders for a

@@ -9,10 +9,10 @@
 use loonfs_api::ChangeSeq;
 use loonfs_api::{
     v0::{
-        BeginUploadRequest, BeginUploadResponse, ChangesResponse,
-        CommitResponse as ApiCommitResponse, CompleteUploadRequest, CompleteUploadResponse,
-        DirectPutUpload, ObjectTransferAccess, UploadContentResponse, UploadMode,
-        ValidatedContentToken,
+        BeginDownloadRequest, BeginDownloadResponse, BeginUploadRequest, BeginUploadResponse,
+        ChangesResponse, CommitResponse as ApiCommitResponse, CompleteUploadRequest,
+        CompleteUploadResponse, DirectPutUpload, ObjectTransferAccess, UploadContentResponse,
+        UploadMode, ValidatedContentToken,
     },
     ApiError, CommitRequest, ContentRef, CreateCheckpointRequest, CreateCheckpointResponse,
     CreateNamespaceRequest, FilesystemOperation, ForkNamespaceRequest, GcRequest, GcResponse,
@@ -48,6 +48,7 @@ pub fn openapi_json_pretty() -> Result<String, serde_json::Error> {
         crate::http::handlers_filesystem::list_path_entries,
         crate::http::handlers_filesystem::stat_path,
         crate::http::handlers_filesystem::get_file_bytes,
+        crate::http::handlers_downloads::begin_download,
         crate::http::handlers_filesystem::list_file_revisions,
         crate::http::handlers_filesystem::list_trash,
         crate::http::handlers_filesystem::apply_commit,
@@ -124,6 +125,8 @@ pub fn openapi_json_pretty() -> Result<String, serde_json::Error> {
         loonfs_api::v0::SignedUploadPart,
         loonfs_api::v0::SignUploadPartsResponse,
         loonfs_api::v0::CompletedUploadPart,
+        BeginDownloadRequest,
+        BeginDownloadResponse,
         ObjectTransferAccess,
         UploadMode,
         ValidatedContentToken,

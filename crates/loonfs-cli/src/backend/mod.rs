@@ -33,8 +33,8 @@ use loonfs_api::{
     ReleaseCheckpointResponse, RevisionNo,
 };
 use loonfs_client::{
-    CopyOptions, CreateDirectoryOptions, DeleteOptions, MoveOptions, NamespacePath, PutFileOptions,
-    RestoreRevisionOptions, UndeleteOptions,
+    CopyOptions, CreateDirectoryOptions, DeleteOptions, DirectDownloadStream, MoveOptions,
+    NamespacePath, PutFileOptions, RestoreRevisionOptions, UndeleteOptions,
 };
 use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
 
@@ -74,8 +74,8 @@ impl StepBudget {
 
 /// One file's content, in the pieces the transport that opened it delivers.
 ///
-/// The two arms exist because the transports genuinely differ, not because
-/// the commands above want to know which they got: both are consumed by the
+/// The arms exist because the transports genuinely differ, not because the
+/// commands above want to know which they got: all are consumed by the
 /// same [`FileDownload::next_chunk`] loop, so a download is written to disk
 /// or to standard output the same way whichever profile served it.
 pub(crate) enum FileDownload {
@@ -86,6 +86,9 @@ pub(crate) enum FileDownload {
         namespace_id: NamespaceId,
         stream: Box<FileContentStream<SharedObjectStore>>,
     },
+    /// A remote object-store response, streamed and verified by the client
+    /// against the content reference in its download grant.
+    Direct(Box<DirectDownloadStream>),
     /// Bytes the transport already holds whole.
     Whole(Vec<u8>),
 }
@@ -105,6 +108,7 @@ impl FileDownload {
             } => stream.next_chunk().await.map_err(|error| {
                 map_namespace_scoped_runtime_error(namespace_id, RuntimeError::Core(error))
             }),
+            Self::Direct(stream) => stream.next_chunk().await.map_err(BackendError::from),
             Self::Whole(bytes) if bytes.is_empty() => Ok(None),
             Self::Whole(bytes) => Ok(Some(Bytes::from(std::mem::take(bytes)))),
         }
@@ -327,15 +331,23 @@ impl ResolvedTarget {
     ///
     /// An embedded profile reads its own store, so it streams: chunks arrive
     /// one at a time and the file's size never becomes the command's memory.
-    /// A remote profile's proxied read answers with one response body, so it
-    /// arrives whole — the same bytes through the same loop, held rather than
-    /// streamed. A revision read is whole on both, because there is no
-    /// streaming revision read to call.
+    /// A remote file past the deployment's proxy cap streams straight from
+    /// object storage under a download grant; a smaller proxied response
+    /// arrives whole. Every arm is verified before it reports its end.
     pub(crate) async fn open_file_download(
         &self,
         spec: &NamespacePath,
         revision_no: Option<RevisionNo>,
+        size_bytes: Option<u64>,
     ) -> Result<FileDownload, BackendError> {
+        if let (Self::Remote(target), Some(size_bytes)) = (self, size_bytes) {
+            if target.client.offers_direct_download(size_bytes).await {
+                let grant = target.client.begin_download(spec, revision_no).await?;
+                return Ok(FileDownload::Direct(Box::new(
+                    target.client.open_direct_download(&grant).await?,
+                )));
+            }
+        }
         if let Some(revision_no) = revision_no {
             return Ok(FileDownload::Whole(
                 self.get_file_revision_bytes(spec, revision_no).await?,

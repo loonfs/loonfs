@@ -13,11 +13,11 @@ use loonfs_api::ChangeSeq;
 use loonfs_api::{
     CheckpointId, CreateCheckpointRequest, CreateCheckpointResponse, CreateNamespaceRequest,
     ErrorCode, ForkNamespaceRequest, MaintenanceStepRequest, MaintenanceStepResponse,
-    ReleaseCheckpointResponse, FEATURE_QUERY_GREP, FEATURE_UPLOADS_DIRECT_MULTIPART,
-    FEATURE_UPLOADS_DIRECT_PUT, LIMIT_DOWNLOAD_MAX_CONCURRENT, LIMIT_DOWNLOAD_MAX_CONTENT_BYTES,
-    LIMIT_QUERY_GREP_DEFAULT, LIMIT_QUERY_GREP_MAX, LIMIT_QUERY_GREP_SCAN_BUDGET_FILES,
-    LIMIT_QUERY_GREP_TAIL_BUDGET_FILES, LIMIT_UPLOAD_MAX_CONCURRENT,
-    LIMIT_UPLOAD_MAX_CONTENT_BYTES, PROFILE_QUERY_V0,
+    ReleaseCheckpointResponse, FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_QUERY_GREP,
+    FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT, LIMIT_DOWNLOAD_MAX_CONCURRENT,
+    LIMIT_DOWNLOAD_MAX_CONTENT_BYTES, LIMIT_QUERY_GREP_DEFAULT, LIMIT_QUERY_GREP_MAX,
+    LIMIT_QUERY_GREP_SCAN_BUDGET_FILES, LIMIT_QUERY_GREP_TAIL_BUDGET_FILES,
+    LIMIT_UPLOAD_MAX_CONCURRENT, LIMIT_UPLOAD_MAX_CONTENT_BYTES, PROFILE_QUERY_V0,
 };
 
 #[derive(Debug, serde::Deserialize)]
@@ -47,10 +47,17 @@ pub(super) async fn capabilities(
 ) -> Result<Json<loonfs_api::CapabilityDocument>, ApiResponseError> {
     authorize(&state.config, &headers)?;
     let mut capabilities = state.reader.capabilities();
-    // Both direct transports rest on the same proof: an endpoint whose
+    // Every direct transport rests on the same proof: an endpoint whose
     // signed preconditions the live conformance suite has exercised. A
-    // deployment that cannot presign one cannot presign the other.
-    for feature in [FEATURE_UPLOADS_DIRECT_PUT, FEATURE_UPLOADS_DIRECT_MULTIPART] {
+    // deployment that cannot presign one cannot presign the others — and
+    // the read belongs with the writes for a second reason: a deployment
+    // that lets a client create an object too large to proxy back has to
+    // be able to hand it back.
+    for feature in [
+        FEATURE_UPLOADS_DIRECT_PUT,
+        FEATURE_UPLOADS_DIRECT_MULTIPART,
+        FEATURE_DOWNLOADS_DIRECT_GET,
+    ] {
         if state.transfer_issuer.is_some() {
             capabilities.features.insert(feature.to_owned(), true);
         } else {

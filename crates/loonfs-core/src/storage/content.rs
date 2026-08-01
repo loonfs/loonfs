@@ -448,7 +448,7 @@ pub(crate) async fn read_durable_content_bytes<S: ObjectStore + ?Sized>(
     Ok(ReadDurableContent { validated, bytes })
 }
 
-fn content_object_key_for_ref(
+pub(crate) fn content_object_key_for_ref(
     content_store_id: &ContentStoreId,
     content_ref: &ContentRef,
 ) -> Result<String, DurableContentValidationError> {

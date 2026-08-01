@@ -18,14 +18,15 @@ mod payload;
 mod transport;
 
 use bytes::Bytes;
+use futures::StreamExt as _;
 use loonfs_api::{
     v0::{
-        AbortUploadResponse, BeginUploadRequest, BeginUploadResponse, ChangesResponse,
-        CommitResponse as ApiCommitResponse, CommittedChange, CompleteUploadRequest,
-        CompleteUploadResponse, CompletedUploadPart, DirectMultipartContentClaim,
-        DirectMultipartUploadOptions, DirectPutContentClaim, DisableGrepIndexResponse,
-        EnableGrepIndexResponse, FilesystemChange, GrepGcRequest, GrepGcResponse,
-        GrepIndexStatusResponse, ObjectTransferAccess, SignUploadPartsRequest,
+        AbortUploadResponse, BeginDownloadRequest, BeginDownloadResponse, BeginUploadRequest,
+        BeginUploadResponse, ChangesResponse, CommitResponse as ApiCommitResponse, CommittedChange,
+        CompleteUploadRequest, CompleteUploadResponse, CompletedUploadPart,
+        DirectMultipartContentClaim, DirectMultipartUploadOptions, DirectPutContentClaim,
+        DisableGrepIndexResponse, EnableGrepIndexResponse, FilesystemChange, GrepGcRequest,
+        GrepGcResponse, GrepIndexStatusResponse, ObjectTransferAccess, SignUploadPartsRequest,
         SignUploadPartsResponse, SignedUploadPart, StoreProbeRequest, StoreProbeResponse,
         UploadContentResponse, UploadMode, UploadPartChecksumClaim, UploadStatusResponse,
         ValidatedContentToken,
@@ -36,8 +37,9 @@ use loonfs_api::{
     FilesystemOperation, ForkNamespaceRequest, GrepRequest, GrepResponse, InodeId,
     ListFileRevisionsResponse, ListPathEntriesResponse, ListTrashResponse, MaintenanceStepRequest,
     MaintenanceStepResponse, NamespaceId, NamespaceStatusResponse, NamespaceSummary,
-    ReleaseCheckpointResponse, RevisionNo, StorageChecksum, UploadId,
-    FEATURE_UPLOADS_DIRECT_MULTIPART,
+    ReleaseCheckpointResponse, RevisionNo, Sha256, StorageChecksum, UploadId,
+    FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_UPLOADS_DIRECT_MULTIPART,
+    LIMIT_DOWNLOAD_MAX_CONTENT_BYTES,
 };
 use payload::PartReader;
 use std::sync::{Arc, OnceLock};
@@ -186,6 +188,77 @@ pub struct Client {
     transient_retry: bool,
     /// Capability document cache, shared by clones and filled on first use.
     capabilities: Arc<OnceLock<CapabilityDocument>>,
+}
+
+/// One direct download response, delivered in bounded chunks and verified
+/// against the content reference carried by its grant.
+///
+/// Verification completes only when [`Self::next_chunk`] returns `None`.
+/// A caller that stops earlier has received provisional bytes, just as with
+/// any streaming read whose digest cannot be known until the end.
+pub struct DirectDownloadStream {
+    body: payload::PayloadStream,
+    expected: ContentRef,
+    path: AbsolutePath,
+    sha256: Option<Sha256>,
+    size_bytes: u64,
+    finished: bool,
+}
+
+impl DirectDownloadStream {
+    /// Returns the next response-body chunk, or `None` once the complete
+    /// object has passed its declared-length and whole-file digest checks.
+    pub async fn next_chunk(&mut self) -> Result<Option<Bytes>> {
+        if self.finished {
+            return Ok(None);
+        }
+        match self.body.next().await {
+            Some(Ok(chunk)) => {
+                self.size_bytes = self.size_bytes.saturating_add(chunk.len() as u64);
+                if self.size_bytes > self.expected.size_bytes {
+                    self.finished = true;
+                    return Err(ClientError::Http(format!(
+                        "direct download of `{}` sent more than the {} bytes the grant named",
+                        self.path, self.expected.size_bytes
+                    )));
+                }
+                if let Some(sha256) = self.sha256.as_mut() {
+                    sha256.update(&chunk);
+                }
+                Ok(Some(chunk))
+            }
+            Some(Err(error)) => {
+                self.finished = true;
+                Err(ClientError::Io(format!(
+                    "read of `{}` failed: {error}",
+                    self.path
+                )))
+            }
+            None => {
+                self.finished = true;
+                if self.size_bytes != self.expected.size_bytes {
+                    return Err(ClientError::Http(format!(
+                        "direct download of `{}` ended after {} bytes, not the {} the grant named",
+                        self.path, self.size_bytes, self.expected.size_bytes
+                    )));
+                }
+                if let (Some(sha256), Some(expected_sha256)) = (
+                    self.sha256.take(),
+                    self.expected.whole_file_sha256.as_deref(),
+                ) {
+                    let observed = sha256.finish().value;
+                    if observed != expected_sha256 {
+                        return Err(ClientError::Http(format!(
+                            "direct download of `{}` hashed to {observed}, not the \
+                             {expected_sha256} the grant named",
+                            self.path
+                        )));
+                    }
+                }
+                Ok(None)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -501,6 +574,131 @@ impl Client {
             revision_no.0
         );
         self.request_bytes(&url).await
+    }
+
+    /// Whether this deployment would refuse to proxy a file of this size
+    /// but can authorize a direct read of it.
+    ///
+    /// The two halves are one question. Under the advertised proxy cap the
+    /// proxied read is the simpler path and stays the default; over it the
+    /// proxied read answers `content_too_large`, and a deployment that
+    /// advertises `core.downloads.direct_get` can hand the object back
+    /// instead — which is the whole point of the capability, because that
+    /// same deployment is one that let a client create the object directly.
+    ///
+    /// A deployment that advertises no cap is left on the proxied path:
+    /// nothing here knows it would refuse.
+    pub async fn offers_direct_download(&self, size_bytes: u64) -> bool {
+        let Ok(capabilities) = self.capabilities().await else {
+            return false;
+        };
+        capabilities.supports(FEATURE_DOWNLOADS_DIRECT_GET)
+            && capabilities
+                .limits
+                .get(LIMIT_DOWNLOAD_MAX_CONTENT_BYTES)
+                .is_some_and(|proxy_cap| size_bytes > *proxy_cap)
+    }
+
+    /// Asks for one short-lived capability to read a file's content object
+    /// straight from the store.
+    pub async fn begin_download(
+        &self,
+        spec: &NamespacePath,
+        revision_no: Option<RevisionNo>,
+    ) -> Result<BeginDownloadResponse> {
+        let url = format!(
+            "{}/v0/namespaces/{}/filesystem/downloads",
+            self.base_url,
+            spec.namespace().as_str()
+        );
+        let request = match revision_no {
+            Some(revision_no) => {
+                BeginDownloadRequest::for_revision(spec.absolute_path().clone(), revision_no)
+            }
+            None => BeginDownloadRequest::for_path(spec.absolute_path().clone()),
+        };
+        // A grant creates nothing and names nothing new, so asking twice
+        // costs two URLs and changes no state: this one may be resent.
+        self.request_json::<_, BeginDownloadResponse>(self.post(&url), Some(&request))
+            .await
+    }
+
+    /// Opens the response body authorized by a download grant as a bounded,
+    /// verified stream.
+    pub async fn open_direct_download(
+        &self,
+        download: &BeginDownloadResponse,
+    ) -> Result<DirectDownloadStream> {
+        let ObjectTransferAccess::PresignedUrl {
+            method,
+            url,
+            headers,
+            ..
+        } = &download.access;
+        if method != "GET" {
+            return Err(ClientError::Http(format!(
+                "unsupported presigned download method `{method}`"
+            )));
+        }
+        let mut request = WireRequest::presigned(reqwest::Method::GET, url);
+        for (name, value) in headers {
+            request = request.header(name, value);
+        }
+        let body = self.call_for_response_stream(&request).await?;
+        Ok(DirectDownloadStream {
+            body,
+            expected: download.content_ref.clone(),
+            path: download.absolute_path.clone(),
+            sha256: download
+                .content_ref
+                .whole_file_sha256
+                .as_ref()
+                .map(|_| Sha256::new()),
+            size_bytes: 0,
+            finished: false,
+        })
+    }
+
+    /// Streams a granted object's bytes into `sink`, checking them against
+    /// the reference the grant carried, and reports how many arrived.
+    ///
+    /// The payload is never held: each chunk is hashed and written as it
+    /// arrives, so this costs one chunk of memory whatever the object's
+    /// length. That is the entire reason the grant exists — a file past the
+    /// deployment's proxy cap has no other way home.
+    ///
+    /// Verification is what keeps a direct read no weaker than a proxied
+    /// one: the length always, and the whole-file SHA-256 whenever the
+    /// reference carries one. A direct-multipart object carries none —
+    /// nobody ever hashed it that way — and its length is then the whole
+    /// check, exactly as it is for the server's own reads.
+    ///
+    /// A failure is reported *after* the sink has already received bytes,
+    /// because that is the only order a streamed read allows. Callers must
+    /// treat the sink as provisional until this returns: write to a
+    /// temporary and install it on success.
+    pub async fn download_via_presigned_url<W>(
+        &self,
+        download: &BeginDownloadResponse,
+        sink: &mut W,
+    ) -> Result<u64>
+    where
+        W: tokio::io::AsyncWrite + Unpin,
+    {
+        use tokio::io::AsyncWriteExt as _;
+        let path = &download.absolute_path;
+        let mut download = self.open_direct_download(download).await?;
+        let mut size_bytes = 0u64;
+        while let Some(chunk) = download.next_chunk().await? {
+            size_bytes += chunk.len() as u64;
+            sink.write_all(&chunk)
+                .await
+                .map_err(|err| ClientError::Io(format!("write of `{path}` failed: {err}")))?;
+        }
+        sink.flush()
+            .await
+            .map_err(|err| ClientError::Io(format!("write of `{path}` failed: {err}")))?;
+        Ok(size_bytes)
     }
 
     pub async fn list_file_revisions_page(
@@ -1708,6 +1906,9 @@ fn append_query_param(url: &mut String, has_query: &mut bool, name: &str, value:
     url.push('=');
     url.push_str(&urlencoding::encode(value));
 }
+
+#[cfg(test)]
+mod download_tests;
 
 #[cfg(test)]
 mod streaming_tests;

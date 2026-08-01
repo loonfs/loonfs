@@ -1,6 +1,9 @@
 //! Presigner for S3-compatible providers (AWS S3, Cloudflare R2).
 
-use super::{ObjectTransferIssuer, PresignedPartRequest, PresignedPutRequest, PresignedUrl};
+use super::{
+    ObjectTransferIssuer, PresignedGetRequest, PresignedPartRequest, PresignedPutRequest,
+    PresignedUrl,
+};
 use crate::keyspace::{parse_endpoint_url, scope_object_key};
 use crate::object_store::Result;
 use crate::presign::aws_sigv4::{
@@ -403,6 +406,26 @@ impl ObjectTransferIssuer for S3CompatiblePresigner {
             now,
         )
     }
+
+    fn presign_get(
+        &self,
+        request: PresignedGetRequest<'_>,
+        now: SystemTime,
+    ) -> Result<PresignedUrl> {
+        // No required headers, so `host` is the only name in
+        // `X-Amz-SignedHeaders` and the only line in the canonical headers.
+        // A `Range` the client adds is therefore outside the signature
+        // entirely, and one issued URL serves ranged, resumed, and parallel
+        // reads of the object without another round trip to the server.
+        // Adding a required header here would silently cost that.
+        self.presign(
+            "GET",
+            request.object_key,
+            BTreeMap::new(),
+            request.expires_in,
+            now,
+        )
+    }
 }
 
 /// Converts a CRC-64/NVME into the base64 spelling the S3 family signs.
@@ -497,7 +520,7 @@ fn signing_key(secret: &str, date: &str, region: &str) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::{S3CompatiblePresigner, S3PresignerConfig};
-    use crate::presign::{ObjectTransferIssuer, PresignedPutRequest};
+    use crate::presign::{ObjectTransferIssuer, PresignedGetRequest, PresignedPutRequest};
     use crate::ObjectStoreError;
     use loonfs_api::{ChecksumAlgorithm, ContentId, ContentRef, ContentRefKind, StorageChecksum};
     use std::time::{Duration, UNIX_EPOCH};
@@ -585,6 +608,70 @@ mod tests {
         assert!(signed
             .url
             .starts_with("https://bucket.s3.us-east-1.amazonaws.com/tenant-a/content-stores/"));
+    }
+
+    /// The read capability signs `host` and nothing else, which is what
+    /// leaves `Range` outside the signature: one issued URL serves ranged,
+    /// resumed, and parallel reads without another round trip to the
+    /// server. The live suite proves the provider agrees.
+    #[test]
+    fn presigned_get_signs_only_the_host_so_range_stays_unsigned() {
+        let signed = presigner(Some("tenant-a"), None)
+            .presign_get(
+                PresignedGetRequest {
+                    object_key: CONTENT_KEY,
+                    expires_in: Duration::from_secs(900),
+                },
+                UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+            )
+            .expect("presign get");
+
+        assert_eq!(signed.method, "GET");
+        assert!(
+            signed.headers.is_empty(),
+            "a read capability requires the client to send nothing"
+        );
+        assert!(signed.url.contains("X-Amz-SignedHeaders=host"));
+        assert!(!signed.url.to_ascii_lowercase().contains("range"));
+        assert!(signed
+            .url
+            .starts_with("https://bucket.s3.us-east-1.amazonaws.com/tenant-a/content-stores/"));
+        assert!(!signed.url.contains("secret"));
+    }
+
+    /// Reads and writes of the same object address the same URL: whatever
+    /// the key prefix and endpoint style resolve to for one, they resolve
+    /// to for the other, so a deployment cannot sign a write it is unable
+    /// to sign a read of.
+    #[test]
+    fn presigned_get_addresses_the_same_object_the_write_did() {
+        let signer = presigner(
+            Some("tenant-a"),
+            Some("https://bucket.s3.us-east-2.amazonaws.com"),
+        );
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let written = signer
+            .presign_put(
+                PresignedPutRequest {
+                    object_key: CONTENT_KEY,
+                    content_ref: &content_ref(),
+                    expires_in: Duration::from_secs(900),
+                },
+                now,
+            )
+            .expect("presign put");
+        let read = signer
+            .presign_get(
+                PresignedGetRequest {
+                    object_key: CONTENT_KEY,
+                    expires_in: Duration::from_secs(900),
+                },
+                now,
+            )
+            .expect("presign get");
+
+        let object_of = |url: &str| url.split('?').next().expect("url path").to_owned();
+        assert_eq!(object_of(&read.url), object_of(&written.url));
     }
 
     #[test]

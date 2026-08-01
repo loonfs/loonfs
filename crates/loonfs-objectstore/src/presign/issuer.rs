@@ -1,4 +1,6 @@
-//! Issuer contract and values for presigned direct-put transfers.
+//! Issuer contract and values for presigned direct transfers, in both
+//! directions: the create-only writes `direct_put` authorizes, and the
+//! reads `direct_get` authorizes.
 
 use crate::object_store::Result;
 use loonfs_api::{ContentRef, StorageChecksum};
@@ -12,6 +14,21 @@ pub struct PresignedPutRequest<'a> {
     pub object_key: &'a str,
     /// Expected digest and byte length the provider must enforce for the request body.
     pub content_ref: &'a ContentRef,
+    /// Lifetime of the issued capability measured from the supplied signing time.
+    pub expires_in: Duration,
+}
+
+/// Describes one read of an existing content object to authorize for a client.
+///
+/// There is nothing to bind but the key. A write has to carry the digest
+/// and the create-only precondition into the signature because the bytes do
+/// not exist yet and the provider is the only party that can refuse them; a
+/// read is of bytes this deployment already verified, and the reader checks
+/// what arrives against the reference it was handed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PresignedGetRequest<'a> {
+    /// Logical unscoped object key that the issuer resolves beneath its configured prefix.
+    pub object_key: &'a str,
     /// Lifetime of the issued capability measured from the supplied signing time.
     pub expires_in: Duration,
 }
@@ -44,7 +61,7 @@ pub struct PresignedUrl {
     pub expires_at_ms: u64,
 }
 
-/// Issues short-lived transfer capabilities for `direct_put` uploads, and in
+/// Issues short-lived transfer capabilities in both directions, and in
 /// doing so carries the write-time enforcement contract the rest of the
 /// system leans on:
 ///
@@ -63,6 +80,12 @@ pub struct PresignedUrl {
 /// preconditions in a presigned request must not implement this trait; the
 /// deployment then reports `direct_put` as unsupported instead of falling
 /// back to weaker verification.
+///
+/// Reads ride the same trait for a plainer reason: a deployment that lets a
+/// client write an object directly must be able to hand that object back,
+/// and it can only do that where it can sign a read of it. So the two
+/// directions are offered together or not at all, and a store with no
+/// issuer proxies both.
 pub trait ObjectTransferIssuer: Send + Sync + std::fmt::Debug {
     /// Issues a create-only write capability bound to the requested content identity.
     ///
@@ -85,6 +108,24 @@ pub trait ObjectTransferIssuer: Send + Sync + std::fmt::Debug {
     fn presign_multipart_part(
         &self,
         request: PresignedPartRequest<'_>,
+        now: SystemTime,
+    ) -> Result<PresignedUrl>;
+
+    /// Issues a read capability for one content object.
+    ///
+    /// One capability serves the whole transfer, however many requests the
+    /// client makes with it. A presigned URL signs a named set of headers,
+    /// and `Range` is not among them — so a reader may range, resume after
+    /// a broken connection, or fetch in parallel windows on the one URL,
+    /// and the signature is unaffected. Implementors must keep it that way:
+    /// signing a `Range` header would bind a capability to one window and
+    /// turn every resumption into another round trip to this server.
+    ///
+    /// Issuance fails for invalid keys, invalid expiry policy, unusable
+    /// signing time, or malformed provider configuration.
+    fn presign_get(
+        &self,
+        request: PresignedGetRequest<'_>,
         now: SystemTime,
     ) -> Result<PresignedUrl>;
 }
