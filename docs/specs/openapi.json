@@ -3573,6 +3573,17 @@
               }
             ]
           },
+          "actual_head_seq": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ChangeSeq",
+                "description": "Head sequence the namespace was actually at, which is what a caller\nthat still means to delete it retries against."
+              }
+            ]
+          },
           "actual_revision": {
             "oneOf": [
               {
@@ -3614,6 +3625,17 @@
               {
                 "$ref": "#/components/schemas/ChangeSeq",
                 "description": "Sequence at which that commit id already landed. Present when the\nfailure was decided against a durable commit receipt, which is what\nholds the sequence; absent when nothing has committed under the id\nyet and two live requests are simply claiming it at once."
+              }
+            ]
+          },
+          "expected_head_seq": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ChangeSeq",
+                "description": "Head sequence a namespace delete required the namespace to still be\nat."
               }
             ]
           },

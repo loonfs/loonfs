@@ -100,6 +100,14 @@ pub struct ErrorDetails {
     /// Deletion generation actually active for the inode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_deletion_seq: Option<ChangeSeq>,
+    /// Head sequence a namespace delete required the namespace to still be
+    /// at.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_head_seq: Option<ChangeSeq>,
+    /// Head sequence the namespace was actually at, which is what a caller
+    /// that still means to delete it retries against.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actual_head_seq: Option<ChangeSeq>,
 }
 
 /// Request to create a namespace.

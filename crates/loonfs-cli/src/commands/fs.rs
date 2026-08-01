@@ -4,8 +4,9 @@
 use super::context::{
     default_remote_put_path, destination_path_for_get, destination_user_path, directory_intent,
     fail, namespace_path, parse_user_path, render_target, resolve_command_context, CommandContext,
+    UndeleteHint,
 };
-use super::output::{CommandData, CommandFailure, CommandOutput};
+use super::output::{CommandData, CommandFailure, CommandOutput, TrashListing};
 use super::partial::{self, PartialDownload, PartialMeta};
 use super::recursive;
 use crate::args::{
@@ -15,6 +16,7 @@ use crate::args::{
     RuntimeBehavior, TrashArgs,
 };
 use crate::backend::FileDownload;
+use crate::config::ConfigLocation;
 use crate::error::CliError;
 use crate::payload::{read_whole_file, LocalPayload, STDIN_PATH};
 use crate::progress::{ProgressOp, ProgressReporter};
@@ -508,20 +510,40 @@ fn local_destination_error(
 
 pub(crate) async fn run_filesystem_trash(
     kind: CommandKind,
-    config_path: &Path,
+    location: &ConfigLocation,
     args: TrashArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, config_path, &args.target).await?;
+    let context = resolve_command_context(kind, &location.path, &args.target).await?;
     let response = context
         .target
         .list_trash(&context.namespace, args.limit, args.cursor.as_deref())
         .await
         .map_err(|error| context.fail(kind, error))?;
+    let hint = UndeleteHint::new(&context, location, args.target.profile.profile.is_some());
+    // The listing carries the deleted binding's leaf name, not the directory
+    // it hung under, so the offered destination is that name at the root. It
+    // is a complete command; a caller who wants the original directory back
+    // edits the path, which is the same edit `undelete` already invites.
+    let recovery_commands = response
+        .entries
+        .iter()
+        .map(|entry| {
+            let destination = entry.display_name.as_ref().map(|name| format!("/{name}"));
+            hint.command(
+                destination.as_deref(),
+                entry.root_inode_id,
+                entry.deleted_at_seq,
+            )
+        })
+        .collect();
     Ok(CommandOutput {
         kind,
         profile: Some(context.profile_name),
         mode: Some(context.mode),
-        data: CommandData::Trash(response),
+        data: CommandData::Trash(TrashListing {
+            response,
+            recovery_commands,
+        }),
     })
 }
 
@@ -722,6 +744,7 @@ async fn commit_put(
             committed_seq: result.committed_seq,
             commit_id: result.commit_id,
             inode_id: None,
+            recovery_command: None,
         },
     })
 }
@@ -870,10 +893,10 @@ fn put_file_options(args: &FilesystemPutArgs) -> Result<PutFileOptions, CliError
 
 pub(crate) async fn run_filesystem_rm(
     kind: CommandKind,
-    config_path: &Path,
+    location: &ConfigLocation,
     args: FilesystemRmArgs,
 ) -> Result<CommandOutput, CommandFailure> {
-    let context = resolve_command_context(kind, config_path, &args.target).await?;
+    let context = resolve_command_context(kind, &location.path, &args.target).await?;
     let allow_root = false;
     let spec = namespace_path(&context.namespace, &args.path, allow_root)
         .map_err(|error| context.fail(kind, error))?;
@@ -906,6 +929,15 @@ pub(crate) async fn run_filesystem_rm(
         .await
         .map_err(|error| context.fail(kind, error))?;
 
+    // The path just deleted is the destination that puts the entry back where
+    // it was, so the printed command is complete for this exact deletion.
+    let recovery_command =
+        UndeleteHint::new(&context, location, args.target.profile.profile.is_some()).command(
+            Some(spec.absolute_path().as_str()),
+            deleted_inode,
+            result.committed_seq,
+        );
+
     Ok(CommandOutput {
         kind,
         profile: Some(context.profile_name),
@@ -915,6 +947,7 @@ pub(crate) async fn run_filesystem_rm(
             committed_seq: result.committed_seq,
             commit_id: result.commit_id,
             inode_id: Some(deleted_inode),
+            recovery_command: Some(recovery_command),
         },
     })
 }
@@ -952,6 +985,7 @@ pub(crate) async fn run_filesystem_restore(
             committed_seq: result.committed_seq,
             commit_id: result.commit_id,
             inode_id: None,
+            recovery_command: None,
         },
     })
 }
@@ -990,6 +1024,7 @@ pub(crate) async fn run_filesystem_undelete(
             committed_seq: result.committed_seq,
             commit_id: result.commit_id,
             inode_id: Some(loonfs_api::InodeId(args.inode)),
+            recovery_command: None,
         },
     })
 }
@@ -1050,6 +1085,7 @@ pub(crate) async fn run_filesystem_mkdir(
             committed_seq: result.committed_seq,
             commit_id: result.commit_id,
             inode_id: None,
+            recovery_command: None,
         },
     })
 }

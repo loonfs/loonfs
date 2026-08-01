@@ -192,10 +192,15 @@ async fn ensure_fork_checkpoint_lease_holds<S: ObjectStore + ?Sized>(
         .expires_at_ms
         .is_some_and(|expires_at_ms| expires_at_ms > now_ms.saturating_add(FORK_GUARD_MARGIN_MS));
     if !holds {
-        return lost(format!(
-            "the lease ({:?}) is inside the {FORK_GUARD_MARGIN_MS}ms guard margin at {now_ms}",
-            record.expires_at_ms
-        ));
+        // Both arms name the same failure — the lease cannot be trusted to
+        // outlast this read — and each says which way it fell short.
+        return lost(match record.expires_at_ms {
+            Some(expires_at_ms) => format!(
+                "its lease expires at {expires_at_ms} ms, inside the \
+                 {FORK_GUARD_MARGIN_MS}ms guard margin at {now_ms}"
+            ),
+            None => "the record carries no lease".to_owned(),
+        });
     }
     Ok(())
 }

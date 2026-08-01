@@ -48,9 +48,22 @@ async fn delete_namespace_is_terminal_and_retires_the_id() {
         .await
         .expect_err("stale precondition");
     match stale {
-        ClientError::Api { status, code, .. } => {
+        ClientError::Api {
+            status,
+            code,
+            message,
+            details,
+            ..
+        } => {
             assert_eq!(status, 409);
             assert_eq!(code, "stale_head");
+            // The rejection reports both sequences, so a caller that still
+            // means to delete knows what to retry against without parsing
+            // anything: in words for a person, typed for a program.
+            assert_eq!(message, "expected head sequence 0, found 1");
+            let details = details.expect("a stale precondition carries its sequences");
+            assert_eq!(details.expected_head_seq, Some(ChangeSeq(0)));
+            assert_eq!(details.actual_head_seq, Some(ChangeSeq(1)));
         }
         other => unreachable!("expected stale_head, got {other:?}"),
     }

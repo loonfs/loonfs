@@ -559,6 +559,14 @@ fn put_expected_revision_replaces_only_the_observed_revision() {
     ]);
     assert_failure(&stale);
     assert_eq!(json_error(&stale)["code"], "stale_revision");
+    // The rejection reads as a sentence, with both revisions in it and no
+    // Rust formatting of the one that may be absent.
+    let stale_error = json_error(&stale);
+    let message = stale_error["message"].as_str().unwrap_or_default();
+    assert!(
+        message.ends_with("expected revision 1, found revision 2"),
+        "{message}"
+    );
     let cat = harness.run(&["cat", "/doc.txt"]);
     assert_success(&cat);
     assert_eq!(cat.stdout, b"v2");
@@ -1715,6 +1723,136 @@ fn trash_lists_recoverable_deletions_with_their_handles() {
     let page = harness.run(&["--json", "trash", "--limit", "1"]);
     assert_success(&page);
     assert!(json_data(&page)["next_cursor"].is_null());
+}
+
+/// The printed recovery commands are meant to be pasted, so they name the
+/// namespace they belong to and quote a path a shell would otherwise split.
+#[test]
+fn recovery_hints_name_their_namespace_and_quote_the_path() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+
+    let payload = harness.temp_dir.path().join("doc.txt");
+    fs::write(&payload, b"body").expect("write payload");
+    assert_success(&harness.run(&[
+        "put",
+        payload.to_str().expect("utf-8 path"),
+        "/docs/Quarterly Report.PDF",
+    ]));
+    let inode = json_data(&harness.run(&["--json", "stat", "/docs/Quarterly Report.PDF"]))
+        ["inode_id"]
+        .as_u64()
+        .expect("the stored inode id");
+
+    // Nothing here is spelled on the command line, so the namespace is the
+    // only ambient value the hint has to pin down.
+    let removed = harness.run(&["rm", "/docs/Quarterly Report.PDF"]);
+    assert_success(&removed);
+    let entry = json_data(&harness.run(&["--json", "trash"]))["entries"][0].clone();
+    let deleted_at = entry["deleted_at_seq"].as_u64().expect("the deletion seq");
+    assert_eq!(
+        hinted_recovery_command(&removed),
+        format!(
+            "loonfs undelete '/docs/Quarterly Report.PDF' --inode {inode} \
+             --deleted-at {deleted_at} --namespace demo"
+        )
+    );
+
+    // The trash table offers the same command for the same deletion. It
+    // recovers to the recorded name at the root, because a listed deletion
+    // carries the name it deleted and not the directory that held it.
+    let listed = harness.run(&["trash"]);
+    assert_success(&listed);
+    assert_eq!(
+        trash_recovery_command(&listed, "Quarterly Report.PDF"),
+        format!(
+            "loonfs undelete '/Quarterly Report.PDF' --inode {inode} \
+             --deleted-at {deleted_at} --namespace demo"
+        )
+    );
+
+    // Pasting the hint into a shell recovers the file, which is the whole
+    // reason the path is quoted.
+    let replayed = harness.replay_in_shell(&hinted_recovery_command(&removed));
+    assert_success(&replayed);
+    let cat = harness.run(&["cat", "/docs/Quarterly Report.PDF"]);
+    assert_success(&cat);
+    assert_eq!(cat.stdout, b"body");
+}
+
+/// A hint that leaves out a profile or a config file a bare invocation would
+/// not find again sends the paste at some other filesystem, so both are
+/// spelled whenever this run did not reach them the default way.
+#[test]
+fn recovery_hints_name_a_profile_and_config_a_bare_invocation_would_miss() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    harness.add_embedded_profile("staging");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+    assert_success(&harness.run(&["namespace", "create", "release", "--profile", "staging"]));
+
+    let payload = harness.temp_dir.path().join("doc.txt");
+    fs::write(&payload, b"body").expect("write payload");
+    let put = |extra: &[&str]| {
+        let mut args = vec!["put", payload.to_str().expect("utf-8 path"), "/notes.txt"];
+        args.extend_from_slice(extra);
+        assert_success(&harness.run(&args));
+    };
+
+    // A spelled --profile means the config's default is some other profile,
+    // so the hint has to say which one it meant.
+    put(&["--profile", "staging", "--namespace", "release"]);
+    let removed = harness.run(&[
+        "rm",
+        "/notes.txt",
+        "--profile",
+        "staging",
+        "--namespace",
+        "release",
+    ]);
+    assert_success(&removed);
+    let command = hinted_recovery_command(&removed);
+    assert!(
+        command.ends_with(" --namespace release --profile staging"),
+        "{command}"
+    );
+
+    // The config flag names a file a later paste would not look at.
+    let elsewhere = harness.temp_dir.path().join("elsewhere.toml");
+    let elsewhere_arg = elsewhere.to_str().expect("utf-8 config path");
+    fs::copy(&harness.config_path, &elsewhere).expect("copy the config aside");
+    put(&[]);
+    let removed = harness.run(&["--config", elsewhere_arg, "rm", "/notes.txt"]);
+    assert_success(&removed);
+    let command = hinted_recovery_command(&removed);
+    assert!(
+        command.ends_with(&format!(" --namespace demo --config {elsewhere_arg}")),
+        "{command}"
+    );
+
+    // So does the environment variable: the pasting shell need not still
+    // export it, so the hint carries the path instead of relying on it.
+    put(&[]);
+    let removed = harness.run_with_env(&[("LOONFS_CONFIG", elsewhere_arg)], &["rm", "/notes.txt"]);
+    assert_success(&removed);
+    let command = hinted_recovery_command(&removed);
+    assert!(
+        command.ends_with(&format!(" --namespace demo --config {elsewhere_arg}")),
+        "{command}"
+    );
+
+    // The default locations need no flag: they are what a bare invocation
+    // reads.
+    put(&[]);
+    let removed = harness.run(&["rm", "/notes.txt"]);
+    assert_success(&removed);
+    let command = hinted_recovery_command(&removed);
+    assert!(command.ends_with(" --namespace demo"), "{command}");
+    assert!(!command.contains("--config"), "{command}");
+    assert!(!command.contains("--profile"), "{command}");
 }
 
 #[test]
@@ -3207,6 +3345,18 @@ fn remote_undelete_recovers_through_http() {
         .as_u64()
         .expect("rm reports the deletion sequence");
 
+    // The hint is built from the invocation, not the backend, so a remote
+    // profile prints the same command an embedded one would.
+    let listed = harness.run(&["trash"]);
+    assert_success(&listed);
+    assert_eq!(
+        trash_recovery_command(&listed, "wire.txt"),
+        format!(
+            "loonfs undelete /wire.txt --inode {inode_id} \
+             --deleted-at {deleted_at} --namespace demo"
+        )
+    );
+
     let recovered = harness.run(&[
         "--json",
         "undelete",
@@ -3294,6 +3444,53 @@ fn namespace_delete_without_yes_fails_cleanly_when_not_interactive() {
 
     let deleted = harness.run(&["--json", "namespace", "delete", "demo", "--yes"]);
     assert_success(&deleted);
+}
+
+/// A refused precondition has to say what it wanted and what it found, or
+/// the caller cannot tell a raced delete from a mistyped sequence.
+#[test]
+fn namespace_delete_reports_both_head_sequences_when_the_precondition_fails() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+
+    let payload = harness.temp_dir.path().join("doc.txt");
+    fs::write(&payload, b"body").expect("write payload");
+    assert_success(&harness.run(&["put", payload.to_str().expect("utf-8 path"), "/doc.txt"]));
+
+    let stale = harness.run(&[
+        "--json",
+        "namespace",
+        "delete",
+        "demo",
+        "--yes",
+        "--expected-head-seq",
+        "0",
+    ]);
+    assert_failure(&stale);
+    let error = json_error(&stale);
+    assert_eq!(error["code"], "stale_head");
+    assert_eq!(error["message"], "expected head sequence 0, found 1");
+
+    // The same sentence is what a human run prints, since the renderer
+    // writes the message through unchanged.
+    let human = harness.run(&[
+        "namespace",
+        "delete",
+        "demo",
+        "--yes",
+        "--expected-head-seq",
+        "0",
+    ]);
+    assert_failure(&human);
+    assert_eq!(
+        stderr_string(&human).trim_end(),
+        "expected head sequence 0, found 1"
+    );
+
+    // Refusing deleted nothing, so the namespace is still readable.
+    assert_success(&harness.run(&["--json", "ls", "/"]));
 }
 
 #[test]
@@ -4636,6 +4833,25 @@ impl Harness {
         command
     }
 
+    /// Runs a command the CLI printed the way a user would: through a shell,
+    /// which is what makes the quoting in it load-bearing. Only the `loonfs`
+    /// the hint spells is swapped for the binary under test.
+    fn replay_in_shell(&self, command: &str) -> Output {
+        let arguments = command
+            .strip_prefix("loonfs ")
+            .expect("a printed command invokes loonfs");
+        let binary = loon_binary_path();
+        let script = format!("'{}' {arguments}", binary.display());
+        Command::new("sh")
+            .arg("-c")
+            .arg(&script)
+            .env("HOME", &self.home_dir)
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("LOONFS_CONFIG")
+            .output()
+            .expect("replay the printed command")
+    }
+
     /// Runs the CLI with a payload on standard input, which is the one
     /// source whose length is not knowable before it is read.
     fn run_with_stdin(&self, args: &[&str], stdin: &[u8]) -> Output {
@@ -4868,6 +5084,35 @@ fn assert_failure(output: &Output) {
 
 fn stdout_string(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// The command a `rm` hint spells, taken from between its backticks.
+fn hinted_recovery_command(output: &Output) -> String {
+    let text = stdout_string(output);
+    let hint = text
+        .split_once("recover with `")
+        .and_then(|(_, rest)| rest.split_once('`'))
+        .map(|(command, _)| command.to_owned());
+    assert!(
+        hint.is_some(),
+        "expected a backtick-delimited recovery hint, got:\n{text}"
+    );
+    hint.expect("checked just above")
+}
+
+/// The `RECOVER` cell of the one trash row naming `display_name`.
+fn trash_recovery_command(output: &Output, display_name: &str) -> String {
+    let table = stdout_string(output);
+    let cell = table
+        .lines()
+        .find(|line| line.split('\t').nth(1) == Some(display_name))
+        .and_then(|row| row.split('\t').nth(4))
+        .map(ToOwned::to_owned);
+    assert!(
+        cell.is_some(),
+        "expected a trash row for `{display_name}`, got:\n{table}"
+    );
+    cell.expect("checked just above")
 }
 
 fn stderr_string(output: &Output) -> String {

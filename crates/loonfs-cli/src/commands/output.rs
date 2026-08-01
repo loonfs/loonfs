@@ -24,6 +24,21 @@ pub(crate) struct TreeTransferFailure {
     pub error: CliError,
 }
 
+/// A trash page plus the recovery command printed beside each entry.
+///
+/// The commands are rendered rather than carried as parts because the JSON
+/// envelope already publishes every field a script would build its own
+/// command from; a ready-to-paste line is a convenience for the human table,
+/// so it is skipped on the wire and the response shape stays the API's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct TrashListing {
+    #[serde(flatten)]
+    pub response: loonfs_api::ListTrashResponse,
+    /// One complete `loonfs undelete` per entry, in `response.entries` order.
+    #[serde(skip)]
+    pub recovery_commands: Vec<String>,
+}
+
 /// One assigned `{job, namespace}` key, as a drain left it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct MaintenanceKeyReport {
@@ -122,7 +137,7 @@ pub(crate) enum CommandData {
     GrepIndexStatus(GrepIndexStatusResponse),
     GrepIndexCollected(GrepGcResponse),
     Changes(ChangesResponse),
-    Trash(loonfs_api::ListTrashResponse),
+    Trash(TrashListing),
     PathEntries {
         entries: Vec<AuthoritativePathEntry>,
         /// Where a bounded listing stopped, and how to resume it. Present
@@ -175,6 +190,10 @@ pub(crate) enum CommandData {
         /// `loonfs undelete`.
         #[serde(skip_serializing_if = "Option::is_none")]
         inode_id: Option<InodeId>,
+        /// The `loonfs undelete` that puts this deletion back, set by `rm`
+        /// alone. Human-only, for the reason [`TrashListing`] gives.
+        #[serde(skip)]
+        recovery_command: Option<String>,
     },
     /// A `mkdir -p` whose target was already a directory. Nothing was
     /// committed, so there is no commit to report — the directory the

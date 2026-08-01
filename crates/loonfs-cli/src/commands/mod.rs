@@ -67,10 +67,10 @@ pub(crate) async fn run(
         Command::Restore(args) => fs::run_filesystem_restore(kind, config_path, args).await,
         Command::Undelete(args) => fs::run_filesystem_undelete(kind, config_path, args).await,
         Command::Mkdir(args) => fs::run_filesystem_mkdir(kind, config_path, args).await,
-        Command::Rm(args) => fs::run_filesystem_rm(kind, config_path, args).await,
+        Command::Rm(args) => fs::run_filesystem_rm(kind, &location, args).await,
         Command::Mv(args) => fs::run_filesystem_mv(kind, config_path, args, runtime).await,
         Command::Cp(args) => fs::run_filesystem_cp(kind, config_path, args, runtime).await,
-        Command::Trash(args) => fs::run_filesystem_trash(kind, config_path, args).await,
+        Command::Trash(args) => fs::run_filesystem_trash(kind, &location, args).await,
         Command::Changes(args) => admin::run_admin_changes(kind, config_path, args).await,
         Command::Admin { command } => admin::run_admin_command(kind, config_path, command).await,
     }
