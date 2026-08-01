@@ -404,14 +404,31 @@ async fn read_after_write_is_served_from_seeded_caches() {
         )
         .await
         .expect("steady-state put");
-    // The publish itself must read the live head and root for freshness;
-    // nothing else.
+    // The publish must read the live head and root for freshness, and the
+    // upload session that owns the staged content has to be read to be
+    // completed on its own etag. One of each, and nothing else.
     let write_gets = recording.take_get_keys();
-    assert!(
+    let uploads_prefix = loonfs_objectstore::keys::upload_session_prefix(namespace_id.as_str());
+    let classify = |suffix: &str| {
         write_gets
             .iter()
-            .all(|key| key.ends_with("/wal/head.json") || key.ends_with("/metadata/root.json")),
-        "a steady-state write reads only the live head and root, got {write_gets:?}"
+            .filter(|key| key.ends_with(suffix))
+            .count()
+    };
+    assert_eq!(classify("/wal/head.json"), 1, "got {write_gets:?}");
+    assert_eq!(classify("/metadata/root.json"), 1, "got {write_gets:?}");
+    assert_eq!(
+        write_gets
+            .iter()
+            .filter(|key| key.starts_with(&uploads_prefix))
+            .count(),
+        1,
+        "one staging session is opened and completed per put, got {write_gets:?}"
+    );
+    assert_eq!(
+        write_gets.len(),
+        3,
+        "a steady-state write reads nothing beyond those three, got {write_gets:?}"
     );
 
     reader

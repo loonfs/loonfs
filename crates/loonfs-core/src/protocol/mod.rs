@@ -8,7 +8,8 @@
 //!
 //! - [`uploads`] stages content before metadata can reference it: begin,
 //!   stage, and complete durable upload sessions, including direct-put
-//!   targets that move bytes past the server.
+//!   targets that move bytes past the server and the in-process staging
+//!   writes that are both ends of an upload at once.
 //! - [`publish_view`] loads the publish-time metadata view: the current head
 //!   plus the WAL tail replayed over the manifest, with head-etag freshness
 //!   checks against concurrent publishers.
@@ -36,5 +37,6 @@ pub use self::uploads::CompletedUpload;
 pub(crate) use self::uploads::{
     abort_upload, begin_direct_multipart_upload_target, begin_direct_put_upload_target,
     begin_upload, complete_upload, direct_multipart_part_targets, read_upload_status,
-    upload_content, upload_streamed_content, AbandonedUpload,
+    stage_owned_bytes, stage_owned_stream, upload_content, upload_streamed_content,
+    AbandonedUpload,
 };

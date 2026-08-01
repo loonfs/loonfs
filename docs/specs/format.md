@@ -2112,7 +2112,12 @@ publishing CAS) — under these rules:
    pass is still sound at delete time — which is why the content family
    needs no delete-time re-verification. The constants live beside `T` in
    `loonfs-core`'s `limits` module and the inequality is a compile-time
-   assertion. The reasoning above assumes a content object is referenced
+   assertion. A publication in the same process that completed the session
+   holds its admission directly instead of carrying a receipt, so nothing
+   expires it; what bounds it is the same grace, and a host that stages
+   content and publishes it much later has to publish inside that grace for
+   the same reason a remote client has to re-read its session for a fresh
+   receipt. The reasoning above assumes a content object is referenced
    only by the namespace whose session created it and by fork descendants
    reading through a pinned basis; a same-content-store copy across
    namespaces (section 2.8) would have to root the reference on the source
