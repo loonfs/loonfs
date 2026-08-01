@@ -2,8 +2,9 @@
 
 use crate::codec::IndexRow;
 use crate::root::GrepRootState;
+use loonfs::Recency;
 use loonfs_api::wire::sst_blocks::{DecodedDataBlock, SegmentFilter, SegmentIndexEntry};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 /// Maximum decoded manifests and segment sections retained by one grep service or worker.
@@ -41,13 +42,14 @@ pub(crate) struct GrepBlockCache {
 #[derive(Debug, Default)]
 struct GrepBlockCacheInner {
     entries: HashMap<GrepBlockCacheKey, CacheSlot>,
-    order: VecDeque<(GrepBlockCacheKey, u64)>,
-    touch_counter: u64,
+    order: Recency<GrepBlockCacheKey>,
 }
 
 #[derive(Debug)]
 struct CacheSlot {
     block: DecodedGrepBlock,
+    /// Stamp of this entry's newest queue position; older positions for the
+    /// same key are ghosts.
     last_touch: u64,
 }
 
@@ -69,7 +71,6 @@ impl GrepBlockCache {
             .expect("grep block cache lock should not be poisoned");
         let block = inner.entries.get(key)?.block.clone();
         inner.touch(key);
-        inner.compact_if_needed(self.max_blocks);
         Some(block)
     }
 
@@ -81,61 +82,46 @@ impl GrepBlockCache {
             .inner
             .lock()
             .expect("grep block cache lock should not be poisoned");
-        let stamp = inner.next_stamp();
         inner.entries.insert(
             key.clone(),
             CacheSlot {
                 block,
-                last_touch: stamp,
+                last_touch: 0,
             },
         );
-        inner.order.push_back((key, stamp));
-        while inner.entries.len() > self.max_blocks {
-            inner.evict_oldest();
+        inner.touch(&key);
+        let GrepBlockCacheInner { entries, order } = &mut *inner;
+        while entries.len() > self.max_blocks {
+            let Some(evicted) = order.pop_oldest(|key, stamp| slot_is_live(entries, key, stamp))
+            else {
+                break;
+            };
+            entries.remove(&evicted);
         }
-        inner.compact_if_needed(self.max_blocks);
     }
 }
 
 impl GrepBlockCacheInner {
-    fn next_stamp(&mut self) -> u64 {
-        self.touch_counter = self.touch_counter.saturating_add(1);
-        self.touch_counter
-    }
-
     fn touch(&mut self, key: &GrepBlockCacheKey) {
-        let stamp = self.next_stamp();
-        let Some(slot) = self.entries.get_mut(key) else {
-            return;
-        };
-        slot.last_touch = stamp;
-        self.order.push_back((key.clone(), stamp));
-    }
-
-    fn evict_oldest(&mut self) {
-        while let Some((key, stamp)) = self.order.pop_front() {
-            if self
-                .entries
-                .get(&key)
-                .is_some_and(|slot| slot.last_touch == stamp)
-            {
-                self.entries.remove(&key);
-                return;
-            }
+        let stamp = self.order.touch(key);
+        if let Some(slot) = self.entries.get_mut(key) {
+            slot.last_touch = stamp;
         }
+        let entries = &self.entries;
+        self.order.compact(entries.len(), |key, stamp| {
+            slot_is_live(entries, key, stamp)
+        });
     }
+}
 
-    fn compact_if_needed(&mut self, max_blocks: usize) {
-        let queue_limit = max_blocks.saturating_mul(4);
-        if self.order.len() <= queue_limit {
-            return;
-        }
-        let mut live = self
-            .entries
-            .iter()
-            .map(|(key, slot)| (key.clone(), slot.last_touch))
-            .collect::<Vec<_>>();
-        live.sort_by_key(|(_, stamp)| *stamp);
-        self.order = live.into();
-    }
+/// Whether a queue position still names the entry's newest access. An entry
+/// that was replaced, evicted, or re-touched leaves stale positions behind.
+fn slot_is_live(
+    entries: &HashMap<GrepBlockCacheKey, CacheSlot>,
+    key: &GrepBlockCacheKey,
+    stamp: u64,
+) -> bool {
+    entries
+        .get(key)
+        .is_some_and(|slot| slot.last_touch == stamp)
 }

@@ -84,6 +84,7 @@ mod gc;
 mod namespace;
 mod options;
 mod protocol;
+mod recency;
 mod storage;
 mod timing;
 mod wal;
@@ -111,8 +112,11 @@ pub mod path;
 pub mod time;
 
 /// Cache types and configuration for runtime read paths. Consumed by
-/// `loonfs`, which owns the runtime's cache configuration and stats.
+/// `loonfs`, which owns the runtime's cache configuration and stats, and
+/// which re-exports [`cache::Recency`] for the grep index's own block cache.
 pub mod cache {
+    pub use crate::recency::Recency;
+
     pub use crate::checkpoint::{
         ManifestLoadError, ManifestLoadFailureClass, MetadataTableCache, MetadataTableCacheConfig,
         MetadataTableCacheStats, WalTailProjectionCache, WalTailProjectionCacheConfig,
