@@ -2,7 +2,7 @@
 //! cursors each paginated endpoint round-trips.
 
 use crate::capability::{LIMIT_PAGINATION_DEFAULT, LIMIT_PAGINATION_MAX};
-use crate::{ChangeSeq, InodeId, NameKey, RevisionNo};
+use crate::{ChangeSeq, InodeId, NameKey, NamespaceId, RevisionNo};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
@@ -345,6 +345,60 @@ pub fn decode_cursor<C: PageCursor>(value: &str) -> Result<C, PageCursorError> {
     let envelope: CursorEnvelope<C> = serde_json::from_slice(&bytes)
         .map_err(|error| PageCursorError::InvalidJson(error.to_string()))?;
     Ok(envelope.cursor)
+}
+
+/// A cursor that resumes an enumeration of one namespace's own keyspace.
+///
+/// Maintenance passes walk keys rather than rows, and their cursors are
+/// enumeration shortcuts and nothing else: a pass re-reads whatever
+/// authorizes the work it does, whatever position it resumed from, so a
+/// cursor that is lost or refused costs a repeated walk and never a wrong
+/// decision. What the binding buys is that a token minted for another
+/// namespace, another job, or another key family is refused instead of
+/// quietly skipping the keys between here and wherever it points.
+pub trait NamespaceCursor: PageCursor {
+    /// Namespace whose keyspace this cursor walks.
+    fn namespace_id(&self) -> &NamespaceId;
+
+    /// Key the enumeration stopped at, or `None` at the start.
+    fn last_key(&self) -> Option<&str>;
+
+    /// Prefix every key this cursor may name lies under.
+    fn key_prefix(&self) -> String;
+}
+
+/// Decodes a cursor issued for `expected_namespace_id`'s own keyspace.
+pub fn decode_namespace_cursor<C: NamespaceCursor>(
+    token: &str,
+    expected_namespace_id: &NamespaceId,
+) -> Result<C, NamespaceCursorError> {
+    let cursor: C = decode_cursor(token)?;
+    if cursor.namespace_id() != expected_namespace_id {
+        return Err(NamespaceCursorError::ForeignNamespace);
+    }
+    let prefix = cursor.key_prefix();
+    if cursor
+        .last_key()
+        .is_some_and(|key| !key.starts_with(&prefix))
+    {
+        return Err(NamespaceCursorError::OutsideKeyspace);
+    }
+    Ok(cursor)
+}
+
+/// Why a namespace-bound cursor cannot resume the enumeration replaying it.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum NamespaceCursorError {
+    /// Not a cursor this enumeration issued: unreadable, or from another
+    /// endpoint, job, or cursor version.
+    #[error(transparent)]
+    Malformed(#[from] PageCursorError),
+    /// A cursor for a different namespace than the one replaying it.
+    #[error("cursor belongs to a different namespace")]
+    ForeignNamespace,
+    /// A cursor naming a key outside the prefix its enumeration walks.
+    #[error("cursor names a key outside the enumeration it resumes")]
+    OutsideKeyspace,
 }
 
 /// Invalid opaque page cursor.

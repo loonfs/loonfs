@@ -64,8 +64,6 @@ pub enum GrepEnvelopeCodecError {
     Envelope(#[from] EnvelopeCodecError),
     #[error("invalid grep manifest state: {0}")]
     InvalidState(#[from] GrepManifestStateError),
-    #[error("invalid grep manifest id: {0}")]
-    InvalidManifestId(#[from] GrepManifestIdError),
 }
 
 /// Failure to load or publish a grep root.

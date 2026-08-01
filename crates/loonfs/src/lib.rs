@@ -69,10 +69,12 @@ pub use loonfs_core::cache::{MetadataTableCacheConfig, Recency};
 pub use loonfs_core::limits::{
     DEFAULT_GC_MAX_OBJECTS, GC_MIN_GRACE_WINDOW_MS, METADATA_PUBLICATION_BUDGET_MS,
 };
+pub use loonfs_core::time::current_time_ms;
 pub use loonfs_core::{
-    BootstrapNamespaceError, CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor,
-    CurrentFileState, DeleteNamespaceOptions, Error as CoreError, ErrorCode, ErrorKind, GcConfig,
-    MetadataViewError, StoreFailureClass, WriterFence, MAX_RESOLVE_CURRENT_FILES,
+    delete_if_aged, BootstrapNamespaceError, CheckpointFile, CheckpointFilesPage,
+    CheckpointFilesPageCursor, CurrentFileState, DeleteNamespaceOptions, Error as CoreError,
+    ErrorCode, ErrorKind, GcConfig, MetadataViewError, PassBudget, StoreFailureClass, WriterFence,
+    MAX_RESOLVE_CURRENT_FILES,
 };
 pub use publisher::PublishObserver;
 

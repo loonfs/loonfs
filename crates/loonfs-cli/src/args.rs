@@ -688,6 +688,8 @@ pub(crate) enum MaintenanceJobArg {
     CoreGc,
     /// Build and fold the gram content index.
     GrepIndex,
+    /// Reclaim one namespace's unreferenced grep objects per step.
+    GrepGc,
 }
 
 #[derive(Debug, Args)]

@@ -79,7 +79,7 @@ mod worker;
 pub use config::{GrepWorkerConfig, GrepWorkerConfigError};
 pub use error::GrepError as Error;
 pub use error::{GrepError, Result};
-pub use maintenance::{GrepMaintenanceJob, GREP_INDEX_JOB};
+pub use maintenance::{GrepGcJob, GrepMaintenanceJob, GREP_GC_JOB, GREP_INDEX_JOB};
 pub use reads::NamespaceReads;
 pub use service::{
     GrepIndexSnapshot, GrepService, DEFAULT_GREP_PAGE_LIMIT, MAX_GREP_PAGE_LIMIT,

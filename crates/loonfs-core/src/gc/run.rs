@@ -203,7 +203,16 @@ async fn process_candidate<S: ObjectStore + ?Sized>(
         CandidateFamily::WalSegments => {
             if sweep.live.wal_segments.contains(key) {
                 report.retained_candidates += 1;
-            } else if delete_if_aged(store, key, config.grace_window_ms, context, report).await? {
+            } else if delete_if_aged(
+                store,
+                key,
+                config.grace_window_ms,
+                context.now_ms,
+                &mut report.retained_candidates,
+            )
+            .await
+            .map_err(|error| CoreError::store(key, &error))?
+            {
                 report.deleted_wal_segments += 1;
             }
         }
@@ -211,7 +220,16 @@ async fn process_candidate<S: ObjectStore + ?Sized>(
             // Rule 5 is sticky across every re-collection in this pass.
             if sweep.degraded || sweep.live.tables.contains(key) {
                 report.retained_candidates += 1;
-            } else if delete_if_aged(store, key, config.grace_window_ms, context, report).await? {
+            } else if delete_if_aged(
+                store,
+                key,
+                config.grace_window_ms,
+                context.now_ms,
+                &mut report.retained_candidates,
+            )
+            .await
+            .map_err(|error| CoreError::store(key, &error))?
+            {
                 report.deleted_metadata_tables += 1;
             }
         }
@@ -222,7 +240,16 @@ async fn process_candidate<S: ObjectStore + ?Sized>(
             };
             if sweep.degraded || live_or_unrecognized {
                 report.retained_candidates += 1;
-            } else if delete_if_aged(store, key, config.grace_window_ms, context, report).await? {
+            } else if delete_if_aged(
+                store,
+                key,
+                config.grace_window_ms,
+                context.now_ms,
+                &mut report.retained_candidates,
+            )
+            .await
+            .map_err(|error| CoreError::store(key, &error))?
+            {
                 report.deleted_manifests += 1;
             }
         }

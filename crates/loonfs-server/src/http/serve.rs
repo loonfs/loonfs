@@ -12,7 +12,7 @@ use loonfs::{
     SharedObjectStore, TraceMode, TraceStoreKind,
 };
 use loonfs_api::NamespaceId;
-use loonfs_grep::{GrepMaintenanceJob, GrepService, GrepWorker, GREP_INDEX_JOB};
+use loonfs_grep::{GrepGcJob, GrepMaintenanceJob, GrepService, GrepWorker, GREP_INDEX_JOB};
 use loonfs_objectstore::presign::ObjectTransferIssuer;
 use std::ffi::OsString;
 use std::net::SocketAddr;
@@ -269,6 +269,20 @@ pub(super) async fn app_with_store_and_transfer_issuer(
         ));
         writer
             .register_maintenance_job(job.clone())
+            .map_err(|error| ServerConfigError::InvalidField {
+                field: "grep",
+                reason: error.to_string(),
+            })?;
+        // Reclaiming what the index leaves behind is upkeep for the same
+        // namespaces, gated by the same switch: a deployment that builds
+        // grep objects is the one that should collect them.
+        writer
+            .register_maintenance_job(Arc::new(GrepGcJob::new(
+                grep_worker
+                    .as_ref()
+                    .expect("an index-maintaining deployment composes a grep worker")
+                    .clone(),
+            )))
             .map_err(|error| ServerConfigError::InvalidField {
                 field: "grep",
                 reason: error.to_string(),

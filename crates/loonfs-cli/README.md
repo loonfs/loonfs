@@ -170,8 +170,9 @@ Maintenance
   loonfs admin run --namespace <ns>... [--job <job>...] [--drain] [--max-steps <n>] [--deadline-ms <ms>]
     Host maintenance for the namespaces named here, continuously until a
     signal; nothing discovers namespaces, so at least one --namespace is
-    required. --job selects `metadata`, `core-gc`, or `grep-index`, all
-    three when omitted. --drain catches every assigned namespace up and
+    required. --job selects `metadata`, `core-gc`, `grep-index`, or
+    `grep-gc`, all four when omitted. --drain catches every assigned
+    namespace up and
     exits instead, which suits cron, and --max-steps or --deadline-ms bound
     the drain, exit nonzero, and report where every namespace stopped
 

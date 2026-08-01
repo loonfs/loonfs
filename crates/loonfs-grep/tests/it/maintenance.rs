@@ -13,7 +13,9 @@ use loonfs::{
 use loonfs_api::{ChangeSeq, IndexSegmentId, NamespaceId};
 use loonfs_grep::keyspace::{root_key, segment_key};
 use loonfs_grep::root::load_grep_root;
-use loonfs_grep::{GramIndexBuildPolicy, GrepMaintenanceJob, GrepWorker, GREP_INDEX_JOB};
+use loonfs_grep::{
+    GramIndexBuildPolicy, GrepGcJob, GrepMaintenanceJob, GrepWorker, GREP_GC_JOB, GREP_INDEX_JOB,
+};
 use loonfs_objectstore::local_fs_store::LocalFsStore;
 use loonfs_objectstore::{
     ByteRange, ObjectBody, ObjectMetadata, ObjectStore, ObjectStoreError, PutMode,
@@ -266,6 +268,129 @@ async fn catch_up<S: ObjectStore + Clone + Send + Sync + 'static>(
     panic!("the grep job did not catch up");
 }
 
+/// The collection job is the reclaiming half the index job deliberately
+/// leaves undone, and a nudge is what asks for it.
+#[tokio::test]
+async fn a_nudge_collects_what_indexing_left_behind() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(AgedGrepStore::new(temp_dir.path()));
+    let namespace_id = NamespaceId::parse("collect").expect("namespace id");
+    let writer = seed(store.clone(), &namespace_id).await;
+    put_file(&writer, &namespace_id, "collect-put").await;
+    let worker = worker(store.clone(), "collect-worker").await;
+    worker.enable(&namespace_id).await.expect("enable grep");
+    let orphan = segment_key(&namespace_id, &IndexSegmentId::generate());
+    store
+        .put_overwrite(&orphan, Bytes::from_static(b"orphan"))
+        .await
+        .expect("write orphan");
+
+    let host = host_writer(store.clone(), "collect-host", 2).await;
+    host.register_maintenance_job(Arc::new(GrepGcJob::new(worker.clone())))
+        .expect("register the grep collection job");
+    host.maintenance().nudge(GREP_GC_JOB, &namespace_id);
+
+    wait_for_deletion(&store, &orphan).await;
+    assert!(
+        store
+            .head(&root_key(&namespace_id))
+            .await
+            .expect("head root")
+            .is_some(),
+        "the pointer a live namespace still names is never a candidate"
+    );
+    host.shutdown_background()
+        .await
+        .expect("settle host maintenance");
+}
+
+/// A resume position the collector refuses restarts the pass instead of
+/// failing the key: every pass rebuilds its own safety proof, so starting
+/// over is always sound.
+#[tokio::test]
+async fn a_refused_resume_position_restarts_the_collection_pass() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store"));
+    let namespace_id = NamespaceId::parse("resume").expect("namespace id");
+    let writer = seed(store.clone(), &namespace_id).await;
+    put_file(&writer, &namespace_id, "resume-put").await;
+    let worker = worker(store.clone(), "resume-worker").await;
+    worker.enable(&namespace_id).await.expect("enable grep");
+    let job = GrepGcJob::new(worker);
+
+    assert_eq!(
+        job.step(&namespace_id, Some("not-a-cursor"))
+            .await
+            .expect("a refused cursor is not a step failure")
+            .conclusion,
+        MaintenanceStepConclusion::Superseded
+    );
+    let fresh = job.step(&namespace_id, None).await.expect("fresh pass");
+    assert_eq!(fresh.conclusion, MaintenanceStepConclusion::Idle);
+    assert_eq!(fresh.continuation, None);
+}
+
+/// Grep objects age out against provider timestamps, so a collection test
+/// needs candidates the provider reports as older than the grace window.
+#[derive(Debug)]
+struct AgedGrepStore {
+    inner: LocalFsStore,
+}
+
+impl AgedGrepStore {
+    fn new(root: &Path) -> Self {
+        Self {
+            inner: LocalFsStore::new(root).expect("local store"),
+        }
+    }
+}
+
+#[async_trait]
+impl ObjectStore for AgedGrepStore {
+    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>, ObjectStoreError> {
+        Ok(self.inner.head(key).await?.map(|mut metadata| {
+            metadata.last_modified_ms = Some(0);
+            metadata
+        }))
+    }
+
+    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>, ObjectStoreError> {
+        self.inner.get_with_metadata(key).await
+    }
+
+    async fn get(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<Option<Bytes>, ObjectStoreError> {
+        self.inner.get(key, range).await
+    }
+
+    async fn put(
+        &self,
+        key: &str,
+        bytes: Bytes,
+        mode: PutMode,
+    ) -> Result<ObjectMetadata, ObjectStoreError> {
+        self.inner.put(key, bytes, mode).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), ObjectStoreError> {
+        self.inner.delete(key).await
+    }
+
+    async fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, ObjectStoreError> {
+        self.inner.list_prefix(prefix).await
+    }
+
+    fn list_prefix_stream(
+        &self,
+        prefix: &str,
+    ) -> BoxStream<'static, Result<String, ObjectStoreError>> {
+        self.inner.list_prefix_stream(prefix)
+    }
+}
+
 /// A writer that only hosts the runner: it serves no namespace of its own,
 /// so every step its pool admits is a grep step.
 async fn host_writer<S: ObjectStore + 'static>(
@@ -313,6 +438,20 @@ async fn put_file(writer: &FsWriter, namespace_id: &NamespaceId, commit_id: &str
         commit_id,
     )
     .await;
+}
+
+/// Waits for the runner's collection steps to reclaim one key.
+#[allow(clippy::disallowed_methods)]
+async fn wait_for_deletion<S: ObjectStore + 'static>(store: &Arc<S>, key: &str) {
+    // The pass reports what it reclaimed durably and nowhere else; this
+    // polls that durable state under a bounded timeout.
+    tokio::time::timeout(WAIT, async {
+        while store.head(key).await.expect("head candidate").is_some() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("`{key}` was never collected"));
 }
 
 /// Waits for the runner's steps to publish a root at `built_through_seq`.
