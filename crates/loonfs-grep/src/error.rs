@@ -13,12 +13,15 @@ use thiserror::Error;
 #[derive(Debug, Clone, Error)]
 #[non_exhaustive]
 pub enum GrepError {
+    // Both messages name the capability key clients gate on (`query.grep`),
+    // the same one capability discovery advertises and the `feature` field
+    // of a `not_supported` response carries.
     /// The namespace has no active grep root.
-    #[error("feature `grep.index` is not enabled on this namespace")]
+    #[error("feature `query.grep` is not enabled on this namespace")]
     NotEnabled,
     /// The namespace's grep backfill has not completed.
     #[error(
-        "feature `grep.index` is enabled but its backfill has not completed on this namespace"
+        "feature `query.grep` is enabled but its backfill has not completed on this namespace"
     )]
     Backfilling,
     /// The backing provider could not serve grep-owned state.

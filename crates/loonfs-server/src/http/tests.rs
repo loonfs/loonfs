@@ -19,6 +19,7 @@ use loonfs::{
 use loonfs_api::ErrorCode;
 use loonfs_api::{
     ChangeSeq, CommitId, DeleteDirectoryBehavior, DestinationBehavior, GrepRequest, NamespaceId,
+    FEATURE_QUERY_GREP,
 };
 use loonfs_client::{Client, ClientConfig, ClientError, MoveOptions, NamespacePath};
 use loonfs_grep::keyspace::{manifest_key as grep_manifest_key, root_key as grep_root_key};
@@ -2083,7 +2084,9 @@ async fn assert_grep_api_error_and_core_read<T: std::fmt::Debug>(
                 "expected `{message_fragment}` in `{message}`"
             );
             if code == ErrorCode::NotSupported {
-                assert_eq!(feature.as_deref(), Some("grep.index"));
+                // The reported feature is the capability key clients gate
+                // on, not a private name for the index.
+                assert_eq!(feature.as_deref(), Some(FEATURE_QUERY_GREP));
             } else {
                 assert_eq!(feature, None);
             }

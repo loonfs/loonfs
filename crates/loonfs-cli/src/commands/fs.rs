@@ -2,8 +2,8 @@
 //! and grep.
 
 use super::context::{
-    default_remote_put_path, destination_path_for_get, destination_user_path, fail, namespace_path,
-    parse_user_path, render_target, resolve_command_context, CommandContext,
+    default_remote_put_path, destination_path_for_get, destination_user_path, directory_intent,
+    fail, namespace_path, parse_user_path, render_target, resolve_command_context, CommandContext,
 };
 use super::output::{CommandData, CommandFailure, CommandOutput};
 use super::recursive;
@@ -16,7 +16,9 @@ use crate::args::{
 use crate::backend::FileDownload;
 use crate::error::CliError;
 use crate::payload::{read_whole_file, LocalPayload, STDIN_PATH};
-use loonfs_api::{CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeKind, RevisionNo};
+use loonfs_api::{
+    CommitId, DeleteDirectoryBehavior, DestinationBehavior, ErrorCode, InodeKind, RevisionNo,
+};
 use loonfs_client::{CreateDirectoryOptions, DeleteOptions, NamespacePath, PutFileOptions};
 use std::fs;
 use std::io::{self, Write};
@@ -95,17 +97,64 @@ pub(crate) async fn run_filesystem_ls(
         allow_root,
     )
     .map_err(|error| context.fail(kind, error))?;
-    let entries = context
-        .target
-        .list_path_entries_all(&spec)
-        .await
-        .map_err(|error| context.fail(kind, error))?;
+    let (entries, next_cursor) = match (args.limit, args.cursor.as_deref()) {
+        // Unbounded is still the default: a listing nobody bounded prints
+        // the whole directory, as it always has.
+        (None, None) => {
+            let entries = context
+                .target
+                .list_path_entries_all(&spec)
+                .await
+                .map_err(|error| context.fail(kind, error))?;
+            (entries, None)
+        }
+        (limit, cursor) => list_bounded_path_entries(&context, kind, &spec, limit, cursor).await?,
+    };
     Ok(CommandOutput {
         kind,
         profile: Some(context.profile_name),
         mode: Some(context.mode),
-        data: CommandData::PathEntries { entries },
+        data: CommandData::PathEntries {
+            entries,
+            next_cursor,
+        },
     })
+}
+
+/// Reads pages until `limit` entries are in hand, and reports the cursor
+/// that resumes where it stopped.
+///
+/// `limit` bounds the total, not one page, so the loop asks for what it
+/// still needs — clamped to a page size every deployment accepts, because a
+/// caller-supplied page limit above `pagination.max_limit` is rejected
+/// rather than clamped by the server. An absent `limit` follows the cursor
+/// to the end, which is what `--cursor` alone asks for.
+async fn list_bounded_path_entries(
+    context: &CommandContext,
+    kind: CommandKind,
+    spec: &NamespacePath,
+    limit: Option<u32>,
+    cursor: Option<&str>,
+) -> Result<(Vec<loonfs_api::AuthoritativePathEntry>, Option<String>), CommandFailure> {
+    let mut entries = Vec::new();
+    let mut cursor = cursor.map(ToOwned::to_owned);
+    loop {
+        let page_limit = limit.map(|limit| {
+            let remaining = limit.saturating_sub(entries.len() as u32);
+            remaining.min(loonfs_api::DEFAULT_PAGE_LIMIT)
+        });
+        let page = context
+            .target
+            .list_path_entries_page(spec, page_limit, cursor.as_deref())
+            .await
+            .map_err(|error| context.fail(kind, error))?;
+        entries.extend(page.entries);
+        cursor = page.next_cursor;
+        let filled = limit.is_some_and(|limit| entries.len() as u32 >= limit);
+        if filled || cursor.is_none() {
+            return Ok((entries, cursor));
+        }
+    }
 }
 
 pub(crate) async fn run_filesystem_stat(
@@ -154,24 +203,38 @@ pub(crate) async fn run_filesystem_grep(
     };
     let mut matches = Vec::new();
     let mut tail_scanned = true;
+    let mut truncated = false;
+    // `--limit` sizes a page and is bounded by the deployment's
+    // `query.grep.max_limit`; `--max-matches` bounds the whole command. They
+    // are separate because a total cap larger than that per-page maximum
+    // would be rejected if it were sent as one.
+    let max_matches = args.max_matches.map(|max| max as usize);
     let (namespace_id, head_seq, built_through_seq) = loop {
         let response = context
             .target
             .grep(&context.namespace, &request)
             .await
             .map_err(|error| context.fail(kind, error))?;
+        let snapshot = (
+            response.namespace_id,
+            response.head_seq,
+            response.built_through_seq,
+        );
         matches.extend(response.matches);
         tail_scanned &= response.tail_scanned;
+        if let Some(max_matches) = max_matches {
+            if matches.len() >= max_matches {
+                // A page can overshoot the cap; the extra matches are real
+                // but were not asked for.
+                truncated = matches.len() > max_matches || response.next_cursor.is_some();
+                matches.truncate(max_matches);
+                break snapshot;
+            }
+        }
         match response.next_cursor {
             Some(cursor) => request.cursor = Some(cursor),
-            None => {
-                // The final page's snapshot describes the completed query.
-                break (
-                    response.namespace_id,
-                    response.head_seq,
-                    response.built_through_seq,
-                );
-            }
+            // The final page's snapshot describes the completed query.
+            None => break snapshot,
         }
     };
     Ok(CommandOutput {
@@ -185,6 +248,7 @@ pub(crate) async fn run_filesystem_grep(
             built_through_seq,
             matches,
             tail_scanned,
+            truncated,
         },
     })
 }
@@ -755,11 +819,36 @@ pub(crate) async fn run_filesystem_mkdir(
         commit_id,
         message: args.message.clone(),
     };
-    let result = context
-        .target
-        .create_directory(&spec, &options)
-        .await
-        .map_err(|error| context.fail(kind, error))?;
+    let result = match context.target.create_directory(&spec, &options).await {
+        Ok(result) => result,
+        // Unix `mkdir -p` treats a directory that is already there as
+        // success. The conflict is what says the path is occupied, and a
+        // stat then says by what: a directory is the state `-p` asked for,
+        // anything else is the conflict the caller has to hear about.
+        // Reading the conflict rather than pre-checking keeps the ordinary
+        // path one round trip, and a pre-check would race just the same.
+        Err(error) if args.parents && error.code == ErrorCode::PathConflict.as_str() => {
+            let existing = context
+                .target
+                .stat_path(&spec)
+                .await
+                .map_err(|_| context.fail(kind, error.clone()))?;
+            if existing.inode_kind != InodeKind::Directory {
+                return Err(context.fail(kind, error));
+            }
+            return Ok(CommandOutput {
+                kind,
+                profile: Some(context.profile_name),
+                mode: Some(context.mode),
+                data: CommandData::DirectoryAlreadyExists {
+                    target: render_target(&context.namespace, spec.absolute_path()),
+                    inode_id: existing.inode_id,
+                    head_seq: existing.head_seq,
+                },
+            });
+        }
+        Err(error) => return Err(context.fail(kind, error)),
+    };
 
     Ok(CommandOutput {
         kind,
@@ -798,6 +887,40 @@ enum TransferKind {
     Copy,
 }
 
+/// Applies the `cp`/`mv` habit for a destination that is an existing
+/// directory: the item lands inside it under its own name.
+///
+/// A trailing slash already said "into this directory" before the command
+/// ran, and this covers the spelling without one, which Unix reads the same
+/// way. Only an existing directory redirects: a destination that does not
+/// exist is the full path the caller typed, and a destination that is a file
+/// stays the overwrite question `--force` answers.
+///
+/// The stat can go stale between here and the commit. That is the same
+/// window `cp` has on any filesystem, and losing it fails the transfer
+/// rather than writing somewhere unexpected — the commit still names the
+/// exact path resolved here.
+async fn resolve_transfer_destination(
+    context: &CommandContext,
+    named: NamespacePath,
+    source_leaf: &str,
+) -> Result<NamespacePath, CliError> {
+    let Ok(existing) = context.target.stat_path(&named).await else {
+        // Absent, or unreadable for a reason the transfer itself will
+        // report: either way this is not a directory to land inside.
+        return Ok(named);
+    };
+    if existing.inode_kind != InodeKind::Directory {
+        return Ok(named);
+    }
+    let leaf = loonfs_api::DisplayName::parse(source_leaf)
+        .map_err(|error| CliError::invalid_input(error.to_string()))?;
+    Ok(NamespacePath::new(
+        context.namespace.clone(),
+        named.absolute_path().join(&leaf),
+    ))
+}
+
 async fn run_filesystem_transfer(
     kind: CommandKind,
     config_path: &Path,
@@ -825,9 +948,19 @@ async fn run_filesystem_transfer(
                 CliError::invalid_input("root path is not allowed for this command"),
             )
         })?;
-    let to = destination_user_path(&args.destination_path, &source_leaf, true)
+    let named_destination = destination_user_path(&args.destination_path, &source_leaf, true)
         .map(|path| NamespacePath::new(context.namespace.clone(), path))
         .map_err(|error| context.fail(kind, error))?;
+    // A destination spelled with a trailing slash already named the
+    // directory to land in, and the leaf is already appended; looking again
+    // would append it twice.
+    let to = if directory_intent(&args.destination_path) || args.destination_path == "/" {
+        named_destination
+    } else {
+        resolve_transfer_destination(&context, named_destination, &source_leaf)
+            .await
+            .map_err(|error| context.fail(kind, error))?
+    };
 
     let commit_id = parse_commit_id_arg(args.commit_id.as_deref())
         .map_err(|error| context.fail(kind, error))?;

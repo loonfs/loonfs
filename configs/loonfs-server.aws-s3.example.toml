@@ -21,6 +21,9 @@ region = "us-east-1"
 # force_path_style = false, LoonFS accepts either a bucket-specific endpoint
 # like "https://your-bucket.s3.us-east-1.amazonaws.com" or a bucket-less
 # regional endpoint like "https://s3.us-east-1.amazonaws.com".
+# Credentials may be left out of this file entirely and supplied through
+# AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and AWS_SESSION_TOKEN. A value
+# named here wins over the environment.
 access_key_id = "YOUR_ACCESS_KEY_ID"
 secret_access_key = "YOUR_SECRET_ACCESS_KEY"
 key_prefix = "loonfs-demo"

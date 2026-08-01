@@ -1968,6 +1968,164 @@ fn profile_names_matching_top_level_config_keys_are_allowed() {
 }
 
 #[test]
+fn ambient_provider_credentials_do_not_look_like_flags() {
+    // An AWS key exported for something else is not `--access-key-id`
+    // passed to this command, so a provider that cannot use it ignores it.
+    let harness = Harness::new();
+    let ambient = &[
+        ("AWS_ACCESS_KEY_ID", "ambient-access"),
+        ("AWS_SECRET_ACCESS_KEY", "ambient-secret"),
+        ("AWS_SESSION_TOKEN", "ambient-session"),
+        ("LOONFS_AUTH_TOKEN", "ambient-token"),
+    ];
+
+    let gcs = harness.run_with_env(
+        ambient,
+        &[
+            "--json",
+            "profile",
+            "create",
+            "gcs",
+            "--mode",
+            "embedded",
+            "--store-kind",
+            "gcp-gcs",
+            "--bucket",
+            "bucket",
+            "--service-account-key-path",
+            "/tmp/service-account.json",
+        ],
+    );
+    assert_success(&gcs);
+    assert_eq!(json_data(&gcs)["store"]["kind"], "gcp-gcs");
+
+    let local_fs = harness.run_with_env(
+        ambient,
+        &[
+            "--json",
+            "profile",
+            "create",
+            "local",
+            "--mode",
+            "embedded",
+            "--store-kind",
+            "local-fs",
+            "--root",
+            harness.store_root("local").to_str().expect("utf-8 path"),
+        ],
+    );
+    assert_success(&local_fs);
+
+    // The same environment still fills the providers that use it.
+    let s3 = harness.run_with_env(
+        ambient,
+        &[
+            "--json",
+            "profile",
+            "create",
+            "s3",
+            "--mode",
+            "embedded",
+            "--store-kind",
+            "aws-s3",
+            "--bucket",
+            "bucket",
+            "--region",
+            "us-east-1",
+        ],
+    );
+    assert_success(&s3);
+    assert_eq!(json_data(&s3)["store"]["access_key_id"], "<redacted>");
+
+    // And a typed flag that does not apply is still rejected.
+    let typed = harness.run_with_env(
+        ambient,
+        &[
+            "--json",
+            "profile",
+            "create",
+            "gcs-typed",
+            "--mode",
+            "embedded",
+            "--store-kind",
+            "gcp-gcs",
+            "--bucket",
+            "bucket",
+            "--service-account-key-path",
+            "/tmp/service-account.json",
+            "--access-key-id",
+            "typed-access",
+        ],
+    );
+    assert_failure(&typed);
+    let error = json_error(&typed);
+    assert_eq!(error["code"], "invalid_input");
+    assert!(error["message"]
+        .as_str()
+        .expect("json string")
+        .contains("`--access-key-id` does not apply"));
+}
+
+/// A command line the parser rejected is a failure like any other under
+/// `--json`, and keeps clap's own exit status so a script can still tell a
+/// command that never ran from one that ran and failed.
+#[test]
+fn json_covers_command_lines_the_parser_rejects() {
+    let harness = Harness::new();
+
+    for arguments in [
+        vec!["--json", "bogus-command"],
+        vec!["--json", "mkdir"],
+        vec![
+            "--json",
+            "admin",
+            "run",
+            "--namespace",
+            "demo",
+            "--drain",
+            "--max-steps",
+            "abc",
+        ],
+        // The flag is global, so it still counts after the subcommand.
+        vec!["stat", "--json", "--nonexistent-flag"],
+    ] {
+        let output = harness.run(&arguments);
+        assert_failure(&output);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "a parse failure keeps clap's usage status for {arguments:?}"
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "the failure belongs on stderr for {arguments:?}"
+        );
+        let envelope = parse_json(&output.stderr);
+        assert_eq!(envelope["kind"], "parse_error");
+        assert_eq!(envelope["format_version"], 1);
+        assert!(envelope["data"].is_null());
+        assert_eq!(envelope["error"]["code"], "invalid_usage");
+        assert!(!envelope["error"]["message"]
+            .as_str()
+            .expect("json string")
+            .is_empty());
+    }
+
+    // Without --json the plain-text rendering and the status are unchanged.
+    let plain = harness.run(&["bogus-command"]);
+    assert_eq!(plain.status.code(), Some(2));
+    assert!(stderr_string(&plain).contains("unrecognized subcommand"));
+    assert!(!stderr_string(&plain).starts_with('{'));
+
+    // Help and version are not failures, whatever else is on the line.
+    let help = harness.run(&["--json", "--help"]);
+    assert_success(&help);
+    assert!(stdout_string(&help).contains("Usage:"));
+    let version = harness.run(&["--json", "--version"]);
+    assert_success(&version);
+}
+
+#[test]
 fn init_rejects_existing_config_file() {
     let harness = Harness::new();
     harness.write_cli_config(format!(
@@ -2695,6 +2853,87 @@ fn embedded_grep_works_after_index_enable() {
     );
 }
 
+/// `--max-matches` caps the whole search, which `--limit` cannot: `--limit`
+/// sizes one page and the deployment rejects a page larger than its own
+/// maximum.
+#[test]
+fn grep_max_matches_caps_the_search_while_limit_sizes_a_page() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "code"]));
+    assert_success(&harness.run(&["use", "code"]));
+
+    let payload = harness.temp_dir.path().join("notes.txt");
+    fs::write(&payload, b"TODO one\nTODO two\nTODO three\nTODO four\n").expect("write payload");
+    assert_success(&harness.run(&["put", payload.to_str().expect("utf-8 path"), "/notes.txt"]));
+    assert_success(&harness.run(&["--json", "admin", "index-enable"]));
+
+    let all = harness.run(&["--json", "grep", "TODO"]);
+    assert_success(&all);
+    let all_data = json_data(&all);
+    assert_eq!(all_data["matches"].as_array().expect("json array").len(), 4);
+    assert_eq!(all_data["truncated"], false);
+
+    let capped = harness.run(&["--json", "grep", "TODO", "--max-matches", "2"]);
+    assert_success(&capped);
+    let capped_data = json_data(&capped);
+    assert_eq!(
+        capped_data["matches"].as_array().expect("json array").len(),
+        2
+    );
+    assert_eq!(capped_data["truncated"], true);
+
+    // A cap the search never reaches is not a truncation.
+    let roomy = harness.run(&["--json", "grep", "TODO", "--max-matches", "99"]);
+    assert_success(&roomy);
+    assert_eq!(
+        json_data(&roomy)["matches"]
+            .as_array()
+            .expect("json array")
+            .len(),
+        4
+    );
+    assert_eq!(json_data(&roomy)["truncated"], false);
+
+    // A small page still returns every match, because it bounds a page and
+    // the command follows the cursor.
+    let paged = harness.run(&["--json", "grep", "TODO", "--limit", "1"]);
+    assert_success(&paged);
+    assert_eq!(
+        json_data(&paged)["matches"]
+            .as_array()
+            .expect("json array")
+            .len(),
+        4
+    );
+    assert_eq!(json_data(&paged)["truncated"], false);
+
+    // The two compose: pages of one, stopped after three.
+    let both = harness.run(&[
+        "--json",
+        "grep",
+        "TODO",
+        "--limit",
+        "1",
+        "--max-matches",
+        "3",
+    ]);
+    assert_success(&both);
+    assert_eq!(
+        json_data(&both)["matches"]
+            .as_array()
+            .expect("json array")
+            .len(),
+        3
+    );
+    assert_eq!(json_data(&both)["truncated"], true);
+
+    // The human rendering says it stopped early.
+    let human = harness.run(&["grep", "TODO", "--max-matches", "2"]);
+    assert_success(&human);
+    assert!(stdout_string(&human).contains("--max-matches"));
+}
+
 #[test]
 fn index_enable_leaves_core_maintenance_decoupled() {
     let harness = Harness::new();
@@ -3323,6 +3562,258 @@ fn every_advertised_capability_maps_to_a_cli_command_path() {
     }
 }
 
+/// `mkdir -p` on a directory that is already there succeeds, the way Unix
+/// does, and still fails on a file — in both profile modes.
+#[test]
+fn mkdir_parents_is_idempotent_over_an_existing_directory_in_both_modes() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("embedded");
+    let remote_server =
+        harness.start_external_server(harness.write_server_config("remote", "mkdir-idempotent"));
+    assert_success(&harness.run(&[
+        "--json",
+        "profile",
+        "create",
+        "remote",
+        "--mode",
+        "remote",
+        "--server-url",
+        &remote_server.server_url,
+        "--auth-token",
+        "test-token",
+    ]));
+
+    let payload = harness.temp_dir.path().join("file.txt");
+    fs::write(&payload, b"bytes\n").expect("payload");
+
+    for profile in ["embedded", "remote"] {
+        assert_success(&harness.run(&["namespace", "create", "--profile", profile, "demo"]));
+        assert_success(&harness.run(&["use", "--profile", profile, "demo"]));
+
+        let created = harness.run(&["--json", "mkdir", "-p", "/a/b", "--profile", profile]);
+        assert_success(&created);
+        assert_eq!(json_data(&created)["kind"], "file_mutation");
+
+        // The second -p is a no-op, not a conflict: no commit, and the
+        // output says what is already there.
+        let again = harness.run(&["--json", "mkdir", "-p", "/a/b", "--profile", profile]);
+        assert_success(&again);
+        let again_data = json_data(&again);
+        assert_eq!(again_data["kind"], "directory_already_exists");
+        assert_eq!(again_data["target"], "demo:/a/b");
+        assert!(again_data["inode_id"].is_number());
+
+        // Without -p the conflict still surfaces.
+        let strict = harness.run(&["--json", "mkdir", "/a/b", "--profile", profile]);
+        assert_failure(&strict);
+        assert_eq!(json_error(&strict)["code"], "path_conflict");
+
+        // A file at the target is a conflict even with -p.
+        assert_success(&harness.run(&[
+            "put",
+            "--profile",
+            profile,
+            payload.to_str().expect("utf-8 path"),
+            "/a/file.txt",
+        ]));
+        let over_file =
+            harness.run(&["--json", "mkdir", "-p", "/a/file.txt", "--profile", profile]);
+        assert_failure(&over_file);
+        assert_eq!(json_error(&over_file)["code"], "path_conflict");
+    }
+}
+
+/// `cp` and `mv` land inside a destination that is already a directory, the
+/// way Unix does; a destination that is a file keeps its overwrite rules.
+#[test]
+fn cp_and_mv_land_inside_an_existing_directory_in_both_modes() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("embedded");
+    let remote_server =
+        harness.start_external_server(harness.write_server_config("remote", "transfer-into-dir"));
+    assert_success(&harness.run(&[
+        "--json",
+        "profile",
+        "create",
+        "remote",
+        "--mode",
+        "remote",
+        "--server-url",
+        &remote_server.server_url,
+        "--auth-token",
+        "test-token",
+    ]));
+
+    let payload = harness.temp_dir.path().join("report.pdf");
+    fs::write(&payload, b"report bytes\n").expect("payload");
+    let other = harness.temp_dir.path().join("other.txt");
+    fs::write(&other, b"other bytes\n").expect("other payload");
+
+    for profile in ["embedded", "remote"] {
+        assert_success(&harness.run(&["namespace", "create", "--profile", profile, "demo"]));
+        assert_success(&harness.run(&["use", "--profile", profile, "demo"]));
+        assert_success(&harness.run(&["mkdir", "/docs", "--profile", profile]));
+        assert_success(&harness.run(&[
+            "put",
+            "--profile",
+            profile,
+            payload.to_str().expect("utf-8 path"),
+            "/report.pdf",
+        ]));
+
+        // No trailing slash, and /docs is a directory: the file keeps its
+        // own name inside it.
+        let copied = harness.run(&["--json", "cp", "/report.pdf", "/docs", "--profile", profile]);
+        assert_success(&copied);
+        assert_eq!(json_data(&copied)["to"], "demo:/docs/report.pdf");
+
+        let moved = harness.run(&["--json", "mv", "/report.pdf", "/docs", "--profile", profile]);
+        assert_failure(&moved);
+        assert_eq!(
+            json_error(&moved)["code"],
+            "path_conflict",
+            "the copy already occupies /docs/report.pdf"
+        );
+        let forced = harness.run(&[
+            "--json",
+            "mv",
+            "/report.pdf",
+            "/docs",
+            "--force",
+            "--profile",
+            profile,
+        ]);
+        assert_success(&forced);
+        assert_eq!(json_data(&forced)["to"], "demo:/docs/report.pdf");
+
+        // A destination that does not exist is still the exact path typed.
+        let renamed = harness.run(&[
+            "--json",
+            "cp",
+            "/docs/report.pdf",
+            "/docs/renamed.pdf",
+            "--profile",
+            profile,
+        ]);
+        assert_success(&renamed);
+        assert_eq!(json_data(&renamed)["to"], "demo:/docs/renamed.pdf");
+
+        // A destination that is a file keeps the overwrite rules it had.
+        assert_success(&harness.run(&[
+            "put",
+            "--profile",
+            profile,
+            other.to_str().expect("utf-8 path"),
+            "/other.txt",
+        ]));
+        let onto_file = harness.run(&[
+            "--json",
+            "cp",
+            "/other.txt",
+            "/docs/renamed.pdf",
+            "--profile",
+            profile,
+        ]);
+        assert_failure(&onto_file);
+        assert_eq!(json_error(&onto_file)["code"], "path_conflict");
+        let onto_file_forced = harness.run(&[
+            "--json",
+            "cp",
+            "/other.txt",
+            "/docs/renamed.pdf",
+            "--force",
+            "--profile",
+            profile,
+        ]);
+        assert_success(&onto_file_forced);
+        assert_eq!(json_data(&onto_file_forced)["to"], "demo:/docs/renamed.pdf");
+
+        // A directory tree lands inside an existing directory too.
+        assert_success(&harness.run(&["mkdir", "/archive", "--profile", profile]));
+        let tree = harness.run(&[
+            "--json",
+            "cp",
+            "-r",
+            "/docs",
+            "/archive",
+            "--profile",
+            profile,
+        ]);
+        assert_success(&tree);
+        assert_eq!(json_data(&tree)["destination"], "demo:/archive/docs");
+    }
+}
+
+/// `ls` bounds its own output on request, and the cursor it reports
+/// resumes exactly where it stopped.
+#[test]
+fn ls_limit_bounds_the_whole_listing_and_resumes_from_its_cursor() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+
+    let payload = harness.temp_dir.path().join("entry.txt");
+    fs::write(&payload, b"bytes\n").expect("payload");
+    for index in 0..5 {
+        assert_success(&harness.run(&[
+            "put",
+            payload.to_str().expect("utf-8 path"),
+            &format!("/f{index}.txt"),
+        ]));
+    }
+
+    // Unbounded still prints everything and reports no cursor.
+    let all = harness.run(&["--json", "ls"]);
+    assert_success(&all);
+    let all_data = json_data(&all);
+    assert_eq!(all_data["entries"].as_array().expect("json array").len(), 5);
+    assert!(all_data.get("next_cursor").is_none());
+
+    // A bound stops at exactly that many entries and hands back a cursor.
+    let first = harness.run(&["--json", "ls", "--limit", "2"]);
+    assert_success(&first);
+    let first_data = json_data(&first);
+    let first_entries = first_data["entries"].as_array().expect("json array");
+    assert_eq!(first_entries.len(), 2);
+    let cursor = first_data["next_cursor"]
+        .as_str()
+        .expect("a truncated listing reports where it stopped")
+        .to_owned();
+
+    let second = harness.run(&["--json", "ls", "--limit", "2", "--cursor", &cursor]);
+    assert_success(&second);
+    let second_data = json_data(&second);
+    let second_entries = second_data["entries"].as_array().expect("json array");
+    assert_eq!(second_entries.len(), 2);
+    assert_ne!(
+        second_entries[0]["absolute_path"], first_entries[0]["absolute_path"],
+        "the cursor resumes after the entries already printed"
+    );
+
+    // The last page fits inside the bound and reports no cursor.
+    let rest = harness.run(&[
+        "--json",
+        "ls",
+        "--limit",
+        "10",
+        "--cursor",
+        second_data["next_cursor"].as_str().expect("second cursor"),
+    ]);
+    assert_success(&rest);
+    let rest_data = json_data(&rest);
+    assert_eq!(
+        rest_data["entries"].as_array().expect("json array").len(),
+        1
+    );
+    assert!(rest_data.get("next_cursor").is_none());
+
+    // The human rendering says the listing stopped early.
+    let human = harness.run(&["ls", "--limit", "2"]);
+    assert_success(&human);
+    assert!(stdout_string(&human).contains("next_cursor:"));
+}
+
 /// The admin plane and the change feed work end to end, and both profile
 /// modes emit the same `--json` shapes and error codes for them.
 #[test]
@@ -3630,6 +4121,17 @@ impl Harness {
             .write_all(stdin)
             .expect("write stdin");
         child.wait_with_output().expect("run loonfs")
+    }
+
+    /// Runs the CLI with extra environment variables set, for the paths
+    /// where the environment is part of the behavior under test.
+    fn run_with_env(&self, env: &[(&str, &str)], args: &[&str]) -> Output {
+        let mut command = Command::new(loon_binary_path());
+        command.env("HOME", &self.home_dir);
+        for (name, value) in env {
+            command.env(name, value);
+        }
+        command.args(args).output().expect("run loonfs")
     }
 
     fn store_root(&self, name: &str) -> PathBuf {

@@ -32,8 +32,8 @@ brew install loonfs/tap/loonfs
 
 Or compile directly from source by checking out this repository and running
 ```bash
-cargo build -p loonfs-cli                     # compile from source
-cp ./target/debug/loonfs ~/.local/bin/loonfs    # copy it to somewhere in your $PATH
+cargo build --release -p loonfs-cli               # compile from source
+cp ./target/release/loonfs ~/.local/bin/loonfs    # copy it to somewhere in your $PATH
 ```
 
 ## Quickstart
@@ -57,11 +57,11 @@ loonfs use {namespace_id}
 Embedded mode gives one process at a time direct object-store access. Concurrent `loonfs` invocations against one namespace contend for the writer role: whichever acquires it last wins, and a command that loses fails with `writer_fenced`, naming both sessions. A fenced command commits nothing, so rerunning it is always safe — but fencing is a stop signal, not a retry loop, so put bulk work in one process or run the server for concurrent writers. To share a deployment across machines and let many clients write concurrently, run the reference server and point remote profiles at it:
 
 ```bash
-cargo build -p loonfs-server
-./target/debug/loonfs-server --config configs/loonfs-server.local-fs.example.toml
+cargo build --release -p loonfs-server
+./target/release/loonfs-server --config configs/loonfs-server.local-fs.example.toml
 ```
 
-Commented example configs for every supported store live in [configs/](configs) (`local-fs`, `aws-s3`, `gcp-gcs`, `cloudflare-r2`, `azure-abs`). The required fields are `bind`, `writer_id`, and a `[store]` block; everything else defaults. A server with no `[grep]` table composes no grep at all; the optional `[grep]` table selects `mode = "disabled" | "serve_only" | "maintain_only" | "serve_and_maintain"` (default `serve_and_maintain`) and the bounded per-step build/fold policy shown in the local-fs example. Grep index maintenance runs as one job under the writer's maintenance runner, driven by writes rather than by a timer or a store enumeration. Connect a client:
+Commented example configs for every supported store live in [configs/](configs) (`local-fs`, `aws-s3`, `gcp-gcs`, `cloudflare-r2`, `azure-abs`). The required fields are `bind`, `writer_id`, and a `[store]` block; everything else defaults. Secrets need not live in the file: `auth_token` and `content_token_secret` fall back to `LOONFS_AUTH_TOKEN` and `LOONFS_CONTENT_TOKEN_SECRET`, and an `aws-s3` or `cloudflare-r2` store falls back to `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_SESSION_TOKEN`. A value written in the file always wins. A server with no `[grep]` table composes no grep at all; the optional `[grep]` table selects `mode = "disabled" | "serve_only" | "maintain_only" | "serve_and_maintain"` (default `serve_and_maintain`) and the bounded per-step build/fold policy shown in the local-fs example. Grep index maintenance runs as one job under the writer's maintenance runner, driven by writes rather than by a timer or a store enumeration. Connect a client:
 
 ```bash
 export LOONFS_AUTH_TOKEN={auth_token}

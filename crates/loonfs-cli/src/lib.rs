@@ -19,8 +19,18 @@ mod resolve;
 use clap::Parser;
 use std::process::ExitCode;
 
+/// Exit status for a command line the parser rejected, which is clap's own.
+///
+/// It stays distinct from the failure status a command that actually ran
+/// reports, so a script can tell "this command never started" from "this
+/// command started and failed" without reading the message.
+const USAGE_EXIT_CODE: u8 = 2;
+
 pub async fn main() -> ExitCode {
-    let cli = args::Cli::parse();
+    let cli = match args::Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => return render_parse_failure(&error),
+    };
     let runtime = args::RuntimeBehavior::detect(&cli);
 
     match commands::run(cli, runtime).await {
@@ -45,4 +55,43 @@ pub async fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Renders a command line clap rejected, in whichever form the caller asked
+/// for.
+///
+/// `--json` is one of the things clap failed to parse, so whether it was
+/// asked for has to be read off the raw arguments. A caller who asked for
+/// JSON gets the same envelope a runtime failure produces, and every caller
+/// keeps clap's exit status: a parse failure is not a command that ran.
+///
+/// `--help` and `--version` arrive here as errors too, and are not
+/// failures: clap renders them on stdout and exits zero.
+fn render_parse_failure(error: &clap::Error) -> ExitCode {
+    if !error.use_stderr() {
+        error.print().ok();
+        return ExitCode::SUCCESS;
+    }
+    if !json_requested(std::env::args_os()) {
+        error.print().ok();
+        return ExitCode::from(USAGE_EXIT_CODE);
+    }
+    let failure = error::CliError::invalid_usage(error.render().to_string());
+    let _ = render::render_parse_error(&failure);
+    ExitCode::from(USAGE_EXIT_CODE)
+}
+
+/// Whether the raw arguments asked for `--json`, scanned the way clap would
+/// have: a bare `--` ends option parsing, so a `--json` after it is a value,
+/// not this flag.
+fn json_requested(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> bool {
+    for argument in arguments {
+        if argument == "--" {
+            return false;
+        }
+        if argument == "--json" {
+            return true;
+        }
+    }
+    false
 }

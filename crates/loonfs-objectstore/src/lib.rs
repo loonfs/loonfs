@@ -50,4 +50,6 @@ pub use provider_object_store::{
     PROVIDER_TRANSFER_ATTEMPT_TIMEOUT,
 };
 pub use secret::SecretString;
-pub use store_config::{StoreConfig, StoreConfigError};
+pub use store_config::{
+    StoreConfig, StoreConfigError, ACCESS_KEY_ID_ENV, SECRET_ACCESS_KEY_ENV, SESSION_TOKEN_ENV,
+};

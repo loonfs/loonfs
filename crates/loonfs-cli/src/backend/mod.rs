@@ -28,8 +28,9 @@ use loonfs_api::{
     },
     AuthoritativePathEntry, ChangeSeq, CheckpointId, CommitResponse, CreateCheckpointRequest,
     CreateCheckpointResponse, DeleteNamespaceResponse, GrepRequest, GrepResponse, InodeId,
-    ListFileRevisionsResponse, ListTrashResponse, MaintenanceStepRequest, MaintenanceStepResponse,
-    NamespaceId, NamespaceStatusResponse, NamespaceSummary, ReleaseCheckpointResponse, RevisionNo,
+    ListFileRevisionsResponse, ListPathEntriesResponse, ListTrashResponse, MaintenanceStepRequest,
+    MaintenanceStepResponse, NamespaceId, NamespaceStatusResponse, NamespaceSummary,
+    ReleaseCheckpointResponse, RevisionNo,
 };
 use loonfs_client::{
     CopyOptions, CreateDirectoryOptions, DeleteOptions, MoveOptions, NamespacePath, PutFileOptions,
@@ -275,6 +276,27 @@ impl ResolvedTarget {
         match self {
             Self::Embedded(target) => target.backend.list_path_entries_all(spec).await,
             Self::Remote(target) => Ok(target.client.list_path_entries_all(spec).await?.entries),
+        }
+    }
+
+    /// Lists one page of a directory, for callers that bound their output.
+    pub(crate) async fn list_path_entries_page(
+        &self,
+        spec: &NamespacePath,
+        limit: Option<u32>,
+        cursor: Option<&str>,
+    ) -> Result<ListPathEntriesResponse, BackendError> {
+        match self {
+            Self::Embedded(target) => {
+                target
+                    .backend
+                    .list_path_entries_page(spec, limit, cursor)
+                    .await
+            }
+            Self::Remote(target) => Ok(target
+                .client
+                .list_path_entries_page(spec, limit, cursor)
+                .await?),
         }
     }
 

@@ -15,7 +15,13 @@ Global flags
     Config file to use, ahead of LOONFS_CONFIG and the default location
 
   --json
-    Emit JSON instead of human output
+    Emit JSON instead of human output. A failure prints the same envelope
+    on stderr with an `error` object instead of `data`, and that includes a
+    command line the parser rejected — an unknown command, a bad value, a
+    missing option — which carries `"kind": "parse_error"` and the code
+    `invalid_usage`. A parse failure keeps its own exit status 2, distinct
+    from the 1 a command that actually ran and failed reports, so the two
+    stay separable without reading the message
 
   --no-input
     Never prompt; fail instead when a value would be asked for
@@ -124,8 +130,11 @@ Namespace management
     Show the active profile and its default namespace
 
 Reading
-  loonfs ls [path]
-    List the entries of a directory, `/` when the path is omitted
+  loonfs ls [path] [--limit <n>] [--cursor <cursor>]
+    List the entries of a directory, `/` when the path is omitted. Without
+    --limit the whole directory is printed, however large; --limit stops
+    after that many entries in total and reports a next_cursor, which
+    --cursor resumes from
 
   loonfs stat <path>
     Describe one path: kind, size, revision, and content digest
@@ -139,11 +148,13 @@ Reading
     path; --force overwrites the local destination and --revision downloads
     an older revision of one file
 
-  loonfs grep <pattern> [--path-prefix <path>] [-i] [--limit <n>] [--allow-scan] [--allow-stale]
+  loonfs grep <pattern> [--path-prefix <path>] [-i] [--limit <n>]
+                        [--max-matches <n>] [--allow-scan] [--allow-stale]
     Search file content through the gram index with a pattern in the Rust
     regex dialect, and print every match; -i ignores ASCII case,
-    --path-prefix narrows to a subtree, --limit sizes a page rather than
-    capping the results,
+    --path-prefix narrows to a subtree, --limit sizes a page (bounded by the
+    deployment's query.grep.max_limit) while --max-matches caps the total
+    and reports that it stopped early,
     --allow-scan permits a capped scan for a pattern with no literal bytes,
     and --allow-stale accepts indexed-only results when the unindexed tail
     exceeds the scan budget
@@ -157,7 +168,8 @@ Writing
     stacking on it
 
   loonfs mkdir <path> [-p]
-    Create a directory; -p creates missing parents as well
+    Create a directory; -p creates missing parents as well and succeeds when
+    the directory is already there
 
   loonfs rm <path> [-r]
     Delete a file, or with -r a directory and everything under it as one
@@ -260,7 +272,10 @@ Profile options
   A field the store requires and the command line omits is asked for on a
   terminal, and is an error under --no-input or --json. Secrets fall back to
   the standard environment variables, so a quickstart never has to put them
-  in argv.
+  in argv. A variable a provider has no use for is ignored: an exported
+  AWS key does not make a gcp-gcs profile fail as though --access-key-id
+  had been passed. A flag actually typed on the command line is still
+  rejected when it does not apply.
 
   Mode:
     --mode <embedded|remote>
@@ -360,6 +375,15 @@ Behavior notes
 
   A remote path ending in `/` names the directory a `put`, `mv`, or `cp`
   lands in, and the item keeps its own name
+
+  A `mv` or `cp` destination that is already a directory means the same
+  thing without the trailing slash, so `loonfs cp /report.pdf /docs` lands
+  at `/docs/report.pdf`. A destination that does not exist is the exact
+  path given, and one that is a file keeps the overwrite rules --force
+  governs
+
+  `loonfs mkdir -p` succeeds when the target is already a directory and
+  commits nothing; a file at the target is still `path_conflict`
 
   `loonfs put -` reads standard input and needs an explicit remote path,
   because a pipe has no local name to derive one from

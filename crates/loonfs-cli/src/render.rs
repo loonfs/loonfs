@@ -260,6 +260,28 @@ pub(crate) fn json_success(output: &CommandOutput) -> io::Result<String> {
     }
 }
 
+/// `kind` for a command line the parser rejected. Every other envelope names
+/// the command it belongs to; this one has none, because clap failed before
+/// a command was chosen.
+const PARSE_ERROR_KIND: &str = "parse_error";
+
+/// Writes the parse-failure envelope to stderr, in the shape a runtime
+/// failure uses.
+pub(crate) fn render_parse_error(error: &CliError) -> io::Result<()> {
+    let body = serde_json::to_string_pretty(&JsonEnvelope::<serde_json::Value> {
+        kind: PARSE_ERROR_KIND,
+        format_version: FORMAT_VERSION,
+        profile: None,
+        mode: None,
+        data: None,
+        error: Some(error),
+    })
+    .map_err(io::Error::other)?;
+    let mut stderr = io::stderr().lock();
+    stderr.write_all(body.as_bytes())?;
+    stderr.write_all(b"\n")
+}
+
 pub(crate) fn json_error(failure: &CommandFailure) -> io::Result<String> {
     serde_json::to_string_pretty(&JsonEnvelope::<serde_json::Value> {
         kind: failure.kind.as_str(),
@@ -462,17 +484,27 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             }
             lines.join("\n")
         }
-        CommandData::PathEntries { entries } => entries
-            .iter()
-            .map(|entry| {
-                let size = entry
-                    .size_bytes
-                    .map(|value: u64| value.to_string())
-                    .unwrap_or_else(|| "-".to_owned());
-                format!("{}\t{}\t{}", entry.inode_kind, size, entry.absolute_path)
-            })
-            .collect::<Vec<_>>()
-            .join("\n"),
+        CommandData::PathEntries {
+            entries,
+            next_cursor,
+        } => {
+            let mut lines: Vec<String> = entries
+                .iter()
+                .map(|entry| {
+                    let size = entry
+                        .size_bytes
+                        .map(|value: u64| value.to_string())
+                        .unwrap_or_else(|| "-".to_owned());
+                    format!("{}\t{}\t{}", entry.inode_kind, size, entry.absolute_path)
+                })
+                .collect();
+            if let Some(cursor) = next_cursor {
+                lines.push(format!(
+                    "next_cursor: {cursor} (more entries; resume with --cursor)"
+                ));
+            }
+            lines.join("\n")
+        }
         CommandData::GrepIndexEnabled {
             namespace_id,
             already_enabled,
@@ -598,6 +630,7 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             pattern,
             matches,
             tail_scanned,
+            truncated,
             ..
         } => {
             let mut lines: Vec<String> = matches
@@ -609,7 +642,14 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
                     )
                 })
                 .collect();
-            lines.push(format!("{} matches for `{pattern}`", matches.len()));
+            if *truncated {
+                lines.push(format!(
+                    "{} matches for `{pattern}` (stopped at --max-matches; there are more)",
+                    matches.len()
+                ));
+            } else {
+                lines.push(format!("{} matches for `{pattern}`", matches.len()));
+            }
             if !tail_scanned {
                 lines.push(
                     "warning: recent commits were not scanned (allow_stale); results may be stale"
@@ -722,6 +762,9 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             }
             _ => format!("{target} @ seq {committed_seq} (commit {commit_id})"),
         },
+        CommandData::DirectoryAlreadyExists { target, .. } => {
+            format!("{target} is already a directory")
+        }
         CommandData::PathMove {
             from,
             to,

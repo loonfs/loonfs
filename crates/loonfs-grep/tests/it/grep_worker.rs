@@ -1164,7 +1164,7 @@ fn assert_not_enabled_error(case: &str, result: loonfs_grep::Result<GrepResponse
             assert_eq!(error.code(), ErrorCode::NotSupported, "code for {case}");
             assert_eq!(
                 error.to_string(),
-                "feature `grep.index` is not enabled on this namespace",
+                "feature `query.grep` is not enabled on this namespace",
                 "error text for {case}"
             );
         }
@@ -1178,7 +1178,7 @@ fn assert_backfilling_error(case: &str, result: loonfs_grep::Result<GrepResponse
             assert_eq!(error.code(), ErrorCode::NotSupported, "code for {case}");
             assert_eq!(
                 error.to_string(),
-                "feature `grep.index` is enabled but its backfill has not completed on this \
+                "feature `query.grep` is enabled but its backfill has not completed on this \
                  namespace",
                 "error text for {case}"
             );

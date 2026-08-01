@@ -24,7 +24,9 @@ const CONTENT_TOKEN_SECRET_ENV: &str = "LOONFS_CONTENT_TOKEN_SECRET";
 ///
 /// `auth_token` and `content_token_secret` may be supplied through the
 /// `LOONFS_AUTH_TOKEN` and `LOONFS_CONTENT_TOKEN_SECRET` environment
-/// variables instead of the file. A non-blank value in the file always takes
+/// variables instead of the file, and the S3-compatible store credentials
+/// through the standard `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and
+/// `AWS_SESSION_TOKEN`. A non-blank value in the file always takes
 /// precedence; the environment variable fills the field only when the file
 /// leaves it unset (blank environment values are ignored).
 #[derive(Debug, Clone, Deserialize)]
@@ -297,6 +299,13 @@ pub enum ServerConfigError {
     Decode(String),
     #[error("missing `{field}`")]
     MissingField { field: &'static str },
+    /// A store credential absent from the file and from the environment
+    /// variable that can stand in for it.
+    #[error("missing `{field}`; set it in the config or export `{env}`")]
+    MissingCredential {
+        field: &'static str,
+        env: &'static str,
+    },
     #[error("invalid `{field}`: {reason}")]
     InvalidField { field: &'static str, reason: String },
 }
@@ -309,6 +318,10 @@ impl ServerConfig {
     /// Fills `auth_token` and `content_token_secret` from the environment
     /// when the file left them unset. Non-blank file values win; blank
     /// environment values are ignored.
+    ///
+    /// The store's own credentials follow the same rule but read their own
+    /// standard variables, so [`StoreConfig::apply_env_credentials`] owns
+    /// that half and this function stays about the server's two secrets.
     fn apply_env_fallbacks(
         &mut self,
         auth_token_env: Option<String>,
@@ -447,6 +460,9 @@ impl From<StoreConfigError> for ServerConfigError {
     fn from(error: StoreConfigError) -> Self {
         match error {
             StoreConfigError::MissingField { field } => ServerConfigError::MissingField { field },
+            StoreConfigError::MissingCredential { field, env } => {
+                ServerConfigError::MissingCredential { field, env }
+            }
             StoreConfigError::InvalidField { field, reason } => {
                 ServerConfigError::InvalidField { field, reason }
             }
@@ -464,6 +480,7 @@ pub fn load_server_config(path: impl AsRef<Path>) -> Result<ServerConfig, Server
         env::var(AUTH_TOKEN_ENV).ok(),
         env::var(CONTENT_TOKEN_SECRET_ENV).ok(),
     );
+    config.store.apply_env_credentials();
     config.validate()?;
     config.object_store()?;
     Ok(config)
@@ -1180,6 +1197,72 @@ root = "/tmp/loonfs-server"
         config.apply_env_fallbacks(Some("   ".to_owned()), Some(String::new()));
         assert!(config.auth_token.is_none());
         assert!(config.content_token_secret().is_empty());
+    }
+
+    #[test]
+    fn a_store_table_may_leave_its_credentials_to_the_environment() {
+        // A credential-less `[store]` used to fail decoding, before any
+        // environment fallback could apply. It now parses, and loading
+        // resolves the credentials from the standard variables.
+        let path = write_config(
+            r#"
+bind = "127.0.0.1:9400"
+auth_token = "dev-token"
+writer_id = "loonfs-server"
+
+[store]
+kind = "aws-s3"
+bucket = "bucket"
+region = "us-east-1"
+"#,
+        );
+        toml::from_str::<super::ServerConfig>(&fs::read_to_string(&path).expect("read config"))
+            .expect("a store table without credentials parses");
+
+        // Only assert the empty-environment answer when the environment is
+        // in fact empty: a developer's own AWS credentials would legitimately
+        // complete this config.
+        if std::env::var("AWS_ACCESS_KEY_ID").is_err() {
+            let error = load_server_config(&path).expect_err("no credentials anywhere");
+            match error {
+                ServerConfigError::MissingCredential { field, env } => {
+                    assert_eq!(field, "store.access_key_id");
+                    assert_eq!(env, "AWS_ACCESS_KEY_ID");
+                }
+                other => panic!("expected a missing-credential error, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn store_credentials_in_the_file_win_over_the_environment() {
+        let path = write_config(
+            r#"
+bind = "127.0.0.1:9400"
+auth_token = "dev-token"
+writer_id = "loonfs-server"
+
+[store]
+kind = "aws-s3"
+bucket = "bucket"
+region = "us-east-1"
+access_key_id = "file-access"
+secret_access_key = "file-secret"
+"#,
+        );
+
+        let config = load_server_config(&path).expect("load config");
+        match config.store {
+            super::StoreConfig::AwsS3 {
+                access_key_id,
+                secret_access_key,
+                ..
+            } => {
+                assert_eq!(access_key_id.expose(), "file-access");
+                assert_eq!(secret_access_key.expose(), "file-secret");
+            }
+            other => panic!("expected an aws-s3 store, got {other:?}"),
+        }
     }
 
     #[test]

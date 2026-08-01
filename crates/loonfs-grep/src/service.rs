@@ -666,7 +666,7 @@ async fn candidate_content(
 
 impl GrepService {
     /// Content search over one pinned snapshot: index-accelerated
-    /// candidates through the `grep.index` watermark, an exhaustive scan of
+    /// candidates through the `query.grep` watermark, an exhaustive scan of
     /// the unindexed tail, and real-pattern verification of every candidate
     /// against current state. Matches order by `(inode_id, byte_offset)`.
     /// Two budgets bound a page — the match limit and a verified-candidate
