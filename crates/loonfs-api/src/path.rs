@@ -115,6 +115,17 @@ pub enum PathError {
         /// Which portability rule it broke.
         reason: &'static str,
     },
+    /// Reports a display name holding a character Windows reserves.
+    #[error(
+        "display name `{display_name}` contains `{character}`, which Windows cannot store; \
+         the reserved characters are `:` `?` `*` `|` `\"` `<` `>` `\\`"
+    )]
+    UnportableDisplayNameCharacter {
+        /// The rejected spelling.
+        display_name: String,
+        /// The first reserved character in the name, reading left to right.
+        character: char,
+    },
     /// Reports a valid display spelling whose canonical lookup key exceeds its durable bound.
     #[error(
         "display name folds to a {byte_length}-byte name key; the maximum is \
@@ -355,10 +366,16 @@ fn validate_display_name(value: &str) -> Result<(), PathError> {
         });
     }
     // Portability floor: names every target filesystem can hold. Windows
-    // cannot materialize trailing dots or spaces or its reserved device
-    // names, and an all-whitespace name is invisible in every listing.
-    // Rejecting here is free pre-release; loosening later is compatible,
-    // tightening later would strand stored names.
+    // cannot materialize its reserved characters, trailing dots or spaces,
+    // or its reserved device names, and an all-whitespace name is invisible
+    // in every listing. Rejecting here is free pre-release; loosening later
+    // is compatible, tightening later would strand stored names.
+    if let Some(character) = first_windows_reserved_character(value) {
+        return Err(PathError::UnportableDisplayNameCharacter {
+            display_name: value.to_owned(),
+            character,
+        });
+    }
     if value.chars().all(char::is_whitespace) {
         return Err(PathError::UnportableDisplayName {
             display_name: value.to_owned(),
@@ -408,6 +425,26 @@ fn validate_path_bounds(byte_length: usize, depth: usize) -> Result<(), PathErro
     Ok(())
 }
 
+/// Characters Windows reserves inside a path component. Each one means
+/// something else there — a drive or stream separator, a wildcard, a pipe, a
+/// quote, a redirect — so a name holding one cannot be written to an NTFS
+/// volume at all, and a tree containing it could not be materialized,
+/// archived, or synced on Windows.
+///
+/// This is the same portability floor the trailing-dot and device-name rules
+/// enforce; they were already Windows-motivated, and admitting these
+/// characters while rejecting `CON` would be the policy disagreeing with
+/// itself.
+const WINDOWS_RESERVED_CHARACTERS: [char; 8] = [':', '?', '*', '|', '"', '<', '>', '\\'];
+
+/// The first reserved character in a name, reading left to right, so the
+/// diagnostic can name the one the caller has to fix first.
+fn first_windows_reserved_character(value: &str) -> Option<char> {
+    value
+        .chars()
+        .find(|character| WINDOWS_RESERVED_CHARACTERS.contains(character))
+}
+
 /// Device names Windows reserves regardless of extension or letter case:
 /// a file called `CON`, `con.txt`, or `Com1.log` cannot exist there.
 fn is_windows_reserved_device_name(value: &str) -> bool {
@@ -432,7 +469,8 @@ impl PathError {
             Self::EmptyDisplayName => "",
             Self::DisplayNameContainsSeparator { display_name }
             | Self::ReservedDisplayName { display_name } => display_name,
-            Self::UnportableDisplayName { display_name, .. } => display_name,
+            Self::UnportableDisplayName { display_name, .. }
+            | Self::UnportableDisplayNameCharacter { display_name, .. } => display_name,
             // Length and control failures do not carry the offending name:
             // an oversized or hostile name must not ride along in error
             // payloads that serialize onto the wire.
@@ -469,6 +507,80 @@ mod tests {
         }
         // Names that merely resemble the reserved set stay legal.
         for name in ["CONSOLE", "com10", "lpt10.txt", ".hidden", "a.b"] {
+            assert!(
+                DisplayName::parse(name).is_ok(),
+                "`{name}` should be accepted"
+            );
+        }
+    }
+
+    /// The characters Windows reserves are rejected the same way its
+    /// trailing dots and device names already were, and the diagnostic names
+    /// the one to fix.
+    #[test]
+    fn windows_reserved_characters_are_rejected() {
+        for (name, character) in [
+            ("c:drive", ':'),
+            ("what?", '?'),
+            ("glob*.txt", '*'),
+            ("a|b", '|'),
+            ("say \"hi\"", '"'),
+            ("<draft>", '<'),
+            ("out>", '>'),
+            ("back\\slash.txt", '\\'),
+        ] {
+            let error = DisplayName::parse(name).expect_err("`{name}` should be rejected");
+            assert_eq!(
+                error,
+                PathError::UnportableDisplayNameCharacter {
+                    display_name: name.to_owned(),
+                    character,
+                },
+                "`{name}` should name the character it broke on"
+            );
+            let message = error.to_string();
+            assert!(
+                message.contains(name) && message.contains(character),
+                "the diagnostic must name the name and the character, got: {message}"
+            );
+
+            // Path components enter through the same grammar.
+            assert_eq!(
+                AbsolutePath::parse(format!("/docs/{name}")),
+                Err(PathError::UnportableDisplayNameCharacter {
+                    display_name: name.to_owned(),
+                    character,
+                })
+            );
+        }
+
+        // The first reserved character is the one reported, so a name with
+        // several is fixed one clear step at a time.
+        assert_eq!(
+            DisplayName::parse("a?b:c"),
+            Err(PathError::UnportableDisplayNameCharacter {
+                display_name: "a?b:c".to_owned(),
+                character: '?',
+            })
+        );
+
+        // Punctuation Windows does allow stays legal; the rule is a fixed
+        // set, not a suspicion about symbols.
+        for name in [
+            "report;final.txt",
+            "hello!.txt",
+            "it's.txt",
+            "a+b=c.txt",
+            "~backup#1.txt",
+            "100%.txt",
+            "a&b.txt",
+            "notes (draft).txt",
+            "list[0].txt",
+            "set{a}.txt",
+            "a,b.txt",
+            "user@host.txt",
+            "a^b$c.txt",
+        ] {
             assert!(
                 DisplayName::parse(name).is_ok(),
                 "`{name}` should be accepted"
