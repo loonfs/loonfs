@@ -599,6 +599,9 @@ async fn validate_content_size<S: ObjectStore + ?Sized>(
     Ok(())
 }
 
+/// Plants durable content under a fresh identity, resolving the namespace's
+/// content store first. See [`store_bytes_as_content_with_store_id`] for
+/// what this is for and what it is not.
 #[tracing::instrument(
     level = "info",
     name = "loonfs.phase",
@@ -615,8 +618,8 @@ pub async fn store_bytes_as_content<S: ObjectStore + ?Sized>(
     store_bytes_as_content_with_store_id(store, content_store_id, bytes).await
 }
 
-/// Stages bytes when the caller already knows the namespace's content-store
-/// binding (it is immutable, so a handle can resolve it once).
+/// Plants durable content for a caller that already knows the namespace's
+/// content-store binding.
 ///
 /// Every call mints its own content identity, so two writers staging the
 /// same bytes produce two objects rather than racing for one key. Sharing a
@@ -624,45 +627,19 @@ pub async fn store_bytes_as_content<S: ObjectStore + ?Sized>(
 /// allowed to upload could learn whether specific known bytes were already
 /// in a shared content store. Retry idempotency, the thing that dedup was
 /// quietly providing, belongs to the upload session instead.
-pub async fn store_bytes_as_content_with_store_id<S: ObjectStore + ?Sized>(
+///
+/// So does reclamation, which is why this is a fixture rather than a write
+/// path. The object it writes belongs to no session, and a session record is
+/// the only handle anything has on a content object before metadata names
+/// one — so nothing will ever collect it. Production staging opens a session
+/// ([`crate::protocol::stage_owned_bytes`]); immortal bytes are what a test
+/// wants and what a namespace does not.
+pub(crate) async fn store_bytes_as_content_with_store_id<S: ObjectStore + ?Sized>(
     store: &S,
     content_store_id: ContentStoreId,
     bytes: &[u8],
 ) -> Result<StoredContent, CoreError> {
     stage_bytes_under_content_id(store, content_store_id, ContentId::generate(), bytes).await
-}
-
-/// Stages a streamed payload under a freshly minted identity.
-///
-/// The streaming twin of [`store_bytes_as_content_with_store_id`], for
-/// writers whose payload arrives in pieces or whose length is not known in
-/// advance. It produces the same acknowledged [`StoredContent`], so
-/// everything downstream — preparation, publication, verified reads — is
-/// unchanged.
-pub async fn store_stream_as_content_with_store_id<S: ObjectStore + ?Sized>(
-    store: &S,
-    content_store_id: ContentStoreId,
-    body: ByteStream,
-) -> Result<StoredContent, CoreError> {
-    let content_id = ContentId::generate();
-    let object_key = content_blob(content_store_id.as_str(), &content_id);
-    let staged =
-        stage_streamed_under_content_id(store, content_store_id.clone(), content_id, body).await?;
-    if staged.already_present {
-        // The identity is 128 fresh random bits, so an occupied key is not
-        // a race with anyone: it is corruption, and it fails loudly.
-        return Err(CoreError::Internal(format!(
-            "content object `{object_key}` already holds bytes under a freshly minted identity"
-        )));
-    }
-
-    Ok(StoredContent {
-        content_store_id,
-        object_key,
-        file_size_bytes: staged.content_ref.size_bytes,
-        content_ref: staged.content_ref,
-        _write_acknowledged: StoredContentWriteAcknowledgement,
-    })
 }
 
 /// What a streamed staging write established about the content object.

@@ -322,6 +322,18 @@ response together with the same evidence. These are embedded conveniences,
 not HTTP operations; hosted clients continue to carry validated content
 tokens on the existing wire requests.
 
+Staging is staging wherever it happens, so `prepare_file_bytes` opens an
+upload session for the object it writes, exactly as a remote upload does: the
+session record lands before the bytes and completes after them, and the
+reference the caller receives is a completed session's content. That is what
+bounds how long the value is worth holding. A prepared reference carries no
+clock and never expires by itself, but the bytes behind it are protected only
+while its session is inside the content-reclamation grace — the same window
+that bounds a remote upload's receipts (section 6.3; format spec, "Garbage
+collection", rule 11). Past it, content nothing references is reclaimed
+whether the reference that named it is still in a caller's hands or not, so
+prepared content is for publishing now rather than for keeping.
+
 ### 5.1 Commit identity and race guards
 
 A commit is one request: a `commit_id` — a client-generated stable

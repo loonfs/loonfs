@@ -7,6 +7,13 @@
 //! durable transition, never before it, so whichever transition wins is what
 //! happened and the loser reports a terminal error instead of undoing
 //! anything.
+//!
+//! Every content object in a namespace is written through a session, whether
+//! its bytes came from a remote peer or from the process doing the
+//! publishing (see [`stage_owned_bytes`]). That is what makes content
+//! collectable: the session record is the only thing that names an object
+//! before metadata does, so an object with no record would be reachable by
+//! nothing and reclaimable by nothing.
 
 use crate::context::MutationContext;
 use crate::control_update::{
@@ -23,7 +30,7 @@ use crate::limits::{
     MAX_MULTIPART_PART_BYTES, MAX_SIGNED_PARTS_PER_REQUEST, MIN_MULTIPART_PART_BYTES,
     UPLOAD_SESSION_LEASE_MS,
 };
-use crate::namespace::catalog::load_namespace_content_store_id;
+use crate::namespace::catalog::{load_namespace_content_store_id, VerifiedNamespaceCatalogEntry};
 use crate::namespace::control::load_namespace_head_control;
 use crate::storage::content::{
     abort_unpublished_multipart_upload, delete_unpublished_content_object,
@@ -723,6 +730,33 @@ pub(crate) async fn complete_upload<S: ObjectStore + ?Sized>(
             }
         };
 
+    freeze_completed_session(
+        store,
+        namespace_id,
+        content_store_id,
+        upload_id,
+        &verified,
+        now_ms,
+    )
+    .await
+}
+
+/// Freezes a verified reference as one session's final word.
+///
+/// Every completion lands here, whatever established the reference above it:
+/// a remote peer's bytes proven against the object that came to rest, or an
+/// in-process staging write proven by the write this runtime performed
+/// itself. By this point both hold the same thing, so the transition that
+/// makes content publishable — and, from the other side, collectable — has
+/// one implementation.
+async fn freeze_completed_session<S: ObjectStore + ?Sized>(
+    store: &S,
+    namespace_id: &NamespaceId,
+    content_store_id: &ContentStoreId,
+    upload_id: &UploadId,
+    verified: &ContentRef,
+    now_ms: u64,
+) -> Result<CompletedUpload> {
     update_upload_session(
         store,
         namespace_id,
@@ -769,6 +803,148 @@ pub(crate) async fn complete_upload<S: ObjectStore + ?Sized>(
         },
     )
     .await
+}
+
+/// The session one in-process staging write fills, from the identity it
+/// allocated to the record that will hold its outcome.
+struct OwnedStagingSession {
+    upload_id: UploadId,
+    content_id: ContentId,
+}
+
+/// Stages bytes this runtime holds under a session that owns them.
+///
+/// The convenience write paths are both ends of an upload at once: the bytes
+/// are already here, so there is no target to hand out, no claim to check,
+/// and no receipt to mint — the publication that follows happens in this
+/// process and takes the reference directly. What they do not skip is the
+/// session, because that is the half of the lifecycle content garbage
+/// collection reads.
+///
+/// The session record is durable before the object exists. That ordering is
+/// the ownership guarantee rather than an optimization: a record written
+/// afterwards leaves a window in which a crash strands bytes nothing names,
+/// which is the exact leak this path exists to close. It costs two small
+/// control writes on top of the content write, and they are sequential for
+/// the same reason.
+pub(crate) async fn stage_owned_bytes<S: ObjectStore + ?Sized>(
+    store: &S,
+    catalog: &VerifiedNamespaceCatalogEntry,
+    bytes: &[u8],
+    context: &MutationContext,
+) -> Result<PreparedContent> {
+    let session = open_owned_staging_session(store, catalog, context).await?;
+    let stored = stage_bytes_under_content_id(
+        store,
+        catalog.content_store_id().clone(),
+        session.content_id,
+        bytes,
+    )
+    .await?;
+    complete_owned_staging(
+        store,
+        catalog,
+        &session.upload_id,
+        stored.content_ref,
+        context,
+    )
+    .await
+}
+
+/// Stages a payload this runtime forwards under a session that owns it.
+///
+/// The streaming twin of [`stage_owned_bytes`]: the bytes are hashed on
+/// their way to the store rather than held, and everything about ownership
+/// is identical.
+pub(crate) async fn stage_owned_stream<S: ObjectStore + ?Sized>(
+    store: &S,
+    catalog: &VerifiedNamespaceCatalogEntry,
+    body: ByteStream,
+    context: &MutationContext,
+) -> Result<PreparedContent> {
+    let session = open_owned_staging_session(store, catalog, context).await?;
+    let content_store_id = catalog.content_store_id().clone();
+    let staged =
+        stage_streamed_under_content_id(store, content_store_id, session.content_id, body).await?;
+    if staged.already_present {
+        // The identity is 128 fresh random bits and this session has made no
+        // earlier attempt, so an occupied key is corruption rather than a
+        // replay, and it fails loudly.
+        return Err(CoreError::Internal(format!(
+            "content object `{}` already holds bytes under a freshly minted identity",
+            content_blob(
+                catalog.content_store_id().as_str(),
+                &staged.content_ref.content_id
+            )
+        )));
+    }
+    complete_owned_staging(
+        store,
+        catalog,
+        &session.upload_id,
+        staged.content_ref,
+        context,
+    )
+    .await
+}
+
+/// Opens the session that will own a content object this runtime is about to
+/// write.
+///
+/// It is a service-proxied session because that is what it is: the bytes pass
+/// through this process on the way to the store. The upload id is never
+/// handed out, so the record has exactly one later reader — garbage
+/// collection, which learns from it that the object has an owner and what
+/// became of it.
+async fn open_owned_staging_session<S: ObjectStore + ?Sized>(
+    store: &S,
+    catalog: &VerifiedNamespaceCatalogEntry,
+    context: &MutationContext,
+) -> Result<OwnedStagingSession> {
+    // No availability check, unlike the sessions a remote peer opens. This
+    // caller holds a catalog read off the namespace's own head, and the
+    // publication it is staging for is the admission decision: a namespace
+    // deleted in between refuses there, and a collection pass on a terminal
+    // namespace reaches nothing, so it reclaims this session and the object
+    // it holds like any other completed content nobody references.
+    let session = NewUploadSession::service_proxied();
+    let content_id = session.content_id.clone();
+    let upload_id = create_upload_session(store, catalog.namespace_id(), session, context).await?;
+    Ok(OwnedStagingSession {
+        upload_id,
+        content_id,
+    })
+}
+
+/// Completes the session an in-process staging write just filled.
+///
+/// Nothing is verified here and nothing needs to be: this runtime wrote the
+/// object and hashed the payload doing it, which is the same evidence a
+/// service-proxied completion accepts from its own staged reference.
+///
+/// A failure before this point leaves an open session whose lease passes and
+/// whose sweep deletes both record and object, so no error path aborts: this
+/// session is unreachable by anyone else, the only way the transition fails
+/// is a store that is not answering, and an abort call is the least likely
+/// thing to get through it. Expiry costs a wait; a second failed write costs
+/// the wait anyway.
+async fn complete_owned_staging<S: ObjectStore + ?Sized>(
+    store: &S,
+    catalog: &VerifiedNamespaceCatalogEntry,
+    upload_id: &UploadId,
+    content_ref: ContentRef,
+    context: &MutationContext,
+) -> Result<PreparedContent> {
+    Ok(freeze_completed_session(
+        store,
+        catalog.namespace_id(),
+        catalog.content_store_id(),
+        upload_id,
+        &content_ref,
+        context.now_ms,
+    )
+    .await?
+    .prepared)
 }
 
 /// Aborts an upload session, then cleans up what it was writing.

@@ -23,6 +23,7 @@ mod publication;
 mod publish_observer;
 mod request_accounting;
 mod runtime_config;
+mod staged_content_reclamation;
 mod streamed_put;
 mod streamed_read;
 mod undelete;

@@ -15,7 +15,7 @@ use crate::path::read::{
 };
 use crate::protocol::CompletedUpload;
 use crate::storage::content::FileContentStream;
-use crate::storage::content_admission::CompletedUploadReceipt;
+use crate::storage::content_admission::{CompletedUploadReceipt, PreparedContent};
 use crate::time::current_time_ms;
 use loonfs_api::v0::{
     AbortUploadResponse, BeginUploadRequest, BeginUploadResponse, ChangesResponse, CommitResponse,
@@ -621,17 +621,7 @@ impl<S: ObjectStore> NamespaceEngine<S> {
         upload_id: &UploadId,
         request: &CompleteUploadRequest,
     ) -> Result<CompletedUpload> {
-        // The caller resolved a catalog for a different namespace, which is
-        // a wiring mistake rather than anything the request did. Naming the
-        // two namespaces says more than naming a content id would, and a
-        // multipart completion has no content id to name anyway.
-        if catalog.namespace_id() != &self.namespace_id {
-            return Err(CoreError::Internal(format!(
-                "upload completion for namespace `{}` was given namespace `{}`'s catalog",
-                self.namespace_id,
-                catalog.namespace_id()
-            )));
-        }
+        let catalog = self.own_catalog(catalog)?;
         crate::protocol::complete_upload(
             &self.store,
             &self.namespace_id,
@@ -641,6 +631,72 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             &self.mutation_context()?,
         )
         .await
+    }
+
+    /// Stages bytes this process holds as content a session owns, ready to
+    /// publish here.
+    ///
+    /// This is the whole upload lifecycle for the caller that is also the
+    /// uploader: a session opens, the bytes land under the identity it
+    /// allocated, and the session completes — with no wire step between them
+    /// and no receipt at the end, because the publication happens in this
+    /// process and takes the reference directly. What it does not skip is
+    /// the session record, which is what content garbage collection reads to
+    /// decide an object's fate; without one the bytes would be reachable by
+    /// nothing and reclaimable by nothing.
+    ///
+    /// Two small control writes on top of the content write, in that order.
+    pub async fn stage_owned_bytes(
+        &self,
+        catalog: &VerifiedNamespaceCatalogEntry,
+        bytes: &[u8],
+    ) -> Result<PreparedContent> {
+        crate::protocol::stage_owned_bytes(
+            &self.store,
+            self.own_catalog(catalog)?,
+            bytes,
+            &self.mutation_context()?,
+        )
+        .await
+    }
+
+    /// Stages a streamed payload as content a session owns, hashing it on
+    /// the way through instead of holding it.
+    ///
+    /// The streaming twin of [`Self::stage_owned_bytes`]; ownership and cost
+    /// are identical.
+    pub async fn stage_owned_stream(
+        &self,
+        catalog: &VerifiedNamespaceCatalogEntry,
+        body: ByteStream,
+    ) -> Result<PreparedContent> {
+        crate::protocol::stage_owned_stream(
+            &self.store,
+            self.own_catalog(catalog)?,
+            body,
+            &self.mutation_context()?,
+        )
+        .await
+    }
+
+    /// Refuses a catalog resolved for some other namespace.
+    ///
+    /// A mismatch is the host's wiring mistake rather than anything a request
+    /// did, so naming the two namespaces says more than naming what was being
+    /// written would — and a multipart completion has no content id to name
+    /// anyway.
+    fn own_catalog<'c>(
+        &self,
+        catalog: &'c VerifiedNamespaceCatalogEntry,
+    ) -> Result<&'c VerifiedNamespaceCatalogEntry> {
+        if catalog.namespace_id() != &self.namespace_id {
+            return Err(CoreError::Internal(format!(
+                "an operation on namespace `{}` was given namespace `{}`'s catalog",
+                self.namespace_id,
+                catalog.namespace_id()
+            )));
+        }
+        Ok(catalog)
     }
 
     /// Aborts an upload session, then deletes the content object it owned.

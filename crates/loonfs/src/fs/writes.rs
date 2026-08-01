@@ -158,8 +158,9 @@ impl FsWriter {
     /// message, or content this build cannot compare surface the conflict.
     ///
     /// The freshly staged duplicate object is then referenced by nothing.
-    /// That is by design, not a leak: content garbage collection reclaims an
-    /// unreferenced object once its grace passes.
+    /// That is by design, not a leak: it is a completed upload session's
+    /// content that no metadata names, and content garbage collection
+    /// reclaims exactly that once the reclamation grace passes.
     pub async fn put_file_bytes(
         &self,
         namespace_id: &NamespaceId,
@@ -349,9 +350,19 @@ impl FsWriter {
 
     /// Stages file bytes as durable content for later publication.
     ///
-    /// Preparation performs one content PUT and no content reads. A publish
-    /// that fails afterward leaves only a GC-covered orphan behind an
-    /// unmoved head.
+    /// Preparation performs one content PUT and no content reads, plus the
+    /// two small control writes of the upload session that owns the object:
+    /// the session record lands before the bytes do, and the completion
+    /// after them. That is what a publish failing afterwards costs, and all
+    /// it costs — the object is a completed session's unpublished content,
+    /// which garbage collection reclaims once nothing references it and the
+    /// reclamation grace has passed.
+    ///
+    /// The same window bounds how long the returned value stays worth
+    /// holding. A prepared reference carries no clock and never expires by
+    /// itself, but the bytes behind it are protected only while its session
+    /// is inside that grace, so a prepared reference is for publishing now,
+    /// not for keeping.
     #[tracing::instrument(
         level = "info",
         name = "loonfs.prepare",
@@ -375,16 +386,10 @@ impl FsWriter {
         let catalog = self
             .load_namespace_catalog_for_content_preparation(namespace_id)
             .await?;
-        let stored = loonfs_core::content::store_bytes_as_content_with_store_id(
-            &self.core.inner.store,
-            catalog.content_store_id().clone(),
-            bytes,
-        )
-        .await?;
-        Ok(
-            loonfs_core::content::prepare_stored_content(&catalog, stored)
-                .map_err(CoreError::from)?,
-        )
+        Ok(self
+            .engine(namespace_id)
+            .stage_owned_bytes(&catalog, bytes)
+            .await?)
     }
 
     /// Stages a streamed payload as durable content for later publication.
@@ -416,16 +421,10 @@ impl FsWriter {
         let catalog = self
             .load_namespace_catalog_for_content_preparation(namespace_id)
             .await?;
-        let stored = loonfs_core::content::store_stream_as_content_with_store_id(
-            &self.core.inner.store,
-            catalog.content_store_id().clone(),
-            body,
-        )
-        .await?;
-        Ok(
-            loonfs_core::content::prepare_stored_content(&catalog, stored)
-                .map_err(CoreError::from)?,
-        )
+        Ok(self
+            .engine(namespace_id)
+            .stage_owned_stream(&catalog, body)
+            .await?)
     }
 
     /// Publishes a file revision from already-prepared content.
