@@ -4165,7 +4165,7 @@
               "null"
             ],
             "format": "int64",
-            "description": "Reads this pass may spend before returning with a `next_cursor`.\nOmit to walk the whole grep keyspace in one call.",
+            "description": "Reads this pass may spend before returning with a `next_cursor`.\nOmit to take the same per-pass default the runtime's own collection\ntakes.",
             "minimum": 0
           }
         }

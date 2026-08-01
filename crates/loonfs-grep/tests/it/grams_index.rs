@@ -76,7 +76,7 @@ async fn grams_built_through_seq(
         .await
         .expect("load grep root")
         .expect("grep root exists")
-        .state()
+        .manifest_state()
         .lifecycle()
         .steady_watermark()
         .expect("a steady grep root has a watermark")
@@ -249,7 +249,7 @@ async fn a_publish_below_the_wal_threshold_does_not_schedule_grep_work() {
         .expect("load grep root")
         .expect("grep root exists");
     assert!(matches!(
-        root.state().lifecycle(),
+        root.manifest_state().lifecycle(),
         loonfs_grep::root::GrepLifecycle::Backfilling { .. }
     ));
     let error = host
@@ -440,7 +440,7 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
         .expect("load partial grep root")
         .expect("partial grep root");
     let (partial_seq, partial_event_index) = partial
-        .state()
+        .manifest_state()
         .lifecycle()
         .steady_watermark()
         .expect("the partial root is steady");
@@ -450,7 +450,7 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
         "the first step must stop within the atomic commit"
     );
     let prefix_segment_ids: BTreeSet<_> = partial
-        .state()
+        .manifest_state()
         .segments()
         .iter()
         .map(|segment| segment.segment_id.clone())
@@ -515,14 +515,14 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
         .expect("complete grep root");
     assert_eq!(
         complete
-            .state()
+            .manifest_state()
             .lifecycle()
             .steady_watermark()
             .expect("the complete root is steady"),
         (commit.committed_seq, 0)
     );
     let complete_segment_ids: BTreeSet<_> = complete
-        .state()
+        .manifest_state()
         .segments()
         .iter()
         .map(|segment| segment.segment_id.clone())
@@ -646,7 +646,7 @@ async fn grep_answers_identically_across_tiered_folds() {
         .expect("load grep root")
         .expect("grep root exists");
     let grams_levels: Vec<u32> = root
-        .state()
+        .manifest_state()
         .segments()
         .iter()
         .map(|segment| segment.level)
@@ -1296,7 +1296,7 @@ async fn a_fold_does_not_reuse_grep_private_index_blocks() {
         .expect("load grep root")
         .expect("grep root exists");
     let grams: Vec<(u32, u64)> = root
-        .state()
+        .manifest_state()
         .segments()
         .iter()
         .map(|segment| (segment.level, segment.run_ordinal))
@@ -1467,7 +1467,7 @@ async fn a_cold_fold_fans_out_its_segment_opens_within_the_io_cap() {
         .expect("load grep root")
         .expect("grep root exists");
     let grams: Vec<u32> = root
-        .state()
+        .manifest_state()
         .segments()
         .iter()
         .map(|segment| segment.level)

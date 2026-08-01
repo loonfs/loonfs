@@ -1,42 +1,45 @@
-//! Versioned JSON envelope codecs for grep root pointers and manifests.
+//! Grep's two durable families, parameterized over the shared envelope codec.
+//!
+//! Grep owns its kinds, its versions, and its payload invariants; the probe,
+//! the checksum rules, and the failure vocabulary are the ones every other
+//! LoonFS durable family reads and writes through.
 
-use super::error::GrepRootCodecError;
-use super::state::{GrepManifestId, GrepRootPointer, GrepRootState};
-use loonfs_api::sha256_digest;
-use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
-use serde_json::value::RawValue;
+use super::error::GrepEnvelopeCodecError;
+use super::state::{GrepManifestState, GrepRootPointer};
+use loonfs_api::wire::envelope::{
+    decode_json_envelope, decode_strict_json_envelope, encode_json_envelope, json_payload_checksum,
+    verify_kind, DecodedJsonEnvelope,
+};
 
 /// Durable kind string for a grep root-pointer envelope.
 pub const GREP_ROOT_KIND: &str = "grep_root";
 /// Durable kind string for a grep manifest envelope.
 pub const GREP_MANIFEST_KIND: &str = "grep_manifest";
-/// Durable v1 root-pointer format string. Unknown strings are rejected.
-pub const GREP_ROOT_FORMAT_VERSION: &str = "v1";
-/// Durable v1 manifest format string. Unknown strings are rejected.
-pub const GREP_MANIFEST_FORMAT_VERSION: &str = "v1";
+/// Sole root-pointer format version this build reads and writes.
+pub const GREP_ROOT_FORMAT_VERSION: u32 = 1;
+/// Sole manifest format version this build reads and writes.
+pub const GREP_MANIFEST_FORMAT_VERSION: u32 = 1;
 
 /// Verified in-memory representation of one grep root-pointer envelope.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrepRootEnvelope {
-    format_version: String,
+    format_version: u32,
     payload_checksum: String,
     pointer: GrepRootPointer,
 }
 
 impl GrepRootEnvelope {
     /// Builds a fresh root-pointer envelope over its canonical payload bytes.
-    pub fn from_pointer(pointer: GrepRootPointer) -> Result<Self, GrepRootCodecError> {
-        let payload = payload_bytes(&pointer)?;
+    pub fn from_pointer(pointer: GrepRootPointer) -> Result<Self, GrepEnvelopeCodecError> {
         Ok(Self {
-            format_version: GREP_ROOT_FORMAT_VERSION.to_owned(),
-            payload_checksum: sha256_digest(&payload),
+            format_version: GREP_ROOT_FORMAT_VERSION,
+            payload_checksum: json_payload_checksum(&pointer)?,
             pointer,
         })
     }
 
-    pub fn format_version(&self) -> &str {
-        &self.format_version
+    pub fn format_version(&self) -> u32 {
+        self.format_version
     }
 
     pub fn payload_checksum(&self) -> &str {
@@ -49,259 +52,97 @@ impl GrepRootEnvelope {
 }
 
 /// Verified in-memory representation of one immutable grep manifest.
+///
+/// The envelope describes the bytes and nothing about which object holds
+/// them: a manifest's identity is the key it was written under, which the
+/// root pointer names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrepManifestEnvelope {
-    format_version: String,
+    format_version: u32,
     payload_checksum: String,
-    manifest_id: GrepManifestId,
-    state: GrepRootState,
+    state: GrepManifestState,
 }
 
 impl GrepManifestEnvelope {
-    /// Builds a manifest whose id is the SHA-256 of its canonical payload.
-    pub fn from_state(state: GrepRootState) -> Result<Self, GrepRootCodecError> {
+    /// Builds a manifest envelope over its canonical payload bytes.
+    pub fn from_state(state: GrepManifestState) -> Result<Self, GrepEnvelopeCodecError> {
         state.validate()?;
-        let payload = payload_bytes(&state)?;
-        let manifest_id = GrepManifestId::for_payload(&payload);
         Ok(Self {
-            format_version: GREP_MANIFEST_FORMAT_VERSION.to_owned(),
-            payload_checksum: manifest_id.payload_checksum(),
-            manifest_id,
+            format_version: GREP_MANIFEST_FORMAT_VERSION,
+            payload_checksum: json_payload_checksum(&state)?,
             state,
         })
     }
 
-    pub fn format_version(&self) -> &str {
-        &self.format_version
+    pub fn format_version(&self) -> u32 {
+        self.format_version
     }
 
     pub fn payload_checksum(&self) -> &str {
         &self.payload_checksum
     }
 
-    pub fn manifest_id(&self) -> &GrepManifestId {
-        &self.manifest_id
-    }
-
-    pub fn state(&self) -> &GrepRootState {
+    pub fn manifest_state(&self) -> &GrepManifestState {
         &self.state
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct EnvelopeProbe {
-    kind: String,
-    format_version: String,
-}
-
-#[derive(Serialize, Deserialize)]
-struct EnvelopeDocument {
-    kind: String,
-    format_version: String,
-    payload_checksum: String,
-    payload: Box<RawValue>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StrictEnvelopeDocument {
-    kind: String,
-    format_version: String,
-    payload_checksum: String,
-    payload: Box<RawValue>,
-}
-
-impl From<StrictEnvelopeDocument> for EnvelopeDocument {
-    fn from(document: StrictEnvelopeDocument) -> Self {
-        Self {
-            kind: document.kind,
-            format_version: document.format_version,
-            payload_checksum: document.payload_checksum,
-            payload: document.payload,
-        }
-    }
-}
-
 /// Encodes a root pointer after rechecking its version and checksum.
-pub fn encode_grep_root(envelope: &GrepRootEnvelope) -> Result<Vec<u8>, GrepRootCodecError> {
-    encode_envelope(
+pub fn encode_grep_root(envelope: &GrepRootEnvelope) -> Result<Vec<u8>, GrepEnvelopeCodecError> {
+    Ok(encode_json_envelope(
         GREP_ROOT_KIND,
+        envelope.format_version,
         GREP_ROOT_FORMAT_VERSION,
-        &envelope.format_version,
         &envelope.payload_checksum,
         &envelope.pointer,
-    )
+    )?)
 }
 
 /// Decodes only the current root-pointer format and verifies exact payload bytes.
-pub fn decode_grep_root(bytes: &[u8]) -> Result<GrepRootEnvelope, GrepRootCodecError> {
-    let document = decode_strict_document(bytes, GREP_ROOT_KIND, GREP_ROOT_FORMAT_VERSION)?;
-    let pointer: GrepRootPointer = decode_payload(&document)?;
+///
+/// The pointer is a mutable control object, so unknown envelope and payload
+/// fields are corruption: a tolerant read followed by the publication rewrite
+/// would erase what this binary does not understand.
+pub fn decode_grep_root(bytes: &[u8]) -> Result<GrepRootEnvelope, GrepEnvelopeCodecError> {
+    let decoded: DecodedJsonEnvelope<GrepRootPointer> =
+        decode_strict_json_envelope(bytes, GREP_ROOT_FORMAT_VERSION, |found| {
+            verify_kind(GREP_ROOT_KIND, found)
+        })?;
     Ok(GrepRootEnvelope {
-        format_version: document.format_version,
-        payload_checksum: document.payload_checksum,
-        pointer,
+        format_version: decoded.format_version,
+        payload_checksum: decoded.payload_checksum,
+        pointer: decoded.payload,
     })
 }
 
 /// Encodes an immutable manifest after rechecking every boundary invariant.
 pub fn encode_grep_manifest(
     envelope: &GrepManifestEnvelope,
-) -> Result<Vec<u8>, GrepRootCodecError> {
+) -> Result<Vec<u8>, GrepEnvelopeCodecError> {
     envelope.state.validate()?;
-    let bytes = encode_envelope(
+    Ok(encode_json_envelope(
         GREP_MANIFEST_KIND,
+        envelope.format_version,
         GREP_MANIFEST_FORMAT_VERSION,
-        &envelope.format_version,
         &envelope.payload_checksum,
         &envelope.state,
-    )?;
-    let payload = payload_bytes(&envelope.state)?;
-    let actual_id = GrepManifestId::for_payload(&payload);
-    if actual_id != envelope.manifest_id {
-        return Err(GrepRootCodecError::StalePayloadChecksum {
-            checksum: envelope.manifest_id.payload_checksum(),
-            actual: actual_id.payload_checksum(),
-        });
-    }
-    Ok(bytes)
+    )?)
 }
 
-/// Decodes only the current manifest format, verifies it, and derives its id.
-pub fn decode_grep_manifest(bytes: &[u8]) -> Result<GrepManifestEnvelope, GrepRootCodecError> {
-    let document = decode_document(bytes, GREP_MANIFEST_KIND, GREP_MANIFEST_FORMAT_VERSION)?;
-    let state: GrepRootState = decode_payload(&document)?;
-    state.validate()?;
-    let manifest_id = GrepManifestId::for_payload(document.payload.get().as_bytes());
-    if manifest_id.payload_checksum() != document.payload_checksum {
-        return Err(GrepRootCodecError::ChecksumMismatch {
-            expected: document.payload_checksum,
-            actual: manifest_id.payload_checksum(),
-        });
-    }
+/// Decodes only the current manifest format and verifies it.
+///
+/// Manifests are immutable, so additive fields are tolerated: nothing
+/// rewrites these bytes, and a reader that drops what it cannot name loses
+/// nothing durable.
+pub fn decode_grep_manifest(bytes: &[u8]) -> Result<GrepManifestEnvelope, GrepEnvelopeCodecError> {
+    let decoded: DecodedJsonEnvelope<GrepManifestState> =
+        decode_json_envelope(bytes, GREP_MANIFEST_FORMAT_VERSION, |found| {
+            verify_kind(GREP_MANIFEST_KIND, found)
+        })?;
+    decoded.payload.validate()?;
     Ok(GrepManifestEnvelope {
-        format_version: document.format_version,
-        payload_checksum: manifest_id.payload_checksum(),
-        manifest_id,
-        state,
+        format_version: decoded.format_version,
+        payload_checksum: decoded.payload_checksum,
+        state: decoded.payload,
     })
-}
-
-fn encode_envelope<T: Serialize>(
-    kind: &str,
-    supported_version: &str,
-    format_version: &str,
-    payload_checksum: &str,
-    payload: &T,
-) -> Result<Vec<u8>, GrepRootCodecError> {
-    verify_version(format_version, supported_version)?;
-    let payload =
-        serde_json::to_string(payload).map_err(|error| GrepRootCodecError::PayloadEncode {
-            message: error.to_string(),
-        })?;
-    let actual = sha256_digest(payload.as_bytes());
-    if actual != payload_checksum {
-        return Err(GrepRootCodecError::StalePayloadChecksum {
-            checksum: payload_checksum.to_owned(),
-            actual,
-        });
-    }
-    let document = EnvelopeDocument {
-        kind: kind.to_owned(),
-        format_version: format_version.to_owned(),
-        payload_checksum: payload_checksum.to_owned(),
-        payload: RawValue::from_string(payload).map_err(|error| {
-            GrepRootCodecError::PayloadEncode {
-                message: error.to_string(),
-            }
-        })?,
-    };
-    serde_json::to_vec(&document).map_err(|error| GrepRootCodecError::EnvelopeEncode {
-        message: error.to_string(),
-    })
-}
-
-fn decode_document(
-    bytes: &[u8],
-    expected_kind: &str,
-    supported_version: &str,
-) -> Result<EnvelopeDocument, GrepRootCodecError> {
-    decode_probe(bytes, expected_kind, supported_version)?;
-    let document: EnvelopeDocument =
-        serde_json::from_slice(bytes).map_err(|error| GrepRootCodecError::EnvelopeDecode {
-            message: error.to_string(),
-        })?;
-    verify_document_checksum(&document)?;
-    Ok(document)
-}
-
-fn decode_strict_document(
-    bytes: &[u8],
-    expected_kind: &str,
-    supported_version: &str,
-) -> Result<EnvelopeDocument, GrepRootCodecError> {
-    decode_probe(bytes, expected_kind, supported_version)?;
-    let document: StrictEnvelopeDocument =
-        serde_json::from_slice(bytes).map_err(|error| GrepRootCodecError::EnvelopeDecode {
-            message: error.to_string(),
-        })?;
-    let document = EnvelopeDocument::from(document);
-    verify_document_checksum(&document)?;
-    Ok(document)
-}
-
-fn decode_probe(
-    bytes: &[u8],
-    expected_kind: &str,
-    supported_version: &str,
-) -> Result<(), GrepRootCodecError> {
-    let probe: EnvelopeProbe =
-        serde_json::from_slice(bytes).map_err(|error| GrepRootCodecError::EnvelopeDecode {
-            message: error.to_string(),
-        })?;
-    if probe.kind != expected_kind {
-        return Err(GrepRootCodecError::KindMismatch {
-            expected: expected_kind.to_owned(),
-            found: probe.kind,
-        });
-    }
-    verify_version(&probe.format_version, supported_version)?;
-    Ok(())
-}
-
-fn verify_document_checksum(document: &EnvelopeDocument) -> Result<(), GrepRootCodecError> {
-    let actual = sha256_digest(document.payload.get().as_bytes());
-    if actual != document.payload_checksum {
-        return Err(GrepRootCodecError::ChecksumMismatch {
-            expected: document.payload_checksum.clone(),
-            actual,
-        });
-    }
-    Ok(())
-}
-
-fn decode_payload<T: DeserializeOwned>(
-    document: &EnvelopeDocument,
-) -> Result<T, GrepRootCodecError> {
-    serde_json::from_str(document.payload.get()).map_err(|error| {
-        GrepRootCodecError::PayloadDecode {
-            message: error.to_string(),
-        }
-    })
-}
-
-fn payload_bytes<T: Serialize>(payload: &T) -> Result<Vec<u8>, GrepRootCodecError> {
-    serde_json::to_vec(payload).map_err(|error| GrepRootCodecError::PayloadEncode {
-        message: error.to_string(),
-    })
-}
-
-fn verify_version(found: &str, supported: &str) -> Result<(), GrepRootCodecError> {
-    if found != supported {
-        return Err(GrepRootCodecError::UnsupportedFormatVersion {
-            found: found.to_owned(),
-            supported: supported.to_owned(),
-        });
-    }
-    Ok(())
 }

@@ -36,7 +36,7 @@ pub fn manifests_prefix(namespace_id: &NamespaceId) -> String {
     format!("{}manifests/", namespace_prefix(namespace_id))
 }
 
-/// Key of one immutable, content-derived grep manifest.
+/// Key of one immutable grep manifest, under the id its publisher minted.
 pub fn manifest_key(namespace_id: &NamespaceId, manifest_id: &GrepManifestId) -> String {
     format!(
         "{}{manifest_id}.manifest.json",
@@ -102,10 +102,8 @@ mod tests {
         let namespace_id = namespace_id();
         let segment_id = segment_id();
 
-        let manifest_id = GrepManifestId::parse(
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        )
-        .expect("valid manifest id");
+        let manifest_id = GrepManifestId::parse("gmf_0123456789abcdef0123456789abcdef")
+            .expect("valid manifest id");
 
         assert_eq!(
             namespace_prefix(&namespace_id),
@@ -121,7 +119,7 @@ mod tests {
         );
         assert_eq!(
             manifest_key(&namespace_id, &manifest_id),
-            "namespaces/docs/extensions/grep/manifests/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.manifest.json"
+            "namespaces/docs/extensions/grep/manifests/gmf_0123456789abcdef0123456789abcdef.manifest.json"
         );
         assert_eq!(
             segments_prefix(&namespace_id),
@@ -137,10 +135,8 @@ mod tests {
     fn built_keys_round_trip_through_the_parser() {
         let namespace_id = namespace_id();
         let segment_id = segment_id();
-        let manifest_id = GrepManifestId::parse(
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        )
-        .expect("valid manifest id");
+        let manifest_id = GrepManifestId::parse("gmf_0123456789abcdef0123456789abcdef")
+            .expect("valid manifest id");
 
         assert_eq!(
             parse_key(&root_key(&namespace_id)),
@@ -194,10 +190,8 @@ mod tests {
     fn core_key_parser_ignores_grep_extension_objects() {
         let namespace_id = namespace_id();
         let segment_id = segment_id();
-        let manifest_id = GrepManifestId::parse(
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        )
-        .expect("valid manifest id");
+        let manifest_id = GrepManifestId::parse("gmf_0123456789abcdef0123456789abcdef")
+            .expect("valid manifest id");
 
         for key in [
             root_key(&namespace_id),

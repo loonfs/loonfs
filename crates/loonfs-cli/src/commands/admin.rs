@@ -500,8 +500,11 @@ async fn run_admin_index_gc(
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, &args.target).await?;
     let single_pass = args.max_objects.is_some();
+    // An omitted budget is left omitted: grep resolves it to the same
+    // per-pass default the runtime uses, and one authority for that number
+    // is what keeps a remote pass and an embedded one the same size.
     let mut request = GrepGcRequest {
-        max_objects: Some(args.max_objects.unwrap_or(loonfs::DEFAULT_GC_MAX_OBJECTS)),
+        max_objects: args.max_objects,
         cursor: None,
     };
     let mut response: Option<loonfs_api::v0::GrepGcResponse> = None;

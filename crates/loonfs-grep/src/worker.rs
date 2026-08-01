@@ -21,7 +21,7 @@ use crate::keyspace::{
 use crate::reads::{published_revision, NamespaceReads};
 use crate::root::{
     advance_grep_root, load_grep_root, seed_grep_root, ChangeFeedResume, GrepIndexState,
-    GrepLifecycle, GrepReorganizeState, GrepRootError, GrepRootState, GrepSegmentRef,
+    GrepLifecycle, GrepManifestState, GrepReorganizeState, GrepRootError, GrepSegmentRef,
     LoadedGrepRoot,
 };
 use crate::service::is_indexable_text_content;
@@ -31,7 +31,8 @@ use futures::future::try_join_all;
 use futures::StreamExt as _;
 use loonfs::{
     CheckpointFilesPageCursor, CoreError, CreateCheckpointOptions, FsAdmin, FsReader, RuntimeError,
-    StoreFailureClass, METADATA_PUBLICATION_BUDGET_MS,
+    StoreFailureClass, DEFAULT_GC_MAX_OBJECTS, GC_MIN_GRACE_WINDOW_MS,
+    METADATA_PUBLICATION_BUDGET_MS,
 };
 use loonfs_api::wire::hex::hex_encode_bytes;
 use loonfs_api::wire::sst_blocks::{
@@ -60,7 +61,22 @@ pub const GREP_BACKFILL_CHECKPOINT_TTL_MS: u64 = 24 * 60 * 60 * 1000;
 
 /// Unreferenced grep objects receive one hour of unconditional protection
 /// before grep-owned garbage collection may delete them.
+///
+/// The window has to outlast the longest publication that could still be
+/// holding an object it has not yet made reachable. Grep's publications are
+/// bounded by the same [`METADATA_PUBLICATION_BUDGET_MS`] the runtime's own
+/// are, so the runtime's derived floor is the bound grep must clear too.
 pub const GREP_GC_GRACE_WINDOW_MS: u64 = 60 * 60 * 1000;
+
+// The floor is derived from publication budgets and provider bounds rather
+// than chosen, so a window that stopped clearing it is a compile error here
+// instead of an unreproducible delete of an object a publication was about
+// to reference.
+const _: () = assert!(
+    GREP_GC_GRACE_WINDOW_MS >= GC_MIN_GRACE_WINDOW_MS,
+    "grep's grace window must outlast the longest publication that could still \
+     reference an object it has written"
+);
 
 const GREP_BACKFILL_CHECKPOINT_NAME: &str = "loonfs-grep-backfill";
 const GRAM_POSTING_BATCH_TARGET: usize = 256;
@@ -178,8 +194,9 @@ pub enum GrepReorganizeOutcome {
 /// Budgets and resume position for one grep garbage-collection pass.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GrepGcRequest {
-    /// Reads this pass may spend before returning a resume cursor. `None`
-    /// walks the whole grep keyspace in one call.
+    /// Reads this pass may spend before returning a resume cursor. Absent
+    /// resolves to the runtime's own per-pass default, so no caller can ask
+    /// for an unbounded walk by leaving the field out.
     pub max_objects: Option<u64>,
     /// Opaque token an earlier pass over the same namespace returned.
     pub cursor: Option<String>,
@@ -256,9 +273,12 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             .await
             .map_err(GrepError::from)?
         {
-            if !matches!(current.state().lifecycle(), GrepLifecycle::Disabled) {
+            if !matches!(
+                current.manifest_state().lifecycle(),
+                GrepLifecycle::Disabled
+            ) {
                 return Ok(GrepEnableOutcome::AlreadyEnabled {
-                    state: current.state().lifecycle().clone(),
+                    state: current.manifest_state().lifecycle().clone(),
                 });
             }
         }
@@ -268,21 +288,24 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             .await
             .map_err(GrepError::from)?;
         if let Some(current) = &current {
-            if !matches!(current.state().lifecycle(), GrepLifecycle::Disabled) {
+            if !matches!(
+                current.manifest_state().lifecycle(),
+                GrepLifecycle::Disabled
+            ) {
                 self.release_checkpoint_if_unreferenced(
                     namespace_id,
                     &checkpoint.checkpoint_id,
-                    current.state(),
+                    current.manifest_state(),
                 )
                 .await?;
                 return Ok(GrepEnableOutcome::AlreadyEnabled {
-                    state: current.state().lifecycle().clone(),
+                    state: current.manifest_state().lifecycle().clone(),
                 });
             }
         }
         let next_run_ordinal = current
             .as_ref()
-            .map_or(0, |root| root.state().index().next_run_ordinal);
+            .map_or(0, |root| root.manifest_state().index().next_run_ordinal);
         let next = backfilling_root(
             namespace_id,
             checkpoint.checkpoint_seq,
@@ -295,7 +318,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         };
         match published {
             Ok(published) => Ok(GrepEnableOutcome::Enabled {
-                state: published.state().lifecycle().clone(),
+                state: published.manifest_state().lifecycle().clone(),
             }),
             Err(GrepRootError::Conflict { .. }) => {
                 self.release_superseded_checkpoint_if_unreferenced(
@@ -319,17 +342,20 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         else {
             return Ok(GrepDisableOutcome::NotEnabled);
         };
-        if matches!(current.state().lifecycle(), GrepLifecycle::Disabled) {
+        if matches!(
+            current.manifest_state().lifecycle(),
+            GrepLifecycle::Disabled
+        ) {
             return Ok(GrepDisableOutcome::NotEnabled);
         }
-        let checkpoint_id = match current.state().lifecycle() {
+        let checkpoint_id = match current.manifest_state().lifecycle() {
             GrepLifecycle::Backfilling { checkpoint_id, .. } => Some(checkpoint_id.clone()),
             GrepLifecycle::Steady { .. } | GrepLifecycle::Disabled => None,
         };
-        let next = GrepRootState::new(
+        let next = GrepManifestState::new(
             namespace_id.clone(),
             GrepLifecycle::Disabled,
-            GrepIndexState::new(None, current.state().index().next_run_ordinal),
+            GrepIndexState::new(None, current.manifest_state().index().next_run_ordinal),
             Vec::new(),
         )
         .map_err(core_state_error)?;
@@ -358,12 +384,15 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         else {
             return Ok(build_report(namespace_id, GrepBuildOutcome::NotEnabled));
         };
-        if matches!(current.state().lifecycle(), GrepLifecycle::Disabled) {
+        if matches!(
+            current.manifest_state().lifecycle(),
+            GrepLifecycle::Disabled
+        ) {
             return Ok(build_report(namespace_id, GrepBuildOutcome::NotEnabled));
         }
         let reads = self.reads(namespace_id);
 
-        let collected = match current.state().lifecycle() {
+        let collected = match current.manifest_state().lifecycle() {
             GrepLifecycle::Backfilling {
                 target_seq,
                 cursor,
@@ -386,7 +415,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             // about a watermark it does not have.
             Ok(None) => {
                 let built_through_seq = current
-                    .state()
+                    .manifest_state()
                     .lifecycle()
                     .steady_watermark()
                     .map(|(built_through_seq, _)| built_through_seq)
@@ -426,22 +455,25 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             .await
             .map_err(GrepError::from)?
             .map_or(GrepLifecycle::Disabled, |root| {
-                root.state().lifecycle().clone()
+                root.manifest_state().lifecycle().clone()
             }))
     }
 
     /// Reads the whole durable root, for a caller that wants the index
     /// bookkeeping beside the lifecycle. `None` where no root exists.
-    pub async fn root_state(&self, namespace_id: &NamespaceId) -> Result<Option<GrepRootState>> {
+    pub async fn root_state(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<Option<GrepManifestState>> {
         Ok(load_grep_root(&self.store, namespace_id)
             .await
             .map_err(GrepError::from)?
-            .map(|root| root.state().clone()))
+            .map(|root| root.manifest_state().clone()))
     }
 
     async fn seed_root(
         &self,
-        state: &GrepRootState,
+        state: &GrepManifestState,
     ) -> std::result::Result<LoadedGrepRoot, GrepRootError> {
         seed_grep_root(&self.store, state).await
     }
@@ -449,7 +481,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
     async fn advance_root(
         &self,
         current: &LoadedGrepRoot,
-        next: &GrepRootState,
+        next: &GrepManifestState,
     ) -> std::result::Result<LoadedGrepRoot, GrepRootError> {
         advance_grep_root(&self.store, current, next).await
     }
@@ -485,7 +517,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         &self,
         namespace_id: &NamespaceId,
         checkpoint_id: &CheckpointId,
-        root: &GrepRootState,
+        root: &GrepManifestState,
     ) -> Result<()> {
         if !root_names_checkpoint(root, checkpoint_id) {
             self.release_checkpoint(namespace_id, checkpoint_id).await?;
@@ -502,8 +534,12 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             .await
             .map_err(GrepError::from)?;
         if let Some(winner) = winner {
-            self.release_checkpoint_if_unreferenced(namespace_id, checkpoint_id, winner.state())
-                .await
+            self.release_checkpoint_if_unreferenced(
+                namespace_id,
+                checkpoint_id,
+                winner.manifest_state(),
+            )
+            .await
         } else {
             self.release_checkpoint(namespace_id, checkpoint_id).await
         }
@@ -514,7 +550,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         namespace_id: &NamespaceId,
         current: &LoadedGrepRoot,
     ) -> Result<GrepBuildReport> {
-        let previous_checkpoint_id = match current.state().lifecycle() {
+        let previous_checkpoint_id = match current.manifest_state().lifecycle() {
             GrepLifecycle::Backfilling { checkpoint_id, .. } => Some(checkpoint_id.clone()),
             GrepLifecycle::Steady { .. } | GrepLifecycle::Disabled => None,
         };
@@ -523,7 +559,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             namespace_id,
             checkpoint.checkpoint_seq,
             checkpoint.checkpoint_id.clone(),
-            current.state().index().next_run_ordinal,
+            current.manifest_state().index().next_run_ordinal,
         )?;
         match self.advance_root(current, &next).await {
             Ok(_) => {
@@ -566,21 +602,21 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             &self.store,
             namespace_id,
             unit.run_seq,
-            current.state().index().next_run_ordinal,
+            current.manifest_state().index().next_run_ordinal,
             rows,
             policy.max_rows_per_segment,
             INDEX_GRAMS_DELTA_LEVEL,
         )
         .await?;
         let segments_written = new_segments.len() as u64;
-        let mut segments = current.state().segments().to_vec();
+        let mut segments = current.manifest_state().segments().to_vec();
         segments.extend(new_segments);
         let next_run_ordinal =
-            current.state().index().next_run_ordinal + u64::from(segments_written > 0);
+            current.manifest_state().index().next_run_ordinal + u64::from(segments_written > 0);
         // A finished backfill turns steady at exactly the sequence its
         // checkpoint captured: the walk answered that state and no other, so
         // the watermark it hands the change feed is the target it reached.
-        let (lifecycle, completed_checkpoint_id) = match current.state().lifecycle() {
+        let (lifecycle, completed_checkpoint_id) = match current.manifest_state().lifecycle() {
             GrepLifecycle::Backfilling {
                 target_seq,
                 checkpoint_id,
@@ -612,10 +648,13 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             GrepLifecycle::Disabled => unreachable!("disabled returned before collection"),
         };
         let materialized = matches!(lifecycle, GrepLifecycle::Steady { .. });
-        let next = GrepRootState::new(
+        let next = GrepManifestState::new(
             namespace_id.clone(),
             lifecycle,
-            GrepIndexState::new(current.state().index().reorganize.clone(), next_run_ordinal),
+            GrepIndexState::new(
+                current.manifest_state().index().reorganize.clone(),
+                next_run_ordinal,
+            ),
             segments,
         )
         .map_err(core_state_error)?;
@@ -657,8 +696,8 @@ fn backfilling_root(
     target_seq: ChangeSeq,
     checkpoint_id: CheckpointId,
     next_run_ordinal: u64,
-) -> Result<GrepRootState> {
-    GrepRootState::new(
+) -> Result<GrepManifestState> {
+    GrepManifestState::new(
         namespace_id.clone(),
         GrepLifecycle::Backfilling {
             target_seq,
@@ -684,7 +723,7 @@ fn rebootstrap_required(error: &GrepError) -> bool {
     )
 }
 
-fn root_names_checkpoint(root: &GrepRootState, checkpoint_id: &CheckpointId) -> bool {
+fn root_names_checkpoint(root: &GrepManifestState, checkpoint_id: &CheckpointId) -> bool {
     matches!(
         root.lifecycle(),
         GrepLifecycle::Backfilling {
@@ -1045,69 +1084,77 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 GrepReorganizeOutcome::NotEnabled,
             ));
         };
-        if matches!(current.state().lifecycle(), GrepLifecycle::Disabled) {
+        if matches!(
+            current.manifest_state().lifecycle(),
+            GrepLifecycle::Disabled
+        ) {
             return Ok(reorganize_report(
                 namespace_id,
                 GrepReorganizeOutcome::NotEnabled,
             ));
         }
-        let (reorganize, next_run_ordinal) = match current.state().index().reorganize.clone() {
-            Some(reorganize) => (reorganize, current.state().index().next_run_ordinal),
-            None => {
-                let l0_runs = distinct_run_ordinals_at_level(
-                    current.state().segments(),
-                    INDEX_GRAMS_DELTA_LEVEL,
-                );
-                let mid_runs = distinct_run_ordinals_at_level(
-                    current.state().segments(),
-                    INDEX_GRAMS_MID_LEVEL,
-                );
-                let (snapshot_segment_ids, output_level) = if l0_runs >= policy.max_l0_runs.get() {
-                    (
-                        current
-                            .state()
-                            .segments()
-                            .iter()
-                            .filter(|segment| segment.level == INDEX_GRAMS_DELTA_LEVEL)
-                            .map(|segment| segment.segment_id.clone())
-                            .collect(),
+        let (reorganize, next_run_ordinal) =
+            match current.manifest_state().index().reorganize.clone() {
+                Some(reorganize) => (
+                    reorganize,
+                    current.manifest_state().index().next_run_ordinal,
+                ),
+                None => {
+                    let l0_runs = distinct_run_ordinals_at_level(
+                        current.manifest_state().segments(),
+                        INDEX_GRAMS_DELTA_LEVEL,
+                    );
+                    let mid_runs = distinct_run_ordinals_at_level(
+                        current.manifest_state().segments(),
                         INDEX_GRAMS_MID_LEVEL,
-                    )
-                } else if mid_runs >= policy.max_mid_runs.get() {
+                    );
+                    let (snapshot_segment_ids, output_level) =
+                        if l0_runs >= policy.max_l0_runs.get() {
+                            (
+                                current
+                                    .manifest_state()
+                                    .segments()
+                                    .iter()
+                                    .filter(|segment| segment.level == INDEX_GRAMS_DELTA_LEVEL)
+                                    .map(|segment| segment.segment_id.clone())
+                                    .collect(),
+                                INDEX_GRAMS_MID_LEVEL,
+                            )
+                        } else if mid_runs >= policy.max_mid_runs.get() {
+                            (
+                                current
+                                    .manifest_state()
+                                    .segments()
+                                    .iter()
+                                    .filter(|segment| segment.level != INDEX_GRAMS_DELTA_LEVEL)
+                                    .map(|segment| segment.segment_id.clone())
+                                    .collect(),
+                                INDEX_GRAMS_BASE_LEVEL,
+                            )
+                        } else {
+                            return Ok(reorganize_report(
+                                namespace_id,
+                                GrepReorganizeOutcome::NotNeeded { l0_runs, mid_runs },
+                            ));
+                        };
                     (
-                        current
-                            .state()
-                            .segments()
-                            .iter()
-                            .filter(|segment| segment.level != INDEX_GRAMS_DELTA_LEVEL)
-                            .map(|segment| segment.segment_id.clone())
-                            .collect(),
-                        INDEX_GRAMS_BASE_LEVEL,
+                        GrepReorganizeState {
+                            snapshot_segment_ids,
+                            output_segment_ids: Vec::new(),
+                            row_key_cursor: String::new(),
+                            output_level,
+                            run_ordinal: current.manifest_state().index().next_run_ordinal,
+                        },
+                        current.manifest_state().index().next_run_ordinal + 1,
                     )
-                } else {
-                    return Ok(reorganize_report(
-                        namespace_id,
-                        GrepReorganizeOutcome::NotNeeded { l0_runs, mid_runs },
-                    ));
-                };
-                (
-                    GrepReorganizeState {
-                        snapshot_segment_ids,
-                        output_segment_ids: Vec::new(),
-                        row_key_cursor: String::new(),
-                        output_level,
-                        run_ordinal: current.state().index().next_run_ordinal,
-                    },
-                    current.state().index().next_run_ordinal + 1,
-                )
-            }
-        };
+                }
+            };
         let snapshot = reorganize
             .snapshot_segment_ids
             .iter()
             .map(|segment_id| {
                 current
-                    .state()
+                    .manifest_state()
                     .segments()
                     .iter()
                     .find(|segment| &segment.segment_id == segment_id)
@@ -1149,7 +1196,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         )
         .await?;
         let segments_written = new_segments.len() as u64;
-        let mut segments = current.state().segments().to_vec();
+        let mut segments = current.manifest_state().segments().to_vec();
         let mut next_reorganize = reorganize.clone();
         next_reorganize.output_segment_ids.extend(
             new_segments
@@ -1167,9 +1214,9 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             next_reorganize.row_key_cursor = merged.next_cursor;
             Some(next_reorganize)
         };
-        let next = GrepRootState::new(
+        let next = GrepManifestState::new(
             namespace_id.clone(),
-            current.state().lifecycle().clone(),
+            current.manifest_state().lifecycle().clone(),
             GrepIndexState::new(reorganize, next_run_ordinal),
             segments,
         )
@@ -1218,7 +1265,11 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
             None => GrepGcCursor::initial(namespace_id),
         };
         let mut report = GrepGcReport::default();
-        let mut budget = GcBudget::new(request.max_objects);
+        // An absent budget is the per-pass default, resolved here — the
+        // entry point an operator calls — because that is where the runtime
+        // resolves its own, and one authority is what keeps the two the
+        // same number.
+        let mut budget = GcBudget::new(Some(request.max_objects.unwrap_or(DEFAULT_GC_MAX_OBJECTS)));
         let reads = self.reads(namespace_id);
         // Liveness is decided once per pass — and re-decided per candidate
         // below, which is what authorizes a delete. This first read is
@@ -1300,11 +1351,13 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
                 budget.charge();
                 Ok(self.delete_if_unreferenced(key, now_ms, report).await?)
             }
-            // Grep segments and manifests are immutable. An identical
-            // rebuild can only recreate the same derived bytes at the same
-            // key; pointer advance verifies and heals its manifest after
-            // CAS, so aged unreachable objects need no condemned state
-            // before deletion.
+            // Grep segments and manifests are immutable and are written
+            // under freshly minted ids, so an unreferenced one is the
+            // leftover of a publication that already ended — no live
+            // publication can be about to point at this key. The grace
+            // window covers the one that has not ended yet, which is why
+            // aged unreachable objects need no condemned state before
+            // deletion.
             NamespaceLiveness::Live => {
                 budget.charge();
                 let root = match load_grep_root(&self.store, namespace_id).await {
@@ -1692,18 +1745,18 @@ async fn live_namespace_probe(reads: &NamespaceReads<'_>) -> Result<()> {
 }
 
 fn live_grep_keys(root: &LoadedGrepRoot) -> BTreeSet<String> {
-    let namespace_id = root.state().namespace_id();
+    let namespace_id = root.manifest_state().namespace_id();
     let mut live = BTreeSet::from([
         root_key(namespace_id),
-        manifest_key(namespace_id, root.manifest_envelope().manifest_id()),
+        manifest_key(namespace_id, root.manifest_id()),
     ]);
     live.extend(
-        root.state()
+        root.manifest_state()
             .segments()
             .iter()
             .map(|segment| segment_key(namespace_id, &segment.segment_id)),
     );
-    if let Some(reorganize) = &root.state().index().reorganize {
+    if let Some(reorganize) = &root.manifest_state().index().reorganize {
         live.extend(
             reorganize
                 .snapshot_segment_ids
@@ -1763,7 +1816,7 @@ fn ensure_publication_budget(timer: &impl MonotonicTimer, started_ms: u64) -> Re
     .into())
 }
 
-fn core_state_error(error: crate::root::GrepRootStateError) -> GrepError {
+fn core_state_error(error: crate::root::GrepManifestStateError) -> GrepError {
     CoreError::Internal(format!("failed to build grep root state: {error}")).into()
 }
 

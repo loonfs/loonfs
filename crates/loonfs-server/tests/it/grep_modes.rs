@@ -177,7 +177,7 @@ async fn serving_and_maintaining_enables_queries_nudges_and_disables_per_namespa
         .expect("load disabled root")
         .expect("disabled root");
     assert!(matches!(
-        disabled.state().lifecycle(),
+        disabled.manifest_state().lifecycle(),
         GrepLifecycle::Disabled
     ));
     settle(&lifecycle).await;
@@ -187,7 +187,7 @@ async fn serving_and_maintaining_enables_queries_nudges_and_disables_per_namespa
                 .await
                 .expect("reload disabled root")
                 .expect("disabled root")
-                .state()
+                .manifest_state()
                 .lifecycle(),
             GrepLifecycle::Disabled
         ),
@@ -289,7 +289,7 @@ async fn first_query_after_restart_resumes_stale_and_mid_backfill_namespaces() {
         .expect("load root")
         .expect("backfill root");
     assert!(matches!(
-        root.state().lifecycle(),
+        root.manifest_state().lifecycle(),
         GrepLifecycle::Backfilling { .. }
     ));
     writer.shutdown_background().await.expect("shutdown writer");
@@ -439,11 +439,11 @@ async fn maintain_only_keeps_the_index_built_without_serving_searches() {
         .expect("load root")
         .expect("maintained root");
     assert!(matches!(
-        root.state().lifecycle(),
+        root.manifest_state().lifecycle(),
         GrepLifecycle::Steady { .. }
     ));
     assert!(
-        !root.state().segments().is_empty(),
+        !root.manifest_state().segments().is_empty(),
         "the index this deployment maintains holds real segments"
     );
     lifecycle.shutdown().await.expect("drain lifecycle");
@@ -576,7 +576,7 @@ async fn lifecycle_of(store: &SharedObjectStore, namespace_id: &NamespaceId) -> 
         .await
         .expect("load grep root")
         .expect("an enabled namespace has a grep root")
-        .state()
+        .manifest_state()
         .lifecycle()
         .clone()
 }

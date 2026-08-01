@@ -120,10 +120,8 @@ mod tests {
             .put_overwrite(&root_key(&namespace_id), Bytes::from_static(b"grep root"))
             .await
             .expect("grep root");
-        let grep_manifest_id = GrepManifestId::parse(
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        )
-        .expect("valid grep manifest id");
+        let grep_manifest_id = GrepManifestId::parse("gmf_0123456789abcdef0123456789abcdef")
+            .expect("valid grep manifest id");
         store
             .put_overwrite(
                 &manifest_key(&namespace_id, &grep_manifest_id),

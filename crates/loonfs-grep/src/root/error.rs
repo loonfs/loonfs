@@ -1,6 +1,7 @@
 //! Typed failures for grep root state, encoding, loading, and publication.
 
 use loonfs::StoreFailureClass;
+use loonfs_api::wire::envelope::EnvelopeCodecError;
 use loonfs_api::{IndexSegmentId, NamespaceId};
 use thiserror::Error;
 
@@ -13,7 +14,7 @@ pub struct GrepManifestIdError {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[non_exhaustive]
-pub enum GrepRootStateError {
+pub enum GrepManifestStateError {
     #[error("unsupported grep index format version `{found}`: this build supports `{supported}`")]
     UnsupportedIndexFormatVersion { found: u32, supported: u32 },
     #[error("disabled grep root carries query-visible segments")]
@@ -52,27 +53,17 @@ pub enum GrepRootStateError {
     ReorganizeOutputDescriptorMismatch { segment_id: IndexSegmentId },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
+/// Failure encoding or decoding one grep root pointer or manifest.
+///
+/// Envelope-shaped failures are the shared vocabulary every durable family
+/// reports through; only grep's own payload invariants are named here.
+#[derive(Debug, Error)]
 #[non_exhaustive]
-pub enum GrepRootCodecError {
-    #[error("failed to encode grep root payload: {message}")]
-    PayloadEncode { message: String },
-    #[error("failed to encode grep root envelope: {message}")]
-    EnvelopeEncode { message: String },
-    #[error("failed to decode grep root envelope: {message}")]
-    EnvelopeDecode { message: String },
-    #[error("failed to decode grep root payload: {message}")]
-    PayloadDecode { message: String },
-    #[error("grep root kind mismatch: expected `{expected}`, found `{found}`")]
-    KindMismatch { expected: String, found: String },
-    #[error("unsupported grep root format version `{found}`: this build supports `{supported}`")]
-    UnsupportedFormatVersion { found: String, supported: String },
-    #[error("grep root payload checksum mismatch: expected `{expected}`, actual `{actual}`")]
-    ChecksumMismatch { expected: String, actual: String },
-    #[error("grep root checksum `{checksum}` is stale for payload `{actual}`")]
-    StalePayloadChecksum { checksum: String, actual: String },
-    #[error("invalid grep root state: {0}")]
-    InvalidState(#[from] GrepRootStateError),
+pub enum GrepEnvelopeCodecError {
+    #[error(transparent)]
+    Envelope(#[from] EnvelopeCodecError),
+    #[error("invalid grep manifest state: {0}")]
+    InvalidState(#[from] GrepManifestStateError),
     #[error("invalid grep manifest id: {0}")]
     InvalidManifestId(#[from] GrepManifestIdError),
 }

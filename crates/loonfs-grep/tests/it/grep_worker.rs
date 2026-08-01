@@ -18,9 +18,8 @@ use loonfs_grep::keyspace::{
     manifest_key, manifests_prefix, namespace_prefix, root_key, segment_key,
 };
 use loonfs_grep::root::{
-    advance_grep_root, encode_grep_manifest, encode_grep_root, load_grep_root, GrepIndexState,
-    GrepLifecycle, GrepManifestEnvelope, GrepManifestId, GrepRootEnvelope, GrepRootPointer,
-    GrepRootState,
+    advance_grep_root, encode_grep_root, load_grep_root, GrepIndexState, GrepLifecycle,
+    GrepManifestId, GrepManifestState, GrepRootEnvelope, GrepRootPointer,
 };
 use loonfs_grep::{
     GramIndexBuildPolicy, GrepBuildOutcome, GrepError, GrepGcReport, GrepGcRequest,
@@ -240,10 +239,10 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
         .await
         .expect("load root")
         .expect("root exists");
-    let GrepLifecycle::Backfilling { checkpoint_id, .. } = root.state().lifecycle() else {
+    let GrepLifecycle::Backfilling { checkpoint_id, .. } = root.manifest_state().lifecycle() else {
         panic!(
             "enable must publish checkpointed backfill: {:?}",
-            root.state()
+            root.manifest_state()
         );
     };
     let checkpoint_id = checkpoint_id.clone();
@@ -286,7 +285,7 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
         .expect("root exists");
     let materialized_segment = segment_key(
         &namespace_id,
-        &materialized_root.state().segments()[0].segment_id,
+        &materialized_root.manifest_state().segments()[0].segment_id,
     );
 
     assert_eq!(
@@ -310,7 +309,7 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
         .expect("load disabled root")
         .expect("disabled root remains");
     assert!(matches!(
-        disabled_root.state().lifecycle(),
+        disabled_root.manifest_state().lifecycle(),
         GrepLifecycle::Disabled
     ));
     assert_eq!(
@@ -329,9 +328,9 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
         .await
         .expect("load re-enabled root")
         .expect("root exists");
-    assert!(root.state().segments().is_empty());
+    assert!(root.manifest_state().segments().is_empty());
     assert!(matches!(
-        root.state().lifecycle(),
+        root.manifest_state().lifecycle(),
         GrepLifecycle::Backfilling { .. }
     ));
     writer.shutdown_background().await.expect("shutdown");
@@ -524,16 +523,19 @@ async fn assert_fresh_backfill_attempt(
         cursor,
         checkpoint_id,
         ..
-    } = root.state().lifecycle()
+    } = root.manifest_state().lifecycle()
     else {
-        panic!("expected a checkpointed backfill: {:?}", root.state());
+        panic!(
+            "expected a checkpointed backfill: {:?}",
+            root.manifest_state()
+        );
     };
     assert_eq!(
         *cursor, None,
         "a rebootstrap restarts the walk from the beginning"
     );
     assert!(
-        root.state().segments().is_empty(),
+        root.manifest_state().segments().is_empty(),
         "a rebootstrap discards the incomplete projection"
     );
     let record = control::checkpoint_record(store, namespace_id, checkpoint_id)
@@ -557,7 +559,7 @@ async fn grep_segment_ids(
         .await
         .expect("load grep root")
         .expect("grep root exists")
-        .state()
+        .manifest_state()
         .segments()
         .iter()
         .map(|segment| segment.segment_id.clone())
@@ -572,7 +574,7 @@ async fn grep_built_through_seq(
         .await
         .expect("load grep root")
         .expect("grep root exists")
-        .state()
+        .manifest_state()
         .lifecycle()
         .steady_watermark()
         .expect("a steady grep root has a watermark")
@@ -951,17 +953,21 @@ async fn grep_root_lifecycle_pins_not_materialized_error_surface() {
     );
 
     let missing_manifest_id =
-        GrepManifestId::parse("1111111111111111111111111111111111111111111111111111111111111111")
-            .expect("valid manifest id");
-    write_pointer(&*store, &namespace_id, missing_manifest_id).await;
+        GrepManifestId::parse("gmf_11111111111111111111111111111111").expect("valid manifest id");
+    write_pointer(
+        &*store,
+        &namespace_id,
+        missing_manifest_id,
+        sha256_digest(b"whatever the absent manifest would have carried"),
+    )
+    .await;
     assert_corrupt_index_error(
         "missing manifest",
         new_query(&store, &namespace_id, &request("needle")).await,
     );
 
     let corrupt_manifest_id =
-        GrepManifestId::parse("2222222222222222222222222222222222222222222222222222222222222222")
-            .expect("valid manifest id");
+        GrepManifestId::parse("gmf_22222222222222222222222222222222").expect("valid manifest id");
     store
         .put_overwrite(
             &manifest_key(&namespace_id, &corrupt_manifest_id),
@@ -969,7 +975,13 @@ async fn grep_root_lifecycle_pins_not_materialized_error_surface() {
         )
         .await
         .expect("write corrupt manifest");
-    write_pointer(&*store, &namespace_id, corrupt_manifest_id).await;
+    write_pointer(
+        &*store,
+        &namespace_id,
+        corrupt_manifest_id,
+        sha256_digest(b"corrupt manifest"),
+    )
+    .await;
     assert_corrupt_index_error(
         "corrupt manifest",
         new_query(&store, &namespace_id, &request("needle")).await,
@@ -1011,16 +1023,19 @@ async fn backfilling_root_without_checkpoint_id_is_index_corrupt() {
         .expect("load backfilling root")
         .expect("backfilling root exists");
     let manifest_bytes = store
-        .get(
-            &manifest_key(&namespace_id, root.manifest_envelope().manifest_id()),
-            None,
-        )
+        .get(&manifest_key(&namespace_id, root.manifest_id()), None)
         .await
         .expect("read backfilling manifest")
         .expect("backfilling manifest exists");
-    let corrupt_manifest_id =
+    let (corrupt_manifest_id, corrupt_payload_checksum) =
         write_manifest_without_checkpoint_id(&*store, &namespace_id, &manifest_bytes).await;
-    write_pointer(&*store, &namespace_id, corrupt_manifest_id).await;
+    write_pointer(
+        &*store,
+        &namespace_id,
+        corrupt_manifest_id,
+        corrupt_payload_checksum,
+    )
+    .await;
 
     assert_corrupt_index_error(
         "backfilling manifest missing checkpoint id",
@@ -1033,7 +1048,7 @@ async fn write_manifest_without_checkpoint_id(
     store: &dyn ObjectStore,
     namespace_id: &NamespaceId,
     manifest_bytes: &[u8],
-) -> GrepManifestId {
+) -> (GrepManifestId, String) {
     let mut document: serde_json::Value =
         serde_json::from_slice(manifest_bytes).expect("decode valid manifest document");
     document["payload"]["lifecycle"]
@@ -1045,12 +1060,7 @@ async fn write_manifest_without_checkpoint_id(
         serde_json::to_vec(&document["payload"]).expect("encode corrupt manifest payload");
     let payload_checksum = sha256_digest(&payload_bytes);
     document["payload_checksum"] = serde_json::Value::String(payload_checksum.clone());
-    let manifest_id = GrepManifestId::parse(
-        payload_checksum
-            .strip_prefix("sha256:")
-            .expect("sha256 digest should carry its algorithm prefix"),
-    )
-    .expect("checksum is a valid manifest id");
+    let manifest_id = GrepManifestId::generate();
     store
         .put_overwrite(
             &manifest_key(namespace_id, &manifest_id),
@@ -1058,17 +1068,21 @@ async fn write_manifest_without_checkpoint_id(
         )
         .await
         .expect("write manifest missing checkpoint id");
-    manifest_id
+    (manifest_id, payload_checksum)
 }
 
 async fn write_pointer(
     store: &dyn ObjectStore,
     namespace_id: &NamespaceId,
     manifest_id: GrepManifestId,
+    manifest_payload_checksum: String,
 ) {
-    let envelope =
-        GrepRootEnvelope::from_pointer(GrepRootPointer::new(namespace_id.clone(), manifest_id))
-            .expect("build pointer");
+    let envelope = GrepRootEnvelope::from_pointer(GrepRootPointer::new(
+        namespace_id.clone(),
+        manifest_id,
+        manifest_payload_checksum,
+    ))
+    .expect("build pointer");
     store
         .put_overwrite(
             &root_key(namespace_id),
@@ -1121,7 +1135,7 @@ async fn planless_scan_covers_wal_revisions_at_or_below_index_watermark() {
         .expect("load grep root")
         .expect("grep root exists");
     assert_eq!(
-        grep_root.state().lifecycle().steady_watermark(),
+        grep_root.manifest_state().lifecycle().steady_watermark(),
         Some((head.seq, 0)),
         "the independent worker can advance past metadata materialization"
     );
@@ -1249,7 +1263,7 @@ async fn grep_worker_pins_fold_tail_and_pagination_results() {
         .expect("load root")
         .expect("root exists");
     let levels: BTreeSet<u32> = root
-        .state()
+        .manifest_state()
         .segments()
         .iter()
         .map(|segment| segment.level)
@@ -1351,7 +1365,7 @@ async fn fork_of_grep_enabled_namespace_starts_unmaterialized_without_manifest_s
         .await
         .expect("load source root")
         .expect("source root exists")
-        .state()
+        .manifest_state()
         .clone();
 
     writer
@@ -1396,7 +1410,7 @@ async fn fork_of_grep_enabled_namespace_starts_unmaterialized_without_manifest_s
         .await
         .expect("reload source root")
         .expect("source root still exists")
-        .state()
+        .manifest_state()
         .clone();
     assert_eq!(source_root_after, source_root_before);
     let source_response = new_query(&store, &source, &request("fork needle"))
@@ -1484,14 +1498,22 @@ async fn checkpoint_backfill_matches_incremental_worker_results() {
     writer.shutdown_background().await.expect("shutdown");
 }
 
+/// A collection pass that lands in the middle of a publication leaves the
+/// candidate manifest alone.
+///
+/// The grace window is the whole argument: the candidate was written
+/// moments ago under an id nothing has used before, and grep bounds its own
+/// publications by the same budget the runtime bounds its own by, which is
+/// what the derived grace floor is built from. So a pass that examines the
+/// key before the pointer moves must retain it.
 #[tokio::test]
-async fn pointer_advance_heals_a_manifest_deleted_after_already_exists() {
+async fn a_publication_in_flight_keeps_its_candidate_through_a_collection_pass() {
     let temp_dir = tempdir().expect("tempdir");
     let base: SharedObjectStore =
         Arc::new(LocalFsStore::new(temp_dir.path()).expect("local store"));
-    let namespace_id = NamespaceId::parse("manifest-heal").expect("namespace id");
+    let namespace_id = NamespaceId::parse("manifest-race").expect("namespace id");
     let writer = FsWriter::builder_with_store(base.clone())
-        .writer_id("manifest-heal-writer")
+        .writer_id("manifest-race-writer")
         .min_publish_interval_ms(0)
         .build()
         .await
@@ -1504,7 +1526,7 @@ async fn pointer_advance_heals_a_manifest_deleted_after_already_exists() {
         .put_file_bytes(
             &namespace_id,
             "/needle.txt",
-            b"verify and heal needle\n",
+            b"publication race needle\n",
             PutFileOptions::default(),
         )
         .await
@@ -1523,8 +1545,8 @@ async fn pointer_advance_heals_a_manifest_deleted_after_already_exists() {
         .await
         .expect("load current root")
         .expect("root exists");
-    let current_state = current.state();
-    let next = GrepRootState::new(
+    let current_state = current.manifest_state();
+    let next = GrepManifestState::new(
         namespace_id.clone(),
         current_state.lifecycle().clone(),
         GrepIndexState::new(
@@ -1534,14 +1556,20 @@ async fn pointer_advance_heals_a_manifest_deleted_after_already_exists() {
         current_state.segments().to_vec(),
     )
     .expect("valid successor state");
-    let candidate = GrepManifestEnvelope::from_state(next.clone()).expect("candidate manifest");
-    let candidate_key = manifest_key(&namespace_id, candidate.manifest_id());
-    base.put_if_absent(
-        &candidate_key,
-        Bytes::from(encode_grep_manifest(&candidate).expect("encode candidate")),
-    )
-    .await
-    .expect("pre-land the content-addressed candidate");
+    let manifests_before = base
+        .list_prefix(&manifests_prefix(&namespace_id))
+        .await
+        .expect("list manifests before the advance");
+    // A clock in the store's own domain: the moment the state this
+    // publication builds on became durable. Everything the publication
+    // itself writes is stamped at or after it.
+    let published_at_ms = base
+        .head(&root_key(&namespace_id))
+        .await
+        .expect("head the installed pointer")
+        .expect("an enabled namespace has a pointer")
+        .last_modified_ms
+        .expect("the local store stamps its objects");
 
     let blocking = Arc::new(BlockingGrepRootCasStore::new(
         base.clone(),
@@ -1553,34 +1581,56 @@ async fn pointer_advance_heals_a_manifest_deleted_after_already_exists() {
         blocking.wait_until_blocked().await;
         let report = worker(&store)
             .await
-            .garbage_collect_namespace(&namespace_id, u64::MAX, &GrepGcRequest::default())
+            .garbage_collect_namespace(&namespace_id, published_at_ms, &GrepGcRequest::default())
             .await;
-        let candidate_after_gc = store.head(&candidate_key).await;
         blocking.unblock();
-        (report, candidate_after_gc)
-    };
-    let (advanced, (report, candidate_after_gc)) = tokio::join!(advance, collect);
-
-    assert!(
         report
-            .expect("grep GC wins the manifest race")
-            .deleted_other_objects
-            >= 1
+    };
+    let (advanced, report) = tokio::join!(advance, collect);
+
+    let report = report.expect("collection pass runs mid-publication");
+    assert_eq!(
+        report.deleted_other_objects, 0,
+        "nothing the publication wrote is old enough to collect"
     );
-    assert!(candidate_after_gc
-        .expect("head candidate after GC")
-        .is_none());
-    advanced.expect("pointer advance verifies and heals its manifest");
+    assert!(
+        report.retained_candidates >= 1,
+        "the unreferenced candidate was examined and kept"
+    );
+    let advanced = advanced.expect("pointer advance completes");
+    let candidate_key = manifest_key(&namespace_id, advanced.manifest_id());
+    assert!(
+        !manifests_before.contains(&candidate_key),
+        "the candidate claimed an object no earlier publication wrote"
+    );
     assert!(store
         .head(&candidate_key)
         .await
-        .expect("head healed manifest")
+        .expect("head published manifest")
         .is_some());
-    let response = new_query(&store, &namespace_id, &request("verify and heal needle"))
+    let response = new_query(&store, &namespace_id, &request("publication race needle"))
         .await
-        .expect("query follows the healed pointer");
+        .expect("query follows the published pointer");
     assert_eq!(response.matches.len(), 1);
     assert_eq!(response.matches[0].absolute_path, "/needle.txt");
+
+    // And the retention above was the grace window, not an inert pass: past
+    // it, the superseded manifest goes and the published one stays.
+    let aged = worker(&store)
+        .await
+        .garbage_collect_namespace(
+            &namespace_id,
+            published_at_ms + GREP_GC_GRACE_WINDOW_MS + 1,
+            &GrepGcRequest::default(),
+        )
+        .await
+        .expect("collection pass after the grace window");
+    assert!(aged.deleted_other_objects >= 1);
+    assert!(store
+        .head(&candidate_key)
+        .await
+        .expect("head published manifest")
+        .is_some());
 }
 
 #[derive(Debug)]
@@ -1701,10 +1751,11 @@ async fn grep_gc_retains_live_roots_reaps_deleted_namespaces_and_never_crosses_k
         .await
         .expect("load live root")
         .expect("root exists");
-    let live_segment_key =
-        segment_key(&live_namespace, &live_root.state().segments()[0].segment_id);
-    let live_manifest_key =
-        manifest_key(&live_namespace, live_root.manifest_envelope().manifest_id());
+    let live_segment_key = segment_key(
+        &live_namespace,
+        &live_root.manifest_state().segments()[0].segment_id,
+    );
+    let live_manifest_key = manifest_key(&live_namespace, live_root.manifest_id());
     let orphan_key = segment_key(&live_namespace, &IndexSegmentId::generate());
     store
         .put(
@@ -1915,7 +1966,7 @@ async fn seed_collectable_namespace(root: &Path, namespace_id: &NamespaceId) -> 
 
 /// Aged, unreferenced segment keys with fixed ids, so two independently
 /// seeded stores hold the same collectable garbage under the same names —
-/// the live segment and manifest ids are content-derived and cannot match.
+/// the live segment and manifest ids are minted and cannot match.
 fn orphan_keys(namespace_id: &NamespaceId) -> Vec<String> {
     (0..6u8)
         .map(|index| {
@@ -1951,9 +2002,9 @@ async fn a_budgeted_grep_collection_walks_everything_an_unbudgeted_one_does() {
         .list_prefix(&namespace_prefix(&namespace_id))
         .await
         .expect("list paged-store keys");
-    // The live segment and manifest ids are content-derived and differ
-    // between the two stores; what must match is how many keys there are
-    // and which of them are collectable.
+    // The live segment and manifest ids are minted and differ between the
+    // two stores; what must match is how many keys there are and which of
+    // them are collectable.
     assert_eq!(
         whole_before.len(),
         paged_before.len(),
