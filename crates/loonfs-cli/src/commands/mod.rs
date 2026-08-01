@@ -6,6 +6,7 @@ mod context;
 mod fs;
 mod namespace;
 mod output;
+mod partial;
 mod profile;
 mod profile_config;
 mod recursive;

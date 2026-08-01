@@ -368,6 +368,39 @@ Update options
     --auth-token <token>
     --ca-cert-path <path>
 
+Interrupted transfers
+  A transfer killed part way is picked up by rerunning the same command.
+  Nothing is asked for and no flag turns it on: a rerun either finds
+  something to continue from or starts over, and says which.
+
+  A download writes into `.<name>.loonfs-partial` beside its destination,
+  with a `.meta` note naming the content those bytes belong to. A rerun
+  continues from them when the note still describes the file it resolves
+  now, and starts over — silently, dropping the bytes — when it does not:
+  a different file at that path, a different revision, or a note this
+  build cannot read. Both files are removed when the download installs at
+  its destination and when it fails and says so, so the only run that
+  leaves anything behind is one that was killed. Verification still covers
+  the whole file: the bytes already on disk are folded back into the same
+  digest as the ones fetched, so a partial that is not really this file's
+  fails the rerun instead of landing.
+
+  A download the server proxies — a remote file under the deployment's
+  cap — arrives in one response and has no midpoint to resume from, so it
+  starts over.
+
+  An upload resumes only where the transfer had parts to lose: a remote
+  profile's direct multipart upload of a file past 8 MiB. The parts that
+  landed are recorded under $XDG_STATE_HOME/loonfs/uploads (or
+  ~/.loonfs/state/uploads when XDG_STATE_HOME is unset), and a rerun sends
+  only the ones still missing — or, when the transfer had actually
+  finished and only the commit was lost, commits what is already stored
+  and sends nothing. A source that changed since the record was written
+  starts over, because the parts already stored came from bytes that are
+  gone. The record is removed when the upload commits. Embedded profiles,
+  proxied uploads, and `loonfs put -` keep no record: there is no session
+  to rejoin, and a pipe cannot be read a second time.
+
 Transfer progress
   `loonfs get` and `loonfs put`, one file or a whole tree, say where they
   have got to while they run. Never on stdout, which carries either the
@@ -405,8 +438,10 @@ Transfer progress
     {"kind":"phase","op":"put","path":"/docs/a.bin","phase":"committing",
      "elapsed_ms":900}
       A stretch where time passes and bytes do not, reported when it
-      starts. `committing` says an upload's payload has been read and the
-      commit is what is left.
+      starts, with `bytes_done` as it stood at that moment. `committing`
+      says an upload's payload has been read and the commit is what is
+      left; `resuming` says a download picked up bytes an interrupted run
+      left behind, and `bytes_done` is how many.
 
   `op` is `get` or `put`. --no-progress silences both forms, and neither is
   produced for `loonfs cat` or for `loonfs get ... -`, which hand the file
@@ -446,8 +481,8 @@ Behavior notes
   download lands inside it under its remote name
 
   `loonfs get` refuses to overwrite an existing local file without --force,
-  and writes through a temporary file so an interrupted download leaves
-  nothing truncated at the target
+  and writes through a partial file beside the target, so an interrupted
+  download leaves nothing truncated at the target itself
 
   `loonfs get` writes a large file as it arrives and never holds it whole, so
   what it costs in memory follows the transfer and not the file's size; an

@@ -1151,6 +1151,142 @@ fn a_download_of_corrupted_content_leaves_nothing_at_the_destination() {
     );
 }
 
+/// The bytes and the note an interrupted download leaves beside its
+/// destination, as this CLI names them.
+fn partial_paths(destination: &Path) -> (PathBuf, PathBuf) {
+    let name = destination
+        .file_name()
+        .expect("destination file name")
+        .to_str()
+        .expect("utf-8 name");
+    let parent = destination.parent().expect("destination parent");
+    (
+        parent.join(format!(".{name}.loonfs-partial")),
+        parent.join(format!(".{name}.loonfs-partial.meta")),
+    )
+}
+
+/// Lays down the bytes and note an interrupted download of `remote_path`
+/// would have left, having got `held` bytes in.
+fn leave_a_partial_download(
+    harness: &Harness,
+    remote_path: &str,
+    destination: &Path,
+    payload: &[u8],
+    held: usize,
+) {
+    let stat = harness.run(&["--json", "stat", remote_path]);
+    assert_success(&stat);
+    let content_ref = json_data(&stat)["content_ref"].clone();
+    let (partial, meta) = partial_paths(destination);
+    fs::write(&partial, &payload[..held]).expect("write partial bytes");
+    let mut note = serde_json::json!({
+        "content_id": content_ref["content_id"],
+        "size_bytes": content_ref["size_bytes"],
+    });
+    if let Some(sha256) = content_ref.get("whole_file_sha256") {
+        note["whole_file_sha256"] = sha256.clone();
+    }
+    fs::write(&meta, serde_json::to_vec(&note).expect("encode note")).expect("write note");
+}
+
+/// A download that stopped part way is picked up rather than started over:
+/// the bytes already on disk are fetched again by nobody, and the file that
+/// lands is still verified as a whole.
+#[test]
+fn an_interrupted_download_resumes_from_what_it_already_has() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+
+    let payload = streaming_payload();
+    let source = harness.temp_dir.path().join("source.bin");
+    fs::write(&source, &payload).expect("write payload");
+    assert_success(&harness.run(&["put", source.to_str().expect("utf-8 path"), "/big.bin"]));
+
+    let destination = harness.temp_dir.path().join("big.bin");
+    let held = 3 * 1024 * 1024;
+    leave_a_partial_download(&harness, "/big.bin", &destination, &payload, held);
+
+    let get = harness.run(&[
+        "--json",
+        "get",
+        "/big.bin",
+        destination.to_str().expect("utf-8 path"),
+    ]);
+    assert_success(&get);
+    assert_eq!(
+        fs::read(&destination).expect("read destination"),
+        payload,
+        "a resumed download still lands the whole verified file"
+    );
+
+    let resuming: Vec<Value> = events_of_kind(&get, "phase")
+        .into_iter()
+        .filter(|event| event["phase"] == "resuming")
+        .collect();
+    assert_eq!(resuming.len(), 1, "one resume to report: {resuming:?}");
+    assert_eq!(
+        resuming[0]["bytes_done"], held as u64,
+        "the run started at what was already on disk, not at zero"
+    );
+
+    let (partial, meta) = partial_paths(&destination);
+    assert!(!partial.exists(), "an installed download leaves no partial");
+    assert!(!meta.exists(), "and takes its note with it");
+}
+
+/// The note is what makes leftover bytes resumable. Bytes belonging to
+/// other content, and bytes with nothing vouching for them, are dropped
+/// without a word and the download starts over.
+#[test]
+fn a_partial_that_does_not_describe_this_file_is_started_over() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+
+    let payload = streaming_payload();
+    let source = harness.temp_dir.path().join("source.bin");
+    fs::write(&source, &payload).expect("write payload");
+    assert_success(&harness.run(&["put", source.to_str().expect("utf-8 path"), "/big.bin"]));
+    assert_success(&harness.run(&["put", source.to_str().expect("utf-8 path"), "/other.bin"]));
+
+    // The note of a different file: same length, same bytes, and a content
+    // id that says it is not this object.
+    let destination = harness.temp_dir.path().join("big.bin");
+    let held = 3 * 1024 * 1024;
+    leave_a_partial_download(&harness, "/other.bin", &destination, &payload, held);
+
+    let get = harness.run(&[
+        "--json",
+        "get",
+        "/big.bin",
+        destination.to_str().expect("utf-8 path"),
+    ]);
+    assert_success(&get);
+    assert_eq!(fs::read(&destination).expect("read destination"), payload);
+    assert!(
+        events_of_kind(&get, "phase").is_empty(),
+        "a download that started over reports no resume"
+    );
+
+    // Bytes with no note beside them say nothing about themselves either.
+    let elsewhere = harness.temp_dir.path().join("again.bin");
+    let (partial, _) = partial_paths(&elsewhere);
+    fs::write(&partial, &payload[..held]).expect("write orphan partial");
+    let get = harness.run(&[
+        "--json",
+        "get",
+        "/big.bin",
+        elsewhere.to_str().expect("utf-8 path"),
+    ]);
+    assert_success(&get);
+    assert_eq!(fs::read(&elsewhere).expect("read destination"), payload);
+    assert!(events_of_kind(&get, "phase").is_empty());
+}
+
 /// The one content object of a given length under a store root. Content
 /// objects live at `content-stores/<store>/objects/<shard>/<id>`, and the
 /// tests that use this write one file whose length nothing else shares.

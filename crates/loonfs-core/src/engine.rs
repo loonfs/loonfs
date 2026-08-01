@@ -255,23 +255,36 @@ impl<S: ObjectStore> NamespaceEngine<S> {
     /// The pinned context resolves the path; it does not have to survive the
     /// read. The reference names one immutable object at a random id, so no
     /// commit landing mid-read can change the bytes under a reader.
+    ///
+    /// `start_offset` skips bytes the caller already holds; the stream still
+    /// verifies the whole object, so those bytes reach it through
+    /// [`FileContentStream::fold_resumed_prefix`] before it fetches
+    /// anything.
     pub async fn read_file_stream(
         &self,
         path: impl AsRef<str>,
         context: &RuntimeReadContext,
         chunk_bytes: NonZeroU64,
+        start_offset: u64,
     ) -> Result<FileContentStream<S>>
     where
         S: Clone,
     {
         let view = self.load_read_view(context).await?;
         let (entry, content_ref) = view.resolve_file_content(path.as_ref()).await?;
+        if start_offset > content_ref.size_bytes {
+            return Err(CoreError::ResumeOffsetOutOfRange {
+                start_offset,
+                size_bytes: content_ref.size_bytes,
+            });
+        }
         Ok(FileContentStream::open(
             self.store.clone(),
             view.content_store_id(),
             entry,
             content_ref,
             chunk_bytes,
+            start_offset,
         )
         .await?)
     }

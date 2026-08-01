@@ -145,6 +145,82 @@ async fn a_streamed_read_writes_the_granted_object_and_reports_its_length() {
     assert_eq!(sink, payload);
 }
 
+/// A download that stopped part way asks for the rest with a `Range`, on
+/// the grant it already has: the signature does not cover that header, so
+/// one grant serves the whole object or any part of it. The bytes already
+/// held still count toward the digest, so the verdict is over the whole
+/// file.
+#[tokio::test]
+async fn a_resumed_download_asks_for_the_rest_and_verifies_the_whole_file() {
+    let payload = b"the first half and then the second half".to_vec();
+    let held = 10;
+    let content_ref = ContentRef::blob_v1(ContentId::generate(), &payload);
+    let client = client();
+
+    let guard = test_transport::script([Outcome::Success(payload[held..].to_vec())]);
+    let mut download = client
+        .open_direct_download_at(
+            &grant(content_ref, "http://example.invalid/object"),
+            held as u64,
+        )
+        .await
+        .expect("resumed grant");
+    download.fold_resumed_prefix(&payload[..held]);
+    let mut received = Vec::new();
+    while let Some(chunk) = download.next_chunk().await.expect("chunk") {
+        received.extend_from_slice(&chunk);
+    }
+
+    assert_eq!(
+        received,
+        payload[held..],
+        "only the bytes past the resume point arrive"
+    );
+    let sent = guard.sent();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(
+        sent[0].header("range"),
+        Some("bytes=10-"),
+        "the rest is asked for by range: {sent:?}"
+    );
+}
+
+/// A download that starts at zero asks for no range at all, and one that
+/// resumes without handing over what it holds reads nothing.
+#[tokio::test]
+async fn a_resume_is_refused_until_it_accounts_for_what_it_holds() {
+    let payload = b"a whole object".to_vec();
+    let content_ref = ContentRef::blob_v1(ContentId::generate(), &payload);
+    let client = client();
+
+    let guard = test_transport::script([Outcome::Success(payload.clone())]);
+    let mut whole = client
+        .open_direct_download(&grant(content_ref.clone(), "http://example.invalid/object"))
+        .await
+        .expect("grant");
+    while whole.next_chunk().await.expect("chunk").is_some() {}
+    assert_eq!(
+        guard.sent()[0].header("range"),
+        None,
+        "a download of the whole object names no range"
+    );
+    drop(guard);
+
+    let _guard = test_transport::script([Outcome::Success(payload[4..].to_vec())]);
+    let mut resumed = client
+        .open_direct_download_at(&grant(content_ref, "http://example.invalid/object"), 4)
+        .await
+        .expect("resumed grant");
+    let error = resumed
+        .next_chunk()
+        .await
+        .expect_err("the skipped bytes are still owed");
+    assert!(
+        matches!(&error, ClientError::Http(message) if message.contains("resumed at offset 4")),
+        "unexpected error: {error}"
+    );
+}
+
 /// A capability is a URL and a method, and this client sends the method it
 /// was given rather than assuming one.
 #[tokio::test]

@@ -191,7 +191,7 @@ impl Client {
         request: &WireRequest,
     ) -> Result<PayloadStream> {
         #[cfg(test)]
-        if let Some(outcome) = test_transport::next() {
+        if let Some(outcome) = test_transport::next(request) {
             return match outcome {
                 Ok(response) => {
                     Ok(
@@ -282,7 +282,7 @@ impl Client {
         body: Option<&Bytes>,
     ) -> std::result::Result<WireResponse, FailedAttempt> {
         #[cfg(test)]
-        if let Some(outcome) = test_transport::next() {
+        if let Some(outcome) = test_transport::next(request) {
             return outcome;
         }
         let mut builder = self.build(request);
@@ -303,7 +303,7 @@ impl Client {
         size_bytes: Option<u64>,
     ) -> std::result::Result<WireResponse, FailedAttempt> {
         #[cfg(test)]
-        if let Some(outcome) = test_transport::next() {
+        if let Some(outcome) = test_transport::next(request) {
             // Drain the body so a scripted test still observes the source
             // being read exactly once, as a real send would.
             let mut body = body;
@@ -481,7 +481,7 @@ async fn transient_retry_pause(backoff: Duration) {
 
 #[cfg(test)]
 pub(crate) mod test_transport {
-    use super::{FailedAttempt, WireResponse};
+    use super::{FailedAttempt, WireRequest, WireResponse};
     use crate::ClientError;
     use std::cell::RefCell;
     use std::collections::VecDeque;
@@ -498,6 +498,26 @@ pub(crate) mod test_transport {
     struct State {
         outcomes: VecDeque<Outcome>,
         attempts: usize,
+        /// What each attempt asked for, so a test can hold the client to the
+        /// request it made and not only to the answer it accepted.
+        sent: Vec<SentRequest>,
+    }
+
+    /// One request a scripted attempt carried.
+    #[derive(Debug, Clone)]
+    pub(crate) struct SentRequest {
+        #[allow(dead_code, reason = "part of what a scripted attempt carried")]
+        pub url: String,
+        pub headers: Vec<(String, String)>,
+    }
+
+    impl SentRequest {
+        pub(crate) fn header(&self, name: &str) -> Option<&str> {
+            self.headers
+                .iter()
+                .find(|(header, _)| header.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value.as_str())
+        }
     }
 
     // A thread-local is sound here because client tests run on the default
@@ -517,6 +537,18 @@ pub(crate) mod test_transport {
                     .as_ref()
                     .expect("test transport should be installed")
                     .attempts
+            })
+        }
+
+        /// Every request the client sent, in order.
+        pub(crate) fn sent(&self) -> Vec<SentRequest> {
+            STATE.with(|state| {
+                state
+                    .borrow()
+                    .as_ref()
+                    .expect("test transport should be installed")
+                    .sent
+                    .clone()
             })
         }
     }
@@ -546,17 +578,22 @@ pub(crate) mod test_transport {
             let replaced = state.borrow_mut().replace(State {
                 outcomes: outcomes.into_iter().collect(),
                 attempts: 0,
+                sent: Vec::new(),
             });
             assert!(replaced.is_none(), "test transport already installed");
         });
         Guard
     }
 
-    pub(super) fn next() -> Option<Result<WireResponse, FailedAttempt>> {
+    pub(super) fn next(request: &WireRequest) -> Option<Result<WireResponse, FailedAttempt>> {
         STATE.with(|state| {
             let mut state = state.borrow_mut();
             let state = state.as_mut()?;
             state.attempts += 1;
+            state.sent.push(SentRequest {
+                url: request.url.clone(),
+                headers: request.headers.clone(),
+            });
             let outcome = state
                 .outcomes
                 .pop_front()

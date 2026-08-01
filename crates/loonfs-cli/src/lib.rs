@@ -16,6 +16,7 @@ mod progress;
 mod prompt;
 mod render;
 mod resolve;
+mod uploads;
 
 use clap::Parser;
 use std::process::ExitCode;

@@ -38,6 +38,11 @@ struct FileJob {
     /// on either transfer it is what lets the whole tree be measured before
     /// the first byte moves.
     size_bytes: Option<u64>,
+    /// What the remote file's content is, when a listing named it. It rides
+    /// along so a download interrupted part way can tell whether the bytes
+    /// it left behind are still the bytes it wants. An upload's jobs come
+    /// from a local walk and name no remote content.
+    content_ref: Option<loonfs_api::ContentRef>,
 }
 
 struct TreeTally {
@@ -290,9 +295,17 @@ pub(crate) async fn run_get_tree(
             // One file of a tree travels exactly as a single `get` of it
             // would: past the deployment's proxy cap it streams straight
             // from object storage, and the walk already read the size that
-            // decides which.
+            // decides which. It resumes the same way too, from bytes an
+            // interrupted run of this transfer left beside that file.
+            let meta = job
+                .content_ref
+                .as_ref()
+                .map(|content_ref| super::partial::PartialMeta::describe(content_ref, None));
+            let start_offset = meta
+                .as_ref()
+                .map_or(0, |meta| super::partial::resumable_bytes(&local, meta));
             let mut download = match backend
-                .open_file_download(&spec, None, job.size_bytes)
+                .open_file_download(&spec, None, job.size_bytes, start_offset)
                 .await
             {
                 Ok(download) => download,
@@ -303,6 +316,7 @@ pub(crate) async fn run_get_tree(
             let written = super::fs::stream_download_to_file(
                 &mut download,
                 &local,
+                meta.as_ref(),
                 force,
                 derived_name,
                 &progress,
@@ -499,6 +513,7 @@ fn collect_local_tree(
                 // way — the failure that matters surfaces when the file is
                 // read.
                 size_bytes: entry.metadata().ok().map(|metadata| metadata.len()),
+                content_ref: None,
             });
         } else {
             tally.fail(
@@ -589,6 +604,7 @@ async fn walk_remote_tree(
                     local: PathBuf::from(child_components.join("/")),
                     remote: format!("{remote_dir}/{name}", name = name.as_str()),
                     size_bytes: entry.size_bytes,
+                    content_ref: entry.content_ref,
                 }),
             }
         }
