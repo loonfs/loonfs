@@ -887,7 +887,6 @@ mod tests {
         RevisionNo,
     };
     use loonfs_client::NamespacePath;
-    use std::sync::Arc;
     use tempfile::tempdir;
 
     fn namespace_id(value: &str) -> NamespaceId {
@@ -939,8 +938,10 @@ mod tests {
             root: temp_dir.display().to_string(),
             key_prefix: None,
         };
-        let store: SharedObjectStore =
-            Arc::new(config.configured_object_store().expect("configure store"));
+        let store = config
+            .configured_object_store()
+            .expect("configure store")
+            .into_shared();
         (config, store)
     }
 
@@ -1342,11 +1343,10 @@ mod tests {
         // Accumulate WAL debt the way pre-fix builds did: a ManualOnly
         // writer publishes until the backpressure gate refuses the next
         // publish outright.
-        let store: SharedObjectStore = Arc::new(
-            store_config
-                .configured_object_store()
-                .expect("configure store"),
-        );
+        let store = store_config
+            .configured_object_store()
+            .expect("configure store")
+            .into_shared();
         let writer = FsWriter::builder_with_store(store)
             .writer_id("debt-builder")
             .background_work(FsBackgroundWork::ManualOnly)

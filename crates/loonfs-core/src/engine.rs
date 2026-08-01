@@ -15,6 +15,7 @@ use crate::path::read::{
 };
 use crate::protocol::CompletedUpload;
 use crate::storage::content_admission::CompletedUploadReceipt;
+use crate::time::current_time_ms;
 use loonfs_api::v0::{
     AbortUploadResponse, BeginUploadRequest, BeginUploadResponse, ChangesResponse, CommitResponse,
     CompleteUploadRequest, CompleteUploadResponse, DirectMultipartUploadOptions,
@@ -31,7 +32,6 @@ use loonfs_api::{
 };
 use loonfs_objectstore::{ByteStream, ObjectStore};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 /// The pinned inputs the runtime resolves once per read: the head anchored
@@ -789,17 +789,6 @@ pub enum NamespaceEngineBuildError {
     /// The writer id was empty or whitespace.
     #[error("writer identity must not be empty")]
     EmptyWriter,
-}
-
-#[allow(clippy::disallowed_methods)]
-fn current_time_ms() -> Result<u64> {
-    // Engine wrappers set request timestamps at this API boundary; core replay remains deterministic.
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_millis() as u64)
-        .map_err(|_| {
-            crate::error::CoreError::Internal("system time is before unix epoch".to_owned())
-        })
 }
 
 #[cfg(test)]

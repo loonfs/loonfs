@@ -3,6 +3,7 @@
 
 use super::runs::MetadataRunManifest;
 use crate::metadata::MetadataState;
+use crate::recency::Recency;
 use loonfs_api::wire::manifest::NamespaceManifestEnvelope;
 use loonfs_api::wire::sst_blocks::{DecodedDataBlock, SegmentFilter, SegmentIndexEntry};
 use loonfs_api::{ChangeSeq, ManifestId, NamespaceId};
@@ -125,14 +126,8 @@ pub struct MetadataTableCache {
 #[derive(Debug, Default)]
 struct MetadataTableCacheInner {
     entries: HashMap<MetadataTableCacheKey, CacheSlot>,
-    /// Recency queue with lazy deletion: a hit appends its key with a fresh
-    /// stamp in constant time and leaves its old position behind as a
-    /// ghost; eviction skips ghosts (stale stamps) as it pops. Nothing is
-    /// scheduled — the queue is compacted inline when ghosts outnumber live
-    /// entries, amortized constant like a vector reallocation.
-    order: VecDeque<(MetadataTableCacheKey, u64)>,
+    order: Recency<MetadataTableCacheKey>,
     decoded_byte_len: usize,
-    touch_counter: u64,
 }
 
 #[derive(Debug)]
@@ -269,21 +264,18 @@ impl MetadataTableCache {
         inner.decoded_byte_len = inner.decoded_byte_len.saturating_add(decoded_byte_len);
         inner.touch(&key);
         self.stats.inserts.fetch_add(1, Ordering::SeqCst);
-        while inner.decoded_byte_len > self.config.max_decoded_bytes {
-            let Some((candidate, stamp)) = inner.order.pop_front() else {
+        let MetadataTableCacheInner {
+            entries,
+            order,
+            decoded_byte_len,
+        } = &mut *inner;
+        while *decoded_byte_len > self.config.max_decoded_bytes {
+            let Some(candidate) = order.pop_oldest(|key, stamp| slot_is_live(entries, key, stamp))
+            else {
                 break;
             };
-            let live = inner
-                .entries
-                .get(&candidate)
-                .is_some_and(|slot| slot.last_touch == stamp);
-            if !live {
-                continue;
-            }
-            if let Some(slot) = inner.entries.remove(&candidate) {
-                inner.decoded_byte_len = inner
-                    .decoded_byte_len
-                    .saturating_sub(slot.block.decoded_byte_len());
+            if let Some(slot) = entries.remove(&candidate) {
+                *decoded_byte_len = decoded_byte_len.saturating_sub(slot.block.decoded_byte_len());
                 self.stats.evictions.fetch_add(1, Ordering::SeqCst);
             }
         }
@@ -292,27 +284,27 @@ impl MetadataTableCache {
 
 impl MetadataTableCacheInner {
     fn touch(&mut self, key: &MetadataTableCacheKey) {
-        self.touch_counter += 1;
-        let stamp = self.touch_counter;
+        let stamp = self.order.touch(key);
         if let Some(slot) = self.entries.get_mut(key) {
             slot.last_touch = stamp;
         }
-        self.order.push_back((key.clone(), stamp));
-        if self.order.len() > (self.entries.len() * 2).max(16) {
-            self.compact_order();
-        }
-    }
-
-    /// Drops ghost queue positions. Runs inline when ghosts outnumber live
-    /// entries, so its cost is amortized over the touches that created them.
-    fn compact_order(&mut self) {
         let entries = &self.entries;
-        self.order.retain(|(key, stamp)| {
-            entries
-                .get(key)
-                .is_some_and(|slot| slot.last_touch == *stamp)
+        self.order.compact(entries.len(), |key, stamp| {
+            slot_is_live(entries, key, stamp)
         });
     }
+}
+
+/// Whether a queue position still names the entry's newest access. An entry
+/// that was replaced, evicted, or re-touched leaves stale positions behind.
+fn slot_is_live(
+    entries: &HashMap<MetadataTableCacheKey, CacheSlot>,
+    key: &MetadataTableCacheKey,
+    stamp: u64,
+) -> bool {
+    entries
+        .get(key)
+        .is_some_and(|slot| slot.last_touch == stamp)
 }
 
 /// Default bounds for WAL-tail projections, shared by the read-side
@@ -617,9 +609,9 @@ mod tests {
         let inner = cache.inner.lock().expect("cache lock");
         assert_eq!(inner.entries.len(), 8);
         assert!(
-            inner.order.len() <= (inner.entries.len() * 2).max(16),
+            inner.order.positions() <= (inner.entries.len() * 2).max(16),
             "hits must not grow the recency queue unboundedly, queue = {}",
-            inner.order.len()
+            inner.order.positions()
         );
     }
 

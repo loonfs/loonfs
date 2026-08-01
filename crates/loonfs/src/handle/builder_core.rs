@@ -74,7 +74,7 @@ impl HandleBuilderCore {
                 let store = config.configured_object_store().map_err(|error| {
                     RuntimeError::Config(format!("invalid store config: {error}"))
                 })?;
-                (Arc::new(store) as SharedObjectStore, kind)
+                (store.into_shared(), kind)
             }
             StoreSource::Shared(store) => (store, TraceStoreKind::Unknown),
         };

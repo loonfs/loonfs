@@ -84,6 +84,7 @@ mod gc;
 mod namespace;
 mod options;
 mod protocol;
+mod recency;
 mod storage;
 mod timing;
 mod wal;
@@ -105,10 +106,17 @@ pub mod metadata;
 /// Path parsing and current-state resolution. Consumed by `loonfs`'s write
 /// path (`ensure_mutation_path`, `parse_mutation_path`).
 pub mod path;
+/// The wall-clock boundary durable timestamps are stamped at. Consumed by
+/// `loonfs`, whose mutation contexts and maintenance clock stamp from the
+/// same boundary this crate's own commits do.
+pub mod time;
 
 /// Cache types and configuration for runtime read paths. Consumed by
-/// `loonfs`, which owns the runtime's cache configuration and stats.
+/// `loonfs`, which owns the runtime's cache configuration and stats, and
+/// which re-exports [`cache::Recency`] for the grep index's own block cache.
 pub mod cache {
+    pub use crate::recency::Recency;
+
     pub use crate::checkpoint::{
         ManifestLoadError, ManifestLoadFailureClass, MetadataTableCache, MetadataTableCacheConfig,
         MetadataTableCacheStats, WalTailProjectionCache, WalTailProjectionCacheConfig,

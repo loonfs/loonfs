@@ -1,20 +1,12 @@
-//! [`ConfiguredObjectStore`]: one enum over every provider, built from
-//! configuration.
+//! [`ConfiguredObjectStore`]: one provider client built from configuration,
+//! paired with the direct-transfer issuer that provider supports.
 
-use super::{
-    ByteRange, ByteStream, MultipartCompletion, MultipartPart, ObjectBody, ObjectMetadata,
-    ObjectStore, PutMode, StoredObjectChecksum,
-};
 use crate::abs::{AzureAbsStore, AzureAbsStoreConfig};
 use crate::gcs::{GcpGcsStore, GcpGcsStoreConfig};
 use crate::local_fs_store::LocalFsStore;
-use crate::object_store::Result;
+use crate::object_store::{Result, SharedObjectStore};
 use crate::presign::{ObjectTransferIssuer, S3CompatiblePresigner, S3PresignerConfig};
 use crate::s3_compatible::{AwsS3StoreConfig, CloudflareR2StoreConfig, S3CompatibleStore};
-use async_trait::async_trait;
-use bytes::Bytes;
-use futures::stream::BoxStream;
-use loonfs_api::StorageChecksum;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -47,21 +39,16 @@ impl ConfiguredObjectStoreKind {
     }
 }
 
-/// Dispatches the common storage contract to one validated runtime provider.
+/// One validated runtime provider, plus the transfer issuer it supports.
+///
+/// Construction is the only thing this type adds: it holds the provider
+/// client as the same shared trait object every handle takes, so callers
+/// dispatch through the provider's own [`ObjectStore`](crate::ObjectStore)
+/// implementation rather than through a copy of it here.
 #[derive(Debug)]
 pub struct ConfiguredObjectStore {
-    kind: ConfiguredObjectStoreKind,
-    inner: ConfiguredObjectStoreInner,
+    inner: SharedObjectStore,
     transfer_issuer: Option<Arc<dyn ObjectTransferIssuer>>,
-}
-
-#[derive(Debug)]
-enum ConfiguredObjectStoreInner {
-    LocalFs(LocalFsStore),
-    AwsS3(S3CompatibleStore),
-    CloudflareR2(S3CompatibleStore),
-    GcpGcs(GcpGcsStore),
-    AzureAbs(AzureAbsStore),
 }
 
 impl ConfiguredObjectStore {
@@ -71,10 +58,7 @@ impl ConfiguredObjectStore {
     /// be created, or when `key_prefix` is invalid.
     pub fn local_fs(root: impl Into<PathBuf>, key_prefix: Option<&str>) -> Result<Self> {
         Ok(Self {
-            kind: ConfiguredObjectStoreKind::LocalFs,
-            inner: ConfiguredObjectStoreInner::LocalFs(LocalFsStore::with_key_prefix(
-                root, key_prefix,
-            )?),
+            inner: Arc::new(LocalFsStore::with_key_prefix(root, key_prefix)?),
             transfer_issuer: None,
         })
     }
@@ -95,8 +79,7 @@ impl ConfiguredObjectStore {
         })?) as Arc<dyn ObjectTransferIssuer>);
         let store = S3CompatibleStore::aws_s3(config)?;
         Ok(Self {
-            kind: ConfiguredObjectStoreKind::AwsS3,
-            inner: ConfiguredObjectStoreInner::AwsS3(store),
+            inner: Arc::new(store),
             transfer_issuer,
         })
     }
@@ -117,8 +100,7 @@ impl ConfiguredObjectStore {
         })?) as Arc<dyn ObjectTransferIssuer>);
         let store = S3CompatibleStore::cloudflare_r2(config)?;
         Ok(Self {
-            kind: ConfiguredObjectStoreKind::CloudflareR2,
-            inner: ConfiguredObjectStoreInner::CloudflareR2(store),
+            inner: Arc::new(store),
             transfer_issuer,
         })
     }
@@ -129,8 +111,7 @@ impl ConfiguredObjectStore {
     pub fn gcp_gcs(config: GcpGcsStoreConfig) -> Result<Self> {
         let store = GcpGcsStore::new(config)?;
         Ok(Self {
-            kind: ConfiguredObjectStoreKind::GcpGcs,
-            inner: ConfiguredObjectStoreInner::GcpGcs(store),
+            inner: Arc::new(store),
             transfer_issuer: None,
         })
     }
@@ -141,15 +122,9 @@ impl ConfiguredObjectStore {
     pub fn azure_abs(config: AzureAbsStoreConfig) -> Result<Self> {
         let store = AzureAbsStore::new(config)?;
         Ok(Self {
-            kind: ConfiguredObjectStoreKind::AzureAbs,
-            inner: ConfiguredObjectStoreInner::AzureAbs(store),
+            inner: Arc::new(store),
             transfer_issuer: None,
         })
-    }
-
-    /// Returns the provider selected when this store was constructed.
-    pub fn kind(&self) -> ConfiguredObjectStoreKind {
-        self.kind
     }
 
     /// Returns a direct-upload issuer for supported S3-compatible providers.
@@ -158,156 +133,19 @@ impl ConfiguredObjectStore {
     pub fn transfer_issuer(&self) -> Option<Arc<dyn ObjectTransferIssuer>> {
         self.transfer_issuer.clone()
     }
-}
 
-#[async_trait]
-impl ObjectStore for ConfiguredObjectStore {
-    async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>> {
-        match &self.inner {
-            ConfiguredObjectStoreInner::LocalFs(store) => store.head(key).await,
-            ConfiguredObjectStoreInner::AwsS3(store) => store.head(key).await,
-            ConfiguredObjectStoreInner::CloudflareR2(store) => store.head(key).await,
-            ConfiguredObjectStoreInner::GcpGcs(store) => store.head(key).await,
-            ConfiguredObjectStoreInner::AzureAbs(store) => store.head(key).await,
-        }
-    }
-
-    async fn head_stored_checksum(&self, key: &str) -> Result<Option<StoredObjectChecksum>> {
-        match &self.inner {
-            ConfiguredObjectStoreInner::LocalFs(store) => store.head_stored_checksum(key).await,
-            ConfiguredObjectStoreInner::AwsS3(store) => store.head_stored_checksum(key).await,
-            ConfiguredObjectStoreInner::CloudflareR2(store) => {
-                store.head_stored_checksum(key).await
-            }
-            ConfiguredObjectStoreInner::GcpGcs(store) => store.head_stored_checksum(key).await,
-            ConfiguredObjectStoreInner::AzureAbs(store) => store.head_stored_checksum(key).await,
-        }
-    }
-
-    async fn create_multipart_upload(&self, key: &str) -> Result<String> {
-        match &self.inner {
-            ConfiguredObjectStoreInner::LocalFs(store) => store.create_multipart_upload(key).await,
-            ConfiguredObjectStoreInner::AwsS3(store) => store.create_multipart_upload(key).await,
-            ConfiguredObjectStoreInner::CloudflareR2(store) => {
-                store.create_multipart_upload(key).await
-            }
-            ConfiguredObjectStoreInner::GcpGcs(store) => store.create_multipart_upload(key).await,
-            ConfiguredObjectStoreInner::AzureAbs(store) => store.create_multipart_upload(key).await,
-        }
-    }
-
-    async fn complete_multipart_upload(
-        &self,
-        key: &str,
-        provider_upload_id: &str,
-        parts: &[MultipartPart],
-        full_object_checksum: &StorageChecksum,
-    ) -> Result<MultipartCompletion> {
-        macro_rules! complete {
-            ($store:expr) => {
-                $store
-                    .complete_multipart_upload(key, provider_upload_id, parts, full_object_checksum)
-                    .await
-            };
-        }
-        match &self.inner {
-            ConfiguredObjectStoreInner::LocalFs(store) => complete!(store),
-            ConfiguredObjectStoreInner::AwsS3(store) => complete!(store),
-            ConfiguredObjectStoreInner::CloudflareR2(store) => complete!(store),
-            ConfiguredObjectStoreInner::GcpGcs(store) => complete!(store),
-            ConfiguredObjectStoreInner::AzureAbs(store) => complete!(store),
-        }
-    }
-
-    async fn abort_multipart_upload(&self, key: &str, provider_upload_id: &str) -> Result<()> {
-        match &self.inner {
-            ConfiguredObjectStoreInner::LocalFs(store) => {
-                store.abort_multipart_upload(key, provider_upload_id).await
-            }
-            ConfiguredObjectStoreInner::AwsS3(store) => {
-                store.abort_multipart_upload(key, provider_upload_id).await
-            }
-            ConfiguredObjectStoreInner::CloudflareR2(store) => {
-                store.abort_multipart_upload(key, provider_upload_id).await
-            }
-            ConfiguredObjectStoreInner::GcpGcs(store) => {
-                store.abort_multipart_upload(key, provider_upload_id).await
-            }
-            ConfiguredObjectStoreInner::AzureAbs(store) => {
-                store.abort_multipart_upload(key, provider_upload_id).await
-            }
-        }
-    }
-
-    async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>> {
-        match &self.inner {
-            ConfiguredObjectStoreInner::LocalFs(store) => store.get_with_metadata(key).await,
-            ConfiguredObjectStoreInner::AwsS3(store) => store.get_with_metadata(key).await,
-            ConfiguredObjectStoreInner::CloudflareR2(store) => store.get_with_metadata(key).await,
-            ConfiguredObjectStoreInner::GcpGcs(store) => store.get_with_metadata(key).await,
-            ConfiguredObjectStoreInner::AzureAbs(store) => store.get_with_metadata(key).await,
-        }
-    }
-
-    async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Option<Bytes>> {
-        match &self.inner {
-            ConfiguredObjectStoreInner::LocalFs(store) => store.get(key, range).await,
-            ConfiguredObjectStoreInner::AwsS3(store) => store.get(key, range).await,
-            ConfiguredObjectStoreInner::CloudflareR2(store) => store.get(key, range).await,
-            ConfiguredObjectStoreInner::GcpGcs(store) => store.get(key, range).await,
-            ConfiguredObjectStoreInner::AzureAbs(store) => store.get(key, range).await,
-        }
-    }
-
-    async fn put(&self, key: &str, bytes: Bytes, mode: PutMode) -> Result<ObjectMetadata> {
-        match &self.inner {
-            ConfiguredObjectStoreInner::LocalFs(store) => store.put(key, bytes, mode).await,
-            ConfiguredObjectStoreInner::AwsS3(store) => store.put(key, bytes, mode).await,
-            ConfiguredObjectStoreInner::CloudflareR2(store) => store.put(key, bytes, mode).await,
-            ConfiguredObjectStoreInner::GcpGcs(store) => store.put(key, bytes, mode).await,
-            ConfiguredObjectStoreInner::AzureAbs(store) => store.put(key, bytes, mode).await,
-        }
-    }
-
-    async fn put_streamed(&self, key: &str, body: ByteStream, mode: PutMode) -> Result<u64> {
-        macro_rules! put_streamed {
-            ($store:expr) => {
-                $store.put_streamed(key, body, mode).await
-            };
-        }
-        match &self.inner {
-            ConfiguredObjectStoreInner::LocalFs(store) => put_streamed!(store),
-            ConfiguredObjectStoreInner::AwsS3(store) => put_streamed!(store),
-            ConfiguredObjectStoreInner::CloudflareR2(store) => put_streamed!(store),
-            ConfiguredObjectStoreInner::GcpGcs(store) => put_streamed!(store),
-            ConfiguredObjectStoreInner::AzureAbs(store) => put_streamed!(store),
-        }
-    }
-
-    async fn delete(&self, key: &str) -> Result<()> {
-        match &self.inner {
-            ConfiguredObjectStoreInner::LocalFs(store) => store.delete(key).await,
-            ConfiguredObjectStoreInner::AwsS3(store) => store.delete(key).await,
-            ConfiguredObjectStoreInner::CloudflareR2(store) => store.delete(key).await,
-            ConfiguredObjectStoreInner::GcpGcs(store) => store.delete(key).await,
-            ConfiguredObjectStoreInner::AzureAbs(store) => store.delete(key).await,
-        }
-    }
-
-    fn list_prefix_stream(&self, prefix: &str) -> BoxStream<'static, Result<String>> {
-        match &self.inner {
-            ConfiguredObjectStoreInner::LocalFs(store) => store.list_prefix_stream(prefix),
-            ConfiguredObjectStoreInner::AwsS3(store) => store.list_prefix_stream(prefix),
-            ConfiguredObjectStoreInner::CloudflareR2(store) => store.list_prefix_stream(prefix),
-            ConfiguredObjectStoreInner::GcpGcs(store) => store.list_prefix_stream(prefix),
-            ConfiguredObjectStoreInner::AzureAbs(store) => store.list_prefix_stream(prefix),
-        }
+    /// Hands out the provider client every handle and helper reads through.
+    ///
+    /// Take [`transfer_issuer`](Self::transfer_issuer) first: this consumes
+    /// the configured store.
+    pub fn into_shared(self) -> SharedObjectStore {
+        self.inner
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ConfiguredObjectStore, ConfiguredObjectStoreKind};
+    use super::ConfiguredObjectStore;
     use crate::abs::AzureAbsStoreConfig;
     use crate::gcs::GcpGcsStoreConfig;
     use crate::keys::wal_head;
@@ -331,7 +169,8 @@ mod tests {
     async fn configured_local_fs_scopes_optional_key_prefix() {
         let temp_dir = unique_temp_dir("configured-store-local");
         let store = ConfiguredObjectStore::local_fs(&temp_dir, Some("tenant-a"))
-            .expect("construct configured local fs store");
+            .expect("construct configured local fs store")
+            .into_shared();
         let head_key = wal_head("ns-1");
 
         store
@@ -354,11 +193,12 @@ mod tests {
         );
     }
 
+    /// Only the S3-compatible providers can presign, so only they carry a
+    /// direct-transfer issuer.
     #[test]
-    fn configured_object_store_builds_provider_variants() {
+    fn configured_object_store_issues_transfers_for_s3_compatible_providers_only() {
         let local = ConfiguredObjectStore::local_fs(unique_temp_dir("configured-store-kind"), None)
             .expect("construct local store");
-        assert_eq!(local.kind(), ConfiguredObjectStoreKind::LocalFs);
         assert!(local.transfer_issuer().is_none());
 
         let s3 = ConfiguredObjectStore::aws_s3(AwsS3StoreConfig {
@@ -372,7 +212,6 @@ mod tests {
             force_path_style: true,
         })
         .expect("construct s3 store");
-        assert_eq!(s3.kind(), ConfiguredObjectStoreKind::AwsS3);
         assert!(s3.transfer_issuer().is_some());
 
         let r2 = ConfiguredObjectStore::cloudflare_r2(CloudflareR2StoreConfig {
@@ -384,7 +223,6 @@ mod tests {
             key_prefix: Some("tenant-a".to_owned()),
         })
         .expect("construct r2 store");
-        assert_eq!(r2.kind(), ConfiguredObjectStoreKind::CloudflareR2);
         assert!(r2.transfer_issuer().is_some());
 
         let gcs_service_account_key_path =
@@ -395,7 +233,6 @@ mod tests {
             key_prefix: Some("tenant-a".to_owned()),
         })
         .expect("construct gcs store");
-        assert_eq!(gcs.kind(), ConfiguredObjectStoreKind::GcpGcs);
         assert!(gcs.transfer_issuer().is_none());
 
         let azure = ConfiguredObjectStore::azure_abs(AzureAbsStoreConfig {
@@ -406,7 +243,6 @@ mod tests {
             key_prefix: Some("tenant-a".to_owned()),
         })
         .expect("construct azure store");
-        assert_eq!(azure.kind(), ConfiguredObjectStoreKind::AzureAbs);
         assert!(azure.transfer_issuer().is_none());
     }
 
@@ -462,7 +298,8 @@ mod tests {
     async fn configured_local_fs_preserves_invalid_key_errors() {
         let temp_dir = unique_temp_dir("configured-store-invalid-key");
         let store = ConfiguredObjectStore::local_fs(&temp_dir, Some("tenant-a"))
-            .expect("construct configured local fs store");
+            .expect("construct configured local fs store")
+            .into_shared();
 
         let error = store
             .put_overwrite("../head.json", Bytes::from_static(br#"{"ok":true}"#))

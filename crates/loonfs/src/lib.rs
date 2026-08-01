@@ -42,7 +42,6 @@ mod maintenance_runner;
 pub mod metrics;
 mod options;
 pub mod publisher;
-mod time;
 mod trace;
 
 use thiserror::Error;
@@ -66,7 +65,7 @@ pub use loonfs_api::{
     FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT, PROFILE_ADMIN_V0,
     PROFILE_CORE_V0, PROTOCOL_VERSION,
 };
-pub use loonfs_core::cache::MetadataTableCacheConfig;
+pub use loonfs_core::cache::{MetadataTableCacheConfig, Recency};
 pub use loonfs_core::limits::{DEFAULT_GC_MAX_OBJECTS, METADATA_PUBLICATION_BUDGET_MS};
 pub use loonfs_core::{
     BootstrapNamespaceError, CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor,
