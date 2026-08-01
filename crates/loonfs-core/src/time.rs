@@ -1,10 +1,16 @@
-//! The runtime's only wall-clock and monotonic-clock touchpoints.
+//! The one wall-clock boundary durable timestamps are stamped at.
 
-use crate::{CoreError, Result};
+use crate::error::{CoreError, Result};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub(crate) fn current_time_ms() -> Result<u64> {
-    unix_ms(wall_clock_now())
+/// Reads the wall clock as unix milliseconds.
+///
+/// Every timestamp that reaches durable state — commit, checkpoint, upload
+/// session, maintenance schedule — is stamped here and then carried as a
+/// value, so replay below this boundary stays deterministic.
+#[allow(clippy::disallowed_methods)]
+pub fn current_time_ms() -> Result<u64> {
+    unix_ms(SystemTime::now())
 }
 
 /// Converts a wall-clock instant to unix milliseconds, failing clearly on a
@@ -12,13 +18,7 @@ pub(crate) fn current_time_ms() -> Result<u64> {
 fn unix_ms(now: SystemTime) -> Result<u64> {
     now.duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_millis() as u64)
-        .map_err(|_| CoreError::Internal("system time is before unix epoch".to_owned()).into())
-}
-
-#[allow(clippy::disallowed_methods)]
-pub(crate) fn wall_clock_now() -> SystemTime {
-    // Request timestamps are stamped at this runtime API boundary so core replay stays deterministic.
-    SystemTime::now()
+        .map_err(|_| CoreError::Internal("system time is before unix epoch".to_owned()))
 }
 
 #[cfg(test)]

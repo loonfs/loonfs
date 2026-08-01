@@ -105,6 +105,10 @@ pub mod metadata;
 /// Path parsing and current-state resolution. Consumed by `loonfs`'s write
 /// path (`ensure_mutation_path`, `parse_mutation_path`).
 pub mod path;
+/// The wall-clock boundary durable timestamps are stamped at. Consumed by
+/// `loonfs`, whose mutation contexts and maintenance clock stamp from the
+/// same boundary this crate's own commits do.
+pub mod time;
 
 /// Cache types and configuration for runtime read paths. Consumed by
 /// `loonfs`, which owns the runtime's cache configuration and stats.

@@ -42,7 +42,6 @@ mod maintenance_runner;
 pub mod metrics;
 mod options;
 pub mod publisher;
-mod time;
 mod trace;
 
 use thiserror::Error;

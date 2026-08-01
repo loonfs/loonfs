@@ -323,8 +323,8 @@ impl<S> InstrumentedObjectStore<S> {
 
 #[allow(clippy::disallowed_methods)]
 fn sample_clock() -> Instant {
-    // Metrics sampling reads the wall clock at this recorder boundary so
-    // protocol replay stays deterministic.
+    // Durations only: sampling reads the monotonic clock at this recorder
+    // boundary, so no wall-clock reading reaches protocol code from here.
     Instant::now()
 }
 

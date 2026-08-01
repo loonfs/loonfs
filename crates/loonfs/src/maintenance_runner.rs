@@ -319,7 +319,7 @@ impl MaintenanceClock for SystemMaintenanceClock {
         // A clock before the unix epoch reads as the epoch here rather than
         // failing: it can only make a scheduling decision early, and every
         // durable path already refuses such a clock outright.
-        crate::time::current_time_ms().unwrap_or(0)
+        loonfs_core::time::current_time_ms().unwrap_or(0)
     }
 
     fn jitter_below_ms(&self, span_ms: u64) -> u64 {

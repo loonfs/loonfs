@@ -7,7 +7,6 @@ use crate::config::{validate_writer_id, ReadConfig};
 use crate::maintenance_runner::MaintenanceRunner;
 use crate::metrics::RuntimeInstruments;
 use crate::publisher::PublishObserver;
-use crate::time::current_time_ms;
 use crate::{
     ChangeSeq, CoreError, ErrorCode, InodeId, ListFileRevisionsResponse, NamespaceId, ObjectStore,
     RuntimeCacheStats,
@@ -24,6 +23,7 @@ use loonfs_api::{
 use loonfs_core::cache::{
     MetadataTableCache, WalTailProjectionCache, WalTailProjectionCacheConfig,
 };
+use loonfs_core::time::current_time_ms;
 use loonfs_core::{MutationContext, NamespaceEngine};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard};
