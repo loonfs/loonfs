@@ -3,6 +3,7 @@
 
 use crate::{Client, ClientError, PayloadStream, Result};
 use bytes::Bytes;
+use futures::StreamExt as _;
 use loonfs_api::{ApiError, ErrorCode};
 use reqwest::Method;
 use std::time::Duration;
@@ -175,6 +176,53 @@ impl Client {
             .await
             .map(|response| response.bytes)
             .map_err(|attempt| attempt.error)
+    }
+
+    /// Sends one request and hands its response body back as a stream, so
+    /// the answer is never held whole.
+    ///
+    /// This is the read counterpart of [`Self::call_streamed_once`], and it
+    /// does not retry for the same reason: the caller consumes what arrives
+    /// as it arrives, so only the caller knows what it already did with the
+    /// first half. A non-success status is read and mapped here instead —
+    /// an error body is small, and it is the one response worth holding.
+    pub(crate) async fn call_for_response_stream(
+        &self,
+        request: &WireRequest,
+    ) -> Result<PayloadStream> {
+        #[cfg(test)]
+        if let Some(outcome) = test_transport::next() {
+            return match outcome {
+                Ok(response) => {
+                    Ok(
+                        futures::stream::once(async move { Ok(Bytes::from(response.bytes)) })
+                            .boxed(),
+                    )
+                }
+                Err(attempt) => Err(attempt.error),
+            };
+        }
+        let response = self
+            .build(request)
+            .send()
+            .await
+            .map_err(|err| ClientError::Http(describe_send_error(&request.url, &err)))?;
+        let status = response.status();
+        if !status.is_success() {
+            let bytes = response
+                .bytes()
+                .await
+                .map_err(|err| ClientError::Http(describe_send_error(&request.url, &err)))?;
+            return Err(map_status_error(status.as_u16(), &bytes));
+        }
+        Ok(response
+            .bytes_stream()
+            .map(|chunk| {
+                chunk.map_err(|err| {
+                    std::io::Error::other(format!("response body ended early: {err}"))
+                })
+            })
+            .boxed())
     }
 
     /// Sends one request, resending on quick-clearing transient failures —

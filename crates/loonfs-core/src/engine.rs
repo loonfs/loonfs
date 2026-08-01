@@ -11,7 +11,7 @@ use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::namespace::{bootstrap, fork, BootstrapNamespaceError};
 use crate::options::{BootstrapOptions, DeleteNamespaceOptions};
 use crate::path::read::{
-    load_metadata_view, CurrentFileState, LoadedMetadataView, ReadLoadContext,
+    load_metadata_view, CurrentFileState, DirectDownloadTarget, LoadedMetadataView, ReadLoadContext,
 };
 use crate::protocol::CompletedUpload;
 use crate::storage::content::FileContentStream;
@@ -274,6 +274,24 @@ impl<S: ObjectStore> NamespaceEngine<S> {
             chunk_bytes,
         )
         .await?)
+    }
+
+    /// Resolves a path to the content object a direct read would fetch,
+    /// against the pinned runtime read context.
+    ///
+    /// This reads metadata only. It is the read-side counterpart of
+    /// [`Self::begin_direct_put_upload_target`]: both hand a host the one
+    /// object key it needs in order to sign a transfer, and neither moves
+    /// a byte.
+    pub async fn direct_download_target(
+        &self,
+        path: impl AsRef<str>,
+        revision_no: Option<RevisionNo>,
+        context: &RuntimeReadContext,
+    ) -> Result<DirectDownloadTarget> {
+        let view = self.load_read_view(context).await?;
+        view.direct_download_target(path.as_ref(), revision_no)
+            .await
     }
 
     /// Lists one revision page for a path against the pinned runtime read context.

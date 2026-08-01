@@ -3527,6 +3527,10 @@ fn every_advertised_capability_maps_to_a_cli_command_path() {
         // staging flow `put` drives; neither needs a separate verb.
         ("core.uploads.direct_put", &["put"]),
         ("core.uploads.direct_multipart", &["put"]),
+        // The read half is negotiated the same way, inside `get`: a file
+        // past the deployment's proxy cap takes a download grant, and one
+        // under it does not.
+        ("core.downloads.direct_get", &["get"]),
         ("query.grep", &["grep"]),
     ];
 
@@ -4083,7 +4087,11 @@ impl Harness {
 
     /// Runs the CLI with `variables` in its environment, for the config
     /// resolution the environment takes part in.
-    fn run_with_env(&self, variables: &[(&str, &Path)], args: &[&str]) -> Output {
+    fn run_with_env<V: AsRef<std::ffi::OsStr>>(
+        &self,
+        variables: &[(&str, V)],
+        args: &[&str],
+    ) -> Output {
         let mut command = self.command();
         for (name, value) in variables {
             command.env(name, value);
@@ -4121,17 +4129,6 @@ impl Harness {
             .write_all(stdin)
             .expect("write stdin");
         child.wait_with_output().expect("run loonfs")
-    }
-
-    /// Runs the CLI with extra environment variables set, for the paths
-    /// where the environment is part of the behavior under test.
-    fn run_with_env(&self, env: &[(&str, &str)], args: &[&str]) -> Output {
-        let mut command = Command::new(loon_binary_path());
-        command.env("HOME", &self.home_dir);
-        for (name, value) in env {
-            command.env(name, value);
-        }
-        command.args(args).output().expect("run loonfs")
     }
 
     fn store_root(&self, name: &str) -> PathBuf {

@@ -128,9 +128,9 @@ async fn begin_direct_put_upload(
                 content_ref: &content_ref,
                 expires_in: DIRECT_PUT_URL_TTL,
             },
-            direct_put_presign_time(),
+            presign_time(),
         )
-        .map_err(direct_put_issuer_error)?;
+        .map_err(presign_issuer_error)?;
 
     Ok(Json(BeginUploadResponse {
         namespace_id: prepared.namespace_id,
@@ -241,7 +241,7 @@ fn sign_parts(
     issuer: &dyn ObjectTransferIssuer,
     targets: &loonfs::uploads::MultipartPartTargets,
 ) -> Result<Vec<SignedUploadPart>, ApiResponseError> {
-    let signing_time = direct_put_presign_time();
+    let signing_time = presign_time();
     targets
         .parts
         .iter()
@@ -257,7 +257,7 @@ fn sign_parts(
                     },
                     signing_time,
                 )
-                .map_err(direct_put_issuer_error)?;
+                .map_err(presign_issuer_error)?;
             Ok(SignedUploadPart {
                 part_number: part.part_number,
                 access: ObjectTransferAccess::PresignedUrl {
@@ -271,7 +271,7 @@ fn sign_parts(
         .collect()
 }
 
-fn direct_put_issuer_error(error: ObjectStoreError) -> ApiResponseError {
+pub(super) fn presign_issuer_error(error: ObjectStoreError) -> ApiResponseError {
     match error {
         ObjectStoreError::InvalidContentRef(message) => {
             ApiResponseError::new(StatusCode::BAD_REQUEST, ErrorCode::InvalidRequest, &message)
@@ -285,7 +285,7 @@ fn direct_put_issuer_error(error: ObjectStoreError) -> ApiResponseError {
 }
 
 #[allow(clippy::disallowed_methods)]
-fn direct_put_presign_time() -> SystemTime {
+pub(super) fn presign_time() -> SystemTime {
     // Issuing a short-lived transfer capability enters wall time at this HTTP
     // boundary so core replay stays deterministic.
     SystemTime::now()

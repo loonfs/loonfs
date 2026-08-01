@@ -14,11 +14,12 @@ use crate::{
 use crate::{Result, RuntimeError, SharedObjectStore};
 use loonfs_api::{
     encode_cursor, CapabilityDocument, EffectiveLimit, FileRevision, FileRevisionsPageCursor, Page,
-    PaginationPolicy, FEATURE_NAMESPACES_CREATE, FEATURE_NAMESPACES_DELETE,
-    FEATURE_NAMESPACES_FORK, FEATURE_UPLOADS_DIRECT_MULTIPART, FEATURE_UPLOADS_DIRECT_PUT,
-    LIMIT_COMMIT_MAX_CONTENT_TOKENS, LIMIT_COMMIT_MAX_EXTERNAL_CONTENT_REFS,
-    LIMIT_COMMIT_MAX_MESSAGE_BYTES, LIMIT_COMMIT_MAX_OPERATIONS, LIMIT_GC_MIN_GRACE_WINDOW_MS,
-    PROFILE_ADMIN_V0, PROFILE_CORE_V0, PROTOCOL_VERSION,
+    PaginationPolicy, FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_NAMESPACES_CREATE,
+    FEATURE_NAMESPACES_DELETE, FEATURE_NAMESPACES_FORK, FEATURE_UPLOADS_DIRECT_MULTIPART,
+    FEATURE_UPLOADS_DIRECT_PUT, LIMIT_COMMIT_MAX_CONTENT_TOKENS,
+    LIMIT_COMMIT_MAX_EXTERNAL_CONTENT_REFS, LIMIT_COMMIT_MAX_MESSAGE_BYTES,
+    LIMIT_COMMIT_MAX_OPERATIONS, LIMIT_GC_MIN_GRACE_WINDOW_MS, PROFILE_ADMIN_V0, PROFILE_CORE_V0,
+    PROTOCOL_VERSION,
 };
 use loonfs_core::cache::{
     MetadataTableCache, WalTailProjectionCache, WalTailProjectionCacheConfig,
@@ -187,8 +188,13 @@ impl ReadCore {
                 (FEATURE_NAMESPACES_CREATE.to_owned(), true),
                 (FEATURE_NAMESPACES_FORK.to_owned(), true),
                 (FEATURE_NAMESPACES_DELETE.to_owned(), true),
+                // The three transfer keys are the host's to answer, not
+                // this runtime's: an embedded engine signs nothing and
+                // reads its own bytes. A serving host that can presign
+                // replaces all three together.
                 (FEATURE_UPLOADS_DIRECT_PUT.to_owned(), false),
                 (FEATURE_UPLOADS_DIRECT_MULTIPART.to_owned(), false),
+                (FEATURE_DOWNLOADS_DIRECT_GET.to_owned(), false),
             ]),
             limits: {
                 let mut limits = PaginationPolicy::default().capability_limits();

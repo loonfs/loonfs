@@ -30,6 +30,12 @@ const TREE_TRANSFER_CONCURRENCY: usize = 8;
 struct FileJob {
     local: PathBuf,
     remote: String,
+    /// The remote file's length, when a listing stated one. It decides how
+    /// a download travels — past the deployment's proxy cap the bytes come
+    /// straight from object storage — so it rides along from the walk that
+    /// already read it. An upload's jobs come from a local walk and carry
+    /// no remote size at all.
+    size_bytes: Option<u64>,
 }
 
 struct TreeTally {
@@ -247,13 +253,22 @@ pub(crate) async fn run_get_tree(
                 Ok(spec) => spec,
                 Err(error) => return (job.remote, Err(CliError::invalid_input(error.to_string()))),
             };
-            let bytes = match backend.get_file_bytes(&spec).await {
-                Ok(bytes) => bytes,
+            // One file of a tree travels exactly as a single `get` of it
+            // would: past the deployment's proxy cap it streams straight
+            // from object storage, and the walk already read the size that
+            // decides which.
+            let mut download = match backend
+                .open_file_download(&spec, None, job.size_bytes)
+                .await
+            {
+                Ok(download) => download,
                 Err(error) => return (job.remote, Err(error.into())),
             };
-            let written = super::fs::write_local_file_atomically(&local, &bytes, force)
-                .map(|()| local.display().to_string())
-                .map_err(|error| CliError::io_for_path(&local, error));
+            let derived_name = false;
+            let written =
+                super::fs::stream_download_to_file(&mut download, &local, force, derived_name)
+                    .await
+                    .map(|_| local.display().to_string());
             (job.remote, written)
         }
     }))
@@ -436,6 +451,8 @@ fn collect_local_tree(
             files.push(FileJob {
                 local: entry.path().to_path_buf(),
                 remote: components.join("/"),
+                // An upload's source is local; there is no remote size yet.
+                size_bytes: None,
             });
         } else {
             tally.fail(
@@ -525,6 +542,7 @@ async fn walk_remote_tree(
                 InodeKind::File => tree.files.push(FileJob {
                     local: PathBuf::from(child_components.join("/")),
                     remote: format!("{remote_dir}/{name}", name = name.as_str()),
+                    size_bytes: entry.size_bytes,
                 }),
             }
         }

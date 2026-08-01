@@ -5,6 +5,7 @@
 
 mod error;
 mod extractors;
+mod handlers_downloads;
 mod handlers_filesystem;
 mod handlers_namespace;
 mod handlers_query;
@@ -28,6 +29,7 @@ use self::extractors::{
     authorize, server_busy_error, AppJson, AppPath, AppQuery, NamespaceIdPath, OptionalAppJson,
     UploadBodyStream,
 };
+use self::handlers_downloads::begin_download;
 use self::handlers_filesystem::{
     apply_commit, get_file_bytes, list_changes, list_file_revisions, list_path_entries, list_trash,
     stat_path,
@@ -176,6 +178,15 @@ fn router(state: AppState) -> Router {
         .route(
             "/v0/namespaces/{namespace}/filesystem/content",
             get(get_file_bytes),
+        )
+        // The read this deployment authorizes rather than performs. It sits
+        // beside the proxied read because it answers the same question
+        // about the same path; the route exists everywhere and refuses with
+        // `not_supported` where no issuer does, exactly as the direct
+        // upload modes do on `POST .../uploads`.
+        .route(
+            "/v0/namespaces/{namespace}/filesystem/downloads",
+            post(begin_download),
         )
         .route("/v0/namespaces/{namespace}/query/grep", grep_route)
         .route(

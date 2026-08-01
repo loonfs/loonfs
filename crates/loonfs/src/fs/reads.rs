@@ -3,6 +3,7 @@
 //! own data from the filesystem walks.
 
 use super::core::{default_page_limit, file_revisions_page_response};
+use crate::downloads::DirectDownloadTarget;
 use crate::FsReader;
 use crate::Result;
 use crate::{
@@ -194,6 +195,32 @@ impl FsReader {
             .cache_stats
             .record_latest_metadata_view_read();
         Ok(stream)
+    }
+
+    /// Resolves a path to the content object a direct read would fetch:
+    /// the reference that names those bytes, and the object key that
+    /// addresses them.
+    ///
+    /// Metadata only — no content is read, and the handle's
+    /// `max_read_content_bytes` does not apply, because that limit bounds
+    /// what this process buffers and nothing here buffers anything. A host
+    /// signs a short-lived read of the returned key and hands the client
+    /// the reference to check the arriving bytes against.
+    pub async fn direct_download_target(
+        &self,
+        namespace_id: &NamespaceId,
+        absolute_path: &str,
+        revision_no: Option<RevisionNo>,
+    ) -> Result<DirectDownloadTarget> {
+        let (engine, read_context) = self.core.pinned_read(namespace_id).await?;
+        let target = engine
+            .direct_download_target(absolute_path, revision_no, &read_context)
+            .await?;
+        self.core
+            .inner
+            .cache_stats
+            .record_latest_metadata_view_read();
+        Ok(target)
     }
 
     /// Reads one page of the files visible in the state a checkpoint pins,

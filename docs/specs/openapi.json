@@ -1338,6 +1338,99 @@
         }
       }
     },
+    "/v0/namespaces/{namespace}/filesystem/downloads": {
+      "post": {
+        "tags": [
+          "filesystem"
+        ],
+        "summary": "Begin download",
+        "description": "Authorizes one direct read of a file's content object and returns a short-lived presigned GET capability, the resolved revision, and the content reference the client checks the arriving bytes against. `Range` is outside the signature, so one grant serves ranged, resumed, and parallel reads. Deployments that cannot presign answer 501 `not_supported`; the proxied `GET /filesystem/content` route stays available and is capped by `download.max_content_bytes`.",
+        "operationId": "begin_download",
+        "parameters": [
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "Namespace id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BeginDownloadRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Download authorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BeginDownloadResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid path or revision",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Namespace, path, or revision not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Namespace deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "Direct download is unsupported",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v0/namespaces/{namespace}/filesystem/list": {
       "get": {
         "tags": [
@@ -2692,6 +2785,64 @@
             "format": "int64",
             "description": "Current file size in bytes, for files.",
             "minimum": 0
+          }
+        }
+      },
+      "BeginDownloadRequest": {
+        "type": "object",
+        "description": "What a client names when it asks to read a file directly.\n\nA path and, optionally, the revision it wants — the same two things the\nproxied content read takes, so a caller switching transports changes\nnothing about what it is asking for.",
+        "required": [
+          "path"
+        ],
+        "properties": {
+          "path": {
+            "$ref": "#/components/schemas/AbsolutePath",
+            "description": "Absolute path of the file to read."
+          },
+          "revision_no": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RevisionNo",
+                "description": "Revision to read, or `None` for the path's current revision."
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "BeginDownloadResponse": {
+        "type": "object",
+        "description": "A short-lived capability to read one file's content object, plus\neverything the reader needs to check what arrives.\n\nThe raw object key is deliberately not here, exactly as it is not in a\n`direct_put` grant: a client learns a URL that expires, not an address it\ncan revisit.\n\nThe grant names one immutable content object, so it does not go stale\nwhen the path moves on. A commit that replaces the file writes a new\nobject and leaves this one alone; what the capability reads is what the\nrequested revision held when the grant was issued, and the reference\nsays which bytes those are.",
+        "required": [
+          "namespace_id",
+          "absolute_path",
+          "revision_no",
+          "content_ref",
+          "access"
+        ],
+        "properties": {
+          "absolute_path": {
+            "$ref": "#/components/schemas/AbsolutePath",
+            "description": "Absolute path as rendered from stored display names."
+          },
+          "access": {
+            "$ref": "#/components/schemas/ObjectTransferAccess",
+            "description": "Short-lived read capability the client uses without learning the raw object key."
+          },
+          "content_ref": {
+            "$ref": "#/components/schemas/ContentRef",
+            "description": "Identity, byte length, and checksum evidence for the object the\ncapability reads. A reader checks the bytes it receives against\n`size_bytes`, and against `whole_file_sha256` when the reference\ncarries one — a direct-multipart object never will, because nobody\never hashed it with SHA-256."
+          },
+          "namespace_id": {
+            "$ref": "#/components/schemas/NamespaceId",
+            "description": "Namespace that was read."
+          },
+          "revision_no": {
+            "$ref": "#/components/schemas/RevisionNo",
+            "description": "Revision the capability reads, resolved from the request."
           }
         }
       },

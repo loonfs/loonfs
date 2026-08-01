@@ -17,7 +17,7 @@ use crate::namespace::basis::read_head_and_metadata_basis;
 use crate::namespace::basis::MetadataBasis;
 use crate::namespace::catalog::VerifiedNamespaceCatalogEntry;
 use crate::path::helpers::{map_path_error_to_core, parse_absolute_path_for_core};
-use crate::storage::content::read_durable_content_bytes;
+use crate::storage::content::{content_object_key_for_ref, read_durable_content_bytes};
 use crate::wal::{load_validated_wal_chain, project_validated_wal_tail, WalChainLoadRequest};
 use loonfs_api::wire::control::{HeadState, NamespaceState};
 use loonfs_api::{
@@ -107,6 +107,24 @@ pub(crate) async fn load_metadata_view<'a, S: ObjectStore + ?Sized>(
                 .await
         }
     }
+}
+
+/// Where one file's bytes actually live, for a host that is about to
+/// authorize a client to read them without passing them through itself.
+///
+/// It names one immutable content object, so it does not go stale when the
+/// path moves on: a commit that replaces the file writes a new object and
+/// leaves this one where it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectDownloadTarget {
+    /// Absolute path as rendered from stored display names.
+    pub absolute_path: AbsolutePath,
+    /// Revision this target reads, resolved from the request.
+    pub revision_no: RevisionNo,
+    /// Identity, byte length, and checksum evidence for those bytes.
+    pub content_ref: ContentRef,
+    /// Logical unscoped object key an issuer signs a read of.
+    pub object_key: String,
 }
 
 /// A coherent, seq-pinned namespace read view.
@@ -273,6 +291,49 @@ impl<'a, S: ObjectStore + ?Sized> LoadedMetadataView<'a, S> {
     /// The content store this view's namespace is bound to.
     pub(crate) fn content_store_id(&self) -> &ContentStoreId {
         &self.content_store_id
+    }
+
+    /// Resolves a path to the content object a direct read would fetch:
+    /// the reference that names those bytes, and the key that addresses
+    /// them.
+    ///
+    /// No bytes move and no read limit applies. The limit bounds what this
+    /// server buffers for one response, and this is the transport that
+    /// buffers nothing — which is the whole reason it exists, because a
+    /// deployment that allowed a direct upload past that limit has an
+    /// object it could not otherwise hand back.
+    pub(crate) async fn direct_download_target(
+        &self,
+        absolute_path: &str,
+        revision_no: Option<RevisionNo>,
+    ) -> Result<DirectDownloadTarget> {
+        let entry = self.resolve_path(absolute_path).await?;
+        if entry.inode_kind != InodeKind::File {
+            return Err(CoreError::ExpectedFile {
+                path: entry.absolute_path.to_string(),
+                kind: entry.inode_kind,
+            });
+        }
+        let (revision_no, content_ref) = match revision_no {
+            Some(requested) => {
+                let revision = self.revision_for_inode(entry.inode_id, requested).await?;
+                (revision.revision_no, revision.content_ref)
+            }
+            // A visible file carries both; a path that resolves without
+            // them is the same absence a proxied read reports.
+            None => match (entry.revision_no, entry.content_ref) {
+                (Some(revision_no), Some(content_ref)) => (revision_no, content_ref),
+                _ => return Err(CoreError::PathNotFound(absolute_path.to_owned())),
+            },
+        };
+        let object_key = content_object_key_for_ref(&self.content_store_id, &content_ref)?;
+
+        Ok(DirectDownloadTarget {
+            absolute_path: entry.absolute_path,
+            revision_no,
+            content_ref,
+            object_key,
+        })
     }
 
     pub(crate) async fn list_file_revisions_page(

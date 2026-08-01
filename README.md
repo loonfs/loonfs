@@ -71,12 +71,21 @@ loonfs init default --no-input --mode remote --server-url http://127.0.0.1:9400
 ### Running a server in production
 
 Two things travel over the connection that must not travel in the clear: the
-bearer token on every request, and the presigned object-store URLs the upload
-routes return in response bodies. Each of those URLs is a capability to write
-into your bucket, so anyone who can read the traffic can both impersonate the
-client and write objects directly. A server that binds anything other than
-loopback therefore refuses to start unless it either terminates TLS itself or
-says out loud that something else does.
+bearer token on every request, and the presigned object-store URLs the
+transfer routes return in response bodies. Each of those URLs is a capability
+to write into or read out of your bucket, so anyone who can read the traffic
+can both impersonate the client and reach objects directly. A server that
+binds anything other than loopback therefore refuses to start unless it either
+terminates TLS itself or says out loud that something else does.
+
+Direct transfers go both ways, and that is a rule rather than a convenience:
+a deployment must be able to serve back whatever it let a client create. On
+S3 and R2 a client can upload an object of any size straight to the bucket,
+while a proxied read buffers the whole file and refuses anything past
+`max_download_bytes` (256 MiB by default) — so those deployments also hand
+out short-lived presigned reads, and `loonfs get` uses one whenever a file is
+larger than the server will proxy. Deployments that cannot presign proxy
+everything, which is safe because they cannot presign an upload either.
 
 Terminate TLS in the server by adding a `[tls]` table:
 

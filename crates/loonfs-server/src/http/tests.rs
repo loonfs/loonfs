@@ -2247,3 +2247,345 @@ fn assert_api_error<T: std::fmt::Debug>(
         other => panic!("expected api error {status} {code}, got {other:?}"),
     }
 }
+
+/// A deployment that authorizes direct uploads has to be able to hand back
+/// what they wrote. These exercise that with a store double standing in for
+/// the provider: a loopback issuer that signs nothing, and a loopback
+/// object server reading the same store the deployment writes to — so the
+/// whole grant path (route, issuer seam, presigned fetch, client
+/// verification) runs end to end without a real bucket.
+mod direct_download {
+    use super::*;
+    use crate::http::app_with_store_and_transfer_issuer;
+    use loonfs_api::{
+        RevisionNo, FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_UPLOADS_DIRECT_MULTIPART,
+        FEATURE_UPLOADS_DIRECT_PUT, LIMIT_DOWNLOAD_MAX_CONTENT_BYTES,
+    };
+    use loonfs_objectstore::presign::{
+        ObjectTransferIssuer, PresignedGetRequest, PresignedPartRequest, PresignedPutRequest,
+        PresignedUrl,
+    };
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+    use std::time::SystemTime;
+
+    /// The read cap these deployments are configured with.
+    ///
+    /// Small on purpose. The audit's case is a file the deployment refuses
+    /// to buffer, and what makes a file that is the cap rather than the
+    /// byte count — so the behavior under test is identical at a kilobyte
+    /// and at 256 MiB, and this suite does not move a gigabyte per run to
+    /// restate the same comparison. That the comparison itself picks the
+    /// grant for a 300 MiB file at the real default is pinned in the
+    /// client's own tests.
+    const PROXY_CAP_BYTES: u64 = 1024;
+
+    /// An issuer that hands out unsigned loopback URLs.
+    ///
+    /// It stands in for the signing half only. What a real presigner adds —
+    /// that the capability expires, and that `Range` stays outside the
+    /// signature — is pinned where it is decided: in the S3-compatible
+    /// presigner's own tests, and against a live provider in the ignored
+    /// suite.
+    #[derive(Debug)]
+    struct LoopbackIssuer {
+        object_base_url: String,
+    }
+
+    impl ObjectTransferIssuer for LoopbackIssuer {
+        fn presign_put(
+            &self,
+            _request: PresignedPutRequest<'_>,
+            _now: SystemTime,
+        ) -> Result<PresignedUrl, ObjectStoreError> {
+            Err(ObjectStoreError::Configuration(
+                "the loopback issuer authorizes reads only".to_owned(),
+            ))
+        }
+
+        fn presign_multipart_part(
+            &self,
+            _request: PresignedPartRequest<'_>,
+            _now: SystemTime,
+        ) -> Result<PresignedUrl, ObjectStoreError> {
+            Err(ObjectStoreError::Configuration(
+                "the loopback issuer authorizes reads only".to_owned(),
+            ))
+        }
+
+        fn presign_get(
+            &self,
+            request: PresignedGetRequest<'_>,
+            _now: SystemTime,
+        ) -> Result<PresignedUrl, ObjectStoreError> {
+            Ok(PresignedUrl {
+                method: "GET".to_owned(),
+                url: format!("{}/{}", self.object_base_url, request.object_key),
+                headers: BTreeMap::new(),
+                expires_at_ms: u64::MAX,
+            })
+        }
+    }
+
+    /// Serves objects out of the deployment's own store, the way a provider
+    /// answers a presigned read, and reports its base URL.
+    async fn serve_objects(store: SharedObjectStore) -> String {
+        async fn object(
+            axum::extract::State(store): axum::extract::State<SharedObjectStore>,
+            axum::extract::Path(key): axum::extract::Path<String>,
+        ) -> axum::response::Response {
+            use axum::response::IntoResponse as _;
+            match store.get(&key, None).await {
+                Ok(Some(bytes)) => (axum::http::StatusCode::OK, bytes).into_response(),
+                Ok(None) => axum::http::StatusCode::NOT_FOUND.into_response(),
+                Err(error) => (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    error.to_string(),
+                )
+                    .into_response(),
+            }
+        }
+
+        let router = axum::Router::new()
+            .route("/{*key}", axum::routing::get(object))
+            .with_state(store);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind object listener");
+        let addr = listener.local_addr().expect("object listener addr");
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.expect("serve objects");
+        });
+        format!("http://{addr}")
+    }
+
+    /// Starts a deployment whose read cap is [`PROXY_CAP_BYTES`], with or
+    /// without an issuer, and returns a client pointed at it.
+    async fn start(
+        root: &Path,
+        writer_id: &str,
+        issuer: Option<Arc<dyn ObjectTransferIssuer>>,
+    ) -> Client {
+        let store: SharedObjectStore =
+            Arc::new(LocalFsStore::new(root).expect("construct local store"));
+        let mut config = test_config(root, writer_id);
+        config.max_download_bytes = PROXY_CAP_BYTES;
+        let (router, _lifecycle, _state) =
+            app_with_store_and_transfer_issuer(config, store, issuer)
+                .await
+                .expect("build app");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.expect("serve app");
+        });
+        Client::new(ClientConfig {
+            server_url: format!("http://{addr}"),
+            auth_token: Some("test-token".to_owned()),
+            request_timeout_ms: None,
+            disable_transient_retry: false,
+            ca_cert_path: None,
+        })
+        .expect("valid client config")
+    }
+
+    /// The store the deployment writes to, opened again for the object
+    /// double. Both see the same objects because both are the same root.
+    fn object_store_at(root: &Path) -> SharedObjectStore {
+        Arc::new(LocalFsStore::new(root).expect("construct local store for the object double"))
+    }
+
+    /// The audit's case in miniature: a file this deployment will not
+    /// buffer for one response comes home through a download grant, byte
+    /// for byte, checked against the reference the grant carried.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_file_past_the_proxy_cap_round_trips_through_a_download_grant() {
+        let temp_dir = tempdir().expect("tempdir");
+        let object_base_url = serve_objects(object_store_at(temp_dir.path())).await;
+        let issuer: Arc<dyn ObjectTransferIssuer> = Arc::new(LoopbackIssuer { object_base_url });
+        let client = start(temp_dir.path(), "direct-download", Some(issuer)).await;
+
+        let namespace = namespace_id("direct-download");
+        client
+            .create_namespace(&namespace)
+            .await
+            .expect("create namespace");
+        let target = NamespacePath::parse(namespace.as_str(), "/big.bin").expect("target");
+        // Past the cap by enough that a truncation would show, and cheap.
+        let payload: Vec<u8> = (0..PROXY_CAP_BYTES as usize * 3)
+            .map(|index| (index % 251) as u8)
+            .collect();
+        client
+            .put_file_bytes(&target, &payload, &replace_file_options())
+            .await
+            .expect("seed the oversized file");
+
+        // The wall the audit found: this deployment let the file exist and
+        // will not proxy it back.
+        assert_api_error(
+            client.get_file_bytes(&target).await,
+            413,
+            ErrorCode::ContentTooLarge.as_str(),
+            None,
+        );
+
+        let grant = client
+            .begin_download(&target, None)
+            .await
+            .expect("download grant");
+        assert_eq!(grant.absolute_path.as_str(), "/big.bin");
+        assert_eq!(grant.content_ref.size_bytes, payload.len() as u64);
+        assert!(
+            grant.content_ref.whole_file_sha256.is_some(),
+            "a proxied write hashes its payload, so the grant names a digest to check against"
+        );
+
+        let mut received = Vec::new();
+        let written = client
+            .download_via_presigned_url(&grant, &mut received)
+            .await
+            .expect("stream the granted object");
+        assert_eq!(written, payload.len() as u64);
+        assert_eq!(received, payload);
+    }
+
+    /// A grant names one immutable object, so a commit that replaces the
+    /// file afterwards changes neither what it reads nor whether it works —
+    /// and a grant asked for one revision reads that revision.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_grant_keeps_reading_the_revision_it_was_issued_for() {
+        let temp_dir = tempdir().expect("tempdir");
+        let object_base_url = serve_objects(object_store_at(temp_dir.path())).await;
+        let issuer: Arc<dyn ObjectTransferIssuer> = Arc::new(LoopbackIssuer { object_base_url });
+        let client = start(temp_dir.path(), "grant-pins", Some(issuer)).await;
+
+        let namespace = namespace_id("grant-pins");
+        client
+            .create_namespace(&namespace)
+            .await
+            .expect("create namespace");
+        let target = NamespacePath::parse(namespace.as_str(), "/pinned.bin").expect("target");
+        let first = vec![b'a'; PROXY_CAP_BYTES as usize * 2];
+        let second = vec![b'b'; PROXY_CAP_BYTES as usize * 2];
+        client
+            .put_file_bytes(&target, &first, &replace_file_options())
+            .await
+            .expect("seed revision 1");
+
+        let grant = client
+            .begin_download(&target, None)
+            .await
+            .expect("grant for revision 1");
+        assert_eq!(grant.revision_no, RevisionNo(1));
+
+        client
+            .put_file_bytes(&target, &second, &replace_file_options())
+            .await
+            .expect("replace with revision 2");
+
+        let mut received = Vec::new();
+        client
+            .download_via_presigned_url(&grant, &mut received)
+            .await
+            .expect("the already-issued grant still reads its own object");
+        assert_eq!(received, first);
+
+        // And asking for the old revision by number resolves to the same
+        // object the earlier grant named.
+        let pinned = client
+            .begin_download(&target, Some(RevisionNo(1)))
+            .await
+            .expect("grant for a prior revision");
+        assert_eq!(pinned.revision_no, RevisionNo(1));
+        assert_eq!(pinned.content_ref, grant.content_ref);
+    }
+
+    /// A deployment that cannot presign refuses the grant the same way it
+    /// refuses a direct upload — one typed `not_supported` naming the
+    /// capability a client would have gated on — rather than 404ing a route
+    /// that exists everywhere.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_deployment_that_cannot_presign_refuses_the_grant_by_capability() {
+        let temp_dir = tempdir().expect("tempdir");
+        let client = start(temp_dir.path(), "no-issuer", None).await;
+
+        let namespace = namespace_id("no-issuer");
+        client
+            .create_namespace(&namespace)
+            .await
+            .expect("create namespace");
+        let target = NamespacePath::parse(namespace.as_str(), "/small.txt").expect("target");
+        client
+            .put_file_bytes(&target, b"small enough to proxy", &replace_file_options())
+            .await
+            .expect("seed a file");
+
+        let error = client
+            .begin_download(&target, None)
+            .await
+            .expect_err("a deployment with no issuer cannot grant reads");
+        match &error {
+            ClientError::Api {
+                status,
+                code,
+                feature,
+                ..
+            } => {
+                assert_eq!(*status, 501);
+                assert_eq!(code, ErrorCode::NotSupported.as_str());
+                assert_eq!(feature.as_deref(), Some(FEATURE_DOWNLOADS_DIRECT_GET));
+            }
+            other => panic!("expected a typed not_supported, got {other:?}"),
+        }
+
+        // The proxied read it does serve is untouched.
+        assert_eq!(
+            client
+                .get_file_bytes(&target)
+                .await
+                .expect("proxied read of a file under the cap"),
+            b"small enough to proxy"
+        );
+    }
+
+    /// The three transfer capabilities are advertised together: they rest
+    /// on one proof, and a deployment offering the writes owes the read.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_transfer_capabilities_are_advertised_together() {
+        let transfer_features = [
+            FEATURE_UPLOADS_DIRECT_PUT,
+            FEATURE_UPLOADS_DIRECT_MULTIPART,
+            FEATURE_DOWNLOADS_DIRECT_GET,
+        ];
+
+        let temp_dir = tempdir().expect("tempdir");
+        let issuer: Arc<dyn ObjectTransferIssuer> = Arc::new(LoopbackIssuer {
+            object_base_url: "http://object.invalid".to_owned(),
+        });
+        let advertised = start(temp_dir.path(), "advertises", Some(issuer))
+            .await
+            .capabilities()
+            .await
+            .expect("capabilities");
+        for feature in transfer_features {
+            assert!(advertised.supports(feature), "missing `{feature}`");
+        }
+        assert_eq!(
+            advertised.limits.get(LIMIT_DOWNLOAD_MAX_CONTENT_BYTES),
+            Some(&PROXY_CAP_BYTES),
+            "the proxy cap stays advertised: it is what tells a client which reads need a grant"
+        );
+
+        let plain_dir = tempdir().expect("tempdir");
+        let advertised = start(plain_dir.path(), "advertises-none", None)
+            .await
+            .capabilities()
+            .await
+            .expect("capabilities");
+        for feature in transfer_features {
+            assert!(!advertised.supports(feature), "unexpected `{feature}`");
+        }
+    }
+}

@@ -10,17 +10,20 @@
 //! - `commits` — commit results and the change feed.
 //! - `search` — content search and grep-index administration.
 //! - `uploads` — upload sessions and direct-put access.
+//! - `downloads` — direct-get download grants.
 //!
 //! The crate root re-exports the common surface for convenience; see the
 //! crate docs for the rule.
 
 mod commits;
+mod downloads;
 mod operations;
 mod reads;
 mod search;
 mod uploads;
 
 pub use commits::{ChangesResponse, CommitResponse, CommittedChange, FilesystemChange};
+pub use downloads::{BeginDownloadRequest, BeginDownloadResponse};
 pub use operations::{
     AdvanceRetentionResponse, ApiError, CommitRequest, CreateCheckpointRequest,
     CreateCheckpointResponse, CreateNamespaceRequest, DeleteDirectoryBehavior,

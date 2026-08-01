@@ -16,6 +16,7 @@ use loonfs_client::{Client, ClientError, NamespacePath, PayloadSource};
 use loonfs_objectstore::ObjectStore;
 use loonfs_server::{ServerConfig, StoreConfig};
 use std::fmt;
+use std::io::Read as _;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const AUTH_TOKEN: &str = "test-token";
@@ -165,7 +166,92 @@ async fn direct_put_round_trip(config: ServerConfig) {
         .expect("read file");
     assert_eq!(loaded, bytes);
 
+    assert_direct_get_returns_the_written_bytes(&harness.client, &target, bytes).await;
+    assert_direct_get_capability_serves_ranges(&harness.client, &target, bytes).await;
+
     harness.server.abort();
+}
+
+/// The symmetry claim, against a real provider: what a client wrote
+/// directly, it can read back directly.
+async fn assert_direct_get_returns_the_written_bytes(
+    client: &Client,
+    target: &NamespacePath,
+    bytes: &[u8],
+) {
+    let capabilities = client.capabilities().await.expect("fetch capabilities");
+    assert!(
+        capabilities.supports("core.downloads.direct_get"),
+        "a provider proven for direct writes must be offered for direct reads"
+    );
+
+    let grant = client
+        .begin_download(target, None)
+        .await
+        .expect("begin download");
+    let ObjectTransferAccess::PresignedUrl { method, .. } = &grant.access;
+    assert_eq!(method, "GET");
+    assert_eq!(grant.content_ref.size_bytes, bytes.len() as u64);
+
+    let mut received = Vec::new();
+    let written = client
+        .download_via_presigned_url(&grant, &mut received)
+        .await
+        .expect("read the granted object from the provider");
+    assert_eq!(written, bytes.len() as u64);
+    assert_eq!(received, bytes);
+}
+
+/// `Range` is not among the headers a presigned GET signs, so one issued
+/// capability serves ranged, resumed, and parallel reads without another
+/// round trip to the server.
+///
+/// That is a property of the provider's SigV4 verification, not of this
+/// codebase, which is why it is asserted here rather than only against the
+/// presigner's own unit tests: this is the run that can be wrong.
+async fn assert_direct_get_capability_serves_ranges(
+    client: &Client,
+    target: &NamespacePath,
+    bytes: &[u8],
+) {
+    let grant = client
+        .begin_download(target, None)
+        .await
+        .expect("begin download for ranged reads");
+    let ObjectTransferAccess::PresignedUrl { url, headers, .. } = &grant.access;
+    assert!(
+        headers.is_empty(),
+        "a read capability requires the client to send nothing, which is what leaves \
+         `Range` free"
+    );
+
+    // Two windows, on the one URL, neither of which the signature knew
+    // about. Concatenating them must reproduce the object exactly.
+    let split = bytes.len() / 2;
+    let head = fetch_range(url, 0, split - 1);
+    let tail = fetch_range(url, split, bytes.len() - 1);
+    assert_eq!(head, &bytes[..split]);
+    assert_eq!(tail, &bytes[split..]);
+}
+
+/// Reads one inclusive byte range from a presigned URL with a `Range`
+/// header the signature never covered.
+fn fetch_range(url: &str, first: usize, last: usize) -> Vec<u8> {
+    let response = ureq::get(url)
+        .set("range", &format!("bytes={first}-{last}"))
+        .call()
+        .expect("ranged read of a presigned capability");
+    assert_eq!(
+        response.status(),
+        206,
+        "a provider that served the whole object ignored the range"
+    );
+    let mut bytes = Vec::new();
+    response
+        .into_reader()
+        .read_to_end(&mut bytes)
+        .expect("read ranged body");
+    bytes
 }
 
 async fn assert_wrong_direct_put_bytes_rejected(client: &Client, namespace_id: &NamespaceId) {
@@ -620,6 +706,29 @@ async fn direct_multipart_round_trip(config: ServerConfig) {
         .await
         .expect("read the assembled file");
     assert_eq!(loaded, payload);
+
+    // The direct read of an object the client assembled directly — the
+    // symmetry this deployment owes. A provider-assembled object carries no
+    // whole-file sha256, so its length is the whole check, and the grant
+    // says as much rather than claiming a digest nobody computed.
+    let grant = harness
+        .client
+        .begin_download(&target, None)
+        .await
+        .expect("begin download of the assembled object");
+    assert!(
+        grant.content_ref.whole_file_sha256.is_none(),
+        "the grant repeats the reference, which for a multipart object has no sha256"
+    );
+    let mut received = Vec::new();
+    let written = harness
+        .client
+        .download_via_presigned_url(&grant, &mut received)
+        .await
+        .expect("read the assembled object straight from the provider");
+    assert_eq!(written, payload.len() as u64);
+    assert_eq!(received, payload);
+    assert_direct_get_capability_serves_ranges(&harness.client, &target, &payload).await;
 
     // And a rerun of the same put under the same commit id reconciles by
     // content rather than conflicting, even with no whole-file sha256 to

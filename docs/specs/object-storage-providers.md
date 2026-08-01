@@ -59,7 +59,19 @@ This never weakens ordinary uploads. The server-mediated upload path is
 available on every supported store and is the default wherever direct-put is
 not offered.
 
-| Provider | Direct-put offered | Proven endpoints |
+**Direct reads travel with direct writes, and the rule is symmetry.** A
+deployment must be able to serve back whatever it let a client create. A
+proxied read buffers the whole file for one response and refuses anything
+past `download.max_content_bytes`, so a store that can presign writes and
+not reads could hold an object it had no way to return. The same predicate
+therefore gates both: where direct-put is offered, `core.downloads.direct_get`
+is offered too, and where it is not, neither is — which is safe precisely
+because such a deployment cannot presign an upload either, so nothing larger
+than it will proxy can be created through it. A presigned read binds nothing
+beyond the object key; a client checks the arriving bytes against the content
+reference the grant carried.
+
+| Provider | Direct transfers offered | Proven endpoints |
 | --- | --- | --- |
 | AWS S3 | Yes | Default endpoint, `amazonaws.com`, `amazonaws.com.cn` |
 | Cloudflare R2 | Yes | `r2.cloudflarestorage.com` |
@@ -67,6 +79,9 @@ not offered.
 | Google Cloud Storage | No | n/a |
 | Azure Blob Storage | No | n/a |
 | Local filesystem | No | n/a |
+
+"Direct transfers" is one column because it is one decision: `direct_put`,
+`direct_multipart`, and `direct_get` are advertised together or not at all.
 
 ## 4. Incremental writes and where they are real
 

@@ -80,6 +80,7 @@ profile nor its `query.*` keys — clients gate on the document either way.
     "core.namespaces.delete": true,
     "core.uploads.direct_put": false,
     "core.uploads.direct_multipart": false,
+    "core.downloads.direct_get": false,
     "query.grep": true
   },
   "limits": {
@@ -124,7 +125,7 @@ Registered limit keys:
 | `pagination.default_limit` | Default page size applied when a paged request omits `limit`. |
 | `pagination.max_limit` | Largest accepted page size for paged requests. |
 | `upload.max_content_bytes` | Largest request body accepted for service-proxied upload content (`PUT .../uploads/{upload_id}/content`). Clients may use `direct_put` for larger content only when `core.uploads.direct_put` is advertised; otherwise they must stay within this limit. |
-| `download.max_content_bytes` | Largest file content a service-proxied read (`GET .../filesystem/content`, inode revision content) will buffer and return in one response. Over-limit reads answer `content_too_large`; v0 has no proxied streaming or range reads. |
+| `download.max_content_bytes` | Largest file content a service-proxied read (`GET .../filesystem/content`, inode revision content) will buffer and return in one response. Over-limit reads answer `content_too_large`; v0 has no proxied streaming or range reads. A file past this limit is read through a download grant (`POST .../filesystem/downloads`) when `core.downloads.direct_get` is advertised — which it is on exactly the deployments that could have let a client create such a file. |
 | `upload.max_concurrent` | How many service-proxied upload bodies the deployment buffers at once; requests past the cap answer `server_busy`. |
 | `download.max_concurrent` | How many service-proxied content reads the deployment materializes at once; requests past the cap answer `server_busy`. |
 | `commit.max_operations` | Most path operations one commit may carry. A longer list answers `invalid_request` before planning, on every transport. |
@@ -150,6 +151,7 @@ hoc.
 | `core.namespaces.delete` | Deleting namespaces (`DELETE /v0/namespaces/{ns}`). | Terminal, and the id is permanently retired. Derived state becomes reclaimable through a `gc`-restricted maintenance step (section 6.3), which also reclaims the content of any upload session that completed, aged past the derived reclamation grace, and is referenced by nothing the namespace can reach. A deployment may still advertise `false` and answer `not_supported`. |
 | `core.uploads.direct_put` | Starting presigned `direct_put` upload sessions (`POST /v0/namespaces/{ns}/uploads`). | The server returns a short-lived presigned PUT capability for the exact content object. The key is present only when the selected provider profile proves the signed preconditions or the deployment explicitly opts into an unproven endpoint. Raw object keys and caller-managed object-store writes are not part of this feature. |
 | `core.uploads.direct_multipart` | Starting presigned `direct_multipart` upload sessions (`POST /v0/namespaces/{ns}/uploads`) and signing their parts (`POST /v0/namespaces/{ns}/uploads/{upload_id}/parts`). | The server opens the provider's multipart upload and returns one short-lived, checksum-bound capability per part. It rests on the same proven-endpoint condition as `core.uploads.direct_put`, plus the provider's multipart control operations, so the two keys are advertised together. |
+| `core.downloads.direct_get` | Taking download grants (`POST /v0/namespaces/{ns}/filesystem/downloads`). | The server returns a short-lived presigned GET capability for the content object behind one path and revision. It rests on the same proven-endpoint condition as the two upload keys and is advertised with them, because a deployment that lets a client create an object larger than `download.max_content_bytes` must be able to hand that object back. Raw object keys are not part of this feature. |
 | `query.grep` | Content search (`POST /v0/namespaces/{ns}/query/grep`). | The serving half of a data-dependent capability: the request also requires a materialized steady-state grep root, and a namespace without one answers `not_supported` whatever this key advertises. |
 
 `admin/v0` currently has required ops only and no feature keys. `acl.*` keys
@@ -232,7 +234,7 @@ The full registry (`ErrorCode` in `loonfs-api`):
 | `invalid_request` | 400 | The request is malformed: a path, id, cursor, parameter, staged content reference, configuration value, or commit request limit fails validation. The message names the offending field or limit. |
 | `unauthorized` | 401 | Missing or wrong credentials. |
 | `permission_denied` | 403 | The backing object store rejected the deployment's storage credentials for this operation. Fix the storage credentials or bucket policy; retrying unchanged will not succeed. |
-| `content_too_large` | 413 | The request body exceeds the deployment's limit: `upload.max_content_bytes` for proxied uploads. Served file content past `download.max_content_bytes` reports it too. For uploads, send a smaller payload or use `direct_put` when that feature is advertised; for reads, the deployment limit must be raised. |
+| `content_too_large` | 413 | The request body exceeds the deployment's limit: `upload.max_content_bytes` for proxied uploads. Served file content past `download.max_content_bytes` reports it too. For uploads, send a smaller payload or use `direct_put` when that feature is advertised; for reads, take a download grant when `core.downloads.direct_get` is advertised, and otherwise the deployment limit must be raised. |
 | `route_not_found` | 404 | No route matches the request path. |
 | `method_not_allowed` | 405 | The path exists but does not serve this HTTP method. |
 | `namespace_not_found` | 404 | The namespace has no head, so it does not exist. |
@@ -559,6 +561,7 @@ A representative v0 binding is shown below.
 | List file revisions by path | `GET /v0/namespaces/{ns}/filesystem/revisions?path=/docs/report.txt&limit=100&cursor=...` |
 | Read file content | `GET /v0/namespaces/{ns}/filesystem/content?path=/docs/report.txt` |
 | Read prior file content by path | `GET /v0/namespaces/{ns}/filesystem/content?path=/docs/report.txt&revision_no=3` |
+| Take a download grant for one file | `POST /v0/namespaces/{ns}/filesystem/downloads` |
 | List recoverable deletions | `GET /v0/namespaces/{ns}/filesystem/trash?limit=100&cursor=...` |
 | Apply a commit | `POST /v0/namespaces/{ns}/commits` |
 | Begin or prepare upload | `POST /v0/namespaces/{ns}/uploads` |
@@ -1193,6 +1196,12 @@ leaves the inner one listed.
 The response body is the authoritative file bytes. Metadata may be exposed in
 headers, but the body itself is raw content rather than JSON.
 
+The server buffers the whole file for one response, so a file past
+`download.max_content_bytes` answers `content_too_large` here. That is not the
+end of the road: the download transport in section 6.10 reads the same bytes
+without the server holding them, and every deployment that could have let a
+client create such a file offers it.
+
 Revision listing returns newest revisions first and uses the same
 `limit` / `cursor` pattern as directory listing, resolving the current path
 to its current inode. Responses include
@@ -1531,7 +1540,79 @@ Representative complete-upload response:
 }
 ```
 
-### 6.10 `GET /changes`
+### 6.10 Download transport
+
+A deployment must be able to serve back whatever it let a client create.
+That is the whole rule, and it is why this exists: `direct_put` and
+`direct_multipart` let a client write an object of any size, while a proxied
+read buffers the file for one response and refuses anything past
+`download.max_content_bytes`. Without a read that does not buffer, a
+deployment could hold a file it had no way to return. So the read capability
+is offered on exactly the deployments that offer the write ones, and
+`core.downloads.direct_get` is advertised with them.
+
+`POST /v0/namespaces/{ns}/filesystem/downloads` takes a path and, optionally,
+the revision to read — the same two things the proxied read takes:
+
+```json
+{ "path": "/docs/report.txt", "revision_no": 3 }
+```
+
+The response is a short-lived read capability plus everything the reader
+checks the arriving bytes against:
+
+```json
+{
+  "namespace_id": "demo",
+  "absolute_path": "/docs/report.txt",
+  "revision_no": 3,
+  "content_ref": {
+    "kind": "blob_v1",
+    "content_id": "con_9f2a6c0e4b7d4a90b13f0d8c5e6a2b41",
+    "size_bytes": 314572800,
+    "storage_checksum": { "algorithm": "sha256", "value": "42d..." },
+    "whole_file_sha256": "42d..."
+  },
+  "access": {
+    "kind": "presigned_url",
+    "method": "GET",
+    "url": "https://bucket.s3.us-east-1.amazonaws.com/...&X-Amz-Signature=...",
+    "expires_at_ms": 1780000000000
+  }
+}
+```
+
+Four properties follow from the shape, and clients may rely on all of them.
+
+**The grant names one immutable object.** A commit that replaces the file
+writes a new content object and leaves this one alone, so an issued
+capability does not go stale when the path moves on, and it reads the
+revision it was issued for rather than whatever is current when it is used.
+
+**No headers are required, and `Range` is free.** The signed header set is
+the host and nothing else, so a client may range, resume after a broken
+connection, or fetch windows in parallel on the one URL without another round
+trip to the server. A server implementation must not sign a `Range` header
+into the capability; doing so would bind it to a single window.
+
+**The reference is the check, not a description.** A client verifies the
+length always, and `whole_file_sha256` whenever the reference carries one. A
+`direct_multipart` object carries none — nothing ever computed a SHA-256 over
+it (section 6.9) — and its length is then the whole check, exactly as it is
+for the server's own reads. Bytes that do not match are a failed download,
+not a file.
+
+**The raw object key is never exposed.** A client learns a URL that expires,
+the same way a `direct_put` client does.
+
+The capability is short-lived — a transfer's worth of time, not a session's.
+A reader that runs out of time asks for another grant, which costs one small
+request and no retransfer. A deployment that cannot presign reads answers 501
+`not_supported` with `feature = "core.downloads.direct_get"`, and its proxied
+read stays available under its own limit; because such a deployment cannot
+presign writes either, no file it holds can be larger than it will proxy.
+
+### 6.11 `GET /changes`
 
 Each change is one commit carrying its identity (`seq`,
 `commit_id`, observational `committed_at_ms`, writer provenance, optional
@@ -1587,7 +1668,7 @@ If `limit` truncates the page before the namespace head, the response includes
 `next_after_seq` set to the last returned change seq. The client resumes with
 `after_seq={next_after_seq}`.
 
-### 6.11 `POST /forks`
+### 6.12 `POST /forks`
 
 Representative request:
 
@@ -1617,7 +1698,7 @@ does, and `checkpoint_unavailable` when the source pin did not survive the
 attempt — in which case the target it published is deleted before the error
 comes back.
 
-### 6.12 `POST /query/grep`
+### 6.13 `POST /query/grep`
 
 Representative request:
 
@@ -1693,7 +1774,7 @@ other path read. A missing data half answers `not_supported` with the
 `feature` field naming `query.grep`, the same key capability discovery
 advertises the serving half under.
 
-### 6.13 `GET /metrics`
+### 6.14 `GET /metrics`
 
 An operational route, alongside the two liveness routes: `GET /health`
 answers `ok` while the process is up, `GET /readiness` answers `ready`
