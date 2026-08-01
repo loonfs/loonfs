@@ -470,7 +470,8 @@ pub(crate) struct FilesystemGetArgs {
     /// stdout).
     pub local_destination: Option<String>,
     /// Download the directory tree rooted at `remote_path`, with bounded
-    /// concurrency and per-file outcomes.
+    /// concurrency and per-file outcomes. The local destination is created
+    /// if it does not exist.
     #[arg(short, long)]
     pub recursive: bool,
     /// Download this revision instead of the current content.

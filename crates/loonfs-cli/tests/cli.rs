@@ -1087,6 +1087,231 @@ fn recursive_transfers_roundtrip_a_tree() {
     assert_eq!(json_error(&mv_recursive)["code"], "invalid_input");
 }
 
+/// A recursive get creates the destination it was handed, parents included,
+/// the way `cp -r` creates its target. The shape that used to fail on every
+/// file is a remote directory holding nothing but files: no subdirectory
+/// existed to create the root as a side effect of its own `mkdir`.
+#[test]
+fn recursive_get_creates_an_absent_destination_root_in_both_modes() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("embedded");
+    let remote_server =
+        harness.start_external_server(harness.write_server_config("remote", "get-destination"));
+    let add_remote = harness.run(&[
+        "--json",
+        "profile",
+        "create",
+        "remote",
+        "--mode",
+        "remote",
+        "--server-url",
+        &remote_server.server_url,
+        "--auth-token",
+        "test-token",
+    ]);
+    assert_success(&add_remote);
+
+    let flat = harness.temp_dir.path().join("flat");
+    fs::create_dir_all(&flat).expect("create flat source");
+    for name in ["a.txt", "b.txt"] {
+        fs::write(flat.join(name), name.as_bytes()).expect("write source file");
+    }
+
+    for profile in ["embedded", "remote"] {
+        assert_success(&harness.run(&["namespace", "create", "--profile", profile, "demo"]));
+        assert_success(&harness.run(&["use", "--profile", profile, "demo"]));
+        assert_success(&harness.run(&[
+            "put",
+            "-r",
+            "--profile",
+            profile,
+            flat.to_str().expect("utf-8 path"),
+            "/flat",
+        ]));
+        // A directory holding nothing, inside another holding nothing.
+        assert_success(&harness.run(&["mkdir", "-p", "--profile", profile, "/nested/empty/inner"]));
+
+        // Files with no subdirectory among them: nothing but the transfer
+        // itself can bring the destination root into being. Neither the root
+        // nor its parent exists here.
+        let destination = harness.temp_dir.path().join(profile).join("dest");
+        let get = harness.run(&[
+            "--json",
+            "get",
+            "-r",
+            "--profile",
+            profile,
+            "/flat",
+            destination.to_str().expect("utf-8 path"),
+        ]);
+        assert_success(&get);
+        let data = json_data(&get);
+        assert_eq!(data["files"], 2, "{data}");
+        // The destination root, counted the way `cp -r` counts its own.
+        assert_eq!(data["directories"], 1, "{data}");
+        assert_eq!(data["failures"].as_array().expect("failures").len(), 0);
+        assert_eq!(
+            fs::read(destination.join("a.txt")).expect("downloaded a.txt"),
+            b"a.txt"
+        );
+
+        // Empty directories, nested, land as local directories.
+        let nested = harness.temp_dir.path().join(profile).join("nested");
+        let nested_get = harness.run(&[
+            "--json",
+            "get",
+            "-r",
+            "--profile",
+            profile,
+            "/nested",
+            nested.to_str().expect("utf-8 path"),
+        ]);
+        assert_success(&nested_get);
+        let nested_data = json_data(&nested_get);
+        assert_eq!(nested_data["files"], 0, "{nested_data}");
+        assert_eq!(nested_data["directories"], 3, "{nested_data}");
+        assert!(nested.join("empty/inner").is_dir());
+
+        // A tree with nothing in it at all still leaves the caller with the
+        // directory they named.
+        let empty_destination = harness.temp_dir.path().join(profile).join("only-empty");
+        let empty = harness.run(&[
+            "--json",
+            "get",
+            "-r",
+            "--profile",
+            profile,
+            "/nested/empty/inner",
+            empty_destination.to_str().expect("utf-8 path"),
+        ]);
+        assert_success(&empty);
+        let empty_data = json_data(&empty);
+        assert_eq!(empty_data["files"], 0, "{empty_data}");
+        assert_eq!(empty_data["directories"], 1, "{empty_data}");
+        assert!(empty_destination.is_dir());
+    }
+}
+
+/// One unwritable destination path fails alone. A local file sitting where a
+/// directory has to go takes down that directory and the files under it —
+/// each named on its own — while every sibling still lands.
+#[test]
+fn recursive_get_names_only_the_paths_it_could_not_write_in_both_modes() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("embedded");
+    let remote_server =
+        harness.start_external_server(harness.write_server_config("remote", "get-partial"));
+    let add_remote = harness.run(&[
+        "--json",
+        "profile",
+        "create",
+        "remote",
+        "--mode",
+        "remote",
+        "--server-url",
+        &remote_server.server_url,
+        "--auth-token",
+        "test-token",
+    ]);
+    assert_success(&add_remote);
+
+    let tree = harness.temp_dir.path().join("tree");
+    fs::create_dir_all(tree.join("docs")).expect("create docs");
+    fs::create_dir_all(tree.join("other")).expect("create other");
+    fs::write(tree.join("top.txt"), b"top").expect("write top");
+    fs::write(tree.join("docs/a.txt"), b"alpha").expect("write a");
+    fs::write(tree.join("docs/b.txt"), b"beta").expect("write b");
+    fs::write(tree.join("other/c.txt"), b"gamma").expect("write c");
+
+    for profile in ["embedded", "remote"] {
+        assert_success(&harness.run(&["namespace", "create", "--profile", profile, "demo"]));
+        assert_success(&harness.run(&["use", "--profile", profile, "demo"]));
+        assert_success(&harness.run(&[
+            "put",
+            "-r",
+            "--profile",
+            profile,
+            tree.to_str().expect("utf-8 path"),
+            "/src",
+        ]));
+
+        // A plain file occupies the place `docs` has to be.
+        let destination = harness.temp_dir.path().join(profile);
+        fs::create_dir_all(&destination).expect("create destination");
+        fs::write(destination.join("docs"), b"in the way").expect("block docs");
+
+        let get = harness.run(&[
+            "--json",
+            "get",
+            "-r",
+            "--profile",
+            profile,
+            "/src",
+            destination.to_str().expect("utf-8 path"),
+        ]);
+        assert_failure(&get);
+        let data = json_data(&get);
+        assert_eq!(data["files"], 2, "{data}");
+        // The destination root and `other`; `docs` is the one that failed.
+        assert_eq!(data["directories"], 2, "{data}");
+
+        // The blocked directory is named by the local path that failed, the
+        // files under it by the remote paths that could not be written.
+        let failed: Vec<&str> = data["failures"]
+            .as_array()
+            .expect("failures")
+            .iter()
+            .map(|failure| failure["path"].as_str().expect("failure path"))
+            .collect();
+        assert_eq!(failed.len(), 3, "{data}");
+        assert!(
+            failed.contains(&destination.join("docs").to_str().expect("utf-8 path")),
+            "{data}"
+        );
+        assert!(failed.contains(&"/src/docs/a.txt"), "{data}");
+        assert!(failed.contains(&"/src/docs/b.txt"), "{data}");
+        for failure in data["failures"].as_array().expect("failures") {
+            assert_eq!(failure["error"]["code"], "io_error", "{data}");
+        }
+
+        // Everything outside the blocked subtree downloaded.
+        assert_eq!(
+            fs::read(destination.join("top.txt")).expect("downloaded top.txt"),
+            b"top"
+        );
+        assert_eq!(
+            fs::read(destination.join("other/c.txt")).expect("downloaded c.txt"),
+            b"gamma"
+        );
+    }
+}
+
+/// One file into a directory that does not exist fails, exactly as `cp` into
+/// a missing parent fails: only `-r`, which owns the destination tree it is
+/// asked to build, creates directories.
+#[test]
+fn single_file_get_refuses_a_missing_parent_directory() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+
+    let payload = harness.temp_dir.path().join("payload.txt");
+    fs::write(&payload, b"body").expect("write payload");
+    assert_success(&harness.run(&["put", payload.to_str().expect("utf-8 path"), "/docs/a.txt"]));
+
+    let missing = harness.temp_dir.path().join("no-such-dir");
+    let get = harness.run(&[
+        "--json",
+        "get",
+        "/docs/a.txt",
+        missing.join("a.txt").to_str().expect("utf-8 path"),
+    ]);
+    assert_failure(&get);
+    assert_eq!(json_error(&get)["code"], "io_error");
+    assert!(!missing.exists(), "a failed get created no directory");
+}
+
 #[test]
 fn rm_recursive_deletes_a_populated_directory_in_one_commit() {
     let harness = Harness::new();

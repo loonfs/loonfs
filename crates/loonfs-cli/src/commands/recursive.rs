@@ -203,7 +203,8 @@ pub(crate) async fn run_put_tree(
 }
 
 /// Downloads a directory tree. Local directories are created for every
-/// remote directory — including empty ones — before any file lands.
+/// remote directory — including empty ones, and including the destination
+/// root itself — before any file lands.
 pub(crate) async fn run_get_tree(
     kind: CommandKind,
     context: &CommandContext,
@@ -212,8 +213,19 @@ pub(crate) async fn run_get_tree(
     force: bool,
     runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
-    let listing = walk_remote_tree(context, kind, remote_root).await?;
     let mut tally = TreeTally::new();
+    // The destination root, with any missing parents, belongs to this
+    // command the way `cp -r`'s target directory belongs to `cp`. It is made
+    // before the walk so a destination that can never hold the tree costs
+    // one error instead of a full traversal, and its failure ends the
+    // command: every file below would fail the same way, and one named
+    // error beats one per file. It counts like `cp -r` counts its own
+    // destination root, so the same tree reports the same directory total
+    // whichever way it is transferred.
+    std::fs::create_dir_all(local_root)
+        .map_err(|error| context.fail(kind, CliError::io_for_path(local_root, error)))?;
+    tally.directories += 1;
+    let listing = walk_remote_tree(context, kind, remote_root).await?;
 
     for components in &listing.directories {
         let local_dir = local_root.join(components.join("/"));
