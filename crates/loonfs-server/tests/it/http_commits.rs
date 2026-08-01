@@ -363,6 +363,10 @@ async fn an_empty_operation_list_is_rejected() {
 
 /// The root is readable but never a mutation target, alone or inside a
 /// batch, and rejecting it commits nothing.
+///
+/// The planners own the rule, so the rejection is attributed exactly like
+/// every other planning failure: a batch names the operation that stopped
+/// it, a one-operation request names nothing, and both echo the commit id.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_root_path_is_rejected_as_a_mutation_target() {
     let temp_dir = tempdir().expect("tempdir");
@@ -405,11 +409,15 @@ async fn the_root_path_is_rejected_as_a_mutation_target() {
         } => {
             assert_eq!(status, 400);
             assert_eq!(code, ErrorCode::InvalidRequest.as_str());
+            let details = details.expect("a failed commit carries details");
             // One operation has one place to fail, so nothing disambiguates it.
             assert_eq!(
-                details.and_then(|details| details.operation_index),
-                None,
+                details.operation_index, None,
                 "a one-operation request names no position"
+            );
+            assert_eq!(
+                details.commit_id.as_ref().map(CommitId::as_str),
+                Some("root-alone")
             );
         }
         other => unreachable!("expected invalid_request, got {other:?}"),
@@ -447,13 +455,17 @@ async fn the_root_path_is_rejected_as_a_mutation_target() {
         } => {
             assert_eq!(status, 400);
             assert_eq!(code, ErrorCode::InvalidRequest.as_str());
-            // The root check runs over the whole request before anything is
-            // planned, so this is the one rejection a batch does not attribute
-            // to a position. Every other failure names its operation.
+            let details = details.expect("a failed commit carries details");
+            // Planning stops at the root operation, so the batch names its
+            // position like it names every other failure's.
             assert_eq!(
-                details.and_then(|details| details.operation_index),
-                None,
-                "the pre-queue root check rejects the request, not an operation"
+                details.operation_index,
+                Some(1),
+                "the batch names the operation that stopped it"
+            );
+            assert_eq!(
+                details.commit_id.as_ref().map(CommitId::as_str),
+                Some("root-in-batch")
             );
         }
         other => unreachable!("expected invalid_request, got {other:?}"),
@@ -469,6 +481,33 @@ async fn the_root_path_is_rejected_as_a_mutation_target() {
             .head_seq,
         ChangeSeq(0)
     );
+
+    // The rule is the planners', so it is answered where every other path
+    // rule is: against a namespace that exists. A root mutation aimed at a
+    // namespace that does not answers for the namespace instead.
+    let unknown = harness
+        .client
+        .commit(
+            &namespace_id("missing"),
+            &CommitRequest {
+                commit_id: commit_id("root-unknown-namespace"),
+                message: None,
+                content_tokens: Vec::new(),
+                operations: vec![FilesystemOperation::CreateDirectory {
+                    path: absolute("/"),
+                    parents: false,
+                }],
+            },
+        )
+        .await
+        .expect_err("the namespace does not exist");
+    match unknown {
+        ClientError::Api { status, code, .. } => {
+            assert_eq!(status, 404);
+            assert_eq!(code, ErrorCode::NamespaceNotFound.as_str());
+        }
+        other => unreachable!("expected namespace_not_found, got {other:?}"),
+    }
 
     harness.server.abort();
 }

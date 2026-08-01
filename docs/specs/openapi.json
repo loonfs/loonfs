@@ -1125,7 +1125,7 @@
           "filesystem"
         ],
         "summary": "Apply a commit",
-        "description": "Applies one commit: an ordered, non-empty list of path operations that commit together as one logical commit, under one commit id that makes retries idempotent. A single-operation call is the one-element case. The first operation that fails aborts the whole request and names its position in `details.operation_index`.",
+        "description": "Applies one commit: an ordered, non-empty list of path operations that commit together as one logical commit, under one commit id that makes retries idempotent. A single-operation call is the one-element case. The first operation that fails aborts the whole request, and a request carrying more than one operation names that operation's position in `details.operation_index`.",
         "operationId": "apply_commit",
         "parameters": [
           {

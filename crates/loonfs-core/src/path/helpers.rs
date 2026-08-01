@@ -24,8 +24,11 @@ pub fn parse_mutation_path(absolute_path: &str) -> Result<AbsolutePath> {
 ///
 /// The absolute-path grammar is carried by the type; this rejects the root,
 /// which is readable but cannot be mutated. Intents can be built from parsed
-/// paths directly, so planning re-asserts this invariant.
-pub fn ensure_mutation_path(path: &AbsolutePath) -> Result<()> {
+/// paths directly, so planning is where the invariant is enforced, and
+/// planning is the only place: a caller that rejects the root ahead of the
+/// planners answers for the request rather than for the operation that
+/// named it.
+pub(crate) fn ensure_mutation_path(path: &AbsolutePath) -> Result<()> {
     if path.is_root() {
         return Err(CoreError::RootMutationForbidden);
     }
