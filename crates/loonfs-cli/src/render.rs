@@ -5,7 +5,9 @@ use crate::commands::{CommandData, CommandFailure, CommandOutput, MaintenanceKey
 use crate::config::ConfigSource;
 use crate::error::CliError;
 use loonfs_api::v0::{GrepIndexLifecycle, StoreProbeCheckOutcome, StoreProbeCheckResult};
-use loonfs_api::{GcResponse, NamespaceId, ReorganizeStepOutcome, WalFlushStepOutcome};
+use loonfs_api::{
+    CheckpointOwnerSummary, GcResponse, NamespaceId, ReorganizeStepOutcome, WalFlushStepOutcome,
+};
 use serde::Serialize;
 use std::io::{self, Write};
 
@@ -83,6 +85,19 @@ fn steps_phrase(steps: u64) -> String {
     }
 }
 
+/// Who a checkpoint record answers to, in one column: the label a user pin
+/// carries, or the fork target that keeps a lease standing. A fork lease is
+/// marked as such because `admin checkpoint-release` refuses it — it goes
+/// when its target namespace does.
+fn checkpoint_owner_label(owner: &CheckpointOwnerSummary) -> String {
+    match owner {
+        CheckpointOwnerSummary::User { name } => name.clone(),
+        CheckpointOwnerSummary::Fork {
+            target_namespace_id,
+        } => format!("fork -> {target_namespace_id}"),
+    }
+}
+
 fn gc_summary(report: &GcResponse) -> String {
     let mut summary = format!(
         "gc deleted {} wal segments, {} tables, {} manifests, {} checkpoint records, {} content objects ({} retained)",
@@ -93,6 +108,12 @@ fn gc_summary(report: &GcResponse) -> String {
         report.deleted_content_objects,
         report.retained_candidates
     );
+    // One reason, not the whole table: the count says how much was kept and
+    // this says what the bulk of it was, which is the question an operator
+    // asks next. `--json` carries every reason.
+    if let Some((reason, count)) = report.retained.top_reason() {
+        summary.push_str(&format!("; mostly {reason}: {count}"));
+    }
     if report.released_fork_checkpoints > 0 {
         summary.push_str(&format!(
             "; released {} fork checkpoints",
@@ -116,7 +137,7 @@ fn gc_summary(report: &GcResponse) -> String {
 /// Renders Unix milliseconds as `YYYY-MM-DD HH:MM:SSZ`. Hand-rolled
 /// civil-from-days arithmetic (Howard Hinnant's algorithm), matching the
 /// presign signer's approach, so the CLI takes no date dependency.
-fn format_utc_ms(unix_ms: u64) -> String {
+pub(crate) fn format_utc_ms(unix_ms: u64) -> String {
     let seconds = unix_ms / 1_000;
     let days = i64::try_from(seconds / 86_400).unwrap_or(0);
     let second_of_day = seconds % 86_400;
@@ -361,6 +382,30 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
                 response.checkpoint_id,
                 response.manifest_id
             )
+        }
+        CommandData::CheckpointsListed(response) => {
+            let mut lines = vec![
+                format!("active checkpoints for {}", response.namespace_id),
+                "CREATED\tEXPIRES\tSEQ\tOWNER\tCHECKPOINT".to_owned(),
+            ];
+            for checkpoint in &response.checkpoints {
+                let (owner, expiry) = (
+                    checkpoint_owner_label(&checkpoint.owner),
+                    checkpoint
+                        .expires_at_ms
+                        .map_or_else(|| "-".to_owned(), format_utc_ms),
+                );
+                lines.push(format!(
+                    "{}\t{expiry}\t{}\t{owner}\t{}",
+                    format_utc_ms(checkpoint.created_at_ms),
+                    checkpoint.checkpoint_seq.0,
+                    checkpoint.checkpoint_id,
+                ));
+            }
+            if response.checkpoints.is_empty() {
+                lines.push("(none)".to_owned());
+            }
+            lines.join("\n")
         }
         CommandData::CheckpointReleased(response) => {
             let state = if response.was_active {

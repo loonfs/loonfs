@@ -35,9 +35,9 @@ use loonfs_api::{
     ChecksumAlgorithm, CommitId, CommitRequest, ContentRef, Crc64Nvme, CreateCheckpointRequest,
     CreateCheckpointResponse, CreateNamespaceRequest, DeleteNamespaceResponse, ErrorCode,
     FilesystemOperation, ForkNamespaceRequest, GrepRequest, GrepResponse, InodeId,
-    ListFileRevisionsResponse, ListPathEntriesResponse, ListTrashResponse, MaintenanceStepRequest,
-    MaintenanceStepResponse, NamespaceId, NamespaceStatusResponse, NamespaceSummary,
-    ReleaseCheckpointResponse, RevisionNo, Sha256, StorageChecksum, UploadId,
+    ListCheckpointsResponse, ListFileRevisionsResponse, ListPathEntriesResponse, ListTrashResponse,
+    MaintenanceStepRequest, MaintenanceStepResponse, NamespaceId, NamespaceStatusResponse,
+    NamespaceSummary, ReleaseCheckpointResponse, RevisionNo, Sha256, StorageChecksum, UploadId,
     FEATURE_DOWNLOADS_DIRECT_GET, FEATURE_UPLOADS_DIRECT_MULTIPART,
     LIMIT_DOWNLOAD_MAX_CONTENT_BYTES,
 };
@@ -1139,6 +1139,25 @@ impl Client {
             self.base_url
         );
         self.request_json(self.post(&url), Some(request)).await
+    }
+
+    /// Lists the namespace's active checkpoint records, oldest first (admin
+    /// plane).
+    ///
+    /// A checkpoint name is a label rather than a key, so this is how a pin
+    /// is found again once its creation response is gone. An expired record
+    /// that no collection pass has released yet is still listed, with its
+    /// expiry in the entry.
+    pub async fn list_checkpoints(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<ListCheckpointsResponse> {
+        let url = format!(
+            "{}/v0/admin/namespaces/{namespace_id}/checkpoints",
+            self.base_url
+        );
+        self.request_json::<(), ListCheckpointsResponse>(self.get(&url), None)
+            .await
     }
 
     /// Releases a user-owned checkpoint pin by id (admin plane). Idempotent:

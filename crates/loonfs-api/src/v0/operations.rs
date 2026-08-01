@@ -404,6 +404,69 @@ pub struct ReleaseCheckpointResponse {
     pub was_active: bool,
 }
 
+/// Who a checkpoint record answers to, as the record durably records it.
+///
+/// The two owners have different releases, so a listing that names the
+/// owner also says which records the release endpoint will act on: a user
+/// pin is released by id, and a fork lease is released by deleting the
+/// target namespace it protects.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CheckpointOwnerSummary {
+    /// An operator-created pin, released by id or by its own expiry.
+    #[cfg_attr(feature = "openapi", schema(title = "CheckpointOwnerUser"))]
+    User {
+        /// The label the creator recorded. Not a key: several records may
+        /// carry one label over different bases.
+        name: String,
+    },
+    /// A fork target keeping its source basis alive for the length of one
+    /// fork attempt.
+    #[cfg_attr(feature = "openapi", schema(title = "CheckpointOwnerFork"))]
+    Fork {
+        /// Namespace whose continued existence keeps this pin standing.
+        target_namespace_id: NamespaceId,
+    },
+}
+
+/// One active checkpoint record, reported from what the record carries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct CheckpointSummary {
+    /// Durable checkpoint id, as the creation response returned it. This is
+    /// what the release endpoint takes.
+    pub checkpoint_id: CheckpointId,
+    /// Who the record answers to, and the label a user pin carries.
+    pub owner: CheckpointOwnerSummary,
+    /// When the record was written, in Unix milliseconds.
+    pub created_at_ms: u64,
+    /// When garbage collection may release the record without being asked,
+    /// in Unix milliseconds. Absent means the pin holds until it is
+    /// released. An instant already in the past is a record whose expiry
+    /// has passed and which no collection pass has reached yet: it is still
+    /// a root, so it is still listed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at_ms: Option<u64>,
+    /// Sequence the pinned basis covers — the same number the creation
+    /// response reported as `checkpoint_seq`.
+    pub checkpoint_seq: ChangeSeq,
+    /// Manifest the record pins.
+    pub manifest_id: ManifestId,
+}
+
+/// Every active checkpoint record a namespace currently carries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct ListCheckpointsResponse {
+    /// Namespace the records belong to.
+    pub namespace_id: NamespaceId,
+    /// Active records, oldest first. Released records are absent because a
+    /// release is what stops a record pinning anything; a released record
+    /// that garbage collection has not yet deleted is not reported either.
+    pub checkpoints: Vec<CheckpointSummary>,
+}
+
 /// How one WAL flush satisfied its goal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -465,6 +528,59 @@ pub struct GcRequest {
     pub cursor: Option<String>,
 }
 
+/// Why a pass kept what it kept: `retained_candidates` split by the
+/// decision that spared each candidate.
+///
+/// The reasons are a closed set — one per place the sweep decides against
+/// deleting — so every field is always reported, and a zero is the answer
+/// that nothing was kept for that reason. The counts sum to
+/// `retained_candidates`.
+///
+/// Retention is a decision per candidate examined, not per object in the
+/// namespace: one object examined by two passes is counted by each.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct RetainedCandidates {
+    /// Selected as unreachable, then found reachable by the re-verification
+    /// that runs immediately before every deletion. A candidate the pass
+    /// already knew was reachable is never examined at all, so this counts
+    /// the namespace moving underneath the pass rather than the size of its
+    /// live set.
+    pub referenced: u64,
+    /// Unreachable, but younger than the grace window by the object's own
+    /// provider timestamp. A later pass deletes it.
+    pub grace_window: u64,
+    /// Unreachable, and the provider reported no last-modified time at all,
+    /// so the object's age is unknown and it is treated as young.
+    pub no_provider_timestamp: u64,
+    /// Root resolution failed somewhere in this pass, so manifest and table
+    /// deletion was suppressed wholesale (`degraded_retention` is set too).
+    pub degraded_roots: u64,
+    /// A key under a swept family that this collector does not recognize as
+    /// one of its own. Never deleted, whatever its age.
+    pub unrecognized_key: u64,
+    /// A checkpoint record this pass could have advanced but could not
+    /// prove ready: a lost compare-and-swap, an unreadable record, a fork
+    /// target not provably gone, a released record still inside its grace
+    /// window, or an active pin that is simply doing its job. The pins
+    /// themselves are listed by
+    /// `GET /v0/admin/namespaces/{ns}/checkpoints`.
+    pub checkpoint_not_releasable: u64,
+    /// An upload session waiting out a window a clock resolves: an open
+    /// session's lease plus the grace, an aborted session's grace, or a
+    /// completed session's derived content-reclamation grace.
+    /// `next_reclamation_at_ms` reports the soonest of these.
+    pub upload_session_window: u64,
+    /// An upload session held over for a reason no clock resolves: a lost
+    /// compare-and-swap, a record that vanished mid-pass, or a reference
+    /// set this pass could not establish. Only a later pass answers it.
+    pub upload_session_undecided: u64,
+    /// A completed session whose content reclamation was skipped because
+    /// the reference scan did not fit in `max_objects`
+    /// (`content_reclamation_deferred` is set too).
+    pub content_scan_deferred: u64,
+}
+
 /// Result of one mark-and-sweep garbage-collection pass.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -503,6 +619,11 @@ pub struct GcResponse {
     /// Candidates retained at delete time (grace window, missing
     /// timestamps, or reachable from the fresh root set).
     pub retained_candidates: u64,
+    /// The same total, split by the decision that spared each candidate.
+    /// The total above stays because it is what every existing consumer
+    /// reads; this says why.
+    #[serde(default)]
+    pub retained: RetainedCandidates,
     /// True when ambiguous roots suppressed manifest/table deletion.
     pub degraded_retention: bool,
     /// True when the pass skipped completed-content reclamation because
@@ -554,11 +675,108 @@ impl GcResponse {
             deleted_content_objects: 0,
             released_missing_basis_checkpoints: 0,
             retained_candidates: 0,
+            retained: RetainedCandidates::default(),
             degraded_retention: false,
             content_reclamation_deferred: false,
             next_cursor: None,
             next_reclamation_at_ms: None,
         }
+    }
+
+    /// Records one retained candidate under the reason that spared it.
+    ///
+    /// The total and the breakdown move together here so they cannot drift:
+    /// every sweep site names a reason, and no site can count a retention
+    /// without naming one.
+    pub fn retain(&mut self, reason: RetainedReason) {
+        self.retained_candidates += 1;
+        *reason.counter(&mut self.retained) += 1;
+    }
+}
+
+/// The reason one candidate was retained, as the sweep site knows it. Each
+/// variant is the field of [`RetainedCandidates`] it counts into, where the
+/// reason itself is described.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RetainedReason {
+    /// Counts into [`RetainedCandidates::referenced`].
+    Referenced,
+    /// Counts into [`RetainedCandidates::grace_window`].
+    GraceWindow,
+    /// Counts into [`RetainedCandidates::no_provider_timestamp`].
+    NoProviderTimestamp,
+    /// Counts into [`RetainedCandidates::degraded_roots`].
+    DegradedRoots,
+    /// Counts into [`RetainedCandidates::unrecognized_key`].
+    UnrecognizedKey,
+    /// Counts into [`RetainedCandidates::checkpoint_not_releasable`].
+    CheckpointNotReleasable,
+    /// Counts into [`RetainedCandidates::upload_session_window`].
+    UploadSessionWindow,
+    /// Counts into [`RetainedCandidates::upload_session_undecided`].
+    UploadSessionUndecided,
+    /// Counts into [`RetainedCandidates::content_scan_deferred`].
+    ContentScanDeferred,
+}
+
+impl RetainedReason {
+    fn counter(self, retained: &mut RetainedCandidates) -> &mut u64 {
+        match self {
+            Self::Referenced => &mut retained.referenced,
+            Self::GraceWindow => &mut retained.grace_window,
+            Self::NoProviderTimestamp => &mut retained.no_provider_timestamp,
+            Self::DegradedRoots => &mut retained.degraded_roots,
+            Self::UnrecognizedKey => &mut retained.unrecognized_key,
+            Self::CheckpointNotReleasable => &mut retained.checkpoint_not_releasable,
+            Self::UploadSessionWindow => &mut retained.upload_session_window,
+            Self::UploadSessionUndecided => &mut retained.upload_session_undecided,
+            Self::ContentScanDeferred => &mut retained.content_scan_deferred,
+        }
+    }
+}
+
+impl RetainedCandidates {
+    /// Every reason and its count, in a fixed order, for callers that
+    /// report the breakdown rather than read one field of it.
+    pub fn by_reason(&self) -> [(&'static str, u64); 9] {
+        [
+            ("referenced", self.referenced),
+            ("grace_window", self.grace_window),
+            ("no_provider_timestamp", self.no_provider_timestamp),
+            ("degraded_roots", self.degraded_roots),
+            ("unrecognized_key", self.unrecognized_key),
+            ("checkpoint_not_releasable", self.checkpoint_not_releasable),
+            ("upload_session_window", self.upload_session_window),
+            ("upload_session_undecided", self.upload_session_undecided),
+            ("content_scan_deferred", self.content_scan_deferred),
+        ]
+    }
+
+    /// Folds another pass's breakdown into this one.
+    pub fn add(&mut self, other: &Self) {
+        self.referenced += other.referenced;
+        self.grace_window += other.grace_window;
+        self.no_provider_timestamp += other.no_provider_timestamp;
+        self.degraded_roots += other.degraded_roots;
+        self.unrecognized_key += other.unrecognized_key;
+        self.checkpoint_not_releasable += other.checkpoint_not_releasable;
+        self.upload_session_window += other.upload_session_window;
+        self.upload_session_undecided += other.upload_session_undecided;
+        self.content_scan_deferred += other.content_scan_deferred;
+    }
+
+    /// The reason with the highest count, and that count. `None` when
+    /// nothing was retained. Ties go to the first in [`Self::by_reason`]
+    /// order, so one pass's report is stable.
+    pub fn top_reason(&self) -> Option<(&'static str, u64)> {
+        self.by_reason()
+            .into_iter()
+            .filter(|(_, count)| *count > 0)
+            // `max_by_key` keeps the last of equal maxima, so the reversal
+            // is what makes a tie report the earlier reason.
+            .rev()
+            .max_by_key(|(_, count)| *count)
     }
 }
 

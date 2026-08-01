@@ -1350,7 +1350,56 @@ async fn gc_retains_everything_inside_the_grace_window() {
     assert_eq!(report.deleted_metadata_tables, 0);
     assert_eq!(report.deleted_manifests, 0);
     assert!(report.retained_candidates > 0);
+    // The breakdown is the same total, said in reasons: nothing is counted
+    // into one without the other, so the two can never disagree.
+    assert_eq!(reason_total(&report), report.retained_candidates);
+    // Everything unreachable here is simply young, and the pass says so
+    // rather than leaving the operator to guess between age and reachability.
+    assert!(report.retained.grace_window > 0);
+    assert_eq!(report.retained.no_provider_timestamp, 0);
     stat_root(&store, &namespace_id).await;
+}
+
+/// Every reason's count, summed — what `retained_candidates` must equal.
+fn reason_total(report: &GcResponse) -> u64 {
+    report
+        .retained
+        .by_reason()
+        .into_iter()
+        .map(|(_, count)| count)
+        .sum()
+}
+
+/// A pass that keeps a checkpoint record says so as a checkpoint decision,
+/// not as an anonymous count — which is the difference between an operator
+/// knowing to look at their pins and knowing nothing.
+#[tokio::test]
+async fn a_pass_names_a_checkpoint_record_it_could_not_advance() {
+    let temp_dir = tempdir().expect("tempdir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("store");
+    let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+    let setup = context(1_000);
+    bootstrap_namespace(&store, &namespace_id, &setup, false)
+        .await
+        .expect("bootstrap");
+    write_test_file(&store, &namespace_id, "/docs/one.txt", "gc-one", &setup).await;
+    let pinned = create_checkpoint(&store, &namespace_id, &setup)
+        .await
+        .expect("checkpoint");
+
+    // Released just now: a candidate the pass must hold for its own grace
+    // window before the key can go.
+    let aged = context(now_after_newest_object(&store, &namespace_id, GRACE_MS * 2).await);
+    crate::checkpoint::release_checkpoint(&store, &namespace_id, &pinned.checkpoint_id, &aged)
+        .await
+        .expect("release checkpoint");
+    let report = gc_namespace(&store, &namespace_id, &config(), &aged)
+        .await
+        .expect("gc pass");
+
+    assert_eq!(report.deleted_checkpoint_records, 0);
+    assert_eq!(report.retained.checkpoint_not_releasable, 1);
+    assert_eq!(reason_total(&report), report.retained_candidates);
 }
 
 #[tokio::test]
@@ -2680,6 +2729,7 @@ fn accumulate_report(total: &mut GcResponse, pass: &GcResponse) {
     total.deleted_content_objects += pass.deleted_content_objects;
     total.released_missing_basis_checkpoints += pass.released_missing_basis_checkpoints;
     total.retained_candidates += pass.retained_candidates;
+    total.retained.add(&pass.retained);
     total.degraded_retention |= pass.degraded_retention;
     total.content_reclamation_deferred |= pass.content_reclamation_deferred;
 }

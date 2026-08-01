@@ -25,14 +25,15 @@ mod uploads;
 pub use commits::{ChangesResponse, CommitResponse, CommittedChange, FilesystemChange};
 pub use downloads::{BeginDownloadRequest, BeginDownloadResponse};
 pub use operations::{
-    AdvanceRetentionResponse, ApiError, CommitRequest, CreateCheckpointRequest,
-    CreateCheckpointResponse, CreateNamespaceRequest, DeleteDirectoryBehavior,
-    DeleteNamespaceResponse, DestinationBehavior, ErrorDetails, FileRevision, FilesystemOperation,
-    FlushWalOutcome, FlushWalResponse, ForkNamespaceRequest, GcRequest, GcResponse,
-    ListFileRevisionsResponse, MaintenanceStepKind, MaintenanceStepRequest,
-    MaintenanceStepResponse, NamespaceStatusResponse, NamespaceSummary, ReleaseCheckpointResponse,
-    ReorganizeStepOutcome, StoreProbeCheckOutcome, StoreProbeCheckResult, StoreProbeRequest,
-    StoreProbeResponse, WalFlushStepOutcome,
+    AdvanceRetentionResponse, ApiError, CheckpointOwnerSummary, CheckpointSummary, CommitRequest,
+    CreateCheckpointRequest, CreateCheckpointResponse, CreateNamespaceRequest,
+    DeleteDirectoryBehavior, DeleteNamespaceResponse, DestinationBehavior, ErrorDetails,
+    FileRevision, FilesystemOperation, FlushWalOutcome, FlushWalResponse, ForkNamespaceRequest,
+    GcRequest, GcResponse, ListCheckpointsResponse, ListFileRevisionsResponse, MaintenanceStepKind,
+    MaintenanceStepRequest, MaintenanceStepResponse, NamespaceStatusResponse, NamespaceSummary,
+    ReleaseCheckpointResponse, ReorganizeStepOutcome, RetainedCandidates, RetainedReason,
+    StoreProbeCheckOutcome, StoreProbeCheckResult, StoreProbeRequest, StoreProbeResponse,
+    WalFlushStepOutcome,
 };
 pub use reads::{
     AuthoritativeFileBytes, AuthoritativePathEntry, ListPathEntriesResponse, ListTrashResponse,

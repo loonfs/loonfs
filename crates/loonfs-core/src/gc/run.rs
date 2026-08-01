@@ -17,7 +17,7 @@ use crate::error::{CoreError, Result};
 use crate::namespace::control::{read_head_object, ControlObjectLoadError};
 use futures::StreamExt;
 use loonfs_api::v0::GcResponse;
-use loonfs_api::{ContentStoreId, NamespaceId, UploadId};
+use loonfs_api::{ContentStoreId, NamespaceId, RetainedReason, UploadId};
 use loonfs_objectstore::ObjectStore;
 use std::sync::Arc;
 
@@ -176,7 +176,7 @@ async fn process_candidate<S: ObjectStore + ?Sized>(
         {
             report.released_missing_basis_checkpoints += 1;
         } else {
-            report.retained_candidates += 1;
+            report.retain(RetainedReason::CheckpointNotReleasable);
         }
         return Ok(());
     }
@@ -199,58 +199,45 @@ async fn process_candidate<S: ObjectStore + ?Sized>(
     }
 
     sweep.refresh_if_due(store, namespace_id, context).await?;
+    // Each arm names the one reason it kept a candidate. The decisions are
+    // exactly the ones they always were — the `||` conditions below are
+    // split only so a retention can say which half of the condition held.
     match family {
         CandidateFamily::WalSegments => {
             if sweep.live.wal_segments.contains(key) {
-                report.retained_candidates += 1;
-            } else if delete_if_aged(
-                store,
-                key,
-                config.grace_window_ms,
-                context.now_ms,
-                &mut report.retained_candidates,
-            )
-            .await
-            .map_err(|error| CoreError::store(key, &error))?
-            {
+                report.retain(RetainedReason::Referenced);
+            } else if sweep_aged(store, key, config, context, report).await? {
                 report.deleted_wal_segments += 1;
             }
         }
         CandidateFamily::MetadataTables => {
             // Rule 5 is sticky across every re-collection in this pass.
-            if sweep.degraded || sweep.live.tables.contains(key) {
-                report.retained_candidates += 1;
-            } else if delete_if_aged(
-                store,
-                key,
-                config.grace_window_ms,
-                context.now_ms,
-                &mut report.retained_candidates,
-            )
-            .await
-            .map_err(|error| CoreError::store(key, &error))?
-            {
+            if sweep.degraded {
+                report.retain(RetainedReason::DegradedRoots);
+            } else if sweep.live.tables.contains(key) {
+                report.retain(RetainedReason::Referenced);
+            } else if sweep_aged(store, key, config, context, report).await? {
                 report.deleted_metadata_tables += 1;
             }
         }
         CandidateFamily::Manifests => {
-            let live_or_unrecognized = match manifest_object_id_of(key) {
-                Some(Ok(id)) => sweep.live.manifests.contains(&id),
-                None | Some(Err(_)) => true,
-            };
-            if sweep.degraded || live_or_unrecognized {
-                report.retained_candidates += 1;
-            } else if delete_if_aged(
-                store,
-                key,
-                config.grace_window_ms,
-                context.now_ms,
-                &mut report.retained_candidates,
-            )
-            .await
-            .map_err(|error| CoreError::store(key, &error))?
-            {
-                report.deleted_manifests += 1;
+            if sweep.degraded {
+                report.retain(RetainedReason::DegradedRoots);
+            } else {
+                match manifest_object_id_of(key) {
+                    Some(Ok(id)) if sweep.live.manifests.contains(&id) => {
+                        report.retain(RetainedReason::Referenced);
+                    }
+                    Some(Ok(_)) => {
+                        if sweep_aged(store, key, config, context, report).await? {
+                            report.deleted_manifests += 1;
+                        }
+                    }
+                    // Candidate selection above never picks an unreadable
+                    // manifest key, so this arm is the same belt-and-braces
+                    // the selection already wears.
+                    None | Some(Err(_)) => report.retain(RetainedReason::UnrecognizedKey),
+                }
             }
         }
         CandidateFamily::Checkpoints => {
@@ -259,6 +246,25 @@ async fn process_candidate<S: ObjectStore + ?Sized>(
         CandidateFamily::UploadSessions => {}
     }
     Ok(())
+}
+
+/// Ages one unreferenced key out, recording the reason when it stays.
+/// Answers whether the key was deleted, so each family still counts its own
+/// deletions.
+async fn sweep_aged<S: ObjectStore + ?Sized>(
+    store: &S,
+    key: &str,
+    config: &GcConfig,
+    context: &MutationContext,
+    report: &mut GcResponse,
+) -> Result<bool> {
+    let outcome = delete_if_aged(store, key, config.grace_window_ms, context.now_ms)
+        .await
+        .map_err(|error| CoreError::store(key, &error))?;
+    if let Some(reason) = outcome.retained_reason() {
+        report.retain(reason);
+    }
+    Ok(outcome.deleted())
 }
 
 async fn process_checkpoint<S: ObjectStore + ?Sized>(
@@ -271,7 +277,7 @@ async fn process_checkpoint<S: ObjectStore + ?Sized>(
     report: &mut GcResponse,
 ) -> Result<()> {
     if sweep.live.checkpoint_keys.contains(key) {
-        report.retained_candidates += 1;
+        report.retain(RetainedReason::Referenced);
         return Ok(());
     }
     match maybe_release_fork_checkpoint(store, key, context).await? {
@@ -280,7 +286,7 @@ async fn process_checkpoint<S: ObjectStore + ?Sized>(
             return Ok(());
         }
         ForkCheckpointSweep::Retained => {
-            report.retained_candidates += 1;
+            report.retain(RetainedReason::CheckpointNotReleasable);
             return Ok(());
         }
         ForkCheckpointSweep::NotAnActiveFork => {}
@@ -303,7 +309,7 @@ async fn process_checkpoint<S: ObjectStore + ?Sized>(
             report.deleted_checkpoint_records += 1;
         }
         CheckpointSweep::Released => report.released_expired_checkpoints += 1,
-        CheckpointSweep::Retain => report.retained_candidates += 1,
+        CheckpointSweep::Retain => report.retain(RetainedReason::CheckpointNotReleasable),
     }
     Ok(())
 }
@@ -321,7 +327,7 @@ async fn process_upload_session<S: ObjectStore + ?Sized>(
     report: &mut GcResponse,
 ) -> Result<()> {
     let Some(upload_id) = upload_id_of(key) else {
-        report.retained_candidates += 1;
+        report.retain(RetainedReason::UnrecognizedKey);
         return Ok(());
     };
     match sweep_upload_session(
@@ -347,7 +353,12 @@ async fn process_upload_session<S: ObjectStore + ?Sized>(
             }
         }
         UploadSessionSweep::Retain { reclaimable_at_ms } => {
-            report.retained_candidates += 1;
+            // A deadline is the difference between "come back then" and
+            // "ask again next pass", and the sweep already draws that line.
+            report.retain(match reclaimable_at_ms {
+                Some(_) => RetainedReason::UploadSessionWindow,
+                None => RetainedReason::UploadSessionUndecided,
+            });
             note_reclamation_deadline(report, reclaimable_at_ms, context.now_ms);
         }
         UploadSessionSweep::ContentReclamationDeferred => {
@@ -355,7 +366,7 @@ async fn process_upload_session<S: ObjectStore + ?Sized>(
             // plus a flag, so a caller can tell a pass that swept
             // everything from one that skipped a question it could not
             // afford to ask.
-            report.retained_candidates += 1;
+            report.retain(RetainedReason::ContentScanDeferred);
             report.content_reclamation_deferred = true;
         }
     }

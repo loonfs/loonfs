@@ -4224,6 +4224,7 @@ fn every_advertised_capability_maps_to_a_cli_command_path() {
             "admin/v0",
             &[
                 &["admin", "checkpoint"],
+                &["admin", "checkpoint-list"],
                 &["admin", "checkpoint-release"],
                 &["admin", "flush"],
                 &["admin", "retention-advance"],
@@ -4650,6 +4651,75 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
             .to_owned();
         assert!(checkpoint_id.starts_with("chk_"));
 
+        // A name is a label, not a key: the same one asked for twice mints a
+        // second record, and the listing is how both ids are found again.
+        let second_checkpoint = harness.run(&[
+            "--json",
+            "admin",
+            "checkpoint",
+            "--name",
+            "nightly",
+            "--profile",
+            profile,
+        ]);
+        assert_success(&second_checkpoint);
+        let second_checkpoint_id = json_data(&second_checkpoint)["checkpoint_id"]
+            .as_str()
+            .expect("json string")
+            .to_owned();
+        assert_ne!(second_checkpoint_id, checkpoint_id);
+
+        let listed = harness.run(&["--json", "admin", "checkpoint-list", "--profile", profile]);
+        assert_success(&listed);
+        let listed_data = json_data(&listed);
+        assert_eq!(listed_data["kind"], "checkpoints_listed");
+        assert_eq!(listed_data["namespace_id"], "demo");
+        let mut listed_ids = listed_data["checkpoints"]
+            .as_array()
+            .expect("json array")
+            .iter()
+            .map(|checkpoint| {
+                assert_eq!(checkpoint["owner"]["kind"], "user");
+                assert_eq!(checkpoint["owner"]["name"], "nightly");
+                assert_eq!(checkpoint["checkpoint_seq"], 2);
+                checkpoint["checkpoint_id"]
+                    .as_str()
+                    .expect("json string")
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+        listed_ids.sort();
+        let mut expected_ids = vec![checkpoint_id.clone(), second_checkpoint_id.clone()];
+        expected_ids.sort();
+        assert_eq!(listed_ids, expected_ids);
+
+        // The human rendering is the same table in both modes, and it names
+        // the id the release command takes.
+        let listed_human = harness.run(&["admin", "checkpoint-list", "--profile", profile]);
+        assert_success(&listed_human);
+        let listed_text = stdout_string(&listed_human);
+        assert!(listed_text.contains("CREATED\tEXPIRES\tSEQ\tOWNER\tCHECKPOINT"));
+        assert!(listed_text.contains(&checkpoint_id));
+        assert!(listed_text.contains("nightly"));
+
+        // Releasing one leaves the other listed: a release is per record,
+        // never per label.
+        assert_success(&harness.run(&[
+            "--json",
+            "admin",
+            "checkpoint-release",
+            &second_checkpoint_id,
+            "--profile",
+            profile,
+        ]));
+        let after_release =
+            harness.run(&["--json", "admin", "checkpoint-list", "--profile", profile]);
+        assert_success(&after_release);
+        let remaining = json_data(&after_release);
+        let remaining = remaining["checkpoints"].as_array().expect("json array");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0]["checkpoint_id"], checkpoint_id.as_str());
+
         // `admin flush` runs a maintenance step restricted to the WAL
         // flush, so it reports a step: the flush part acted, the parts `only`
         // excluded report `not_needed`.
@@ -4719,6 +4789,27 @@ fn admin_and_changes_commands_report_the_same_shapes_in_both_modes() {
         assert_eq!(gc_data["deleted_manifests"], 0);
         assert_eq!(gc_data["degraded_retention"], false);
         assert!(gc_data.get("next_cursor").is_none());
+        // Every retention reason is reported whether or not it happened, so
+        // a consumer reads a field rather than probing for one, and the
+        // breakdown accounts for exactly the total beside it.
+        let retained = gc_data["retained"].as_object().expect("json object");
+        let reason_total: u64 = retained
+            .values()
+            .map(|count| count.as_u64().expect("json number"))
+            .sum();
+        assert_eq!(
+            reason_total,
+            gc_data["retained_candidates"]
+                .as_u64()
+                .expect("json number")
+        );
+        assert!(retained.contains_key("checkpoint_not_releasable"));
+
+        // A run that took one pass says nothing on the way: its summary on
+        // standard output is the whole report.
+        let quiet_gc = harness.run(&["admin", "gc", "--profile", profile]);
+        assert_success(&quiet_gc);
+        assert!(!stderr_string(&quiet_gc).contains("pass 1:"));
 
         // Supplying a candidate budget requests exactly one pass and exposes
         // the opaque cursor instead of the CLI's default completion loop.

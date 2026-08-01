@@ -72,6 +72,8 @@ pub(crate) async fn run(
         Command::Cp(args) => fs::run_filesystem_cp(kind, config_path, args, runtime).await,
         Command::Trash(args) => fs::run_filesystem_trash(kind, &location, args).await,
         Command::Changes(args) => admin::run_admin_changes(kind, config_path, args).await,
-        Command::Admin { command } => admin::run_admin_command(kind, config_path, command).await,
+        Command::Admin { command } => {
+            admin::run_admin_command(kind, config_path, command, runtime).await
+        }
     }
 }

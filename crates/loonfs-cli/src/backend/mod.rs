@@ -30,9 +30,10 @@ use loonfs_api::{
     },
     AuthoritativePathEntry, ChangeSeq, CheckpointId, CommitResponse, ContentRef,
     CreateCheckpointRequest, CreateCheckpointResponse, DeleteNamespaceResponse, GrepRequest,
-    GrepResponse, InodeId, ListFileRevisionsResponse, ListPathEntriesResponse, ListTrashResponse,
-    MaintenanceStepRequest, MaintenanceStepResponse, NamespaceId, NamespaceStatusResponse,
-    NamespaceSummary, ReleaseCheckpointResponse, RevisionNo, UploadId,
+    GrepResponse, InodeId, ListCheckpointsResponse, ListFileRevisionsResponse,
+    ListPathEntriesResponse, ListTrashResponse, MaintenanceStepRequest, MaintenanceStepResponse,
+    NamespaceId, NamespaceStatusResponse, NamespaceSummary, ReleaseCheckpointResponse, RevisionNo,
+    UploadId,
 };
 use loonfs_client::{
     CopyOptions, CreateDirectoryOptions, DeleteOptions, DirectDownloadStream, MoveOptions,
@@ -784,6 +785,17 @@ impl ResolvedTarget {
                 .client
                 .create_checkpoint(namespace_id, &request)
                 .await?),
+        }
+    }
+
+    /// Lists the namespace's active checkpoint pins, oldest first.
+    pub(crate) async fn list_checkpoints(
+        &self,
+        namespace_id: &NamespaceId,
+    ) -> Result<ListCheckpointsResponse, BackendError> {
+        match self {
+            Self::Embedded(target) => target.backend.list_checkpoints(namespace_id).await,
+            Self::Remote(target) => Ok(target.client.list_checkpoints(namespace_id).await?),
         }
     }
 

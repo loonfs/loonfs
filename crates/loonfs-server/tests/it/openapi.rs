@@ -55,6 +55,11 @@ fn openapi_documents_current_server_paths() {
         ),
         ("/v0/namespaces/{namespace}/changes", "get"),
         ("/v0/admin/namespaces/{namespace}/checkpoints", "post"),
+        ("/v0/admin/namespaces/{namespace}/checkpoints", "get"),
+        (
+            "/v0/admin/namespaces/{namespace}/checkpoints/{checkpoint_id}/release",
+            "post",
+        ),
         ("/v0/admin/namespaces/{namespace}/maintenance/step", "post"),
         ("/v0/admin/namespaces/{namespace}/grep/index/enable", "post"),
         (
@@ -120,6 +125,10 @@ fn openapi_names_tagged_one_of_alternatives() {
         (
             "ObjectTransferAccess",
             &["ObjectTransferAccessPresignedUrl"][..],
+        ),
+        (
+            "CheckpointOwnerSummary",
+            &["CheckpointOwnerUser", "CheckpointOwnerFork"][..],
         ),
     ] {
         let titles = one_of_titles(schemas, schema_name);

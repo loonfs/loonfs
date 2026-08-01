@@ -6,9 +6,10 @@ use super::output::{CommandData, CommandFailure, CommandOutput, MaintenanceKeyRe
 use crate::args::{
     AdminCheckpointArgs, AdminCheckpointReleaseArgs, AdminCommand, AdminGcArgs,
     AdminIndexEnableArgs, AdminIndexGcArgs, AdminNamespaceArgs, AdminProbeStoreArgs, AdminRunArgs,
-    AdminStepArgs, ChangesArgs, CommandKind, MaintenanceJobArg,
+    AdminStepArgs, ChangesArgs, CommandKind, MaintenanceJobArg, RuntimeBehavior,
 };
 use crate::backend::{MaintenanceKeyProgress, StepBudget};
+use crate::render::{format_utc_ms, write_stderr_progress};
 use crate::resolve::{parse_namespace_id, resolve_target_profile};
 use clap::ValueEnum;
 use loonfs::{MaintenanceJobId, NamespaceId};
@@ -27,9 +28,13 @@ pub(crate) async fn run_admin_command(
     kind: CommandKind,
     config_path: &Path,
     command: AdminCommand,
+    runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
     match command {
         AdminCommand::Checkpoint(args) => run_admin_checkpoint(kind, config_path, args).await,
+        AdminCommand::CheckpointList(args) => {
+            run_admin_checkpoint_list(kind, config_path, args).await
+        }
         AdminCommand::CheckpointRelease(args) => {
             run_admin_checkpoint_release(kind, config_path, args).await
         }
@@ -39,12 +44,12 @@ pub(crate) async fn run_admin_command(
         }
         AdminCommand::Run(args) => run_admin_run(kind, config_path, args).await,
         AdminCommand::Step(args) => run_admin_step(kind, config_path, args).await,
-        AdminCommand::Gc(args) => run_admin_gc(kind, config_path, args).await,
+        AdminCommand::Gc(args) => run_admin_gc(kind, config_path, args, runtime).await,
         AdminCommand::ProbeStore(args) => run_admin_probe_store(kind, config_path, args).await,
         AdminCommand::IndexEnable(args) => run_admin_index_enable(kind, config_path, args).await,
         AdminCommand::IndexDisable(args) => run_admin_index_disable(kind, config_path, args).await,
         AdminCommand::IndexStatus(args) => run_admin_index_status(kind, config_path, args).await,
-        AdminCommand::IndexGc(args) => run_admin_index_gc(kind, config_path, args).await,
+        AdminCommand::IndexGc(args) => run_admin_index_gc(kind, config_path, args, runtime).await,
     }
 }
 
@@ -74,10 +79,19 @@ async fn run_admin_step(
     })
 }
 
+/// Sweeps the namespace, looping the cursor through completion unless
+/// `--max-objects` asks for one pass.
+///
+/// A run that takes several passes says where it has got to as each pass
+/// lands, on standard error: the summary on standard output is still one
+/// accumulated report per invocation, whether the run took one pass or
+/// twenty, and `--json` is untouched by the progress. A single-pass run
+/// prints no progress at all — its summary is the whole story.
 async fn run_admin_gc(
     kind: CommandKind,
     config_path: &Path,
     args: AdminGcArgs,
+    runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, config_path, &args.target).await?;
     let single_pass = args.max_objects.is_some();
@@ -86,6 +100,7 @@ async fn run_admin_gc(
         max_objects: Some(args.max_objects.unwrap_or(loonfs::DEFAULT_GC_MAX_OBJECTS)),
         cursor: None,
     };
+    let mut progress = PassProgress::new(runtime);
     let mut response = None;
     loop {
         let pass = context
@@ -104,6 +119,7 @@ async fn run_admin_gc(
             .gc
             .expect("gc report present when the step opted in");
         let next_cursor = pass.next_cursor.clone();
+        progress.pass_completed(gc_pass_line(&pass));
         match &mut response {
             Some(total) => accumulate_gc_response(total, pass),
             None => response = Some(pass),
@@ -123,6 +139,73 @@ async fn run_admin_gc(
     })
 }
 
+/// Holds the passes of a cursor loop until there are at least two of them.
+///
+/// The first pass's line is written only once a second pass proves the run
+/// is a multi-pass one, so a single-pass run stays as quiet as it always
+/// was. Nothing is written at all under `--json`, where standard output is
+/// the whole answer.
+struct PassProgress {
+    enabled: bool,
+    held_first_line: Option<String>,
+    passes: u64,
+}
+
+impl PassProgress {
+    fn new(runtime: RuntimeBehavior) -> Self {
+        Self {
+            enabled: !runtime.json,
+            held_first_line: None,
+            passes: 0,
+        }
+    }
+
+    fn pass_completed(&mut self, line: String) {
+        for line in self.lines_for_completed_pass(line) {
+            write_stderr_progress(line);
+        }
+    }
+
+    /// The lines this completed pass adds, in the order they are written.
+    /// Separate from the writing so the sequencing itself is testable.
+    fn lines_for_completed_pass(&mut self, line: String) -> Vec<String> {
+        self.passes += 1;
+        if !self.enabled {
+            return Vec::new();
+        }
+        if self.passes == 1 {
+            self.held_first_line = Some(line);
+            return Vec::new();
+        }
+        let mut lines = Vec::new();
+        if let Some(first) = self.held_first_line.take() {
+            lines.push(format!("pass 1: {first}"));
+        }
+        lines.push(format!("pass {}: {line}", self.passes));
+        lines
+    }
+}
+
+/// What one collection pass did, in the terms an operator watching a long
+/// run needs: what went, what stayed and mostly why, and when the next thing
+/// this pass kept becomes reclaimable.
+fn gc_pass_line(pass: &loonfs_api::GcResponse) -> String {
+    let deleted = pass.deleted_wal_segments
+        + pass.deleted_metadata_tables
+        + pass.deleted_manifests
+        + pass.deleted_checkpoint_records
+        + pass.deleted_upload_sessions
+        + pass.deleted_content_objects;
+    let mut line = format!("{deleted} deleted, {} retained", pass.retained_candidates);
+    if let Some((reason, count)) = pass.retained.top_reason() {
+        line.push_str(&format!(" (mostly {reason}: {count})"));
+    }
+    if let Some(at_ms) = pass.next_reclamation_at_ms {
+        line.push_str(&format!("; next reclaimable at {}", format_utc_ms(at_ms)));
+    }
+    line
+}
+
 fn accumulate_gc_response(total: &mut loonfs_api::GcResponse, pass: loonfs_api::GcResponse) {
     total.deleted_wal_segments += pass.deleted_wal_segments;
     total.deleted_metadata_tables += pass.deleted_metadata_tables;
@@ -133,6 +216,7 @@ fn accumulate_gc_response(total: &mut loonfs_api::GcResponse, pass: loonfs_api::
     total.deleted_content_objects += pass.deleted_content_objects;
     total.released_missing_basis_checkpoints += pass.released_missing_basis_checkpoints;
     total.retained_candidates += pass.retained_candidates;
+    total.retained.add(&pass.retained);
     total.degraded_retention |= pass.degraded_retention;
     total.content_reclamation_deferred |= pass.content_reclamation_deferred;
     total.next_cursor = pass.next_cursor;
@@ -159,6 +243,26 @@ async fn run_admin_checkpoint(
         profile: Some(context.profile_name),
         mode: Some(context.mode),
         data: CommandData::CheckpointCreated(response),
+    })
+}
+
+async fn run_admin_checkpoint_list(
+    kind: CommandKind,
+    config_path: &Path,
+    args: AdminNamespaceArgs,
+) -> Result<CommandOutput, CommandFailure> {
+    let context = resolve_command_context(kind, config_path, &args.target).await?;
+    let response = context
+        .target
+        .list_checkpoints(&context.namespace)
+        .await
+        .map_err(|error| context.fail(kind, error))?;
+
+    Ok(CommandOutput {
+        kind,
+        profile: Some(context.profile_name),
+        mode: Some(context.mode),
+        data: CommandData::CheckpointsListed(response),
     })
 }
 
@@ -516,6 +620,7 @@ async fn run_admin_index_gc(
     kind: CommandKind,
     config_path: &Path,
     args: AdminIndexGcArgs,
+    runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
     let context = resolve_command_context(kind, config_path, &args.target).await?;
     let single_pass = args.max_objects.is_some();
@@ -526,6 +631,7 @@ async fn run_admin_index_gc(
         max_objects: args.max_objects,
         cursor: None,
     };
+    let mut progress = PassProgress::new(runtime);
     let mut response: Option<loonfs_api::v0::GrepGcResponse> = None;
     loop {
         let pass = context
@@ -534,6 +640,11 @@ async fn run_admin_index_gc(
             .await
             .map_err(|error| context.fail(kind, error))?;
         let next_cursor = pass.next_cursor.clone();
+        progress.pass_completed(format!(
+            "{} deleted, {} retained",
+            pass.deleted_segments + pass.deleted_other_objects,
+            pass.retained_candidates
+        ));
         match &mut response {
             Some(total) => accumulate_grep_gc_response(total, pass),
             None => response = Some(pass),
@@ -582,4 +693,90 @@ async fn run_admin_index_disable(
         mode: Some(context.mode),
         data: CommandData::GrepIndexDisabled(response),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::progress::ProgressMode;
+    use loonfs_api::{GcResponse, NamespaceId, RetainedReason};
+
+    fn runtime(json: bool) -> RuntimeBehavior {
+        RuntimeBehavior {
+            json,
+            no_input: true,
+            interactive: false,
+            progress: ProgressMode::Off,
+        }
+    }
+
+    /// A run that finishes in one pass has nothing to report progress about:
+    /// its summary is the whole story, and a stray "pass 1" line before it
+    /// would be noise on every quiet invocation.
+    #[test]
+    fn a_single_pass_run_reports_no_progress() {
+        let mut progress = PassProgress::new(runtime(false));
+        assert!(progress
+            .lines_for_completed_pass("first".to_owned())
+            .is_empty());
+    }
+
+    /// Once a second pass proves the run is a long one, the first pass's line
+    /// is written too — so a multi-pass run accounts for every pass, in
+    /// order, rather than starting the story at pass two.
+    #[test]
+    fn a_multi_pass_run_reports_every_pass_in_order() {
+        let mut progress = PassProgress::new(runtime(false));
+        assert!(progress
+            .lines_for_completed_pass("first".to_owned())
+            .is_empty());
+        assert_eq!(
+            progress.lines_for_completed_pass("second".to_owned()),
+            vec!["pass 1: first".to_owned(), "pass 2: second".to_owned()]
+        );
+        assert_eq!(
+            progress.lines_for_completed_pass("third".to_owned()),
+            vec!["pass 3: third".to_owned()]
+        );
+    }
+
+    /// `--json` promises one machine-readable envelope and nothing else, so
+    /// however many passes a run takes, it says nothing on the way.
+    #[test]
+    fn json_output_stays_silent_across_passes() {
+        let mut progress = PassProgress::new(runtime(true));
+        for pass in ["first", "second", "third"] {
+            assert!(progress
+                .lines_for_completed_pass(pass.to_owned())
+                .is_empty());
+        }
+    }
+
+    /// A progress line answers what an operator watching a sweep asks: what
+    /// went, what stayed and mostly why, and when to expect the rest.
+    #[test]
+    fn a_pass_line_names_what_stayed_and_mostly_why() {
+        let mut pass = GcResponse::empty(NamespaceId::parse("demo").expect("namespace id"));
+        pass.deleted_wal_segments = 2;
+        pass.deleted_content_objects = 1;
+        for _ in 0..4 {
+            pass.retain(RetainedReason::GraceWindow);
+        }
+        pass.retain(RetainedReason::UploadSessionWindow);
+        pass.next_reclamation_at_ms = Some(1_700_000_000_000);
+
+        assert_eq!(
+            gc_pass_line(&pass),
+            "3 deleted, 5 retained (mostly grace_window: 4); \
+             next reclaimable at 2023-11-14 22:13:20Z"
+        );
+    }
+
+    /// A pass that kept nothing says so plainly rather than inventing a
+    /// reason for zero candidates.
+    #[test]
+    fn a_pass_line_that_kept_nothing_names_no_reason() {
+        let pass = GcResponse::empty(NamespaceId::parse("demo").expect("namespace id"));
+        assert_eq!(gc_pass_line(&pass), "0 deleted, 0 retained");
+    }
 }

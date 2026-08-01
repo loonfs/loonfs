@@ -1392,16 +1392,13 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         now_ms: u64,
         report: &mut GrepGcReport,
     ) -> Result<bool> {
-        if delete_if_aged(
-            &self.store,
-            key,
-            GREP_GC_GRACE_WINDOW_MS,
-            now_ms,
-            &mut report.retained_candidates,
-        )
-        .await
-        .map_err(|error| core_store_error(key, &error))?
-        {
+        let outcome = delete_if_aged(&self.store, key, GREP_GC_GRACE_WINDOW_MS, now_ms)
+            .await
+            .map_err(|error| core_store_error(key, &error))?;
+        if outcome.retained_reason().is_some() {
+            report.retained_candidates += 1;
+        }
+        if outcome.deleted() {
             count_deleted_key(key, report);
             return Ok(true);
         }

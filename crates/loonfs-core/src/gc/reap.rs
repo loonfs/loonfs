@@ -12,7 +12,7 @@ use loonfs_api::wire::control::{
     decode_control_object, CheckpointOwner, CheckpointRecordLifecycle, CheckpointRecordState,
     ControlObjectKind,
 };
-use loonfs_api::{GeneratedIdValidationError, ManifestObjectId, NamespaceId};
+use loonfs_api::{GeneratedIdValidationError, ManifestObjectId, NamespaceId, RetainedReason};
 use loonfs_objectstore::{ObjectStore, ObjectStoreError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,36 +116,62 @@ pub(super) async fn sweep_checkpoint_record<S: ObjectStore + ?Sized>(
     }
 }
 
+/// What aging one unreferenced candidate decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgedSweep {
+    /// The grace window had passed over the object and it was deleted.
+    Deleted,
+    /// The object was already gone; nothing was decided and nothing counts.
+    AlreadyGone,
+    /// Younger than the grace window by its own provider timestamp.
+    RetainedInGraceWindow,
+    /// The provider reported no last-modified time, so the object's age is
+    /// unknown and it is treated as young (rule 1).
+    RetainedWithoutTimestamp,
+}
+
+impl AgedSweep {
+    /// True when the key was deleted.
+    pub fn deleted(self) -> bool {
+        self == Self::Deleted
+    }
+
+    /// The retention reason this outcome is, for a caller reporting why a
+    /// pass kept what it kept. `None` for the two outcomes that retained
+    /// nothing.
+    pub fn retained_reason(self) -> Option<RetainedReason> {
+        match self {
+            Self::Deleted | Self::AlreadyGone => None,
+            Self::RetainedInGraceWindow => Some(RetainedReason::GraceWindow),
+            Self::RetainedWithoutTimestamp => Some(RetainedReason::NoProviderTimestamp),
+        }
+    }
+}
+
 /// Deletes one unreferenced candidate if the grace window has passed over
-/// it, counting it as retained otherwise.
+/// it, and says what it decided otherwise.
 ///
-/// Answers whether the key was deleted. Store failures surface unmapped so
-/// each collector keeps its own error vocabulary; everything about the
-/// decision itself — which timestamp, what an absent one means, what the
-/// window is measured against — is the same wherever objects age out, so it
-/// is decided once here.
+/// Store failures surface unmapped so each collector keeps its own error
+/// vocabulary; everything about the decision itself — which timestamp, what
+/// an absent one means, what the window is measured against — is the same
+/// wherever objects age out, so it is decided once here.
 pub async fn delete_if_aged<S: ObjectStore + ?Sized>(
     store: &S,
     key: &str,
     grace_window_ms: u64,
     now_ms: u64,
-    retained_candidates: &mut u64,
-) -> std::result::Result<bool, ObjectStoreError> {
+) -> std::result::Result<AgedSweep, ObjectStoreError> {
     let Some(metadata) = store.head(key).await? else {
-        // Already gone; nothing to count.
-        return Ok(false);
+        return Ok(AgedSweep::AlreadyGone);
     };
     let Some(last_modified_ms) = metadata.last_modified_ms else {
-        // No provider timestamp: treat as young, retain (rule 1).
-        *retained_candidates += 1;
-        return Ok(false);
+        return Ok(AgedSweep::RetainedWithoutTimestamp);
     };
     if now_ms.saturating_sub(last_modified_ms) < grace_window_ms {
-        *retained_candidates += 1;
-        return Ok(false);
+        return Ok(AgedSweep::RetainedInGraceWindow);
     }
     store.delete(key).await?;
-    Ok(true)
+    Ok(AgedSweep::Deleted)
 }
 
 pub(super) fn manifest_object_id_of(

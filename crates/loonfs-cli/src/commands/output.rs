@@ -10,8 +10,8 @@ use loonfs_api::v0::{
 };
 use loonfs_api::{
     AuthoritativePathEntry, ChangeSeq, CommitId, CreateCheckpointResponse, DeleteNamespaceResponse,
-    FileRevision, GcResponse, GrepMatch, InodeId, MaintenanceStepResponse, NamespaceId,
-    NamespaceSummary, ReleaseCheckpointResponse,
+    FileRevision, GcResponse, GrepMatch, InodeId, ListCheckpointsResponse, MaintenanceStepResponse,
+    NamespaceId, NamespaceSummary, ReleaseCheckpointResponse,
 };
 use serde::Serialize;
 
@@ -94,6 +94,7 @@ pub(crate) enum CommandData {
     NamespaceSummary(NamespaceSummary),
     NamespaceDeleted(DeleteNamespaceResponse),
     CheckpointCreated(CreateCheckpointResponse),
+    CheckpointsListed(ListCheckpointsResponse),
     CheckpointReleased(ReleaseCheckpointResponse),
     MaintenanceStepped(MaintenanceStepResponse),
     GarbageCollected(GcResponse),

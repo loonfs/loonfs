@@ -35,8 +35,8 @@ use self::handlers_filesystem::{
     stat_path,
 };
 use self::handlers_namespace::{
-    create_checkpoint, create_namespace, delete_namespace, fork_namespace, maintenance_step,
-    namespace_status, release_checkpoint,
+    create_checkpoint, create_namespace, delete_namespace, fork_namespace, list_checkpoints,
+    maintenance_step, namespace_status, release_checkpoint,
 };
 use self::handlers_query::{
     disable_grep_index, enable_grep_index, gc_grep_index, grep, grep_index_not_maintained,
@@ -242,7 +242,7 @@ fn router(state: AppState) -> Router {
         .route("/v0/namespaces/{namespace}/changes", get(list_changes))
         .route(
             "/v0/admin/namespaces/{namespace}/checkpoints",
-            post(create_checkpoint),
+            post(create_checkpoint).get(list_checkpoints),
         )
         .route(
             "/v0/admin/namespaces/{namespace}/checkpoints/{checkpoint_id}/release",

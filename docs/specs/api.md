@@ -586,6 +586,7 @@ A representative v0 binding is shown below.
 | Fork a namespace | `POST /v0/namespaces/{source_ns}/forks` |
 | Delete a namespace | `DELETE /v0/namespaces/{ns}?expected_head_seq=418` (feature `core.namespaces.delete`; the precondition is optional) |
 | Create a checkpoint | `POST /v0/admin/namespaces/{ns}/checkpoints` (body carries the required `name` and optional `ttl_ms`; every call mints a new user-owned record under a new id, and that record is a GC root until it is released) |
+| List checkpoints | `GET /v0/admin/namespaces/{ns}/checkpoints` (every active record, oldest first, with the id the release route takes; see below) |
 | Release a checkpoint | `POST /v0/admin/namespaces/{ns}/checkpoints/{checkpoint_id}/release` (idempotent and one-way; fork-owned records are rejected) |
 | Run a maintenance step | `POST /v0/admin/namespaces/{ns}/maintenance/step` (the one maintenance entry point; see below) |
 | Content search | `POST /v0/namespaces/{ns}/query/grep` (feature `query.grep`; requires a materialized steady-state grep root) |
@@ -657,6 +658,30 @@ The retention floor bounds incremental replay only. File revision history
 is never pruned: a revisions listing is always complete, however far the
 floor has advanced.
 
+#### Checkpoint inventory
+
+A checkpoint name is a label, not a key: every create mints a new record
+under a new id, and two creates under one name leave two records. The
+creation response is where that id comes from, so losing it — or never
+seeing it — would otherwise leave a garbage-collection root nobody can name.
+The listing is the way back to it.
+
+`GET /v0/admin/namespaces/{ns}/checkpoints` returns every active record on
+the namespace, oldest first, each carrying its `checkpoint_id`, `owner`,
+`created_at_ms`, `expires_at_ms` (absent when the pin holds until released),
+`checkpoint_seq`, and `manifest_id` — the same identity the create response
+returned. `owner` is tagged: `user` carries the label the creator recorded,
+and `fork` carries the `target_namespace_id` whose existence keeps that
+lease standing. Only a `user` record is released by id; a `fork` record goes
+when its target namespace does.
+
+Released records are absent, because a release is what stops a record
+pinning anything. A record whose `expires_at_ms` has passed is still
+present, with that instant in the entry: expiry is not release — garbage
+collection is what turns a passed expiry into one — so until a pass reaches
+it the record is still a root, and reads still serve from it. Listing it is
+the honest answer to the question the route is asked.
+
 #### Store contract probe
 
 The store probe proves the configured object store honours the provider
@@ -716,6 +741,74 @@ deletion. If the namespace advances or keys disappear between calls, a stale
 cursor may re-examine work or defer a newly inserted key that sorts before its
 position until the next full pass; it can never make a newly live object
 deletable.
+
+Every GC response also carries `retained`, which is `retained_candidates`
+split by the decision that spared each candidate. The reasons are a closed
+set, so every field is always present and a zero means nothing was kept for
+that reason, and the fields sum to the total:
+
+| Reason | Means |
+| --- | --- |
+| `referenced` | Selected as unreachable, then found reachable by the re-verification that runs immediately before every deletion. A candidate the pass already knew was reachable is never examined, so this counts the namespace moving underneath the pass, not the size of its live set. |
+| `grace_window` | Unreachable, but younger than `grace_window_ms` by the object's own provider timestamp. |
+| `no_provider_timestamp` | Unreachable, and the provider reported no last-modified time, so the object's age is unknown and it is treated as young. |
+| `degraded_roots` | Root resolution failed somewhere in the pass, so manifest and table deletion was suppressed wholesale. `degraded_retention` is set too. |
+| `unrecognized_key` | A key under a swept family that this collector does not recognize as one of its own. Never deleted, whatever its age. |
+| `checkpoint_not_releasable` | A checkpoint record the pass could not advance: a lost compare-and-swap, an unreadable record, a fork target not provably gone, a released record still inside its grace, or an active pin doing its job. |
+| `upload_session_window` | An upload session waiting out a window a clock resolves — the same waits `next_reclamation_at_ms` reports. |
+| `upload_session_undecided` | An upload session held for a reason no clock resolves: a lost compare-and-swap, a record that vanished mid-pass, or a reference set the pass could not establish. |
+| `content_scan_deferred` | A completed session whose content reclamation was skipped because the reference scan did not fit in `max_objects`. `content_reclamation_deferred` is set too. |
+
+Retention is counted per candidate examined, not per object in the
+namespace, so one object two passes both examine is counted by each.
+
+#### Deleting, retaining, and reclaiming
+
+Two horizons decide when a namespace actually gets smaller, and they are
+independent.
+
+The first is the **metadata retention floor**. It bounds incremental replay:
+below it, the WAL history a client could have replayed is surrendered, and
+the segments holding it become collectable. Nothing advances it on its own —
+no maintenance job exists for it — so it moves only when an operator asks
+(`POST .../maintenance/step` with `retention: true`, or `loonfs admin
+retention-advance`). File revision history is never affected, however far
+the floor has moved.
+
+The second is the **content reclamation grace**, a little over seven days.
+It is derived rather than configured, and it is what separates a file
+disappearing from its bytes disappearing. Content is staged by an upload
+session before any commit can name it, so an object whose session completed
+but which nothing ever published cannot be reclaimed until no receipt can
+still turn it into a reference (format spec, "Garbage collection", rule 11).
+Until that grace passes, a pass keeps the object and reports it under
+`upload_session_window`.
+
+Deleting a file is not what reclaims its bytes, and no waiting changes that:
+file revision history is never pruned, so every revision goes on referencing
+its content and the object stays live. What reclamation collects is staged
+content nothing published — an abandoned upload, a completed session whose
+commit never arrived. An operator who deletes a large tree and watches the
+bucket should expect it to stay the size it is.
+
+Nothing has to be scheduled for the second horizon by hand. Every pass
+reports `next_reclamation_at_ms`, the soonest instant ahead of it at which
+something it kept becomes reclaimable, and the runtime's collection job
+hands that straight back as the earliest it will run the namespace again.
+A namespace that is being written to therefore reclaims its own staged
+content without a cron entry.
+
+What that leaves is namespaces nobody is writing to. LoonFS has no operation
+that enumerates namespaces, so nothing can discover them: coverage is an
+assignment. `loonfs admin run --namespace <id>` hosts maintenance for exactly
+the namespaces named on the command line, continuously until a signal, or as
+one bounded catch-up with `--drain` for a cron entry. A cold namespace gets
+collected because it is on somebody's assignment list, and not otherwise.
+
+When a pass keeps more than it deletes, `retained` above says why. The one
+answer that is an operator decision rather than a wait is
+`checkpoint_not_releasable`: a pin holds its basis for as long as it exists,
+so `GET /v0/admin/namespaces/{ns}/checkpoints` is where to look next.
 
 #### Service-proxied upload
 
