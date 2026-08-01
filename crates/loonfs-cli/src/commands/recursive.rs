@@ -13,12 +13,14 @@ use super::context::CommandContext;
 use super::output::{CommandData, CommandFailure, CommandOutput, TreeTransferFailure};
 use crate::args::{CommandKind, RuntimeBehavior};
 use crate::error::CliError;
+use crate::progress::{ProgressOp, ProgressReporter};
 use crate::render::write_stderr_progress;
 use futures::StreamExt;
 use loonfs_api::DestinationBehavior;
 use loonfs_api::InodeKind;
 use loonfs_client::{CreateDirectoryOptions, NamespacePath, PutFileOptions};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// How many per-file operations run at once. Matches the reference server's
 /// default upload concurrency; deliberately a constant, not a flag, until a
@@ -30,11 +32,11 @@ const TREE_TRANSFER_CONCURRENCY: usize = 8;
 struct FileJob {
     local: PathBuf,
     remote: String,
-    /// The remote file's length, when a listing stated one. It decides how
-    /// a download travels — past the deployment's proxy cap the bytes come
-    /// straight from object storage — so it rides along from the walk that
-    /// already read it. An upload's jobs come from a local walk and carry
-    /// no remote size at all.
+    /// The file's length, when the walk that found it stated one. On a
+    /// download it also decides how the bytes travel — past the
+    /// deployment's proxy cap they come straight from object storage — and
+    /// on either transfer it is what lets the whole tree be measured before
+    /// the first byte moves.
     size_bytes: Option<u64>,
 }
 
@@ -59,6 +61,15 @@ impl TreeTally {
             error,
         });
     }
+}
+
+/// What the whole tree weighs, or nothing at all when even one file's
+/// length is unknown: a total that is missing some files would misreport
+/// every percentage derived from it.
+fn tree_bytes(files: &[FileJob]) -> Option<u64> {
+    files
+        .iter()
+        .try_fold(0u64, |total, job| Some(total + job.size_bytes?))
 }
 
 fn joined_remote(root: &str, components: &[String]) -> String {
@@ -153,16 +164,24 @@ pub(crate) async fn run_put_tree(
         }
     }
 
+    let progress = Arc::new(ProgressReporter::new(
+        runtime,
+        ProgressOp::Put,
+        format!("{}:{}", context.namespace, remote_root),
+    ));
+    progress.expect(tree_bytes(&files), Some(files.len() as u64));
     let outcomes = futures::stream::iter(files.into_iter().map(|job| {
         let backend = &context.target;
         let namespace = context.namespace.clone();
         let message = message.clone();
+        let progress = Arc::clone(&progress);
         let remote = format!("{}/{}", remote_root.trim_end_matches('/'), job.remote);
         async move {
             let spec = match NamespacePath::parse(namespace.as_str(), &remote) {
                 Ok(spec) => spec,
                 Err(error) => return (remote, Err(CliError::invalid_input(error.to_string()))),
             };
+            progress.file_started(&remote, job.size_bytes);
             let bytes = match std::fs::read(&job.local) {
                 Ok(bytes) => bytes,
                 Err(error) => return (remote, Err(CliError::io_for_path(&job.local, error))),
@@ -181,12 +200,20 @@ pub(crate) async fn run_put_tree(
                 .await
                 .map(|_| spec_target(&spec))
                 .map_err(CliError::from);
+            // One file of a tree uploads as a single request, so the tree's
+            // count advances a whole file at a time: what it reports is
+            // files stored, measured in bytes.
+            if result.is_ok() {
+                progress.advance(bytes.len() as u64);
+                progress.file_finished(&remote, bytes.len() as u64);
+            }
             (remote, result)
         }
     }))
     .buffer_unordered(TREE_TRANSFER_CONCURRENCY)
     .collect::<Vec<_>>()
     .await;
+    progress.finish();
     for (remote, result) in outcomes {
         match result {
             Ok(target) => {
@@ -244,9 +271,16 @@ pub(crate) async fn run_get_tree(
         }
     }
 
+    let progress = Arc::new(ProgressReporter::new(
+        runtime,
+        ProgressOp::Get,
+        format!("{}:{}", context.namespace, remote_root),
+    ));
+    progress.expect(tree_bytes(&listing.files), Some(listing.files.len() as u64));
     let outcomes = futures::stream::iter(listing.files.into_iter().map(|job| {
         let backend = &context.target;
         let namespace = context.namespace.clone();
+        let progress = Arc::clone(&progress);
         let local = local_root.join(job.local);
         async move {
             let spec = match NamespacePath::parse(namespace.as_str(), &job.remote) {
@@ -264,17 +298,26 @@ pub(crate) async fn run_get_tree(
                 Ok(download) => download,
                 Err(error) => return (job.remote, Err(error.into())),
             };
+            progress.file_started(&job.remote, job.size_bytes);
             let derived_name = false;
-            let written =
-                super::fs::stream_download_to_file(&mut download, &local, force, derived_name)
-                    .await
-                    .map(|_| local.display().to_string());
-            (job.remote, written)
+            let written = super::fs::stream_download_to_file(
+                &mut download,
+                &local,
+                force,
+                derived_name,
+                &progress,
+            )
+            .await;
+            if let Ok(bytes_written) = &written {
+                progress.file_finished(&job.remote, *bytes_written);
+            }
+            (job.remote, written.map(|_| local.display().to_string()))
         }
     }))
     .buffer_unordered(TREE_TRANSFER_CONCURRENCY)
     .collect::<Vec<_>>()
     .await;
+    progress.finish();
     for (remote, result) in outcomes {
         match result {
             Ok(local) => {
@@ -451,8 +494,11 @@ fn collect_local_tree(
             files.push(FileJob {
                 local: entry.path().to_path_buf(),
                 remote: components.join("/"),
-                // An upload's source is local; there is no remote size yet.
-                size_bytes: None,
+                // A local length nobody can read leaves the tree's total
+                // unknown rather than wrong, and the upload proceeds either
+                // way — the failure that matters surfaces when the file is
+                // read.
+                size_bytes: entry.metadata().ok().map(|metadata| metadata.len()),
             });
         } else {
             tally.fail(

@@ -12,6 +12,7 @@ mod config;
 mod error;
 mod payload;
 mod profiles;
+mod progress;
 mod prompt;
 mod render;
 mod resolve;

@@ -18,6 +18,7 @@ mod embedded;
 
 use crate::backend_error::{map_namespace_scoped_runtime_error, BackendError};
 use crate::payload::LocalPayload;
+use crate::progress::ProgressReporter;
 use crate::resolve::ResolvedTarget;
 use bytes::Bytes;
 use loonfs_api::{
@@ -37,6 +38,7 @@ use loonfs_client::{
     NamespacePath, PutFileOptions, RestoreRevisionOptions, UndeleteOptions,
 };
 use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
+use std::sync::Arc;
 
 pub(crate) use embedded::EmbeddedBackend;
 use loonfs::{
@@ -542,19 +544,22 @@ impl ResolvedTarget {
     ///
     /// The payload is opened per arm rather than shared: the two runtimes
     /// spell a byte stream in their own terms, and only one arm ever runs.
+    /// `progress` counts what the payload gives up, so both arms report the
+    /// same bytes for the same file.
     pub(crate) async fn put_file_stream(
         &self,
         spec: &NamespacePath,
         payload: &LocalPayload,
         options: &PutFileOptions,
+        progress: &Arc<ProgressReporter>,
     ) -> Result<CommitResponse, BackendError> {
         match self {
             Self::Embedded(target) => {
-                let body = payload.open_byte_stream().await?;
+                let body = payload.open_byte_stream(progress).await?;
                 target.backend.put_file_stream(spec, body, options).await
             }
             Self::Remote(target) => {
-                let source = payload.open_source().await?;
+                let source = payload.open_source(progress).await?;
                 Ok(target.client.put_file_stream(spec, source, options).await?)
             }
         }

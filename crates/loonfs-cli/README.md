@@ -26,6 +26,10 @@ Global flags
   --no-input
     Never prompt; fail instead when a value would be asked for
 
+  --no-progress
+    Say nothing about a transfer while it runs, on a terminal or under
+    --json
+
   -h, --help
     Show command help
 
@@ -364,6 +368,50 @@ Update options
     --auth-token <token>
     --ca-cert-path <path>
 
+Transfer progress
+  `loonfs get` and `loonfs put`, one file or a whole tree, say where they
+  have got to while they run. Never on stdout, which carries either the
+  file's bytes or the JSON result.
+
+  On a terminal, one line on stderr is redrawn in place: bytes moved, the
+  total when it is known, a percentage, a rate, and how long is left at
+  that rate. A tree also shows files finished out of files found. The line
+  is erased when the transfer ends. When stderr is not a terminal nothing
+  is printed, the way curl stays quiet in a pipeline.
+
+  With --json, stderr carries one JSON object per line instead, so an agent
+  can tell healthy work from a hang. That makes stderr a stream of JSON
+  documents under --json: these events while the command runs, then the
+  failure envelope if it failed. The names and fields below are stable.
+
+    {"kind":"file_started","op":"get","path":"/docs/a.bin",
+     "bytes_total":4096,"elapsed_ms":12}
+      One file began moving. bytes_total is left out when nothing knows it.
+
+    {"kind":"progress","op":"get","path":"/docs/a.bin","bytes_done":2048,
+     "bytes_total":4096,"files_done":0,"files_total":1,"rate_bps":10240,
+     "elapsed_ms":200}
+      Where the whole operation is. `path` is the file for a single
+      transfer and `<namespace>:<root>` for a tree. bytes_total and
+      files_total are null when they cannot be known — a piped put, or a
+      tree holding a file whose length the walk could not read. rate_bps is
+      the average over the transfer so far. Reported at most four times a
+      second, and whenever the whole-number percentage moves.
+
+    {"kind":"file_finished","op":"get","path":"/docs/a.bin",
+     "bytes_done":4096,"elapsed_ms":420}
+      One file finished, and what it actually moved.
+
+    {"kind":"phase","op":"put","path":"/docs/a.bin","phase":"committing",
+     "elapsed_ms":900}
+      A stretch where time passes and bytes do not, reported when it
+      starts. `committing` says an upload's payload has been read and the
+      commit is what is left.
+
+  `op` is `get` or `put`. --no-progress silences both forms, and neither is
+  produced for `loonfs cat` or for `loonfs get ... -`, which hand the file
+  itself to stdout.
+
 Behavior notes
   `loonfs cat` always streams raw bytes to stdout
 
@@ -419,4 +467,19 @@ Behavior notes
   same reason
 
   `loonfs mv` moves a directory in one commit and takes no -r
+
+  How much of a transfer is watchable follows how it travels. A streamed or
+  direct download reports bytes as they land, and so does a streamed
+  upload; a proxied download and a small buffered upload are one request
+  each, so they go from nothing to done in one step. A recursive put
+  uploads one file per request, so a tree's byte count advances a whole
+  file at a time
+
+  An embedded profile's edit latency grows with the WAL tail between
+  maintenance passes: every write appends, and reads replay what has not
+  been folded into the metadata yet, so a namespace that is written to and
+  never maintained gets slower. Embedded profiles run maintenance manually
+  — `loonfs admin run --namespace <ns>` hosts it, `--drain` catches up and
+  exits, and `loonfs admin step` runs one pass — while a server runs its
+  own automatically for the namespaces it serves
 ```

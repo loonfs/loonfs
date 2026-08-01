@@ -1,5 +1,6 @@
 //! The clap argument grammar for every `loonfs` command.
 
+use crate::progress::ProgressMode;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -27,6 +28,9 @@ pub(crate) struct Cli {
     /// Never prompt; fail instead when input would be required.
     #[arg(long, global = true)]
     pub no_input: bool,
+    /// Say nothing about a transfer while it runs.
+    #[arg(long, global = true)]
+    pub no_progress: bool,
     #[command(subcommand)]
     pub command: Command,
 }
@@ -823,6 +827,8 @@ pub(crate) struct RuntimeBehavior {
     pub json: bool,
     pub no_input: bool,
     pub interactive: bool,
+    /// How a transfer that takes human time says where it has got to.
+    pub progress: ProgressMode,
 }
 
 impl RuntimeBehavior {
@@ -835,6 +841,11 @@ impl RuntimeBehavior {
             json: cli.json,
             no_input: cli.no_input,
             interactive,
+            // Progress asks standard error alone, not the terminal pair
+            // `interactive` needs: a `put` fed by a pipe still has a
+            // terminal to draw on, and `--no-input` says nothing about
+            // whether anyone is watching.
+            progress: ProgressMode::detect(cli.no_progress, cli.json),
         }
     }
 }
