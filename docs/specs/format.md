@@ -1752,7 +1752,7 @@ over its namespace manifest. The mutable
 root-pointer decoder rejects unknown envelope and payload fields; the
 immutable manifest decoder tolerates additive fields.
 
-The nested `index` object carries its own `format_version`, currently `2`.
+The nested `index` object carries its own `format_version`, currently `1`.
 It holds what every phase has — the in-progress `reorganize` state and the
 `next_run_ordinal` allocator — while each phase's own position lives in the
 `lifecycle` tag beside it:
@@ -1763,11 +1763,11 @@ It holds what every phase has — the in-progress `reorganize` state and the
 - `steady`: `built_through_seq` and an optional `next_event_index`;
 - `disabled`: no fields, no segments, and no reorganization.
 
-A phase carrying another phase's sequence is not representable. Version 1
-put one `built_through_seq` in the index object for every phase, where it
-meant the backfill's target in one phase and real indexed progress in
-another; the decoder rejects that version outright, with no shim, and the
-namespace rebuilds its index from a fresh checkpoint.
+A phase carrying another phase's sequence is not representable. Before the
+first stable release, this nested schema evolves in place at version 1; the
+implementation carries no compatibility shim for intermediate pre-release
+encodings, and a namespace can rebuild its derived index from a fresh
+checkpoint.
 
 A gram-index segment uses the section 4.2.1 block grammar unchanged —
 prefix-compressed data blocks, one bloom filter block, one index block,
