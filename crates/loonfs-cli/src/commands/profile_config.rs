@@ -1250,6 +1250,7 @@ mod tests {
             json: false,
             no_input: true,
             interactive: false,
+            progress: crate::progress::ProgressMode::Off,
         }
     }
 }

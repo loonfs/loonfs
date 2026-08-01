@@ -16,6 +16,7 @@ use crate::args::{
 use crate::backend::FileDownload;
 use crate::error::CliError;
 use crate::payload::{read_whole_file, LocalPayload, STDIN_PATH};
+use crate::progress::{ProgressOp, ProgressReporter};
 use loonfs_api::{
     CommitId, DeleteDirectoryBehavior, DestinationBehavior, ErrorCode, InodeKind, RevisionNo,
 };
@@ -23,6 +24,7 @@ use loonfs_client::{CreateDirectoryOptions, DeleteOptions, NamespacePath, PutFil
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 // --- filesystem ---
 
@@ -355,6 +357,8 @@ pub(crate) async fn run_filesystem_get(
         .map_err(|error| context.fail(kind, error))?;
     let data = match args.local_destination.as_deref() {
         Some("-") => {
+            // No progress: standard output is carrying the file, and a
+            // caller piping bytes onward is not watching a line anyway.
             stream_download_to_stdout(&mut download)
                 .await
                 .map_err(|error| context.fail(kind, error))?;
@@ -364,14 +368,30 @@ pub(crate) async fn run_filesystem_get(
             let derived_name = other.is_none();
             let destination = destination_path_for_get(spec.absolute_path().as_str(), other)
                 .map_err(|error| context.fail(kind, error))?;
+            let progress = Arc::new(ProgressReporter::new(
+                runtime,
+                ProgressOp::Get,
+                spec.absolute_path().as_str(),
+            ));
+            progress.expect(entry.size_bytes, Some(1));
+            progress.file_started(spec.absolute_path().as_str(), entry.size_bytes);
             // The local working copy is the one thing this CLI touches
             // that has no revision history behind it, so clobbering it is
             // opt-in. `persist_noclobber` closes the race between checking
             // and installing the completed temporary file.
-            let bytes_written =
-                stream_download_to_file(&mut download, &destination, args.force, derived_name)
-                    .await
-                    .map_err(|error| context.fail(kind, error))?;
+            let written = stream_download_to_file(
+                &mut download,
+                &destination,
+                args.force,
+                derived_name,
+                &progress,
+            )
+            .await;
+            if let Ok(bytes_written) = &written {
+                progress.file_finished(spec.absolute_path().as_str(), *bytes_written);
+            }
+            progress.finish();
+            let bytes_written = written.map_err(|error| context.fail(kind, error))?;
             CommandData::FileTransfer {
                 target: render_target(&context.namespace, spec.absolute_path()),
                 destination: destination.display().to_string(),
@@ -400,6 +420,7 @@ pub(super) async fn stream_download_to_file(
     destination: &Path,
     force: bool,
     derived_name: bool,
+    progress: &ProgressReporter,
 ) -> Result<u64, CliError> {
     let mut temp = open_partial_file(destination)
         .map_err(|error| local_open_error(destination, error, force, derived_name))?;
@@ -408,6 +429,7 @@ pub(super) async fn stream_download_to_file(
         temp.write_all(&chunk)
             .map_err(|error| local_destination_error(destination, error, force, derived_name))?;
         bytes_written += chunk.len() as u64;
+        progress.advance(chunk.len() as u64);
     }
     temp.flush()
         .map_err(|error| local_destination_error(destination, error, force, derived_name))?;
@@ -536,7 +558,7 @@ pub(crate) async fn run_filesystem_put(
     let context = resolve_command_context(kind, config_path, &args.target).await?;
     let local_path = PathBuf::from(&args.local_path);
     if local_path == Path::new(STDIN_PATH) {
-        return run_filesystem_put_stdin(kind, args, context).await;
+        return run_filesystem_put_stdin(kind, args, context, runtime).await;
     }
 
     let metadata = fs::metadata(&local_path)
@@ -607,7 +629,16 @@ pub(crate) async fn run_filesystem_put(
     let spec = NamespacePath::new(context.namespace.clone(), remote_path);
     let payload = LocalPayload::file(&local_path, metadata.len());
     let options = put_file_options(&args).map_err(|error| context.fail(kind, error))?;
-    commit_put(kind, &context, &spec, &payload, &options).await
+    commit_put(
+        kind,
+        &context,
+        &spec,
+        &payload,
+        &options,
+        runtime,
+        Some(metadata.len()),
+    )
+    .await
 }
 
 /// `loonfs put - <remote>`: standard input, whose length is not knowable, so
@@ -619,6 +650,7 @@ async fn run_filesystem_put_stdin(
     kind: CommandKind,
     args: FilesystemPutArgs,
     context: CommandContext,
+    runtime: RuntimeBehavior,
 ) -> Result<CommandOutput, CommandFailure> {
     if args.recursive {
         return Err(context.fail(
@@ -639,7 +671,18 @@ async fn run_filesystem_put_stdin(
         parse_user_path(remote_path, false).map_err(|error| context.fail(kind, error))?;
     let spec = NamespacePath::new(context.namespace.clone(), remote_path);
     let options = put_file_options(&args).map_err(|error| context.fail(kind, error))?;
-    commit_put(kind, &context, &spec, &LocalPayload::Stdin, &options).await
+    // A pipe cannot say how long it is, so there is a byte count but never a
+    // total, a percentage, or an estimate.
+    commit_put(
+        kind,
+        &context,
+        &spec,
+        &LocalPayload::Stdin,
+        &options,
+        runtime,
+        None,
+    )
+    .await
 }
 
 /// Writes one payload and renders what the commit did.
@@ -653,17 +696,41 @@ async fn commit_put(
     spec: &NamespacePath,
     payload: &LocalPayload,
     options: &PutFileOptions,
+    runtime: RuntimeBehavior,
+    size_bytes: Option<u64>,
 ) -> Result<CommandOutput, CommandFailure> {
+    let progress = Arc::new(ProgressReporter::new(
+        runtime,
+        ProgressOp::Put,
+        spec.absolute_path().as_str(),
+    ));
+    progress.expect(size_bytes, Some(1));
+    progress.file_started(spec.absolute_path().as_str(), size_bytes);
     let result = match payload.holdable_file() {
+        // A payload small enough to hold travels as one request, so there is
+        // no midpoint to report: it is read, and then the commit is all
+        // that is left.
         Some(path) => {
             let bytes = read_whole_file(path)
                 .await
                 .map_err(|error| context.fail(kind, error))?;
+            progress.advance(bytes.len() as u64);
+            progress.phase("committing");
             context.target.put_file_bytes(spec, &bytes, options).await
         }
-        None => context.target.put_file_stream(spec, payload, options).await,
+        None => {
+            context
+                .target
+                .put_file_stream(spec, payload, options, &progress)
+                .await
+        }
+    };
+    if result.is_ok() {
+        let moved = progress.bytes_done();
+        progress.file_finished(spec.absolute_path().as_str(), moved);
     }
-    .map_err(|error| context.fail(kind, error))?;
+    progress.finish();
+    let result = result.map_err(|error| context.fail(kind, error))?;
 
     Ok(CommandOutput {
         kind,

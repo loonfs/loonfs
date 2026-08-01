@@ -8,10 +8,12 @@
 
 use crate::backend_error::BackendError;
 use crate::error::CliError;
+use crate::progress::ProgressReporter;
 use futures::stream::StreamExt;
 use loonfs::{ByteStream, ObjectStoreError};
 use loonfs_client::{PayloadSource, STREAMING_PUT_MIN_BYTES};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Standard input's spelling on the command line.
 pub(crate) const STDIN_PATH: &str = "-";
@@ -50,18 +52,64 @@ impl LocalPayload {
     }
 
     /// Opens the payload for the in-process runtime.
-    pub(crate) async fn open_byte_stream(&self) -> Result<ByteStream, BackendError> {
-        Ok(as_object_store_stream(self.open_source().await?))
+    pub(crate) async fn open_byte_stream(
+        &self,
+        progress: &Arc<ProgressReporter>,
+    ) -> Result<ByteStream, BackendError> {
+        Ok(as_object_store_stream(self.open_source(progress).await?))
     }
 
     /// Opens the payload for the HTTP client.
-    pub(crate) async fn open_source(&self) -> Result<PayloadSource, BackendError> {
-        match self {
+    ///
+    /// The source counts itself as it is read, which is the one place an
+    /// upload's bytes are observable without reaching into a transport: past
+    /// here they belong to the runtime that is staging them. That puts the
+    /// count slightly ahead of the wire — a direct multipart upload holds a
+    /// few parts in flight — so what it reports is payload read, which is
+    /// what a caller watching their own file wants to know.
+    pub(crate) async fn open_source(
+        &self,
+        progress: &Arc<ProgressReporter>,
+    ) -> Result<PayloadSource, BackendError> {
+        let source = match self {
             Self::File { path, .. } => PayloadSource::open_file(path).await.map_err(|error| {
                 BackendError::io_error(format!("i/o error for `{}`: {error}", path.display()))
-            }),
-            Self::Stdin => Ok(PayloadSource::reader(tokio::io::stdin())),
-        }
+            })?,
+            Self::Stdin => PayloadSource::reader(tokio::io::stdin()),
+        };
+        Ok(counted_source(source, Arc::clone(progress)))
+    }
+}
+
+/// Wraps a source so every byte read off it is counted, and the end of the
+/// payload announces the phase that follows it.
+///
+/// The commit is the part a finished upload waits on with no bytes moving,
+/// so the transition is reported where it actually happens: when the source
+/// runs dry.
+fn counted_source(source: PayloadSource, progress: Arc<ProgressReporter>) -> PayloadSource {
+    if !progress.enabled() {
+        return source;
+    }
+    let (stream, size_bytes) = source.into_stream();
+    let counted =
+        futures::stream::unfold((stream, progress), |(mut stream, progress)| async move {
+            match stream.next().await {
+                Some(Ok(chunk)) => {
+                    progress.advance(chunk.len() as u64);
+                    Some((Ok(chunk), (stream, progress)))
+                }
+                Some(Err(error)) => Some((Err(error), (stream, progress))),
+                None => {
+                    progress.phase("committing");
+                    None
+                }
+            }
+        })
+        .boxed();
+    match size_bytes {
+        Some(size_bytes) => PayloadSource::sized_stream(counted, size_bytes),
+        None => PayloadSource::stream(counted),
     }
 }
 

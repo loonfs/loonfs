@@ -787,6 +787,212 @@ fn download(harness: &Harness, remote_path: &str, name: &str) -> Vec<u8> {
     fs::read(&local).expect("read downloaded file")
 }
 
+/// Events of one kind, in the order they were reported.
+fn events_of_kind(output: &Output, kind: &str) -> Vec<Value> {
+    json_progress_events(output)
+        .into_iter()
+        .filter(|event| event["kind"] == kind)
+        .collect()
+}
+
+/// A download that takes real time says where it has got to, in events an
+/// agent can tell apart from a hang, and says so without disturbing the
+/// result document on standard output.
+#[test]
+fn a_download_reports_its_progress_to_an_agent() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+
+    let payload = streaming_payload();
+    let local = harness.temp_dir.path().join("big.bin");
+    fs::write(&local, &payload).expect("write payload");
+    assert_success(&harness.run(&["put", local.to_str().expect("utf-8 path"), "/big.bin"]));
+
+    let back = harness.temp_dir.path().join("back.bin");
+    let get = harness.run(&[
+        "--json",
+        "get",
+        "/big.bin",
+        back.to_str().expect("utf-8 path"),
+    ]);
+    assert_success(&get);
+    assert_eq!(json_data(&get)["bytes_written"], payload.len() as u64);
+
+    let started = events_of_kind(&get, "file_started");
+    assert_eq!(started.len(), 1, "one file, one start: {started:?}");
+    assert_eq!(started[0]["op"], "get");
+    assert_eq!(started[0]["path"], "/big.bin");
+    assert_eq!(started[0]["bytes_total"], payload.len() as u64);
+
+    let progress = events_of_kind(&get, "progress");
+    assert!(
+        !progress.is_empty(),
+        "a download past one chunk reports as it lands"
+    );
+    let last = progress.last().expect("a progress event");
+    assert_eq!(last["op"], "get");
+    assert_eq!(last["bytes_done"], payload.len() as u64);
+    assert_eq!(last["bytes_total"], payload.len() as u64);
+    assert_eq!(last["files_total"], 1);
+    assert!(last["rate_bps"].is_u64(), "a rate is always reported");
+    assert!(last["elapsed_ms"].is_u64());
+
+    let finished = events_of_kind(&get, "file_finished");
+    assert_eq!(finished.len(), 1, "one file, one finish: {finished:?}");
+    assert_eq!(finished[0]["bytes_done"], payload.len() as u64);
+    assert_eq!(finished[0]["path"], "/big.bin");
+}
+
+/// An upload counts the payload as it is read and then names the commit,
+/// which is the stretch where time passes and no bytes move.
+#[test]
+fn an_upload_reports_bytes_read_and_then_the_commit() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+
+    let payload = streaming_payload();
+    let local = harness.temp_dir.path().join("big.bin");
+    fs::write(&local, &payload).expect("write payload");
+    let put = harness.run(&[
+        "--json",
+        "put",
+        local.to_str().expect("utf-8 path"),
+        "/big.bin",
+    ]);
+    assert_success(&put);
+
+    let progress = events_of_kind(&put, "progress");
+    let last = progress.last().expect("a progress event");
+    assert_eq!(last["op"], "put");
+    assert_eq!(last["path"], "/big.bin");
+    assert_eq!(last["bytes_done"], payload.len() as u64);
+    assert_eq!(last["bytes_total"], payload.len() as u64);
+
+    let phases = events_of_kind(&put, "phase");
+    assert_eq!(phases.len(), 1, "one transition to report: {phases:?}");
+    assert_eq!(phases[0]["phase"], "committing");
+    assert_eq!(phases[0]["op"], "put");
+
+    // A payload with no knowable length still counts its bytes; it just
+    // has no total to measure them against.
+    let piped = harness.run_with_stdin(&["--json", "put", "-", "/piped.bin"], &payload);
+    assert_success(&piped);
+    let piped_progress = events_of_kind(&piped, "progress");
+    let last = piped_progress.last().expect("a progress event");
+    assert_eq!(last["bytes_done"], payload.len() as u64);
+    assert!(
+        last["bytes_total"].is_null(),
+        "a pipe has no total: {last:?}"
+    );
+}
+
+/// A tree is measured as a tree: one operation's bytes and files, plus a
+/// start and a finish for every file inside it.
+#[test]
+fn a_recursive_transfer_counts_files_and_bytes_for_the_whole_tree() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+
+    let tree = harness.temp_dir.path().join("tree");
+    fs::create_dir_all(tree.join("docs")).expect("create tree dirs");
+    fs::write(tree.join("top.txt"), b"top").expect("write top");
+    fs::write(tree.join("docs/a.txt"), b"alpha").expect("write a");
+    fs::write(tree.join("docs/b.txt"), b"beta").expect("write b");
+    let tree_bytes = (b"top".len() + b"alpha".len() + b"beta".len()) as u64;
+
+    let put = harness.run(&[
+        "--json",
+        "put",
+        "-r",
+        tree.to_str().expect("utf-8 path"),
+        "/up",
+    ]);
+    assert_success(&put);
+    assert_eq!(events_of_kind(&put, "file_started").len(), 3);
+    assert_eq!(events_of_kind(&put, "file_finished").len(), 3);
+    let last = events_of_kind(&put, "progress")
+        .pop()
+        .expect("a progress event");
+    assert_eq!(last["op"], "put");
+    assert_eq!(last["path"], "demo:/up");
+    assert_eq!(last["bytes_done"], tree_bytes);
+    assert_eq!(last["bytes_total"], tree_bytes);
+    assert_eq!(last["files_total"], 3);
+
+    let back = harness.temp_dir.path().join("back");
+    let get = harness.run(&[
+        "--json",
+        "get",
+        "-r",
+        "/up",
+        back.to_str().expect("utf-8 path"),
+    ]);
+    assert_success(&get);
+    assert_eq!(events_of_kind(&get, "file_started").len(), 3);
+    assert_eq!(events_of_kind(&get, "file_finished").len(), 3);
+    let last = events_of_kind(&get, "progress")
+        .pop()
+        .expect("a progress event");
+    assert_eq!(last["op"], "get");
+    assert_eq!(last["path"], "demo:/up");
+    assert_eq!(last["bytes_done"], tree_bytes);
+    assert_eq!(last["bytes_total"], tree_bytes);
+    assert_eq!(last["files_done"], 3);
+    assert_eq!(last["files_total"], 3);
+}
+
+/// Nobody asked, so nobody is told: a run whose standard error is a pipe
+/// and which asked for no events says nothing about the transfer, and
+/// --no-progress silences the agent stream too.
+#[test]
+fn progress_is_silent_unless_someone_is_watching() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+
+    let local = harness.temp_dir.path().join("doc.txt");
+    fs::write(&local, b"body").expect("write payload");
+    let put = harness.run(&["put", local.to_str().expect("utf-8 path"), "/doc.txt"]);
+    assert_success(&put);
+    assert_eq!(
+        stderr_string(&put),
+        "",
+        "a piped run draws no line, the way curl does not"
+    );
+
+    let quiet = harness.run(&[
+        "--json",
+        "--no-progress",
+        "put",
+        local.to_str().expect("utf-8 path"),
+        "/quiet.txt",
+    ]);
+    assert_success(&quiet);
+    assert_eq!(
+        stderr_string(&quiet),
+        "",
+        "--no-progress silences the event stream"
+    );
+
+    // A failure still reports itself, and is still the last document on
+    // standard error when progress preceded it.
+    let clash = harness.run(&[
+        "--json",
+        "put",
+        local.to_str().expect("utf-8 path"),
+        "/doc.txt",
+    ]);
+    assert_failure(&clash);
+    assert_eq!(json_error(&clash)["code"], "path_conflict");
+}
+
 /// A large file and a pipe both round-trip through an embedded profile,
 /// and the retry contract holds for them exactly as it does for a payload
 /// small enough to hold.
@@ -4367,8 +4573,32 @@ fn json_data(output: &Output) -> Value {
     parse_json(&output.stdout)["data"].clone()
 }
 
+/// The failure envelope, which is the last document on standard error.
+///
+/// Under `--json` standard error carries a stream of JSON documents, not
+/// one: a transfer reports progress there while it runs, and the envelope
+/// comes last.
 fn json_error(output: &Output) -> Value {
-    parse_json(&output.stderr)["error"].clone()
+    json_stderr_documents(output)
+        .pop()
+        .expect("a failure envelope on stderr")["error"]
+        .clone()
+}
+
+/// Every JSON document standard error carried, in order.
+fn json_stderr_documents(output: &Output) -> Vec<Value> {
+    serde_json::Deserializer::from_slice(&output.stderr)
+        .into_iter::<Value>()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("parse the json documents on stderr")
+}
+
+/// The progress events of one run, in the order they were reported.
+fn json_progress_events(output: &Output) -> Vec<Value> {
+    json_stderr_documents(output)
+        .into_iter()
+        .filter(|document| document.get("error").is_none() && document.get("data").is_none())
+        .collect()
 }
 
 fn sorted_object_keys(value: &Value) -> Vec<String> {
