@@ -42,6 +42,7 @@ async fn records_put_success() {
     assert_eq!(sample.put_mode, Some(PutModeClass::CreateIfAbsent));
     assert_eq!(sample.key_class, KeyClass::NamespaceHead);
     assert_eq!(sample.store_kind.as_deref(), Some("local-fs"));
+    assert_eq!(sample.attempts, 1);
 }
 
 #[tokio::test]
@@ -283,6 +284,7 @@ async fn jsonl_recorder_writes_privacy_safe_samples() {
     let first: serde_json::Value = serde_json::from_str(lines[0]).expect("first sample");
     assert_eq!(first["operation"], "put");
     assert_eq!(first["result"], "ok");
+    assert_eq!(first["attempts"], 1);
     let second: serde_json::Value = serde_json::from_str(lines[1]).expect("second sample");
     assert_eq!(second["operation"], "get");
     assert_eq!(second["result"], "not_found");

@@ -1,12 +1,11 @@
 //! HTTP application construction, listener service, and shutdown lifecycle.
 
+use super::metrics::ServerMetrics;
 use super::router;
 use super::tls::{self, TlsConfigError, TlsListener};
 use crate::config::{ServerConfig, ServerConfigError};
 use axum::Router;
-use loonfs::metrics::{
-    InstrumentedObjectStore, JsonlObjectStoreMetricsRecorder, ObjectStoreMetricsRecorder,
-};
+use loonfs::metrics::{JsonlObjectStoreMetricsRecorder, ObjectStoreMetricsRecorder};
 use loonfs::publisher::PublisherRegistry;
 use loonfs::{
     FsAdmin, FsReader, FsWriter, MaintenanceHandle, MaintenanceJob, MaintenanceProbe,
@@ -61,6 +60,12 @@ pub(super) struct AppState {
     /// worst-case download memory is
     /// `max_concurrent_downloads * max_download_bytes`.
     pub(super) download_permits: Arc<Semaphore>,
+    /// The recorder every handle in this process reports through, and the
+    /// request-level instruments only this server can report. `GET /metrics`
+    /// renders its snapshot. Always installed: a metrics surface a
+    /// deployment has to remember to switch on is a metrics surface nobody
+    /// has during the incident.
+    pub(super) metrics: Arc<ServerMetrics>,
 }
 
 /// Everything a request path tells the writer's maintenance runner about
@@ -216,14 +221,7 @@ pub(super) async fn app_with_store_and_transfer_issuer(
     store: SharedObjectStore,
     transfer_issuer: Option<Arc<dyn ObjectTransferIssuer>>,
 ) -> Result<(Router, ServerLifecycle, AppState), ServerConfigError> {
-    // Instrumentation is installed once, here, so every LoonFS-owned request
-    // the process makes is measured — the handles' own traffic and the
-    // grep-owned traffic that used to run on a second, raw client.
-    let store = instrumented_store(
-        &config,
-        store,
-        std::env::var_os(OBJECT_STORE_METRICS_JSONL_ENV),
-    )?;
+    let metrics = ServerMetrics::new();
     // Two switches decide automatic grep indexing and nothing else does:
     // whether this server maintains anything automatically, and whether its
     // grep mode maintains the index.
@@ -234,12 +232,20 @@ pub(super) async fn app_with_store_and_transfer_issuer(
     // the writer for its publications to reach the index: the job says on
     // the trait that publications concern it, and registering it is what
     // subscribes it.
-    let (writer, reader, admin) = build_handles(&config, store.clone()).await?;
-    let probe_store = store.clone();
+    let (writer, reader, admin) = build_handles(
+        &config,
+        store,
+        &metrics,
+        std::env::var_os(OBJECT_STORE_METRICS_JSONL_ENV),
+    )
+    .await?;
+    let probe_store = writer.object_store();
     // A deployment that maintains the index needs a worker whether or not it
-    // answers queries with one.
+    // answers queries with one. It runs on the writer's own instrumented
+    // client, so the grep-owned traffic is measured like every other
+    // request instead of escaping on a second, raw client.
     let grep_worker = (config.grep.mode.serves_grep() || config.grep.mode.maintains_index())
-        .then(|| GrepWorker::new(store.clone(), reader.clone(), admin.clone()));
+        .then(|| GrepWorker::new(writer.object_store(), reader.clone(), admin.clone()));
     let grep_service = config
         .grep
         .mode
@@ -296,26 +302,9 @@ pub(super) async fn app_with_store_and_transfer_issuer(
         grep_worker,
         grep_service,
         grep_maintenance,
+        metrics,
     };
     Ok((router(state.clone()), lifecycle, state))
-}
-
-/// Wraps the store for object-store metrics when a recorder is configured.
-///
-/// One wrapper serves the whole process: the handles are built on it, and so
-/// is the grep worker, so no LoonFS-owned request escapes measurement.
-fn instrumented_store(
-    config: &ServerConfig,
-    store: SharedObjectStore,
-    metrics_jsonl_path: Option<OsString>,
-) -> Result<SharedObjectStore, ServerConfigError> {
-    let Some(recorder) = object_store_metrics_recorder(metrics_jsonl_path)? else {
-        return Ok(store);
-    };
-    Ok(Arc::new(
-        InstrumentedObjectStore::new(store, recorder)
-            .store_kind(TraceStoreKind::from(config.store.kind()).as_str()),
-    ) as SharedObjectStore)
 }
 
 #[cfg(test)]
@@ -324,21 +313,30 @@ pub(super) async fn build_handles_with_metrics_jsonl_path(
     store: SharedObjectStore,
     metrics_jsonl_path: Option<OsString>,
 ) -> Result<(FsWriter, FsReader, FsAdmin), ServerConfigError> {
-    let store = instrumented_store(config, store, metrics_jsonl_path)?;
-    build_handles(config, store).await
+    build_handles(config, store, &ServerMetrics::new(), metrics_jsonl_path).await
 }
 
+/// Opens the process's handles on one store, with the metrics wiring every
+/// deployment gets.
+///
+/// Both handles report through the same recorder, so their instruments are
+/// one set of numbers rather than two. The optional JSONL path adds a second
+/// sink for the raw object-store samples; the handle fans one store wrapper
+/// out to both rather than stacking two.
 async fn build_handles(
     config: &ServerConfig,
     store: SharedObjectStore,
+    metrics: &ServerMetrics,
+    metrics_jsonl_path: Option<OsString>,
 ) -> Result<(FsWriter, FsReader, FsAdmin), ServerConfigError> {
     let trace_store_kind = TraceStoreKind::from(config.store.kind());
+    let samples = object_store_metrics_recorder(metrics_jsonl_path)?;
     let runtime_error = |error: loonfs::RuntimeError| ServerConfigError::InvalidField {
         field: "runtime",
         reason: error.to_string(),
     };
 
-    let writer_builder = FsWriter::builder_with_store(store.clone())
+    let mut writer_builder = FsWriter::builder_with_store(store.clone())
         .writer_id(config.writer_id.clone())
         .background_work(config.maintenance.background_work())
         .min_publish_interval_ms(config.min_publish_interval_ms)
@@ -348,11 +346,15 @@ async fn build_handles(
         .max_concurrent_maintenance(config.max_concurrent_maintenance)
         .runtime_cache(config.runtime_cache_config())
         .trace_mode(TraceMode::Remote)
-        .trace_store_kind(trace_store_kind);
+        .trace_store_kind(trace_store_kind)
+        .metrics_recorder(metrics.recorder());
+    if let Some(samples) = &samples {
+        writer_builder = writer_builder.object_store_metrics_recorder(Arc::clone(samples));
+    }
     let writer = writer_builder.build().await.map_err(runtime_error)?;
     let reader = writer.reader();
 
-    let admin_builder = FsAdmin::builder_with_store(store)
+    let mut admin_builder = FsAdmin::builder_with_store(store)
         .actor_id(format!("{}-admin", config.writer_id))
         // The admin honors the configured cache sizing and shares the
         // writer's decoded-block cache instance, so explicit maintenance
@@ -361,7 +363,11 @@ async fn build_handles(
         .runtime_cache(config.runtime_cache_config())
         .shared_metadata_table_cache(&writer)
         .trace_mode(TraceMode::Remote)
-        .trace_store_kind(trace_store_kind);
+        .trace_store_kind(trace_store_kind)
+        .metrics_recorder(metrics.recorder());
+    if let Some(samples) = samples {
+        admin_builder = admin_builder.object_store_metrics_recorder(samples);
+    }
     let admin = admin_builder.build().await.map_err(runtime_error)?;
 
     Ok((writer, reader, admin))

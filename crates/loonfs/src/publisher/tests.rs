@@ -8,6 +8,7 @@ use crate::config::ReadConfig;
 use crate::content_tokens::ContentTokenError;
 use crate::fs::WriterIdentity;
 use crate::maintenance_runner::MaintenanceRunner;
+use crate::metrics::RuntimeInstruments;
 use crate::publish::{ContentPreparationError, FilesystemOperation};
 use crate::{
     BeginUploadRequest, CreateNamespaceOptions, ErrorCode, RuntimeCacheConfig,
@@ -199,6 +200,7 @@ fn test_read_core(store: SharedStore) -> ReadCore {
             trace_store_kind: TraceStoreKind::LocalFs,
         },
         None,
+        RuntimeInstruments::new(None),
     )
 }
 
@@ -209,6 +211,7 @@ fn test_writer_bits() -> Arc<WriterBits> {
             crate::FsBackgroundWork::ManualOnly,
             None,
             std::num::NonZeroUsize::new(1).expect("nonzero"),
+            RuntimeInstruments::new(None),
         ),
         publish_observer: None,
     })

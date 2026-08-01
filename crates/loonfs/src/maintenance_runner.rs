@@ -42,6 +42,7 @@ mod jobs;
 #[cfg(test)]
 mod tests;
 
+use crate::metrics::RuntimeInstruments;
 use crate::{NamespaceId, Result, RuntimeError};
 use admission::{Admission, MaintenanceKey, StepOutcome};
 use std::collections::BTreeMap;
@@ -445,6 +446,11 @@ struct RunnerInner {
     state: Mutex<RunnerState>,
     wake: Arc<Notify>,
     counters: RunnerCounters,
+    /// Where settled steps report. The two [`RunnerCounters`] above stay
+    /// where they are: they answer "is this happening at all", which a
+    /// number on an existing trace answers for a reader with no metrics
+    /// pipeline at all.
+    instruments: Arc<RuntimeInstruments>,
 }
 
 struct RunnerState {
@@ -462,12 +468,14 @@ impl MaintenanceRunner {
         policy: FsBackgroundWork,
         runtime: Option<tokio::runtime::Handle>,
         max_concurrent: std::num::NonZeroUsize,
+        instruments: Arc<RuntimeInstruments>,
     ) -> Self {
         Self::with_clock(
             policy,
             runtime,
             max_concurrent,
             Arc::new(SystemMaintenanceClock::default()),
+            instruments,
         )
     }
 
@@ -476,6 +484,7 @@ impl MaintenanceRunner {
         runtime: Option<tokio::runtime::Handle>,
         max_concurrent: std::num::NonZeroUsize,
         clock: Arc<dyn MaintenanceClock>,
+        instruments: Arc<RuntimeInstruments>,
     ) -> Self {
         let next_reconcile_ms = clock.now_ms().saturating_add(RECONCILE_INTERVAL_MS);
         Self {
@@ -492,6 +501,7 @@ impl MaintenanceRunner {
                 clock,
                 wake: Arc::new(Notify::new()),
                 counters: RunnerCounters::default(),
+                instruments,
             }),
         }
     }
@@ -826,6 +836,10 @@ async fn run_step(inner: &Arc<RunnerInner>, key: &MaintenanceKey) -> StepOutcome
     let started = tokio::time::Instant::now();
     match job.step(&key.namespace_id, continuation.as_deref()).await {
         Ok(result) => {
+            let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            inner
+                .instruments
+                .maintenance_step(key.job, result.conclusion, queued_ms, elapsed_ms);
             tracing::debug!(
                 job = %key.job,
                 namespace_id = %key.namespace_id,
@@ -836,12 +850,15 @@ async fn run_step(inner: &Arc<RunnerInner>, key: &MaintenanceKey) -> StepOutcome
                 // The two halves of what a step cost: how long it waited
                 // for a permit, and how long it then took.
                 queued_ms,
-                elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                elapsed_ms,
                 "maintenance step settled"
             );
             StepOutcome::Concluded(result)
         }
         Err(error) => {
+            inner
+                .instruments
+                .maintenance_step_failed(key.job, queued_ms);
             tracing::info!(
                 job = %key.job,
                 namespace_id = %key.namespace_id,

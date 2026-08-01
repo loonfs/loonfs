@@ -2,6 +2,7 @@
 //! delete and multipart stages, and multipart upload for large immutable
 //! payloads.
 
+use crate::attempts::count_retry_attempt;
 use crate::immutable_write::{readback, ImmutableReadback};
 use crate::keyspace::{
     normalize_key_prefix, scope_list_prefix, scope_object_key, unscope_listed_key,
@@ -371,6 +372,10 @@ impl ProviderObjectStore {
             remaining = deadline_remaining;
         }
         *retries += 1;
+        // Every write retry this store grants passes through here, so this
+        // is the one place a measuring wrapper above needs counted for its
+        // sample's attempt count.
+        count_retry_attempt();
         let backoff = transport_retry_backoff(&self.transport_retry, *retries).min(remaining);
         tracing::info!(
             object_key = key,
@@ -1172,6 +1177,9 @@ fn mask_xml_element_text(message: &str, element: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metrics::{
+        InstrumentedObjectStore, ObjectStoreOperation, VecObjectStoreMetricsRecorder,
+    };
     use crate::test_support::SteppingTimer;
     use futures::StreamExt;
     use object_store::memory::InMemory;
@@ -2054,6 +2062,46 @@ mod tests {
             .expect("transient delete failure is retried");
         assert_eq!(flaky.deletes.load(Ordering::SeqCst), 4);
         assert!(store.head(transient_key).await.expect("head").is_none());
+    }
+
+    /// The metrics wrapper sits above this store's retry loops, so without
+    /// the attempt tally a retried call and a slow one make the same sample.
+    #[tokio::test]
+    async fn a_retried_call_reports_its_attempts_to_the_metrics_wrapper() {
+        let flaky = Arc::new(FlakyStore::default());
+        let recorder = Arc::new(VecObjectStoreMetricsRecorder::default());
+        let store =
+            InstrumentedObjectStore::new(retrying_store(Arc::clone(&flaky)), recorder.clone());
+        let key = "namespaces/demo/uploads/upl_8.json";
+
+        store
+            .put_overwrite(key, Bytes::from_static(b"payload"))
+            .await
+            .expect("seed object");
+        flaky
+            .delete_script
+            .lock()
+            .expect("delete script")
+            .push_back(WriteScript::FailWithoutLanding);
+        store.delete(key).await.expect("the delete converges");
+
+        let samples = recorder.samples();
+        let delete = samples
+            .iter()
+            .find(|sample| sample.operation == ObjectStoreOperation::Delete)
+            .expect("the delete is sampled");
+        assert_eq!(
+            delete.attempts, 2,
+            "one failed attempt, then the one that landed"
+        );
+        let seed = samples
+            .iter()
+            .find(|sample| sample.operation == ObjectStoreOperation::Put)
+            .expect("the seed write is sampled");
+        assert_eq!(
+            seed.attempts, 1,
+            "a call that never retried made one attempt"
+        );
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! A metrics-recording wrapper around any object store: per-operation
 //! samples classified by object family.
 
+use crate::attempts::counting_attempts;
 use crate::layout::{parse_object_key, DurableObjectFamily};
 use crate::object_store::Result;
 use crate::{
@@ -29,6 +30,16 @@ pub struct ObjectStoreMetricSample {
     pub operation: ObjectStoreOperation,
     /// End-to-end operation latency in microseconds, including provider waits.
     pub elapsed_micros: u128,
+    /// Provider attempts this one call made, counting the first: `1` is a
+    /// call that never retried.
+    ///
+    /// Retries are what makes an otherwise unexplained `elapsed_micros`
+    /// readable. The count covers the bounded retry loops inside the store
+    /// this wrapper measures; a retry loop that sits *above* the wrapper —
+    /// [`crate::ObjectStore::put_immutable_verified`] is the one — surfaces
+    /// as one sample per attempt instead, because each of its attempts
+    /// really is a separate measured call.
+    pub attempts: u32,
     /// Cardinality-bounded success or failure classification.
     pub result: ObjectStoreResultClass,
     /// Request payload bytes for a put, including failed attempts; otherwise `None`.
@@ -75,6 +86,26 @@ pub enum ObjectStoreOperation {
     ListPrefixStream,
 }
 
+impl ObjectStoreOperation {
+    /// The label an aggregating recorder groups by. Identical to the serde
+    /// name: one operation has one spelling wherever it is reported.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Head => "head",
+            Self::GetWithMetadata => "get_with_metadata",
+            Self::Get => "get",
+            Self::Put => "put",
+            Self::PutStreamed => "put_streamed",
+            Self::Delete => "delete",
+            Self::CreateMultipartUpload => "create_multipart_upload",
+            Self::CompleteMultipartUpload => "complete_multipart_upload",
+            Self::AbortMultipartUpload => "abort_multipart_upload",
+            Self::ListPrefix => "list_prefix",
+            Self::ListPrefixStream => "list_prefix_stream",
+        }
+    }
+}
+
 /// Collapses object-store outcomes into a bounded metrics vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -99,6 +130,25 @@ pub enum ObjectStoreResultClass {
     Transport,
     /// Reserves a forward-compatible bucket for errors outside the current registry.
     OtherError,
+}
+
+impl ObjectStoreResultClass {
+    /// The label an aggregating recorder groups by. Identical to the serde
+    /// name: one outcome has one spelling wherever it is reported.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::NotFound => "not_found",
+            Self::InvalidKey => "invalid_key",
+            Self::InvalidContentRef => "invalid_content_ref",
+            Self::InvalidRange => "invalid_range",
+            Self::PreconditionFailed => "precondition_failed",
+            Self::PermissionDenied => "permission_denied",
+            Self::Unsupported => "unsupported",
+            Self::Transport => "transport",
+            Self::OtherError => "other_error",
+        }
+    }
 }
 
 /// Groups durable keys into low-cardinality operational families.
@@ -285,23 +335,35 @@ where
 {
     async fn head(&self, key: &str) -> Result<Option<ObjectMetadata>> {
         let start = sample_clock();
-        let result = self.inner.head(key).await;
-        self.record_head_like(ObjectStoreOperation::Head, key, start.elapsed(), &result);
+        let (result, attempts) = counting_attempts(self.inner.head(key)).await;
+        self.record_head_like(
+            ObjectStoreOperation::Head,
+            key,
+            start.elapsed(),
+            attempts,
+            &result,
+        );
         result
     }
 
     async fn head_stored_checksum(&self, key: &str) -> Result<Option<StoredObjectChecksum>> {
         let start = sample_clock();
-        let result = self.inner.head_stored_checksum(key).await;
+        let (result, attempts) = counting_attempts(self.inner.head_stored_checksum(key)).await;
         // One provider metadata request, recorded as the head it is: the
         // point of this call is that it moves no payload.
-        self.record_head_like(ObjectStoreOperation::Head, key, start.elapsed(), &result);
+        self.record_head_like(
+            ObjectStoreOperation::Head,
+            key,
+            start.elapsed(),
+            attempts,
+            &result,
+        );
         result
     }
 
     async fn create_multipart_upload(&self, key: &str) -> Result<String> {
         let start = sample_clock();
-        let result = self.inner.create_multipart_upload(key).await;
+        let (result, attempts) = counting_attempts(self.inner.create_multipart_upload(key)).await;
         // The multipart control calls move no payload of their own: the
         // parts travel from the client straight to the provider. Timing them
         // is the only thing there is to record.
@@ -309,6 +371,7 @@ where
             ObjectStoreOperation::CreateMultipartUpload,
             key,
             start.elapsed(),
+            attempts,
             &result,
         );
         result
@@ -322,14 +385,18 @@ where
         full_object_checksum: &StorageChecksum,
     ) -> Result<MultipartCompletion> {
         let start = sample_clock();
-        let result = self
-            .inner
-            .complete_multipart_upload(key, provider_upload_id, parts, full_object_checksum)
-            .await;
+        let (result, attempts) = counting_attempts(self.inner.complete_multipart_upload(
+            key,
+            provider_upload_id,
+            parts,
+            full_object_checksum,
+        ))
+        .await;
         self.record_unit(
             ObjectStoreOperation::CompleteMultipartUpload,
             key,
             start.elapsed(),
+            attempts,
             &result,
         );
         result
@@ -337,14 +404,13 @@ where
 
     async fn abort_multipart_upload(&self, key: &str, provider_upload_id: &str) -> Result<()> {
         let start = sample_clock();
-        let result = self
-            .inner
-            .abort_multipart_upload(key, provider_upload_id)
-            .await;
+        let (result, attempts) =
+            counting_attempts(self.inner.abort_multipart_upload(key, provider_upload_id)).await;
         self.record_unit(
             ObjectStoreOperation::AbortMultipartUpload,
             key,
             start.elapsed(),
+            attempts,
             &result,
         );
         result
@@ -352,23 +418,23 @@ where
 
     async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Option<Bytes>> {
         let start = sample_clock();
-        let result = self.inner.get(key, range.clone()).await;
-        self.record_get(key, range.as_ref(), start.elapsed(), &result);
+        let (result, attempts) = counting_attempts(self.inner.get(key, range.clone())).await;
+        self.record_get(key, range.as_ref(), start.elapsed(), attempts, &result);
         result
     }
 
     async fn get_with_metadata(&self, key: &str) -> Result<Option<ObjectBody>> {
         let start = sample_clock();
-        let result = self.inner.get_with_metadata(key).await;
-        self.record_get_with_metadata(key, start.elapsed(), &result);
+        let (result, attempts) = counting_attempts(self.inner.get_with_metadata(key)).await;
+        self.record_get_with_metadata(key, start.elapsed(), attempts, &result);
         result
     }
 
     async fn put(&self, key: &str, bytes: Bytes, mode: PutMode) -> Result<ObjectMetadata> {
         let start = sample_clock();
         let bytes_in = bytes.len() as u64;
-        let result = self.inner.put(key, bytes, mode.clone()).await;
-        self.record_put(key, bytes_in, &mode, start.elapsed(), &result);
+        let (result, attempts) = counting_attempts(self.inner.put(key, bytes, mode.clone())).await;
+        self.record_put(key, bytes_in, &mode, start.elapsed(), attempts, &result);
         result
     }
 
@@ -378,10 +444,12 @@ where
     /// its content is taking.
     async fn put_streamed(&self, key: &str, body: ByteStream, mode: PutMode) -> Result<u64> {
         let start = sample_clock();
-        let result = self.inner.put_streamed(key, body, mode.clone()).await;
+        let (result, attempts) =
+            counting_attempts(self.inner.put_streamed(key, body, mode.clone())).await;
         self.record(ObjectStoreMetricSample {
             operation: ObjectStoreOperation::PutStreamed,
             elapsed_micros: start.elapsed().as_micros(),
+            attempts,
             result: classify_result(&result),
             bytes_in: result.as_ref().ok().copied(),
             bytes_out: None,
@@ -396,8 +464,14 @@ where
 
     async fn delete(&self, key: &str) -> Result<()> {
         let start = sample_clock();
-        let result = self.inner.delete(key).await;
-        self.record_unit(ObjectStoreOperation::Delete, key, start.elapsed(), &result);
+        let (result, attempts) = counting_attempts(self.inner.delete(key)).await;
+        self.record_unit(
+            ObjectStoreOperation::Delete,
+            key,
+            start.elapsed(),
+            attempts,
+            &result,
+        );
         result
     }
 
@@ -419,16 +493,18 @@ where
 
     async fn list_prefix(&self, prefix: &str) -> Result<Vec<String>> {
         let start = sample_clock();
-        let result: Result<Vec<_>> = self
-            .inner
-            .list_prefix_stream(prefix)
-            .try_collect()
-            .await
-            .map(|mut keys: Vec<String>| {
-                keys.sort();
-                keys
-            });
-        self.record_list(prefix, start.elapsed(), &result);
+        let (result, attempts): (Result<Vec<_>>, u32) = counting_attempts(async {
+            self.inner
+                .list_prefix_stream(prefix)
+                .try_collect()
+                .await
+                .map(|mut keys: Vec<String>| {
+                    keys.sort();
+                    keys
+                })
+        })
+        .await;
+        self.record_list(prefix, start.elapsed(), attempts, &result);
         result
     }
 }
@@ -439,11 +515,13 @@ impl<S> InstrumentedObjectStore<S> {
         operation: ObjectStoreOperation,
         key: &str,
         elapsed: Duration,
+        attempts: u32,
         result: &Result<Option<T>>,
     ) {
         self.record(ObjectStoreMetricSample {
             operation,
             elapsed_micros: elapsed.as_micros(),
+            attempts,
             result: classify_optional_result(result),
             bytes_in: None,
             bytes_out: None,
@@ -460,11 +538,13 @@ impl<S> InstrumentedObjectStore<S> {
         key: &str,
         range: Option<&ByteRange>,
         elapsed: Duration,
+        attempts: u32,
         result: &Result<Option<Bytes>>,
     ) {
         self.record(ObjectStoreMetricSample {
             operation: ObjectStoreOperation::Get,
             elapsed_micros: elapsed.as_micros(),
+            attempts,
             result: classify_optional_result(result),
             bytes_in: None,
             bytes_out: result
@@ -483,11 +563,13 @@ impl<S> InstrumentedObjectStore<S> {
         &self,
         key: &str,
         elapsed: Duration,
+        attempts: u32,
         result: &Result<Option<ObjectBody>>,
     ) {
         self.record(ObjectStoreMetricSample {
             operation: ObjectStoreOperation::GetWithMetadata,
             elapsed_micros: elapsed.as_micros(),
+            attempts,
             result: classify_optional_result(result),
             bytes_in: None,
             bytes_out: result
@@ -508,11 +590,13 @@ impl<S> InstrumentedObjectStore<S> {
         bytes_in: u64,
         mode: &PutMode,
         elapsed: Duration,
+        attempts: u32,
         result: &Result<ObjectMetadata>,
     ) {
         self.record(ObjectStoreMetricSample {
             operation: ObjectStoreOperation::Put,
             elapsed_micros: elapsed.as_micros(),
+            attempts,
             result: classify_result(result),
             bytes_in: Some(bytes_in),
             bytes_out: None,
@@ -529,11 +613,13 @@ impl<S> InstrumentedObjectStore<S> {
         operation: ObjectStoreOperation,
         key: &str,
         elapsed: Duration,
+        attempts: u32,
         result: &Result<T>,
     ) {
         self.record(ObjectStoreMetricSample {
             operation,
             elapsed_micros: elapsed.as_micros(),
+            attempts,
             result: classify_result(result),
             bytes_in: None,
             bytes_out: None,
@@ -545,10 +631,17 @@ impl<S> InstrumentedObjectStore<S> {
         });
     }
 
-    fn record_list(&self, prefix: &str, elapsed: Duration, result: &Result<Vec<String>>) {
+    fn record_list(
+        &self,
+        prefix: &str,
+        elapsed: Duration,
+        attempts: u32,
+        result: &Result<Vec<String>>,
+    ) {
         self.record(ObjectStoreMetricSample {
             operation: ObjectStoreOperation::ListPrefix,
             elapsed_micros: elapsed.as_micros(),
+            attempts,
             result: classify_result(result),
             bytes_in: None,
             bytes_out: None,
@@ -602,6 +695,11 @@ impl Drop for RecordedListStream {
         self.recorder.record(ObjectStoreMetricSample {
             operation: ObjectStoreOperation::ListPrefixStream,
             elapsed_micros: self.started.elapsed().as_micros(),
+            // A listing stream is polled by whoever holds it, across tasks a
+            // tally cannot follow, and no LoonFS-owned retry gate sits on
+            // the listing path: what retries a provider client does there
+            // are its own and were never countable from here.
+            attempts: 1,
             result: self.first_error.unwrap_or(ObjectStoreResultClass::Ok),
             bytes_in: None,
             bytes_out: None,

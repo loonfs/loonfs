@@ -10,6 +10,7 @@ mod handlers_namespace;
 mod handlers_query;
 mod handlers_store;
 mod handlers_uploads;
+mod metrics;
 #[cfg(feature = "openapi")]
 mod openapi;
 mod serve;
@@ -50,10 +51,11 @@ use self::serve::{
     app_with_store, app_with_store_and_state, app_with_store_and_transfer_issuer,
     build_handles_with_metrics_jsonl_path, serve_on,
 };
-use axum::extract::{Request, State};
-use axum::http::{HeaderValue, StatusCode};
+use axum::extract::{MatchedPath, Request, State};
+use axum::http::header::CONTENT_TYPE;
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::Router;
 use loonfs::ErrorCode;
@@ -83,6 +85,41 @@ async fn with_request_id(request: Request, next: Next) -> Response {
         response.headers_mut().insert(REQUEST_ID_HEADER, value);
     }
     response
+}
+
+/// Counts and times every request against the route axum matched it to.
+///
+/// The label is the route template, never the request's own path: a path
+/// carries namespace, upload, and checkpoint ids, and one unbounded label
+/// set is how a metrics backend dies. A request that matched no route — a
+/// 404 — reports as `unmatched`, which is one label rather than one per
+/// probe an internet-facing listener receives.
+async fn with_request_metrics(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let route = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map(|matched| matched.as_str().to_owned());
+    let method = request.method().clone();
+    let started = request_clock();
+    let response = next.run(request).await;
+    state.metrics.request_served(
+        route.as_deref(),
+        &method,
+        response.status(),
+        started.elapsed().as_secs_f64(),
+    );
+    response
+}
+
+#[allow(clippy::disallowed_methods)]
+fn request_clock() -> std::time::Instant {
+    // The measuring boundary the workspace lint points to: this reading
+    // becomes a histogram observation and reaches no protocol state.
+    std::time::Instant::now()
 }
 
 fn router(state: AppState) -> Router {
@@ -123,6 +160,7 @@ fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/readiness", get(readiness))
+        .route("/metrics", get(serve_metrics))
         .route("/v0/capabilities", get(handlers_namespace::capabilities))
         .route("/v0/namespaces", post(create_namespace))
         .route(
@@ -210,6 +248,12 @@ fn router(state: AppState) -> Router {
         // contract instead of axum's empty default bodies.
         .fallback(route_not_found)
         .method_not_allowed_fallback(method_not_allowed)
+        // Request timing runs inside the correlation id, so a slow request's
+        // trace and its measurement name the same id.
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            with_request_metrics,
+        ))
         .layer(middleware::from_fn(with_request_id))
         .with_state(state)
 }
@@ -285,4 +329,44 @@ async fn readiness(State(state): State<AppState>) -> Result<&'static str, ApiRes
         ));
     }
     Ok("ready")
+}
+
+/// Content type of the Prometheus text exposition format this server emits.
+const PROMETHEUS_CONTENT_TYPE: &str = "text/plain; version=0.0.4";
+
+/// Renders this process's metrics.
+///
+/// Authorized like every other route, unlike `/health` and `/readiness`:
+/// those report whether the process is up, while this reports what it has
+/// been doing, and a deployment's traffic shape is not public. Scrapers send
+/// the same bearer token clients do.
+#[cfg_attr(
+    feature = "openapi",
+    utoipa::path(
+        get,
+        path = "/metrics",
+        tag = "health",
+        summary = "Scrape metrics",
+        description = "Returns this process's metrics in Prometheus text exposition format \
+                       0.0.4. Unlike `/health` and `/readiness`, the route requires the \
+                       deployment's bearer token.",
+        responses(
+            (status = 200, description = "Prometheus text exposition", body = String),
+            (status = 401, description = "Missing or invalid bearer token", body = loonfs_api::ApiError)
+        )
+    )
+)]
+async fn serve_metrics(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, ApiResponseError> {
+    authorize(&state.config, &headers)?;
+    // Read at scrape time rather than accumulated: these are levels, and a
+    // level is only true when it is asked for.
+    let rendered = state.metrics.render(
+        &state.writer.runtime_cache_stats(),
+        state.upload_permits.available_permits(),
+        state.download_permits.available_permits(),
+    );
+    Ok(([(CONTENT_TYPE, PROMETHEUS_CONTENT_TYPE)], rendered).into_response())
 }

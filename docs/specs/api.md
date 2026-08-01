@@ -571,6 +571,7 @@ A representative v0 binding is shown below.
 | Disable the grep index | `POST /v0/admin/namespaces/{ns}/grep/index/disable` (CAS-publishes the grep root as disabled; grep-owned garbage collection later reclaims unreferenced segments; idempotent) |
 | Collect grep-index garbage | `POST /v0/admin/namespaces/{ns}/grep/index/gc` (one explicit pass over only that namespace's grep extension; `max_objects` bounds the reads it spends and returns a `next_cursor` when keys remain; also reaps aged state for an absent or tombstoned namespace) |
 | Probe the store contract | `POST /v0/admin/store/probe` (the one admin route whose subject is the store rather than a namespace; body carries no options today and `{}` is the request; see below) |
+| Scrape metrics | `GET /metrics` (Prometheus text exposition; authorized, unlike the liveness routes — see below) |
 
 The status route and the enable response both report the index's lifecycle
 as a tagged `state`, and the phases never share a field:
@@ -1683,6 +1684,35 @@ scope resolves to an inode under the namespace's name policy and filters by
 ancestry, so it requires the same canonical spelling and validation as every
 other path read. A missing data half answers `not_supported` with the
 `feature` field naming `grep.index`.
+
+### 6.13 `GET /metrics`
+
+An operational route, alongside the two liveness routes: `GET /health`
+answers `ok` while the process is up, `GET /readiness` answers `ready`
+while it still admits work, and this one reports what the process has been
+doing. It answers Prometheus text exposition format 0.0.4 with
+`Content-Type: text/plain; version=0.0.4`.
+
+Unlike `/health` and `/readiness`, it requires the deployment's bearer
+token. Those two say only whether the process is alive, which a load
+balancer needs and nobody can misuse; this one describes a deployment's
+traffic, its namespaces' shape of work, and its failure rates, which is
+not public. A scrape sends the same `Authorization: Bearer` header a
+client does, and an unauthorized one answers `401 unauthorized` inside the
+standard error envelope.
+
+Metric names are `loonfs_<subsystem>_<metric>`, covering the object-store
+calls the process made, the maintenance steps it settled, the publications
+it batched, what garbage collection reclaimed, and the requests this
+server served. Label values come from closed vocabularies only: a request
+is labeled by the route template it matched (`/v0/namespaces/{namespace}`),
+never by its own path, so no namespace, upload, commit, or checkpoint id
+ever appears in a label. Values are per process and reset when it
+restarts, which is the ordinary contract for a counter a scraper reads.
+
+The metric set is not part of the v0 wire contract: names may be added or
+adjusted as the runtime's instrumentation grows, and clients must not
+depend on any particular series existing.
 
 ## 7. Conformance requirements
 

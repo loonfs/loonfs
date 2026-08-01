@@ -336,7 +336,10 @@ impl FromRequest<AppState> for UploadBodyStream {
             .upload_permits
             .clone()
             .try_acquire_owned()
-            .map_err(|_| server_busy_error("proxied uploads"))?;
+            .map_err(|_| {
+                state.metrics.upload_rejected_as_busy();
+                server_busy_error("proxied uploads")
+            })?;
         let max_bytes = state.config.max_upload_bytes;
         // A declared length past the limit is refused before a byte moves.
         // The incremental count still runs: a chunked body declares nothing,

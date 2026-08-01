@@ -32,6 +32,7 @@ fn openapi_documents_current_server_paths() {
     for (path, method) in [
         ("/health", "get"),
         ("/readiness", "get"),
+        ("/metrics", "get"),
         ("/v0/capabilities", "get"),
         ("/v0/namespaces", "post"),
         ("/v0/namespaces/{namespace}", "get"),

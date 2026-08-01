@@ -9,6 +9,7 @@ mod http_admin;
 mod http_auth;
 mod http_commits;
 mod http_limits;
+mod http_metrics;
 mod http_pagination;
 mod http_paths;
 mod http_retry;

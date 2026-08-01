@@ -186,7 +186,10 @@ pub(super) async fn get_file_bytes(
         .download_permits
         .clone()
         .try_acquire_owned()
-        .map_err(|_| super::server_busy_error("proxied content reads"))?;
+        .map_err(|_| {
+            state.metrics.download_rejected_as_busy();
+            super::server_busy_error("proxied content reads")
+        })?;
     let path = query.path;
     let revision_no = query
         .revision_no

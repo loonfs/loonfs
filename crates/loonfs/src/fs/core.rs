@@ -5,6 +5,7 @@
 use crate::cache::{RuntimeCacheStatsInner, RuntimeControlCache};
 use crate::config::{validate_writer_id, ReadConfig};
 use crate::maintenance_runner::MaintenanceRunner;
+use crate::metrics::RuntimeInstruments;
 use crate::publisher::PublishObserver;
 use crate::time::current_time_ms;
 use crate::{
@@ -47,6 +48,10 @@ pub(crate) struct ReadCoreInner {
     pub(crate) metadata_table_cache: Arc<MetadataTableCache>,
     pub(crate) wal_tail_projection_cache: Arc<WalTailProjectionCache>,
     pub(crate) cache_stats: RuntimeCacheStatsInner,
+    /// Where this runtime's publication, maintenance, and collection
+    /// numbers go. Reports nothing unless the handle was built with a
+    /// metrics recorder.
+    pub(crate) instruments: Arc<RuntimeInstruments>,
 }
 
 /// The actor identity a write-capable handle publishes under: immutable
@@ -111,6 +116,7 @@ impl ReadCore {
         store: SharedObjectStore,
         config: ReadConfig,
         shared_metadata_table_cache: Option<Arc<MetadataTableCache>>,
+        instruments: Arc<RuntimeInstruments>,
     ) -> Self {
         let metadata_table_cache = shared_metadata_table_cache.unwrap_or_else(|| {
             Arc::new(MetadataTableCache::new(
@@ -133,8 +139,15 @@ impl ReadCore {
                 metadata_table_cache,
                 wal_tail_projection_cache,
                 cache_stats: RuntimeCacheStatsInner::default(),
+                instruments,
             }),
         }
+    }
+
+    /// This runtime's instrument set, for the publication, maintenance, and
+    /// collection paths that report through it.
+    pub(crate) fn instruments(&self) -> &Arc<RuntimeInstruments> {
+        &self.inner.instruments
     }
 
     /// This runtime's shared decoded-block cache handle, for builders

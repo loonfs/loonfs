@@ -623,6 +623,9 @@ impl NamespacePublisher {
 
             match item {
                 WorkItem::Batch(batch) => {
+                    self.read_core
+                        .instruments()
+                        .publisher_batch(batch.candidates.len());
                     tracing::info!(
                         phase = "batch_collect",
                         mode = self.trace_mode,
@@ -659,6 +662,11 @@ impl NamespacePublisher {
         }
         let item = state.queue.pop_front();
         state.next_allowed_cas_at = Some(Instant::now() + self.min_publish_interval);
+        let queue_depth = queued_candidates(&state);
+        drop(state);
+        self.read_core
+            .instruments()
+            .publisher_queue_depth(queue_depth);
         item
     }
 
@@ -956,6 +964,7 @@ impl NamespacePublisher {
         }
 
         for (result, wait_ms) in wait_traces {
+            self.read_core.instruments().publisher_publish(result);
             tracing::info!(
                 phase = "wait_for_result",
                 mode = self.trace_mode,
@@ -972,6 +981,9 @@ impl NamespacePublisher {
     }
 
     fn trace_enqueue(&self, queue_depth: usize, reason: &'static str) {
+        self.read_core
+            .instruments()
+            .publisher_queue_depth(queue_depth);
         tracing::info!(
             phase = "enqueue",
             mode = self.trace_mode,
