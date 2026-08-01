@@ -567,6 +567,11 @@ fn put_expected_revision_replaces_only_the_observed_revision() {
         message.ends_with("expected revision 1, found revision 2"),
         "{message}"
     );
+    // The embedded backend carries the same structured details a server's
+    // envelope would, so `--json` consumers read one contract from both
+    // profiles.
+    assert_eq!(stale_error["details"]["expected_revision"], 1);
+    assert_eq!(stale_error["details"]["actual_revision"], 2);
     let cat = harness.run(&["cat", "/doc.txt"]);
     assert_success(&cat);
     assert_eq!(cat.stdout, b"v2");
