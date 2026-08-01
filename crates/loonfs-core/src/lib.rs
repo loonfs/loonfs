@@ -104,7 +104,7 @@ pub mod limits;
 /// reference model; `loonfs` reaches metadata only through the seams above.
 pub mod metadata;
 /// Path parsing and current-state resolution. Consumed by `loonfs`'s write
-/// path (`ensure_mutation_path`, `parse_mutation_path`).
+/// path (`parse_mutation_path`).
 pub mod path;
 /// The wall-clock boundary durable timestamps are stamped at. Consumed by
 /// `loonfs`, whose mutation contexts and maintenance clock stamp from the

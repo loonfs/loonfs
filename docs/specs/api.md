@@ -1239,6 +1239,14 @@ This is the binding for the commit model in section 5.1: one `commit_id`,
 an optional `message`, and `operations` — an ordered, non-empty array of
 path operations. An empty array is `invalid_request`.
 
+The root path `/` is readable but never a mutation target. An operation that
+names it — as its own path, or as either end of a move or copy — is
+`invalid_request`. The rejection belongs to the operation rather than to the
+request, so it is attributed like every other failure: inside a batch it
+names its position, and it is decided against a namespace that exists, so a
+root mutation sent to an unknown namespace answers `namespace_not_found`
+first.
+
 Representative request:
 
 ```json

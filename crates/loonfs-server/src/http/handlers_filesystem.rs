@@ -11,9 +11,7 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use loonfs::publish::{
-    ensure_mutation_path, CommitCandidate, CommitRequest, ContentPreparationError,
-};
+use loonfs::publish::{CommitCandidate, CommitRequest, ContentPreparationError};
 use loonfs::{payload_class, ErrorCode, ListChangesOptions, TraceStoreKind};
 #[cfg(feature = "openapi")]
 use loonfs_api::ApiError;
@@ -23,7 +21,7 @@ use loonfs_api::ApiError;
 use loonfs_api::{
     decode_cursor,
     v0::{ChangesResponse, CommitResponse as ApiCommitResponse},
-    AbsolutePath, CommitRequest as ApiCommitRequest, DirectoryPageCursor, FileRevisionsPageCursor,
+    CommitRequest as ApiCommitRequest, DirectoryPageCursor, FileRevisionsPageCursor,
     FilesystemOperation, LimitError, ListFileRevisionsResponse, ListTrashResponse, PageCursorError,
     PageRequest, PaginationPolicy, RevisionNo,
 };
@@ -300,23 +298,6 @@ pub(super) async fn list_file_revisions(
     Ok(Json(response))
 }
 
-/// Every path an operation would mutate.
-fn mutation_paths(operation: &FilesystemOperation) -> Vec<&AbsolutePath> {
-    match operation {
-        FilesystemOperation::CreateDirectory { path, .. }
-        | FilesystemOperation::PutFile { path, .. }
-        | FilesystemOperation::DeletePath { path, .. }
-        | FilesystemOperation::Undelete { path, .. }
-        | FilesystemOperation::RestoreRevision { path, .. } => vec![path],
-        FilesystemOperation::MovePath {
-            from_path, to_path, ..
-        }
-        | FilesystemOperation::CopyPath {
-            from_path, to_path, ..
-        } => vec![from_path, to_path],
-    }
-}
-
 #[cfg_attr(
     feature = "openapi",
     utoipa::path(
@@ -324,7 +305,7 @@ fn mutation_paths(operation: &FilesystemOperation) -> Vec<&AbsolutePath> {
         path = "/v0/namespaces/{namespace}/commits",
         tag = "filesystem",
         summary = "Apply a commit",
-        description = "Applies one commit: an ordered, non-empty list of path operations that commit together as one logical commit, under one commit id that makes retries idempotent. A single-operation call is the one-element case. The first operation that fails aborts the whole request and names its position in `details.operation_index`.",
+        description = "Applies one commit: an ordered, non-empty list of path operations that commit together as one logical commit, under one commit id that makes retries idempotent. A single-operation call is the one-element case. The first operation that fails aborts the whole request, and a request carrying more than one operation names that operation's position in `details.operation_index`.",
         params(("namespace" = String, Path, description = "Namespace id")),
         request_body = ApiCommitRequest,
         responses(
@@ -384,19 +365,6 @@ pub(super) async fn apply_commit(
             .await?,
         ))
     };
-    // Absolute-path grammar was validated while decoding the wire body. The
-    // root remains a valid read path but is not a legal mutation target.
-    //
-    // Every planner re-asserts this, so the pass is a duplicate; it stays
-    // because it rejects before the commit queue, and because dropping it
-    // would start attributing root rejections to an operation index the
-    // wire has never carried for them.
-    for path in operations.iter().flat_map(mutation_paths) {
-        ensure_mutation_path(path).map_err(|error| {
-            ApiResponseError::core_for_namespace(&namespace_id, error)
-                .with_commit_id(&commit_id_for_errors)
-        })?;
-    }
     let request = CommitRequest {
         commit_id,
         message,
