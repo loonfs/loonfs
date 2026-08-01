@@ -642,6 +642,112 @@ fn large_and_piped_puts_round_trip_through_an_embedded_profile() {
     assert_eq!(json_error(&no_destination)["code"], "invalid_input");
 }
 
+/// A payload of several download chunks, so a `get` that read the file whole
+/// and one that reads it in chunks are told apart by what comes back rather
+/// than by what a comment claims.
+fn multi_chunk_payload() -> Vec<u8> {
+    let len = 3 * loonfs::CONTENT_READ_CHUNK_BYTES as usize + 1_024;
+    (0..len).map(|offset| (offset % 251) as u8).collect()
+}
+
+/// A file many chunks long round-trips through an embedded profile to a
+/// local file and to standard output, byte for byte.
+#[test]
+fn a_multi_chunk_file_round_trips_to_a_file_and_to_stdout() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+    let payload = multi_chunk_payload();
+
+    let local = harness.temp_dir.path().join("chunked.bin");
+    fs::write(&local, &payload).expect("write payload");
+    assert_success(&harness.run(&["put", local.to_str().expect("utf-8 path"), "/chunked.bin"]));
+
+    assert_eq!(
+        download(&harness, "/chunked.bin", "chunked-back.bin"),
+        payload,
+        "a downloaded file is the file that was uploaded"
+    );
+
+    let streamed = harness.run(&["get", "/chunked.bin", "-"]);
+    assert_success(&streamed);
+    assert_eq!(
+        streamed.stdout, payload,
+        "streaming to stdout writes the content and nothing else"
+    );
+}
+
+/// Content that no longer matches its reference fails the download, and
+/// fails it without leaving anything at the destination: no file, and no
+/// partial file beside it. A verified-looking local copy of unverified bytes
+/// is the outcome the temp-file-then-rename order exists to prevent.
+#[test]
+fn a_download_of_corrupted_content_leaves_nothing_at_the_destination() {
+    let harness = Harness::new();
+    harness.add_embedded_profile("default");
+    assert_success(&harness.run(&["namespace", "create", "demo"]));
+    assert_success(&harness.run(&["use", "demo"]));
+
+    let payload = b"the bytes that were committed".to_vec();
+    let local = harness.temp_dir.path().join("source.bin");
+    fs::write(&local, &payload).expect("write payload");
+    assert_success(&harness.run(&["put", local.to_str().expect("utf-8 path"), "/doc.bin"]));
+
+    // Same length, different bytes: the reference's digest is the only
+    // thing that can tell, which is what the read has to notice.
+    let object = content_object_path(&harness.store_root("default"), payload.len() as u64);
+    let mut corrupted = payload.clone();
+    corrupted[0] ^= 0xff;
+    fs::write(&object, &corrupted).expect("corrupt content object");
+
+    let destination = harness.temp_dir.path().join("downloads").join("doc.bin");
+    fs::create_dir_all(destination.parent().expect("parent")).expect("create download dir");
+    let failed = harness.run(&[
+        "--json",
+        "get",
+        "/doc.bin",
+        destination.to_str().expect("utf-8 path"),
+    ]);
+    assert_failure(&failed);
+    assert_eq!(json_error(&failed)["code"], "namespace_corrupt");
+    assert!(
+        !destination.exists(),
+        "a failed download must not install a file"
+    );
+    let leftovers: Vec<PathBuf> = fs::read_dir(destination.parent().expect("parent"))
+        .expect("read download dir")
+        .map(|entry| entry.expect("dir entry").path())
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "the partial file must be cleaned up, found {leftovers:?}"
+    );
+}
+
+/// The one content object of a given length under a store root. Content
+/// objects live at `content-stores/<store>/objects/<shard>/<id>`, and the
+/// tests that use this write one file whose length nothing else shares.
+fn content_object_path(store_root: &Path, size_bytes: u64) -> PathBuf {
+    let objects = walkdir::WalkDir::new(store_root.join("content-stores"))
+        .into_iter()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry.file_type().is_file()
+                && entry
+                    .metadata()
+                    .is_ok_and(|metadata| metadata.len() == size_bytes)
+        })
+        .map(|entry| entry.path().to_path_buf())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        objects.len(),
+        1,
+        "expected exactly one content object of {size_bytes} bytes, found {objects:?}"
+    );
+    objects.into_iter().next().expect("one content object")
+}
+
 /// The same two payloads over the remote transport. This deployment stores
 /// to a local filesystem, so it cannot authorize direct part uploads and
 /// the payload streams through the server instead — the fallback the client

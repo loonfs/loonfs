@@ -201,6 +201,8 @@ pub(crate) fn render_success(output: &CommandOutput, json_mode: bool) -> io::Res
             let mut stdout = io::stdout().lock();
             stdout.write_all(bytes)?;
         }
+        // Already written, chunk by chunk, by the command itself.
+        CommandData::StreamedToStdout => {}
         _ => {
             let rendered = human_success(output);
             let mut stdout = io::stdout().lock();
@@ -241,7 +243,7 @@ pub(crate) fn write_stderr_progress(message: impl std::fmt::Display) {
 
 pub(crate) fn json_success(output: &CommandOutput) -> io::Result<String> {
     match &output.data {
-        CommandData::StreamBytes(_) => Err(io::Error::new(
+        CommandData::StreamBytes(_) | CommandData::StreamedToStdout => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "streaming output does not support json rendering",
         )),
@@ -747,7 +749,7 @@ pub(crate) fn human_success(output: &CommandOutput) -> String {
             commit,
             commit_date,
         } => format!("{version} ({commit} {commit_date})"),
-        CommandData::StreamBytes(_) => String::new(),
+        CommandData::StreamBytes(_) | CommandData::StreamedToStdout => String::new(),
     }
 }
 

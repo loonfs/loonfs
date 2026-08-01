@@ -9,9 +9,10 @@ use crate::render::write_stderr_warning;
 use loonfs::{
     ByteStream, ChangesResponse, CopyOptions, CreateCheckpointOptions, CreateDirectoryOptions,
     CreateNamespaceOptions, DeleteNamespaceOptions, DeleteNamespaceResponse, DeleteOptions,
-    FsAdmin, FsReader, FsWriter, ListChangesOptions, MaintenanceHandle, MaintenanceJob,
-    MaintenanceJobId, MaintenanceStepConclusion, MaintenanceStepOptions, MoveOptions,
-    PutFileOptions, RestoreRevisionOptions, RuntimeError, SharedObjectStore, UndeleteOptions,
+    FileContentStream, FsAdmin, FsReader, FsWriter, ListChangesOptions, MaintenanceHandle,
+    MaintenanceJob, MaintenanceJobId, MaintenanceStepConclusion, MaintenanceStepOptions,
+    MoveOptions, PutFileOptions, ReadFileStreamOptions, RestoreRevisionOptions, RuntimeError,
+    SharedObjectStore, UndeleteOptions,
 };
 use loonfs_api::{
     v0::{
@@ -214,6 +215,22 @@ impl EmbeddedBackend {
             .await
             .map_err(|error| map_namespace_scoped_runtime_error(spec.namespace(), error))?;
         Ok(result.bytes)
+    }
+
+    /// Opens a file's content as bounded chunks, at the runtime's own chunk
+    /// size: what a download costs this process is that chunk, not the file.
+    pub(super) async fn read_file_stream(
+        &self,
+        spec: &NamespacePath,
+    ) -> Result<FileContentStream<SharedObjectStore>, BackendError> {
+        self.reader
+            .read_file_stream(
+                spec.namespace(),
+                spec.absolute_path().as_str(),
+                ReadFileStreamOptions::default(),
+            )
+            .await
+            .map_err(|error| map_namespace_scoped_runtime_error(spec.namespace(), error))
     }
 
     pub(super) async fn grep(

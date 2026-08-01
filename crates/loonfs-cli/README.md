@@ -352,6 +352,18 @@ Behavior notes
   and writes through a temporary file so an interrupted download leaves
   nothing truncated at the target
 
+  `loonfs get` writes a large file as it arrives and never holds it whole, so
+  what it costs in memory follows the transfer and not the file's size; an
+  embedded profile reads its own store in chunks, and a remote profile
+  receives one proxied response
+
+  A file destination is renamed into place only once the download is complete
+  and its content verified, so content that fails verification leaves nothing
+  at the destination. `loonfs get ... -` hands bytes to stdout as they
+  arrive, so the same failure exits nonzero after part of the file has
+  already been written — with `-`, the exit status is what says the content
+  was verified
+
   A recursive put, get, or cp works file by file with bounded concurrency,
   so a partial failure reruns per file; --commit-id names one commit, so
   `put -r` and `cp -r` reject it, and `get -r` rejects --revision for the

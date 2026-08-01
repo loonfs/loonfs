@@ -194,6 +194,11 @@ pub(crate) enum CommandData {
         commit_date: String,
     },
     StreamBytes(Vec<u8>),
+    /// The payload already went to standard output as it arrived, so there is
+    /// nothing left to render. `get -` reports this: a download that is
+    /// written chunk by chunk cannot also be handed to the renderer at the
+    /// end without holding all of it.
+    StreamedToStdout,
 }
 
 impl CommandData {

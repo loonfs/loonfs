@@ -1,18 +1,19 @@
-//! Watches how much of a payload a write path holds in memory at once.
+//! Watches how much of a payload a transfer path holds in memory at once.
 //!
-//! A streamed write's whole promise is that peak memory follows the part
+//! A streamed transfer's whole promise is that peak memory follows the chunk
 //! size rather than the object size, and that promise is easy to lose by
-//! accident: one `collect()` on the way through, one decorator that does
-//! not forward `put_streamed` and falls back to buffering, and a large
-//! upload is materialized again with nothing failing.
+//! accident: one `collect()` on the way through, one decorator that does not
+//! forward `put_streamed` and falls back to buffering, one read that asks for
+//! no range and gets the whole object — and a large transfer is materialized
+//! again with nothing failing.
 //!
 //! This wrapper makes the promise checkable without measuring the process.
 //! It sits above a store and watches every payload buffer that crosses the
-//! boundary — a whole-payload `put`, or each chunk of a `put_streamed`
-//! stream — recording the largest one and the most bytes alive at any
-//! instant. Liveness is exact: each chunk handed downstream carries a drop
-//! guard, so the counter falls when the consumer actually releases it, not
-//! when the wrapper guesses it has.
+//! boundary in either direction — a whole-payload `put`, each chunk of a
+//! `put_streamed` stream, and each `get`, whole or ranged — recording the
+//! largest one and the most bytes alive at any instant. Liveness is exact:
+//! each buffer handed on carries a drop guard, so the counter falls when the
+//! consumer actually releases it, not when the wrapper guesses it has.
 
 use super::KeyPredicate;
 use async_trait::async_trait;
@@ -158,12 +159,27 @@ impl<S: ObjectStore> ObjectStore for BufferWatchStore<S> {
         self.inner.get_with_metadata(key).await
     }
 
+    /// A read's answer is a payload buffer like any other: one whole object
+    /// for an unranged read, one range for a chunked one. The caller's drop
+    /// is what releases it, so a reader that accumulates chunks shows up as
+    /// bytes alive rather than as chunks that were merely handed out.
     async fn get(
         &self,
         key: &str,
         range: Option<ByteRange>,
     ) -> Result<Option<Bytes>, ObjectStoreError> {
-        self.inner.get(key, range).await
+        let bytes = self.inner.get(key, range).await?;
+        let Some(bytes) = bytes else {
+            return Ok(None);
+        };
+        if !self.matches(key) {
+            return Ok(Some(bytes));
+        }
+        self.peaks.observe(bytes.len() as u64);
+        Ok(Some(Bytes::from_owner(WatchedChunk {
+            bytes,
+            peaks: Arc::clone(&self.peaks),
+        })))
     }
 
     async fn put(

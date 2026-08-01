@@ -160,6 +160,49 @@ impl StorageChecksum {
     }
 }
 
+/// One full-object checksum folded over a payload delivered in pieces.
+///
+/// This is the streaming form of [`StorageChecksum::matches`], for a reader
+/// that verifies an object it never holds whole. The two agree about what
+/// this build can recompute: [`StreamingChecksum::for_algorithm`] answers
+/// `None` for exactly the algorithms `matches` refuses to judge, so an
+/// unverifiable checksum is refused before any bytes move rather than after.
+#[derive(Debug)]
+pub enum StreamingChecksum {
+    /// SHA-256 folded over the payload.
+    Sha256(Sha256),
+    /// CRC-64/NVME folded over the payload.
+    Crc64nvme(Crc64Nvme),
+}
+
+impl StreamingChecksum {
+    /// Starts an empty digest for `algorithm`, or `None` when this build
+    /// cannot recompute that algorithm.
+    pub fn for_algorithm(algorithm: ChecksumAlgorithm) -> Option<Self> {
+        match algorithm {
+            ChecksumAlgorithm::Sha256 => Some(Self::Sha256(Sha256::new())),
+            ChecksumAlgorithm::Crc64nvme => Some(Self::Crc64nvme(Crc64Nvme::new())),
+            ChecksumAlgorithm::Crc32c => None,
+        }
+    }
+
+    /// Folds the next piece of the payload in, in order.
+    pub fn update(&mut self, bytes: &[u8]) {
+        match self {
+            Self::Sha256(digest) => digest.update(bytes),
+            Self::Crc64nvme(digest) => digest.update(bytes),
+        }
+    }
+
+    /// Closes the digest over everything fed so far.
+    pub fn finish(self) -> StorageChecksum {
+        match self {
+            Self::Sha256(digest) => digest.finish(),
+            Self::Crc64nvme(digest) => digest.finish(),
+        }
+    }
+}
+
 /// CRC-64/NVME over a payload delivered in pieces.
 ///
 /// A direct multipart upload needs this digest twice over the same bytes:
@@ -385,7 +428,7 @@ fn validate_checksum_value(
 mod tests {
     use super::{
         ChecksumAlgorithm, ContentRef, ContentRefKind, ContentRefValidationError, Crc64Nvme,
-        StorageChecksum,
+        StorageChecksum, StreamingChecksum,
     };
     use crate::ids::ContentId;
 
@@ -513,6 +556,27 @@ mod tests {
         }
 
         assert_eq!(streamed.finish(), StorageChecksum::crc64nvme(&payload));
+    }
+
+    /// A verifying reader folds the same checksum the one-shot check
+    /// computes, and refuses the same algorithms it refuses — a reader that
+    /// disagreed with [`StorageChecksum::matches`] would accept or reject
+    /// objects the buffered read would not.
+    #[test]
+    fn a_streamed_checksum_agrees_with_the_whole_payload_at_once() {
+        let payload: Vec<u8> = (0..4096u32).map(|byte| byte as u8).collect();
+        for expected in [
+            StorageChecksum::sha256(&payload),
+            StorageChecksum::crc64nvme(&payload),
+        ] {
+            let mut streaming = StreamingChecksum::for_algorithm(expected.algorithm)
+                .expect("a producing algorithm folds");
+            for chunk in payload.chunks(97) {
+                streaming.update(chunk);
+            }
+            assert_eq!(streaming.finish(), expected);
+        }
+        assert!(StreamingChecksum::for_algorithm(ChecksumAlgorithm::Crc32c).is_none());
     }
 
     /// A checksum this build cannot recompute must answer "cannot tell",

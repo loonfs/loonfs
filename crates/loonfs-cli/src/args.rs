@@ -467,7 +467,14 @@ pub(crate) struct FilesystemGetArgs {
     pub target: TargetSelectorArgs,
     pub remote_path: String,
     /// Local destination (defaults to the remote basename; `-` streams to
-    /// stdout).
+    /// stdout). A large file is written as it arrives and never held whole,
+    /// so what a get costs in memory does not follow what it downloads. A
+    /// file destination is written beside itself and renamed into place only
+    /// once the download is complete and its content verified, so a failed
+    /// download leaves nothing there. Streaming to stdout hands bytes on as
+    /// they arrive, so content that fails verification at the end exits
+    /// nonzero after part of it has already been written — the exit status,
+    /// not the output, is what says the content was verified.
     pub local_destination: Option<String>,
     /// Download the directory tree rooted at `remote_path`, with bounded
     /// concurrency and per-file outcomes.

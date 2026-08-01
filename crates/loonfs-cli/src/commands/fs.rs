@@ -13,12 +13,13 @@ use crate::args::{
     FilesystemRevisionsArgs, FilesystemRmArgs, FilesystemTransferArgs, FilesystemUndeleteArgs,
     RuntimeBehavior, TrashArgs,
 };
+use crate::backend::FileDownload;
 use crate::error::CliError;
 use crate::payload::{read_whole_file, LocalPayload, STDIN_PATH};
 use loonfs_api::{CommitId, DeleteDirectoryBehavior, DestinationBehavior, InodeKind, RevisionNo};
 use loonfs_client::{CreateDirectoryOptions, DeleteOptions, NamespacePath, PutFileOptions};
 use std::fs;
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 // --- filesystem ---
@@ -32,13 +33,11 @@ fn parse_commit_id_arg(commit_id: Option<&str>) -> Result<Option<CommitId>, CliE
         .transpose()
 }
 
-/// Writes via a same-directory temp file and an atomic rename, so a failed
-/// or interrupted download never leaves a truncated file at the target.
-pub(super) fn write_local_file_atomically(
-    destination: &Path,
-    bytes: &[u8],
-    force: bool,
-) -> std::io::Result<()> {
+/// Opens the same-directory temp file a download is written into.
+///
+/// Dropping it deletes it, which is what makes a failed or interrupted
+/// download leave nothing behind at the target.
+fn open_partial_file(destination: &Path) -> std::io::Result<tempfile::NamedTempFile> {
     let file_name = destination
         .file_name()
         .ok_or_else(|| std::io::Error::other("destination has no file name"))?;
@@ -49,17 +48,38 @@ pub(super) fn write_local_file_atomically(
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    let mut temp = tempfile::Builder::new()
-        .prefix(&prefix)
-        .tempfile_in(parent)?;
-    temp.write_all(bytes)?;
-    temp.flush()?;
+    tempfile::Builder::new().prefix(&prefix).tempfile_in(parent)
+}
+
+/// Installs a completed download at its destination with one rename.
+///
+/// Only a download that finished — and, when it was streamed, verified —
+/// reaches this, so the file at the destination is never a truncated or
+/// unverified one.
+fn install_partial_file(
+    temp: tempfile::NamedTempFile,
+    destination: &Path,
+    force: bool,
+) -> std::io::Result<()> {
     let persisted = if force {
         temp.persist(destination)
     } else {
         temp.persist_noclobber(destination)
     };
     persisted.map(|_| ()).map_err(|error| error.error)
+}
+
+/// Writes via a same-directory temp file and an atomic rename, so a failed
+/// or interrupted download never leaves a truncated file at the target.
+pub(super) fn write_local_file_atomically(
+    destination: &Path,
+    bytes: &[u8],
+    force: bool,
+) -> std::io::Result<()> {
+    let mut temp = open_partial_file(destination)?;
+    temp.write_all(bytes)?;
+    temp.flush()?;
+    install_partial_file(temp, destination, force)
 }
 
 pub(crate) async fn run_filesystem_ls(
@@ -265,18 +285,18 @@ pub(crate) async fn run_filesystem_get(
     }
 
     let revision_no = args.revision.map(RevisionNo);
-    let bytes = match revision_no {
-        Some(revision_no) => {
-            context
-                .target
-                .get_file_revision_bytes(&spec, revision_no)
-                .await
-        }
-        None => context.target.get_file_bytes(&spec).await,
-    }
-    .map_err(|error| context.fail(kind, error))?;
+    let mut download = context
+        .target
+        .open_file_download(&spec, revision_no)
+        .await
+        .map_err(|error| context.fail(kind, error))?;
     let data = match args.local_destination.as_deref() {
-        Some("-") => CommandData::StreamBytes(bytes),
+        Some("-") => {
+            stream_download_to_stdout(&mut download)
+                .await
+                .map_err(|error| context.fail(kind, error))?;
+            CommandData::StreamedToStdout
+        }
         other => {
             let derived_name = other.is_none();
             let destination = destination_path_for_get(spec.absolute_path().as_str(), other)
@@ -285,23 +305,14 @@ pub(crate) async fn run_filesystem_get(
             // that has no revision history behind it, so clobbering it is
             // opt-in. `persist_noclobber` closes the race between checking
             // and installing the completed temporary file.
-            write_local_file_atomically(&destination, &bytes, args.force).map_err(|error| {
-                if !args.force && error.kind() == std::io::ErrorKind::AlreadyExists {
-                    return context.fail(kind, CliError::destination_exists(&destination));
-                }
-                let mut error = CliError::io_for_path(&destination, error);
-                if derived_name {
-                    error.message.push_str(
-                        "; if the remote name exceeds local filesystem limits, pass an \
-                         explicit destination or `-` for stdout",
-                    );
-                }
-                context.fail(kind, error)
-            })?;
+            let bytes_written =
+                stream_download_to_file(&mut download, &destination, args.force, derived_name)
+                    .await
+                    .map_err(|error| context.fail(kind, error))?;
             CommandData::FileTransfer {
                 target: render_target(&context.namespace, spec.absolute_path()),
                 destination: destination.display().to_string(),
-                bytes_written: bytes.len() as u64,
+                bytes_written,
             }
         }
     };
@@ -312,6 +323,74 @@ pub(crate) async fn run_filesystem_get(
         mode: Some(context.mode),
         data,
     })
+}
+
+/// Writes a download into its destination through the partial file, and
+/// installs it only once the download has ended cleanly.
+///
+/// The temp file is dropped — and so deleted — on any failure, including a
+/// streamed download whose content failed verification at its last chunk. An
+/// integrity failure therefore leaves no file at the destination at all,
+/// never a complete-looking one.
+async fn stream_download_to_file(
+    download: &mut FileDownload,
+    destination: &Path,
+    force: bool,
+    derived_name: bool,
+) -> Result<u64, CliError> {
+    let mut temp = open_partial_file(destination)
+        .map_err(|error| local_destination_error(destination, error, force, derived_name))?;
+    let mut bytes_written = 0u64;
+    while let Some(chunk) = download.next_chunk().await? {
+        temp.write_all(&chunk)
+            .map_err(|error| local_destination_error(destination, error, force, derived_name))?;
+        bytes_written += chunk.len() as u64;
+    }
+    temp.flush()
+        .map_err(|error| local_destination_error(destination, error, force, derived_name))?;
+    install_partial_file(temp, destination, force)
+        .map_err(|error| local_destination_error(destination, error, force, derived_name))?;
+    Ok(bytes_written)
+}
+
+/// Writes a download to standard output as it arrives.
+///
+/// Bytes are handed on chunk by chunk, so a streamed download that fails its
+/// verification at the end fails after some of the file has already been
+/// written. That is what streaming to a pipe means — `cat` behaves the same
+/// way — and it is why the exit status, not the output, is what says whether
+/// the content was verified.
+async fn stream_download_to_stdout(download: &mut FileDownload) -> Result<(), CliError> {
+    while let Some(chunk) = download.next_chunk().await? {
+        // Locked per chunk rather than held across the fetch: nothing else
+        // writes to stdout while a download runs, and a guard held across an
+        // await would pin this future to one thread.
+        io::stdout()
+            .lock()
+            .write_all(&chunk)
+            .map_err(CliError::io)?;
+    }
+    io::stdout().lock().flush().map_err(CliError::io)
+}
+
+/// Shapes a local write failure the way `get` has always reported one.
+fn local_destination_error(
+    destination: &Path,
+    error: std::io::Error,
+    force: bool,
+    derived_name: bool,
+) -> CliError {
+    if !force && error.kind() == std::io::ErrorKind::AlreadyExists {
+        return CliError::destination_exists(destination);
+    }
+    let mut error = CliError::io_for_path(destination, error);
+    if derived_name {
+        error.message.push_str(
+            "; if the remote name exceeds local filesystem limits, pass an \
+             explicit destination or `-` for stdout",
+        );
+    }
+    error
 }
 
 pub(crate) async fn run_filesystem_trash(
