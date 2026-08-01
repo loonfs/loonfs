@@ -123,9 +123,24 @@ impl LocalFsStore {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(err) => return Err(io_error(key, err)),
         };
-        let content_digest =
-            sha256_digest(&fs::read(path).await.map_err(|err| io_error(key, err))?);
+        let Some(content_bytes) = Self::read_for_digest(key, path).await? else {
+            return Ok(None);
+        };
+        let content_digest = sha256_digest(&content_bytes);
         Self::metadata_from_fs_metadata(key, &metadata, &content_digest, path).map(Some)
+    }
+
+    /// Reads the object's bytes for the digest, answering `None` when the
+    /// object is gone. The stat above and this read are separate syscalls,
+    /// so a concurrent delete can land between them; a head that races a
+    /// delete reports "gone" — the answer a provider's head gives — never
+    /// a transport error.
+    async fn read_for_digest(key: &str, path: &Path) -> Result<Option<Vec<u8>>> {
+        match fs::read(path).await {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(io_error(key, err)),
+        }
     }
 
     fn metadata_from_fs_metadata(
@@ -825,6 +840,43 @@ mod tests {
             .await
             .expect("listing succeeds despite dangling entries");
         assert_eq!(keys, vec![key]);
+    }
+
+    #[tokio::test]
+    async fn a_head_of_a_missing_object_answers_gone() {
+        let temp_dir = TestDir::new("head-missing");
+        let store = LocalFsStore::new(temp_dir.path()).expect("create local fs store");
+
+        let answer = store.head(&wal_head("ns-1")).await.expect("head succeeds");
+        assert!(answer.is_none());
+    }
+
+    // A delete can land between `metadata_for_path`'s stat and its digest
+    // read; no single filesystem state makes the stat succeed and the read
+    // answer NotFound (both follow the same path resolution), so the race
+    // window cannot be staged whole. Each arm of the read is pinned
+    // directly instead.
+    #[tokio::test]
+    async fn a_digest_read_of_a_vanished_object_answers_gone() {
+        let temp_dir = TestDir::new("digest-vanished");
+        let vanished = temp_dir.path().join("vanished.json");
+
+        let answer = LocalFsStore::read_for_digest("namespaces/ns-1/wal/head.json", &vanished)
+            .await
+            .expect("a vanished object is an answer, not an error");
+        assert!(answer.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_digest_read_that_fails_for_another_reason_stays_an_error() {
+        let temp_dir = TestDir::new("digest-error");
+        let directory = temp_dir.path().join("dir");
+        fs::create_dir(&directory).expect("create directory");
+
+        let error = LocalFsStore::read_for_digest("namespaces/ns-1/wal/head.json", &directory)
+            .await
+            .expect_err("reading a directory is not a missing object");
+        assert!(matches!(error, ObjectStoreError::Transport { .. }));
     }
 
     #[tokio::test]
