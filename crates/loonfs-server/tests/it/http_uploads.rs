@@ -319,6 +319,79 @@ async fn http_upload_status_re_mints_and_abort_is_terminal() {
     harness.server.abort();
 }
 
+/// Cross-process recovery through the Rust client alone: the upload id is
+/// the only thing that has to survive. Reading the session back names the
+/// exact content that landed and hands over a token that admits it, so the
+/// retry commits without re-uploading anything.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn client_reads_a_completed_upload_back_and_commits_what_it_names() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loonfs-server-test",
+        "http-client-upload-readback",
+    ))
+    .await;
+    let namespace = namespace_id("demo");
+    harness
+        .client
+        .create_namespace(&namespace)
+        .await
+        .expect("create namespace");
+
+    let file_bytes = b"read the session back";
+    let (upload_id, content_ref) = complete_upload_session(&harness, &namespace, file_bytes).await;
+
+    let status = harness
+        .client
+        .read_upload_status(&namespace, &upload_id)
+        .await
+        .expect("read the upload session back");
+    assert_eq!(status.namespace_id, namespace);
+    assert_eq!(status.upload_id, upload_id);
+    let UploadSessionStatus::Completed {
+        content_ref: reported_ref,
+        validated_content_token,
+        ..
+    } = status.status
+    else {
+        unreachable!("a completed session reports itself completed");
+    };
+    assert_eq!(reported_ref, content_ref);
+
+    let commit = harness
+        .client
+        .commit(
+            &namespace,
+            &CommitRequest {
+                commit_id: CommitId::parse("client-read-back-put").expect("valid commit id"),
+                message: None,
+                content_tokens: vec![loonfs_api::v0::ValidatedContentToken {
+                    content_ref: content_ref.clone(),
+                    token: validated_content_token.expect("a completed session re-mints"),
+                }],
+                operations: vec![FilesystemOperation::PutFile {
+                    path: AbsolutePath::parse("/read-back.txt").expect("path"),
+                    content_ref,
+                    behavior: DestinationBehavior::NoReplace,
+                    expected_revision_no: None,
+                }],
+            },
+        )
+        .await
+        .expect("the token the read handed back admits its content");
+    assert_eq!(commit.committed_seq, ChangeSeq(1));
+
+    let read_back = harness
+        .client
+        .get_file_bytes(&NamespacePath::parse("demo", "/read-back.txt").expect("path"))
+        .await
+        .expect("read the committed file");
+    assert_eq!(read_back, file_bytes);
+
+    harness.server.abort();
+}
+
 /// Stages content and hands back the session id, which the shared helper
 /// does not expose.
 async fn complete_upload_session(

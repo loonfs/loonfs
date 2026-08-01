@@ -84,6 +84,25 @@ fn committed_content_ref(change: &CommittedChange) -> Option<&ContentRef> {
     })
 }
 
+/// Whether the committed reference provably holds the bytes just staged.
+///
+/// The evidence is the trusted whole-file digest when one exists, and
+/// otherwise the reference's own storage checksum — which for a
+/// provider-assembled multipart object is the only full-object evidence
+/// there is. Only a digest this build can recompute, over bytes that agree,
+/// proves anything: a digest that disagrees and a digest this build cannot
+/// recompute are both unproven, and both leave the conflict standing.
+fn staged_matches_committed(staged: &StagedPayload<'_>, content_ref: &ContentRef) -> bool {
+    let evidence = match &content_ref.whole_file_sha256 {
+        Some(digest) => StorageChecksum {
+            algorithm: ChecksumAlgorithm::Sha256,
+            value: digest.clone(),
+        },
+        None => content_ref.storage_checksum.clone(),
+    };
+    staged.matches(&evidence) == Some(true)
+}
+
 impl FsWriter {
     /// A mutating engine under this writer's identity.
     pub(crate) fn engine(
@@ -239,8 +258,9 @@ impl FsWriter {
     ///
     /// The evidence is the committed content itself, read from the change
     /// feed at the sequence the conflict reported and compared against the
-    /// bytes just staged. Nothing weaker counts: a comparison this build
-    /// cannot make is reported as a conflict that names why, never as
+    /// bytes just staged. Nothing weaker counts: every way of failing to
+    /// prove the two are the same — including a comparison this build
+    /// cannot make — leaves the original conflict standing, never
     /// agreement.
     async fn reconcile_commit_id_reuse(
         &self,
@@ -264,31 +284,14 @@ impl FsWriter {
         if content_ref.size_bytes != staged.size_bytes() {
             return Err(conflict);
         }
-
-        // The trusted whole-file digest when one exists, and otherwise the
-        // reference's own storage checksum — which for a provider-assembled
-        // multipart object is the only full-object evidence there is.
-        let evidence = match &content_ref.whole_file_sha256 {
-            Some(digest) => StorageChecksum {
-                algorithm: ChecksumAlgorithm::Sha256,
-                value: digest.clone(),
-            },
-            None => content_ref.storage_checksum.clone(),
-        };
-        match staged.matches(&evidence) {
-            Some(true) => Ok(CommitResponse {
-                namespace_id: namespace_id.clone(),
-                commit_id: committed.commit_id,
-                committed_seq: committed.seq,
-            }),
-            Some(false) => Err(conflict),
-            None => Err(RuntimeError::Config(format!(
-                "commit `{commit_id}` already committed content checksummed with `{}`, \
-                 which this build cannot compare against what it just staged, so it \
-                 cannot tell whether this is the same upload retried",
-                evidence.algorithm
-            ))),
+        if !staged_matches_committed(&staged, content_ref) {
+            return Err(conflict);
         }
+        Ok(CommitResponse {
+            namespace_id: namespace_id.clone(),
+            commit_id: committed.commit_id,
+            committed_seq: committed.seq,
+        })
     }
 
     /// Reads the one change a reuse conflict said the commit id landed at.
@@ -869,4 +872,56 @@ fn maybe_auto_step_after_publish(
         .maintenance
         .handle()
         .nudge(MaintenanceJobId::METADATA, namespace_id);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{staged_matches_committed, StagedPayload};
+    use crate::{ChecksumAlgorithm, ContentId, ContentRef, ContentRefKind};
+    use loonfs_api::StorageChecksum;
+
+    /// A reference whose only full-object evidence is a digest this build
+    /// has no implementation for. Nothing mints one today, which is exactly
+    /// why the reconciliation has to say what it does when one arrives.
+    fn crc32c_ref(bytes: &[u8]) -> ContentRef {
+        ContentRef {
+            kind: ContentRefKind::BlobV1,
+            content_id: ContentId::generate(),
+            size_bytes: bytes.len() as u64,
+            storage_checksum: StorageChecksum {
+                algorithm: ChecksumAlgorithm::Crc32c,
+                value: "0f5c0a1e".to_owned(),
+            },
+            whole_file_sha256: None,
+        }
+    }
+
+    #[test]
+    fn a_digest_this_build_cannot_compare_leaves_the_reuse_conflict_standing() {
+        let bytes = b"retried payload";
+        let committed = crc32c_ref(bytes);
+        let staged = StagedPayload::Bytes(bytes);
+
+        assert_eq!(
+            staged.matches(&committed.storage_checksum),
+            None,
+            "the fixture must reach the refusal, not a comparison"
+        );
+        assert!(!staged_matches_committed(&staged, &committed));
+    }
+
+    #[test]
+    fn a_whole_file_digest_over_the_same_bytes_proves_the_retry_did_this_work() {
+        let bytes = b"retried payload";
+        let committed = ContentRef::blob_v1(ContentId::generate(), bytes);
+
+        assert!(staged_matches_committed(
+            &StagedPayload::Bytes(bytes),
+            &committed
+        ));
+        assert!(!staged_matches_committed(
+            &StagedPayload::Bytes(b"some other payload"),
+            &committed
+        ));
+    }
 }

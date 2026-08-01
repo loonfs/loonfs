@@ -27,7 +27,8 @@ use loonfs_api::{
         EnableGrepIndexResponse, FilesystemChange, GrepGcRequest, GrepGcResponse,
         GrepIndexStatusResponse, ObjectTransferAccess, SignUploadPartsRequest,
         SignUploadPartsResponse, SignedUploadPart, StoreProbeRequest, StoreProbeResponse,
-        UploadContentResponse, UploadMode, UploadPartChecksumClaim, ValidatedContentToken,
+        UploadContentResponse, UploadMode, UploadPartChecksumClaim, UploadStatusResponse,
+        ValidatedContentToken,
     },
     AbsolutePath, AuthoritativePathEntry, CapabilityDocument, ChangeSeq, CheckpointId,
     ChecksumAlgorithm, CommitId, CommitRequest, ContentRef, Crc64Nvme, CreateCheckpointRequest,
@@ -111,6 +112,26 @@ fn digest_of(content_ref: &ContentRef, algorithm: ChecksumAlgorithm) -> Option<&
         ChecksumAlgorithm::Sha256 => content_ref.whole_file_sha256.as_deref(),
         _ => None,
     }
+}
+
+/// Whether the committed reference provably holds the bytes just uploaded.
+///
+/// The evidence is the trusted whole-file digest when the server has one,
+/// and otherwise the reference's own storage checksum — which for a
+/// provider-assembled multipart object is the only full-object evidence
+/// that exists. Only a digest this client can recompute, over bytes that
+/// agree, proves anything: a digest that disagrees and a digest this client
+/// cannot recompute are both unproven, and both leave the conflict
+/// standing.
+fn uploaded_matches_committed(uploaded: &UploadedContent<'_>, content_ref: &ContentRef) -> bool {
+    let evidence = match &content_ref.whole_file_sha256 {
+        Some(digest) => StorageChecksum {
+            algorithm: ChecksumAlgorithm::Sha256,
+            value: digest.clone(),
+        },
+        None => content_ref.storage_checksum.clone(),
+    };
+    uploaded.matches(&evidence) == Some(true)
 }
 
 /// Where a reuse conflict says the commit id already landed.
@@ -769,6 +790,26 @@ impl Client {
             .await
     }
 
+    /// Reads one upload session back.
+    ///
+    /// A completed session answers with the exact content reference it
+    /// settled on and a freshly minted validation token, so a caller that
+    /// lost its completion response — or the whole process — can commit
+    /// that content without re-uploading a byte. The upload id is the only
+    /// thing it has to have kept.
+    pub async fn read_upload_status(
+        &self,
+        namespace_id: &NamespaceId,
+        upload_id: &UploadId,
+    ) -> Result<UploadStatusResponse> {
+        let url = format!(
+            "{}/v0/namespaces/{namespace_id}/uploads/{upload_id}",
+            self.base_url
+        );
+        self.request_json::<(), UploadStatusResponse>(self.get(&url), None)
+            .await
+    }
+
     pub async fn complete_upload(
         &self,
         namespace_id: &NamespaceId,
@@ -1385,9 +1426,10 @@ impl Client {
     ///
     /// The evidence is the committed content itself, read back from the
     /// change feed at the sequence the conflict reported, and compared
-    /// against the bytes that were just uploaded. Nothing weaker counts: a
-    /// comparison this build cannot make is reported as a conflict that
-    /// names why, never as agreement.
+    /// against the bytes that were just uploaded. Nothing weaker counts:
+    /// every way of failing to prove the two are the same — including a
+    /// comparison this client cannot make — leaves the original conflict
+    /// standing, never agreement.
     async fn reconcile_commit_id_reuse(
         &self,
         namespace_id: &NamespaceId,
@@ -1410,32 +1452,14 @@ impl Client {
         if content_ref.size_bytes != uploaded.size_bytes() {
             return Err(conflict);
         }
-
-        // The trusted whole-file digest when the server has one, and
-        // otherwise the reference's own storage checksum — which for a
-        // provider-assembled multipart object is the only full-object
-        // evidence that exists.
-        let evidence = match &content_ref.whole_file_sha256 {
-            Some(digest) => StorageChecksum {
-                algorithm: ChecksumAlgorithm::Sha256,
-                value: digest.clone(),
-            },
-            None => content_ref.storage_checksum.clone(),
-        };
-        match uploaded.matches(&evidence) {
-            Some(true) => Ok(ApiCommitResponse {
-                namespace_id: namespace_id.clone(),
-                commit_id: committed.commit_id,
-                committed_seq: committed.seq,
-            }),
-            Some(false) => Err(conflict),
-            None => Err(ClientError::Http(format!(
-                "commit `{commit_id}` already committed content checksummed with \
-                 `{}`, which this client cannot compare against what it just \
-                 uploaded, so it cannot tell whether this is the same upload retried",
-                evidence.algorithm
-            ))),
+        if !uploaded_matches_committed(&uploaded, content_ref) {
+            return Err(conflict);
         }
+        Ok(ApiCommitResponse {
+            namespace_id: namespace_id.clone(),
+            commit_id: committed.commit_id,
+            committed_seq: committed.seq,
+        })
     }
 
     /// Reads the one change a reuse conflict said the commit id landed at.
@@ -1705,6 +1729,52 @@ mod tests {
             size_bytes: content_ref.size_bytes,
             sha256: content_ref.storage_checksum.value,
         }
+    }
+
+    /// A reference whose only full-object evidence is a digest this client
+    /// has no implementation for. No server mints one today, which is
+    /// exactly why the reconciliation has to say what it does when one
+    /// arrives.
+    fn crc32c_content_ref(bytes: &[u8]) -> ContentRef {
+        ContentRef {
+            kind: loonfs_api::ContentRefKind::BlobV1,
+            content_id: ContentId::generate(),
+            size_bytes: bytes.len() as u64,
+            storage_checksum: StorageChecksum {
+                algorithm: ChecksumAlgorithm::Crc32c,
+                value: "0f5c0a1e".to_owned(),
+            },
+            whole_file_sha256: None,
+        }
+    }
+
+    #[test]
+    fn a_digest_this_client_cannot_compare_leaves_the_reuse_conflict_standing() {
+        let bytes = b"retried payload";
+        let committed = crc32c_content_ref(bytes);
+        let uploaded = UploadedContent::Bytes(bytes);
+
+        assert_eq!(
+            uploaded.matches(&committed.storage_checksum),
+            None,
+            "the fixture must reach the refusal, not a comparison"
+        );
+        assert!(!uploaded_matches_committed(&uploaded, &committed));
+    }
+
+    #[test]
+    fn a_whole_file_digest_over_the_same_bytes_proves_the_retry_did_this_work() {
+        let bytes = b"retried payload";
+        let committed = test_content_ref(bytes);
+
+        assert!(uploaded_matches_committed(
+            &UploadedContent::Bytes(bytes),
+            &committed
+        ));
+        assert!(!uploaded_matches_committed(
+            &UploadedContent::Bytes(b"some other payload"),
+            &committed
+        ));
     }
 
     /// `Client::new` runs the same validation as `ClientConfig::load`, so a
