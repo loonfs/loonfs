@@ -217,7 +217,7 @@ async fn gram_segment_levels(
         .await
         .expect("load grep root")
         .expect("grep root exists")
-        .state()
+        .manifest_state()
         .segments()
         .iter()
         .map(|segment| segment.level)

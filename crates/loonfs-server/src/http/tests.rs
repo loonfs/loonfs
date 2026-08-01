@@ -623,7 +623,7 @@ async fn built_through_seq(state: &AppState, namespace_id: &NamespaceId) -> Chan
         .await
         .expect("load grep root")
         .expect("an enabled namespace has a grep root")
-        .state()
+        .manifest_state()
         .lifecycle()
         .steady_watermark()
         .expect("a steady grep root has a watermark")
@@ -738,8 +738,7 @@ async fn grep_error_missing_manifest_is_index_corrupt_and_core_reads_survive() {
     let namespace_id = namespace_id("grep-error-missing-manifest");
     let writer = seed_grep_error_namespace(&store, &namespace_id).await;
     let manifest_id =
-        GrepManifestId::parse("1111111111111111111111111111111111111111111111111111111111111111")
-            .expect("manifest id");
+        GrepManifestId::parse("gmf_11111111111111111111111111111111").expect("manifest id");
     write_grep_pointer(&*store, &namespace_id, namespace_id.clone(), manifest_id).await;
     writer.shutdown_background().await.expect("shutdown writer");
 
@@ -754,8 +753,7 @@ async fn grep_error_corrupt_manifest_is_index_corrupt_and_core_reads_survive() {
     let namespace_id = namespace_id("grep-error-manifest");
     let writer = seed_grep_error_namespace(&store, &namespace_id).await;
     let manifest_id =
-        GrepManifestId::parse("2222222222222222222222222222222222222222222222222222222222222222")
-            .expect("manifest id");
+        GrepManifestId::parse("gmf_22222222222222222222222222222222").expect("manifest id");
     store
         .put_overwrite(
             &grep_manifest_key(&namespace_id, &manifest_id),
@@ -777,8 +775,7 @@ async fn grep_error_identity_mismatch_is_index_corrupt_and_core_reads_survive() 
     let namespace_id = namespace_id("grep-error-identity");
     let writer = seed_grep_error_namespace(&store, &namespace_id).await;
     let manifest_id =
-        GrepManifestId::parse("3333333333333333333333333333333333333333333333333333333333333333")
-            .expect("manifest id");
+        GrepManifestId::parse("gmf_33333333333333333333333333333333").expect("manifest id");
     write_grep_pointer(
         &*store,
         &namespace_id,
@@ -2007,9 +2004,14 @@ async fn write_grep_pointer(
     pointer_namespace_id: NamespaceId,
     manifest_id: GrepManifestId,
 ) {
-    let envelope =
-        GrepRootEnvelope::from_pointer(GrepRootPointer::new(pointer_namespace_id, manifest_id))
-            .expect("build grep pointer");
+    // Every caller here injects a fault the load hits before it compares
+    // digests, so any well-formed digest stands in for the real one.
+    let envelope = GrepRootEnvelope::from_pointer(GrepRootPointer::new(
+        pointer_namespace_id,
+        manifest_id,
+        loonfs_api::sha256_digest(b"a manifest these tests never reach"),
+    ))
+    .expect("build grep pointer");
     store
         .put_overwrite(
             &grep_root_key(stored_namespace_id),

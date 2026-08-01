@@ -111,8 +111,9 @@ possible; metadata families keep byte-identical output.
 
 Segments live under
 `namespaces/{namespace}/extensions/grep/segments/`. The small mutable
-`extensions/grep/root.json` pointer names an immutable, content-derived
-manifest under `extensions/grep/manifests/`; that manifest records the
+`extensions/grep/root.json` pointer names an immutable manifest under
+`extensions/grep/manifests/`, minted under a fresh id and bound to the
+pointer by its payload digest; that manifest records the
 query-visible segments, the lifecycle, run-ordinal allocation, and any
 in-progress reorganization snapshot, outputs, and cursor. The pointer and
 manifests are independent of the namespace manifest, so core never has to
@@ -326,13 +327,13 @@ deletion under a reverified tombstone needs no grep-specific condemned state.
 The index job never collects: a build or fold step writes and publishes, and
 reclaiming what it orphaned is a separate operation somebody asks for.
 
-Grep manifests are content-addressed, so two identical builders derive the
-same manifest id. A worker that observes its create-if-absent as already
-present can race GC deleting that unreachable candidate before the worker's
-pointer CAS. Every successful pointer advance therefore HEADs its manifest
-after the CAS and, if absent, re-puts the still-buffered bytes with
-create-if-absent before returning. This verify-and-heal step closes the race
-without adding mutable state to an immutable family.
+Every candidate manifest is written under a freshly minted id, so an
+identical rebuild claims a new object rather than adopting the one an earlier
+publication left behind. That is what keeps collection and publication apart:
+an unreferenced manifest always belongs to a publication that has already
+ended, and the grace window — no shorter than the runtime's derived floor —
+covers the one that has not. The pointer carries the manifest's payload
+digest, so nothing is lost by an id that says nothing about its bytes.
 
 Postings for revisions that later become unobservable are not
 dropped in the first version. They are harmless — verification

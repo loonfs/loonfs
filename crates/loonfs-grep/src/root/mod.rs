@@ -22,11 +22,13 @@ pub use codec::{
     GrepManifestEnvelope, GrepRootEnvelope, GREP_MANIFEST_FORMAT_VERSION, GREP_MANIFEST_KIND,
     GREP_ROOT_FORMAT_VERSION, GREP_ROOT_KIND,
 };
-pub use error::{GrepManifestIdError, GrepRootCodecError, GrepRootError, GrepRootStateError};
+pub use error::{
+    GrepEnvelopeCodecError, GrepManifestIdError, GrepManifestStateError, GrepRootError,
+};
 pub(crate) use state::ChangeFeedResume;
 pub use state::{
-    GrepIndexState, GrepLifecycle, GrepManifestId, GrepReorganizeState, GrepRootPointer,
-    GrepRootState, GrepSegmentRef, GREP_INDEX_FORMAT_VERSION,
+    GrepIndexState, GrepLifecycle, GrepManifestId, GrepManifestState, GrepReorganizeState,
+    GrepRootPointer, GrepSegmentRef, GREP_INDEX_FORMAT_VERSION,
 };
 pub use store::{
     advance_grep_root, load_grep_manifest, load_grep_root, load_grep_root_pointer, seed_grep_root,

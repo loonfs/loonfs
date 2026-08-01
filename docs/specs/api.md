@@ -569,7 +569,7 @@ A representative v0 binding is shown below.
 | Read the grep index's lifecycle | `GET /v0/admin/namespaces/{ns}/grep/index` (one grep root read, no side effects; requires a deployment that maintains the index) |
 | Enable the grep index | `POST /v0/admin/namespaces/{ns}/grep/index/enable` (CAS-publishes the independent grep root into checkpointed backfill and nudges the deployment's maintenance runner; requires a deployment that maintains the index; idempotent) |
 | Disable the grep index | `POST /v0/admin/namespaces/{ns}/grep/index/disable` (CAS-publishes the grep root as disabled; grep-owned garbage collection later reclaims unreferenced segments; idempotent) |
-| Collect grep-index garbage | `POST /v0/admin/namespaces/{ns}/grep/index/gc` (one explicit pass over only that namespace's grep extension; `max_objects` bounds the reads it spends and returns a `next_cursor` when keys remain; also reaps aged state for an absent or tombstoned namespace) |
+| Collect grep-index garbage | `POST /v0/admin/namespaces/{ns}/grep/index/gc` (one explicit pass over only that namespace's grep extension; `max_objects` bounds the reads it spends and defaults to 1024 when omitted, returning a `next_cursor` when keys remain; also reaps aged state for an absent or tombstoned namespace) |
 | Probe the store contract | `POST /v0/admin/store/probe` (the one admin route whose subject is the store rather than a namespace; body carries no options today and `{}` is the request; see below) |
 | Scrape metrics | `GET /metrics` (Prometheus text exposition; authorized, unlike the liveness routes — see below) |
 

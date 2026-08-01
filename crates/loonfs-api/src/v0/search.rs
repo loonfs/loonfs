@@ -214,7 +214,8 @@ pub struct DisableGrepIndexResponse {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct GrepGcRequest {
     /// Reads this pass may spend before returning with a `next_cursor`.
-    /// Omit to walk the whole grep keyspace in one call.
+    /// Omit to take the same per-pass default the runtime's own collection
+    /// takes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_objects: Option<u64>,
     /// Opaque resume token returned as `next_cursor` by an earlier pass

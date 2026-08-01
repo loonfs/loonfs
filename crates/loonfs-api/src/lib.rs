@@ -58,9 +58,15 @@ pub mod wire {
     }
 
     pub mod envelope {
-        //! Errors shared by the durable envelope codecs.
+        //! The shared durable envelope codec: probe, validation rules, JSON
+        //! codec, and the one error vocabulary every family reports through.
+        //!
+        //! Published so a durable format outside this crate — a first-party
+        //! extension's own objects — parameterizes the same codec instead of
+        //! copying it and drifting from the rules in section 4 of the format
+        //! spec.
 
-        pub use crate::envelope::EnvelopeCodecError;
+        pub use crate::envelope::*;
     }
 
     pub mod sst_blocks {

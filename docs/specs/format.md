@@ -1666,9 +1666,9 @@ Two rules make these envelopes evolvable:
 | --- | --- | --- | --- |
 | WAL segment | `namespace_wal_segment` | CBOR envelope, zstd-compressed; CBOR payload | 1 |
 | Metadata segment | none (section 4.2.1) | block sections, per-block zstd + CRC32C | 1 (via manifest) |
-| Grep root pointer | `grep_root` | JSON, uncompressed | `v1` |
-| Grep manifest | `grep_manifest` | JSON, uncompressed | `v1` |
-| Grep segment | none (section 4.2.2) | block sections, per-block zstd + CRC32C | `v1` (via the grep manifest) |
+| Grep root pointer | `grep_root` | JSON, uncompressed | 1 |
+| Grep manifest | `grep_manifest` | JSON, uncompressed | 1 |
+| Grep segment | none (section 4.2.2) | block sections, per-block zstd + CRC32C | 1 (via the grep manifest) |
 | Namespace manifest | `namespace_manifest` | JSON, uncompressed | 1 |
 | Control objects (head, metadata root, WAL floor) | per-kind snake_case names | JSON, uncompressed | 1 (tracked per kind) |
 | Checkpoint record | `checkpoint_record` | JSON, uncompressed | 1 |
@@ -1720,25 +1720,33 @@ namespaces/{namespace_id}/extensions/grep/
 └── segments/{segment_id}.sst.zst
 ```
 
-`manifest_id` is the 64-character lowercase hex portion of the SHA-256 digest
-of the exact manifest payload fragment. The manifest envelope's
-`payload_checksum` is `sha256:{manifest_id}`. Namespace manifests carry no
+`manifest_id` is `gmf_` followed by 32 lowercase hex characters, drawn fresh
+for every candidate. It names *which object* holds the manifest and says
+nothing about its contents: a content-derived id would make an identical
+rebuild reuse the object an earlier publication left behind, and that reuse
+is what would let collection race a publication for a manifest the winner is
+about to point at. The bytes are bound to the pointer instead, through
+`manifest_payload_checksum`. Namespace manifests carry no
 grep pointer, watermark, lifecycle, or segment references. A fork therefore
 starts without grep state until grep is enabled for the target.
 
 `root.json` is a small mutable pointer envelope with these fields, in order:
 
-- envelope: `kind = "grep_root"`, `format_version = "v1"`,
+- envelope: `kind = "grep_root"`, `format_version = 1`,
   `payload_checksum`, and raw JSON `payload`;
-- payload: `namespace_id` and `manifest_id`.
+- payload: `namespace_id`, `manifest_id`, and `manifest_payload_checksum`,
+  which must equal the named manifest envelope's own `payload_checksum`.
 
 Each immutable manifest has the same envelope grammar with
-`kind = "grep_manifest"` and `format_version = "v1"`. Its payload is the full
+`kind = "grep_manifest"` and `format_version = 1`. Its payload is the full
 grep state: `namespace_id`, `lifecycle`, nested `index` bookkeeping, and the
 `segments` descriptors. Both decoders verify the checksum over the exact
 stored payload fragment before decoding, reject unknown versions and kind
-mismatches without fallback, and validate namespace, manifest-id, lifecycle,
-fold, run-allocation, and segment invariants at every boundary. The mutable
+mismatches without fallback, and validate namespace, lifecycle,
+fold, run-allocation, and segment invariants at every boundary. A manifest
+load additionally requires the loaded envelope's `payload_checksum` to equal
+what the pointer promised, which is the same binding a metadata root holds
+over its namespace manifest. The mutable
 root-pointer decoder rejects unknown envelope and payload fields; the
 immutable manifest decoder tolerates additive fields.
 
@@ -1763,9 +1771,9 @@ A gram-index segment uses the section 4.2.1 block grammar unchanged —
 prefix-compressed data blocks, one bloom filter block, one index block,
 handles and checksums in the grep-manifest descriptor — with a grep-owned row
 payload instead of metadata rows. The tokenizer, row shapes, and posting
-encoding below are frozen by grep format `v1`; their evolution follows the
-rules in section 4.3 and always permits rebuilding this derived work
-(section 6.6).
+encoding below are frozen by grep manifest format version 1; their evolution
+follows the rules in section 4.3 and always permits rebuilding this derived
+work (section 6.6).
 
 - The **tokenizer** is every overlapping three-byte window (gram) of an
   eligible revision's content, after folding ASCII letters to lower case.
@@ -1784,17 +1792,19 @@ rules in section 4.3 and always permits rebuilding this derived work
 - Several rows may carry the same gram (within a segment and across
   segments); readers union their batches.
 
-Publication writes segments first, writes the content-derived manifest with
-create-if-absent semantics, and finally installs `root.json` with one etag
-compare-and-swap (or create-if-absent for the first pointer). A pointer-CAS
-loser's manifest and segments remain unreachable derived garbage; grep GC
-reclaims them after its grace window. Because an identical rebuild derives
-the same manifest id, an AlreadyExists observation can race that collection:
-after a successful pointer CAS, the publisher HEADs the installed manifest
-and re-puts its still-buffered bytes with create-if-absent if GC removed it.
-The pointer is returned only after that verification/heal completes. Query
-readers load the pointer afresh, then load the immutable manifest it names;
-decoded manifests may be cached by manifest id.
+Publication writes segments first, writes the manifest under a freshly minted
+id with create-if-absent semantics, and finally installs `root.json` with one
+etag compare-and-swap (or create-if-absent for the first pointer). A
+pointer-CAS loser's manifest and segments remain unreachable derived garbage;
+grep GC reclaims them after its grace window. Because every candidate is
+written under an id no earlier publication used, an unreferenced manifest is
+always the leftover of a publication that has already ended, and the grace
+window covers the one that has not: it is at least the derived minimum grace
+window ("Garbage collection", rule 1), and grep enforces the same publication
+budget the runtime's own publications do. Query readers load the pointer
+afresh, then load the immutable manifest it names and check its
+`payload_checksum` against the pointer; decoded manifests may be cached by
+that checksum.
 
 The namespace-scoped layout is maintained only when that namespace is named
 by an enable, publish, query, detached assignment, or explicit GC operation;

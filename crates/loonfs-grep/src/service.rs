@@ -12,7 +12,7 @@ use crate::keyspace::{manifest_key, segment_key};
 use crate::query::{plan_pattern, GramPlanOutcome, GramQueryPlan};
 use crate::reads::{published_revision, resolve_batch_size, NamespaceReads};
 use crate::root::{
-    load_grep_manifest, load_grep_root_pointer, ChangeFeedResume, GrepLifecycle, GrepRootState,
+    load_grep_manifest, load_grep_root_pointer, ChangeFeedResume, GrepLifecycle, GrepManifestState,
 };
 use crate::{GrepError, Result};
 use futures::future::{join_all, try_join_all};
@@ -129,7 +129,7 @@ impl GrepIndexSnapshot {
         };
         let manifest_id = pointer.pointer().manifest_id();
         let cache_key = GrepBlockCacheKey {
-            payload_checksum: manifest_id.payload_checksum(),
+            payload_checksum: pointer.pointer().manifest_payload_checksum().to_owned(),
             block_kind: GrepBlockKind::Manifest,
             block_offset: 0,
         };
@@ -148,20 +148,21 @@ impl GrepIndexSnapshot {
                 });
             }
             None => {
-                let manifest = match load_grep_manifest(store, namespace_id, manifest_id).await {
-                    Ok(Some(manifest)) => manifest,
-                    Ok(None) => {
-                        return Self::from_error(GrepError::CorruptIndex {
-                            message: format!(
-                                "grep root `{}` names missing manifest `{}`",
-                                pointer.object_key(),
-                                manifest_key(namespace_id, manifest_id)
-                            ),
-                        });
-                    }
-                    Err(error) => return Self::from_error(error.into()),
-                };
-                let state = Arc::new(manifest.state().clone());
+                let manifest =
+                    match load_grep_manifest(store, namespace_id, pointer.pointer()).await {
+                        Ok(Some(manifest)) => manifest,
+                        Ok(None) => {
+                            return Self::from_error(GrepError::CorruptIndex {
+                                message: format!(
+                                    "grep root `{}` names missing manifest `{}`",
+                                    pointer.object_key(),
+                                    manifest_key(namespace_id, manifest_id)
+                                ),
+                            });
+                        }
+                        Err(error) => return Self::from_error(error.into()),
+                    };
+                let state = Arc::new(manifest.manifest_state().clone());
                 service
                     .block_cache
                     .insert(cache_key, DecodedGrepBlock::Manifest(state.clone()));
@@ -180,7 +181,7 @@ impl GrepIndexSnapshot {
         Self::from_state(&state)
     }
 
-    fn from_state(root: &GrepRootState) -> Self {
+    fn from_state(root: &GrepManifestState) -> Self {
         // Only a steady root has a watermark, and only a watermark makes an
         // index answerable: the other two phases refuse the query outright
         // rather than borrow a sequence they do not own.

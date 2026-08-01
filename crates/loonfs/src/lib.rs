@@ -66,7 +66,9 @@ pub use loonfs_api::{
     PROFILE_CORE_V0, PROTOCOL_VERSION,
 };
 pub use loonfs_core::cache::{MetadataTableCacheConfig, Recency};
-pub use loonfs_core::limits::{DEFAULT_GC_MAX_OBJECTS, METADATA_PUBLICATION_BUDGET_MS};
+pub use loonfs_core::limits::{
+    DEFAULT_GC_MAX_OBJECTS, GC_MIN_GRACE_WINDOW_MS, METADATA_PUBLICATION_BUDGET_MS,
+};
 pub use loonfs_core::{
     BootstrapNamespaceError, CheckpointFile, CheckpointFilesPage, CheckpointFilesPageCursor,
     CurrentFileState, DeleteNamespaceOptions, Error as CoreError, ErrorCode, ErrorKind, GcConfig,

@@ -27,9 +27,11 @@ use thiserror::Error;
 /// error instead of a generic decode error. `kind` is deliberately a string
 /// (not an enum) so future kinds remain reportable.
 #[derive(Debug, Deserialize)]
-pub(crate) struct EnvelopeProbe {
-    pub(crate) kind: String,
-    pub(crate) format_version: u32,
+pub struct EnvelopeProbe {
+    /// Durable family declared by the stored object.
+    pub kind: String,
+    /// Family-independent version gate declared by the stored object.
+    pub format_version: u32,
 }
 
 /// Failure vocabulary shared by every envelope codec. Messages are
@@ -104,7 +106,7 @@ pub enum EnvelopeCodecError {
 }
 
 /// Requires the probed kind to be exactly `expected`.
-pub(crate) fn verify_kind(expected: &str, found: &str) -> Result<(), EnvelopeCodecError> {
+pub fn verify_kind(expected: &str, found: &str) -> Result<(), EnvelopeCodecError> {
     if found != expected {
         return Err(EnvelopeCodecError::KindMismatch {
             expected: expected.to_owned(),
@@ -116,11 +118,7 @@ pub(crate) fn verify_kind(expected: &str, found: &str) -> Result<(), EnvelopeCod
 
 /// Requires the probed format version to be exactly what this build writes
 /// for `kind` — no envelope family tolerates version skew.
-pub(crate) fn verify_version(
-    kind: &str,
-    found: u32,
-    supported: u32,
-) -> Result<(), EnvelopeCodecError> {
+pub fn verify_version(kind: &str, found: u32, supported: u32) -> Result<(), EnvelopeCodecError> {
     if found != supported {
         return Err(EnvelopeCodecError::UnsupportedFormatVersion {
             kind: kind.to_owned(),
@@ -132,7 +130,7 @@ pub(crate) fn verify_version(
 }
 
 /// Requires the stored checksum to match the payload bytes as stored.
-pub(crate) fn verify_payload_checksum(
+pub fn verify_payload_checksum(
     expected: &str,
     payload_bytes: &[u8],
 ) -> Result<(), EnvelopeCodecError> {
@@ -149,7 +147,7 @@ pub(crate) fn verify_payload_checksum(
 /// Requires an in-memory envelope's recorded checksum to still match its
 /// payload before encoding — a stale checksum means the caller mutated the
 /// payload without rebuilding the envelope.
-pub(crate) fn verify_checksum_fresh(
+pub fn verify_checksum_fresh(
     checksum: &str,
     payload_bytes: &[u8],
 ) -> Result<(), EnvelopeCodecError> {
@@ -197,9 +195,7 @@ impl From<StrictJsonEnvelopeDocument> for JsonEnvelopeDocument {
 
 /// The `sha256:<hex>` checksum a JSON payload will carry, computed over its
 /// canonical serialization.
-pub(crate) fn json_payload_checksum<T: Serialize>(
-    payload: &T,
-) -> Result<String, EnvelopeCodecError> {
+pub fn json_payload_checksum<T: Serialize>(payload: &T) -> Result<String, EnvelopeCodecError> {
     let bytes = serde_json::to_vec(payload)
         .map_err(|err| EnvelopeCodecError::PayloadEncode(err.to_string()))?;
     Ok(sha256_digest(&bytes))
@@ -208,7 +204,7 @@ pub(crate) fn json_payload_checksum<T: Serialize>(
 /// Encodes one JSON-bodied envelope, validating that the recorded version is
 /// what this build writes for `kind` and that the recorded checksum still
 /// matches the payload.
-pub(crate) fn encode_json_envelope<T: Serialize>(
+pub fn encode_json_envelope<T: Serialize>(
     kind: &str,
     format_version: u32,
     supported_version: u32,
@@ -230,10 +226,13 @@ pub(crate) fn encode_json_envelope<T: Serialize>(
 }
 
 /// A decoded JSON-bodied envelope's shared fields plus its parsed payload.
-pub(crate) struct DecodedJsonEnvelope<T> {
-    pub(crate) format_version: u32,
-    pub(crate) payload_checksum: String,
-    pub(crate) payload: T,
+pub struct DecodedJsonEnvelope<T> {
+    /// Version gate the stored object declared and this build accepted.
+    pub format_version: u32,
+    /// Digest verified against the payload fragment exactly as stored.
+    pub payload_checksum: String,
+    /// The family payload decoded from that verified fragment.
+    pub payload: T,
 }
 
 /// Decodes one JSON-bodied envelope: probe first (kind through
@@ -243,7 +242,7 @@ pub(crate) struct DecodedJsonEnvelope<T> {
 /// `classify_kind` lets a family with a kind registry report unknown kinds
 /// distinctly from mismatched ones; families with one kind pass
 /// [`verify_kind`] directly.
-pub(crate) fn decode_json_envelope<T: DeserializeOwned>(
+pub fn decode_json_envelope<T: DeserializeOwned>(
     bytes: &[u8],
     supported_version: u32,
     classify_kind: impl FnOnce(&str) -> Result<(), EnvelopeCodecError>,
@@ -257,7 +256,7 @@ pub(crate) fn decode_json_envelope<T: DeserializeOwned>(
 /// Immutable envelope families tolerate unknown fields, while mutable control-object envelopes
 /// reject them. A tolerant read followed by rewrite would erase fields the current binary does
 /// not understand.
-pub(crate) fn decode_strict_json_envelope<T: DeserializeOwned>(
+pub fn decode_strict_json_envelope<T: DeserializeOwned>(
     bytes: &[u8],
     supported_version: u32,
     classify_kind: impl FnOnce(&str) -> Result<(), EnvelopeCodecError>,

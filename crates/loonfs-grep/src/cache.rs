@@ -1,7 +1,7 @@
 //! Grep-private cache for immutable manifests and decoded segment blocks.
 
 use crate::codec::IndexRow;
-use crate::root::GrepRootState;
+use crate::root::GrepManifestState;
 use loonfs::Recency;
 use loonfs_api::wire::sst_blocks::{DecodedDataBlock, SegmentFilter, SegmentIndexEntry};
 use std::collections::HashMap;
@@ -27,7 +27,7 @@ pub(crate) struct GrepBlockCacheKey {
 
 #[derive(Debug, Clone)]
 pub(crate) enum DecodedGrepBlock {
-    Manifest(Arc<GrepRootState>),
+    Manifest(Arc<GrepManifestState>),
     Filter(Arc<SegmentFilter>),
     Index(Arc<Vec<SegmentIndexEntry>>),
     Data(Arc<DecodedDataBlock<IndexRow>>),

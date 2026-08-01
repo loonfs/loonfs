@@ -7,11 +7,11 @@ use loonfs_api::{ChangeSeq, NamespaceId};
 use loonfs_grep::keyspace::{manifest_key, manifests_prefix, root_key};
 use loonfs_grep::root::{
     advance_grep_root, encode_grep_manifest, encode_grep_root, load_grep_root, seed_grep_root,
-    GrepIndexState, GrepLifecycle, GrepManifestEnvelope, GrepRootEnvelope, GrepRootError,
-    GrepRootPointer, GrepRootState,
+    GrepIndexState, GrepLifecycle, GrepManifestEnvelope, GrepManifestId, GrepManifestState,
+    GrepRootEnvelope, GrepRootError, GrepRootPointer,
 };
 use loonfs_objectstore::local_fs_store::LocalFsStore;
-use loonfs_objectstore::{ObjectStore, PutMode};
+use loonfs_objectstore::{ImmutableWriteError, ObjectStore, PutMode};
 use loonfs_test_support::ids::namespace_id;
 
 #[tokio::test]
@@ -21,10 +21,11 @@ async fn load_rejects_namespace_identity_mismatch() {
     let requested = namespace_id("requested");
     let wrong = root(namespace_id("other"), ChangeSeq(0));
     let manifest = GrepManifestEnvelope::from_state(wrong).expect("manifest envelope");
+    let manifest_id = GrepManifestId::generate();
     let manifest_bytes = encode_grep_manifest(&manifest).expect("encode manifest");
     store
         .put(
-            &manifest_key(&requested, manifest.manifest_id()),
+            &manifest_key(&requested, &manifest_id),
             Bytes::from(manifest_bytes),
             PutMode::CreateIfAbsent,
         )
@@ -32,7 +33,8 @@ async fn load_rejects_namespace_identity_mismatch() {
         .expect("write mismatched manifest");
     let envelope = GrepRootEnvelope::from_pointer(GrepRootPointer::new(
         requested.clone(),
-        manifest.manifest_id().clone(),
+        manifest_id,
+        manifest.payload_checksum().to_owned(),
     ))
     .expect("pointer envelope");
     let bytes = encode_grep_root(&envelope).expect("encode pointer");
@@ -64,23 +66,62 @@ async fn seed_succeeds_once_and_second_seed_conflicts() {
     ));
 }
 
-/// A manifest id is the digest of its payload, and the rest of the envelope
-/// is family constants, so this writer cannot produce two different byte
-/// strings for one id. A foreign writer or a damaged object still can, and
-/// the immutable-write byte check is what catches it.
+/// Republishing identical state writes a new object rather than adopting the
+/// one an earlier publication left behind. Nothing about a manifest's key
+/// derives from its bytes, which is what stops collection of an old
+/// candidate from ever reaching a new publication's manifest.
 #[tokio::test]
-async fn same_manifest_id_with_different_envelope_bytes_is_corrupt() {
+async fn identical_state_publishes_a_fresh_manifest_object() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let store = LocalFsStore::new(temp_dir.path()).expect("local store");
+    let namespace_id = namespace_id("docs");
+    let successor = root(namespace_id.clone(), ChangeSeq(1));
+    let seeded = seed_grep_root(&store, &root(namespace_id.clone(), ChangeSeq(0)))
+        .await
+        .expect("seed root");
+
+    let first = advance_grep_root(&store, &seeded, &successor)
+        .await
+        .expect("first advance");
+    let second = advance_grep_root(&store, &first, &successor)
+        .await
+        .expect("second advance over identical state");
+
+    assert_eq!(
+        first.manifest_envelope().payload_checksum(),
+        second.manifest_envelope().payload_checksum(),
+        "the two candidates carry the very same bytes"
+    );
+    assert_ne!(
+        first.manifest_id(),
+        second.manifest_id(),
+        "and still occupy different objects"
+    );
+    assert_eq!(
+        store
+            .list_prefix(&manifests_prefix(&namespace_id))
+            .await
+            .expect("list candidate manifests")
+            .len(),
+        3
+    );
+}
+
+/// A manifest key is claimed create-only, so an occupant carrying other
+/// bytes is corruption rather than something to overwrite. A random id
+/// cannot collide, so only a foreign writer or a damaged object gets here.
+#[tokio::test]
+async fn a_manifest_key_occupied_by_other_bytes_is_corrupt() {
     let temp_dir = tempfile::tempdir().expect("temp dir");
     let store = LocalFsStore::new(temp_dir.path()).expect("local store");
     let namespace_id = namespace_id("docs");
     let state = root(namespace_id.clone(), ChangeSeq(0));
-
-    // Occupy the manifest key this seed will claim with different bytes.
     let envelope = GrepManifestEnvelope::from_state(state.clone()).expect("manifest envelope");
-    let key = manifest_key(&namespace_id, envelope.manifest_id());
+    let bytes = encode_grep_manifest(&envelope).expect("encode manifest");
+    let manifest_id = GrepManifestId::generate();
     store
         .put(
-            &key,
+            &manifest_key(&namespace_id, &manifest_id),
             Bytes::from_static(b"not the manifest these bytes claim to be"),
             PutMode::Overwrite,
         )
@@ -88,8 +129,13 @@ async fn same_manifest_id_with_different_envelope_bytes_is_corrupt() {
         .expect("plant divergent manifest bytes");
 
     assert!(matches!(
-        seed_grep_root(&store, &state).await,
-        Err(GrepRootError::Corrupt { .. })
+        store
+            .put_immutable_verified(
+                &manifest_key(&namespace_id, &manifest_id),
+                Bytes::from(bytes)
+            )
+            .await,
+        Err(ImmutableWriteError::DifferentObject { .. })
     ));
 }
 
@@ -140,7 +186,7 @@ async fn racing_advancers_have_one_winner_and_loser_can_reload_and_retry() {
         .expect("final load succeeds")
         .expect("root exists");
     assert_eq!(
-        final_root.state().lifecycle().steady_watermark(),
+        final_root.manifest_state().lifecycle().steady_watermark(),
         Some((ChangeSeq(3), 0))
     );
 }
@@ -163,8 +209,8 @@ async fn stale_etag_advance_fails_after_concurrent_advance() {
     ));
 }
 
-fn root(namespace_id: NamespaceId, built_through_seq: ChangeSeq) -> GrepRootState {
-    GrepRootState::new(
+fn root(namespace_id: NamespaceId, built_through_seq: ChangeSeq) -> GrepManifestState {
+    GrepManifestState::new(
         namespace_id,
         GrepLifecycle::Steady {
             built_through_seq,

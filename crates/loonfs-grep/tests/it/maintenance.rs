@@ -331,7 +331,7 @@ async fn wait_for_watermark<S: ObjectStore + 'static>(
                 .expect("load grep root")
             {
                 if root
-                    .state()
+                    .manifest_state()
                     .lifecycle()
                     .steady_watermark()
                     .is_some_and(|(reached, _)| reached >= built_through_seq)

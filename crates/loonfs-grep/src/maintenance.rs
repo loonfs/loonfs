@@ -103,7 +103,7 @@ impl<S: ObjectStore + Clone + Send + Sync + 'static> MaintenanceJob for GrepMain
         else {
             return Ok(MaintenanceProbe::Idle);
         };
-        match root.state().lifecycle() {
+        match root.manifest_state().lifecycle() {
             // Nothing to maintain: the runner forgets this namespace until
             // an enable nudges it back.
             GrepLifecycle::Disabled => Ok(MaintenanceProbe::Idle),

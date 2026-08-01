@@ -1,7 +1,7 @@
 //! Constructor-validated grep manifest payload and its root pointer.
 
-use super::error::{GrepManifestIdError, GrepRootStateError};
-use loonfs_api::sha256_digest;
+use super::error::{GrepManifestIdError, GrepManifestStateError};
+use loonfs_api::generated_id;
 use loonfs_api::wire::sst_blocks::BlockHandle;
 use loonfs_api::{ChangeSeq, CheckpointId, IndexSegmentId, InodeId, NamespaceId};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -9,8 +9,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::str::FromStr;
 
-const SHA256_PREFIX: &str = "sha256:";
-const SHA256_HEX_LEN: usize = 64;
+const GREP_MANIFEST_ID_PREFIX: &str = "gmf";
+const GREP_MANIFEST_ID_BODY_LEN: usize = 32;
 
 /// Version of the grep index state nested inside a v1 manifest.
 ///
@@ -21,27 +21,48 @@ const SHA256_HEX_LEN: usize = 64;
 /// apart after the fact.
 pub const GREP_INDEX_FORMAT_VERSION: u32 = 2;
 
-/// Content-derived identity of one immutable grep manifest payload.
+/// Durable object id for one immutable grep manifest candidate.
+///
+/// The id is drawn fresh for every candidate and names *which object*, never
+/// what it contains. A content-derived id would make an identical rebuild
+/// reuse the object an earlier publication left behind, and that reuse is
+/// what lets collection race a publication for a manifest the winner is
+/// about to point at. Integrity evidence rides
+/// [`GrepRootPointer::manifest_payload_checksum`] beside the id.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct GrepManifestId(String);
 
 impl GrepManifestId {
-    /// Parses the manifest id's 64-character lowercase SHA-256 hex form.
+    /// Generates an id no earlier candidate can carry.
+    pub fn generate() -> Self {
+        Self(generated_id(GREP_MANIFEST_ID_PREFIX))
+    }
+
+    /// Parses the `gmf_` marker plus a 32-character lowercase hex body.
     pub fn parse(value: impl AsRef<str>) -> Result<Self, GrepManifestIdError> {
         let value = value.as_ref();
-        if value.len() != SHA256_HEX_LEN {
+        let expected_prefix = format!("{GREP_MANIFEST_ID_PREFIX}_");
+        let Some(body) = value.strip_prefix(&expected_prefix) else {
             return Err(GrepManifestIdError {
                 value: value.to_owned(),
-                reason: format!("must contain exactly {SHA256_HEX_LEN} lowercase hex characters"),
+                reason: format!("must start with `{expected_prefix}`"),
+            });
+        };
+        if body.len() != GREP_MANIFEST_ID_BODY_LEN {
+            return Err(GrepManifestIdError {
+                value: value.to_owned(),
+                reason: format!(
+                    "body must be {GREP_MANIFEST_ID_BODY_LEN} lowercase hex characters"
+                ),
             });
         }
-        if !value
+        if !body
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         {
             return Err(GrepManifestIdError {
                 value: value.to_owned(),
-                reason: "must contain only lowercase hex characters".to_owned(),
+                reason: "body must contain only lowercase hex characters".to_owned(),
             });
         }
         Ok(Self(value.to_owned()))
@@ -49,20 +70,6 @@ impl GrepManifestId {
 
     pub fn as_str(&self) -> &str {
         &self.0
-    }
-
-    pub(crate) fn for_payload(payload: &[u8]) -> Self {
-        let digest = sha256_digest(payload);
-        Self(
-            digest
-                .strip_prefix(SHA256_PREFIX)
-                .expect("sha256_digest should carry the sha256 prefix")
-                .to_owned(),
-        )
-    }
-
-    pub(crate) fn payload_checksum(&self) -> String {
-        format!("{SHA256_PREFIX}{}", self.0)
     }
 }
 
@@ -128,18 +135,28 @@ impl<'de> Deserialize<'de> for GrepManifestId {
 }
 
 /// Small mutable control payload installed at `extensions/grep/root.json`.
+///
+/// The pointer names the manifest and carries its digest, so the object the
+/// key resolves to is bound to the bytes the publisher installed even though
+/// nothing about the id derives from them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GrepRootPointer {
     namespace_id: NamespaceId,
     manifest_id: GrepManifestId,
+    manifest_payload_checksum: String,
 }
 
 impl GrepRootPointer {
-    pub fn new(namespace_id: NamespaceId, manifest_id: GrepManifestId) -> Self {
+    pub fn new(
+        namespace_id: NamespaceId,
+        manifest_id: GrepManifestId,
+        manifest_payload_checksum: String,
+    ) -> Self {
         Self {
             namespace_id,
             manifest_id,
+            manifest_payload_checksum,
         }
     }
 
@@ -149,6 +166,11 @@ impl GrepRootPointer {
 
     pub fn manifest_id(&self) -> &GrepManifestId {
         &self.manifest_id
+    }
+
+    /// Must equal `payload_checksum` in the referenced manifest envelope.
+    pub fn manifest_payload_checksum(&self) -> &str {
+        &self.manifest_payload_checksum
     }
 }
 
@@ -353,21 +375,21 @@ pub struct GrepSegmentRef {
 /// Fields stay private so every constructed or decoded manifest passes the
 /// inexpensive reorganize/segment and run-allocation checks in [`Self::new`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GrepRootState {
+pub struct GrepManifestState {
     namespace_id: NamespaceId,
     lifecycle: GrepLifecycle,
     index: GrepIndexState,
     segments: Vec<GrepSegmentRef>,
 }
 
-impl GrepRootState {
-    /// Creates a root after validating its cross-field invariants.
+impl GrepManifestState {
+    /// Creates a manifest payload after validating its cross-field invariants.
     pub fn new(
         namespace_id: NamespaceId,
         lifecycle: GrepLifecycle,
         index: GrepIndexState,
         segments: Vec<GrepSegmentRef>,
-    ) -> Result<Self, GrepRootStateError> {
+    ) -> Result<Self, GrepManifestStateError> {
         let state = Self {
             namespace_id,
             lifecycle,
@@ -394,38 +416,38 @@ impl GrepRootState {
         &self.segments
     }
 
-    pub(super) fn validate(&self) -> Result<(), GrepRootStateError> {
+    pub(super) fn validate(&self) -> Result<(), GrepManifestStateError> {
         if self.index.format_version != GREP_INDEX_FORMAT_VERSION {
-            return Err(GrepRootStateError::UnsupportedIndexFormatVersion {
+            return Err(GrepManifestStateError::UnsupportedIndexFormatVersion {
                 found: self.index.format_version,
                 supported: GREP_INDEX_FORMAT_VERSION,
             });
         }
         if matches!(self.lifecycle, GrepLifecycle::Disabled) {
             if !self.segments.is_empty() {
-                return Err(GrepRootStateError::DisabledHasSegments);
+                return Err(GrepManifestStateError::DisabledHasSegments);
             }
             if self.index.reorganize.is_some() {
-                return Err(GrepRootStateError::DisabledHasReorganize);
+                return Err(GrepManifestStateError::DisabledHasReorganize);
             }
         }
 
         let mut by_id = BTreeMap::new();
         for segment in &self.segments {
             if segment.min_row_key > segment.max_row_key {
-                return Err(GrepRootStateError::InvalidSegmentRange {
+                return Err(GrepManifestStateError::InvalidSegmentRange {
                     segment_id: segment.segment_id.clone(),
                 });
             }
             if segment.run_ordinal >= self.index.next_run_ordinal {
-                return Err(GrepRootStateError::UnallocatedSegmentRunOrdinal {
+                return Err(GrepManifestStateError::UnallocatedSegmentRunOrdinal {
                     segment_id: segment.segment_id.clone(),
                     run_ordinal: segment.run_ordinal,
                     next_run_ordinal: self.index.next_run_ordinal,
                 });
             }
             if by_id.insert(&segment.segment_id, segment).is_some() {
-                return Err(GrepRootStateError::DuplicateSegmentId {
+                return Err(GrepManifestStateError::DuplicateSegmentId {
                     segment_id: segment.segment_id.clone(),
                 });
             }
@@ -442,9 +464,9 @@ fn validate_reorganize(
     reorganize: &GrepReorganizeState,
     next_run_ordinal: u64,
     segments: &BTreeMap<&IndexSegmentId, &GrepSegmentRef>,
-) -> Result<(), GrepRootStateError> {
+) -> Result<(), GrepManifestStateError> {
     if reorganize.run_ordinal >= next_run_ordinal {
-        return Err(GrepRootStateError::UnallocatedReorganizeRunOrdinal {
+        return Err(GrepManifestStateError::UnallocatedReorganizeRunOrdinal {
             run_ordinal: reorganize.run_ordinal,
             next_run_ordinal,
         });
@@ -453,12 +475,12 @@ fn validate_reorganize(
     let mut snapshot_ids = BTreeSet::new();
     for segment_id in &reorganize.snapshot_segment_ids {
         if !snapshot_ids.insert(segment_id) {
-            return Err(GrepRootStateError::DuplicateReorganizeSegmentId {
+            return Err(GrepManifestStateError::DuplicateReorganizeSegmentId {
                 segment_id: segment_id.clone(),
             });
         }
         if !segments.contains_key(segment_id) {
-            return Err(GrepRootStateError::MissingReorganizeSnapshotSegment {
+            return Err(GrepManifestStateError::MissingReorganizeSnapshotSegment {
                 segment_id: segment_id.clone(),
             });
         }
@@ -467,18 +489,18 @@ fn validate_reorganize(
     let mut output_ids = BTreeSet::new();
     for segment_id in &reorganize.output_segment_ids {
         if snapshot_ids.contains(segment_id) || !output_ids.insert(segment_id) {
-            return Err(GrepRootStateError::DuplicateReorganizeSegmentId {
+            return Err(GrepManifestStateError::DuplicateReorganizeSegmentId {
                 segment_id: segment_id.clone(),
             });
         }
         let Some(segment) = segments.get(segment_id) else {
-            return Err(GrepRootStateError::MissingReorganizeOutputSegment {
+            return Err(GrepManifestStateError::MissingReorganizeOutputSegment {
                 segment_id: segment_id.clone(),
             });
         };
         if segment.level != reorganize.output_level || segment.run_ordinal != reorganize.run_ordinal
         {
-            return Err(GrepRootStateError::ReorganizeOutputDescriptorMismatch {
+            return Err(GrepManifestStateError::ReorganizeOutputDescriptorMismatch {
                 segment_id: segment_id.clone(),
             });
         }
