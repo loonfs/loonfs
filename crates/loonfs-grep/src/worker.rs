@@ -26,21 +26,21 @@ use crate::root::{
 };
 use crate::service::is_indexable_text_content;
 use crate::{GrepError, Result};
-use base64::Engine as _;
 use futures::future::try_join_all;
 use futures::StreamExt as _;
 use loonfs::{
-    CheckpointFilesPageCursor, CoreError, CreateCheckpointOptions, FsAdmin, FsReader, RuntimeError,
-    StoreFailureClass, DEFAULT_GC_MAX_OBJECTS, GC_MIN_GRACE_WINDOW_MS,
-    METADATA_PUBLICATION_BUDGET_MS,
+    delete_if_aged, CheckpointFilesPageCursor, CoreError, CreateCheckpointOptions, FsAdmin,
+    FsReader, PassBudget, RuntimeError, StoreFailureClass, DEFAULT_GC_MAX_OBJECTS,
+    GC_MIN_GRACE_WINDOW_MS, METADATA_PUBLICATION_BUDGET_MS,
 };
 use loonfs_api::wire::hex::hex_encode_bytes;
 use loonfs_api::wire::sst_blocks::{
     index_blocks_for_key_range, DecodedDataBlock, SegmentBlocksBuilder, SegmentIndexEntry,
 };
 use loonfs_api::{
-    sha256_digest, ChangeSeq, CheckpointId, ContentRef, ErrorCode, IndexSegmentId, InodeId,
-    NamespaceId, RevisionNo,
+    decode_namespace_cursor, encode_cursor, sha256_digest, ChangeSeq, CheckpointId, ContentRef,
+    ErrorCode, IndexSegmentId, InodeId, NamespaceCursor, NamespaceCursorError, NamespaceId,
+    PageCursor, RevisionNo,
 };
 use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
 use loonfs_objectstore::{ImmutableWriteError, ObjectStore, ObjectStoreError};
@@ -1269,7 +1269,8 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         // entry point an operator calls — because that is where the runtime
         // resolves its own, and one authority is what keeps the two the
         // same number.
-        let mut budget = GcBudget::new(Some(request.max_objects.unwrap_or(DEFAULT_GC_MAX_OBJECTS)));
+        let mut budget =
+            PassBudget::new(Some(request.max_objects.unwrap_or(DEFAULT_GC_MAX_OBJECTS)));
         let reads = self.reads(namespace_id);
         // Liveness is decided once per pass — and re-decided per candidate
         // below, which is what authorizes a delete. This first read is
@@ -1334,7 +1335,7 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         liveness: NamespaceLiveness,
         key: &str,
         now_ms: u64,
-        budget: &mut GcBudget,
+        budget: &mut PassBudget,
         report: &mut GrepGcReport,
     ) -> Result<bool> {
         match liveness {
@@ -1391,40 +1392,20 @@ impl<S: ObjectStore + Clone> GrepWorker<S> {
         now_ms: u64,
         report: &mut GrepGcReport,
     ) -> Result<bool> {
-        if delete_if_aged(&self.store, key, now_ms, report).await? {
+        if delete_if_aged(
+            &self.store,
+            key,
+            GREP_GC_GRACE_WINDOW_MS,
+            now_ms,
+            &mut report.retained_candidates,
+        )
+        .await
+        .map_err(|error| core_store_error(key, &error))?
+        {
             count_deleted_key(key, report);
             return Ok(true);
         }
         Ok(false)
-    }
-}
-
-/// The reads one garbage-collection pass may spend.
-///
-/// A key costs more than its listing: deciding it re-reads liveness or the
-/// grep root, and reading its age is another round trip. Charging those to
-/// the same budget is what keeps `max_objects` a bound on the work the pass
-/// does rather than only on the keys it names.
-struct GcBudget {
-    max_objects: Option<u64>,
-    spent: u64,
-}
-
-impl GcBudget {
-    fn new(max_objects: Option<u64>) -> Self {
-        Self {
-            max_objects,
-            spent: 0,
-        }
-    }
-
-    fn charge(&mut self) {
-        self.spent = self.spent.saturating_add(1);
-    }
-
-    fn exhausted(&self) -> bool {
-        self.max_objects
-            .is_some_and(|max_objects| self.spent >= max_objects)
     }
 }
 
@@ -1439,6 +1420,24 @@ struct GrepGcCursor {
     namespace_id: NamespaceId,
     #[serde(default)]
     last_key: Option<String>,
+}
+
+impl PageCursor for GrepGcCursor {
+    const KIND: &'static str = "grep_gc";
+}
+
+impl NamespaceCursor for GrepGcCursor {
+    fn namespace_id(&self) -> &NamespaceId {
+        &self.namespace_id
+    }
+
+    fn last_key(&self) -> Option<&str> {
+        self.last_key.as_deref()
+    }
+
+    fn key_prefix(&self) -> String {
+        namespace_prefix(&self.namespace_id)
+    }
 }
 
 impl GrepGcCursor {
@@ -1464,40 +1463,25 @@ impl GrepGcCursor {
     }
 
     fn decode(token: &str, namespace_id: &NamespaceId) -> Result<Self> {
-        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(token)
-            .map_err(|_| malformed_gc_cursor())?;
-        let cursor: Self = serde_json::from_slice(&bytes).map_err(|_| malformed_gc_cursor())?;
-        if cursor.namespace_id != *namespace_id {
-            return Err(GrepError::Runtime(RuntimeError::Core(
-                CoreError::InvalidGcConfig("cursor belongs to a different namespace".to_owned()),
-            )));
-        }
-        let prefix = namespace_prefix(namespace_id);
-        if cursor
-            .last_key
-            .as_ref()
-            .is_some_and(|key| !key.starts_with(&prefix))
-        {
-            return Err(malformed_gc_cursor());
-        }
-        Ok(cursor)
+        decode_namespace_cursor(token, namespace_id).map_err(|error| match error {
+            NamespaceCursorError::ForeignNamespace => {
+                CoreError::InvalidGcConfig(error.to_string()).into()
+            }
+            NamespaceCursorError::Malformed(_) | NamespaceCursorError::OutsideKeyspace => {
+                malformed_gc_cursor()
+            }
+        })
     }
 
     fn encode(&self) -> Result<String> {
-        let bytes = serde_json::to_vec(self).map_err(|error| {
-            GrepError::Runtime(RuntimeError::Core(CoreError::Internal(format!(
-                "failed to encode grep GC cursor: {error}"
-            ))))
-        })?;
-        Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
+        encode_cursor(self).map_err(|error| {
+            CoreError::Internal(format!("failed to encode grep GC cursor: {error}")).into()
+        })
     }
 }
 
 fn malformed_gc_cursor() -> GrepError {
-    GrepError::Runtime(RuntimeError::Core(CoreError::InvalidGcConfig(
-        "cursor is malformed".to_owned(),
-    )))
+    CoreError::InvalidGcConfig("cursor is malformed".to_owned()).into()
 }
 
 fn reorganize_report(
@@ -1766,34 +1750,6 @@ fn live_grep_keys(root: &LoadedGrepRoot) -> BTreeSet<String> {
         );
     }
     live
-}
-
-async fn delete_if_aged<S: ObjectStore + ?Sized>(
-    store: &S,
-    key: &str,
-    now_ms: u64,
-    report: &mut GrepGcReport,
-) -> Result<bool> {
-    let Some(metadata) = store
-        .head(key)
-        .await
-        .map_err(|error| core_store_error(key, &error))?
-    else {
-        return Ok(false);
-    };
-    let Some(last_modified_ms) = metadata.last_modified_ms else {
-        report.retained_candidates += 1;
-        return Ok(false);
-    };
-    if now_ms.saturating_sub(last_modified_ms) < GREP_GC_GRACE_WINDOW_MS {
-        report.retained_candidates += 1;
-        return Ok(false);
-    }
-    store
-        .delete(key)
-        .await
-        .map_err(|error| core_store_error(key, &error))?;
-    Ok(true)
 }
 
 fn count_deleted_key(key: &str, report: &mut GrepGcReport) {

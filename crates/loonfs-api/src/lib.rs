@@ -110,10 +110,10 @@ pub use ids::{
 };
 pub use name_policy::name_key_for_display_name;
 pub use pagination::{
-    decode_cursor, encode_cursor, DirectoryPageCursor, EffectiveLimit, FileRevisionsPageCursor,
-    GrepPageCursor, LimitError, Page, PageCursor, PageCursorError, PageRequest, PaginationPolicy,
-    PaginationPolicyError, TrashPageCursor, DEFAULT_MAX_PAGE_LIMIT, DEFAULT_PAGE_LIMIT,
-    PAGE_CURSOR_VERSION,
+    decode_cursor, decode_namespace_cursor, encode_cursor, DirectoryPageCursor, EffectiveLimit,
+    FileRevisionsPageCursor, GrepPageCursor, LimitError, NamespaceCursor, NamespaceCursorError,
+    Page, PageCursor, PageCursorError, PageRequest, PaginationPolicy, PaginationPolicyError,
+    TrashPageCursor, DEFAULT_MAX_PAGE_LIMIT, DEFAULT_PAGE_LIMIT, PAGE_CURSOR_VERSION,
 };
 pub use path::{
     AbsolutePath, DisplayName, PathComponent, PathError, MAX_DISPLAY_NAME_BYTES, MAX_PATH_BYTES,

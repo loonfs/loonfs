@@ -2420,14 +2420,14 @@ fn admin_run_drains_an_assignment_and_leaves_the_work_done() {
     assert_eq!(data["drained"], true);
     assert_eq!(data["budget_exhausted"], false);
     let keys = data["keys"].as_array().expect("json array");
-    assert_eq!(keys.len(), 6, "three jobs over two namespaces: {data}");
+    assert_eq!(keys.len(), 8, "four jobs over two namespaces: {data}");
     assert!(
         keys.iter().all(|key| key["settled"] == true),
         "an unbudgeted drain settles every key: {data}"
     );
     assert_eq!(
         data["jobs"],
-        serde_json::json!(["metadata", "gc", "grep-index"])
+        serde_json::json!(["metadata", "gc", "grep-index", "grep-gc"])
     );
 
     for namespace in ["alpha", "beta"] {
@@ -2511,7 +2511,7 @@ fn admin_run_requires_an_assignment_and_names_the_jobs_it_hosts() {
     let unknown_job = harness.run(&["admin", "run", "--namespace", "alpha", "--job", "bogus"]);
     assert_failure(&unknown_job);
     let message = stderr_string(&unknown_job);
-    for job in ["metadata", "core-gc", "grep-index"] {
+    for job in ["metadata", "core-gc", "grep-index", "grep-gc"] {
         assert!(
             message.contains(job),
             "the valid set must be listed: {message}"

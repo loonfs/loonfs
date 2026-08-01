@@ -27,8 +27,9 @@ use loonfs_api::{
 };
 use loonfs_client::NamespacePath;
 use loonfs_grep::{
-    GramIndexBuildPolicy, GrepDisableOutcome, GrepEnableOutcome, GrepError, GrepIndexSnapshot,
-    GrepMaintenanceJob, GrepService, GrepWorker, NamespaceReads, GREP_INDEX_JOB,
+    GramIndexBuildPolicy, GrepDisableOutcome, GrepEnableOutcome, GrepError, GrepGcJob,
+    GrepIndexSnapshot, GrepMaintenanceJob, GrepService, GrepWorker, NamespaceReads, GREP_GC_JOB,
+    GREP_INDEX_JOB,
 };
 use loonfs_objectstore::probe::{run_store_contract_probe, StoreProbeOutcome, StoreProbeReport};
 use loonfs_objectstore::timing::{MonotonicTimer, StdMonotonicTimer};
@@ -378,6 +379,11 @@ impl EmbeddedBackend {
                     self.grep_worker(),
                     GramIndexBuildPolicy::default(),
                 )))
+                .map_err(map_runtime_error)?;
+        }
+        if jobs.contains(&GREP_GC_JOB) {
+            self.writer
+                .register_maintenance_job(Arc::new(GrepGcJob::new(self.grep_worker())))
                 .map_err(map_runtime_error)?;
         }
         jobs.iter()

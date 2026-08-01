@@ -24,29 +24,34 @@ use super::config::GcConfig;
 /// charge attached to it, and that running out stops the pass instead of
 /// letting it finish "just this one thing" unboundedly.
 #[derive(Debug)]
-pub(super) struct PassBudget {
+pub struct PassBudget {
     max_objects: Option<u64>,
     spent: u64,
 }
 
 impl PassBudget {
-    pub(super) fn of(config: &GcConfig) -> Self {
+    /// Meters a pass at `max_objects` units, or at nothing when absent.
+    pub fn new(max_objects: Option<u64>) -> Self {
         Self {
-            max_objects: config.max_objects,
+            max_objects,
             spent: 0,
         }
+    }
+
+    pub(super) fn of(config: &GcConfig) -> Self {
+        Self::new(config.max_objects)
     }
 
     /// True once nothing further may be charged: the caller stops where it
     /// stands. The sweep returns its cursor; the content reference scan
     /// gives up on collecting and the pass defers that reclamation.
-    pub(super) fn exhausted(&self) -> bool {
+    pub fn exhausted(&self) -> bool {
         self.max_objects
             .is_some_and(|max_objects| self.spent >= max_objects)
     }
 
     /// Charges one unit for work already done.
-    pub(super) fn charge(&mut self) {
+    pub fn charge(&mut self) {
         self.spent = self.spent.saturating_add(1);
     }
 

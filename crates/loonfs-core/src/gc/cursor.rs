@@ -1,8 +1,10 @@
 //! Opaque, namespace-bound cursors for bounded GC enumeration.
 
 use crate::error::{CoreError, Result};
-use base64::Engine as _;
-use loonfs_api::NamespaceId;
+use loonfs_api::{
+    decode_namespace_cursor, encode_cursor, NamespaceCursor, NamespaceCursorError, NamespaceId,
+    PageCursor,
+};
 use loonfs_objectstore::keys::{
     checkpoint_prefix, metadata_manifest_prefix, metadata_table_prefix, upload_session_prefix,
     wal_segment_prefix,
@@ -59,6 +61,24 @@ pub(super) struct GcCursor {
     pub(super) last_key: Option<String>,
 }
 
+impl PageCursor for GcCursor {
+    const KIND: &'static str = "core_gc";
+}
+
+impl NamespaceCursor for GcCursor {
+    fn namespace_id(&self) -> &NamespaceId {
+        &self.namespace_id
+    }
+
+    fn last_key(&self) -> Option<&str> {
+        self.last_key.as_deref()
+    }
+
+    fn key_prefix(&self) -> String {
+        self.family.prefix(&self.namespace_id)
+    }
+}
+
 impl GcCursor {
     pub(super) fn initial(namespace_id: &NamespaceId) -> Self {
         Self {
@@ -77,29 +97,17 @@ impl GcCursor {
     }
 
     pub(super) fn decode(token: &str, namespace_id: &NamespaceId) -> Result<Self> {
-        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(token)
-            .map_err(|_| invalid_cursor())?;
-        let cursor: Self = serde_json::from_slice(&bytes).map_err(|_| invalid_cursor())?;
-        if cursor.namespace_id != *namespace_id {
-            return Err(CoreError::InvalidGcConfig(
-                "cursor belongs to a different namespace".to_owned(),
-            ));
-        }
-        if cursor
-            .last_key
-            .as_ref()
-            .is_some_and(|key| !key.starts_with(&cursor.family.prefix(namespace_id)))
-        {
-            return Err(invalid_cursor());
-        }
-        Ok(cursor)
+        decode_namespace_cursor(token, namespace_id).map_err(|error| match error {
+            NamespaceCursorError::ForeignNamespace => CoreError::InvalidGcConfig(error.to_string()),
+            NamespaceCursorError::Malformed(_) | NamespaceCursorError::OutsideKeyspace => {
+                invalid_cursor()
+            }
+        })
     }
 
     pub(super) fn encode(&self) -> Result<String> {
-        let bytes = serde_json::to_vec(self)
-            .map_err(|error| CoreError::Internal(format!("failed to encode GC cursor: {error}")))?;
-        Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
+        encode_cursor(self)
+            .map_err(|error| CoreError::Internal(format!("failed to encode GC cursor: {error}")))
     }
 }
 
@@ -110,18 +118,23 @@ fn invalid_cursor() -> CoreError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use loonfs_api::wire::hex::hex_encode_bytes;
+
+    fn token_over(payload: &serde_json::Value) -> String {
+        hex_encode_bytes(&serde_json::to_vec(payload).expect("encode payload"))
+    }
 
     #[test]
     fn cursor_decode_tolerates_additive_fields() {
         let namespace_id = NamespaceId::parse("demo").expect("namespace id");
-        let payload = serde_json::json!({
+        let token = token_over(&serde_json::json!({
+            "v": 1,
+            "kind": "core_gc",
             "namespace_id": "demo",
             "family": "metadata_tables",
             "last_key": "namespaces/demo/metadata/tables/table.sst.zst",
             "future_field": {"ignored": true}
-        });
-        let token = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(serde_json::to_vec(&payload).expect("encode payload"));
+        }));
 
         let cursor = GcCursor::decode(&token, &namespace_id).expect("decode cursor");
         assert_eq!(cursor.family, CandidateFamily::MetadataTables);
@@ -145,13 +158,30 @@ mod tests {
         assert!(GcCursor::decode(&token, &namespace_id).is_ok());
         assert!(GcCursor::decode(&token, &other_namespace_id).is_err());
 
-        let malformed = serde_json::json!({
+        let wrong_family_prefix = token_over(&serde_json::json!({
+            "v": 1,
+            "kind": "core_gc",
             "namespace_id": "demo",
             "family": "wal_segments",
             "last_key": "namespaces/demo/checkpoints/checkpoint.json"
-        });
-        let malformed = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(serde_json::to_vec(&malformed).expect("encode malformed payload"));
-        assert!(GcCursor::decode(&malformed, &namespace_id).is_err());
+        }));
+        assert!(GcCursor::decode(&wrong_family_prefix, &namespace_id).is_err());
+    }
+
+    /// Core and grep collect the same namespace under two cursors of the
+    /// same shape. The kind is what stops one job resuming the other's
+    /// position.
+    #[test]
+    fn a_cursor_from_another_job_is_refused() {
+        let namespace_id = NamespaceId::parse("demo").expect("namespace id");
+        let foreign_kind = token_over(&serde_json::json!({
+            "v": 1,
+            "kind": "grep_gc",
+            "namespace_id": "demo",
+            "family": "wal_segments",
+            "last_key": "namespaces/demo/wal/segments/segment.wal.zst"
+        }));
+
+        assert!(GcCursor::decode(&foreign_kind, &namespace_id).is_err());
     }
 }

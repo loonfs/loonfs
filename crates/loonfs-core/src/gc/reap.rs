@@ -8,7 +8,6 @@
 use crate::checkpoint::record::encode_checkpoint_record;
 use crate::context::MutationContext;
 use crate::error::{CoreError, Result};
-use loonfs_api::v0::GcResponse;
 use loonfs_api::wire::control::{
     decode_control_object, CheckpointOwner, CheckpointRecordLifecycle, CheckpointRecordState,
     ControlObjectKind,
@@ -117,34 +116,35 @@ pub(super) async fn sweep_checkpoint_record<S: ObjectStore + ?Sized>(
     }
 }
 
-pub(super) async fn delete_if_aged<S: ObjectStore + ?Sized>(
+/// Deletes one unreferenced candidate if the grace window has passed over
+/// it, counting it as retained otherwise.
+///
+/// Answers whether the key was deleted. Store failures surface unmapped so
+/// each collector keeps its own error vocabulary; everything about the
+/// decision itself — which timestamp, what an absent one means, what the
+/// window is measured against — is the same wherever objects age out, so it
+/// is decided once here.
+pub async fn delete_if_aged<S: ObjectStore + ?Sized>(
     store: &S,
     key: &str,
     grace_window_ms: u64,
-    context: &MutationContext,
-    report: &mut GcResponse,
-) -> Result<bool> {
-    let Some(metadata) = store
-        .head(key)
-        .await
-        .map_err(|error| CoreError::store(key, &error))?
-    else {
+    now_ms: u64,
+    retained_candidates: &mut u64,
+) -> std::result::Result<bool, ObjectStoreError> {
+    let Some(metadata) = store.head(key).await? else {
         // Already gone; nothing to count.
         return Ok(false);
     };
     let Some(last_modified_ms) = metadata.last_modified_ms else {
         // No provider timestamp: treat as young, retain (rule 1).
-        report.retained_candidates += 1;
+        *retained_candidates += 1;
         return Ok(false);
     };
-    if context.now_ms.saturating_sub(last_modified_ms) < grace_window_ms {
-        report.retained_candidates += 1;
+    if now_ms.saturating_sub(last_modified_ms) < grace_window_ms {
+        *retained_candidates += 1;
         return Ok(false);
     }
-    store
-        .delete(key)
-        .await
-        .map_err(|error| CoreError::store(key, &error))?;
+    store.delete(key).await?;
     Ok(true)
 }
 

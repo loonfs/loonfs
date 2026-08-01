@@ -17,7 +17,7 @@ use loonfs_api::{
     ChangeSeq, CheckpointId, CreateCheckpointRequest, ErrorCode, GcRequest, MaintenanceStepKind,
     MaintenanceStepRequest,
 };
-use loonfs_grep::GREP_INDEX_JOB;
+use loonfs_grep::{GREP_GC_JOB, GREP_INDEX_JOB};
 use std::collections::BTreeSet;
 
 // --- maintenance/admin plane ---
@@ -345,6 +345,7 @@ fn job_id(job: MaintenanceJobArg) -> MaintenanceJobId {
         MaintenanceJobArg::Metadata => MaintenanceJobId::METADATA,
         MaintenanceJobArg::CoreGc => MaintenanceJobId::GC,
         MaintenanceJobArg::GrepIndex => GREP_INDEX_JOB,
+        MaintenanceJobArg::GrepGc => GREP_GC_JOB,
     }
 }
 

@@ -79,9 +79,10 @@ A step may also hand back an opaque continuation — where it stopped, for the n
 | `metadata` | Flush the WAL tail past its threshold, then fold one bounded reorganization unit. | Automatic. Nudged by publication. |
 | `gc` | One bounded mark-and-sweep pass. | Automatic, and clock-driven: work becomes eligible when a lease expires or a grace window passes, so the deadlines that create reclaimable state are what plant the wakeup. |
 | `grep-index` | One bounded gram-index build or fold unit. | Automatic where a host maintains the index. Nudged by enable, publication, and queries that find the index behind. |
+| `grep-gc` | One bounded pass over one namespace's grep keyspace. | Registered where a host maintains the index, on the same switch. Never nudged by anything the index does: like grep collection generally, somebody asks for it. |
 | retention (*not a job*) | Advance the retention floor. | **Never automatic.** There is no job id to register; an operator asks for it. |
 
-Retention is the one deliberate exception, and it is a moral distinction rather than a safety budget. Collection reclaims state that is provably dead; advancing the retention floor surrenders replay history that is still there. So collection runs on its own and retention is asked for explicitly, through the maintenance step's `retention` opt-in or the typed admin operation. Grep collection is likewise explicit and per namespace.
+Retention is the one deliberate exception, and it is a moral distinction rather than a safety budget. Collection reclaims state that is provably dead; advancing the retention floor surrenders replay history that is still there. So collection runs on its own and retention is asked for explicitly, through the maintenance step's `retention` opt-in or the typed admin operation. Grep collection is likewise explicit and per namespace: `grep-gc` is a job so that a pass resumes where the last one stopped and shares the runner's admission and permits, but nothing schedules it on grep's behalf.
 
 ### Coverage: touched and assigned
 

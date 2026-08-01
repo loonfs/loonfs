@@ -183,7 +183,7 @@ pub use error::{
     Error, ErrorCode, ErrorKind, MetadataProjectionLoadError, MetadataViewError, StoreFailureClass,
     WriterFence,
 };
-pub use gc::{gc_namespace, GcConfig};
+pub use gc::{delete_if_aged, gc_namespace, GcConfig, PassBudget};
 pub use namespace::BootstrapNamespaceError;
 pub use options::{BootstrapOptions, DeleteNamespaceOptions};
 pub use path::read::{CurrentFileState, MAX_RESOLVE_CURRENT_FILES};
