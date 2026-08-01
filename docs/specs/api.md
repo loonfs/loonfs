@@ -431,8 +431,8 @@ answer on its own.
 
 **Client-side retry reconciliation.** Rerunning a whole upload-then-commit
 sequence under one `commit_id` — the shape of a command rerun, where no
-`content_ref` survived the first attempt — is nonetheless safe on identical
-bytes. A client that composes upload and commit must, on
+`content_ref` survived the first attempt — is nonetheless safe when the
+request is identical. A client that composes upload and commit must, on
 `commit_id_reuse_conflict`, resolve it as follows before surfacing it:
 
 1. Find what that `commit_id` committed. There is no read keyed by commit
@@ -441,8 +441,14 @@ bytes. A client that composes upload and commit must, on
    — and take the row whose `commit_id` matches. If `details.committed_seq`
    is absent, or the feed answers `rebootstrap_required` because retention
    has moved past that sequence, or the row there names some other commit,
-   there is nothing to compare: go straight to rule 4.
-2. Compare the committed content against what was just uploaded: the
+   there is nothing to compare: go straight to rule 5.
+2. Compare the committed change's `message` against the one the request
+   asked for. The message is part of the commit's identity, so a rerun that
+   changed it asked for a different mutation: go to rule 5. Compare the
+   annotations exactly as the server fingerprints them — an absent message
+   and an empty one are different commits, so a client must not fold both
+   into "no message".
+3. Compare the committed content against what was just uploaded: the
    content's `whole_file_sha256` when it has one, and otherwise its
    `storage_checksum`, after checking `size_bytes`.
 
@@ -453,16 +459,17 @@ bytes. A client that composes upload and commit must, on
    `crc64nvme` it claimed at completion, which is also what the reference
    the server minted carries. Both are evidence about the same bytes; they
    differ only in which digests they can answer for, and a digest the
-   upload never computed falls to rule 4 rather than being guessed at.
-3. Equal content means the logical operation had already succeeded: report
-   the commit that landed, with its original `committed_seq`.
-4. Anything else surfaces a failure. Different content is the
-   `commit_id_reuse_conflict` unchanged, and so is a commit the client
-   could not locate — an absent `committed_seq`, or a sequence retention no
-   longer answers for. Content the client *cannot* compare — a checksum
-   algorithm it does not implement — is reported as a failure naming why it
-   could not reconcile. **A comparison that cannot be made is never
-   reported as success.**
+   upload never computed falls to rule 5 rather than being guessed at.
+4. The same message over equal content means the logical operation had
+   already succeeded: report the commit that landed, with its original
+   `committed_seq`.
+5. Anything else surfaces a failure. Different content is the
+   `commit_id_reuse_conflict` unchanged, and so are a changed message and a
+   commit the client could not locate — an absent `committed_seq`, or a
+   sequence retention no longer answers for. Content the client *cannot*
+   compare — a checksum algorithm it does not implement — is reported as a
+   failure naming why it could not reconcile. **A comparison that cannot be
+   made is never reported as success.**
 
 The duplicate content object the rerun uploaded is then referenced by
 nothing. That is by design: it is a completed upload whose content no

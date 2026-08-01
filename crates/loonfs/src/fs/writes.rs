@@ -148,14 +148,14 @@ impl FsWriter {
         )
     )]
     /// Re-running this with a `commit_id` that already committed is safe
-    /// when the bytes are the same. A commit's identity names *which*
+    /// when the request is the same. A commit's identity names *which*
     /// content object it wrote, and a re-run necessarily stages a fresh
     /// one, so the publisher sees a different commit and reports
     /// `commit_id_reuse_conflict`. This resolves that by reading back what
-    /// the commit id actually committed and comparing its content against
-    /// the bytes just staged: equal means the operation had already
-    /// succeeded. Different bytes, or content this build cannot compare,
-    /// surface the conflict.
+    /// the commit id actually committed and comparing it against the
+    /// request just made: same content and same message means the
+    /// operation had already succeeded. Different bytes, a different
+    /// message, or content this build cannot compare surface the conflict.
     ///
     /// The freshly staged duplicate object is then referenced by nothing.
     /// That is by design, not a leak: content garbage collection reclaims an
@@ -171,6 +171,7 @@ impl FsWriter {
         self.core.record_trace_context(&span);
         span.record("payload_class", crate::trace::payload_class(bytes.len()));
         let commit_id = options.commit_id.clone();
+        let message = options.message.clone();
         let prepared_content = self.prepare_file_bytes(namespace_id, bytes).await?;
         let published = self
             .put_file_prepared(namespace_id, absolute_path, prepared_content, options)
@@ -178,6 +179,7 @@ impl FsWriter {
         self.settle_put(
             namespace_id,
             commit_id,
+            message,
             published,
             StagedPayload::Bytes(bytes),
         )
@@ -219,6 +221,7 @@ impl FsWriter {
     ) -> Result<CommitResponse> {
         self.core.record_trace_context(&tracing::Span::current());
         let commit_id = options.commit_id.clone();
+        let message = options.message.clone();
         let prepared_content = self.prepare_file_stream(namespace_id, body).await?;
         // The prepared reference describes the bytes that just went past,
         // and with the payload gone it is the only description of them that
@@ -230,6 +233,7 @@ impl FsWriter {
         self.settle_put(
             namespace_id,
             commit_id,
+            message,
             published,
             StagedPayload::Streamed(&staged),
         )
@@ -242,13 +246,20 @@ impl FsWriter {
         &self,
         namespace_id: &NamespaceId,
         commit_id: Option<CommitId>,
+        message: Option<String>,
         published: Result<CommitResponse>,
         staged: StagedPayload<'_>,
     ) -> Result<CommitResponse> {
         match (published, commit_id) {
             (Err(error), Some(commit_id)) if error.code() == ErrorCode::CommitIdReuseConflict => {
-                self.reconcile_commit_id_reuse(namespace_id, &commit_id, staged, error)
-                    .await
+                self.reconcile_commit_id_reuse(
+                    namespace_id,
+                    &commit_id,
+                    message.as_deref(),
+                    staged,
+                    error,
+                )
+                .await
             }
             (published, _) => published,
         }
@@ -256,16 +267,17 @@ impl FsWriter {
 
     /// Decides whether a reused commit id already did this exact work.
     ///
-    /// The evidence is the committed content itself, read from the change
-    /// feed at the sequence the conflict reported and compared against the
-    /// bytes just staged. Nothing weaker counts: every way of failing to
-    /// prove the two are the same — including a comparison this build
-    /// cannot make — leaves the original conflict standing, never
-    /// agreement.
+    /// The evidence is the committed change itself, read from the change
+    /// feed at the sequence the conflict reported: its message against the
+    /// one this request asked for, and its content against the bytes just
+    /// staged. Nothing weaker counts: every way of failing to prove the two
+    /// requests are the same — including a comparison this build cannot
+    /// make — leaves the original conflict standing, never agreement.
     async fn reconcile_commit_id_reuse(
         &self,
         namespace_id: &NamespaceId,
         commit_id: &CommitId,
+        message: Option<&str>,
         staged: StagedPayload<'_>,
         conflict: RuntimeError,
     ) -> Result<CommitResponse> {
@@ -278,6 +290,15 @@ impl FsWriter {
         else {
             return Err(conflict);
         };
+        // The message is part of a commit's identity, so a rerun that
+        // changed it asked for a different mutation and the conflict is the
+        // honest answer. Equality here is the fingerprint's: it serializes
+        // the message as given — absent becomes `null`, an empty message
+        // becomes `""` — so no message and an empty message are different
+        // commits, and this comparison must not fold them together.
+        if committed.message.as_deref() != message {
+            return Err(conflict);
+        }
         let Some(content_ref) = committed_content_ref(&committed) else {
             return Err(conflict);
         };

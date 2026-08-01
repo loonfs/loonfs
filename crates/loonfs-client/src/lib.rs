@@ -1304,15 +1304,16 @@ impl Client {
     /// Uploads bytes and commits them at a path.
     ///
     /// Re-running this with a `commit_id` that already committed is safe
-    /// when the bytes are the same. A commit's identity names *which*
+    /// when the request is the same. A commit's identity names *which*
     /// content object it wrote, and a re-run necessarily uploads a fresh
     /// one, so the server sees a different commit and reports
     /// `commit_id_reuse_conflict`. This resolves that the only honest way
     /// available: it reads back what the commit id actually committed and
-    /// compares its content against the bytes just sent. Equal means the
-    /// operation had already succeeded and the original answer is returned;
-    /// anything else — different bytes, or content this build cannot
-    /// compare — surfaces the conflict.
+    /// compares it against the request just made. The same content under
+    /// the same message means the operation had already succeeded and the
+    /// original answer is returned; anything else — different bytes, a
+    /// different message, or content this build cannot compare — surfaces
+    /// the conflict.
     ///
     /// The freshly uploaded duplicate object is then referenced by nothing.
     /// That is by design, not a leak: content garbage collection reclaims an
@@ -1399,8 +1400,14 @@ impl Client {
         match response {
             Ok(response) => Ok(response),
             Err(error) if error.code() == Some(ErrorCode::CommitIdReuseConflict) => {
-                self.reconcile_commit_id_reuse(spec.namespace(), &commit_id, uploaded, error)
-                    .await
+                self.reconcile_commit_id_reuse(
+                    spec.namespace(),
+                    &commit_id,
+                    options.message.as_deref(),
+                    uploaded,
+                    error,
+                )
+                .await
             }
             Err(error) => Err(error),
         }
@@ -1408,16 +1415,18 @@ impl Client {
 
     /// Decides whether a reused commit id already did this exact work.
     ///
-    /// The evidence is the committed content itself, read back from the
-    /// change feed at the sequence the conflict reported, and compared
-    /// against the bytes that were just uploaded. Nothing weaker counts:
-    /// every way of failing to prove the two are the same — including a
+    /// The evidence is the committed change itself, read back from the
+    /// change feed at the sequence the conflict reported: its message
+    /// against the one this request asked for, and its content against the
+    /// bytes that were just uploaded. Nothing weaker counts: every way of
+    /// failing to prove the two requests are the same — including a
     /// comparison this client cannot make — leaves the original conflict
     /// standing, never agreement.
     async fn reconcile_commit_id_reuse(
         &self,
         namespace_id: &NamespaceId,
         commit_id: &CommitId,
+        message: Option<&str>,
         uploaded: UploadedContent<'_>,
         conflict: ClientError,
     ) -> Result<ApiCommitResponse> {
@@ -1430,6 +1439,16 @@ impl Client {
         else {
             return Err(conflict);
         };
+        // The message is part of a commit's identity, so a rerun that
+        // changed it asked for a different mutation and the server's
+        // conflict is the honest answer. Equality here is the server
+        // fingerprint's: the message is taken as given — absent serializes
+        // as `null`, an empty message as `""` — so no message and an empty
+        // message are different commits, and this comparison must not fold
+        // them together.
+        if committed.message.as_deref() != message {
+            return Err(conflict);
+        }
         let Some(content_ref) = committed_content_ref(&committed) else {
             return Err(conflict);
         };
