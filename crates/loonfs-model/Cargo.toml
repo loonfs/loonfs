@@ -9,7 +9,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-loonfs-api = { path = "../loonfs-api" }
+loonfs-api.workspace = true
 serde.workspace = true
 
 [lints]

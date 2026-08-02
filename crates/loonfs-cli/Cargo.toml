@@ -19,11 +19,11 @@ futures.workspace = true
 dialoguer = { version = "0.11", features = ["fuzzy-select"] }
 hostname = "0.4"
 http.workspace = true
-loonfs-api = { path = "../loonfs-api" }
-loonfs-client = { path = "../loonfs-client" }
-loonfs = { path = "../loonfs" }
-loonfs-grep = { path = "../loonfs-grep" }
-loonfs-objectstore = { path = "../loonfs-objectstore" }
+loonfs-api.workspace = true
+loonfs-client.workspace = true
+loonfs.workspace = true
+loonfs-grep.workspace = true
+loonfs-objectstore.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true

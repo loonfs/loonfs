@@ -15,7 +15,7 @@ fs4.workspace = true
 futures.workspace = true
 http.workspace = true
 http-body.workspace = true
-loonfs-api = { path = "../loonfs-api" }
+loonfs-api.workspace = true
 object_store.workspace = true
 serde.workspace = true
 serde_json.workspace = true
