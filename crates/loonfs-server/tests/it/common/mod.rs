@@ -245,7 +245,7 @@ pub(crate) mod http_split_support {
         file_bytes: &[u8],
     ) -> CompleteUploadResponse {
         let begin = client
-            .begin_upload(namespace_id, &BeginUploadRequest::default())
+            .begin_upload(namespace_id, &BeginUploadRequest::ServiceProxied {})
             .await
             .expect("begin upload");
         let staged = client

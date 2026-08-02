@@ -2908,44 +2908,73 @@
         }
       },
       "BeginUploadRequest": {
-        "type": "object",
-        "description": "Request for starting an upload session.",
-        "properties": {
-          "content": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
+        "oneOf": [
+          {
+            "type": "object",
+            "title": "BeginUploadServiceProxied",
+            "description": "Send the bytes to the service, which writes the content object.",
+            "required": [
+              "mode"
+            ],
+            "properties": {
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "service_proxied"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "title": "BeginUploadDirectPut",
+            "description": "Write the whole object through one presigned request. The server\nsigns exactly these bytes into the write it authorizes, so the claim\nis required.",
+            "required": [
+              "content",
+              "mode"
+            ],
+            "properties": {
+              "content": {
                 "$ref": "#/components/schemas/DirectPutContentClaim",
-                "description": "Required for `direct_put`; the server signs exactly these bytes into\nthe write it authorizes."
-              }
-            ]
-          },
-          "mode": {
-            "oneOf": [
-              {
-                "type": "null"
+                "description": "Byte length and digest of the payload about to be written."
               },
-              {
-                "$ref": "#/components/schemas/UploadMode",
-                "description": "Requested upload transport. Absent keeps the existing service-proxied path."
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "direct_put"
+                ]
               }
-            ]
+            }
           },
-          "multipart": {
-            "oneOf": [
-              {
-                "type": "null"
+          {
+            "type": "object",
+            "title": "BeginUploadDirectMultipart",
+            "description": "Write the object in parts through presigned part uploads.",
+            "required": [
+              "mode"
+            ],
+            "properties": {
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "direct_multipart"
+                ]
               },
-              {
-                "$ref": "#/components/schemas/DirectMultipartUploadOptions",
-                "description": "Optional for `direct_multipart`; selects the part geometry. Absent\ntakes the server's default. `direct_multipart` claims its content at\ncompletion, so nothing about the payload is declared here."
+              "multipart": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/DirectMultipartUploadOptions",
+                    "description": "Selects the part geometry; absent takes the server's default.\nA multipart upload claims its content at completion, so nothing\nabout the payload is declared here."
+                  }
+                ]
               }
-            ]
+            }
           }
-        },
-        "additionalProperties": false
+        ],
+        "description": "Request for starting an upload session, tagged by the transport it asks\nfor.\n\nEach transport carries only what it needs, so the combinations a flat\nrequest could spell — a proxied begin carrying multipart geometry, a\ndirect put with no claim to sign — are refused when the body is decoded\nrather than by a handler reading them back. `mode` is required: a\nrequest that does not say how it intends to move its bytes is not a\nrequest this API can answer."
       },
       "BeginUploadResponse": {
         "type": "object",
@@ -3290,43 +3319,59 @@
         }
       },
       "CompleteUploadRequest": {
-        "type": "object",
-        "description": "Request to complete an upload.\n\nThe two shapes correspond to who knew the content identity first. A\nservice-proxied or `direct_put` session was handed its reference before\nany byte moved, so its completion names that reference back. A\n`direct_multipart` session was never told one — there was nothing to\ntell — so its completion carries the claim instead and the server builds\nthe reference from the identity it has held all along.",
-        "properties": {
-          "content_ref": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/ContentRef",
-                "description": "Content identity the caller expects the session to have staged.\nRequired for `service_proxied` and `direct_put`; absent for\n`direct_multipart`, whose identity the client never learns."
-              }
-            ]
-          },
-          "multipart": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/DirectMultipartContentClaim",
-                "description": "Required for `direct_multipart`: the assembled object's length and\nCRC-64/NVME, which completion verifies against the provider's own\nreading of the object."
-              }
-            ]
-          },
-          "multipart_parts": {
-            "type": [
-              "array",
-              "null"
+        "oneOf": [
+          {
+            "type": "object",
+            "title": "CompleteUploadContentRef",
+            "description": "Completes a session the server named a content object for: the\ncaller names it back and the server proves the object matches.",
+            "required": [
+              "content_ref",
+              "completion"
             ],
-            "items": {
-              "$ref": "#/components/schemas/CompletedUploadPart"
-            },
-            "description": "Required for `direct_multipart`: every part the client uploaded, in\nascending part order. The server holds no part records of its own, so\nthis list is what it assembles the object from."
+            "properties": {
+              "completion": {
+                "type": "string",
+                "enum": [
+                  "content_ref"
+                ]
+              },
+              "content_ref": {
+                "$ref": "#/components/schemas/ContentRef",
+                "description": "Content identity the caller expects the session to have settled\non."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "title": "CompleteUploadMultipart",
+            "description": "Completes a `direct_multipart` session with what it uploaded.",
+            "required": [
+              "multipart",
+              "parts",
+              "completion"
+            ],
+            "properties": {
+              "completion": {
+                "type": "string",
+                "enum": [
+                  "multipart"
+                ]
+              },
+              "multipart": {
+                "$ref": "#/components/schemas/DirectMultipartContentClaim",
+                "description": "The assembled object's length and CRC-64/NVME, which completion\nverifies against the provider's own reading of the object."
+              },
+              "parts": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/CompletedUploadPart"
+                },
+                "description": "Every part the client uploaded, in ascending part order. The\nserver holds no part records of its own, so this list is what it\nassembles the object from."
+              }
+            }
           }
-        },
-        "additionalProperties": false
+        ],
+        "description": "Request to complete an upload, tagged by which of its two shapes it is.\n\nThe shapes correspond to who knew the content identity first. A\nservice-proxied or `direct_put` session was handed its reference before\nany byte moved, so its completion names that reference back. A\n`direct_multipart` session was never told one — there was nothing to\ntell — so its completion carries the claim and its parts instead, and\nthe server builds the reference from the identity it has held all along.\n\nThe two share no fields, so a completion carrying one shape's fields\nunder the other's tag does not decode. What decoding cannot settle is\nwhether the shape matches the *session*, because only the server knows\nwhich transport the session was opened with; that one check is made\nagainst the durable record."
       },
       "CompleteUploadResponse": {
         "type": "object",

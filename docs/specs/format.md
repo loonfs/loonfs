@@ -1580,36 +1580,66 @@ Nothing returns a session to `open`, and no state records consumption: a
 client that wants another attempt begins another session, which mints its own
 content identity, and publication never writes back to a session record.
 
-Every session records `namespace_id`, `upload_id`, `mode`, `content_id`, and
-`created_at_ms` alongside its lifecycle. The content identity is allocated
-when the session opens, before any byte is read, so the object's final key is
-known from birth and belongs to exactly one session.
+A session record is an identity, a transport, and a state. It carries
+`namespace_id`, `upload_id`, `content_id`, and `created_at_ms`, then a
+`transport` object and a `state` object, each tagged by a `kind`. The content
+identity is allocated when the session opens, before any byte is read, so the
+object's final key is known from birth and belongs to exactly one session.
 
-What a session records *about its payload* depends on when it can know
-anything. A `direct_put` session records `claimed_checksum` and
-`direct_put_content_ref` because its SHA-256 is signed into the write the
-server authorizes, so the claim has to exist before the session does. A
-service-proxied session records neither and learns both from the bytes it
-receives. A `direct_multipart` session records neither either: it is opened
-for a payload whose length may not be known yet, and its claim arrives with
-its completion. All three record `staged_content_ref` once content has
-passed validation, and the terminal `completed` state carries the verified
-reference.
+The `transport` is settled when the session opens and never changes. Each
+`kind` carries exactly what its own path needs, and no other's:
 
-A session that uploads through a provider's multipart API also records
-`provider_multipart_upload_id`, the handle that upload is addressed by, and
-`multipart_part_size_bytes`, the geometry it was opened with. The upload id
-is the *only* provider handle a session keeps: parts are the uploader's
-bookkeeping, exactly as they are in the provider's own API, so there is no
-durable record per part and none is permitted. The geometry is recorded
-because it is settled at begin and the client may not be told it twice — a
-session resumed after a lost begin response reads it back rather than being
-handed a second, possibly different, one. Cleanup reads the upload id to
-abandon what a terminated session left open, under rule 2 above — after the
-durable transition, never before it. Aborting an upload that already
-assembled its object is safe on every supported provider: it succeeds and
-leaves the object untouched, so cleanup never has to prove what state it is
-cleaning up first.
+- `service_proxied`: no fields. The service receives the bytes and writes the
+  object, so it learns size and digest from the bytes as they pass and has
+  nothing to record up front.
+- `direct_put`: `promised_content`, the content reference the presigned write
+  is signed against. Its SHA-256 is given to the provider, which refuses any
+  body that does not match, so the reference has to exist before the session
+  does; completion reads the stored object back against this same reference.
+- `direct_multipart`: `provider_upload_id`, the handle the provider's
+  multipart upload is addressed by, and `part_size_bytes`, the geometry the
+  session was opened with, which is a non-zero integer.
+
+A `direct_multipart` transport carries no content reference, and this is the
+enforcement of section 6.9's rule that a multipart upload claims its payload
+at completion: the session is opened for a payload whose length may not be
+known yet, so there is nothing to promise, and the record has nowhere to put
+a promise if there were. The provider upload id is likewise the *only*
+provider handle a session keeps: parts are the uploader's bookkeeping,
+exactly as they are in the provider's own API, so there is no durable record
+per part and none is permitted. The geometry is recorded because it is
+settled at begin and the client may not be told it twice — a session resumed
+after a lost begin response reads it back rather than being handed a second,
+possibly different, one. Cleanup reads the upload id to abandon what a
+terminated session left open, under rule 2 above — after the durable
+transition, never before it. Aborting an upload that already assembled its
+object is safe on every supported provider: it succeeds and leaves the object
+untouched, so cleanup never has to prove what state it is cleaning up first.
+
+The `state` carries what its own phase of the lifecycle needs. `open` carries
+`expires_at_ms` and, once bytes have passed validation, `staged_content`;
+`completed` carries `completed_at_ms` and the verified `content_ref`;
+`aborted` carries `aborted_at_ms`. A completed session's reference lives in
+exactly one place — the `completed` state — so no reader has to decide which
+of two copies is authoritative, and no writer can leave them disagreeing.
+
+Two invariants are checked when the record is read, because the shape cannot
+express them:
+
+- Every content reference the record holds — the transport's promise, the
+  staged reference, the completed reference — names the record's own
+  `content_id`. A record that disagrees with itself describes two objects and
+  could verify one while publishing the other.
+- The record carries a `transport` and a `state`. Neither has a default and
+  neither may be omitted.
+
+A record that fails either is rejected outright, like any other corruption.
+This schema evolves in place at control-object version 1 before the first
+stable release; the implementation carries no compatibility shim for
+intermediate pre-release encodings, and in particular the earlier encoding
+that spelled the transport as a bare `mode` beside independent optional
+`claimed_checksum`, `direct_put_content_ref`, `provider_multipart_upload_id`,
+`multipart_part_size_bytes`, and `staged_content_ref` fields does not decode.
 
 Three rules apply:
 

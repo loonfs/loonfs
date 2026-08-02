@@ -431,7 +431,7 @@ async fn every_upload_session_route_requires_the_bearer_token() {
         .expect("create namespace");
     let begin = harness
         .client
-        .begin_upload(&namespace, &BeginUploadRequest::default())
+        .begin_upload(&namespace, &BeginUploadRequest::ServiceProxied {})
         .await
         .expect("begin upload");
     let upload_id = begin.upload_id;

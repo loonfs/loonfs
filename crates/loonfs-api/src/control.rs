@@ -3,7 +3,6 @@
 //! "Control objects").
 
 use crate::envelope::EnvelopeCodecError;
-use crate::v0::UploadMode;
 use crate::WriterEpoch;
 use crate::{
     ChangeSeq, CheckpointId, ChecksumAlgorithm, CommitId, ContentId, ContentRef, ContentRefKind,
@@ -13,6 +12,7 @@ use crate::{
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::fmt;
+use std::num::NonZeroU64;
 
 /// Selects one independently versioned mutable control-object family.
 ///
@@ -505,6 +505,73 @@ impl HeadState {
     }
 }
 
+/// How one upload session moves its bytes into object storage, and
+/// everything that choice settles before any byte moves.
+///
+/// A session's transport is fixed when it opens and never changes. Each
+/// variant carries exactly what its own path needs, so a session cannot
+/// hold a provider upload it will never use, or a promise it was never
+/// given.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum UploadSessionTransport {
+    /// The service receives the bytes and writes the content object itself,
+    /// so it learns size and digest from the bytes as they pass and has
+    /// nothing to record here.
+    ///
+    /// The empty braces are load-bearing: serde lets a *unit* variant of a
+    /// tagged enum swallow whatever else the object carried, so spelling
+    /// this as `ServiceProxied` would read a record holding a provider
+    /// upload as a proxied session and drop the handle that cleans it up.
+    /// A variant with no fields refuses it as the corruption it is.
+    ServiceProxied {},
+    /// The client writes the whole object through one presigned request.
+    DirectPut {
+        /// The reference that signed write is minted for.
+        ///
+        /// A direct-put client declares its byte length and SHA-256 before
+        /// the write is authorized, because both are signed into the
+        /// request and the provider refuses any body that does not match.
+        /// Completion reads the stored object back against this same
+        /// reference rather than believing it.
+        promised_content: ContentRef,
+    },
+    /// The client writes the object in parts through presigned part
+    /// uploads, and the provider assembles it.
+    ///
+    /// There is deliberately no content promise here. A session that had to
+    /// declare its length and digest up front would make a one-pass
+    /// uploader read its payload twice, and a client reading from a pipe
+    /// could not start at all — so a multipart upload claims what it wrote
+    /// at completion, which is where it was always verified rather than
+    /// believed. This variant carrying no reference is what makes an
+    /// up-front multipart claim unrepresentable.
+    DirectMultipart {
+        /// The provider-side upload the parts assemble through, and the
+        /// only provider handle LoonFS keeps: parts are the client's
+        /// bookkeeping, exactly as they are in the provider's own API, so
+        /// there is no durable record per part.
+        provider_upload_id: String,
+        /// Byte length of every part except the last, settled at begin.
+        ///
+        /// A session resumed after a lost begin response reads its geometry
+        /// from here rather than being told a second, possibly different,
+        /// one. Zero is not a geometry, so it is not representable.
+        part_size_bytes: NonZeroU64,
+    },
+}
+
+impl UploadSessionTransport {
+    /// The reference this transport was opened against, for the one
+    /// transport that is opened against anything.
+    fn promised_content(&self) -> Option<&ContentRef> {
+        match self {
+            Self::DirectPut { promised_content } => Some(promised_content),
+            Self::ServiceProxied {} | Self::DirectMultipart { .. } => None,
+        }
+    }
+}
+
 /// Lifecycle of a durable upload session: one live state and two terminal
 /// ones, with no way back.
 ///
@@ -526,6 +593,17 @@ pub enum UploadSessionLifecycle {
         /// The record carries it so no session transition depends on an
         /// object's provider timestamp.
         expires_at_ms: u64,
+        /// Content this session has already written and proven, or `None`
+        /// before any bytes have passed validation.
+        ///
+        /// Only a service-proxied session stages: the other transports
+        /// write past this server, so what they wrote is established at
+        /// completion. Staged content lives here rather than beside the
+        /// state because it is the one thing about an open session that
+        /// changes, and because a terminal session has no use for it — a
+        /// completed one names its content once, below.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        staged_content: Option<ContentRef>,
     },
     /// Terminal: the content is durable and verified. This is the only state
     /// a receipt may be minted from, and the content reference it carries is
@@ -534,7 +612,8 @@ pub enum UploadSessionLifecycle {
         /// Unix-millisecond stamp written by the completing compare-and-swap,
         /// and the only input to when the content may be reclaimed.
         completed_at_ms: u64,
-        /// Verified immutable content this session settled on.
+        /// Verified immutable content this session settled on, and the one
+        /// place a completed session's reference exists.
         content_ref: ContentRef,
     },
     /// Terminal: the session will never select content. Its content
@@ -545,6 +624,17 @@ pub enum UploadSessionLifecycle {
         /// and the only input to when the record may be deleted.
         aborted_at_ms: u64,
     },
+}
+
+impl UploadSessionLifecycle {
+    /// The content reference this state names, whichever state names one.
+    fn content_ref(&self) -> Option<&ContentRef> {
+        match self {
+            Self::Open { staged_content, .. } => staged_content.as_ref(),
+            Self::Completed { content_ref, .. } => Some(content_ref),
+            Self::Aborted { .. } => None,
+        }
+    }
 }
 
 impl std::fmt::Display for UploadSessionLifecycle {
@@ -560,6 +650,13 @@ impl std::fmt::Display for UploadSessionLifecycle {
 
 /// Tracks one durable content-upload workflow independently of commit publication.
 ///
+/// The record is an identity, a transport, and a state. Everything a
+/// transport needs lives in its own variant and everything a state needs
+/// lives in its own variant, so the combinations that used to be spelled
+/// with independent optional fields — a proxied session holding a provider
+/// upload, a multipart session promising content, a completed reference in
+/// two places at once — are not shapes this type has.
+///
 /// See [upload before publish](../../../docs/specs/format.md#242-upload-before-publish).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct UploadSessionState {
@@ -567,51 +664,17 @@ pub struct UploadSessionState {
     pub namespace_id: NamespaceId,
     /// Durable session identity used by staging and completion requests.
     pub upload_id: UploadId,
-    /// Transport path selected when the session was created.
-    #[serde(default, skip_serializing_if = "UploadMode::is_service_proxied")]
-    pub mode: UploadMode,
     /// Content object this session writes, allocated when the session began.
     ///
     /// The identity exists before any byte is read, so the final object key
-    /// is known up front and belongs to exactly this session.
+    /// is known up front and belongs to exactly this session. Every
+    /// reference the record holds names this object; see the decoder below,
+    /// which refuses a record that disagrees with itself.
     pub content_id: ContentId,
-    /// What the client promised about the bytes, for the one mode that
-    /// promises anything up front.
-    ///
-    /// Only `direct_put` does: its SHA-256 is signed into the presigned
-    /// request, so it has to exist before the write is authorized. A
-    /// service-proxied session learns size and digest from the bytes it
-    /// receives, and a `direct_multipart` session is told at completion —
-    /// neither records a claim here.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub claimed_checksum: Option<StorageChecksum>,
-    /// For `direct_put` sessions, the content ref the signed write was
-    /// minted for. It becomes staged only after completion verifies the
-    /// durable object.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub direct_put_content_ref: Option<ContentRef>,
-    /// The provider-side multipart upload this session opened, for the one
-    /// mode that opens one.
-    ///
-    /// It is the only provider handle LoonFS keeps: parts are the client's
-    /// bookkeeping, exactly as they are in the provider's own API, so there
-    /// is no durable record per part. Cleanup reads this to abort what the
-    /// session left open; nothing else reads it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_multipart_upload_id: Option<String>,
-    /// Part geometry a `direct_multipart` session was opened with.
-    ///
-    /// It is recorded because the geometry is settled at begin and the
-    /// client may not learn it again: a session resumed after a lost begin
-    /// response reads its part size from here rather than being told a
-    /// second, possibly different, one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub multipart_part_size_bytes: Option<u64>,
-    /// Content already verified and staged, or `None` before bytes have passed validation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub staged_content_ref: Option<ContentRef>,
     /// Unix-millisecond creation stamp.
     pub created_at_ms: u64,
+    /// How the bytes reach object storage, settled when the session opened.
+    pub transport: UploadSessionTransport,
     /// The session's lifecycle, and the field every upload operation
     /// compare-and-swaps against.
     pub state: UploadSessionLifecycle,
@@ -622,21 +685,43 @@ pub struct UploadSessionState {
 struct StrictUploadSessionState {
     namespace_id: NamespaceId,
     upload_id: UploadId,
-    #[serde(default)]
-    mode: UploadMode,
     content_id: ContentId,
-    #[serde(default)]
-    claimed_checksum: Option<StrictStorageChecksum>,
-    #[serde(default)]
-    direct_put_content_ref: Option<StrictContentRef>,
-    #[serde(default)]
-    provider_multipart_upload_id: Option<String>,
-    #[serde(default)]
-    multipart_part_size_bytes: Option<u64>,
-    #[serde(default)]
-    staged_content_ref: Option<StrictContentRef>,
     created_at_ms: u64,
+    transport: StrictUploadSessionTransport,
     state: StrictUploadSessionLifecycle,
+}
+
+/// The transport read back through the same strict content-ref decoder the
+/// rest of the record uses.
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum StrictUploadSessionTransport {
+    ServiceProxied {},
+    DirectPut {
+        promised_content: StrictContentRef,
+    },
+    DirectMultipart {
+        provider_upload_id: String,
+        part_size_bytes: NonZeroU64,
+    },
+}
+
+impl From<StrictUploadSessionTransport> for UploadSessionTransport {
+    fn from(transport: StrictUploadSessionTransport) -> Self {
+        match transport {
+            StrictUploadSessionTransport::ServiceProxied {} => Self::ServiceProxied {},
+            StrictUploadSessionTransport::DirectPut { promised_content } => Self::DirectPut {
+                promised_content: promised_content.into(),
+            },
+            StrictUploadSessionTransport::DirectMultipart {
+                provider_upload_id,
+                part_size_bytes,
+            } => Self::DirectMultipart {
+                provider_upload_id,
+                part_size_bytes,
+            },
+        }
+    }
 }
 
 /// The lifecycle read back through the same strict content-ref decoder the
@@ -647,6 +732,8 @@ struct StrictUploadSessionState {
 enum StrictUploadSessionLifecycle {
     Open {
         expires_at_ms: u64,
+        #[serde(default)]
+        staged_content: Option<StrictContentRef>,
     },
     Completed {
         completed_at_ms: u64,
@@ -660,7 +747,13 @@ enum StrictUploadSessionLifecycle {
 impl From<StrictUploadSessionLifecycle> for UploadSessionLifecycle {
     fn from(state: StrictUploadSessionLifecycle) -> Self {
         match state {
-            StrictUploadSessionLifecycle::Open { expires_at_ms } => Self::Open { expires_at_ms },
+            StrictUploadSessionLifecycle::Open {
+                expires_at_ms,
+                staged_content,
+            } => Self::Open {
+                expires_at_ms,
+                staged_content: staged_content.map(Into::into),
+            },
             StrictUploadSessionLifecycle::Completed {
                 completed_at_ms,
                 content_ref,
@@ -724,23 +817,42 @@ impl From<StrictContentRef> for ContentRef {
 }
 
 impl<'de> Deserialize<'de> for UploadSessionState {
+    /// Reads one session record and proves the one relationship its shape
+    /// cannot: that every reference it holds names the object it owns.
+    ///
+    /// The transport promise and the staged or completed reference are all
+    /// about the same content object, whose identity the session allocated
+    /// before any byte moved. A record whose references disagree with its
+    /// own `content_id` describes two objects and cannot be acted on — a
+    /// completion would verify one key and publish another — so it is
+    /// refused at load like any other corruption, with no shim and no
+    /// salvage.
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
         let state = StrictUploadSessionState::deserialize(deserializer)?;
+        let transport = UploadSessionTransport::from(state.transport);
+        let lifecycle = UploadSessionLifecycle::from(state.state);
+        for content_ref in transport
+            .promised_content()
+            .into_iter()
+            .chain(lifecycle.content_ref())
+        {
+            if content_ref.content_id != state.content_id {
+                return Err(serde::de::Error::custom(format!(
+                    "upload session `{}` owns content `{}` but holds a reference to `{}`",
+                    state.upload_id, state.content_id, content_ref.content_id
+                )));
+            }
+        }
         Ok(Self {
             namespace_id: state.namespace_id,
             upload_id: state.upload_id,
-            mode: state.mode,
             content_id: state.content_id,
-            claimed_checksum: state.claimed_checksum.map(Into::into),
-            direct_put_content_ref: state.direct_put_content_ref.map(Into::into),
-            provider_multipart_upload_id: state.provider_multipart_upload_id,
-            multipart_part_size_bytes: state.multipart_part_size_bytes,
-            staged_content_ref: state.staged_content_ref.map(Into::into),
             created_at_ms: state.created_at_ms,
-            state: state.state.into(),
+            transport,
+            state: lifecycle,
         })
     }
 }

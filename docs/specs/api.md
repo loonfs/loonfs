@@ -1010,8 +1010,9 @@ therefore carries no `whole_file_sha256` (format spec, provenance rule).
 
 ```json
 {
+  "completion": "multipart",
   "multipart": { "size_bytes": 17301504, "crc64nvme": "<16 hex>" },
-  "multipart_parts": [
+  "parts": [
     { "part_number": 1, "etag": "\"...\"", "crc64nvme": "<16 hex>" },
     { "part_number": 2, "etag": "\"...\"", "crc64nvme": "<16 hex>" },
     { "part_number": 3, "etag": "\"...\"", "crc64nvme": "<16 hex>" }
@@ -1023,7 +1024,8 @@ Every part, once each, in ascending part order. A `direct_multipart`
 completion carries **no** `content_ref`: the client was never told the
 identity, and the completion response is where it learns it. Service-proxied
 and `direct_put` completions are the other way round — they name back the
-`content_ref` they were given and carry no `multipart` claim.
+`content_ref` they were given under `"completion": "content_ref"`, and carry
+no multipart claim and no parts.
 
 The server asks the provider to assemble the object and then **reads the
 assembled object's stored checksum and size back and compares them against
@@ -1552,6 +1554,30 @@ The semantic rule is:
 - the returned `content_ref` is then safe to reference from a commit. Remote
   servers may also return an opaque `validated_content_token` that remote
   create/replace mutations carry back as their content-preparation proof.
+
+**Both request bodies are tagged unions, and the tag is required.** A begin
+request names its transport in `mode` and carries that transport's fields and
+no other's:
+
+```json
+{ "mode": "service_proxied" }
+{ "mode": "direct_put", "content": { "size_bytes": 1234, "sha256": "<64 hex>" } }
+{ "mode": "direct_multipart", "multipart": { "part_size_bytes": 8388608 } }
+```
+
+`service_proxied` takes no other fields; `direct_put` requires its `content`
+claim, because the digest is signed into the write the provider enforces;
+`direct_multipart` takes an optional `multipart` object and defaults its
+geometry. A completion body is tagged the same way in `completion`, over the
+two shapes section 6.9's transports produce — `content_ref` for a session the
+server named an object for, `multipart` for one that assembled its own.
+
+A body that mixes two transports' fields, or omits the tag, is rejected as
+`invalid_request` when it is decoded — before any session is read. What the
+decoder cannot settle is whether the shape matches the *session*, since only
+the server knows which transport a session was opened with; completing a
+session with the other shape is `invalid_request` too, reported after the
+record is read.
 
 An upload session allocates its content object when it begins, so repeating
 `PUT /content` with the same bytes for the same upload id writes the same

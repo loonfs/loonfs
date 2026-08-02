@@ -452,7 +452,7 @@ impl RuntimeTestExt for TestRuntime {
     ) -> loonfs::Result<BeginUploadResponse> {
         block_on(
             self.writer
-                .begin_upload(namespace_id, BeginUploadRequest::default()),
+                .begin_upload(namespace_id, BeginUploadRequest::ServiceProxied {}),
         )
     }
 

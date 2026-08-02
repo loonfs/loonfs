@@ -235,7 +235,7 @@ async fn valid_content_admission_skips_durable_content_validation() {
     // so the token this test admits has to come from a real upload.
     let engine = namespace_engine(&store, &namespace_id, &context);
     let upload = engine
-        .begin_upload(loonfs_api::v0::BeginUploadRequest::default())
+        .begin_upload(loonfs_api::v0::BeginUploadRequest::ServiceProxied {})
         .await
         .expect("begin upload");
     let staged = engine
@@ -946,7 +946,7 @@ async fn a_re_minted_receipt_publishes_after_the_first_one_expired() {
         .expect("bootstrap");
     let engine = namespace_engine(&store, &namespace_id, &context);
     let upload = engine
-        .begin_upload(loonfs_api::v0::BeginUploadRequest::default())
+        .begin_upload(loonfs_api::v0::BeginUploadRequest::ServiceProxied {})
         .await
         .expect("begin upload");
     let staged = engine

@@ -84,30 +84,54 @@ pub enum UploadMode {
     DirectMultipart,
 }
 
-impl UploadMode {
-    /// Reports whether the service, rather than the client, transfers bytes to object storage.
-    pub fn is_service_proxied(&self) -> bool {
-        matches!(self, Self::ServiceProxied)
-    }
+/// Request for starting an upload session, tagged by the transport it asks
+/// for.
+///
+/// Each transport carries only what it needs, so the combinations a flat
+/// request could spell — a proxied begin carrying multipart geometry, a
+/// direct put with no claim to sign — are refused when the body is decoded
+/// rather than by a handler reading them back. `mode` is required: a
+/// request that does not say how it intends to move its bytes is not a
+/// request this API can answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum BeginUploadRequest {
+    // The empty braces are load-bearing: serde lets a *unit* variant of a
+    // tagged enum swallow whatever else the body carried, so spelling this
+    // as `ServiceProxied` would quietly accept a proxied begin holding
+    // another transport's fields. A variant with no fields refuses them.
+    /// Send the bytes to the service, which writes the content object.
+    #[cfg_attr(feature = "openapi", schema(title = "BeginUploadServiceProxied"))]
+    ServiceProxied {},
+    /// Write the whole object through one presigned request. The server
+    /// signs exactly these bytes into the write it authorizes, so the claim
+    /// is required.
+    #[cfg_attr(feature = "openapi", schema(title = "BeginUploadDirectPut"))]
+    DirectPut {
+        /// Byte length and digest of the payload about to be written.
+        content: DirectPutContentClaim,
+    },
+    /// Write the object in parts through presigned part uploads.
+    #[cfg_attr(feature = "openapi", schema(title = "BeginUploadDirectMultipart"))]
+    DirectMultipart {
+        /// Selects the part geometry; absent takes the server's default.
+        /// A multipart upload claims its content at completion, so nothing
+        /// about the payload is declared here.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        multipart: Option<DirectMultipartUploadOptions>,
+    },
 }
 
-/// Request for starting an upload session.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[serde(deny_unknown_fields)]
-pub struct BeginUploadRequest {
-    /// Requested upload transport. Absent keeps the existing service-proxied path.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mode: Option<UploadMode>,
-    /// Required for `direct_put`; the server signs exactly these bytes into
-    /// the write it authorizes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content: Option<DirectPutContentClaim>,
-    /// Optional for `direct_multipart`; selects the part geometry. Absent
-    /// takes the server's default. `direct_multipart` claims its content at
-    /// completion, so nothing about the payload is declared here.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub multipart: Option<DirectMultipartUploadOptions>,
+impl BeginUploadRequest {
+    /// The transport this request asks for.
+    pub fn mode(&self) -> UploadMode {
+        match self {
+            Self::ServiceProxied {} => UploadMode::ServiceProxied,
+            Self::DirectPut { .. } => UploadMode::DirectPut,
+            Self::DirectMultipart { .. } => UploadMode::DirectMultipart,
+        }
+    }
 }
 
 /// Client-facing direct transfer capability.
@@ -265,43 +289,49 @@ pub struct UploadContentResponse {
     pub content_ref: ContentRef,
 }
 
-/// Request to complete an upload.
+/// Request to complete an upload, tagged by which of its two shapes it is.
 ///
-/// The two shapes correspond to who knew the content identity first. A
+/// The shapes correspond to who knew the content identity first. A
 /// service-proxied or `direct_put` session was handed its reference before
 /// any byte moved, so its completion names that reference back. A
 /// `direct_multipart` session was never told one — there was nothing to
-/// tell — so its completion carries the claim instead and the server builds
-/// the reference from the identity it has held all along.
+/// tell — so its completion carries the claim and its parts instead, and
+/// the server builds the reference from the identity it has held all along.
+///
+/// The two share no fields, so a completion carrying one shape's fields
+/// under the other's tag does not decode. What decoding cannot settle is
+/// whether the shape matches the *session*, because only the server knows
+/// which transport the session was opened with; that one check is made
+/// against the durable record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[serde(deny_unknown_fields)]
-pub struct CompleteUploadRequest {
-    /// Content identity the caller expects the session to have staged.
-    /// Required for `service_proxied` and `direct_put`; absent for
-    /// `direct_multipart`, whose identity the client never learns.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content_ref: Option<ContentRef>,
-    /// Required for `direct_multipart`: the assembled object's length and
-    /// CRC-64/NVME, which completion verifies against the provider's own
-    /// reading of the object.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub multipart: Option<DirectMultipartContentClaim>,
-    /// Required for `direct_multipart`: every part the client uploaded, in
-    /// ascending part order. The server holds no part records of its own, so
-    /// this list is what it assembles the object from.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub multipart_parts: Option<Vec<CompletedUploadPart>>,
+#[serde(tag = "completion", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CompleteUploadRequest {
+    /// Completes a session the server named a content object for: the
+    /// caller names it back and the server proves the object matches.
+    #[cfg_attr(feature = "openapi", schema(title = "CompleteUploadContentRef"))]
+    ContentRef {
+        /// Content identity the caller expects the session to have settled
+        /// on.
+        content_ref: ContentRef,
+    },
+    /// Completes a `direct_multipart` session with what it uploaded.
+    #[cfg_attr(feature = "openapi", schema(title = "CompleteUploadMultipart"))]
+    Multipart {
+        /// The assembled object's length and CRC-64/NVME, which completion
+        /// verifies against the provider's own reading of the object.
+        multipart: DirectMultipartContentClaim,
+        /// Every part the client uploaded, in ascending part order. The
+        /// server holds no part records of its own, so this list is what it
+        /// assembles the object from.
+        parts: Vec<CompletedUploadPart>,
+    },
 }
 
 impl CompleteUploadRequest {
     /// Completes a session that already knows its content reference.
     pub fn for_content_ref(content_ref: ContentRef) -> Self {
-        Self {
-            content_ref: Some(content_ref),
-            multipart: None,
-            multipart_parts: None,
-        }
+        Self::ContentRef { content_ref }
     }
 
     /// Completes a `direct_multipart` session with what it assembled.
@@ -309,10 +339,9 @@ impl CompleteUploadRequest {
         claim: DirectMultipartContentClaim,
         parts: Vec<CompletedUploadPart>,
     ) -> Self {
-        Self {
-            content_ref: None,
-            multipart: Some(claim),
-            multipart_parts: Some(parts),
+        Self::Multipart {
+            multipart: claim,
+            parts,
         }
     }
 }
@@ -397,8 +426,8 @@ pub struct AbortUploadResponse {
 #[cfg(test)]
 mod tests {
     use super::{
-        BeginUploadRequest, BeginUploadResponse, DirectPutContentClaim, DirectPutUpload,
-        ObjectTransferAccess, UploadMode, UploadSessionStatus,
+        BeginUploadRequest, BeginUploadResponse, CompleteUploadRequest, DirectPutContentClaim,
+        DirectPutUpload, ObjectTransferAccess, UploadMode, UploadSessionStatus,
     };
     use crate::{ContentId, ContentRef, NamespaceId, UploadId};
     use std::collections::BTreeMap;
@@ -411,10 +440,51 @@ mod tests {
         );
     }
 
+    /// A begin request says how it means to move its bytes, or it is not a
+    /// request. Nothing is inferred from what the body left out.
     #[test]
-    fn begin_upload_request_keeps_service_proxied_as_default() {
-        let request: BeginUploadRequest = serde_json::from_str("{}").expect("decode request");
-        assert_eq!(request.mode.unwrap_or_default(), UploadMode::ServiceProxied);
+    fn a_begin_request_without_a_mode_does_not_decode() {
+        assert!(serde_json::from_str::<BeginUploadRequest>("{}").is_err());
+        assert_eq!(
+            serde_json::from_str::<BeginUploadRequest>(r#"{"mode":"service_proxied"}"#)
+                .expect("decode proxied begin request"),
+            BeginUploadRequest::ServiceProxied {}
+        );
+    }
+
+    /// The combinations a flat begin request could spell are refused where
+    /// the body is read, not by a handler comparing fields afterwards.
+    #[test]
+    fn a_begin_request_carrying_another_modes_fields_does_not_decode() {
+        for body in [
+            r#"{"mode":"service_proxied","multipart":{"part_size_bytes":8388608}}"#,
+            r#"{"mode":"service_proxied","content":{"size_bytes":5,"sha256":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}}"#,
+            r#"{"mode":"direct_multipart","content":{"size_bytes":5,"sha256":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}}"#,
+            // A direct put with nothing to sign is not a direct put.
+            r#"{"mode":"direct_put"}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<BeginUploadRequest>(body).is_err(),
+                "decoded a begin request that mixes modes: {body}"
+            );
+        }
+    }
+
+    /// A completion carries one shape's fields under that shape's tag.
+    #[test]
+    fn a_completion_mixing_its_two_shapes_does_not_decode() {
+        for body in [
+            r#"{"completion":"multipart","multipart":{"size_bytes":5,"crc64nvme":"0123456789abcdef"},"parts":[],"content_ref":{"kind":"blob_v1","content_id":"con_0123456789abcdef0123456789abcdef","size_bytes":5,"storage_checksum":{"algorithm":"sha256","value":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}}}"#,
+            // Neither multipart field stands without the other.
+            r#"{"completion":"multipart","multipart":{"size_bytes":5,"crc64nvme":"0123456789abcdef"}}"#,
+            r#"{"completion":"multipart","parts":[]}"#,
+            r#"{"completion":"content_ref"}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<CompleteUploadRequest>(body).is_err(),
+                "decoded a completion that mixes shapes: {body}"
+            );
+        }
     }
 
     #[test]
@@ -455,9 +525,16 @@ mod tests {
             r#"{"mode":"direct_put","content":{"size_bytes":5,"sha256":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}}"#,
         )
         .expect("decode direct-put begin request");
-        let claim = request.content.expect("claim");
-        assert_eq!(claim.size_bytes, 5);
-        assert_eq!(claim.sha256.len(), 64);
+        assert_eq!(
+            request,
+            BeginUploadRequest::DirectPut {
+                content: DirectPutContentClaim {
+                    size_bytes: 5,
+                    sha256: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+                        .to_owned(),
+                },
+            }
+        );
 
         assert!(
             serde_json::from_str::<DirectPutContentClaim>(

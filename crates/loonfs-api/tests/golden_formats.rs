@@ -21,8 +21,8 @@
 use loonfs_api::wire::control::{
     decode_control_object, encode_control_object, CheckpointOwner, CheckpointRecordLifecycle,
     CheckpointRecordState, ControlObjectEnvelope, ControlObjectKind, ForkBasis, HeadState,
-    MetadataRootState, NamespaceState, UploadSessionLifecycle, UploadSessionState, WalFloorState,
-    WalSegmentPointer, WriterBlock,
+    MetadataRootState, NamespaceState, UploadSessionLifecycle, UploadSessionState,
+    UploadSessionTransport, WalFloorState, WalSegmentPointer, WriterBlock,
 };
 use loonfs_api::wire::envelope::EnvelopeCodecError;
 use loonfs_api::wire::manifest::{
@@ -34,14 +34,15 @@ use loonfs_api::wire::wal::{
     WalCommitPayload, WalDelta, WalSegmentEnvelope, WalSegmentPayload,
 };
 use loonfs_api::{
-    sha256_digest, v0::UploadMode, ChangeSeq, CheckpointId, ChecksumAlgorithm, CommitId, ContentId,
-    ContentRef, ContentRefKind, ContentStoreId, InodeId, InodeKind, ManifestId, ManifestObjectId,
+    sha256_digest, ChangeSeq, CheckpointId, ChecksumAlgorithm, CommitId, ContentId, ContentRef,
+    ContentRefKind, ContentStoreId, InodeId, InodeKind, ManifestId, ManifestObjectId,
     MetadataTableId, NameKey, NamespaceId, RevisionNo, StorageChecksum, UploadId, WalSegmentId,
     WriterEpoch,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::fmt::Debug;
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
@@ -570,18 +571,13 @@ fn control_objects_match_golden_bytes() {
             namespace_id: namespace_id(),
             upload_id: UploadId::parse("upl_0123456789abcdef0123456789abcdef")
                 .expect("valid upload id"),
-            mode: UploadMode::ServiceProxied,
             content_id: content_id("con_0123456789abcdef0123456789abcdef"),
-            claimed_checksum: None,
-            direct_put_content_ref: None,
-            staged_content_ref: Some(sample_content_ref()),
             created_at_ms: 1_000,
+            transport: UploadSessionTransport::ServiceProxied {},
             state: UploadSessionLifecycle::Completed {
                 completed_at_ms: 2_000,
                 content_ref: sample_content_ref(),
             },
-            provider_multipart_upload_id: None,
-            multipart_part_size_bytes: None,
         },
     );
     // The released lifecycle and the direct-put session shape are durable
@@ -617,17 +613,15 @@ fn control_objects_match_golden_bytes() {
             namespace_id: namespace_id(),
             upload_id: UploadId::parse("upl_abcdef0123456789abcdef0123456789")
                 .expect("valid upload id"),
-            mode: UploadMode::DirectPut,
             content_id: content_id("con_0123456789abcdef0123456789abcdef"),
-            claimed_checksum: Some(sample_content_ref().storage_checksum),
-            direct_put_content_ref: Some(sample_content_ref()),
-            staged_content_ref: None,
             created_at_ms: 1_000,
+            transport: UploadSessionTransport::DirectPut {
+                promised_content: sample_content_ref(),
+            },
             state: UploadSessionLifecycle::Open {
                 expires_at_ms: 87_400_000,
+                staged_content: None,
             },
-            provider_multipart_upload_id: None,
-            multipart_part_size_bytes: None,
         },
     );
     // The one session shape that carries a provider handle, and the one
@@ -641,17 +635,34 @@ fn control_objects_match_golden_bytes() {
             namespace_id: namespace_id(),
             upload_id: UploadId::parse("upl_22222222222222222222222222222222")
                 .expect("valid upload id"),
-            mode: UploadMode::DirectMultipart,
             content_id: content_id("con_22222222222222222222222222222222"),
-            claimed_checksum: None,
-            direct_put_content_ref: None,
-            staged_content_ref: None,
             created_at_ms: 1_000,
+            transport: UploadSessionTransport::DirectMultipart {
+                provider_upload_id: "provider-upload-id".to_owned(),
+                part_size_bytes: NonZeroU64::new(8 * 1024 * 1024).expect("part size"),
+            },
             state: UploadSessionLifecycle::Open {
                 expires_at_ms: 87_400_000,
+                staged_content: None,
             },
-            provider_multipart_upload_id: Some("provider-upload-id".to_owned()),
-            multipart_part_size_bytes: Some(8 * 1024 * 1024),
+        },
+    );
+    // A proxied session mid-flight: it has written its bytes and recorded
+    // what they were, and is still open to complete.
+    check_control_golden(
+        "control_upload_session_staged.v1.json",
+        ControlObjectKind::UploadSession,
+        UploadSessionState {
+            namespace_id: namespace_id(),
+            upload_id: UploadId::parse("upl_33333333333333333333333333333333")
+                .expect("valid upload id"),
+            content_id: content_id("con_0123456789abcdef0123456789abcdef"),
+            created_at_ms: 1_000,
+            transport: UploadSessionTransport::ServiceProxied {},
+            state: UploadSessionLifecycle::Open {
+                expires_at_ms: 87_400_000,
+                staged_content: Some(sample_content_ref()),
+            },
         },
     );
     check_control_golden(
@@ -661,17 +672,12 @@ fn control_objects_match_golden_bytes() {
             namespace_id: namespace_id(),
             upload_id: UploadId::parse("upl_11111111111111111111111111111111")
                 .expect("valid upload id"),
-            mode: UploadMode::ServiceProxied,
             content_id: content_id("con_11111111111111111111111111111111"),
-            claimed_checksum: None,
-            direct_put_content_ref: None,
-            staged_content_ref: None,
             created_at_ms: 1_000,
+            transport: UploadSessionTransport::ServiceProxied {},
             state: UploadSessionLifecycle::Aborted {
                 aborted_at_ms: 5_000,
             },
-            provider_multipart_upload_id: None,
-            multipart_part_size_bytes: None,
         },
     );
 }
@@ -743,10 +749,18 @@ fn mutable_control_nested_structs_reject_unknown_fields_as_corruption() {
         |payload| payload["state"]["field_from_the_future"] = serde_json::Value::from(true),
     );
     assert_control_payload_edit_is_corrupt::<UploadSessionState>(
-        "control_upload_session.v1.json",
+        "control_upload_session_staged.v1.json",
         ControlObjectKind::UploadSession,
         |payload| {
-            payload["staged_content_ref"]["field_from_the_future"] = serde_json::Value::from(true);
+            payload["state"]["staged_content"]["field_from_the_future"] =
+                serde_json::Value::from(true);
+        },
+    );
+    assert_control_payload_edit_is_corrupt::<UploadSessionState>(
+        "control_upload_session_direct_multipart.v1.json",
+        ControlObjectKind::UploadSession,
+        |payload| {
+            payload["transport"]["field_from_the_future"] = serde_json::Value::from(true);
         },
     );
 }
@@ -821,11 +835,142 @@ fn mutable_control_enums_fail_closed_on_unknown_variants() {
         |payload| payload["state"] = serde_json::Value::from("future_state"),
     );
     assert_control_payload_edit_is_corrupt::<UploadSessionState>(
+        "control_upload_session_staged.v1.json",
+        ControlObjectKind::UploadSession,
+        |payload| {
+            payload["state"]["staged_content"]["kind"] =
+                serde_json::Value::from("future_content_kind");
+        },
+    );
+    assert_control_payload_edit_is_corrupt::<UploadSessionState>(
+        "control_upload_session_direct_multipart.v1.json",
+        ControlObjectKind::UploadSession,
+        |payload| payload["transport"]["kind"] = serde_json::Value::from("future_transport"),
+    );
+}
+
+/// The record holds a transport and a state, and each carries only what it
+/// needs. The encoding that spelled those with independent optional fields
+/// beside a bare `mode` is refused outright: `transport` is not optional,
+/// and nothing else is a field this payload has.
+#[test]
+fn upload_sessions_reject_the_pre_transport_flat_encoding() {
+    // The whole flat payload, exactly as it was written before the
+    // transport became a variant of its own.
+    assert_control_payload_edit_is_corrupt::<UploadSessionState>(
         "control_upload_session.v1.json",
         ControlObjectKind::UploadSession,
         |payload| {
-            payload["staged_content_ref"]["kind"] = serde_json::Value::from("future_content_kind");
+            let content_ref = payload["state"]["content_ref"].clone();
+            let object = payload.as_object_mut().expect("payload object");
+            object.remove("transport");
+            object.insert("mode".to_owned(), serde_json::Value::from("direct_put"));
+            object.insert(
+                "claimed_checksum".to_owned(),
+                content_ref["storage_checksum"].clone(),
+            );
+            object.insert("direct_put_content_ref".to_owned(), content_ref.clone());
+            object.insert("staged_content_ref".to_owned(), content_ref);
         },
+    );
+    // Each field of that encoding on its own, over a record that is
+    // otherwise current: none of them is a field this payload has.
+    for legacy_field in [
+        "mode",
+        "claimed_checksum",
+        "direct_put_content_ref",
+        "provider_multipart_upload_id",
+        "multipart_part_size_bytes",
+        "staged_content_ref",
+    ] {
+        assert_control_payload_edit_is_corrupt::<UploadSessionState>(
+            "control_upload_session.v1.json",
+            ControlObjectKind::UploadSession,
+            |payload| payload[legacy_field] = serde_json::Value::from("direct_put"),
+        );
+    }
+    // A session with no transport at all is not a session: there is no
+    // default to fall back to, which is the point of moving it here.
+    assert_control_payload_edit_is_corrupt::<UploadSessionState>(
+        "control_upload_session.v1.json",
+        ControlObjectKind::UploadSession,
+        |payload| {
+            payload
+                .as_object_mut()
+                .expect("payload object")
+                .remove("transport");
+        },
+    );
+}
+
+/// Every reference a record holds names the object the session owns. A
+/// record that disagrees with itself describes two objects and could
+/// publish one while verifying the other, so it is refused at load.
+#[test]
+fn upload_sessions_reject_a_reference_to_another_content_object() {
+    let other = serde_json::Value::from("con_99999999999999999999999999999999");
+    assert_control_payload_edit_is_corrupt::<UploadSessionState>(
+        "control_upload_session.v1.json",
+        ControlObjectKind::UploadSession,
+        |payload| payload["state"]["content_ref"]["content_id"] = other.clone(),
+    );
+    assert_control_payload_edit_is_corrupt::<UploadSessionState>(
+        "control_upload_session_staged.v1.json",
+        ControlObjectKind::UploadSession,
+        |payload| payload["state"]["staged_content"]["content_id"] = other.clone(),
+    );
+    assert_control_payload_edit_is_corrupt::<UploadSessionState>(
+        "control_upload_session_direct_put.v1.json",
+        ControlObjectKind::UploadSession,
+        |payload| payload["transport"]["promised_content"]["content_id"] = other.clone(),
+    );
+}
+
+/// Each transport carries its own details, and carries all of them. A
+/// direct-put session that never recorded the reference its write was
+/// signed against could not check what landed; a multipart session missing
+/// its provider upload could not assemble or clean up. Neither is a record
+/// that decodes.
+#[test]
+fn upload_sessions_reject_a_transport_missing_its_own_fields() {
+    assert_control_payload_edit_is_corrupt::<UploadSessionState>(
+        "control_upload_session_direct_put.v1.json",
+        ControlObjectKind::UploadSession,
+        |payload| {
+            payload["transport"]
+                .as_object_mut()
+                .expect("transport object")
+                .remove("promised_content");
+        },
+    );
+    for missing in ["provider_upload_id", "part_size_bytes"] {
+        assert_control_payload_edit_is_corrupt::<UploadSessionState>(
+            "control_upload_session_direct_multipart.v1.json",
+            ControlObjectKind::UploadSession,
+            |payload| {
+                payload["transport"]
+                    .as_object_mut()
+                    .expect("transport object")
+                    .remove(missing);
+            },
+        );
+    }
+    // And no transport holds another's details.
+    assert_control_payload_edit_is_corrupt::<UploadSessionState>(
+        "control_upload_session_direct_multipart.v1.json",
+        ControlObjectKind::UploadSession,
+        |payload| payload["transport"]["kind"] = serde_json::Value::from("service_proxied"),
+    );
+}
+
+/// A part size of zero cuts no bytes, so it is not a geometry a multipart
+/// session can be opened with, and not a number this record can hold.
+#[test]
+fn upload_sessions_reject_a_zero_multipart_part_size() {
+    assert_control_payload_edit_is_corrupt::<UploadSessionState>(
+        "control_upload_session_direct_multipart.v1.json",
+        ControlObjectKind::UploadSession,
+        |payload| payload["transport"]["part_size_bytes"] = serde_json::Value::from(0),
     );
 }
 
@@ -875,17 +1020,12 @@ fn checkpoint_and_upload_decoders_reject_wrong_format_version_without_fallback()
                 namespace_id: namespace_id(),
                 upload_id: UploadId::parse("upl_11111111111111111111111111111111")
                     .expect("valid upload id"),
-                mode: UploadMode::ServiceProxied,
                 content_id: content_id("con_11111111111111111111111111111111"),
-                claimed_checksum: None,
-                direct_put_content_ref: None,
-                staged_content_ref: None,
                 created_at_ms: 1_000,
+                transport: UploadSessionTransport::ServiceProxied {},
                 state: UploadSessionLifecycle::Aborted {
                     aborted_at_ms: 5_000,
                 },
-                provider_multipart_upload_id: None,
-                multipart_part_size_bytes: None,
             })
             .expect("upload state"),
         ),

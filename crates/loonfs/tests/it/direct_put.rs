@@ -456,7 +456,7 @@ fn concurrent_puts_coalesce_into_one_wal_segment() {
         for bytes in [b"alpha" as &[u8], b"beta", b"gamma", b"delta"] {
             let begin = fs
                 .writer
-                .begin_upload(&namespace_id, BeginUploadRequest::default())
+                .begin_upload(&namespace_id, BeginUploadRequest::ServiceProxied {})
                 .await
                 .expect("begin upload");
             let staged = fs
