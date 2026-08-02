@@ -53,6 +53,58 @@ async fn http_upload_content_rejects_invalid_upload_id() {
     harness.server.abort();
 }
 
+/// A begin body that mixes two transports, or names none, is refused where
+/// it is read. These used to reach a handler that compared the fields back
+/// against the mode; the tagged request means there is nothing to compare,
+/// and the standard 400 envelope is what the client sees either way.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_begin_upload_rejects_a_body_that_mixes_transports() {
+    let temp_dir = tempdir().expect("tempdir");
+    let harness = start_server(test_config(
+        temp_dir.path().join("store"),
+        "loonfs-server-test",
+        "http-begin-upload-shape",
+    ))
+    .await;
+
+    harness
+        .client
+        .create_namespace(&namespace_id("demo"))
+        .await
+        .expect("create namespace");
+
+    for body in [
+        // A proxied begin has no geometry to ask for.
+        r#"{"mode":"service_proxied","multipart":{"part_size_bytes":8388608}}"#,
+        // A direct put with nothing to sign is not a direct put.
+        r#"{"mode":"direct_put"}"#,
+        // A multipart begin promises nothing about its payload.
+        r#"{"mode":"direct_multipart","content":{"size_bytes":5,"sha256":"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"}}"#,
+        // And a request that does not say how it moves its bytes.
+        "{}",
+    ] {
+        let result = raw_agent()
+            .post(&format!(
+                "{}/v0/namespaces/demo/uploads",
+                harness.server_url
+            ))
+            .set("authorization", "Bearer test-token")
+            .set("content-type", "application/json")
+            .send_string(body);
+        let ureq::Error::Status(status, response) =
+            result.expect_err("a mixed begin body should fail")
+        else {
+            unreachable!("a rejected begin body returns an HTTP status");
+        };
+        assert_eq!(status, 400, "body: {body}");
+        let error: ApiError =
+            serde_json::from_reader(response.into_reader()).expect("API error envelope");
+        assert_eq!(error.code, "invalid_request", "body: {body}");
+    }
+
+    harness.server.abort();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_upload_commit_and_change_feed_are_idempotent() {
     let temp_dir = tempdir().expect("tempdir");
@@ -74,7 +126,7 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
 
     let begin = harness
         .client
-        .begin_upload(&namespace, &BeginUploadRequest::default())
+        .begin_upload(&namespace, &BeginUploadRequest::ServiceProxied {})
         .await
         .expect("begin upload");
     let first_content = harness
@@ -99,7 +151,7 @@ async fn http_upload_commit_and_change_feed_are_idempotent() {
 
     let mismatch_upload = harness
         .client
-        .begin_upload(&namespace, &BeginUploadRequest::default())
+        .begin_upload(&namespace, &BeginUploadRequest::ServiceProxied {})
         .await
         .expect("begin mismatch upload");
     let staged = harness
@@ -234,7 +286,7 @@ async fn http_upload_status_re_mints_and_abort_is_terminal() {
     // An open session reports itself and mints nothing.
     let open = harness
         .client
-        .begin_upload(&namespace, &BeginUploadRequest::default())
+        .begin_upload(&namespace, &BeginUploadRequest::ServiceProxied {})
         .await
         .expect("begin upload");
     let status = read_upload_status(&harness.server_url, &open.upload_id);
@@ -401,7 +453,7 @@ async fn complete_upload_session(
 ) -> (loonfs_api::UploadId, ContentRef) {
     let begin = harness
         .client
-        .begin_upload(namespace, &BeginUploadRequest::default())
+        .begin_upload(namespace, &BeginUploadRequest::ServiceProxied {})
         .await
         .expect("begin upload");
     let staged = harness

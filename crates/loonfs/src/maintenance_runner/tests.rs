@@ -858,7 +858,7 @@ async fn upload_paths_plant_the_collection_deadlines_they_create() {
         .expect("create namespace");
 
     let begun = writer
-        .begin_upload(&namespace_id, BeginUploadRequest::default())
+        .begin_upload(&namespace_id, BeginUploadRequest::ServiceProxied {})
         .await
         .expect("begin upload");
     assert_eq!(

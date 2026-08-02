@@ -284,17 +284,13 @@ async fn write_upload_session(store: &LocalFsStore, namespace_id: &NamespaceId) 
     let state = loonfs_api::wire::control::UploadSessionState {
         namespace_id: namespace_id.clone(),
         upload_id: upload_id.clone(),
-        mode: loonfs_api::v0::UploadMode::ServiceProxied,
         content_id: loonfs_api::ContentId::generate(),
-        claimed_checksum: None,
-        direct_put_content_ref: None,
-        staged_content_ref: None,
         created_at_ms: 1_000,
+        transport: loonfs_api::wire::control::UploadSessionTransport::ServiceProxied {},
         state: loonfs_api::wire::control::UploadSessionLifecycle::Open {
             expires_at_ms: 1_000 + UPLOAD_SESSION_LEASE_MS,
+            staged_content: None,
         },
-        provider_multipart_upload_id: None,
-        multipart_part_size_bytes: None,
     };
     let envelope = loonfs_api::wire::control::UploadSessionEnvelope::from_state(
         loonfs_api::wire::control::ControlObjectKind::UploadSession,
@@ -319,7 +315,7 @@ async fn stage_upload<S: ObjectStore + ?Sized>(
     let begin = crate::protocol::begin_upload(
         store,
         namespace_id,
-        loonfs_api::v0::BeginUploadRequest::default(),
+        loonfs_api::v0::BeginUploadRequest::ServiceProxied {},
         context,
     )
     .await
@@ -751,10 +747,11 @@ async fn complete_staged_upload<S: ObjectStore + ?Sized>(
     let session = read_upload_session(store, namespace_id, upload_id)
         .await
         .expect("open session");
-    let content_ref = session
-        .staged_content_ref
-        .clone()
-        .expect("a staged session carries the reference it wrote");
+    let content_ref = match session.state {
+        UploadSessionLifecycle::Open { staged_content, .. } => staged_content,
+        UploadSessionLifecycle::Completed { .. } | UploadSessionLifecycle::Aborted { .. } => None,
+    }
+    .expect("a staged session is open and carries the reference it wrote");
     crate::protocol::complete_upload(
         store,
         namespace_id,
@@ -905,7 +902,7 @@ async fn complete_upload_for_gc<S: ObjectStore + ?Sized>(
     let begin = crate::protocol::begin_upload(
         store,
         namespace_id,
-        loonfs_api::v0::BeginUploadRequest::default(),
+        loonfs_api::v0::BeginUploadRequest::ServiceProxied {},
         context,
     )
     .await

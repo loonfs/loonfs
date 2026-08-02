@@ -488,7 +488,7 @@ async fn proxied_upload_completion_proof_publishes_without_additional_content_io
     let bytes = b"service proxied upload";
     let begin = harness
         .writer
-        .begin_upload(&harness.namespace_id, BeginUploadRequest::default())
+        .begin_upload(&harness.namespace_id, BeginUploadRequest::ServiceProxied {})
         .await
         .expect("begin upload");
     harness.recording.reset();

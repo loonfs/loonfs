@@ -93,7 +93,7 @@ async fn reads_commits_and_change_feed_never_list() {
 
     let baseline = store.count(OperationClass::List);
     let staged = engine
-        .begin_upload(BeginUploadRequest::default())
+        .begin_upload(BeginUploadRequest::ServiceProxied {})
         .await
         .expect("begin upload");
     let uploaded = engine
@@ -192,7 +192,7 @@ async fn maintenance_never_touches_the_wal_head() {
         .await
         .expect("gc pass");
     let staged = engine
-        .begin_upload(BeginUploadRequest::default())
+        .begin_upload(BeginUploadRequest::ServiceProxied {})
         .await
         .expect("second upload");
     let uploaded = engine

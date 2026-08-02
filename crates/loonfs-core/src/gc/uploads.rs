@@ -97,7 +97,7 @@ pub(super) async fn sweep_upload_session<S: ObjectStore + ?Sized>(
     };
 
     match state.state {
-        UploadSessionLifecycle::Open { expires_at_ms } => {
+        UploadSessionLifecycle::Open { expires_at_ms, .. } => {
             abort_expired_session(
                 store,
                 namespace_id,

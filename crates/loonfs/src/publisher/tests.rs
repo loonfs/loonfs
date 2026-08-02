@@ -1199,14 +1199,7 @@ async fn publisher_batches_plain_and_prepared_mutations_together() {
         .await
         .expect("bootstrap");
     let upload = writer
-        .begin_upload(
-            &namespace_id,
-            BeginUploadRequest {
-                mode: None,
-                content: None,
-                multipart: None,
-            },
-        )
+        .begin_upload(&namespace_id, BeginUploadRequest::ServiceProxied {})
         .await
         .expect("begin upload");
     let staged = writer

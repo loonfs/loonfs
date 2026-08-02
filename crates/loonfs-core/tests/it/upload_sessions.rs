@@ -8,14 +8,11 @@ use crate::common::namespace_engine;
 use bytes::Bytes;
 use loonfs_api::v0::DirectPutContentClaim;
 use loonfs_api::{
-    v0::{CompleteUploadRequest, UploadMode},
-    wire::control::{
-        encode_control_object, ControlObjectKind, UploadSessionEnvelope, UploadSessionState,
-    },
+    v0::CompleteUploadRequest,
+    wire::control::{ControlObjectKind, UploadSessionState, UploadSessionTransport},
     ContentRef, DestinationBehavior, NamespaceId, UploadId,
 };
 use loonfs_api::{ContentId, StorageChecksum};
-use loonfs_core::content::store_bytes_as_content;
 use loonfs_core::{
     BeginDirectPutUploadTargetResponse, Error as CoreError, ErrorCode, MutationContext,
 };
@@ -32,7 +29,7 @@ async fn begin_upload<S: ObjectStore + ?Sized>(
     context: &MutationContext,
 ) -> Result<loonfs_api::v0::BeginUploadResponse, CoreError> {
     namespace_engine(store, namespace_id, context)
-        .begin_upload(loonfs_api::v0::BeginUploadRequest::default())
+        .begin_upload(loonfs_api::v0::BeginUploadRequest::ServiceProxied {})
         .await
 }
 
@@ -322,60 +319,13 @@ async fn complete_upload_does_not_get_content_blob_after_staging() {
     assert_eq!(store.count(OperationClass::Read), 0);
 }
 
-#[tokio::test]
-async fn complete_upload_rejects_direct_put_session_without_bound_target() {
-    let temp_dir = tempdir().expect("tempdir");
-    let store = LocalFsStore::new(temp_dir.path()).expect("store");
-    let namespace_id = NamespaceId::parse("demo").expect("valid namespace id");
-    let context = mutation_context();
-    bootstrap_namespace(&store, &namespace_id, &context, false)
-        .await
-        .expect("bootstrap");
-    let stored = store_bytes_as_content(&store, &namespace_id, b"hello")
-        .await
-        .expect("store content");
-
-    let upload_id =
-        UploadId::parse("upl_00000000000000000000000000000001").expect("valid upload id");
-    let state = UploadSessionState {
-        namespace_id: namespace_id.clone(),
-        upload_id: upload_id.clone(),
-        mode: UploadMode::DirectPut,
-        content_id: stored.content_ref.content_id.clone(),
-        claimed_checksum: None,
-        direct_put_content_ref: None,
-        staged_content_ref: None,
-        created_at_ms: context.now_ms,
-        state: loonfs_api::wire::control::UploadSessionLifecycle::Open {
-            expires_at_ms: context.now_ms + 60_000,
-        },
-        provider_multipart_upload_id: None,
-        multipart_part_size_bytes: None,
-    };
-    let envelope = UploadSessionEnvelope::from_state(ControlObjectKind::UploadSession, state)
-        .expect("upload session envelope");
-    let encoded = encode_control_object(&envelope).expect("encode upload session");
-    store
-        .put_if_absent(
-            &upload_session(namespace_id.as_str(), upload_id.as_str()),
-            Bytes::from(encoded),
-        )
-        .await
-        .expect("write malformed upload session");
-
-    let error = complete_upload(
-        &store,
-        &namespace_id,
-        &upload_id,
-        &CompleteUploadRequest::for_content_ref(stored.content_ref),
-        &context,
-    )
-    .await
-    .expect_err("direct_put session without target should fail closed");
-
-    assert_eq!(error.code(), ErrorCode::InvalidRequest);
-}
-
+/// A direct-put session that never recorded the reference its write was
+/// signed against used to be a record this test could write and complete
+/// against. The transport variant carries that reference, so there is no
+/// such record to write any more — in Rust or on the wire. What is left of
+/// this case lives where the durable bytes are read: see
+/// `upload_sessions_reject_a_transport_missing_its_own_fields` in
+/// loonfs-api's golden format tests.
 #[tokio::test]
 async fn upload_content_rejects_invalid_upload_id_before_key_construction() {
     let temp_dir = tempdir().expect("tempdir");
@@ -578,22 +528,24 @@ mod direct_multipart {
             .await
             .expect("begin direct multipart");
         let state = session_state(store, &namespace_id, &begin.upload_id).await;
-        assert!(
-            state.claimed_checksum.is_none() && state.direct_put_content_ref.is_none(),
-            "a multipart session is opened knowing nothing about its payload"
-        );
+        // A multipart session is opened knowing nothing about its payload,
+        // which is why its transport carries no content reference at all.
+        let UploadSessionTransport::DirectMultipart {
+            provider_upload_id,
+            part_size_bytes,
+        } = state.transport.clone()
+        else {
+            panic!("a multipart begin opens a multipart session");
+        };
         assert_eq!(
-            state.multipart_part_size_bytes,
-            Some(begin.target.part_size_bytes),
+            part_size_bytes.get(),
+            begin.target.part_size_bytes,
             "the geometry it handed out is the geometry it recorded"
         );
         let catalog = loonfs_core::control::load_namespace_catalog_entry(store, &namespace_id)
             .await
             .expect("catalog");
         let object_key = content_blob(catalog.content_store_id().as_str(), &state.content_id);
-        let provider_upload_id = state
-            .provider_multipart_upload_id
-            .expect("a multipart session records its provider upload");
 
         Session {
             namespace_id,
@@ -916,7 +868,7 @@ mod direct_multipart {
         // The session carries its own expiry, so collection is decided
         // against that stamp and never against an object's provider
         // timestamp.
-        let UploadSessionLifecycle::Open { expires_at_ms } =
+        let UploadSessionLifecycle::Open { expires_at_ms, .. } =
             session_state(&store, &session.namespace_id, &session.upload_id)
                 .await
                 .state
@@ -983,53 +935,40 @@ mod direct_multipart {
         }
     }
 
-    /// The two completion shapes are not interchangeable. A multipart
-    /// session's client never learned an identity, so naming one is a
-    /// mistake worth reporting rather than a value worth checking; and a
-    /// session that was handed one has no claim to make.
+    /// The two completion shapes are not interchangeable, and which one is
+    /// right depends on the durable record. That is the one thing decoding
+    /// a completion body cannot settle — the client's request is well
+    /// formed either way — so it is settled here, against the session.
     #[tokio::test]
     async fn each_mode_completes_with_the_shape_it_was_opened_for() {
         let temp_dir = tempdir().expect("tempdir");
         let store = MultipartStore::new(LocalFsStore::new(temp_dir.path()).expect("store"));
         let context = mutation_context();
         let session = open_session(&store, &context).await;
-        let parts = upload_every_part(&store, &session);
 
+        // A multipart session's client never learned an identity, so naming
+        // one back is a mistake worth reporting rather than a value worth
+        // checking.
         let error = complete_upload(
             &store,
             &session.namespace_id,
             &session.upload_id,
-            &CompleteUploadRequest {
-                content_ref: Some(ContentRef::blob_v1(ContentId::generate(), PART)),
-                multipart: Some(session.claim.clone()),
-                multipart_parts: Some(parts.clone()),
-            },
+            &CompleteUploadRequest::for_content_ref(ContentRef::blob_v1(
+                ContentId::generate(),
+                PART,
+            )),
             &context,
         )
         .await
         .expect_err("a multipart completion cannot name the identity");
         assert_eq!(error.code(), ErrorCode::InvalidRequest);
 
-        let error = complete_upload(
-            &store,
-            &session.namespace_id,
-            &session.upload_id,
-            &CompleteUploadRequest {
-                content_ref: None,
-                multipart: None,
-                multipart_parts: Some(parts),
-            },
-            &context,
-        )
-        .await
-        .expect_err("a multipart completion carries its claim");
-        assert_eq!(error.code(), ErrorCode::InvalidRequest);
-
-        // And the proxied direction: a staged session claims nothing.
+        // And the proxied direction: a session that was handed a reference
+        // has no assembly to claim.
         let begin = begin_upload(&store, &session.namespace_id, &context)
             .await
             .expect("begin a proxied session");
-        let staged = upload_content(
+        upload_content(
             &store,
             &session.namespace_id,
             &begin.upload_id,
@@ -1042,11 +981,10 @@ mod direct_multipart {
             &store,
             &session.namespace_id,
             &begin.upload_id,
-            &CompleteUploadRequest {
-                content_ref: Some(staged.content_ref),
-                multipart: Some(session.claim.clone()),
-                multipart_parts: None,
-            },
+            &CompleteUploadRequest::for_multipart(
+                session.claim.clone(),
+                upload_every_part(&store, &session),
+            ),
             &context,
         )
         .await

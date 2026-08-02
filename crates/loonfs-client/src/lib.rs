@@ -28,7 +28,7 @@ use loonfs_api::{
         DisableGrepIndexResponse, EnableGrepIndexResponse, FilesystemChange, GrepGcRequest,
         GrepGcResponse, GrepIndexStatusResponse, ObjectTransferAccess, SignUploadPartsRequest,
         SignUploadPartsResponse, SignedUploadPart, StoreProbeRequest, StoreProbeResponse,
-        UploadContentResponse, UploadMode, UploadPartChecksumClaim, UploadStatusResponse,
+        UploadContentResponse, UploadPartChecksumClaim, UploadStatusResponse,
         ValidatedContentToken,
     },
     AbsolutePath, AuthoritativePathEntry, CapabilityDocument, ChangeSeq, CheckpointId,
@@ -877,11 +877,7 @@ impl Client {
     ) -> Result<BeginUploadResponse> {
         self.begin_upload(
             namespace_id,
-            &BeginUploadRequest {
-                mode: Some(UploadMode::DirectPut),
-                content: Some(claim),
-                multipart: None,
-            },
+            &BeginUploadRequest::DirectPut { content: claim },
         )
         .await
     }
@@ -901,9 +897,7 @@ impl Client {
     ) -> Result<BeginUploadResponse> {
         self.begin_upload(
             namespace_id,
-            &BeginUploadRequest {
-                mode: Some(UploadMode::DirectMultipart),
-                content: None,
+            &BeginUploadRequest::DirectMultipart {
                 multipart: Some(options),
             },
         )
@@ -1606,7 +1600,7 @@ impl Client {
         bytes: &[u8],
     ) -> Result<StagedContent> {
         let upload = self
-            .begin_upload(namespace_id, &BeginUploadRequest::default())
+            .begin_upload(namespace_id, &BeginUploadRequest::ServiceProxied {})
             .await?;
         let staged = self
             .upload_content(namespace_id, &upload.upload_id, bytes)
@@ -1626,7 +1620,7 @@ impl Client {
         source: PayloadSource,
     ) -> Result<StagedContent> {
         let upload = self
-            .begin_upload(namespace_id, &BeginUploadRequest::default())
+            .begin_upload(namespace_id, &BeginUploadRequest::ServiceProxied {})
             .await?;
         let staged = self
             .upload_streamed_content(namespace_id, &upload.upload_id, source)
@@ -2487,7 +2481,7 @@ mod tests {
         let (transport, client) = single_attempt_probe();
         assert_single_attempt(
             client
-                .begin_upload(&namespace_id, &BeginUploadRequest::default())
+                .begin_upload(&namespace_id, &BeginUploadRequest::ServiceProxied {})
                 .await,
             &transport,
         );

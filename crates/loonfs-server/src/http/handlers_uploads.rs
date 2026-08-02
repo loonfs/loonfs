@@ -2,9 +2,7 @@
 //! backing them.
 
 use super::error::ApiResponseError;
-use super::{
-    authorize, AppJson, AppPath, AppState, NamespaceIdPath, OptionalAppJson, UploadBodyStream,
-};
+use super::{authorize, AppJson, AppPath, AppState, NamespaceIdPath, UploadBodyStream};
 use crate::config::ServerConfig;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -18,9 +16,10 @@ use loonfs_api::ErrorCode;
 use loonfs_api::{
     v0::{
         AbortUploadResponse, BeginUploadRequest, BeginUploadResponse, CompleteUploadRequest,
-        CompleteUploadResponse, DirectMultipartUpload, DirectPutUpload, ObjectTransferAccess,
-        SignUploadPartsRequest, SignUploadPartsResponse, SignedUploadPart, UploadContentResponse,
-        UploadMode, UploadSessionStatus, UploadStatusResponse, ValidatedContentToken,
+        CompleteUploadResponse, DirectMultipartUpload, DirectMultipartUploadOptions,
+        DirectPutContentClaim, DirectPutUpload, ObjectTransferAccess, SignUploadPartsRequest,
+        SignUploadPartsResponse, SignedUploadPart, UploadContentResponse, UploadMode,
+        UploadSessionStatus, UploadStatusResponse, ValidatedContentToken,
     },
     ContentRef, NamespaceId, UploadId, FEATURE_UPLOADS_DIRECT_MULTIPART,
     FEATURE_UPLOADS_DIRECT_PUT,
@@ -73,45 +72,40 @@ pub(super) struct UploadPathParams {
 pub(super) async fn begin_upload(
     State(state): State<AppState>,
     namespace: NamespaceIdPath,
-    OptionalAppJson(request): OptionalAppJson<BeginUploadRequest>,
+    AppJson(request): AppJson<BeginUploadRequest>,
 ) -> Result<Json<BeginUploadResponse>, ApiResponseError> {
     let namespace_id = namespace.into_id()?;
-    let request = request.unwrap_or_default();
-    match request.mode.unwrap_or_default() {
-        UploadMode::DirectPut => {
-            return begin_direct_put_upload(state, namespace_id, request).await
+    // Decoding the body settled which transport this is and that it carries
+    // that transport's fields and no other's, so there is nothing left here
+    // to check before dispatching on it.
+    match request {
+        BeginUploadRequest::DirectPut { content } => {
+            begin_direct_put_upload(state, namespace_id, content).await
         }
-        UploadMode::DirectMultipart => {
-            return begin_direct_multipart_upload(state, namespace_id, request).await
+        BeginUploadRequest::DirectMultipart { multipart } => {
+            begin_direct_multipart_upload(state, namespace_id, multipart).await
         }
-        UploadMode::ServiceProxied => {}
+        BeginUploadRequest::ServiceProxied {} => {
+            let response = state
+                .writer
+                .begin_upload(&namespace_id, request)
+                .await
+                .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
+            Ok(Json(response))
+        }
     }
-
-    let response = state
-        .writer
-        .begin_upload(&namespace_id, request)
-        .await
-        .map_err(|error| ApiResponseError::runtime_for_namespace(&namespace_id, error))?;
-    Ok(Json(response))
 }
 
 async fn begin_direct_put_upload(
     state: AppState,
     namespace_id: NamespaceId,
-    request: BeginUploadRequest,
+    claim: DirectPutContentClaim,
 ) -> Result<Json<BeginUploadResponse>, ApiResponseError> {
     let Some(issuer) = state.transfer_issuer.as_ref() else {
         return Err(ApiResponseError::not_supported(
             FEATURE_UPLOADS_DIRECT_PUT,
             "direct_put requires an object store that can presign create-only, \
              checksum-bound uploads; this deployment's endpoint cannot",
-        ));
-    };
-    let Some(claim) = request.content else {
-        return Err(ApiResponseError::new(
-            StatusCode::BAD_REQUEST,
-            ErrorCode::InvalidRequest,
-            "invalid upload content: direct_put requires a content claim at begin_upload",
         ));
     };
 
@@ -152,7 +146,7 @@ async fn begin_direct_put_upload(
 async fn begin_direct_multipart_upload(
     state: AppState,
     namespace_id: NamespaceId,
-    request: BeginUploadRequest,
+    options: Option<DirectMultipartUploadOptions>,
 ) -> Result<Json<BeginUploadResponse>, ApiResponseError> {
     if state.transfer_issuer.is_none() {
         return Err(ApiResponseError::not_supported(
@@ -164,7 +158,7 @@ async fn begin_direct_multipart_upload(
     }
     // A multipart begin declares nothing about the payload, so an absent
     // `multipart` object simply takes the server's default geometry.
-    let options = request.multipart.unwrap_or_default();
+    let options = options.unwrap_or_default();
 
     let prepared = state
         .writer
