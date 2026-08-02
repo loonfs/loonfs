@@ -11,7 +11,7 @@ repository.workspace = true
 bytes.workspace = true
 futures.workspace = true
 http.workspace = true
-loonfs-api = { path = "../loonfs-api" }
+loonfs-api.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

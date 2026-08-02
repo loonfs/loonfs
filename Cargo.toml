@@ -16,7 +16,7 @@ members = [
 
 [workspace.package]
 edition = "2021"
-version = "0.1.1"
+version = "0.2.0"
 license = "Apache-2.0"
 rust-version = "1.85"
 description = "Spec-locked object-store-backed file service"
@@ -54,6 +54,14 @@ serde_bytes = "0.11"
 serde_json = { version = "1", features = ["raw_value"] }
 sha2 = "0.10"
 hmac = "0.12"
+# Published workspace crates need a registry version as well as a local path.
+# Keep these versions in lockstep with `workspace.package.version`.
+loonfs = { path = "crates/loonfs", version = "0.2.0" }
+loonfs-api = { path = "crates/loonfs-api", version = "0.2.0" }
+loonfs-client = { path = "crates/loonfs-client", version = "0.2.0" }
+loonfs-core = { path = "crates/loonfs-core", version = "0.2.0" }
+loonfs-grep = { path = "crates/loonfs-grep", version = "0.2.0" }
+loonfs-objectstore = { path = "crates/loonfs-objectstore", version = "0.2.0" }
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
