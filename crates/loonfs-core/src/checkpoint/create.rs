@@ -76,7 +76,7 @@ pub(crate) async fn create_checkpoint<S: ObjectStore + ?Sized>(
             created_at_ms: context.now_ms,
             expires_at_ms,
             owner: owner.clone(),
-            state: CheckpointRecordLifecycle::Active,
+            state: CheckpointRecordLifecycle::Active {},
         };
         let verify_started_ms = timer.monotonic_now_ms();
         write_checkpoint_record(store, &record).await?;

@@ -504,7 +504,7 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
         assert_eq!(record.created_at_ms, 2_000);
         assert_eq!(
             record.state,
-            loonfs_api::wire::control::CheckpointRecordLifecycle::Active
+            loonfs_api::wire::control::CheckpointRecordLifecycle::Active {}
         );
     }
 
@@ -519,7 +519,7 @@ async fn each_create_mints_its_own_record_and_carries_its_own_expiry() {
     assert_eq!(original.expires_at_ms, Some(10_000));
     assert_eq!(
         original.state,
-        loonfs_api::wire::control::CheckpointRecordLifecycle::Active
+        loonfs_api::wire::control::CheckpointRecordLifecycle::Active {}
     );
 }
 
@@ -564,7 +564,7 @@ async fn an_expired_but_unreleased_pin_still_enumerates_its_files() {
             .expect("record exists")
             .state
             .state,
-        loonfs_api::wire::control::CheckpointRecordLifecycle::Active
+        loonfs_api::wire::control::CheckpointRecordLifecycle::Active {}
     );
     assert!(
         !read_checkpoint_files(&store, &namespace_id, &already_expired.checkpoint_id)
@@ -633,7 +633,7 @@ async fn a_pin_without_a_ttl_is_held_until_it_is_released() {
         .state;
     assert_eq!(
         record.state,
-        loonfs_api::wire::control::CheckpointRecordLifecycle::Active
+        loonfs_api::wire::control::CheckpointRecordLifecycle::Active {}
     );
     assert!(
         !read_checkpoint_files(&store, &namespace_id, &pin.checkpoint_id)
@@ -692,7 +692,7 @@ async fn checkpoint_verification_rejects_a_basis_below_the_floor() {
         owner: loonfs_api::wire::control::CheckpointOwner::User {
             name: "test-pin".to_owned(),
         },
-        state: loonfs_api::wire::control::CheckpointRecordLifecycle::Active,
+        state: loonfs_api::wire::control::CheckpointRecordLifecycle::Active {},
     };
     let verified = super::record::verify_checkpoint_basis(&store, &stale)
         .await

@@ -539,7 +539,7 @@ fn control_objects_match_golden_bytes() {
             owner: CheckpointOwner::User {
                 name: "nightly".to_owned(),
             },
-            state: CheckpointRecordLifecycle::Active,
+            state: CheckpointRecordLifecycle::Active {},
         },
     );
     // The fork owner is a durable encoding of its own: the tagged `owner`
@@ -561,7 +561,7 @@ fn control_objects_match_golden_bytes() {
             owner: CheckpointOwner::Fork {
                 target_namespace_id: NamespaceId::parse("clone").expect("valid namespace id"),
             },
-            state: CheckpointRecordLifecycle::Active,
+            state: CheckpointRecordLifecycle::Active {},
         },
     );
     check_control_golden(
@@ -789,6 +789,15 @@ fn checkpoint_records_reject_the_pre_monotonic_lifecycle_encoding() {
         "control_checkpoint_record.v1.json",
         ControlObjectKind::CheckpointRecord,
         |payload| payload["state"]["kind"] = serde_json::Value::from("released"),
+    );
+}
+
+#[test]
+fn active_checkpoint_records_reject_release_stamps() {
+    assert_control_payload_edit_is_corrupt::<CheckpointRecordState>(
+        "control_checkpoint_record.v1.json",
+        ControlObjectKind::CheckpointRecord,
+        |payload| payload["state"]["released_at_ms"] = serde_json::Value::from(9_000),
     );
 }
 

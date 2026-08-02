@@ -543,7 +543,7 @@ async fn assert_fresh_backfill_attempt(
         .expect("the new attempt's checkpoint record exists");
     assert_eq!(
         record.state,
-        CheckpointRecordLifecycle::Active,
+        CheckpointRecordLifecycle::Active {},
         "a fresh backfill attempt must hold a checkpoint that still pins its basis"
     );
     checkpoint_id.clone()
