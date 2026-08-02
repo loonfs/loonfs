@@ -203,7 +203,7 @@ async fn a_batch_commits_once_and_matches_the_same_batch_embedded() {
     );
 
     writer
-        .shutdown_background()
+        .shutdown()
         .await
         .expect("settle embedded background work");
     harness.server.abort();
@@ -641,7 +641,7 @@ async fn a_commit_id_used_embedded_replays_over_http() {
             .await
             .expect("embedded batch commits");
         writer
-            .shutdown_background()
+            .shutdown()
             .await
             .expect("settle embedded background work");
         receipt

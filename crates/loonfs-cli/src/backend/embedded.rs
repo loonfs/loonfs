@@ -77,7 +77,7 @@ impl EmbeddedBackend {
         &self,
         result: Result<T, BackendError>,
     ) -> Result<T, BackendError> {
-        match (result, self.writer.wait_for_background_work().await) {
+        match (result, self.writer.flush_background().await) {
             (result, Ok(())) => result,
             (Ok(value), Err(error)) => {
                 write_stderr_warning(format_args!(
@@ -114,7 +114,7 @@ impl EmbeddedBackend {
                 break;
             }
             self.writer
-                .wait_for_background_work()
+                .flush_background()
                 .await
                 .map_err(map_runtime_error)?;
             result = attempt().await;
@@ -451,9 +451,8 @@ impl EmbeddedBackend {
     /// nudges every key once at start-up and again on `poll_interval_ms`
     /// (the default cadence when `None`), and the runner decides when each
     /// step runs, how many run at once, and what happens when one fails. The
-    /// shutdown is the writer's own: maintenance admission closes before
-    /// publications drain, so nothing admitted is left running behind a
-    /// publisher that is already gone.
+    /// signal ends the assignment and [`FsWriter::shutdown`] ends the
+    /// process's background work, in the one order that is correct.
     pub(super) async fn host_maintenance(
         &self,
         namespaces: &[NamespaceId],
@@ -474,10 +473,7 @@ impl EmbeddedBackend {
                 }
             }
         }
-        self.writer
-            .shutdown_background()
-            .await
-            .map_err(map_runtime_error)
+        self.writer.shutdown().await.map_err(map_runtime_error)
     }
 
     /// Runs every `{job, namespace}` key to a settled conclusion, or until
@@ -485,11 +481,13 @@ impl EmbeddedBackend {
     ///
     /// A drain hosts the steps itself rather than nudging the runner: it has
     /// a budget to spend and per-key progress to report, and admission
-    /// offers neither. So it closes the runner down first — a second
+    /// offers neither. So it shuts the writer down first — a second
     /// scheduler over the same keys would race these steps and make the
     /// counts below a lie — and then walks the assignment, carrying each
     /// key's continuation from one step to the next exactly as the runner
-    /// would have.
+    /// would have. Shutting the writer down does not disarm the steps: a
+    /// job compare-and-swaps the namespace head through `FsAdmin`, never
+    /// through the publication service the shutdown closed.
     pub(super) async fn drain_maintenance(
         &self,
         namespaces: &[NamespaceId],
@@ -497,10 +495,7 @@ impl EmbeddedBackend {
         budget: StepBudget,
     ) -> Result<MaintenanceDrainProgress, BackendError> {
         let hosted = self.hosted_jobs(jobs)?;
-        self.writer
-            .shutdown_background()
-            .await
-            .map_err(map_runtime_error)?;
+        self.writer.shutdown().await.map_err(map_runtime_error)?;
         let timer = StdMonotonicTimer::default();
         let started_ms = timer.monotonic_now_ms();
         let mut steps = 0;

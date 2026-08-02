@@ -1,4 +1,5 @@
-//! HTTP application construction, listener service, and shutdown lifecycle.
+//! HTTP application construction, the listener service, and where its
+//! graceful shutdown is triggered from.
 
 use super::metrics::ServerMetrics;
 use super::router;
@@ -6,7 +7,6 @@ use super::tls::{self, TlsConfigError, TlsListener};
 use crate::config::{ServerConfig, ServerConfigError};
 use axum::Router;
 use loonfs::metrics::{JsonlObjectStoreMetricsRecorder, ObjectStoreMetricsRecorder};
-use loonfs::publisher::PublisherRegistry;
 use loonfs::{
     FsAdmin, FsReader, FsWriter, MaintenanceHandle, MaintenanceJob, MaintenanceProbe,
     SharedObjectStore, TraceMode, TraceStoreKind,
@@ -24,8 +24,9 @@ const OBJECT_STORE_METRICS_JSONL_ENV: &str = "LOONFS_OBJECT_STORE_METRICS_JSONL"
 
 /// Purpose-specific handles over one shared store client: read endpoints go
 /// through `reader`, mutations through `writer` (and the publication service
-/// it hands out), maintenance endpoints through `admin`. Shutdown-relevant
-/// handles also live in the [`ServerLifecycle`] returned beside the router.
+/// it hands out), maintenance endpoints through `admin`. `writer` is also
+/// what a host settles at shutdown, and what [`app`] returns beside the
+/// router for that purpose.
 ///
 /// `reader` is a cheap clone derived from `writer` at construction, kept as
 /// its own field because most handlers only read.
@@ -102,77 +103,19 @@ impl GrepMaintenance {
     }
 }
 
-/// Everything the app spawns that must settle at shutdown: publisher
-/// publications, and the writer's maintenance runner — which now admits the
-/// grep index's steps alongside the runtime's own.
-///
-/// [`serve`] drives this itself. A host embedding the [`Router`] on its own
-/// HTTP server must call [`ServerLifecycle::shutdown`] after its listener
-/// drains, or publisher tasks and writer maintenance outlive the listener
-/// unobserved.
-pub struct ServerLifecycle {
-    writer: FsWriter,
-    publisher: PublisherRegistry,
-    maintains_grep_index: bool,
-}
-
-impl ServerLifecycle {
-    /// Settles the app's spawned work in one order: maintenance admission
-    /// closes, publisher admission closes, admitted publications finish,
-    /// then the writer's runner drains its in-flight steps. Panicked tasks
-    /// surface as the returned error.
-    ///
-    /// Maintenance admission closes first because draining publications is
-    /// an await, and until it returns the runner is still live. Its timer
-    /// promotes keys whose deadlines have arrived, each publication that
-    /// lands nudges the jobs subscribed to publications — the grep index
-    /// among them — and a finishing step hands its permit straight to the
-    /// next queued key.
-    /// Everything admitted in that window is work this shutdown already
-    /// decided to drop, and none of it is free: a metadata step advances
-    /// the metadata root, a collection pass deletes provider objects, an
-    /// index step writes segments. Then the drain below has to wait for
-    /// whatever it started. Closing first leaves the window empty.
-    ///
-    /// Neither order can wedge, and the reason is worth stating because it
-    /// is not the obvious one. A maintenance step never submits to the
-    /// publication service at all: every job does its work through
-    /// `FsAdmin`, which compare-and-swaps against the namespace head
-    /// itself. So the publication drain waits only on client work, its
-    /// pending set can only shrink, and no step of any kind can be left
-    /// waiting behind a publisher that is closing. A step already running
-    /// when this lands finishes normally, and its chain then ends rather
-    /// than passing its permit on, because a shut admission book releases
-    /// the permit instead of handing it to the next key.
-    pub async fn shutdown(self) -> Result<(), loonfs::RuntimeError> {
-        self.writer.close_maintenance_admission();
-        self.publisher.close_admission();
-        self.publisher.drain().await?;
-        // Closes maintenance admission a second time — idempotent — and
-        // then drains the steps that were already running.
-        self.writer.shutdown_background().await
-    }
-
-    /// Waits for every maintenance step this server's writer has admitted —
-    /// metadata, collection, and grep indexing alike — to settle, without
-    /// closing the runner.
-    ///
-    /// This is a drain, not a per-namespace wait: the runner admits work per
-    /// `{job, namespace}` key and reports progress durably, so what a caller
-    /// waits for is quiet, and what it then reads is durable state.
-    pub async fn wait_for_maintenance(&self) -> Result<(), loonfs::RuntimeError> {
-        self.writer.wait_for_background_work().await
-    }
-
-    /// Whether this deployment registered the grep index job.
-    pub fn maintains_grep_index(&self) -> bool {
-        self.maintains_grep_index
-    }
-}
-
 /// Builds the HTTP application: the router that serves requests, and the
-/// lifecycle handle its host must shut down after draining the listener.
-pub async fn app(config: ServerConfig) -> Result<(Router, ServerLifecycle), ServerConfigError> {
+/// writer whose background work its host must settle.
+///
+/// Everything this app spawns belongs to that writer — publications, and
+/// the maintenance runner that admits the runtime's steps alongside the
+/// grep index's. [`serve`] settles it itself. A host embedding the
+/// [`Router`] on its own HTTP server must call [`FsWriter::shutdown`] after
+/// its listener drains, or publisher tasks and writer maintenance outlive
+/// the listener unobserved. The writer also answers what a deployment's
+/// shape is, so a host that needs to know whether the grep index job is
+/// registered here asks
+/// [`FsWriter::maintenance_job`](loonfs::FsWriter::maintenance_job).
+pub async fn app(config: ServerConfig) -> Result<(Router, FsWriter), ServerConfigError> {
     // The one unavoidable validation point: configs that skipped
     // `load_server_config` (direct Rust construction) fail here exactly as
     // file-loaded ones fail at load.
@@ -189,9 +132,9 @@ pub async fn app(config: ServerConfig) -> Result<(Router, ServerLifecycle), Serv
         .then(|| store.transfer_issuer())
         .flatten();
     let store = store.into_shared();
-    let (router, lifecycle, _state) =
+    let (router, state) =
         app_with_store_and_transfer_issuer(config, store, transfer_issuer).await?;
-    Ok((router, lifecycle))
+    Ok((router, state.writer))
 }
 
 #[cfg(test)]
@@ -211,16 +154,14 @@ pub(super) async fn app_with_store_and_state(
     config: ServerConfig,
     store: SharedObjectStore,
 ) -> Result<(Router, AppState), ServerConfigError> {
-    let (router, _lifecycle, state) =
-        app_with_store_and_transfer_issuer(config, store, None).await?;
-    Ok((router, state))
+    app_with_store_and_transfer_issuer(config, store, None).await
 }
 
 pub(super) async fn app_with_store_and_transfer_issuer(
     config: ServerConfig,
     store: SharedObjectStore,
     transfer_issuer: Option<Arc<dyn ObjectTransferIssuer>>,
-) -> Result<(Router, ServerLifecycle, AppState), ServerConfigError> {
+) -> Result<(Router, AppState), ServerConfigError> {
     let metrics = ServerMetrics::new();
     // Two switches decide automatic grep indexing and nothing else does:
     // whether this server maintains anything automatically, and whether its
@@ -295,11 +236,6 @@ pub(super) async fn app_with_store_and_transfer_issuer(
         None
     };
     let config = Arc::new(config);
-    let lifecycle = ServerLifecycle {
-        writer: writer.clone(),
-        publisher: writer.publisher(),
-        maintains_grep_index: grep_maintenance.is_some(),
-    };
     let state = AppState {
         upload_permits: Arc::new(Semaphore::new(
             config.max_concurrent_uploads.min(Semaphore::MAX_PERMITS),
@@ -318,7 +254,7 @@ pub(super) async fn app_with_store_and_transfer_issuer(
         grep_maintenance,
         metrics,
     };
-    Ok((router(state.clone()), lifecycle, state))
+    Ok((router(state.clone()), state))
 }
 
 #[cfg(test)]
@@ -458,8 +394,8 @@ pub async fn serve_with_shutdown(
 
 /// The one serving body, over whichever listener the deployment configured.
 /// Plaintext and TLS differ in what `accept` returns and in nothing else:
-/// the same router, the same graceful shutdown, and the same lifecycle
-/// settle after the listener has drained.
+/// the same router, the same graceful shutdown, and the same writer settles
+/// after the listener has drained.
 pub(super) async fn serve_on<L>(
     listener: L,
     config: ServerConfig,
@@ -468,16 +404,17 @@ pub(super) async fn serve_on<L>(
 where
     L: axum::serve::Listener<Addr = SocketAddr>,
 {
-    let (router, lifecycle) = app(config).await?;
+    let (router, writer) = app(config).await?;
     axum::serve(listener, router)
         .with_graceful_shutdown(shutdown)
         .await
         .map_err(ServeError::Serve)?;
-    // The listener has drained; close maintenance admission, then publisher
-    // admission, finish admitted publications, then settle the maintenance
-    // steps already running. Panicked tasks surface here rather than
-    // disappearing with the process.
-    lifecycle.shutdown().await.map_err(ServeError::Shutdown)
+    // Only once the listener has drained: the writer's shutdown refuses new
+    // mutations, so running it while requests are still arriving would fail
+    // work this server accepted. What order the shutdown itself runs in is
+    // the writer's business, not this function's. Panicked tasks surface
+    // here rather than disappearing with the process.
+    writer.shutdown().await.map_err(ServeError::Shutdown)
 }
 
 /// Resolves on ctrl-c or, on unix, SIGTERM — the stop signal container

@@ -74,7 +74,7 @@ fn a_writer_with_a_recorder_reports_stores_publications_and_steps() {
                 .expect("put file");
         }
         fs.writer
-            .wait_for_background_work()
+            .flush_background()
             .await
             .expect("background steps settle");
         recorder.snapshot()

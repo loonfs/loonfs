@@ -28,7 +28,8 @@ use std::sync::Arc;
 /// long-lived Tokio runtime that will drive it, and do not share one writer
 /// across unrelated runtimes — open another from [`StoreConfig`] instead.
 /// `FsWriter` is cheap to clone; clones share the identity, caches, and
-/// background-work state.
+/// background-work state — including its end, which is why
+/// [`Self::shutdown`] is one call rather than a sequence a host respells.
 #[derive(Clone)]
 pub struct FsWriter {
     pub(crate) core: ReadCore,
@@ -88,8 +89,22 @@ impl FsWriter {
     /// service; hosts that classify their own mutation candidates — the
     /// reference server, for example — submit here directly. Clones share
     /// the writer's per-namespace publishers.
+    ///
+    /// Lifecycle is not the caller's to drive here: [`Self::shutdown`] owns
+    /// closing this service, and [`Self::is_shutting_down`] answers the one
+    /// question a host asks about it from outside.
     pub fn publisher(&self) -> PublisherRegistry {
         self.publisher.clone()
+    }
+
+    /// Whether [`Self::shutdown`] has begun on this writer or any clone of
+    /// it.
+    ///
+    /// Mutations submitted from here on fail with `shutting_down`, so a
+    /// readiness probe answers "draining" from this and a load balancer can
+    /// take the instance out before its in-flight work settles.
+    pub fn is_shutting_down(&self) -> bool {
+        self.publisher.is_admission_closed()
     }
 
     /// Returns the capability document for this embedded build (API spec,
@@ -144,63 +159,62 @@ impl FsWriter {
     }
 
     /// Waits until every writer-scheduled maintenance task has finished,
-    /// without closing the handle. Panicked tasks surface as a runtime-task
+    /// without closing anything. Panicked tasks surface as a runtime-task
     /// error.
-    pub async fn wait_for_background_work(&self) -> Result<()> {
+    ///
+    /// Non-terminal: the writer keeps admitting work, so what this waits
+    /// for is quiet, not the end. A one-shot host calls it before exiting
+    /// so a step is never torn down mid-flight; a long-lived host calls it
+    /// to read durable state a step was about to leave. Callers await their
+    /// own publications, so a quiet runner is a quiet writer.
+    pub async fn flush_background(&self) -> Result<()> {
         self.bits.maintenance.drain().await
     }
 
-    /// Closes maintenance admission and drops what is still queued, without
-    /// waiting for anything.
+    /// Terminal shutdown: closes maintenance admission, closes publication
+    /// admission, settles admitted publications, then settles in-flight
+    /// maintenance steps. Panicked tasks surface as a runtime-task error.
     ///
-    /// The first half of [`Self::shutdown_background`] on its own, for a
-    /// host with work to do between closing the front door and waiting at
-    /// it. The reference server is that host: it closes this, closes
-    /// publisher admission, drains publications, and only then runs the
-    /// full shutdown — because draining publications is an await, and until
-    /// it returns an open runner keeps admitting steps this shutdown has
-    /// already decided to drop.
+    /// This is the only valid order, and it lives here so no host has to
+    /// respell it. Afterward, mutations fail with `shutting_down`, nudges
+    /// are dropped, and work that claimed a maintenance slot without
+    /// starting is refused rather than left running unobserved. Reads still
+    /// work: nothing here touches the read path.
     ///
-    /// Synchronous and idempotent, so it is safe before
-    /// [`Self::shutdown_background`], which closes again and then drains.
-    /// After it, nudges are dropped and work still waiting for a permit is
-    /// discarded; steps already running are untouched, and the drain is
-    /// what settles them.
-    pub fn close_maintenance_admission(&self) {
+    /// Maintenance admission has to close first, and before this future's
+    /// first await — the publication drain below is that await. While it is
+    /// pending the runtime keeps polling the runner: its timer promotes
+    /// keys whose deadlines have arrived, each landing publication nudges
+    /// the jobs subscribed to publications, and a finishing step hands its
+    /// permit straight to the next queued key. Everything admitted in that
+    /// window is work this shutdown already decided to drop, and none of it
+    /// is free — a metadata step advances the metadata root, a collection
+    /// pass deletes provider objects, an index step writes segments, all
+    /// after the process was asked to stop, and all of it the drain then
+    /// has to sit through. Closing first leaves the window empty.
+    ///
+    /// Nor can the order wedge, for a reason worth stating because it is
+    /// not the obvious one: no maintenance step submits to the publication
+    /// service at all. Every job compare-and-swaps the namespace head
+    /// through [`FsAdmin`](crate::FsAdmin), so the publication drain waits
+    /// only on client work and its pending set can only shrink. A step
+    /// already running finishes normally, and its chain then ends rather
+    /// than passing its permit on, because a shut admission book releases
+    /// the permit instead of handing it to the next key.
+    ///
+    /// Takes `&self` because `FsWriter` is [`Clone`] and exclusivity is
+    /// therefore unenforceable: clones observe the shutdown rather than
+    /// being consumed by it, and [`Self::is_shutting_down`] is what they
+    /// see. Calling it again — from this handle or any clone — is safe: the
+    /// closes are idempotent and the drains are waits, so a later call
+    /// settles whatever a concurrent one has not and returns. Dropping
+    /// every clone without calling this is best-effort cleanup, not the
+    /// documented graceful shutdown path.
+    pub async fn shutdown(&self) -> Result<()> {
+        // Both closes belong above the first await, for the reason the doc
+        // gives. Nothing may move below `drain`.
         self.bits.maintenance.shut_down();
-    }
-
-    /// Shuts down writer-scheduled background work: rejects new maintenance
-    /// scheduling, then settles admitted publications whose callers are gone
-    /// and waits for in-flight maintenance tasks to settle, surfacing panics.
-    /// Work that claimed its maintenance slot but has not started when the
-    /// shutdown lands is refused, never left running unobserved.
-    ///
-    /// Foreground calls remain usable afterward; this settles only
-    /// handle-owned background work, and with
-    /// [`FsBackgroundWork::ManualOnly`] it is nearly trivial. For a
-    /// terminal shutdown that also refuses later submissions with
-    /// `shutting_down`, call [`Self::close_maintenance_admission`] and then
-    /// [`PublisherRegistry::close_admission`](crate::publisher::PublisherRegistry::close_admission)
-    /// via [`Self::publisher`] first, in that order, as the reference
-    /// server does. Dropping the handle without calling this is best-effort
-    /// cleanup, not the documented graceful shutdown path.
-    pub async fn shutdown_background(&self) -> Result<()> {
-        // Closing maintenance admission has to come first, and before this
-        // future's first await. The drain below is that await: while it is
-        // pending the runtime keeps polling the runner, so a nudge landing
-        // in the window is admitted and its step does real durable work
-        // after the shutdown began — and a finishing step hands its slot
-        // straight to the next queued key rather than releasing it. Closing
-        // first leaves that window empty.
-        self.bits.maintenance.shut_down();
-        // Publications second, and this order cannot wedge: no maintenance
-        // step submits to the publication service at all — every job
-        // compare-and-swaps the namespace head through `FsAdmin` — so the
-        // drain waits only on client work and its pending set can only
-        // shrink. Draining without closing admission keeps the handle
-        // usable; a caller that keeps submitting concurrently just keeps
-        // the drain waiting.
+        self.publisher.close_admission();
         self.publisher.drain().await?;
         self.bits.maintenance.drain().await
     }
@@ -418,7 +432,8 @@ impl FsWriterBuilder {
 #[cfg(test)]
 mod tests {
     use crate::{
-        CreateNamespaceOptions, FsBackgroundWork, FsWriter, MaintenanceJobId, PutFileOptions,
+        CreateNamespaceOptions, ErrorCode, FsBackgroundWork, FsWriter, MaintenanceJobId,
+        NamespaceId, PutFileOptions,
     };
     use loonfs_objectstore::local_fs_store::LocalFsStore;
     use loonfs_test_support::ids::namespace_id;
@@ -426,32 +441,45 @@ mod tests {
     use std::sync::Arc;
     use tempfile::tempdir;
 
-    /// Maintenance admission must close on the shutdown's first poll, before
-    /// it starts draining publications. The drain is a wait, and the runner
+    /// A writer whose store parks the first head compare-and-swap, so a
+    /// publication can be held open across a shutdown's first poll.
+    async fn parked_publication_writer(
+        temp_dir: &std::path::Path,
+        writer_id: &str,
+        namespace_id: &NamespaceId,
+    ) -> (FsWriter, Arc<BlockingStore<LocalFsStore>>) {
+        let blocking = Arc::new(BlockingStore::new(
+            LocalFsStore::new(temp_dir).expect("create local-fs store"),
+            KeyPredicate::wal_head(namespace_id.as_str()),
+            OperationClass::CompareAndSwap,
+        ));
+        let writer = FsWriter::builder_with_store(blocking.clone())
+            .writer_id(writer_id)
+            .background_work(FsBackgroundWork::Enabled)
+            .build()
+            .await
+            .expect("build writer");
+        writer
+            .create_namespace(namespace_id, CreateNamespaceOptions::default())
+            .await
+            .expect("create namespace");
+        (writer, blocking)
+    }
+
+    /// Both admissions must close on the shutdown's first poll, before it
+    /// starts draining publications. The drain is a wait, and the runner
     /// stays live across it: a queue still open here lets a nudge landing in
     /// that window be admitted, and lets a finishing step hand its slot on
     /// and spawn work the shutdown already decided to drop. Asserting on the
     /// first poll pins the order on every machine; the integration coverage
     /// in `tests/it/handles.rs` only loses the race on some.
     #[tokio::test]
-    async fn shutdown_closes_maintenance_admission_before_draining_publications() {
+    async fn shutdown_closes_both_admissions_before_draining_publications() {
         let temp_dir = tempdir().expect("tempdir");
         let namespace_id = namespace_id("parked");
-        let blocking = Arc::new(BlockingStore::new(
-            LocalFsStore::new(temp_dir.path()).expect("create local-fs store"),
-            KeyPredicate::wal_head(namespace_id.as_str()),
-            OperationClass::CompareAndSwap,
-        ));
-        let writer = FsWriter::builder_with_store(blocking.clone())
-            .writer_id("shutdown-order-writer")
-            .background_work(FsBackgroundWork::Enabled)
-            .build()
-            .await
-            .expect("build writer");
-        writer
-            .create_namespace(&namespace_id, CreateNamespaceOptions::default())
-            .await
-            .expect("create namespace");
+        let (writer, blocking) =
+            parked_publication_writer(temp_dir.path(), "shutdown-order-writer", &namespace_id)
+                .await;
 
         // Park a publication so the shutdown's publication drain is still
         // pending when the first poll returns.
@@ -472,7 +500,7 @@ mod tests {
         });
         blocking.wait_until_blocked().await;
 
-        let mut shutdown = Box::pin(writer.shutdown_background());
+        let mut shutdown = Box::pin(writer.shutdown());
         assert!(
             futures::poll!(shutdown.as_mut()).is_pending(),
             "the parked publication must keep the shutdown pending"
@@ -489,11 +517,56 @@ mod tests {
                 .is_pending(MaintenanceJobId::METADATA, &namespace_id),
             "maintenance admission must already be closed while publications drain"
         );
+        // The publication half of the same window: a mutation submitted
+        // into the drain would be work the drain then has to wait for.
+        let refused = writer
+            .put_file_bytes(
+                &namespace_id,
+                "/late.txt",
+                b"body",
+                PutFileOptions::default(),
+            )
+            .await
+            .expect_err("a mutation submitted during the drain must be refused");
+        assert_eq!(
+            refused.code(),
+            ErrorCode::ShuttingDown,
+            "a late mutation reports `shutting_down`: {refused:?}"
+        );
+        assert!(writer.is_shutting_down());
 
         blocking.release();
         put.await
             .expect("join the parked put")
             .expect("the released put succeeds");
-        shutdown.await.expect("shut down writer background work");
+        shutdown.await.expect("shut down the writer");
+    }
+
+    /// Shutdown is a state of the shared runtime, not a token one handle
+    /// holds: a clone that shuts down is observable from every other clone,
+    /// and a second shutdown settles rather than panicking or wedging.
+    #[tokio::test]
+    async fn a_clone_observes_a_shutdown_and_may_repeat_it() {
+        let temp_dir = tempdir().expect("tempdir");
+        let namespace_id = namespace_id("clones");
+        let (writer, _blocking) =
+            parked_publication_writer(temp_dir.path(), "shutdown-clone-writer", &namespace_id)
+                .await;
+        let clone = writer.clone();
+        assert!(!clone.is_shutting_down());
+
+        writer.shutdown().await.expect("shut down the writer");
+        assert!(
+            clone.is_shutting_down(),
+            "a clone sees the runtime it shares shutting down"
+        );
+        clone
+            .shutdown()
+            .await
+            .expect("a second shutdown settles rather than failing");
+        clone
+            .flush_background()
+            .await
+            .expect("a shut runner has nothing left to settle");
     }
 }

@@ -13,7 +13,7 @@ pub use config::{
     load_server_config, GrepConfig, GrepMode, MaintenanceMode, RuntimeCacheConfigOverrides,
     ServerConfig, ServerConfigError, StoreConfig, TlsServerConfig,
 };
-pub use http::{app, serve, serve_with_shutdown, ServeError, ServerLifecycle, TlsConfigError};
+pub use http::{app, serve, serve_with_shutdown, ServeError, TlsConfigError};
 #[cfg(feature = "openapi")]
 pub use http::{openapi_document, openapi_json_pretty};
 pub use trace::{init_tracing_from_env, TraceInitError};

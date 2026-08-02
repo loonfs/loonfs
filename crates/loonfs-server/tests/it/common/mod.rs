@@ -36,9 +36,9 @@ pub(crate) async fn start_server(config: ServerConfig) -> TestServer {
         .await
         .expect("bind listener");
     let addr = listener.local_addr().expect("listener addr");
-    // The lifecycle handle is dropped: tests abort the server task instead
-    // of shutting it down gracefully.
-    let (router, _lifecycle) = app(config).await.expect("build app");
+    // The writer is dropped: tests abort the server task instead of shutting
+    // it down gracefully.
+    let (router, _writer) = app(config).await.expect("build app");
     let server = tokio::spawn(async move {
         axum::serve(listener, router).await.expect("serve app");
     });

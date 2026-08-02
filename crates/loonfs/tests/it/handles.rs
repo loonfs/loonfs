@@ -8,8 +8,9 @@
 
 use loonfs::{
     CommitId, CreateCheckpointOptions, CreateNamespaceOptions, ErrorCode, FsAdmin,
-    FsBackgroundWork, FsReader, FsWriter, MaintenanceStepKind, MaintenanceStepOptions, ManifestId,
-    NamespaceId, PutFileOptions, RuntimeCacheConfig, RuntimeError, SharedObjectStore, StoreConfig,
+    FsBackgroundWork, FsReader, FsWriter, MaintenanceJobId, MaintenanceStepKind,
+    MaintenanceStepOptions, ManifestId, NamespaceId, PutFileOptions, RuntimeCacheConfig,
+    RuntimeError, SharedObjectStore, StoreConfig,
 };
 use loonfs_api::wire::manifest::decode_namespace_manifest_json;
 use loonfs_core::control::load_namespace_metadata_root_control;
@@ -137,7 +138,7 @@ fn a_threshold_crossing_during_an_active_step_still_bounds_the_tail() {
 
         blocking.release();
         writer
-            .wait_for_background_work()
+            .flush_background()
             .await
             .expect("background maintenance quiesces");
 
@@ -155,7 +156,7 @@ fn a_threshold_crossing_during_an_active_step_still_bounds_the_tail() {
             "deferred crossings must rerun the step and bound the tail: {status:?}"
         );
         writer
-            .shutdown_background()
+            .shutdown()
             .await
             .expect("shut down writer background work");
     });
@@ -198,7 +199,7 @@ fn a_step_queued_at_the_global_cap_runs_without_another_publish() {
 
         blocking.release();
         writer
-            .wait_for_background_work()
+            .flush_background()
             .await
             .expect("queued maintenance quiesces");
 
@@ -216,7 +217,7 @@ fn a_step_queued_at_the_global_cap_runs_without_another_publish() {
             "the queued step must run without another publish: {status:?}"
         );
         writer
-            .shutdown_background()
+            .shutdown()
             .await
             .expect("shut down writer background work");
     });
@@ -269,7 +270,7 @@ fn a_write_stopped_namespace_queued_at_the_global_cap_unblocks_itself() {
 
         blocking.release();
         writer
-            .wait_for_background_work()
+            .flush_background()
             .await
             .expect("queued maintenance quiesces");
 
@@ -296,7 +297,7 @@ fn a_write_stopped_namespace_queued_at_the_global_cap_unblocks_itself() {
             "the queued step must flush the write-stopped tail before the retry: {status:?}"
         );
         writer
-            .shutdown_background()
+            .shutdown()
             .await
             .expect("shut down writer background work");
     });
@@ -337,7 +338,7 @@ fn shutdown_clears_a_non_empty_maintenance_queue_without_spawning_it() {
         blocking.wait_until_blocked().await;
         fill_wal_tail_past_threshold(&writer, &queued_namespace).await;
 
-        let mut shutdown = Box::pin(writer.shutdown_background());
+        let mut shutdown = Box::pin(writer.shutdown());
         assert!(
             futures::poll!(shutdown.as_mut()).is_pending(),
             "shutdown must wait for the parked active step"
@@ -362,7 +363,9 @@ fn shutdown_clears_a_non_empty_maintenance_queue_without_spawning_it() {
             "shutdown must clear queued work before the active step releases its permit"
         );
 
-        writer
+        // The shutdown that cleared the queue also closed the write path,
+        // so nothing can cross the WAL threshold behind it.
+        let refused = writer
             .put_file_bytes(
                 &queued_namespace,
                 "/after-close.txt",
@@ -370,18 +373,24 @@ fn shutdown_clears_a_non_empty_maintenance_queue_without_spawning_it() {
                 PutFileOptions::default(),
             )
             .await
-            .expect("foreground writes remain available after background shutdown");
+            .expect_err("a mutation after shutdown must be refused");
+        assert_eq!(refused.code(), ErrorCode::ShuttingDown);
+        // And the runner stays shut rather than reopening behind the drain:
+        // a nudge is the one trigger left, and it must admit nothing.
         writer
-            .wait_for_background_work()
+            .maintenance()
+            .nudge(MaintenanceJobId::METADATA, &queued_namespace);
+        writer
+            .flush_background()
             .await
-            .expect("nothing may spawn after background shutdown");
+            .expect("nothing may spawn after shutdown");
         let status = admin
             .namespace_status(&queued_namespace)
             .await
-            .expect("queued namespace status after post-close write");
+            .expect("queued namespace status after the post-shutdown nudge");
         assert_eq!(
             status.current_manifest_id, None,
-            "post-close threshold crossings must not spawn maintenance"
+            "post-shutdown nudges must not spawn maintenance"
         );
     });
 }
@@ -451,7 +460,7 @@ fn writer_reader_and_admin_share_a_namespace_through_store_config() {
         // Only the writer owns background work, so only the writer has
         // anything to shut down.
         writer
-            .shutdown_background()
+            .shutdown()
             .await
             .expect("shut down writer background work");
     });
@@ -530,7 +539,7 @@ fn admin_over_writer_core_invalidates_shared_caches() {
         let reader = writer.reader();
         fill_wal_tail_past_threshold(&writer, &namespace_id).await;
         writer
-            .wait_for_background_work()
+            .flush_background()
             .await
             .expect("background maintenance quiesces");
 
@@ -575,7 +584,7 @@ fn admin_over_writer_core_invalidates_shared_caches() {
             .expect("read after write on the shared core");
 
         writer
-            .shutdown_background()
+            .shutdown()
             .await
             .expect("shut down writer background work");
     });
@@ -665,7 +674,7 @@ fn manual_only_writer_never_schedules_maintenance() {
             .expect("create namespace");
         fill_wal_tail_past_threshold(&writer, &namespace_id).await;
         writer
-            .wait_for_background_work()
+            .flush_background()
             .await
             .expect("no background work to wait for");
 
@@ -724,7 +733,7 @@ fn enabled_writer_schedules_maintenance_on_its_owning_runtime() {
             .expect("create namespace");
         fill_wal_tail_past_threshold(&writer, &namespace_id).await;
         writer
-            .wait_for_background_work()
+            .flush_background()
             .await
             .expect("background maintenance quiesces");
 
@@ -746,7 +755,7 @@ fn enabled_writer_schedules_maintenance_on_its_owning_runtime() {
             "auto step should have bounded the tail: {status:?}"
         );
         writer
-            .shutdown_background()
+            .shutdown()
             .await
             .expect("shut down writer background work");
     });
@@ -772,7 +781,7 @@ fn enabled_writer_schedules_maintenance_with_caches_disabled() {
             .expect("create namespace");
         fill_wal_tail_past_threshold(&writer, &namespace_id).await;
         writer
-            .wait_for_background_work()
+            .flush_background()
             .await
             .expect("background maintenance quiesces");
 
@@ -790,14 +799,18 @@ fn enabled_writer_schedules_maintenance_with_caches_disabled() {
             "auto step should have bounded the tail: {status:?}"
         );
         writer
-            .shutdown_background()
+            .shutdown()
             .await
             .expect("shut down writer background work");
     });
 }
 
 #[test]
-fn shut_down_writer_rejects_new_background_work_but_keeps_writing() {
+fn a_shut_down_writer_refuses_mutations_and_keeps_reading() {
+    // Shutdown is terminal for the write path only. Mutations are refused,
+    // so nothing can cross the WAL threshold and schedule work the runner
+    // is no longer around to run, while reads — which own no background
+    // work — answer from durable state exactly as before.
     let temp_dir = tempdir().expect("tempdir");
     let namespace_id = namespace_id("demo");
     block_on(async {
@@ -807,18 +820,49 @@ fn shut_down_writer_rejects_new_background_work_but_keeps_writing() {
             .await
             .expect("create namespace");
         writer
-            .shutdown_background()
+            .put_file_bytes(
+                &namespace_id,
+                "/docs/hello.txt",
+                b"hello",
+                PutFileOptions::default(),
+            )
             .await
-            .expect("shut down writer background work");
+            .expect("put file before the shutdown");
+        let tail_at_shutdown = FsAdmin::builder(store_config(temp_dir.path()))
+            .actor_id("handle-test-admin")
+            .build()
+            .await
+            .expect("build admin")
+            .namespace_status(&namespace_id)
+            .await
+            .expect("status before the shutdown")
+            .wal_tail_segments;
 
-        // Foreground writes still work after the background shutdown; only
-        // handle-owned background scheduling is rejected.
-        fill_wal_tail_past_threshold(&writer, &namespace_id).await;
+        assert!(!writer.is_shutting_down());
+        writer.shutdown().await.expect("shut down the writer");
+        assert!(writer.is_shutting_down());
+
+        let refused = writer
+            .put_file_bytes(
+                &namespace_id,
+                "/docs/after.txt",
+                b"body",
+                PutFileOptions::default(),
+            )
+            .await
+            .expect_err("a mutation after shutdown must be refused");
+        assert_eq!(refused.code(), ErrorCode::ShuttingDown);
+        let read = writer
+            .reader()
+            .get_file_bytes(&namespace_id, "/docs/hello.txt")
+            .await
+            .expect("reads survive the writer's shutdown");
+        assert_eq!(read.bytes, b"hello");
+
         writer
-            .wait_for_background_work()
+            .flush_background()
             .await
-            .expect("nothing scheduled after background shutdown");
-
+            .expect("nothing scheduled after the shutdown");
         let admin = FsAdmin::builder(store_config(temp_dir.path()))
             .actor_id("handle-test-admin")
             .build()
@@ -827,14 +871,14 @@ fn shut_down_writer_rejects_new_background_work_but_keeps_writing() {
         let status = admin
             .namespace_status(&namespace_id)
             .await
-            .expect("status after post-shutdown writes");
+            .expect("status after the shutdown");
         assert_eq!(
             status.current_manifest_id, None,
-            "shut-down writer must not schedule checkpoints: {status:?}"
+            "a shut-down writer must not schedule checkpoints: {status:?}"
         );
-        assert!(
-            status.wal_tail_segments >= wal_tail_segment_count_past_threshold(),
-            "shut-down writer must leave the tail alone: {status:?}"
+        assert_eq!(
+            status.wal_tail_segments, tail_at_shutdown,
+            "a refused mutation must leave the tail exactly as it was: {status:?}"
         );
     });
 }
@@ -972,7 +1016,7 @@ fn enabled_writer_drains_reorganization_backlog_without_admin() {
                     .expect("put file");
             }
             writer
-                .wait_for_background_work()
+                .flush_background()
                 .await
                 .expect("background steps finish");
         }

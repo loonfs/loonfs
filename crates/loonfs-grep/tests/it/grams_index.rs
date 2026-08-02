@@ -198,7 +198,7 @@ async fn grep_worker_builds_the_gram_index_once_enabled() {
     assert!(matches!(error, GrepError::NotEnabled));
     assert_eq!(error.code(), ErrorCode::NotSupported);
 
-    writer.shutdown_background().await.expect("writer shutdown");
+    writer.shutdown().await.expect("writer shutdown");
 }
 
 /// Runtime background maintenance is metadata-only: a small publish leaves
@@ -240,7 +240,7 @@ async fn a_publish_below_the_wal_threshold_does_not_schedule_grep_work() {
         .await
         .expect("write delta");
     writer
-        .wait_for_background_work()
+        .flush_background()
         .await
         .expect("background work quiesces");
 
@@ -273,7 +273,7 @@ async fn a_publish_below_the_wal_threshold_does_not_schedule_grep_work() {
     assert_eq!(response.matches.len(), 1);
     assert_eq!(response.matches[0].absolute_path, "/delta.txt");
 
-    writer.shutdown_background().await.expect("writer shutdown");
+    writer.shutdown().await.expect("writer shutdown");
 }
 
 /// A policy passed to the worker bounds each explicit build step: with
@@ -340,7 +340,7 @@ async fn a_worker_policy_bounds_each_build_step() {
         "the next step must consume the remaining two commits"
     );
 
-    writer.shutdown_background().await.expect("writer shutdown");
+    writer.shutdown().await.expect("writer shutdown");
 }
 
 /// A single legal commit can carry thousands of file revisions. The content
@@ -538,7 +538,7 @@ async fn a_thousand_file_commit_is_byte_bounded_query_complete_and_crash_resumab
         FILES
     );
 
-    writer.shutdown_background().await.expect("writer shutdown");
+    writer.shutdown().await.expect("writer shutdown");
 }
 
 async fn assert_grep_paths(
@@ -656,7 +656,7 @@ async fn grep_answers_identically_across_tiered_folds() {
         "ten one-delta rounds must fold at least once into a mid run, got levels {grams_levels:?}"
     );
 
-    writer.shutdown_background().await.expect("writer shutdown");
+    writer.shutdown().await.expect("writer shutdown");
 }
 
 /// Accounts full content-blob GETs issued by one explicit worker step.
@@ -885,7 +885,7 @@ async fn repeated_grep_serves_posting_blocks_from_the_grep_cache() {
          posting block from the decoded-block cache"
     );
 
-    writer.shutdown_background().await.expect("writer shutdown");
+    writer.shutdown().await.expect("writer shutdown");
 }
 
 /// Concurrent candidate content reads keep the serial loop's error
@@ -998,7 +998,7 @@ async fn a_failed_candidate_read_surfaces_in_traversal_order() {
     };
     assert_eq!(core.code(), ErrorCode::NamespaceCorrupt);
 
-    writer.shutdown_background().await.expect("writer shutdown");
+    writer.shutdown().await.expect("writer shutdown");
 }
 
 /// Records the key of every store GET against a content blob object, so
@@ -1198,7 +1198,7 @@ async fn an_oversized_tail_candidate_is_skipped_without_a_content_read() {
         "no content GET may touch the oversized object: {fetched_during_greps:?}"
     );
 
-    writer.shutdown_background().await.expect("writer shutdown");
+    writer.shutdown().await.expect("writer shutdown");
 }
 
 /// Fold steps and grep queries deliberately use separate decoded-block
@@ -1313,7 +1313,7 @@ async fn a_fold_does_not_reuse_grep_private_index_blocks() {
         "each eight-round batch must have folded into its own mid run, got {grams:?}"
     );
 
-    writer.shutdown_background().await.expect("writer shutdown");
+    writer.shutdown().await.expect("writer shutdown");
 }
 
 /// Tracks how many GETs against gram index segment objects are in flight
@@ -1477,5 +1477,5 @@ async fn a_cold_fold_fans_out_its_segment_opens_within_the_io_cap() {
         "the observed fold must have left a mid run behind, got {grams:?}"
     );
 
-    writer.shutdown_background().await.expect("writer shutdown");
+    writer.shutdown().await.expect("writer shutdown");
 }

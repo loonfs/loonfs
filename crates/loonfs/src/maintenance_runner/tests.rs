@@ -904,7 +904,7 @@ async fn upload_paths_plant_the_collection_deadlines_they_create() {
     );
 
     writer
-        .shutdown_background()
+        .shutdown()
         .await
         .expect("shut down writer background work");
     assert_eq!(
