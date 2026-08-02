@@ -135,7 +135,10 @@ pub struct MetadataRootState {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CheckpointRecordLifecycle {
     /// Protects the checkpoint basis. The sole state a read may serve from.
-    Active,
+    ///
+    /// The braces make serde reject a stray `released_at_ms`; a unit variant
+    /// would silently accept and discard that field.
+    Active {},
     /// Terminal: the pin is gone and the record is waiting to be deleted.
     Released {
         /// Unix-millisecond stamp written by the release compare-and-swap,
@@ -147,7 +150,7 @@ pub enum CheckpointRecordLifecycle {
 impl std::fmt::Display for CheckpointRecordLifecycle {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let state = match self {
-            Self::Active => "active",
+            Self::Active {} => "active",
             Self::Released { .. } => "released",
         };
         formatter.write_str(state)

@@ -154,7 +154,7 @@ pub(super) async fn collect_live_set<S: ObjectStore + ?Sized>(
                 // Every check here is repeated at decision time; this only
                 // selects candidates.
                 let candidate = match &record.owner {
-                    _ if record.state != CheckpointRecordLifecycle::Active => true,
+                    _ if record.state != (CheckpointRecordLifecycle::Active {}) => true,
                     CheckpointOwner::User { .. } => lease_expired(&record, now_ms),
                     CheckpointOwner::Fork {
                         target_namespace_id,

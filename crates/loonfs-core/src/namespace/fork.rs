@@ -185,7 +185,7 @@ async fn ensure_fork_checkpoint_lease_holds<S: ObjectStore + ?Sized>(
     else {
         return lost("the record is gone".to_owned());
     };
-    if record.state != CheckpointRecordLifecycle::Active {
+    if record.state != (CheckpointRecordLifecycle::Active {}) {
         return lost(format!("the record is `{}`", record.state));
     }
     let holds = record

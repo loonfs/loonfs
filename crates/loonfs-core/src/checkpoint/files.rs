@@ -215,7 +215,7 @@ async fn read_pinning_checkpoint_record<S: ObjectStore + ?Sized>(
             "checkpoint `{checkpoint_id}` does not exist in namespace `{namespace_id}`"
         )));
     };
-    if record.state != CheckpointRecordLifecycle::Active {
+    if record.state != (CheckpointRecordLifecycle::Active {}) {
         return Err(CoreError::CheckpointUnavailable(format!(
             "checkpoint `{checkpoint_id}` is `{}` and no longer pins its basis",
             record.state

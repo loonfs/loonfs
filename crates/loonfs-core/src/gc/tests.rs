@@ -2298,7 +2298,7 @@ async fn gc_never_releases_a_fork_record_while_its_target_lives() {
         assert_eq!(report.released_expired_checkpoints, 0, "at {now_ms}");
         assert_eq!(
             checkpoint_lifecycle(&store, &source, &fork_record.checkpoint_id).await,
-            CheckpointRecordLifecycle::Active,
+            CheckpointRecordLifecycle::Active {},
             "a live target keeps its pin at {now_ms}"
         );
     }
@@ -2375,7 +2375,7 @@ async fn gc_releases_abandoned_fork_checkpoints_once_the_lease_expires() {
         assert_eq!(report.released_fork_checkpoints, 0, "at {now_ms}");
         assert_eq!(
             checkpoint_lifecycle(&store, &source, &abandoned.checkpoint_id).await,
-            CheckpointRecordLifecycle::Active
+            CheckpointRecordLifecycle::Active {}
         );
         assert!(crate::checkpoint::load_namespace_manifest_envelope(
             &store,
@@ -2445,7 +2445,7 @@ async fn a_fork_retry_after_abandonment_takes_a_record_of_its_own() {
     assert_eq!(retry, 2, "the retry pins for itself instead of reusing");
     assert_eq!(
         checkpoint_lifecycle(&store, &source, &abandoned.checkpoint_id).await,
-        CheckpointRecordLifecycle::Active,
+        CheckpointRecordLifecycle::Active {},
         "the abandoned record is untouched; its lease ends it"
     );
     load_metadata_view(&store, &clone, ReadLoadContext::latest())

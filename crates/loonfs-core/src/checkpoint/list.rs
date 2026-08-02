@@ -59,7 +59,7 @@ pub(crate) async fn list_checkpoints<S: ObjectStore + ?Sized>(
         else {
             continue;
         };
-        if loaded.state.state != CheckpointRecordLifecycle::Active {
+        if loaded.state.state != (CheckpointRecordLifecycle::Active {}) {
             continue;
         }
         let record = loaded.state;

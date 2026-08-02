@@ -52,7 +52,7 @@ pub(super) async fn release_missing_basis_checkpoint<S: ObjectStore + ?Sized>(
         return Ok(false);
     };
     let record = envelope.state;
-    if record.state != CheckpointRecordLifecycle::Active {
+    if record.state != (CheckpointRecordLifecycle::Active {}) {
         return Ok(false);
     }
     if context.now_ms.saturating_sub(record.created_at_ms) < grace_window_ms {
@@ -96,7 +96,7 @@ pub(super) async fn maybe_release_fork_checkpoint<S: ObjectStore + ?Sized>(
         return Ok(ForkCheckpointSweep::Retained);
     };
     let record = envelope.state;
-    if record.state != CheckpointRecordLifecycle::Active {
+    if record.state != (CheckpointRecordLifecycle::Active {}) {
         return Ok(ForkCheckpointSweep::NotAnActiveFork);
     }
     let CheckpointOwner::Fork {
