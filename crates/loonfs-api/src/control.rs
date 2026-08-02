@@ -136,8 +136,8 @@ pub struct MetadataRootState {
 pub enum CheckpointRecordLifecycle {
     /// Protects the checkpoint basis. The sole state a read may serve from.
     ///
-    /// The empty braces are load-bearing: a unit variant would silently
-    /// accept and discard a `released_at_ms` stamp.
+    /// The braces make serde reject a stray `released_at_ms`; a unit variant
+    /// would silently accept and discard that field.
     Active {},
     /// Terminal: the pin is gone and the record is waiting to be deleted.
     Released {
