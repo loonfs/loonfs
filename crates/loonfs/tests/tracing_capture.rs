@@ -99,7 +99,7 @@ fn background_step_conclusions_emit_debug_events() {
             .expect("create namespace");
         fill_wal_tail_past_threshold(&writer, &namespace_id).await;
         writer
-            .wait_for_background_work()
+            .flush_background()
             .await
             .expect("background maintenance quiesces");
     });

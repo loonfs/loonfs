@@ -51,7 +51,7 @@ async fn registered_observer_sees_namespace_and_sequence_after_publish() {
         *observed.lock().expect("observer values lock poisoned"),
         vec![(namespace_id, ChangeSeq(1))]
     );
-    writer.shutdown_background().await.expect("shutdown");
+    writer.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test]
@@ -81,5 +81,5 @@ async fn unregistered_writer_publishes_with_the_existing_result_shape() {
         .expect("publish without observer");
     assert_eq!(response.namespace_id, namespace_id);
     assert_eq!(response.committed_seq, ChangeSeq(1));
-    writer.shutdown_background().await.expect("shutdown");
+    writer.shutdown().await.expect("shutdown");
 }

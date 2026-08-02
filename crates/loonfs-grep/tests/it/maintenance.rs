@@ -180,9 +180,7 @@ async fn a_nudge_indexes_a_namespace_while_a_poisoned_sibling_backs_off() {
         Bytes::from_static(b"poison"),
         "a step that cannot read its root publishes nothing"
     );
-    host.shutdown_background()
-        .await
-        .expect("settle host maintenance");
+    host.shutdown().await.expect("settle host maintenance");
 }
 
 /// One writer, one permit pool: the runner's cap is what bounds grep steps
@@ -238,9 +236,7 @@ async fn the_runners_one_permit_pool_caps_grep_steps_across_namespaces() {
         store.peak_in_flight() <= MAX_CONCURRENT_MAINTENANCE,
         "executing grep steps exceeded the runner's pool"
     );
-    host.shutdown_background()
-        .await
-        .expect("settle host maintenance");
+    host.shutdown().await.expect("settle host maintenance");
 }
 
 fn job<S: ObjectStore + Clone>(worker: &GrepWorker<S>) -> GrepMaintenanceJob<S> {
@@ -299,9 +295,7 @@ async fn a_nudge_collects_what_indexing_left_behind() {
             .is_some(),
         "the pointer a live namespace still names is never a candidate"
     );
-    host.shutdown_background()
-        .await
-        .expect("settle host maintenance");
+    host.shutdown().await.expect("settle host maintenance");
 }
 
 /// A resume position the collector refuses restarts the pass instead of

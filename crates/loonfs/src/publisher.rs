@@ -55,10 +55,9 @@
 //! result delivery, and the publication still lands. At shutdown,
 //! [`PublisherRegistry::close_admission`] refuses new submissions with
 //! `shutting_down` and [`PublisherRegistry::drain`] settles everything
-//! already admitted; the reference server runs both once its listener
-//! drains, and
-//! [`FsWriter::shutdown_background`](crate::FsWriter::shutdown_background)
-//! drains without closing, so the handle stays usable.
+//! already admitted. Hosts do not sequence those themselves:
+//! [`FsWriter::shutdown`](crate::FsWriter::shutdown) owns the order they
+//! run in relative to the maintenance runner's own close and drain.
 
 use crate::fs::{ReadCore, WriterBits};
 use crate::publish::{CommitCandidate, CommitRequest, PreparedContent};
@@ -105,9 +104,11 @@ const MAX_BATCH_CANDIDATES: usize = 1024;
 /// registry — [`FsWriter::publisher`](crate::FsWriter::publisher) hands
 /// out exactly that.
 ///
-/// The registry owns the worker tasks its publishers spawn. Shut it down
-/// in two steps once the host stops accepting work:
-/// [`Self::close_admission`], then [`Self::drain`].
+/// The registry owns the worker tasks its publishers spawn, and settling
+/// them is two steps: [`Self::close_admission`], then [`Self::drain`]. A
+/// host does not run them itself —
+/// [`FsWriter::shutdown`](crate::FsWriter::shutdown) does, in the order
+/// that is correct relative to the maintenance runner.
 #[derive(Clone)]
 pub struct PublisherRegistry {
     shared: Arc<RegistryShared>,

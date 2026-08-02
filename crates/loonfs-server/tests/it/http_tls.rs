@@ -134,7 +134,7 @@ async fn a_plaintext_request_to_the_tls_port_loses_only_its_own_connection() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn graceful_shutdown_settles_the_lifecycle_on_the_tls_path() {
+async fn graceful_shutdown_settles_background_work_on_the_tls_path() {
     let temp_dir = tempdir().expect("tempdir");
     let harness = start_tls_server(test_config(
         temp_dir.path().join("store"),
@@ -157,7 +157,7 @@ async fn graceful_shutdown_settles_the_lifecycle_on_the_tls_path() {
         .expect("write file");
 
     // `serve_with_shutdown` returns only after the listener drains and the
-    // lifecycle settles; an unsettled one would surface here as an error.
+    // writer settles; unsettled background work surfaces here as an error.
     shut_down(harness).await;
 }
 

@@ -46,6 +46,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let file = reader.get_file_bytes(&namespace_id, "/hello.txt").await?;
     println!("{}", String::from_utf8_lossy(&file.bytes));
 
-    writer.shutdown_background().await?;
+    writer.shutdown().await?;
     Ok(())
 }

@@ -1,7 +1,8 @@
 //! HTTP route assembly for the LoonFS server.
 //!
 //! Handlers are grouped by API area, request decoding lives in
-//! [`extractors`], and listener/lifecycle ownership lives in [`serve`].
+//! [`extractors`], and handle construction and listener ownership live in
+//! [`serve`].
 
 mod error;
 mod extractors;
@@ -21,7 +22,7 @@ mod tls;
 
 #[cfg(feature = "openapi")]
 pub use self::openapi::{openapi_document, openapi_json_pretty};
-pub use self::serve::{app, serve, serve_with_shutdown, ServeError, ServerLifecycle};
+pub use self::serve::{app, serve, serve_with_shutdown, ServeError};
 pub use self::tls::TlsConfigError;
 
 use self::error::ApiResponseError;
@@ -332,11 +333,11 @@ async fn health() -> &'static str {
     )
 )]
 async fn readiness(State(state): State<AppState>) -> Result<&'static str, ApiResponseError> {
-    if state.writer.publisher().is_admission_closed() {
+    if state.writer.is_shutting_down() {
         return Err(ApiResponseError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             ErrorCode::ShuttingDown,
-            "publisher admission is closed; the server is shutting down",
+            "the server is shutting down and no longer admits new work",
         ));
     }
     Ok("ready")

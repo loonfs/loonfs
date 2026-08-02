@@ -360,10 +360,9 @@ async fn embedded_shutdown_drains_an_active_grep_step() {
 
     blocking_store.block_next();
     let config = test_config(temp_dir.path(), "grep-shutdown-server");
-    let (_router, lifecycle, state) =
-        super::app_with_store_and_transfer_issuer(config, store, None)
-            .await
-            .expect("build app");
+    let (_router, state) = super::app_with_store_and_transfer_issuer(config, store, None)
+        .await
+        .expect("build app");
     state
         .grep_maintenance
         .as_ref()
@@ -371,7 +370,10 @@ async fn embedded_shutdown_drains_an_active_grep_step() {
         .nudge(&namespace_id);
     blocking_store.wait_until_blocked().await;
 
-    let shutdown = tokio::runtime::Handle::current().spawn(lifecycle.shutdown());
+    let shutdown = tokio::runtime::Handle::current().spawn({
+        let writer = state.writer.clone();
+        async move { writer.shutdown().await }
+    });
     tokio::task::yield_now().await;
     assert!(
         !shutdown.is_finished(),
@@ -420,9 +422,10 @@ impl MaintenanceJob for StepCountingJob {
     }
 }
 
-/// The server closes maintenance admission before it starts draining
-/// publications, mirroring the rule `FsWriter::shutdown_background` holds
-/// internally.
+/// `FsWriter::shutdown` closes maintenance admission before it starts
+/// draining publications, under a real deployment rather than a bare
+/// writer: this server registers the grep index job and runs the publish
+/// observer that nudges it.
 ///
 /// The drain is a wait, and it is the whole window: while it runs, the
 /// runner's timer is still promoting deadlines and every publication that
@@ -444,7 +447,7 @@ async fn shutdown_closes_maintenance_admission_before_draining_publications() {
         OperationClass::CompareAndSwap,
     ));
     let config = test_config(temp_dir.path(), "shutdown-order-server");
-    let (_router, lifecycle, state) = super::app_with_store_and_transfer_issuer(
+    let (_router, state) = super::app_with_store_and_transfer_issuer(
         config,
         blocking.clone() as SharedObjectStore,
         None,
@@ -470,8 +473,9 @@ async fn shutdown_closes_maintenance_admission_before_draining_publications() {
     // The control. Without it, a later count of zero would prove only that
     // this job never ran under any conditions.
     state.writer.maintenance().nudge(job, &namespace_id);
-    lifecycle
-        .wait_for_maintenance()
+    state
+        .writer
+        .flush_background()
         .await
         .expect("settle the admitted step");
     let admitted_while_serving = steps.load(Ordering::SeqCst);
@@ -500,7 +504,7 @@ async fn shutdown_closes_maintenance_admission_before_draining_publications() {
     });
     blocking.wait_until_blocked().await;
 
-    let mut shutdown = Box::pin(lifecycle.shutdown());
+    let mut shutdown = Box::pin(state.writer.shutdown());
     assert!(
         futures::poll!(shutdown.as_mut()).is_pending(),
         "the parked publication must keep the shutdown pending"
@@ -527,7 +531,7 @@ async fn shutdown_closes_maintenance_admission_before_draining_publications() {
     state.writer.maintenance().nudge(job, &namespace_id);
     state
         .writer
-        .wait_for_background_work()
+        .flush_background()
         .await
         .expect("a shut runner has nothing left to settle");
     assert_eq!(
@@ -542,10 +546,9 @@ async fn the_publish_observer_nudges_the_enabled_namespaces_index() {
     let temp_dir = tempdir().expect("tempdir");
     let store = Arc::new(LocalFsStore::new(temp_dir.path()).expect("store")) as SharedObjectStore;
     let config = test_config(temp_dir.path(), "grep-observer-server");
-    let (_router, lifecycle, state) =
-        super::app_with_store_and_transfer_issuer(config, store, None)
-            .await
-            .expect("build app");
+    let (_router, state) = super::app_with_store_and_transfer_issuer(config, store, None)
+        .await
+        .expect("build app");
     let namespace_id = namespace_id("grep-observer");
     state
         .writer
@@ -564,8 +567,9 @@ async fn the_publish_observer_nudges_the_enabled_namespaces_index() {
         .as_ref()
         .expect("an index-maintaining app carries a maintenance handle")
         .nudge(&namespace_id);
-    lifecycle
-        .wait_for_maintenance()
+    state
+        .writer
+        .flush_background()
         .await
         .expect("settle the backfill");
     assert_eq!(
@@ -585,8 +589,9 @@ async fn the_publish_observer_nudges_the_enabled_namespaces_index() {
         )
         .await
         .expect("publish file");
-    lifecycle
-        .wait_for_maintenance()
+    state
+        .writer
+        .flush_background()
         .await
         .expect("settle the observer-driven step");
     assert_eq!(
@@ -615,7 +620,7 @@ async fn the_publish_observer_nudges_the_enabled_namespaces_index() {
         .await
         .expect("grep caught-up index");
     assert_eq!(response.matches.len(), 1);
-    lifecycle.shutdown().await.expect("drain lifecycle");
+    state.writer.shutdown().await.expect("drain the writer");
 }
 
 /// What the index's steps published, read where an operator reads it.
@@ -640,7 +645,7 @@ async fn grep_error_disabled_root_is_not_materialized_and_core_reads_survive() {
     let worker = grep_error_worker(&store).await;
     worker.enable(&namespace_id).await.expect("enable grep");
     worker.disable(&namespace_id).await.expect("disable grep");
-    writer.shutdown_background().await.expect("shutdown writer");
+    writer.shutdown().await.expect("shutdown writer");
 
     let harness = start_grep_error_server(store, temp_dir.path(), "disabled-server").await;
     let client = &harness.client;
@@ -669,7 +674,7 @@ async fn grep_error_mid_backfill_is_not_materialized_and_core_reads_survive() {
         .enable(&namespace_id)
         .await
         .expect("leave grep backfilling");
-    writer.shutdown_background().await.expect("shutdown writer");
+    writer.shutdown().await.expect("shutdown writer");
 
     let harness = start_grep_error_server(store, temp_dir.path(), "backfill-server").await;
     let client = &harness.client;
@@ -694,7 +699,7 @@ async fn grep_error_store_outage_is_provider_failure_and_core_reads_survive() {
     let fault_store = Arc::new(FaultGrepRootStore::new(temp_dir.path(), &namespace_id));
     let store = fault_store.clone() as SharedObjectStore;
     let writer = seed_grep_error_namespace(&store, &namespace_id).await;
-    writer.shutdown_background().await.expect("shutdown writer");
+    writer.shutdown().await.expect("shutdown writer");
 
     let harness = start_grep_error_server(store, temp_dir.path(), "store-server").await;
     fault_store.fail_next_root_read();
@@ -726,7 +731,7 @@ async fn grep_error_corrupt_pointer_is_index_corrupt_and_core_reads_survive() {
         )
         .await
         .expect("write corrupt grep pointer");
-    writer.shutdown_background().await.expect("shutdown writer");
+    writer.shutdown().await.expect("shutdown writer");
 
     let harness = start_grep_error_server(store, temp_dir.path(), "pointer-server").await;
     assert_index_corrupt_and_core_read(harness, namespace_id).await;
@@ -741,7 +746,7 @@ async fn grep_error_missing_manifest_is_index_corrupt_and_core_reads_survive() {
     let manifest_id =
         GrepManifestId::parse("gmf_11111111111111111111111111111111").expect("manifest id");
     write_grep_pointer(&*store, &namespace_id, namespace_id.clone(), manifest_id).await;
-    writer.shutdown_background().await.expect("shutdown writer");
+    writer.shutdown().await.expect("shutdown writer");
 
     let harness = start_grep_error_server(store, temp_dir.path(), "missing-manifest-server").await;
     assert_index_corrupt_and_core_read(harness, namespace_id).await;
@@ -763,7 +768,7 @@ async fn grep_error_corrupt_manifest_is_index_corrupt_and_core_reads_survive() {
         .await
         .expect("write corrupt grep manifest");
     write_grep_pointer(&*store, &namespace_id, namespace_id.clone(), manifest_id).await;
-    writer.shutdown_background().await.expect("shutdown writer");
+    writer.shutdown().await.expect("shutdown writer");
 
     let harness = start_grep_error_server(store, temp_dir.path(), "manifest-server").await;
     assert_index_corrupt_and_core_read(harness, namespace_id).await;
@@ -784,7 +789,7 @@ async fn grep_error_identity_mismatch_is_index_corrupt_and_core_reads_survive() 
         manifest_id,
     )
     .await;
-    writer.shutdown_background().await.expect("shutdown writer");
+    writer.shutdown().await.expect("shutdown writer");
 
     let harness = start_grep_error_server(store, temp_dir.path(), "identity-server").await;
     assert_index_corrupt_and_core_read(harness, namespace_id).await;
@@ -797,7 +802,7 @@ async fn grep_error_publication_conflict_is_stale_head_and_core_reads_survive() 
     let fault_store = Arc::new(FaultGrepRootStore::new(temp_dir.path(), &namespace_id));
     let store = fault_store.clone() as SharedObjectStore;
     let writer = seed_grep_error_namespace(&store, &namespace_id).await;
-    writer.shutdown_background().await.expect("shutdown writer");
+    writer.shutdown().await.expect("shutdown writer");
 
     let harness = start_grep_admin_error_server(store, temp_dir.path(), "conflict-server").await;
     fault_store.conflict_next_root_publication();
@@ -1936,7 +1941,10 @@ async fn readiness_answers_ready_then_shutting_down_once_admission_closes() {
         .expect("readiness body");
     assert_eq!(body, "ready");
 
-    state.writer.publisher().close_admission();
+    // The production trigger, not a poke at the registry: readiness flips
+    // because the writer shut down. The listener stays up across it, which
+    // is the whole window this route exists for.
+    state.writer.shutdown().await.expect("shut down the writer");
 
     tokio::task::spawn_blocking(move || match raw_agent().get(&ready_url).call() {
         Err(ureq::Error::Status(503, response)) => {
@@ -2378,10 +2386,9 @@ mod direct_download {
             Arc::new(LocalFsStore::new(root).expect("construct local store"));
         let mut config = test_config(root, writer_id);
         config.max_download_bytes = PROXY_CAP_BYTES;
-        let (router, _lifecycle, _state) =
-            app_with_store_and_transfer_issuer(config, store, issuer)
-                .await
-                .expect("build app");
+        let (router, _state) = app_with_store_and_transfer_issuer(config, store, issuer)
+            .await
+            .expect("build app");
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind listener");

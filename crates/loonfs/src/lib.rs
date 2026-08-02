@@ -30,8 +30,9 @@
 //! process touches and the ones a host explicitly assigns to it, and it
 //! discovers none. LoonFS never creates a hidden maintenance runtime: that
 //! work is spawned on the writer's own owning runtime, and
-//! [`FsWriter::shutdown_background`] settles it. Readers and admins start no
-//! background work at all, so they have nothing to shut down.
+//! [`FsWriter::shutdown`] settles it in the one order that is correct.
+//! Readers and admins start no background work at all, so they have nothing
+//! to shut down.
 #![warn(missing_docs)]
 
 mod cache;

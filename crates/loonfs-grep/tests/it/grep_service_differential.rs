@@ -299,11 +299,7 @@ async fn planless_scan_returns_exact_materialized_and_wal_boundary_revisions_onc
         1
     );
 
-    fixture
-        .writer
-        .shutdown_background()
-        .await
-        .expect("writer shutdown");
+    fixture.writer.shutdown().await.expect("writer shutdown");
 }
 
 #[tokio::test]
@@ -356,11 +352,7 @@ async fn planless_scan_deduplicates_an_inode_revised_across_materialization() {
     assert_eq!(response.matches[0].revision_no.0, 2);
     assert_eq!(response.matches[0].line, "x WAL revision");
 
-    fixture
-        .writer
-        .shutdown_background()
-        .await
-        .expect("writer shutdown");
+    fixture.writer.shutdown().await.expect("writer shutdown");
 }
 
 #[tokio::test]
@@ -631,5 +623,5 @@ async fn grep_service_pins_query_semantics_response_shapes_and_budgets() {
     assert!(!stale.tail_scanned);
     assert_eq!(stale.matches.len(), 1);
 
-    writer.shutdown_background().await.expect("writer shutdown");
+    writer.shutdown().await.expect("writer shutdown");
 }

@@ -333,7 +333,7 @@ async fn grep_worker_lifecycle_uses_and_releases_checkpointed_backfill() {
         root.manifest_state().lifecycle(),
         GrepLifecycle::Backfilling { .. }
     ));
-    writer.shutdown_background().await.expect("shutdown");
+    writer.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test]
@@ -431,7 +431,7 @@ async fn retention_gap_and_vanished_checkpoint_restart_fresh_backfill() {
         .await
         .expect("query after rebootstrap");
     assert_eq!(response.matches.len(), 1);
-    writer.shutdown_background().await.expect("shutdown");
+    writer.shutdown().await.expect("shutdown");
 }
 
 /// A backfill whose pin has outlived its ttl but has not been released
@@ -505,7 +505,7 @@ async fn an_expired_but_unreleased_backfill_pin_keeps_enumerating() {
         .await
         .expect("query after a backfill on an expired pin");
     assert_eq!(response.matches.len(), 1);
-    writer.shutdown_background().await.expect("shutdown");
+    writer.shutdown().await.expect("shutdown");
 }
 
 /// Asserts the namespace's grep root is at the start of a backfill attempt
@@ -699,7 +699,7 @@ async fn commits_during_backfill_are_indexed_once_by_the_feed_phase() {
         superseded.matches.is_empty(),
         "a revision the checkpoint pinned but the feed replaced must not match"
     );
-    writer.shutdown_background().await.expect("shutdown");
+    writer.shutdown().await.expect("shutdown");
 }
 
 /// A move changes no content, so it changes no posting: the index is left
@@ -761,7 +761,7 @@ async fn a_move_reindexes_nothing_and_answers_the_new_path() {
         .await
         .expect("query after the move");
     assert_eq!(matched_paths(&response), vec!["/docs/renamed.txt"]);
-    writer.shutdown_background().await.expect("shutdown");
+    writer.shutdown().await.expect("shutdown");
 }
 
 /// A recursive delete hides every match under it and an undelete brings
@@ -865,7 +865,7 @@ async fn a_recursive_delete_hides_matches_and_an_undelete_restores_them() {
         segments_before,
         "an undelete must write no new postings"
     );
-    writer.shutdown_background().await.expect("shutdown");
+    writer.shutdown().await.expect("shutdown");
 }
 
 /// Grep is a projection beside the filesystem, not inside it: a worker step
@@ -917,7 +917,7 @@ async fn a_failing_worker_step_never_blocks_a_concurrent_commit() {
         .await
         .expect("the committed file is readable");
     assert_eq!(read.bytes, b"isolated needle\n");
-    writer.shutdown_background().await.expect("shutdown");
+    writer.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test]
@@ -998,7 +998,7 @@ async fn grep_root_lifecycle_pins_not_materialized_error_surface() {
         "corrupt pointer",
         new_query(&store, &namespace_id, &request("needle")).await,
     );
-    writer.shutdown_background().await.expect("shutdown");
+    writer.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test]
@@ -1041,7 +1041,7 @@ async fn backfilling_root_without_checkpoint_id_is_index_corrupt() {
         "backfilling manifest missing checkpoint id",
         new_query(&store, &namespace_id, &request("needle")).await,
     );
-    writer.shutdown_background().await.expect("shutdown");
+    writer.shutdown().await.expect("shutdown");
 }
 
 async fn write_manifest_without_checkpoint_id(
@@ -1155,7 +1155,7 @@ async fn planless_scan_covers_wal_revisions_at_or_below_index_watermark() {
         "/only-in-wal.txt"
     );
 
-    writer.shutdown_background().await.expect("shutdown");
+    writer.shutdown().await.expect("shutdown");
 }
 
 fn assert_not_enabled_error(case: &str, result: loonfs_grep::Result<GrepResponse>) {
@@ -1329,7 +1329,7 @@ async fn grep_worker_pins_fold_tail_and_pagination_results() {
     }
     assert_eq!(found_matches.len(), 12);
     assert_eq!(cursors.len(), 11);
-    writer.shutdown_background().await.expect("shutdown");
+    writer.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test]
@@ -1418,7 +1418,7 @@ async fn fork_of_grep_enabled_namespace_starts_unmaterialized_without_manifest_s
         .expect("source query after fork");
     assert_eq!(source_response.matches.len(), 1);
     assert_eq!(source_response.matches[0].absolute_path, "/source.txt");
-    writer.shutdown_background().await.expect("shutdown");
+    writer.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test]
@@ -1495,7 +1495,7 @@ async fn checkpoint_backfill_matches_incremental_worker_results() {
         normalize_namespace(incremental, &backfill_namespace),
         backfill
     );
-    writer.shutdown_background().await.expect("shutdown");
+    writer.shutdown().await.expect("shutdown");
 }
 
 /// A collection pass that lands in the middle of a publication leaves the
@@ -1539,7 +1539,7 @@ async fn a_publication_in_flight_keeps_its_candidate_through_a_collection_pass()
         GramIndexBuildPolicy::default(),
     )
     .await;
-    writer.shutdown_background().await.expect("shutdown writer");
+    writer.shutdown().await.expect("shutdown writer");
 
     let current = load_grep_root(&*base, &namespace_id)
         .await
@@ -1919,7 +1919,7 @@ async fn grep_gc_retains_live_roots_reaps_deleted_namespaces_and_never_crosses_k
             .is_some(),
         "core GC must not learn grep keys"
     );
-    writer.shutdown_background().await.expect("shutdown");
+    writer.shutdown().await.expect("shutdown");
 }
 
 /// Seeds one namespace with an index plus a fixed set of aged orphans, so
@@ -1960,7 +1960,7 @@ async fn seed_collectable_namespace(root: &Path, namespace_id: &NamespaceId) -> 
             .await
             .expect("write orphan");
     }
-    writer.shutdown_background().await.expect("shutdown");
+    writer.shutdown().await.expect("shutdown");
     store
 }
 
@@ -2111,7 +2111,7 @@ async fn the_collection_budget_charges_each_key_the_reads_it_costs() {
         .delete_namespace(&namespace_id, DeleteNamespaceOptions::default())
         .await
         .expect("delete namespace");
-    writer.shutdown_background().await.expect("shutdown");
+    writer.shutdown().await.expect("shutdown");
     let keys_before = store
         .list_prefix(&namespace_prefix(&namespace_id))
         .await
@@ -2317,5 +2317,5 @@ async fn a_backfilling_root_never_reports_a_built_through_sequence() {
     assert!(!serde_json::to_string(&steady)
         .expect("serialize the steady lifecycle")
         .contains("target_seq"));
-    writer.shutdown_background().await.expect("shutdown");
+    writer.shutdown().await.expect("shutdown");
 }

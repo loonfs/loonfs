@@ -171,7 +171,7 @@ async fn all_callers_cancelled_publication_still_lands() {
 
     // The writer-owned drain settles the publish tasks the callers left
     // behind.
-    timeout(Duration::from_secs(15), parked.writer.shutdown_background())
+    timeout(Duration::from_secs(15), parked.writer.shutdown())
         .await
         .expect("drain must settle")
         .expect("drain surfaces no panics");
