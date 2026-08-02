@@ -1269,9 +1269,10 @@ of every id ever committed, and the durable format does not carry one.
 
 A reused `commit_id` with an equal fingerprint replays the originally
 committed response; an unequal fingerprint is rejected as
-`commit_id_reuse_conflict`. Reference values are pinned by tests in
-`loonfs-core` (`path/write/planner.rs`); those literals must never change
-within scheme `v0`.
+`commit_id_reuse_conflict`, which reports the stored fingerprint so a client
+can prove its retry is the same request (API spec, section 5.2). Reference
+values are pinned by tests in `loonfs-api` (`commit_identity.rs`); those
+literals must never change within scheme `v0`.
 
 ### 3.4 Server authority
 

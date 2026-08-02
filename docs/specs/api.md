@@ -215,7 +215,7 @@ The codes that populate it:
 | --- | --- |
 | `writer_fenced` | `fenced_epoch`, `active_writer_epoch`, plus `active_writer` and `active_acquired_at_ms` when the head recorded a writer block. Writer ids are process labels, so two runs on one machine can share one; the acquisition stamp is what tells them apart |
 | `stale_revision` | `inode_id`, `expected_revision`, `actual_revision` (absent when the inode has no current revision) |
-| `commit_id_reuse_conflict` | `commit_id`, plus `committed_seq` when the conflict was decided against a durable commit receipt — the sequence that `commit_id` already landed at. Absent when nothing has committed under the id yet and two live requests are claiming it at once |
+| `commit_id_reuse_conflict` | `commit_id`, plus `committed_seq` and `committed_fingerprint` when the conflict was decided against a durable commit receipt — the sequence that `commit_id` already landed at, and the semantic identity of what landed there (section 5.1). Both come from the receipt, so both are present or neither is; both are absent when nothing has committed under the id yet and two live requests are claiming it at once |
 | `rebootstrap_required` | `after_seq`, `retention_floor_seq` |
 | `stale_head` | `expected_head_seq`, `actual_head_seq`, when the failure was a caller-supplied `expected_head_seq` precondition rather than a raced head advance. A caller that still means to delete retries against the sequence it found |
 | `not_deleted` | `inode_id`, plus `requested_deletion_seq` and `active_deletion_seq` when a live deletion exists at a different generation |
@@ -448,43 +448,64 @@ answer on its own.
 sequence under one `commit_id` — the shape of a command rerun, where no
 `content_ref` survived the first attempt — is nonetheless safe when the
 request is identical. A client that composes upload and commit must, on
-`commit_id_reuse_conflict`, resolve it as follows before surfacing it:
+`commit_id_reuse_conflict`, resolve it as follows before surfacing it.
+
+The proof is the commit's whole semantic identity, not a selection of its
+parts. The conflict reports `details.committed_fingerprint`, the fingerprint
+the server's receipt holds for what landed. The client recomputes the
+fingerprint its own retry would have had if the only difference were the
+fresh content object, and the two values must be equal. Comparing the whole
+value is what makes the check complete: a path, a `behavior`, an
+`expected_revision_no`, a `message`, or an operation count that differs is
+a different mutation, and every field a future request gains is covered the
+day it joins the preimage.
 
 1. Find what that `commit_id` committed. There is no read keyed by commit
    id, but the error names where it landed: read the change feed once at
    `details.committed_seq` — cursor `after_seq = committed_seq - 1`, limit 1
    — and take the row whose `commit_id` matches. If `details.committed_seq`
-   is absent, or the feed answers `rebootstrap_required` because retention
-   has moved past that sequence, or the row there names some other commit,
-   there is nothing to compare: go straight to rule 5.
-2. Compare the committed change's `message` against the one the request
-   asked for. The message is part of the commit's identity, so a rerun that
-   changed it asked for a different mutation: go to rule 5. Compare the
-   annotations exactly as the server fingerprints them — an absent message
-   and an empty one are different commits, so a client must not fold both
-   into "no message".
-3. Compare the committed content against what was just uploaded: the
-   content's `whole_file_sha256` when it has one, and otherwise its
-   `storage_checksum`, after checking `size_bytes`.
+   or `details.committed_fingerprint` is absent, or the feed answers
+   `rebootstrap_required` because retention has moved past that sequence, or
+   the row there names some other commit, there is nothing to compare: go
+   straight to rule 5.
+2. Take the committed content reference from that row. The row must carry
+   exactly one content-bearing event — a `created` with a `content_ref`, or
+   a `content_changed`. A single put produces exactly one, however many
+   parent directories it also had to create, because directory creations
+   carry no content ref. None, or more than one, means the commit was not
+   this put: go to rule 5.
+3. Recompute the fingerprint of the request just made, with that committed
+   `content_ref` substituted for the freshly uploaded one, and compare it
+   against `details.committed_fingerprint`. Any difference means the two
+   requests are not the same mutation: go to rule 5. The preimage is the
+   one defined in section 5.1, so annotations are compared exactly as the
+   server fingerprints them — an absent message and an empty one are
+   different commits, and a client must not fold both into "no message".
+4. Prove the uploaded bytes are the committed object's bytes: the content's
+   `whole_file_sha256` when it has one, and otherwise its
+   `storage_checksum`. This is the one question the fingerprint cannot
+   answer, because the retry deliberately fingerprints the *committed*
+   object.
 
    A client that still holds its bytes recomputes whichever digest the
    comparison calls for. A client that streamed its payload no longer has
-   the bytes, and compares the length it measured and the digest it folded
-   during that one pass instead — for a `direct_multipart` upload, the
-   `crc64nvme` it claimed at completion, which is also what the reference
-   the server minted carries. Both are evidence about the same bytes; they
-   differ only in which digests they can answer for, and a digest the
-   upload never computed falls to rule 5 rather than being guessed at.
-4. The same message over equal content means the logical operation had
-   already succeeded: report the commit that landed, with its original
+   the bytes, and compares the digest it folded during that one pass
+   instead — for a `direct_multipart` upload, the `crc64nvme` it claimed at
+   completion, which is also what the reference the server minted carries.
+   Both are evidence about the same bytes; they differ only in which digests
+   they can answer for, and a digest the upload never computed falls to rule
+   5 rather than being guessed at.
+
+   Equal fingerprints over provably equal bytes mean the logical operation
+   had already succeeded: report the commit that landed, with its original
    `committed_seq`.
-5. Anything else surfaces a failure. Different content is the
-   `commit_id_reuse_conflict` unchanged, and so are a changed message and a
-   commit the client could not locate — an absent `committed_seq`, or a
-   sequence retention no longer answers for. Content the client *cannot*
-   compare — a checksum algorithm it does not implement — is reported as a
-   failure naming why it could not reconcile. **A comparison that cannot be
-   made is never reported as success.**
+5. Anything else surfaces a failure. A fingerprint that differs is the
+   `commit_id_reuse_conflict` unchanged, and so are different content and a
+   commit the client could not locate — absent receipt fields, or a sequence
+   retention no longer answers for. Content the client *cannot* compare — a
+   checksum algorithm it does not implement — is reported as a failure
+   naming why it could not reconcile. **A comparison that cannot be made is
+   never reported as success.**
 
 The duplicate content object the rerun uploaded is then referenced by
 nothing. That is by design: it is a completed upload whose content no

@@ -131,6 +131,12 @@ pub enum CoreError {
         /// live requests are claiming it at once, which is the one case a
         /// caller cannot reconcile by reading the feed.
         committed_seq: Option<ChangeSeq>,
+        /// Semantic identity of the mutation that landed under the id, taken
+        /// from the same receipt as `committed_seq` and present exactly when
+        /// it is. Reporting it is what lets a retry prove it is the same
+        /// request by recomputing one value, rather than comparing whichever
+        /// fields it thought to compare.
+        committed_fingerprint: Option<String>,
     },
     #[error(transparent)]
     ContentPreparation(#[from] ContentPreparationError),
@@ -466,9 +472,11 @@ impl CoreError {
             CoreError::CommitIdReuseConflict {
                 commit_id,
                 committed_seq,
+                committed_fingerprint,
             } => Some(ErrorDetails {
                 commit_id: CommitId::parse(commit_id).ok(),
                 committed_seq: *committed_seq,
+                committed_fingerprint: committed_fingerprint.clone(),
                 ..ErrorDetails::default()
             }),
             CoreError::RebootstrapRequired {
@@ -931,10 +939,12 @@ mod tests {
             .ends_with("epoch 3 was fenced by epoch 4"));
 
         // A conflict decided against a durable receipt names where the
-        // commit id landed, which is what a retry reads back.
+        // commit id landed and what landed there, which is what a retry
+        // reads back and proves itself against.
         let reuse = CoreError::CommitIdReuseConflict {
             commit_id: "retry-key-1".to_owned(),
             committed_seq: Some(ChangeSeq(9)),
+            committed_fingerprint: Some("v0:sha256:abc".to_owned()),
         };
         let details = reuse.details().expect("reuse details");
         assert_eq!(
@@ -942,14 +952,21 @@ mod tests {
             Some(CommitId::parse("retry-key-1").expect("valid commit id"))
         );
         assert_eq!(details.committed_seq, Some(ChangeSeq(9)));
+        assert_eq!(
+            details.committed_fingerprint.as_deref(),
+            Some("v0:sha256:abc")
+        );
 
-        // A conflict between two live claims has no landed commit to name.
+        // A conflict between two live claims has no landed commit to name,
+        // so it carries neither half of the receipt.
         let contended = CoreError::CommitIdReuseConflict {
             commit_id: "retry-key-1".to_owned(),
             committed_seq: None,
+            committed_fingerprint: None,
         };
         let details = contended.details().expect("reuse details");
         assert_eq!(details.committed_seq, None);
+        assert_eq!(details.committed_fingerprint, None);
 
         let stale =
             CoreError::CommitValidation(CommitValidationError::ReplaceFileBaseRevisionMismatch {

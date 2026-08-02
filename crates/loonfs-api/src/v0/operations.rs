@@ -59,6 +59,14 @@ pub struct ErrorDetails {
     /// yet and two live requests are simply claiming it at once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub committed_seq: Option<ChangeSeq>,
+    /// Semantic identity of the mutation that already landed under that
+    /// commit id, from the same receipt as `committed_seq` and present
+    /// exactly when it is. A retry recomputes this value from the request it
+    /// just made — see
+    /// [`put_retry_fingerprint`](crate::put_retry_fingerprint) — and equality
+    /// is what proves the two are the same request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub committed_fingerprint: Option<String>,
     /// Position, in the request's operation list, of the operation that
     /// failed. A commit applies all of its operations or none of them, so
     /// this names the one that stopped the whole request.

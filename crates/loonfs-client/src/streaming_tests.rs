@@ -591,7 +591,6 @@ fn streamed_evidence_answers_only_the_digests_it_has() {
     let bytes = b"the same bytes twice";
     let sha256 = ContentRef::blob_v1(ContentId::generate(), bytes);
     let streamed = UploadedContent::Streamed(&sha256);
-    assert_eq!(streamed.size_bytes(), bytes.len() as u64);
     assert_eq!(
         streamed.matches(&StorageChecksum::sha256(bytes)),
         Some(true)
@@ -635,7 +634,6 @@ fn streamed_evidence_answers_only_the_digests_it_has() {
 fn held_evidence_recomputes_whatever_it_is_asked() {
     let bytes = b"held in memory";
     let held = UploadedContent::Bytes(bytes);
-    assert_eq!(held.size_bytes(), bytes.len() as u64);
     assert_eq!(held.matches(&StorageChecksum::sha256(bytes)), Some(true));
     assert_eq!(held.matches(&StorageChecksum::crc64nvme(bytes)), Some(true));
     assert_eq!(

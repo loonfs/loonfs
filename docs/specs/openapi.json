@@ -3769,6 +3769,13 @@
               }
             ]
           },
+          "committed_fingerprint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Semantic identity of the mutation that already landed under that\ncommit id, from the same receipt as `committed_seq` and present\nexactly when it is. A retry recomputes this value from the request it\njust made — see\n[`put_retry_fingerprint`](crate::put_retry_fingerprint) — and equality\nis what proves the two are the same request."
+          },
           "committed_seq": {
             "oneOf": [
               {

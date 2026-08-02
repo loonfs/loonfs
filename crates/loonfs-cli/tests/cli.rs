@@ -1193,6 +1193,9 @@ fn large_and_piped_puts_round_trip_through_an_embedded_profile() {
     let local = harness.temp_dir.path().join("big.bin");
     fs::write(&local, &payload).expect("write payload");
     let local_path = local.to_str().expect("utf-8 path");
+    // `--force` on every run of this id, first included: the replacement
+    // behavior is part of a commit's identity, so a rerun that adds the
+    // flag is asking for a different mutation and conflicts.
     let first = harness.run(&[
         "--json",
         "put",
@@ -1200,6 +1203,7 @@ fn large_and_piped_puts_round_trip_through_an_embedded_profile() {
         "/big.bin",
         "--commit-id",
         "pinned-big",
+        "--force",
     ]);
     assert_success(&first);
     assert_eq!(download(&harness, "/big.bin", "big-back.bin"), payload);
